@@ -94,7 +94,6 @@ pub(super) fn validate(pattern: &PatternSpec) -> Result<(), &'static str> {
         ) {
             return Err("plan pattern node");
         }
-        let mut sensitive = Vec::new();
         for key in [
             "kind",
             "access",
@@ -104,12 +103,27 @@ pub(super) fn validate(pattern: &PatternSpec) -> Result<(), &'static str> {
             "route",
             "routes",
         ] {
+            let mut named = Vec::new();
             if let Some(value) = node.get(key) {
-                placeholders(value, &mut sensitive)?;
+                placeholders(value, &mut named)?;
             }
-        }
-        if !sensitive.is_empty() {
-            return Err("plan pattern cannot vary fixed authority fields by parameter");
+            // A route, or the read root that follows a registered worktree, may
+            // pick from a closed list the pattern fixes, so every value the
+            // fragment can choose is one the catalogue already names.
+            let closed = matches!(key, "route" | "routes" | "read_roots")
+                && named.iter().all(|name| {
+                    pattern.parameters.get(name).is_some_and(|parameter| {
+                        parameter.kind == PatternParameterKind::String
+                            && !parameter.allowed.is_empty()
+                            && parameter.allowed.iter().all(Value::is_string)
+                    })
+                });
+            if !named.is_empty() && !closed {
+                return Err("plan pattern cannot vary fixed authority fields by parameter");
+            }
+            if key == "read_roots" && !named.is_empty() {
+                closed_read_roots(pattern, node)?;
+            }
         }
         let mut names = Vec::new();
         placeholders(node, &mut names)?;
@@ -159,6 +173,41 @@ pub(super) fn validate(pattern: &PatternSpec) -> Result<(), &'static str> {
         },
     )
     .map_err(|_| "plan pattern node template")?;
+    Ok(())
+}
+
+/// A read root that follows a parameter is that parameter alone, never joined
+/// to other text, and every value the parameter may take is a clean absolute
+/// path. The host still confines each value to the project's worktrees before
+/// the graph runs; this keeps the template from composing an escape.
+fn closed_read_roots(pattern: &PatternSpec, node: &Value) -> Result<(), &'static str> {
+    const REFUSED: &str = "plan pattern read roots must be a bare parameter over absolute paths";
+    let Some(roots) = node.get("read_roots").and_then(Value::as_array) else {
+        return Err(REFUSED);
+    };
+    for root in roots {
+        let text = root.as_str().ok_or(REFUSED)?;
+        if !text.contains("${") {
+            continue;
+        }
+        let name = text
+            .strip_prefix("${")
+            .and_then(|rest| rest.strip_suffix('}'))
+            .filter(|name| !name.contains(['$', '{', '}']))
+            .ok_or(REFUSED)?;
+        let parameter = pattern.parameters.get(name).ok_or(REFUSED)?;
+        for value in &parameter.allowed {
+            let path = std::path::Path::new(value.as_str().ok_or(REFUSED)?);
+            if !path.is_absolute()
+                || path
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir))
+                || path.to_string_lossy().contains(['\0', '$'])
+            {
+                return Err(REFUSED);
+            }
+        }
+    }
     Ok(())
 }
 

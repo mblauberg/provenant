@@ -884,3 +884,258 @@ fn fragment_cannot_widen_read_roots_source_or_role() {
     let run = advance(&doc, &mut fixture_owner(&[&result(vec![same]), "done", "done"]), &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.checkpoint.expansions.len(), 1);
 }
+
+fn two_instances(first: Value, second: Value) -> String {
+    format!(
+        "```fragment\n{}\n```",
+        json!({"schema_version":1,"nodes":[],"patterns":[first, second]})
+    )
+}
+
+#[test]
+fn disjoint_waves_refuse_overlapping_scopes_unless_a_dependency_orders_them() {
+    let mut doc = pattern_planner(8);
+    doc.integration_branch = Some("integration".into());
+    doc.nodes[0].plan.as_mut().unwrap().disjoint_waves = true;
+    let one = json!({"id":"one", "pattern":"generator", "parameters":{"scope":["src/a"]}});
+    let clash = json!({"id":"two", "pattern":"generator", "parameters":{"scope":["src/a/b"]}});
+    let mut owner = fixture_owner(&[&two_instances(one.clone(), clash.clone())]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+    assert!(run.checkpoint.expansions.is_empty());
+    assert_eq!(owner.calls.len(), 1);
+
+    let disjoint = json!({"id":"two", "pattern":"generator", "parameters":{"scope":["src/b"]}});
+    let mut ordered = clash.clone();
+    ordered["depends_on"] = json!(["one"]);
+    for second in [disjoint, ordered] {
+        let results = ["implemented", "reviewed", "implemented", "reviewed", "checked"];
+        let mut owner = fixture_owner(&[&[two_instances(one.clone(), second).as_str()][..], &results[..]].concat());
+        let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+        assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+        assert_eq!(run.checkpoint.expansions[0].patterns.len(), 2);
+    }
+
+    // Without the switch, overlapping instances keep sharing one checkout.
+    let mut plain = pattern_planner(8);
+    plain.integration_branch = Some("integration".into());
+    plain.nodes[0].plan.as_mut().unwrap().disjoint_waves = false;
+    let results = ["implemented", "reviewed", "implemented", "reviewed", "checked"];
+    let mut owner = fixture_owner(&[&[two_instances(one, clash).as_str()][..], &results[..]].concat());
+    let run = advance(&plain, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+}
+
+#[test]
+fn patterns_only_plans_refuse_raw_fragment_nodes() {
+    let mut doc = pattern_planner(8);
+    doc.nodes[0].plan.as_mut().unwrap().patterns_only = true;
+    let raw = format!(
+        "```fragment\n{}\n```",
+        json!({"schema_version":1,"nodes":[slice("a", &["src"])],"patterns":[]})
+    );
+    let mut owner = fixture_owner(&[&raw]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+}
+
+#[test]
+fn pattern_routes_may_vary_only_over_a_closed_list() {
+    let mut doc = pattern_planner(4);
+    {
+        let pattern = &mut doc.nodes[0].plan.as_mut().unwrap().patterns[0];
+        pattern.nodes[0]["route"] = json!({"alias":"${label}"});
+    }
+    assert!(plans::validate_spec(&doc.nodes[0]).is_err(), "free text names any route");
+    {
+        let parameter = doc.nodes[0].plan.as_mut().unwrap().patterns[0]
+            .parameters
+            .get_mut("label")
+            .unwrap();
+        parameter.default = Some(json!("junior"));
+        parameter.allowed = vec![json!("junior"), json!("senior")];
+    }
+    assert!(plans::validate_spec(&doc.nodes[0]).is_ok());
+    let outside = json!({"id":"impl", "pattern":"generator", "parameters":{"label":"principal"}});
+    let mut owner = fixture_owner(&[&pattern_result(outside)]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
+    let inside = json!({"id":"impl", "pattern":"generator", "parameters":{"label":"senior"}});
+    let mut owner = fixture_owner(&[&pattern_result(inside), "implemented", "reviewed", "checked"]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+}
+
+#[test]
+fn pattern_read_roots_may_follow_only_a_closed_list() {
+    let mut doc = pattern_planner(4);
+    doc.nodes[0].plan.as_mut().unwrap().patterns[0].nodes[0]["read_roots"] = json!(["${label}"]);
+    assert!(plans::validate_spec(&doc.nodes[0]).is_err(), "free text names any root");
+    {
+        let parameter = doc.nodes[0].plan.as_mut().unwrap().patterns[0]
+            .parameters
+            .get_mut("label")
+            .unwrap();
+        parameter.default = Some(json!("/repo/a"));
+        parameter.allowed = vec![json!("/repo/a"), json!("/repo/b")];
+    }
+    assert!(plans::validate_spec(&doc.nodes[0]).is_ok());
+}
+
+#[test]
+fn pattern_read_roots_must_be_the_bare_placeholder_over_clean_absolute_values() {
+    let closed = |roots: Value, values: &[&str]| {
+        let mut doc = pattern_planner(4);
+        let pattern = &mut doc.nodes[0].plan.as_mut().unwrap().patterns[0];
+        pattern.nodes[0]["read_roots"] = roots;
+        let parameter = pattern.parameters.get_mut("label").unwrap();
+        parameter.default = Some(json!(values[0]));
+        parameter.allowed = values.iter().map(|value| json!(value)).collect();
+        plans::validate_spec(&doc.nodes[0])
+    };
+    assert!(closed(json!(["${label}"]), &["/repo/a", "/repo/b"]).is_ok());
+    // A suffix lets a parameter climb out of the registered worktree.
+    assert!(closed(json!(["${label}/../../outside"]), &["/repo/a"]).is_err());
+    assert!(closed(json!(["/repo/${label}"]), &["a"]).is_err());
+    // An enum value that is relative or climbs is no read root.
+    assert!(closed(json!(["${label}"]), &["/repo/a", "/repo/../../outside"]).is_err());
+    assert!(closed(json!(["${label}"]), &["/repo/a", "../outside"]).is_err());
+    assert!(closed(json!(["${label}"]), &["/repo/a", ""]).is_err());
+}
+
+#[test]
+fn planned_big_batch_expands_to_its_static_composite_and_records_the_patterns() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/presets/fixtures/big-batch.plan.json");
+    // The CLI pins `HEAD` to a commit before a graph runs; do the same here.
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("\"commit\": \"HEAD\"", "\"commit\": \"0123456789abcdef0123456789abcdef01234567\"");
+    let mut doc: GraphDocument = serde_json::from_str(&text).unwrap();
+    // Run the planner node alone, ahead of one consumer.
+    doc.nodes.retain(|node| node.id == "plan");
+    doc.nodes[0].depends_on.clear();
+    doc.nodes[0].inputs.clear();
+    doc.nodes.push(serde_json::from_value(json!({
+        "id":"after", "access":"read_only", "prompt":"Check all slices",
+        "depends_on":["plan"], "route":{"alias":"senior"}
+    })).unwrap());
+
+    let lane = |id: &str, tree: &str, scope: &str, extra: Value| {
+        let mut instance = json!({"id":id, "pattern":"writer-lane", "parameters":{
+            "lane":id, "worktree":tree, "scope":[scope], "acceptance":[format!("{id} works")],
+            "route":"junior", "budget_seconds":1800}});
+        instance.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        instance
+    };
+    let instances = vec![
+        lane("a", "/repo/lane1", "src/a", json!({})),
+        lane("b", "/repo/lane2", "src/b", json!({})),
+        json!({"id":"barrier", "pattern":"wave-barrier", "parameters":{"wave":"one"},
+               "depends_on":["a","b"],
+               "inputs":[{"node":"a","outputs":["commit"]},{"node":"b","outputs":["commit"]}]}),
+        lane("c", "/repo/lane1", "src/a", json!({"depends_on":["barrier"]})),
+    ];
+    let fragment = format!("```fragment\n{}\n```", json!({"schema_version":1,"nodes":[],"patterns":instances}));
+    // Every lane runs a writer, two lens legs and an evaluator, then the barrier and consumer.
+    let mut results = vec![fragment.as_str()];
+    results.extend(std::iter::repeat_n("done\nVERDICT: PASS", 40));
+    let mut owner = fixture_owner(&results);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    let expansion = &run.checkpoint.expansions[0];
+    let recorded: Vec<_> = expansion.patterns.iter().map(|p| (p.id.as_str(), p.name.as_str())).collect();
+    assert_eq!(recorded, [("plan--a", "writer-lane"), ("plan--b", "writer-lane"), ("plan--barrier", "wave-barrier"), ("plan--c", "writer-lane")]);
+    assert_eq!(expansion.patterns[0].parameters["budget_seconds"], 1800);
+    assert_eq!(expansion.patterns[0].parameters["route"], "junior");
+    assert_eq!(expansion.patterns[2].parameters, json!({"wave":"one"}));
+
+    // Each planned lane is the static lane written independently: the golden
+    // expansion of the static preset, flattened. Same roles and digests, access,
+    // family separation, dispositions, source and dependency edges.
+    let golden: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../assets/presets/fixtures/big-batch.expansion.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let lane = &golden["nodes"].as_array().unwrap().iter().find(|n| n["id"] == "lanes").unwrap()["composite"]["nodes"][0];
+    let mut static_nodes: Vec<Value> = Vec::new();
+    for child in lane["composite"]["nodes"].as_array().unwrap() {
+        match child.get("composite") {
+            // Legs inherit the lens composite's source, which flat nodes carry themselves.
+            Some(inner) => static_nodes.extend(inner["nodes"].as_array().unwrap().iter().cloned().map(|mut leg| {
+                leg["source"] = child["source"].clone();
+                leg
+            })),
+            None => static_nodes.push(child.clone()),
+        }
+    }
+    let project = |nodes: &[Value], prefix: &str| -> Vec<Value> {
+        let mut rows: Vec<Value> = nodes
+            .iter()
+            .map(|node| {
+                json!({
+                    "id": node["id"].as_str().unwrap().trim_start_matches(prefix),
+                    "role": node["role"],
+                    "role_digest": node["role_digest"],
+                    "access": node["access"],
+                    "kind": node.get("kind").filter(|kind| *kind != "composite"),
+                    "distinct_from": node.get("distinct_from"),
+                    "dispositions": node.get("dispositions"),
+                    "source": node["source"]["type"],
+                })
+            })
+            .collect();
+        rows.sort_by_key(|row| row["id"].as_str().unwrap().to_owned());
+        rows
+    };
+    let planned: Vec<Value> = expansion.nodes.iter().filter(|n| n.id.starts_with("plan--a--")).map(|n| serde_json::to_value(n).unwrap()).collect();
+    assert_eq!(planned.len(), 4);
+    assert_eq!(project(&planned, "plan--a--"), project(&static_nodes, ""));
+    // The evaluator waits for the lens legs and the writer, as the static one does.
+    let evaluate = planned.iter().find(|n| n["id"] == "plan--a--evaluate").unwrap();
+    assert_eq!(evaluate["depends_on"], json!(["plan--a--lens-correctness-spec", "plan--a--lens-simplicity", "plan--a--implement"]));
+    // A lane's exports carry the evaluator's verdict for the barrier and later waves.
+    assert!(expansion.patterns[0].nodes.iter().any(|id| id == "plan--a--evaluate"));
+}
+
+#[test]
+fn planned_big_batch_refuses_overlapping_waves_and_budgets_over_the_lane_deadline() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/presets/fixtures/big-batch.plan.json");
+    let mut doc: GraphDocument = serde_json::from_str(
+        &std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("\"commit\": \"HEAD\"", "\"commit\": \"0123456789abcdef0123456789abcdef01234567\""),
+    )
+    .unwrap();
+    doc.nodes.retain(|node| node.id == "plan");
+    doc.nodes[0].depends_on.clear();
+    doc.nodes[0].inputs.clear();
+    let lane = |id: &str, tree: &str, scope: &str, budget: u64| json!({"id":id, "pattern":"writer-lane", "parameters":{
+        "lane":id, "worktree":tree, "scope":[scope], "acceptance":["works"], "budget_seconds":budget}});
+    let cases = [
+        ("overlap", vec![lane("a", "/repo/lane1", "src", 600), lane("b", "/repo/lane2", "src/b", 600)]),
+        ("budget", vec![lane("a", "/repo/lane1", "src/a", 3601)]),
+        ("worktree", vec![lane("a", "/elsewhere", "src/a", 600)]),
+    ];
+    for (label, instances) in cases {
+        let fragment = format!("```fragment\n{}\n```", json!({"schema_version":1,"nodes":[],"patterns":instances}));
+        let mut owner = fixture_owner(&[&fragment]);
+        let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+        assert_eq!(run.status, GraphStatus::Paused, "{label}");
+        assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"), "{label}");
+        assert!(run.checkpoint.expansions.is_empty(), "{label}");
+        assert_eq!(owner.calls.len(), 1, "{label}");
+    }
+    // The same two lanes are admitted once they are ordered or disjoint.
+    let fragment = format!("```fragment\n{}\n```", json!({"schema_version":1,"nodes":[],"patterns":[lane("a", "/repo/lane1", "src/a", 3600), lane("b", "/repo/lane2", "src/b", 60)]}));
+    let mut owner = fixture_owner(&[&fragment, "a", "b"]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.checkpoint.expansions.len(), 1, "{:?}", run.checkpoint.pause_reason);
+}

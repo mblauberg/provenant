@@ -2531,6 +2531,657 @@ fn previous_round_selections_resolve_against_the_loop_body() {
     assert!(error.contains("commit from look"), "{error}");
 }
 
+mod planner_front_end {
+    use super::super::preset::{Layers, expand_with, planner};
+    use super::shapes;
+    use provenant_fabric_runtime::config::{PlanAuto, PlanMode};
+    use serde_json::{Value, json};
+
+    fn layers(mode: PlanMode, unavailable: Option<&str>) -> Layers {
+        let mut layers = Layers::empty();
+        layers.review = Some(shapes());
+        layers.plan = Some(planner::PlanContext {
+            mode,
+            route: "principal".into(),
+            lane_deadline_seconds: 3600,
+            max_nodes: 24,
+            auto: PlanAuto::default(),
+            unavailable: unavailable.map(str::to_owned),
+            from_cli: true,
+            paths: Vec::new(),
+            worktrees: Vec::new(),
+        });
+        layers
+    }
+
+    fn run(
+        layers: &Layers,
+        name: &str,
+        brief: &str,
+        params: Vec<(String, Value)>,
+    ) -> super::super::preset::Expansion {
+        expand_with(layers, name, brief, &params, &[]).unwrap()
+    }
+
+    fn worktrees() -> Vec<(String, Value)> {
+        vec![
+            ("worktrees".into(), json!(["/repo/lane1", "/repo/lane2"])),
+            ("batch_worktree".into(), json!("/repo/batch")),
+        ]
+    }
+
+    /// The same preset without any plan context: the baseline that `off` must equal.
+    fn plain(name: &str, params: Vec<(String, Value)>) -> super::super::preset::Expansion {
+        let mut layers = Layers::empty();
+        layers.review = Some(shapes());
+        expand_with(&layers, name, "brief", &params, &[]).unwrap()
+    }
+
+    fn ids(expansion: &super::super::preset::Expansion) -> Vec<String> {
+        expansion.document["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| node["id"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn plan_on_swaps_the_lanes_for_a_principal_planner_with_the_catalogue() {
+        let expansion = run(
+            &layers(PlanMode::On, None),
+            "big-batch",
+            "brief",
+            worktrees(),
+        );
+        assert_eq!(ids(&expansion)[..3], ["scout", "plan", "council"]);
+        let plan = &expansion.document["nodes"][1];
+        assert_eq!(plan["kind"], "plan");
+        assert_eq!(plan["role"], "plan.shape");
+        assert_eq!(plan["access"], "read_only");
+        assert_eq!(plan["route"]["alias"], "principal");
+        assert_eq!(plan["depends_on"], json!(["scout"]));
+        assert_eq!(plan["plan"]["patterns_only"], true);
+        assert_eq!(plan["plan"]["disjoint_waves"], true);
+        let names: Vec<_> = plan["plan"]["patterns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|pattern| pattern["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["writer-lane", "wave-barrier"]);
+        let budget = &plan["plan"]["patterns"][0]["parameters"]["budget_seconds"];
+        assert_eq!(
+            (budget["default"].clone(), budget["max"].clone()),
+            (json!(3600), json!(3600))
+        );
+        assert_eq!(
+            plan["plan"]["patterns"][0]["parameters"]["worktree"]["enum"],
+            json!(["/repo/lane1", "/repo/lane2"])
+        );
+        assert_eq!(
+            expansion.document["nodes"][2]["depends_on"],
+            json!(["plan"])
+        );
+        let decision = expansion.plan.as_ref().unwrap();
+        assert_eq!(decision.line(), "plan: on -> on (planning requested)");
+        assert_eq!(
+            expansion.document["provenance"]["plan"]["route"],
+            "principal"
+        );
+        // The planned graph is admissible: the runtime validates every pattern.
+        let document: provenant_fabric_runtime::graph::GraphDocument =
+            serde_json::from_value(expansion.document.clone()).unwrap();
+        document.inspect(&Default::default()).unwrap();
+    }
+
+    #[test]
+    fn plan_off_and_no_context_leave_the_static_graph_untouched() {
+        let plain = plain("big-batch", Vec::new());
+        let off = run(
+            &layers(PlanMode::Off, None),
+            "big-batch",
+            "brief",
+            Vec::new(),
+        );
+        assert_eq!(plain.document["nodes"], off.document["nodes"]);
+        assert_eq!(
+            off.plan.as_ref().unwrap().line(),
+            "plan: off -> off (planning turned off)"
+        );
+        assert!(plain.plan.is_none());
+        // A preset with no catalogue is never planned under auto, and refuses on.
+        let single = run(&layers(PlanMode::Auto, None), "single", "brief", Vec::new());
+        assert!(single.plan.is_none());
+        let error =
+            expand_with(&layers(PlanMode::On, None), "single", "brief", &[], &[]).unwrap_err();
+        assert!(error.contains("declares no planner patterns"), "{error}");
+        assert!(error.contains("single"), "{error}");
+        assert!(error.contains("#2531 follow-up"), "{error}");
+        // A config default of `on` is not an explicit request: the run goes
+        // ahead on the static graph with the reason recorded.
+        let mut configured = layers(PlanMode::On, None);
+        configured.plan.as_mut().unwrap().from_cli = false;
+        let quiet = run(&configured, "single", "brief", Vec::new());
+        let decision = quiet.plan.as_ref().unwrap();
+        assert!(!decision.applied);
+        assert_eq!(decision.reason, "preset declares no planner patterns");
+        assert_eq!(
+            decision.line(),
+            "plan: on -> off (preset declares no planner patterns)"
+        );
+        assert!(!ids(&quiet).contains(&"plan".to_owned()));
+    }
+
+    #[test]
+    fn plan_on_warns_when_it_discards_explicit_lanes() {
+        let lanes = vec![(
+            "lanes".into(),
+            json!([{"name":"one","worktree":"/w","scope":["src"],"spec":""}]),
+        )];
+        let expansion = run(
+            &layers(PlanMode::On, None),
+            "big-batch",
+            "brief",
+            lanes.clone(),
+        );
+        assert!(ids(&expansion).contains(&"plan".to_owned()));
+        assert!(
+            expansion
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("--plan on discards the explicit lanes")),
+            "{:?}",
+            expansion.warnings
+        );
+        // Without explicit lanes there is nothing to discard.
+        let quiet = run(
+            &layers(PlanMode::On, None),
+            "big-batch",
+            "brief",
+            Vec::new(),
+        );
+        assert!(
+            quiet
+                .warnings
+                .iter()
+                .all(|warning| !warning.contains("discards"))
+        );
+        // Auto never overrides explicit lanes, so it never warns.
+        let auto = run(&layers(PlanMode::Auto, None), "big-batch", "brief", lanes);
+        assert!(
+            auto.warnings
+                .iter()
+                .all(|warning| !warning.contains("discards"))
+        );
+    }
+
+    #[test]
+    fn worktrees_default_to_the_projects_linked_worktrees_unless_listed() {
+        let mut project = layers(PlanMode::On, None);
+        project.plan.as_mut().unwrap().worktrees = vec!["/repo/w1".into(), "/repo/w2".into()];
+        let defaulted = run(&project, "big-batch", "brief", Vec::new());
+        let enumerated = |expansion: &super::super::preset::Expansion| {
+            expansion.document["nodes"][1]["plan"]["patterns"][0]["parameters"]["worktree"]["enum"]
+                .clone()
+        };
+        assert_eq!(enumerated(&defaulted), json!(["/repo/w1", "/repo/w2"]));
+        // A chair-supplied list wins over the discovered one.
+        let listed = run(&project, "big-batch", "brief", worktrees());
+        assert_eq!(enumerated(&listed), json!(["/repo/lane1", "/repo/lane2"]));
+    }
+
+    #[test]
+    fn linked_worktrees_come_from_git_without_the_main_checkout() {
+        let temp = tempfile::tempdir().unwrap();
+        let main = temp.path().join("main");
+        let linked = temp.path().join("linked");
+        std::fs::create_dir(&main).unwrap();
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let output = provenant_os::fixture::git_command()
+                .current_dir(dir)
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{args:?}: {output:?}");
+        };
+        git(&main, &["init", "-q", "-b", "main"]);
+        git(&main, &["commit", "-q", "--allow-empty", "-m", "root"]);
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "lane",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let found = super::super::preset::linked_worktrees(&main);
+        let expected = std::fs::canonicalize(&linked)
+            .unwrap()
+            .display()
+            .to_string();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(
+            std::fs::canonicalize(&found[0])
+                .unwrap()
+                .display()
+                .to_string(),
+            expected
+        );
+        // Outside a repository the project is only its own directory: no lanes.
+        let bare = temp.path().join("bare");
+        std::fs::create_dir(&bare).unwrap();
+        assert!(super::super::preset::linked_worktrees(&bare).is_empty());
+        // The discovered list is what the planner is offered by default.
+        let mut project = layers(PlanMode::On, None);
+        project.plan.as_mut().unwrap().worktrees = found.clone();
+        let expansion = run(&project, "big-batch", "brief", Vec::new());
+        assert_eq!(
+            expansion.document["nodes"][1]["plan"]["patterns"][0]["parameters"]["worktree"]["enum"],
+            json!(found)
+        );
+    }
+
+    #[test]
+    fn any_override_beyond_the_bundled_default_counts_as_explicit() {
+        let lane = "[{name='one', worktree='/w', scope=['src'], spec=''}]";
+        let mut layers = layers(PlanMode::Auto, None);
+        layers
+            .insert(
+                "repo",
+                "mine",
+                &format!("extends='big-batch'\n[parameters]\nlanes={lane}\n"),
+            )
+            .unwrap();
+        let expansion = run(&layers, "mine", &acceptance(7), Vec::new());
+        let decision = expansion.plan.as_ref().unwrap();
+        assert!(!decision.applied, "{}", decision.line());
+        assert_eq!(decision.reason, "lanes given explicitly");
+        // The bundled default alone is not an override.
+        let bundled = run(&layers, "big-batch", &acceptance(2), Vec::new());
+        assert!(bundled.plan.as_ref().unwrap().applied);
+    }
+
+    #[test]
+    fn an_extending_preset_missing_the_shaped_stage_degrades_never_errors() {
+        let mut layers = layers(PlanMode::On, None);
+        layers
+            .insert(
+                "user",
+                "narrow",
+                "extends='big-batch'\nstages=[{ id = 'only', preset = 'single' }]\n",
+            )
+            .unwrap();
+        let expansion = run(&layers, "narrow", "brief", Vec::new());
+        let decision = expansion.plan.as_ref().unwrap();
+        assert!(!decision.applied);
+        let why = decision.degraded.as_deref().unwrap();
+        assert!(why.contains("names no top-level stage: lanes"), "{why}");
+        assert!(decision.reason.contains("deterministic defaults"));
+        assert!(!ids(&expansion).contains(&"plan".to_owned()));
+        assert!(
+            expansion
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("deterministic defaults"))
+        );
+    }
+
+    fn acceptance(count: usize) -> String {
+        let items: String = (1..=count).map(|n| format!("{n}. item {n}\n")).collect();
+        format!("Do the work.\n\n## Acceptance\n{items}\n## Verify\n- cargo test\n")
+    }
+
+    #[test]
+    fn auto_decides_on_and_off_with_a_reason() {
+        let explicit_lanes = vec![(
+            "lanes".into(),
+            json!([{"name":"one","worktree":"/w","scope":["src"],"spec":""}]),
+        )];
+        type Case = (
+            &'static str,
+            String,
+            Vec<(String, Value)>,
+            bool,
+            &'static str,
+        );
+        let cases: Vec<Case> = vec![
+            (
+                "large spec",
+                acceptance(7),
+                explicit_lanes.clone(),
+                false,
+                "lanes given explicitly",
+            ),
+            (
+                "lanes unset, long spec",
+                acceptance(7),
+                Vec::new(),
+                true,
+                "7 acceptance items, more than 6",
+            ),
+            (
+                "lanes unset, short spec",
+                acceptance(3),
+                Vec::new(),
+                true,
+                "lanes not set",
+            ),
+            (
+                "several crates",
+                "Touch crates/a/x.rs, crates/b/y.rs and crates/c/z.rs".into(),
+                Vec::new(),
+                true,
+                "write scope spans 3 crates, more than 2",
+            ),
+            (
+                "batch of issues",
+                "Land #101 and #102 together".into(),
+                Vec::new(),
+                true,
+                "2 issues in one batch",
+            ),
+        ];
+        for (label, brief, params, on, reason) in cases {
+            let expansion = run(&layers(PlanMode::Auto, None), "big-batch", &brief, params);
+            let decision = expansion.plan.as_ref().unwrap();
+            assert_eq!(decision.applied, on, "{label}: {}", decision.line());
+            assert!(
+                decision.reason.contains(reason),
+                "{label}: {}",
+                decision.line()
+            );
+            assert_eq!(ids(&expansion).contains(&"plan".to_owned()), on, "{label}");
+        }
+        let small = run(
+            &layers(PlanMode::Auto, None),
+            "big-batch",
+            &acceptance(2),
+            explicit_lanes,
+        );
+        assert!(
+            small
+                .plan
+                .as_ref()
+                .unwrap()
+                .line()
+                .starts_with("plan: auto -> off (lanes given explicitly")
+        );
+        // Thresholds come from the configuration.
+        let mut tight = layers(PlanMode::Auto, None);
+        tight.plan.as_mut().unwrap().auto.acceptance_items = 2;
+        let expansion = run(&tight, "big-batch", &acceptance(3), vec![]);
+        assert!(
+            expansion
+                .plan
+                .as_ref()
+                .unwrap()
+                .reason
+                .contains("3 acceptance items, more than 2")
+        );
+    }
+
+    #[test]
+    fn subject_counters_read_briefs() {
+        assert_eq!(
+            planner::acceptance_items("## Acceptance\n- a\n- b\n## Out\n- c"),
+            2
+        );
+        assert_eq!(
+            planner::acceptance_items("Acceptance:\n1. a\n2) b\n\n3. c"),
+            3
+        );
+        assert_eq!(planner::acceptance_items("- a\n- b"), 0);
+        assert_eq!(planner::issues("Closes #12, refs #12 and #13; C#"), 2);
+        assert_eq!(planner::issues("no issues &#39;"), 0);
+        // Hex colours, identifiers and over-long numbers are not issues.
+        assert_eq!(planner::issues("colour #1a2b3c and #fff and #1234567"), 0);
+        assert_eq!(planner::issues("#abc123 #12ab #99 #123456"), 2);
+        assert_eq!(planner::issues("see (#7) and #8."), 2);
+        // Nested sub-bullets belong to their parent item.
+        assert_eq!(
+            planner::acceptance_items(
+                "## Acceptance\n- a\n  - detail\n    - more\n- b\n\t- tab detail\n1. c\n   1. nested"
+            ),
+            3
+        );
+    }
+
+    #[test]
+    fn unavailable_principal_route_degrades_to_the_static_defaults_with_a_reason() {
+        let degraded = run(
+            &layers(
+                PlanMode::On,
+                Some("route principal is not defined in the routing configuration"),
+            ),
+            "big-batch",
+            "brief",
+            Vec::new(),
+        );
+        let plain = plain("big-batch", Vec::new());
+        assert_eq!(degraded.document["nodes"], plain.document["nodes"]);
+        let decision = degraded.plan.as_ref().unwrap();
+        assert!(!decision.applied);
+        assert!(
+            decision
+                .line()
+                .starts_with("plan: on -> off (principal route unavailable"),
+            "{}",
+            decision.line()
+        );
+        assert!(
+            decision
+                .degraded
+                .as_deref()
+                .unwrap()
+                .contains("not defined")
+        );
+        assert!(
+            degraded
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("deterministic defaults"))
+        );
+        assert_eq!(
+            degraded.document["provenance"]["plan"]["degraded"],
+            "route principal is not defined in the routing configuration"
+        );
+        // Never a weaker planner: no node stands in for the planner.
+        assert!(!ids(&degraded).contains(&"plan".to_owned()));
+    }
+
+    /// A planned writer lane is the static `generator-evaluator` lane, written
+    /// independently: expand that preset on its own and compare node by node.
+    #[test]
+    fn a_planned_lane_keeps_the_static_lanes_review_steps() {
+        let planned = run(
+            &layers(PlanMode::On, None),
+            "big-batch",
+            "brief",
+            worktrees(),
+        );
+        let catalogue = &planned.document["nodes"][1]["plan"]["patterns"][0];
+        assert_eq!(catalogue["name"], "writer-lane");
+        // The default lens roster and the evaluator, with no review shape
+        // selecting a roster; shape-selected rosters are a follow-up.
+        let unplanned = Layers::empty();
+        let lane = expand_with(
+            &unplanned,
+            "generator-evaluator",
+            "brief",
+            &[
+                ("worktree".into(), json!("${worktree}")),
+                ("scope".into(), json!(["${scope}"])),
+                ("delivery".into(), json!("integrate:batch/graph")),
+            ],
+            &[],
+        )
+        .unwrap();
+        let mut expected = Vec::new();
+        for node in lane.document["nodes"].as_array().unwrap() {
+            match node.get("composite") {
+                Some(inner) => {
+                    for leg in inner["nodes"].as_array().unwrap() {
+                        let mut leg = leg.clone();
+                        leg["source"] = node["source"].clone();
+                        expected.push(leg);
+                    }
+                }
+                None => expected.push(node.clone()),
+            }
+        }
+        let project = |node: &Value| {
+            json!({
+                "id": node["id"],
+                "role": node["role"],
+                "role_digest": node["role_digest"],
+                "access": node["access"],
+                "kind": node.get("kind"),
+                "route": node["route"]["alias"],
+                "distinct_from": node.get("distinct_from"),
+                "dispositions": node.get("dispositions"),
+                "source": node.get("source").map(|source| source["type"].clone()),
+                "read_roots": node.get("read_roots"),
+                "prompt": node["prompt"],
+            })
+        };
+        let by_id = |nodes: &[Value]| {
+            let mut rows: Vec<Value> = nodes.iter().map(project).collect();
+            rows.sort_by_key(|row| row["id"].as_str().unwrap().to_owned());
+            rows
+        };
+        let mut actual: Vec<Value> = catalogue["nodes"].as_array().unwrap().clone();
+        // The writer's route is the pattern's `route` parameter and its brief is
+        // the lane's own; the review steps match the static ones exactly.
+        for node in &mut actual {
+            if node["id"] == "implement" {
+                node["route"] = json!({"alias": "senior"});
+            }
+        }
+        let (actual, expected) = (by_id(&actual), by_id(&expected));
+        assert_eq!(actual.len(), 4);
+        for (planned, static_lane) in actual.iter().zip(&expected) {
+            if planned["id"] == "implement" {
+                for key in ["role", "role_digest", "access", "source"] {
+                    assert_eq!(planned[key], static_lane[key], "implement {key}");
+                }
+            } else {
+                assert_eq!(planned, static_lane);
+            }
+        }
+        let ids: Vec<_> = actual
+            .iter()
+            .map(|row| row["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "evaluate",
+                "implement",
+                "lens-correctness-spec",
+                "lens-simplicity"
+            ]
+        );
+    }
+
+    /// The planned document is a checked-in fixture the runtime plan tests run.
+    /// A planner node whose pattern reads `root` and may take any of `values`.
+    fn reading(root: &str, values: &[String]) -> Value {
+        json!({"id": "plan", "plan": {"patterns": [{
+            "name": "lane",
+            "parameters": {"tree": {"type": "string", "enum": values}},
+            "nodes": [{"id": "lens", "read_roots": [root]}]
+        }]}})
+    }
+
+    #[test]
+    fn a_pattern_read_root_is_confined_to_the_projects_worktrees() {
+        use provenant_fabric_runtime::read_roots::ReadRoots;
+        let temp = tempfile::tempdir().unwrap();
+        let inside = temp.path().join("inside");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let policy = ReadRoots::new(vec![inside.clone()], &[]);
+        let text = |path: &std::path::Path| path.display().to_string();
+        let confine = |root: &str, values: &[String]| {
+            super::super::preset::confine_pattern_roots(&mut reading(root, values), &policy)
+        };
+        assert!(confine("${tree}", &[text(&inside)]).is_ok());
+        // A suffix, a prefix or a second placeholder is not a closed-list root.
+        let tree = [text(&inside)];
+        assert!(confine("${tree}/../outside", &tree).is_err());
+        assert!(confine("/x/${tree}", &tree).is_err());
+        assert!(confine("${tree}${tree}", &tree).is_err());
+        // Every value the planner may pick is confined, not only the first.
+        assert!(confine("${tree}", &[text(&inside), text(&outside)]).is_err());
+        let climbing = inside.join("..").join("outside");
+        assert!(confine("${tree}", &[text(&inside), text(&climbing)]).is_err());
+        assert!(confine("${tree}", &["inside".into()]).is_err(), "relative");
+        assert!(confine("${tree}", &[]).is_err(), "an open list");
+    }
+
+    #[test]
+    fn a_pattern_read_root_that_is_a_link_is_pinned_to_its_canonical_target() {
+        use provenant_fabric_runtime::read_roots::ReadRoots;
+        let temp = tempfile::tempdir().unwrap();
+        let inside = temp.path().join("inside");
+        let target = inside.join("lane");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let policy = ReadRoots::new(vec![inside.clone()], &[]);
+        let given = link.display().to_string();
+        let mut node = reading("${tree}", std::slice::from_ref(&given));
+        node["prompt"] = json!(format!("Pick from {given}, then {given}."));
+        super::super::preset::confine_pattern_roots(&mut node, &policy).unwrap();
+        let canonical = std::fs::canonicalize(&target)
+            .unwrap()
+            .display()
+            .to_string();
+        let values = &node["plan"]["patterns"][0]["parameters"]["tree"]["enum"];
+        assert_eq!(values, &json!([canonical]));
+        assert_eq!(
+            node["prompt"],
+            json!(format!("Pick from {canonical}, then {canonical}."))
+        );
+        // Retargeting the link after admission moves nothing the graph holds.
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        assert_eq!(
+            &node["plan"]["patterns"][0]["parameters"]["tree"]["enum"],
+            values
+        );
+    }
+
+    #[test]
+    fn planned_big_batch_matches_its_golden_graph() {
+        let expansion = run(
+            &layers(PlanMode::On, None),
+            "big-batch",
+            "brief",
+            worktrees(),
+        );
+        let mut actual = serde_json::to_string_pretty(&expansion.document).unwrap();
+        actual.push('\n');
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/presets/fixtures/big-batch.plan.json");
+        if std::env::var_os("UPDATE_GOLDEN").is_some() {
+            std::fs::write(&path, &actual).unwrap();
+        }
+        let expected = std::fs::read_to_string(&path).unwrap_or_default();
+        assert_eq!(actual, expected, "rerun with UPDATE_GOLDEN=1 to refresh");
+    }
+}
+
 fn real_selector(directory: &str) -> Layers {
     let mut layers = Layers::empty();
     layers.review = Some(super::preset::review_selector(

@@ -488,6 +488,48 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 
 ```json
 {
+  "host_plan_settings": {
+    "path": "domains.fabric.plan",
+    "settings": {
+      "auto.acceptance_items": {
+        "default": "6",
+        "effect": "`auto` turns planning on when the subject lists more acceptance items than this (nested sub-bullets are not counted). For big-batch unset lanes already force on, so this only changes the reason.",
+        "min": 1,
+        "type": "int"
+      },
+      "auto.batch_issues": {
+        "default": "2",
+        "effect": "`auto` turns planning on when one batch names at least this many distinct issues (`#N`, decimal, at most six digits). For big-batch unset lanes already force on, so this only changes the reason.",
+        "min": 1,
+        "type": "int"
+      },
+      "auto.write_crates": {
+        "default": "2",
+        "effect": "`auto` turns planning on when the subject's write scope touches more crates than this. For big-batch unset lanes already force on, so this only changes the reason.",
+        "min": 1,
+        "type": "int"
+      },
+      "max_nodes": {
+        "default": "24",
+        "effect": "Most nodes and pattern instances one plan may emit, within the host graph limits.",
+        "max": 512,
+        "min": 1,
+        "type": "int"
+      },
+      "mode": {
+        "allowed": "auto, on or off",
+        "default": "auto",
+        "effect": "Default for `provenant run --preset --plan`. on puts a principal planner node in front of the preset graph so it can shape the graph from the preset's pattern catalogue; off keeps the preset's static graph; auto stays off when the preset's shape parameter has any non-bundled origin and otherwise plans when the subject is large or its shape is unset; for big-batch unset lanes always force on, so the auto.* thresholds only change the recorded reason. `--explain` prints the decision and its reason.",
+        "type": "enum"
+      },
+      "route": {
+        "allowed": "a pool alias",
+        "default": "principal",
+        "effect": "Route alias the planner node runs on. When it is unavailable (undefined, excluded, exhausted or unauthenticated) the run falls back to the preset's deterministic defaults and records the reason; a weaker planner is never substituted.",
+        "type": "string"
+      }
+    }
+  },
   "presets": {
     "balanced": {
       "description": "Today's behaviour: every knob at its registry default.",

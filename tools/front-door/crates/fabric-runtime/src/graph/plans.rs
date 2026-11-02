@@ -11,6 +11,14 @@ pub struct PlanSpec {
     /// Patterns this plan node allows a fragment to instantiate.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub patterns: Vec<PatternSpec>,
+    /// A fragment may instantiate patterns only, never emit raw nodes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub patterns_only: bool,
+    /// Fragment units that no dependency orders form one wave, and the writers
+    /// of one wave must hold disjoint scopes. Without it, overlapping writers
+    /// share a checkout and run in turn.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disjoint_waves: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -489,6 +497,9 @@ fn fragment(
     }
     let mut fragment: Fragment =
         serde_json::from_value(value).map_err(|e| format!("invalid fragment: {e}"))?;
+    if spec.patterns_only && !fragment.nodes.is_empty() {
+        return Err("this plan accepts pattern instances only; raw nodes are refused".into());
+    }
     if fragment.schema_version != 1
         || (fragment.nodes.is_empty() && fragment.patterns.is_empty())
         || fragment.nodes.len() > spec.max_nodes
@@ -537,6 +548,16 @@ fn fragment(
     }
     let mut local_nodes = fragment.nodes;
     local_nodes.extend(wrappers);
+    let units: BTreeMap<String, Vec<String>> = local_nodes
+        .iter()
+        .map(|unit| {
+            let after = unit
+                .depends_on
+                .iter()
+                .chain(unit.inputs.iter().map(|i| &i.node));
+            (unit.id.clone(), after.cloned().collect())
+        })
+        .collect();
     let local = GraphDocument {
         context: document.context.clone(),
         extra: Default::default(),
@@ -564,6 +585,9 @@ fn fragment(
         .iter()
         .filter_map(|n| local.nodes.iter().find(|child| child.id == n.id).cloned())
         .collect();
+    if spec.disjoint_waves {
+        check_waves(&units, &nodes)?;
+    }
     // Union overlapping writer scopes, including transitive overlaps. Every
     // component uses one checkout; admission fences serialise its writers.
     let mut components: Vec<usize> = (0..nodes.len()).collect();
@@ -644,6 +668,53 @@ fn fragment(
         nodes,
         patterns: instantiations,
     })
+}
+
+/// Refuse a wave whose units write overlapping scopes. A unit is a fragment
+/// node or pattern instance; two units are in one wave when neither depends,
+/// directly or through other units, on the other.
+fn check_waves(units: &BTreeMap<String, Vec<String>>, nodes: &[GraphNode]) -> Result<(), String> {
+    fn reaches(units: &BTreeMap<String, Vec<String>>, from: &str, to: &str) -> bool {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut stack = vec![from];
+        while let Some(current) = stack.pop() {
+            if current == to {
+                return true;
+            }
+            if seen.insert(current) {
+                stack.extend(units.get(current).into_iter().flatten().map(String::as_str));
+            }
+        }
+        false
+    }
+    let writers = |unit: &str| -> Vec<&GraphNode> {
+        nodes
+            .iter()
+            .filter(|n| n.id == unit || n.id.starts_with(&format!("{unit}--")))
+            .filter(|n| n.access == AccessMode::WorktreeWrite)
+            .collect()
+    };
+    let names: Vec<_> = units.keys().collect();
+    for (position, left) in names.iter().enumerate() {
+        for right in &names[position + 1..] {
+            let (a, b) = (writers(left), writers(right));
+            if a.is_empty()
+                || b.is_empty()
+                || reaches(units, left, right)
+                || reaches(units, right, left)
+            {
+                continue;
+            }
+            if a.iter()
+                .any(|x| b.iter().any(|y| overlaps(&x.write_scope, &y.write_scope)))
+            {
+                return Err(format!(
+                    "{left} and {right} write overlapping scopes in one wave; order one after the other with depends_on or split their write scopes"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn coordinate(

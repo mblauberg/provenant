@@ -2366,6 +2366,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "provider_timeout", "operation_id"], "description": "Expand and run a named pipeline preset", "name": "preset", "requires": ["prompt_file"]}` |
 | `--set` | `{"description": "Override a preset value (PATH=TOML_VALUE); quote TOML strings; repeatable", "name": "preset_set", "repeatable": true, "requires": ["preset"]}` |
 | `--params-file` | `{"description": "Read preset parameters from a TOML table file; --set overrides it", "name": "preset_params_file", "requires": ["preset"]}` |
+| `--plan` | `{"description": "Planner front-end: auto, on or off; the default is [domains.fabric.plan] mode", "name": "preset_plan", "requires": ["preset"], "values": ["auto", "on", "off"]}` |
 | `--explain` | `{"defaults": ["false"], "description": "Explain roles, limits and the expanded graph without running it", "name": "explain", "values": ["true", "false"]}` |
 | `--risk-tier` | `{"description": "Risk tier supplied to automatic preset selection", "name": "risk_tier"}` |
 | `--task-kind` | `{"description": "Task kind supplied to automatic preset selection", "name": "task_kind"}` |
@@ -2591,6 +2592,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "provider_timeout", "operation_id"], "description": "Expand and run a named pipeline preset", "name": "preset", "requires": ["prompt_file"]}` |
 | `--set` | `{"description": "Override a preset value (PATH=TOML_VALUE); quote TOML strings; repeatable", "name": "preset_set", "repeatable": true, "requires": ["preset"]}` |
 | `--params-file` | `{"description": "Read preset parameters from a TOML table file; --set overrides it", "name": "preset_params_file", "requires": ["preset"]}` |
+| `--plan` | `{"description": "Planner front-end: auto, on or off; the default is [domains.fabric.plan] mode", "name": "preset_plan", "requires": ["preset"], "values": ["auto", "on", "off"]}` |
 | `--explain` | `{"defaults": ["false"], "description": "Explain roles, limits and the expanded graph without running it", "name": "explain", "values": ["true", "false"]}` |
 | `--risk-tier` | `{"description": "Risk tier supplied to automatic preset selection", "name": "risk_tier"}` |
 | `--task-kind` | `{"description": "Task kind supplied to automatic preset selection", "name": "task_kind"}` |

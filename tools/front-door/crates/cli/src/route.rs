@@ -2166,6 +2166,129 @@ pub(crate) fn explain_dispatch(
         text,
     ))
 }
+/// Whether the account's reading says a window is spent and has not reset.
+/// Admission gates only models with a quota pool; native providers surface a
+/// spent allowance as an exhausted snapshot, which a preview reads directly.
+fn spent(record: &provenant_quota::AccountRecord, now: i64) -> bool {
+    record.snapshot.as_ref().is_some_and(|snapshot| {
+        snapshot.status == provenant_quota::QuotaStatus::Exhausted
+            && snapshot.observed_unix_seconds <= now
+            && snapshot.windows.iter().any(|window| {
+                window.used_basis_points >= 10_000
+                    && window.resets_unix_seconds.is_none_or(|reset| reset > now)
+            })
+    })
+}
+
+/// Why a route alias cannot serve work now, resolved the way dispatch resolves
+/// it: the configured pool, the exclusions (flags and configuration), and the
+/// cached account evidence and quota routing already holds. `None` means a
+/// member can run, or readiness is only known once a provider is probed at
+/// dispatch. A planner never falls through to a weaker route, so the preset
+/// front-end degrades on a `Some`.
+pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<String> {
+    let query = RouteResolve {
+        writes: false,
+        account: None,
+        name: None,
+        request: RouteRequest {
+            read_heavy: false,
+            model: None,
+            route: Some(alias.into()),
+            effort: None,
+            confidential: false,
+            fallback: Vec::new(),
+            exclude: exclude.to_vec(),
+        },
+    };
+    let blocked = with_context(
+        roots,
+        &[],
+        &[],
+        "local-preview",
+        &[],
+        |context, records, policies| {
+            let request = resolve_request(&query, context)?;
+            let rules = effective_exclusion_rules(exclude, roots)?;
+            let now = context.now.as_timestamp().as_second();
+            // Dispatch retries the next pool member when one is refused, so a
+            // route is blocked only when every member is. The resolver picks
+            // each candidate in turn; a refused member is excluded from the
+            // next pick, exactly as dispatch narrows its own retry.
+            let mut excluded: Vec<ModelId> = Vec::new();
+            let mut refusals: Vec<String> = Vec::new();
+            loop {
+                let route = match provenant_routing::resolve_for_account_with_seed_excluding(
+                    &request,
+                    context,
+                    None,
+                    "route-preview",
+                    0,
+                    &excluded,
+                    &rules,
+                ) {
+                    Ok(route) => route,
+                    Err(error) if refusals.is_empty() => return Err(error.into()),
+                    // Every member has been judged and refused.
+                    Err(_) => return Ok::<_, EdgeError>(Some(refusals.join("; "))),
+                };
+                let model = ModelId::parse(&format!("{}/{}", route.adapter, route.model))?;
+                // The resolver ignores exclusions for a route that names one
+                // model, and returns it again: every candidate has been seen.
+                if excluded.contains(&model) {
+                    return Ok(Some(refusals.join("; ")));
+                }
+                let pools = context.catalogue.admission_pools(&model);
+                let admission = provenant_quota::Admission {
+                    policies,
+                    now_unix_seconds: now,
+                    records,
+                    pools: &pools,
+                };
+                // Judge each cached account of the member's provider as if its
+                // provider were ready: a spent, refused or unauthenticated
+                // account cannot serve. With no cached account, nothing is
+                // known and the member may run once dispatch probes it.
+                let mut member = Vec::new();
+                for record in records
+                    .iter()
+                    .filter(|record| record.account.adapter == route.adapter)
+                {
+                    let mut probe = route.clone();
+                    probe.account_key = Some(record.account.account_key.clone());
+                    probe.readiness = RouteReadiness::Ready {
+                        extra: Default::default(),
+                        availability_ref: "preview".into(),
+                        expires_unix_seconds: now + 60,
+                    };
+                    match admission.check(&probe) {
+                        Ok(()) if !spent(record, now) => return Ok(None),
+                        Ok(()) => member.push("allowance exhausted".to_owned()),
+                        Err(error) => member.push(error.to_string()),
+                    }
+                }
+                if member.is_empty() {
+                    return Ok(None);
+                }
+                refusals.push(format!(
+                    "{}/{}: {}",
+                    route.adapter,
+                    route.model,
+                    member.join("; ")
+                ));
+                // Dispatch narrows only a pool; a single model has no next one.
+                if route.pool_selection.is_none() {
+                    return Ok(Some(refusals.join("; ")));
+                }
+                excluded.push(model);
+            }
+        },
+    );
+    match blocked {
+        Ok(reason) => reason,
+        Err(error) => Some(error.to_string()),
+    }
+}
 /// The human report for a resolved route preview, naming each exclusion that
 /// removed a pool candidate and where it came from.
 pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
@@ -3737,21 +3860,30 @@ mod route_tests {
             &self,
             edit: impl FnOnce(&mut provenant_quota::AccountRecord),
         ) -> Result<(), Box<dyn Error>> {
+            self.seed("claude", edit)
+        }
+        /// Persist one provider account's record, as the quota cache holds it.
+        fn seed(
+            &self,
+            adapter: &str,
+            edit: impl FnOnce(&mut provenant_quota::AccountRecord),
+        ) -> Result<(), Box<dyn Error>> {
             use std::os::unix::fs::PermissionsExt;
+            let key = format!("{adapter}-account");
             let scope = provenant_quota::AccountScope {
-                adapter: "claude".into(),
-                account_key: "claude-account".into(),
-                label: "claude-account".into(),
+                adapter: adapter.into(),
+                account_key: key.clone(),
+                label: key.clone(),
             };
             let mut record = provenant_quota::AccountRecord::empty(scope);
             edit(&mut record);
             let quota = self.roots.state.as_path().join("quota");
-            let account = quota.join("claude-account");
+            let account = quota.join(&key);
             std::fs::create_dir_all(&account)?;
             for dir in [&quota, &account] {
                 std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
             }
-            let file = account.join("claude.json");
+            let file = account.join(format!("{adapter}.json"));
             std::fs::write(&file, serde_json::to_vec(&record)?)?;
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))?;
             Ok(())
@@ -3947,6 +4079,163 @@ mod route_tests {
                 ..
             }
         ));
+        Ok(())
+    }
+
+    /// A one-member `principal` pool, with the member's account record seeded.
+    fn blocked_fixture(
+        edit: impl FnOnce(&mut provenant_quota::AccountRecord),
+    ) -> Result<ReviewFixture, Box<dyn Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = ReviewFixture::new()?;
+        let path = fixture.roots.state.as_path().join("config.toml");
+        std::fs::write(
+            &path,
+            "schema_version=1\n[domains.routing.pools]\nprincipal=[{model='claude/claude-haiku-5-5',weight=1,effort='high',efforts=['high']}]\n",
+        )?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        fixture.seed_claude(edit)?;
+        Ok(fixture)
+    }
+
+    #[test]
+    fn route_blocked_is_quiet_for_a_usable_route() -> Result<(), Box<dyn Error>> {
+        let fixture = blocked_fixture(|_| {})?;
+        assert_eq!(super::route_blocked("principal", &[], &fixture.roots), None);
+        Ok(())
+    }
+
+    #[test]
+    fn route_blocked_names_an_excluded_principal() -> Result<(), Box<dyn Error>> {
+        let fixture = blocked_fixture(|_| {})?;
+        let flag = super::route_blocked("principal", &["claude".to_owned()], &fixture.roots);
+        assert!(flag.is_some(), "{flag:?}");
+        // A configured exclusion blocks the same way.
+        std::fs::write(
+            fixture.roots.state.as_path().join("config.toml"),
+            "schema_version=1\n[knobs]\n'routing.exclude'=['claude']\n[domains.routing.pools]\nprincipal=[{model='claude/claude-haiku-5-5',weight=1,effort='high',efforts=['high']}]\n",
+        )?;
+        let configured = super::route_blocked("principal", &[], &fixture.roots);
+        assert!(configured.is_some(), "{configured:?}");
+        Ok(())
+    }
+
+    /// Mark the account's allowance spent until it resets in an hour.
+    fn exhaust(record: &mut provenant_quota::AccountRecord) {
+        let account = record.account.clone();
+        let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
+        record.snapshot = Some(provenant_quota::QuotaSnapshot {
+            schema_version: 1,
+            account,
+            revision: 0,
+            status: provenant_quota::QuotaStatus::Exhausted,
+            observed_unix_seconds: now,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            windows: vec![provenant_quota::QuotaWindow {
+                pool: "seven_day".into(),
+                window_seconds: Some(604_800),
+                used_basis_points: 10_000,
+                resets_unix_seconds: Some(now + 3_600),
+            }],
+            details: None,
+        });
+    }
+
+    /// A two-member `principal` pool, one member per provider, each with its
+    /// account record seeded. Whichever the resolver picks first, the other
+    /// is the retry.
+    fn pair_fixture(
+        claude: impl FnOnce(&mut provenant_quota::AccountRecord),
+        codex: impl FnOnce(&mut provenant_quota::AccountRecord),
+    ) -> Result<ReviewFixture, Box<dyn Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = ReviewFixture::new()?;
+        let path = fixture.roots.state.as_path().join("config.toml");
+        std::fs::write(
+            &path,
+            "schema_version=1\n[domains.routing.pools]\nprincipal=[{model='claude/claude-haiku-5-5',weight=1,effort='high',efforts=['high']},{model='codex/gpt-6-luna',weight=1,effort='high',efforts=['high']}]\n",
+        )?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        fixture.seed("claude", claude)?;
+        fixture.seed("codex", codex)?;
+        Ok(fixture)
+    }
+
+    #[test]
+    fn route_blocked_looks_past_an_exhausted_member_to_a_usable_one() -> Result<(), Box<dyn Error>>
+    {
+        // Dispatch retries the next member, so either one spent is no block.
+        for spent_claude in [true, false] {
+            let fixture = pair_fixture(
+                |record| {
+                    if spent_claude {
+                        exhaust(record)
+                    }
+                },
+                |record| {
+                    if !spent_claude {
+                        exhaust(record)
+                    }
+                },
+            )?;
+            assert_eq!(
+                super::route_blocked("principal", &[], &fixture.roots),
+                None,
+                "claude spent: {spent_claude}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn route_blocked_names_every_member_when_all_are_exhausted() -> Result<(), Box<dyn Error>> {
+        let fixture = pair_fixture(exhaust, exhaust)?;
+        let reason = super::route_blocked("principal", &[], &fixture.roots)
+            .ok_or("a pool with every member spent must block")?;
+        assert!(reason.contains("claude/claude-haiku-5-5"), "{reason}");
+        assert!(reason.contains("codex/gpt-6-luna"), "{reason}");
+        Ok(())
+    }
+
+    #[test]
+    fn route_blocked_ends_for_a_single_model_route_with_every_account_spent()
+    -> Result<(), Box<dyn Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = blocked_fixture(exhaust)?;
+        let path = fixture.roots.state.as_path().join("config.toml");
+        std::fs::write(
+            &path,
+            "schema_version=1\n[domains.routing.routes.solo]\nmodel='claude/claude-haiku-5-5'\n",
+        )?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        // A resolver that returns the same model for ever would hang this
+        // call, so bound it.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let roots = fixture.roots.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(super::route_blocked("solo", &[], &roots));
+        });
+        let blocked = receiver
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .map_err(|_| "route_blocked did not end")?;
+        let reason = blocked.ok_or("a spent single-model route must block")?;
+        assert!(reason.contains("allowance exhausted"), "{reason}");
+        assert_eq!(
+            reason.matches("claude/claude-haiku-5-5").count(),
+            1,
+            "{reason}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn route_blocked_names_an_exhausted_principal() -> Result<(), Box<dyn Error>> {
+        let fixture = blocked_fixture(exhaust)?;
+        let blocked = super::route_blocked("principal", &[], &fixture.roots);
+        let reason = blocked.ok_or("an exhausted principal must block")?;
+        assert!(reason.contains("claude"), "{reason}");
+        assert!(reason.contains("allowance exhausted"), "{reason}");
         Ok(())
     }
 }
