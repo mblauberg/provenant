@@ -37,8 +37,8 @@ default-filter = '''
 not (
     (package(=provenant-confinement) & (
         test(=output_custody::tests::install_refuses_oversize_and_linked_sources) |
-        test(=permissions::tests::linked_worktree_grants_derive_from_verified_git_paths_and_ref) |
-        test(=permissions::tests::native_sandbox_blocks_path_escape_probes)
+        test(=permissions::tests::grants::linked_worktree_grants_derive_from_verified_git_paths_and_ref) |
+        test(=permissions::tests::escape::native_sandbox_blocks_path_escape_probes)
     )) |
     (package(=provenant-fabric-runtime) & test(=fetch::tests::cleanup_refuses_hard_links)) |
     (package(=provenant-supervisor) & (

@@ -1,0 +1,2374 @@
+#[cfg(test)]
+#[test]
+fn cli_failure_uses_stderr_without_structured_json() {
+    let error = cli_failure(b"not json", b"specific failure\nadditional detail\n");
+    assert!(matches!(error, ServiceError::Cli { code, message, data }
+        if code == "cli_failed" && message == "specific failure" && data.is_null()));
+}
+#[cfg(test)]
+#[allow(dead_code)] // The worktree driver includes these helpers without libtest.
+mod peer_tests {
+    use super::*;
+    #[allow(unused_imports)]
+    // The worktree driver includes this module without libtest functions.
+    use provenant_confinement::worktrees;
+    use provenant_core::{AttemptId, RunId, TaskId};
+    use provenant_run::{AttemptState, Outcome, RunStore};
+
+    #[test]
+    fn tick_reports_unreadable_once_and_advances_another_graph()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph;
+        struct Seed {
+            actor: String,
+            at: provenant_core::WallTime,
+        }
+        impl graph::AttemptOwner for Seed {
+            type Error = FacadeError;
+            fn actor(&self) -> String {
+                self.actor.clone()
+            }
+            fn wall_now(&self) -> Option<provenant_core::WallTime> {
+                Some(self.at)
+            }
+            fn observe_or_start(
+                &mut self,
+                _: &graph::AttemptKey,
+                _: graph::NodeInput<'_>,
+                _: &graph::GraphRoute,
+                _: graph::AccessMode,
+                _: Option<&str>,
+                _: graph::Replay<'_>,
+            ) -> Result<graph::AttemptObservation, Self::Error> {
+                Err(FacadeError::OwnerUnavailable)
+            }
+        }
+        let rig = crate::worktree_tests::support::TestRig::new()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let context = Context::open(roots.clone(), &rig.home, &rig.project)?;
+        let project = context.identity.project;
+        let clock = SystemClock;
+        let now = clock.wall_now()?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 10)?;
+        let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1, "graph_id":"b-good", "decision_session":"chair-session",
+            "nodes":[{"id":"choose", "kind":"decide", "access":"read_only", "decide":{
+                "question":"Ship?", "options":[{"id":"ship","label":"Ship"},{"id":"hold","label":"Hold"}],
+                "default":"hold", "timeout_seconds":60
+            }}]
+        }))?;
+        let mut journal =
+            graph::FileJournal::open(&roots.state, project, "b-good", budget, &cancel, &clock)?;
+        journal.bind(graph::GraphExecution {
+            extra: Default::default(),
+            integration_base: None,
+            directory: rig.project.clone(),
+            document: document.clone(),
+        })?;
+        let mut seed = Seed {
+            actor: context.identity.inbox.actor.to_string(),
+            at: provenant_core::WallTime::from_micros(now.as_micros() - 120_000_000)?,
+        };
+        let seeded = graph::advance_with_budget(
+            &document,
+            &mut seed,
+            &mut journal,
+            &Default::default(),
+            &Default::default(),
+        )?;
+        assert_eq!(seeded.checkpoint.nodes[0].state, graph::NodeState::Running);
+        drop(journal);
+        let directory = roots
+            .state
+            .as_path()
+            .join("fabric/graphs")
+            .join(project.to_string());
+        std::fs::write(directory.join("graph-a-bad.json"), b"invalid json")?;
+        let resolved = crate::roots::Resolved {
+            assets: rig.project.clone(),
+            home: rig.home.clone(),
+            project: rig.project.clone(),
+            roots: roots.clone(),
+            claude_config: None,
+            codex_home: None,
+        };
+        let first = tick_graphs(&resolved, now, &FreeWorkers)?;
+        assert_eq!(first.errors.len(), 1, "{:?}", first.errors);
+        assert!(first.errors[0].contains("a-bad"));
+        assert_eq!(first.advanced, 1);
+        let good = graph::FileJournal::read_checkpoint(&roots.state, project, "b-good")?
+            .ok_or("missing good graph")?;
+        assert_eq!(good.nodes[0].state, graph::NodeState::Succeeded);
+        let second = tick_graphs(&resolved, now, &FreeWorkers)?;
+        assert!(second.errors.is_empty(), "{:?}", second.errors);
+        assert_eq!(second.advanced, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn graph_status_and_cancel_retire_unreadable_record() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use provenant_fabric_runtime::graph::{FileJournal, GraphStatus};
+        let rig = crate::worktree_tests::support::TestRig::new()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots.clone(), &rig.home, &rig.project)?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let project = factory.context.identity.project;
+        drop(FileJournal::open(
+            &roots.state,
+            project,
+            "broken",
+            budget,
+            &cancel,
+            &factory.clock,
+        )?);
+        let directory = roots
+            .state
+            .as_path()
+            .join("fabric/graphs")
+            .join(project.to_string());
+        std::fs::write(directory.join("graph-broken.json"), b"invalid json")?;
+        let status = factory.graph(
+            GraphInput::Status {
+                extra: Default::default(),
+                id: "broken".into(),
+            },
+            budget,
+            &cancel,
+        )?;
+        assert_eq!(status.status, GraphStatus::Paused);
+        assert!(
+            status
+                .advance_error
+                .unwrap()
+                .contains("cancel it to retire")
+        );
+        let retired = factory.graph(
+            GraphInput::Cancel {
+                extra: Default::default(),
+                id: "broken".into(),
+            },
+            budget,
+            &cancel,
+        )?;
+        assert!(
+            retired
+                .advance_error
+                .unwrap()
+                .contains("Active attempts were not cancelled")
+        );
+        assert!(!directory.join("graph-broken.json").exists());
+        assert!(matches!(
+            factory.graph(
+                GraphInput::Status {
+                    extra: Default::default(),
+                    id: "broken".into()
+                },
+                budget,
+                &cancel
+            ),
+            Err(FacadeError::NotFound)
+        ));
+        Ok(())
+    }
+
+    fn host_test(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
+        if !provenant_cli::fabric::in_lane() {
+            return Ok(false);
+        }
+        use provenant_os::exec::{ExecOptions, Executor, Termination};
+        let argv = vec![
+            std::env::current_exe()?.into_os_string(),
+            "--exact".into(),
+            name.into(),
+            "--nocapture".into(),
+        ];
+        let removed = [
+            provenant_core::RUN_STATE_DIRECTORY_ENV,
+            provenant_run::LANE_DEPTH_ENV,
+            provenant_run::PARENT_ATTEMPT_ENV,
+        ];
+        let fixture_home = tempfile::tempdir()?;
+        let isolate_home = name
+            .ends_with("explicit_writer_refreshes_tracking_ref_while_collection_is_busy")
+            || name.ends_with("adopted_writer_refresh_failure_does_not_change_receipt");
+        let mut environment: Vec<_> = std::env::vars_os()
+            .filter(|(key, _)| {
+                !removed.iter().any(|name| key == name) && !(isolate_home && key == "HOME")
+            })
+            .collect();
+        if isolate_home {
+            environment.push(("HOME".into(), fixture_home.path().as_os_str().to_owned()));
+        }
+        let cwd = std::env::current_dir()?;
+        let mut options = ExecOptions::new(&argv, &cwd, std::time::Duration::from_secs(30));
+        options.env = Some(&environment);
+        let output = SystemExecutor::new(1)?.execute(options)?;
+        assert_eq!(
+            output.termination,
+            Termination::Exit(0),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout.bytes),
+            String::from_utf8_lossy(&output.stderr.bytes)
+        );
+        Ok(true)
+    }
+
+    struct FreeWorkers;
+    impl WorkerObserver for FreeWorkers {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::WorkerState>
+        {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, provenant_confinement::worktrees::WorkerState::Free))
+                .collect()
+        }
+    }
+
+    mod loop_repair_tests {
+        include!("loop_repair_tests.rs");
+    }
+
+    mod tick_tests {
+        include!("tick_tests.rs");
+    }
+
+    struct SettlementFixture {
+        rig: crate::worktree_tests::support::TestRig,
+        roots: provenant_core::Roots,
+        store: RunStore,
+        settled: provenant_run::HolderContext,
+        worktree: PathBuf,
+    }
+
+    fn publish_success(
+        rig: &crate::worktree_tests::support::TestRig,
+        store: &RunStore,
+        record: &provenant_run::AttemptRecord,
+        head: provenant_core::GitOid,
+        call: &provenant_run::Request<'_>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        publish_outcome(rig, store, record, head, Outcome::Succeeded, call)
+    }
+
+    fn publish_outcome(
+        rig: &crate::worktree_tests::support::TestRig,
+        store: &RunStore,
+        record: &provenant_run::AttemptRecord,
+        head: provenant_core::GitOid,
+        outcome: Outcome,
+        call: &provenant_run::Request<'_>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        publish_routed(rig, store, record, head, outcome, "fixture/model", call)
+    }
+
+    fn publish_routed(
+        rig: &crate::worktree_tests::support::TestRig,
+        store: &RunStore,
+        record: &provenant_run::AttemptRecord,
+        head: provenant_core::GitOid,
+        outcome: Outcome,
+        model: &str,
+        call: &provenant_run::Request<'_>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let attempt = rig
+            .state
+            .join("runs")
+            .join(record.run_id.to_string())
+            .join("attempts")
+            .join(record.attempt_id.to_string());
+        let directory = provenant_os::fs::Directory::open_anchor(&attempt)?;
+        use provenant_supervisor::custody::{
+            ExitObservation, PublicationState, Scope, SettlementEvidence,
+        };
+        let exit = ExitObservation {
+            publication: PublicationState::Durable,
+            scope: Scope {
+                run: record.run_id,
+                attempt: record.attempt_id,
+                generation: record.generation,
+            },
+            termination: Some(provenant_os::exec::Termination::Exit(0)),
+            never_spawned: false,
+            stop_reason: None,
+            delivered_signals: vec![],
+            reaped: vec![],
+            omitted_reaped: 0,
+            spared: vec![],
+            omitted_spared: 0,
+            warnings: vec![],
+            omitted_warnings: 0,
+            terminal_observed: false,
+            unresolved_cleanup: false,
+            unresolved_pids: vec![],
+            settlement_evidence: SettlementEvidence::DarwinCensusAndCustodyLease,
+            stdout: Default::default(),
+            stderr: Default::default(),
+        };
+        let mut exit_wire = serde_json::to_value(&exit)?;
+        let object = exit_wire.as_object_mut().ok_or("exit object")?;
+        object.remove("publication");
+        object.insert("schema_version".into(), 1.into());
+        for (name, wire) in [
+            ("process-exit.json", exit_wire),
+            (
+                "writer-terminal.json",
+                serde_json::json!({"schema_version":1,"head":head,"protected_paths":[]}),
+            ),
+        ] {
+            directory
+                .atomic_write(
+                    std::ffi::OsStr::new(name),
+                    ".fixture-",
+                    &serde_json::to_vec(&wire)?,
+                    provenant_os::fs::PublishMode::NoReplace,
+                )?
+                .require_durable()?;
+        }
+        drop(directory.lock(
+            std::ffi::OsStr::new("custody.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+            call.lock_budget(),
+            call.cancel,
+            call.clock,
+        )?);
+        let route = provenant_run::RouteRecord {
+            provider: model.split_once('/').map(|(adapter, _)| adapter.into()),
+            model: Some(model.into()),
+            ..Default::default()
+        };
+        store.publish_terminal(
+            record.attempt_id,
+            record.revision,
+            &provenant_run::TerminalPublication {
+                outcome,
+                finished_at: call.clock.wall_now()?,
+                started_at: None,
+                provider_ms: None,
+                reason: None,
+                result: "OK",
+                complete: true,
+                redacted: false,
+                resolved_route: Some(route.clone()),
+                applied_route: Some(route.clone()),
+                observed_route: Some(route),
+                usage: Default::default(),
+                session: None,
+                partial_signals: Vec::new(),
+            },
+            &exit,
+            call,
+        )?;
+        Ok(())
+    }
+
+    impl SettlementFixture {
+        fn resumed() -> Result<Self, Box<dyn std::error::Error>> {
+            use provenant_confinement::worktrees::{
+                self, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
+            };
+            let rig = crate::worktree_tests::support::TestRig::new()?;
+            let git = provenant_os::git::git_executable().ok_or("git")?;
+            for args in [
+                vec!["config", "user.name", "Fixture"],
+                vec!["config", "user.email", "fixture@example.invalid"],
+                vec!["commit", "--allow-empty", "-qm", "base"],
+            ] {
+                let output = rig.execute(&git, &args, None)?;
+                assert_eq!(crate::worktree_tests::support::code(&output), 0);
+            }
+            let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+            let identity = Context::open(roots.clone(), &rig.home, &rig.project)?.identity;
+            let clock = SystemClock;
+            let cancel = CancelToken::new();
+            let call = provenant_run::Request {
+                clock: &clock,
+                cancel: &cancel,
+            };
+            let context = provenant_run::ExecutionContext {
+                state_root: roots.state.clone(),
+                project_id: identity.project,
+                actor_id: identity.inbox.actor,
+                read_prompts: true,
+            };
+            let store =
+                RunStore::open(&context, &call)?.with_writer_registry(roots.state.as_path());
+            let info = worktrees::with_context(
+                &roots,
+                &rig.home,
+                &rig.project,
+                &clock,
+                &cancel,
+                |context| {
+                    worktrees::create(
+                        &worktrees::WorktreeContext {
+                            workers: &FreeWorkers,
+                            ..*context
+                        },
+                        WorktreeCreate {
+                            branch: "resumed-lane".into(),
+                            base: Some("HEAD".into()),
+                        },
+                        &cancel,
+                    )
+                },
+            )?;
+            let run = provenant_run::Service::new(&store).dispatch(
+                provenant_run::DispatchRequest {
+                    chair: None,
+                    operation_id: "settlement-original".parse()?,
+                    concurrency: 1,
+                    lane_depth: 1,
+                    parent_attempt: None,
+                    tasks: vec![provenant_run::DispatchTask {
+                        context: None,
+                        build_heavy: false,
+                        title: None,
+                        task_id: TaskId::from_bytes([3; 16]),
+                        prompt: "reply OK".into(),
+                        base: Some(info.head.to_string()),
+                        pinned_base: None,
+                        head: None,
+                        profile: Default::default(),
+                        route: provenant_run::RequestedRoute::Model {
+                            extra: Default::default(),
+                            provider: "fixture".into(),
+                            model: "fixture/model".into(),
+                            effort: None,
+                        },
+                        account: None,
+                        fallback: vec![],
+                        timeout_seconds: 30,
+                        delivery_id: None,
+                        deliver: None,
+                        worktree: Some(info.path.clone()),
+                        access: Default::default(),
+                    }],
+                },
+                &rig.project,
+                &call,
+            )?;
+            let prior = store
+                .pending_attempts(run.run_id, &call)?
+                .first()
+                .ok_or("attempt")?
+                .attempt_id;
+            worktrees::with_context(
+                &roots,
+                &rig.home,
+                &rig.project,
+                &clock,
+                &cancel,
+                |context| {
+                    let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
+                    worktrees::save_owner(
+                        &tree,
+                        &WorktreeOwner {
+                            attempt_id: Some(prior),
+                            operation_id: Some(run.operation_id.clone()),
+                            branch: "resumed-lane".into(),
+                            base: info.head.to_string(),
+                            host: identity.host,
+                            created_at: clock
+                                .wall_now()
+                                .map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
+                            origin: WorktreeOrigin::Lane,
+                            label: None,
+                        },
+                    )?;
+                    Ok(())
+                },
+            )?;
+            store.withdraw(
+                prior,
+                AttemptState::Queued {
+                    extra: Default::default(),
+                },
+                Outcome::Cancelled,
+                "fixture",
+                clock.wall_now()?,
+                &call,
+            )?;
+            let resume = provenant_run::Resume {
+                prior,
+                expected_generation: 0,
+                operation_id: "settlement-resume".parse()?,
+                run_id: RunId::from_bytes([30; 16]),
+                attempt_id: AttemptId::from_bytes([31; 16]),
+                prompt: "continue".into(),
+                created_at: clock.wall_now()?,
+            };
+            store.resume_fresh(&resume, "fixture", &call)?;
+            let record = store.record(resume.attempt_id, &call)?;
+            publish_success(&rig, &store, &record, info.head, &call)?;
+            let settled = provenant_run::HolderContext {
+                schema_version: 1,
+                roots: provenant_run::RootSeed {
+                    home: rig.home.clone(),
+                    checkout: rig.project.clone(),
+                    state_root: rig.state.clone(),
+                },
+                project_id: identity.project,
+                actor_id: identity.inbox.actor,
+                run_id: record.run_id,
+                attempt_id: record.attempt_id,
+                host_delivery: None,
+                launch: None,
+                sealed: None,
+            };
+            Ok(Self {
+                rig,
+                roots,
+                store,
+                settled,
+                worktree: info.path,
+            })
+        }
+    }
+
+    #[test]
+    fn graph_replay_preserves_legacy_context_without_a_checkpoint_reference()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test(
+            "fabric::peer_tests::graph_replay_preserves_legacy_context_without_a_checkpoint_reference",
+        )? {
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::{self, AttemptOwner};
+        let rig = crate::worktree_tests::support::TestRig::new()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project)?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
+            "graph_id":"legacy-context", "node_id":"inspect", "route_index":0
+        }))?;
+        let mut run_owner = BinaryRunOwner {
+            factory: &factory,
+            allow_remote: true,
+            actor: None,
+            chair: None,
+        };
+        let input: SubmitInput = serde_json::from_value(serde_json::json!({
+            "op":"submit", "operation_id":graph_operation("graph-attempt-operation", &key)?,
+            "tasks":[{
+                "title":"inspect", "prompt":"Review the slice",
+                "route":{"kind":"model", "provider":"fixture", "model":"fixture/model"},
+                "timeout_seconds":factory.context.config.limits.graph_timeout_seconds
+            }], "concurrency":1
+        }))?;
+        let receipt = run_owner.submit_with_access(input, budget, &cancel, Default::default())?;
+        let target = receipt.targets.first().ok_or("target")?;
+        let mut graph_owner = BoundGraphOwner {
+            factory: &factory,
+            integration_base: None,
+            integration_branch: None,
+            network: None,
+            budget,
+            cancel: &cancel,
+            prices: None,
+            tick: false,
+        };
+        let actor = graph_owner.actor();
+        let route = serde_json::from_value(
+            serde_json::json!({"adapter":"fixture", "model":"fixture/model"}),
+        )?;
+        let store = run_owner.store(&cancel)?;
+        for prepared in [false, true] {
+            if prepared {
+                // Reserve the legacy digest without the canonical request file,
+                // as a crash between row reservation and publication would leave it.
+                let call = run_owner.call(&cancel);
+                let mut operation = store
+                    .operation(&receipt.operation_id, &call)?
+                    .ok_or("operation")?;
+                operation.state = provenant_run::OperationState::Prepared;
+                let db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
+                db.execute(
+                    "UPDATE operations SET record=?1",
+                    [serde_json::to_vec(&operation)?],
+                )?;
+                std::fs::remove_file(
+                    rig.state
+                        .join("runs")
+                        .join(operation.run_id.to_string())
+                        .join("request.json"),
+                )?;
+            }
+            let observation = graph_owner.observe_or_start(
+                &key,
+                graph::NodeInput {
+                    context: provenant_records::run::WorkContext {
+                        graph_id: Some(key.graph_id.clone()),
+                        node_id: Some(key.node_id.clone()),
+                        pattern: Some("council".into()),
+                        ..Default::default()
+                    },
+                    read_roots: &[],
+                    distinct_from_attempts: &[],
+                    require_distinct: false,
+                    source_commit: None,
+                    title: "inspect",
+                    prompt: "Review the slice",
+                    required_verdict: None,
+                },
+                &route,
+                graph::AccessMode::ReadOnly,
+                None,
+                graph::Replay {
+                    delivery: None,
+                    branch: None,
+                    stored_ref: None,
+                    launch_actor: &actor,
+                },
+            )?;
+            let graph::AttemptObservation::Terminal { attempt_ref, .. } = observation else {
+                return Err("expected settled fixture attempt".into());
+            };
+            assert_eq!(
+                attempt_ref,
+                Some(format!(
+                    "{}/{}",
+                    factory.context.identity.host, target.attempt
+                ))
+            );
+            let record = store.record(target.attempt, &run_owner.call(&cancel))?;
+            assert!(record.context.is_none());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn run_list_is_compact_and_pages_newest_first() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::run_list_is_compact_and_pages_newest_first")? {
+            return Ok(());
+        }
+        let fixture = SettlementFixture::resumed()?;
+        let factory = Factory {
+            context: Context::open(
+                fixture.roots.clone(),
+                &fixture.rig.home,
+                &fixture.rig.project,
+            )?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: fixture.rig.home.clone(),
+            cwd: fixture.rig.project.clone(),
+            assets: fixture.rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let mut owner = BinaryRunOwner {
+            factory: &factory,
+            allow_remote: false,
+            actor: None,
+            chair: None,
+        };
+        let first = owner.run(
+            RunInput::List {
+                extra: Default::default(),
+                after: None,
+                limit: 1,
+            },
+            budget,
+            &cancel,
+        )?;
+        let wire = serde_json::to_value(&first)?;
+        let row = &wire["page"]["items"][0];
+        assert!(
+            row["attempt_id"] == fixture.settled.attempt_id.to_string()
+                && row.get("usage").is_none()
+                && row.get("prompt").is_none()
+                && row.get("trace").is_none(),
+            "expected newest compact row, got {row}"
+        );
+        let RunResult::List { page, .. } = first else {
+            return Err("list result".into());
+        };
+        assert!(page.truncated);
+        let cursor = page.next_after.ok_or("next cursor")?;
+        let second = owner.run(
+            RunInput::List {
+                extra: Default::default(),
+                after: Some(cursor),
+                limit: 1,
+            },
+            budget,
+            &cancel,
+        )?;
+        let RunResult::List { page, .. } = second else {
+            return Err("list result".into());
+        };
+        assert!(!page.truncated);
+        assert!(page.next_after.is_none());
+        let second = serde_json::to_value(&page.items[0])?;
+        assert_ne!(second["attempt_id"], row["attempt_id"]);
+        assert_eq!(second["state"]["outcome"], "cancelled");
+        assert_eq!(second["state"]["reason"], "fixture");
+        assert!(second["state"]["finished_at"].is_string());
+        let status = owner.run(
+            RunInput::Status {
+                extra: Default::default(),
+                target: AttemptTarget {
+                    extra: Default::default(),
+                    attempt: fixture.settled.attempt_id,
+                    host: None,
+                },
+            },
+            budget,
+            &cancel,
+        )?;
+        let RunResult::Status { mut attempt, .. } = status else {
+            return Err("status result".into());
+        };
+        let status = serde_json::to_value(RunResult::Status {
+            extra: Default::default(),
+            attempt: attempt.clone(),
+        })?;
+        assert!(status["attempt"].get("usage").is_some());
+        assert!(status["attempt"].get("prompt").is_some());
+        // Pool routing carries an audit receipt in full records. It must not
+        // enlarge the compact route returned by list.
+        attempt.applied_route = Some(serde_json::from_value(serde_json::json!({
+            "provider":"fixture", "model":"fixture/model", "effort":"high",
+            "account_label":"fixture", "account_key":"private-key", "source":"pool",
+            "pool_selection": {
+                "pool":"senior", "candidates":[], "roll":0, "total_weight":1,
+                "pick":"fixture/model"
+            }
+        }))?);
+        let summary = provenant_fabric_runtime::runs::AttemptSummary::from(attempt);
+        let summary = serde_json::to_value(summary)?;
+        assert_eq!(
+            summary["applied_route"],
+            serde_json::json!({
+                "provider":"fixture", "model":"fixture/model", "effort":"high",
+                "account_label":"fixture"
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn settlement_failure_in_one_graph_does_not_stop_another_graph()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test(
+            "fabric::peer_tests::settlement_failure_in_one_graph_does_not_stop_another_graph",
+        )? {
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::{
+            self, AttemptKey, AttemptObservation, AttemptOwner, FileJournal, GraphDocument,
+            GraphExecution, GraphRoute, NodeState, Replay,
+        };
+        struct SeedAttempt {
+            reference: String,
+            actor: String,
+        }
+        impl AttemptOwner for SeedAttempt {
+            type Error = std::convert::Infallible;
+            fn actor(&self) -> String {
+                self.actor.clone()
+            }
+            fn observe_or_start(
+                &mut self,
+                _: &AttemptKey,
+                _: graph::NodeInput<'_>,
+                _: &GraphRoute,
+                _: graph::AccessMode,
+                _: Option<&str>,
+                _: Replay<'_>,
+            ) -> Result<AttemptObservation, Self::Error> {
+                Ok(AttemptObservation::Pending {
+                    attempt_ref: Some(self.reference.clone()),
+                })
+            }
+        }
+        let mut fixture = SettlementFixture::resumed()?;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let call = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let identity = Context::open(
+            fixture.roots.clone(),
+            &fixture.rig.home,
+            &fixture.rig.project,
+        )?
+        .identity;
+        // Two different terminal attempts let the settlement error be attributed
+        // to A alone. B's journal still needs its running node to be observed.
+        let continuation = provenant_run::Resume {
+            prior: fixture.settled.attempt_id,
+            expected_generation: 0,
+            operation_id: "graph-b-attempt".parse()?,
+            run_id: RunId::from_bytes([40; 16]),
+            attempt_id: AttemptId::from_bytes([41; 16]),
+            prompt: "continue".into(),
+            created_at: clock.wall_now()?,
+        };
+        fixture
+            .store
+            .resume_fresh(&continuation, "fixture", &call)?;
+        let second = fixture.store.record(continuation.attempt_id, &call)?;
+        let head = fixture
+            .store
+            .record(fixture.settled.attempt_id, &call)?
+            .head
+            .ok_or("head")?;
+        publish_success(&fixture.rig, &fixture.store, &second, head, &call)?;
+        for (id, attempt) in [
+            ("a-settlement-error", fixture.settled.attempt_id),
+            ("b-completes", continuation.attempt_id),
+        ] {
+            let document: GraphDocument = serde_json::from_value(serde_json::json!({
+                "schema_version":1,"graph_id":id,"nodes":[{"id":"one","prompt":"reply OK","access":"worktree_write","worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}}]
+            }))?;
+            let mut journal = FileJournal::open(
+                &fixture.roots.state,
+                fixture.settled.project_id,
+                id,
+                call.lock_budget(),
+                &cancel,
+                &clock,
+            )?;
+            journal.bind(GraphExecution {
+                extra: Default::default(),
+                integration_base: None,
+                directory: fixture.rig.project.clone(),
+                document: document.clone(),
+            })?;
+            let mut seed = SeedAttempt {
+                reference: format!("{}/{attempt}", identity.host),
+                actor: identity.inbox.actor.to_string(),
+            };
+            let seeded = graph::advance_with_budget(
+                &document,
+                &mut seed,
+                &mut journal,
+                &Default::default(),
+                &Default::default(),
+            )?;
+            assert_eq!(seeded.checkpoint.nodes[0].state, NodeState::Running);
+        }
+        // An unsafe receipt path makes settlement itself fail before the graph
+        // loop. It must leave A observable and still allow B to complete.
+        let receipt_path = fixture
+            .rig
+            .state
+            .join("runs")
+            .join(fixture.settled.run_id.to_string())
+            .join("attempts")
+            .join(fixture.settled.attempt_id.to_string())
+            .join("worktree-settlement.json");
+        std::fs::create_dir(&receipt_path)?;
+        let settlement_error =
+            settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)
+                .err()
+                .ok_or("settlement should fail")?
+                .to_string();
+        fixture.settled.launch = Some(provenant_run::HostLaunchContext {
+            configuration_root: fixture.rig.state.clone(),
+            cwd: fixture.rig.project.clone(),
+            executables: Default::default(),
+            executable_search_path: Vec::new(),
+            git: provenant_os::git::git_executable().ok_or("git")?,
+            codex_home: None,
+            cargo_build_jobs: None,
+            fixture_state_write: false,
+        });
+        let error = advance_graphs_after_settlement(&fixture.settled, &FreeWorkers)
+            .err()
+            .ok_or("settlement failure must propagate")?;
+        assert_eq!(error.to_string(), settlement_error);
+        assert_eq!(
+            FileJournal::read_advance_error(
+                &fixture.roots.state,
+                fixture.settled.project_id,
+                "a-settlement-error"
+            )?
+            .as_deref(),
+            Some(settlement_error.as_str())
+        );
+        let completed = FileJournal::read_checkpoint(
+            &fixture.roots.state,
+            fixture.settled.project_id,
+            "b-completes",
+        )?
+        .ok_or("B checkpoint")?;
+        assert_eq!(completed.nodes[0].state, NodeState::Succeeded);
+        assert!(
+            FileJournal::pending_execution(
+                &fixture.roots.state,
+                fixture.settled.project_id,
+                "b-completes"
+            )?
+            .is_none()
+        );
+        assert!(
+            FileJournal::read_advance_error(
+                &fixture.roots.state,
+                fixture.settled.project_id,
+                "b-completes"
+            )?
+            .is_none()
+        );
+        assert!(fixture.worktree.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn graph_owner_fails_node_when_result_integrity_is_lost()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::graph_owner_fails_node_when_result_integrity_is_lost")? {
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::{self, AttemptOwner, GraphJournal};
+        struct Seed(String);
+        impl AttemptOwner for Seed {
+            type Error = std::convert::Infallible;
+            fn actor(&self) -> String {
+                "fixture".into()
+            }
+            fn observe_or_start(
+                &mut self,
+                _: &graph::AttemptKey,
+                _: graph::NodeInput<'_>,
+                _: &graph::GraphRoute,
+                _: graph::AccessMode,
+                _: Option<&str>,
+                _: graph::Replay<'_>,
+            ) -> Result<graph::AttemptObservation, Self::Error> {
+                Ok(graph::AttemptObservation::Pending {
+                    attempt_ref: Some(self.0.clone()),
+                })
+            }
+        }
+        let fixture = SettlementFixture::resumed()?;
+        let factory = Factory {
+            context: Context::open(
+                fixture.roots.clone(),
+                &fixture.rig.home,
+                &fixture.rig.project,
+            )?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: fixture.rig.home.clone(),
+            cwd: fixture.rig.project.clone(),
+            assets: fixture.rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let artifact = fixture.rig.state.join(format!(
+            "runs/{}/attempts/{}/result.md",
+            fixture.settled.run_id, fixture.settled.attempt_id
+        ));
+        std::fs::write(&artifact, b"XX")?;
+        for required in [None, Some("VERDICT: PASS")] {
+            let id = if required.is_some() {
+                "corrupt-required"
+            } else {
+                "corrupt-result"
+            };
+            let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+                "schema_version":1,"graph_id":id,"nodes":[
+                    {"id":"parent","prompt":"work","access":"worktree_write","worktree":fixture.worktree,"required_verdict":required,"route":{"adapter":"fixture","model":"fixture/model"}},
+                    {"id":"child","prompt":"review","access":"read_only","depends_on":["parent"],"inputs":[{"node":"parent","outputs":["result"]}],"route":{"adapter":"fixture","model":"fixture/model"}}
+                ]
+            }))?;
+            let mut journal = graph::FileJournal::open(
+                &fixture.roots.state,
+                fixture.settled.project_id,
+                id,
+                budget,
+                &cancel,
+                &factory.clock,
+            )?;
+            journal.bind(graph::GraphExecution {
+                extra: Default::default(),
+                integration_base: None,
+                directory: fixture.rig.project.clone(),
+                document: document.clone(),
+            })?;
+            let mut seed = Seed(format!(
+                "{}/{}",
+                factory.context.identity.host, fixture.settled.attempt_id
+            ));
+            graph::advance_with_budget(
+                &document,
+                &mut seed,
+                &mut journal,
+                &Default::default(),
+                &Default::default(),
+            )?;
+            let mut owner = BoundGraphOwner {
+                factory: &factory,
+                integration_base: None,
+                integration_branch: None,
+                network: None,
+                budget,
+                cancel: &cancel,
+                prices: None,
+                tick: false,
+            };
+            let run = graph::advance_with_budget(
+                &document,
+                &mut owner,
+                &mut journal,
+                &Default::default(),
+                &Default::default(),
+            )?;
+            let parent = &run.checkpoint.nodes[0];
+            assert_eq!(parent.state, graph::NodeState::Failed);
+            assert_eq!(
+                parent.attempts[0].outcome,
+                Some(graph::AttemptOutcome::OtherFailure)
+            );
+            assert!(
+                parent
+                    .outputs
+                    .as_ref()
+                    .ok_or("outputs")?
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("digest or length"))
+            );
+            assert_eq!(run.checkpoint.nodes[1].state, graph::NodeState::Blocked);
+            assert_eq!(
+                journal.load(id)?.ok_or("checkpoint")?.nodes[0].state,
+                graph::NodeState::Failed
+            );
+        }
+
+        // A corrupt authentication failure must not consume a fallback route,
+        // even for a read-only node where that provider outcome normally would.
+        let call = provenant_run::Request {
+            clock: &factory.clock,
+            cancel: &cancel,
+        };
+        let continuation = provenant_run::Resume {
+            prior: fixture.settled.attempt_id,
+            expected_generation: 0,
+            operation_id: "graph-corrupt-auth".parse()?,
+            run_id: RunId::from_bytes([43; 16]),
+            attempt_id: AttemptId::from_bytes([44; 16]),
+            prompt: "continue".into(),
+            created_at: factory.clock.wall_now()?,
+        };
+        fixture
+            .store
+            .resume_fresh(&continuation, "fixture", &call)?;
+        let record = fixture.store.record(continuation.attempt_id, &call)?;
+        let head = fixture
+            .store
+            .record(fixture.settled.attempt_id, &call)?
+            .head
+            .ok_or("head")?;
+        publish_outcome(
+            &fixture.rig,
+            &fixture.store,
+            &record,
+            head,
+            Outcome::AuthRequired,
+            &call,
+        )?;
+        let artifact = fixture.rig.state.join(format!(
+            "runs/{}/attempts/{}/result.md",
+            continuation.run_id, continuation.attempt_id
+        ));
+        std::fs::write(&artifact, b"XX")?;
+        let id = "corrupt-auth";
+        let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":id,"nodes":[
+                {"id":"parent","prompt":"work","access":"read_only","routes":[
+                    {"adapter":"fixture","model":"fixture/model"},
+                    {"adapter":"fixture","model":"fixture/other"}
+                ]}
+            ]
+        }))?;
+        let mut journal = graph::FileJournal::open(
+            &fixture.roots.state,
+            fixture.settled.project_id,
+            id,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        journal.bind(graph::GraphExecution {
+            extra: Default::default(),
+            integration_base: None,
+            directory: fixture.rig.project.clone(),
+            document: document.clone(),
+        })?;
+        let mut seed = Seed(format!(
+            "{}/{}",
+            factory.context.identity.host, continuation.attempt_id
+        ));
+        graph::advance_with_budget(
+            &document,
+            &mut seed,
+            &mut journal,
+            &Default::default(),
+            &Default::default(),
+        )?;
+        let mut owner = BoundGraphOwner {
+            factory: &factory,
+            integration_base: None,
+            integration_branch: None,
+            network: None,
+            budget,
+            cancel: &cancel,
+            prices: None,
+            tick: false,
+        };
+        let run = graph::advance_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &Default::default(),
+            &Default::default(),
+        )?;
+        let parent = &run.checkpoint.nodes[0];
+        assert_eq!(parent.state, graph::NodeState::Failed);
+        assert_eq!(parent.attempts.len(), 1);
+        assert_eq!(
+            parent.attempts[0].outcome,
+            Some(graph::AttemptOutcome::OtherFailure)
+        );
+        assert!(
+            parent
+                .outputs
+                .as_ref()
+                .ok_or("outputs")?
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("digest or length"))
+        );
+        std::fs::remove_file(&artifact)?;
+        let mut missing_document = document.clone();
+        missing_document.graph_id = "missing-auth-result".into();
+        let mut journal = graph::FileJournal::open(
+            &fixture.roots.state,
+            fixture.settled.project_id,
+            &missing_document.graph_id,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        journal.bind(graph::GraphExecution {
+            extra: Default::default(),
+            integration_base: None,
+            directory: fixture.rig.project.clone(),
+            document: missing_document.clone(),
+        })?;
+        let mut seed = Seed(format!(
+            "{}/{}",
+            factory.context.identity.host, continuation.attempt_id
+        ));
+        graph::advance_with_budget(
+            &missing_document,
+            &mut seed,
+            &mut journal,
+            &Default::default(),
+            &Default::default(),
+        )?;
+        let run = graph::advance_with_budget(
+            &missing_document,
+            &mut owner,
+            &mut journal,
+            &Default::default(),
+            &Default::default(),
+        )?;
+        let parent = &run.checkpoint.nodes[0];
+        assert_eq!(parent.state, graph::NodeState::Failed);
+        assert_eq!(parent.attempts.len(), 1);
+        assert_eq!(
+            parent.attempts[0].outcome,
+            Some(graph::AttemptOutcome::OtherFailure)
+        );
+        assert!(
+            parent
+                .outputs
+                .as_ref()
+                .ok_or("outputs")?
+                .warnings
+                .iter()
+                .any(|warning| warning == "result artifact is missing")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn exact_route_in_an_excluded_family_is_refused_before_launch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test(
+            "fabric::peer_tests::exact_route_in_an_excluded_family_is_refused_before_launch",
+        )? {
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::{self, AttemptOwner};
+        struct Seed(String);
+        impl AttemptOwner for Seed {
+            type Error = std::convert::Infallible;
+            fn actor(&self) -> String {
+                "fixture".into()
+            }
+            fn observe_or_start(
+                &mut self,
+                _: &graph::AttemptKey,
+                _: graph::NodeInput<'_>,
+                _: &graph::GraphRoute,
+                _: graph::AccessMode,
+                _: Option<&str>,
+                _: graph::Replay<'_>,
+            ) -> Result<graph::AttemptObservation, Self::Error> {
+                Ok(graph::AttemptObservation::Pending {
+                    attempt_ref: Some(self.0.clone()),
+                })
+            }
+        }
+        let fixture = SettlementFixture::resumed()?;
+        let factory = Factory {
+            context: Context::open(
+                fixture.roots.clone(),
+                &fixture.rig.home,
+                &fixture.rig.project,
+            )?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: fixture.rig.home.clone(),
+            cwd: fixture.rig.project.clone(),
+            assets: fixture.rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let call = provenant_run::Request {
+            clock: &factory.clock,
+            cancel: &cancel,
+        };
+        // The upstream attempt ran in the OpenAI family.
+        let upstream = provenant_run::Resume {
+            prior: fixture.settled.attempt_id,
+            expected_generation: 0,
+            operation_id: "graph-exact-upstream".parse()?,
+            run_id: RunId::from_bytes([53; 16]),
+            attempt_id: AttemptId::from_bytes([54; 16]),
+            prompt: "continue".into(),
+            created_at: factory.clock.wall_now()?,
+        };
+        fixture.store.resume_fresh(&upstream, "fixture", &call)?;
+        let record = fixture.store.record(upstream.attempt_id, &call)?;
+        let head = fixture
+            .store
+            .record(fixture.settled.attempt_id, &call)?
+            .head
+            .ok_or("head")?;
+        publish_routed(
+            &fixture.rig,
+            &fixture.store,
+            &record,
+            head,
+            Outcome::Succeeded,
+            "codex/gpt-6-luna",
+            &call,
+        )?;
+        let id = "exact-separation";
+        let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":id,"nodes":[
+                {"id":"author","prompt":"work","access":"read_only",
+                    "route":{"adapter":"fixture","model":"fixture/model"}},
+                {"id":"verifier","prompt":"verify","access":"read_only","depends_on":["author"],
+                    "distinct_from":"dependencies","distinct_strength":"require",
+                    "route":{"adapter":"codex","model":"gpt-6.1-terra"}}
+            ]
+        }))?;
+        let mut journal = graph::FileJournal::open(
+            &fixture.roots.state,
+            fixture.settled.project_id,
+            id,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        journal.bind(graph::GraphExecution {
+            extra: Default::default(),
+            integration_base: None,
+            directory: fixture.rig.project.clone(),
+            document: document.clone(),
+        })?;
+        graph::advance_with_budget(
+            &document,
+            &mut Seed(format!(
+                "{}/{}",
+                factory.context.identity.host, upstream.attempt_id
+            )),
+            &mut journal,
+            &Default::default(),
+            &Default::default(),
+        )?;
+        let mut owner = BoundGraphOwner {
+            factory: &factory,
+            integration_base: None,
+            integration_branch: None,
+            network: None,
+            budget,
+            cancel: &cancel,
+            prices: None,
+            tick: false,
+        };
+        let run = graph::advance_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &Default::default(),
+            &Default::default(),
+        )?;
+        assert_eq!(run.checkpoint.nodes[0].state, graph::NodeState::Succeeded);
+        let verifier = &run.checkpoint.nodes[1];
+        assert_eq!(verifier.state, graph::NodeState::Failed, "{verifier:?}");
+        let attempt = &verifier.attempts[0];
+        assert!(!attempt.launched);
+        assert_eq!(attempt.attempt_ref, None, "the exact route was submitted");
+        assert_eq!(
+            attempt.outcome,
+            Some(graph::AttemptOutcome::AdapterUnavailable)
+        );
+        let separation = verifier.separation.as_ref().ok_or("separation")?;
+        assert_eq!(separation.strength, graph::FamilyStrength::Require);
+        assert_eq!(separation.excluded, ["openai"]);
+        assert_eq!(separation.outcome, graph::SeparationOutcome::Unavailable);
+        Ok(())
+    }
+
+    #[test]
+    fn graph_submission_refuses_a_push_to_main_before_admission()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test(
+            "fabric::peer_tests::graph_submission_refuses_a_push_to_main_before_admission",
+        )? {
+            return Ok(());
+        }
+        use provenant_confinement::worktrees::{self, WorktreeCreate};
+        use provenant_fabric_runtime::graph::FileJournal;
+        let fixture = SettlementFixture::resumed()?;
+        let cancel = CancelToken::new();
+        let info = worktrees::with_context(
+            &fixture.roots,
+            &fixture.rig.home,
+            &fixture.rig.project,
+            &SystemClock,
+            &cancel,
+            |context| {
+                worktrees::create(
+                    &worktrees::WorktreeContext {
+                        workers: &FreeWorkers,
+                        ..*context
+                    },
+                    WorktreeCreate {
+                        branch: "main".into(),
+                        base: Some("HEAD".into()),
+                    },
+                    &cancel,
+                )
+            },
+        )?;
+        let factory = Factory {
+            context: Context::open(
+                fixture.roots.clone(),
+                &fixture.rig.home,
+                &fixture.rig.project,
+            )?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: fixture.rig.home.clone(),
+            cwd: fixture.rig.project.clone(),
+            assets: fixture.rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &FreeWorkers,
+        };
+        let document = fixture.rig.project.join("protected-push-graph.json");
+        std::fs::write(
+            &document,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version":1, "graph_id":"protected-push",
+                "nodes":[{"id":"one","prompt":"reply OK","access":"worktree_write",
+                    "worktree":info.path,"delivery":"push",
+                    "route":{"adapter":"fixture","model":"fixture/model"}}]
+            }))?,
+        )?;
+        let result = factory.graph(
+            GraphInput::Run {
+                extra: Default::default(),
+                document,
+            },
+            WaitBudget::cli(factory.clock.mono_now(), 30)?,
+            &cancel,
+        );
+        assert!(
+            FileJournal::read_checkpoint(
+                &fixture.roots.state,
+                fixture.settled.project_id,
+                "protected-push"
+            )?
+            .is_none(),
+            "protected push was admitted: {result:?}"
+        );
+        assert!(
+            matches!(result, Err(FacadeError::ConfinementRefused)),
+            "{result:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn graph_submission_replays_an_accepted_push_after_protection_changes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test(
+            "fabric::peer_tests::graph_submission_replays_an_accepted_push_after_protection_changes",
+        )? {
+            return Ok(());
+        }
+        let fixture = SettlementFixture::resumed()?;
+        let factory = Factory {
+            context: Context::open(
+                fixture.roots.clone(),
+                &fixture.rig.home,
+                &fixture.rig.project,
+            )?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: fixture.rig.home.clone(),
+            cwd: fixture.rig.project.clone(),
+            assets: fixture.rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &FreeWorkers,
+        };
+        let document = fixture.rig.project.join("replay-push-graph.json");
+        std::fs::write(
+            &document,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version":1, "graph_id":"replay-push",
+                "nodes":[{"id":"one","prompt":"reply OK","access":"worktree_write",
+                    "worktree":fixture.worktree,"delivery":"push",
+                    "route":{"adapter":"fixture","model":"fixture/model"}}]
+            }))?,
+        )?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let run = factory.graph(
+            GraphInput::Run {
+                extra: Default::default(),
+                document: document.clone(),
+            },
+            budget,
+            &cancel,
+        )?;
+        assert_eq!(
+            run.checkpoint.nodes[0].state,
+            provenant_fabric_runtime::graph::NodeState::Failed
+        );
+        assert!(!run.checkpoint.nodes[0].attempts[0].launched);
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        for args in [
+            vec![
+                "remote",
+                "add",
+                "origin",
+                fixture.rig.project.to_str().ok_or("project")?,
+            ],
+            vec![
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/resumed-lane",
+            ],
+        ] {
+            let output = fixture.rig.execute(&git, &args, None)?;
+            assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        }
+        for input in [
+            GraphInput::Run {
+                extra: Default::default(),
+                document: document.clone(),
+            },
+            GraphInput::Resume {
+                extra: Default::default(),
+                document,
+                extend: vec![],
+            },
+        ] {
+            let replay = factory.graph(input, budget, &cancel)?;
+            assert_eq!(replay.checkpoint, run.checkpoint);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn graph_submission_pins_the_integration_base_across_replay()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test(
+            "fabric::peer_tests::graph_submission_pins_the_integration_base_across_replay",
+        )? {
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::FileJournal;
+        let fixture = SettlementFixture::resumed()?;
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        let output = fixture
+            .rig
+            .execute(&git, &["branch", "integration"], None)?;
+        assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        let factory = Factory {
+            context: Context::open(
+                fixture.roots.clone(),
+                &fixture.rig.home,
+                &fixture.rig.project,
+            )?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: fixture.rig.home.clone(),
+            cwd: fixture.rig.project.clone(),
+            assets: fixture.rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &FreeWorkers,
+        };
+        let document = fixture.rig.project.join("base-graph.json");
+        std::fs::write(
+            &document,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version":1, "graph_id":"pinned-base", "integration_branch":"integration", "delivery":"pr",
+                "nodes":[{"id":"one","prompt":"reply OK","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
+            }))?,
+        )?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        // The fixture adapter is unavailable, so no provider launches. The
+        // first graph checkpoint must already contain its integration base.
+        let run = factory.graph(
+            GraphInput::Run {
+                extra: Default::default(),
+                document: document.clone(),
+            },
+            budget,
+            &cancel,
+        )?;
+        assert_eq!(
+            run.checkpoint.nodes[0].state,
+            provenant_fabric_runtime::graph::NodeState::Failed
+        );
+        assert!(!run.checkpoint.nodes[0].attempts[0].launched);
+        let owner = BinaryRunOwner {
+            factory: &factory,
+            allow_remote: true,
+            actor: None,
+            chair: None,
+        };
+        let store = owner.store(&cancel)?;
+        let operation = graph_operation(
+            "graph-attempt-operation",
+            &run.checkpoint.nodes[0].attempts[0].key,
+        )?;
+        let operation = store
+            .operation(&operation, &owner.call(&cancel))?
+            .ok_or("graph run not admitted")?;
+        let index_call = provenant_fabric_runtime::chairs::Request {
+            clock: &factory.clock,
+            cancel: &cancel,
+        };
+        let binding = provenant_fabric_runtime::chairs::ChairIndex::open(
+            &factory.context.roots.state,
+            &index_call,
+        )?
+        .read(
+            factory.context.identity.project,
+            operation.run_id,
+            &index_call,
+        )?
+        .ok_or("graph index missing")?;
+        assert!(binding.chair.is_none(), "graph created a chair association");
+        let base = {
+            let journal = FileJournal::open(
+                &fixture.roots.state,
+                fixture.settled.project_id,
+                "pinned-base",
+                budget,
+                &cancel,
+                &factory.clock,
+            )?;
+            journal.integration_base().ok_or("graph base missing")?
+        };
+        assert_eq!(
+            Some(base),
+            fixture
+                .store
+                .record(
+                    fixture.settled.attempt_id,
+                    &provenant_run::Request {
+                        clock: &factory.clock,
+                        cancel: &cancel,
+                    }
+                )?
+                .head
+        );
+        for args in [
+            vec![
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "Unrelated primary checkout",
+            ],
+            vec!["branch", "-f", "integration", "HEAD"],
+        ] {
+            let output = fixture.rig.execute(&git, &args, None)?;
+            assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        }
+        let replay = factory.graph(
+            GraphInput::Resume {
+                extra: Default::default(),
+                document,
+                extend: vec![],
+            },
+            budget,
+            &cancel,
+        )?;
+        assert_eq!(replay.checkpoint, run.checkpoint);
+        let journal = FileJournal::open(
+            &fixture.roots.state,
+            fixture.settled.project_id,
+            "pinned-base",
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        assert_eq!(journal.integration_base(), Some(base));
+        Ok(())
+    }
+
+    #[test]
+    fn retained_lane_settlement_collects_only_its_output_and_cache()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test(
+            "fabric::peer_tests::retained_lane_settlement_collects_only_its_output_and_cache",
+        )? {
+            return Ok(());
+        }
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let fixture = SettlementFixture::resumed()?;
+        std::fs::write(
+            fixture.rig.project.join(".git/info/exclude"),
+            "build/\nsaved/\n",
+        )?;
+        std::fs::write(
+            fixture.rig.state.join("config.toml"),
+            format!(
+                "schema_version=1\n[gc.projects.\"{}\"]\nregenerable=['build','saved']\nkeep=['saved']\nforeign_worktrees='merged-clean'\n",
+                fixture.settled.project_id
+            ),
+        )?;
+        std::fs::create_dir(fixture.worktree.join("build"))?;
+        std::fs::write(fixture.worktree.join("build/artifact"), "regenerable")?;
+        std::fs::create_dir(fixture.worktree.join("saved"))?;
+        std::fs::write(fixture.worktree.join("saved/keep"), "keep")?;
+        let other = fixture.rig.project.join(".worktrees/foreign");
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        let output = fixture.rig.execute(
+            &git,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "foreign",
+                other.to_str().ok_or("path")?,
+            ],
+            None,
+        )?;
+        assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        std::fs::create_dir(other.join("build"))?;
+        std::fs::write(other.join("build/artifact"), "foreign")?;
+        let cache_root = fixture.rig.home.join("Library/Caches/provenant-lane-cargo");
+        // Use valid cache ownership markers, including an unrelated orphan.
+        let cache = cache_root.join("a".repeat(64));
+        let orphan = cache_root.join("b".repeat(64));
+        let identity = std::fs::metadata(&fixture.worktree)?;
+        for (path, owner) in [
+            (&cache, fixture.worktree.clone()),
+            (&orphan, fixture.rig.root.join("missing")),
+        ] {
+            std::fs::create_dir_all(path)?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+            let mut marker = b"provenant-lane-cargo-owner-v2\n".to_vec();
+            marker.extend_from_slice(&identity.dev().to_le_bytes());
+            marker.extend_from_slice(&identity.ino().to_le_bytes());
+            marker.extend_from_slice(owner.as_os_str().as_encoded_bytes());
+            std::fs::write(path.join(".provenant-worktree-owner"), marker)?;
+            std::fs::write(path.join("artifact"), "cached")?;
+        }
+        let delivery = provenant_run::WriterDeliveryReceipt {
+            extra: Default::default(),
+            schema_version: 1,
+            remote: "origin".into(),
+            branch: "resumed-lane".into(),
+            head: None,
+            review_acceptance: None,
+            state: provenant_run::WriterDeliveryState::NotAttempted {
+                extra: Default::default(),
+            },
+        };
+        let collection = crate::worktrees::collection_lock(&fixture.roots)?;
+        settle_owned_worktree(
+            &fixture.settled,
+            &fixture.roots,
+            &FreeWorkers,
+            Some(&delivery),
+        )?;
+        assert!(fixture.worktree.join("build/artifact").exists());
+        assert!(cache.exists());
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let call = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let busy = fixture
+            .store
+            .worktree_settlement(fixture.settled.attempt_id, &call)?
+            .ok_or("missing busy settlement receipt")?;
+        assert_eq!(busy["state"], "retained", "{busy}");
+        assert_eq!(busy["reason"], crate::worktrees::COLLECTION_BUSY);
+        drop(collection);
+        let state = provenant_os::fs::Directory::open_anchor(
+            &fixture
+                .rig
+                .state
+                .join("worktrees")
+                .join(fixture.settled.project_id.to_string())
+                .join(provenant_confinement::worktrees::state_dir_name(
+                    &fixture.worktree,
+                )),
+        )?;
+        let writer = state.lock(
+            std::ffi::OsStr::new("writer.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+            WaitBudget::nonblocking(SystemClock.mono_now()),
+            &CancelToken::new(),
+            &SystemClock,
+        )?;
+        settle_owned_worktree(
+            &fixture.settled,
+            &fixture.roots,
+            &FreeWorkers,
+            Some(&delivery),
+        )?;
+        assert!(fixture.worktree.join("build/artifact").exists());
+        assert!(cache.exists());
+        drop(writer);
+        for _ in 0..2 {
+            settle_owned_worktree(
+                &fixture.settled,
+                &fixture.roots,
+                &FreeWorkers,
+                Some(&delivery),
+            )?;
+            assert!(fixture.worktree.exists());
+            assert!(!fixture.worktree.join("build/artifact").exists());
+            assert!(!cache.exists(), "settled lane cache survived");
+            assert_eq!(
+                std::fs::read_to_string(fixture.worktree.join("saved/keep"))?,
+                "keep"
+            );
+            assert_eq!(
+                std::fs::read_to_string(other.join("build/artifact"))?,
+                "foreign"
+            );
+            assert!(orphan.exists(), "unrelated cache collected");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_writer_refreshes_tracking_ref_while_collection_is_busy()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test(
+            "fabric::peer_tests::explicit_writer_refreshes_tracking_ref_while_collection_is_busy",
+        )? {
+            return Ok(());
+        }
+        let fixture = SettlementFixture::resumed()?;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let owner_path = worktrees::with_context(
+            &fixture.roots,
+            &fixture.rig.home,
+            &fixture.rig.project,
+            &clock,
+            &cancel,
+            |context| {
+                let tree = provenant_confinement::verify_worktree(context.repo, &fixture.worktree)?;
+                Ok(tree.repo().private_git_dir().join("provenant-owner.json"))
+            },
+        )?;
+        std::fs::remove_file(owner_path)?;
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        let remote = fixture.rig.root.join("remote.git");
+        for args in [
+            vec!["init", "--bare", remote.to_str().ok_or("remote path")?],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                remote.to_str().ok_or("remote path")?,
+            ],
+            vec![
+                "push",
+                "origin",
+                "refs/heads/resumed-lane:refs/heads/resumed-lane",
+            ],
+            vec!["update-ref", "-d", "refs/remotes/origin/resumed-lane"],
+        ] {
+            let output = fixture.rig.execute(&git, &args, None)?;
+            assert_eq!(
+                crate::worktree_tests::support::code(&output),
+                0,
+                "{}",
+                String::from_utf8_lossy(&output.stderr.bytes)
+            );
+        }
+        let collection = crate::worktrees::collection_lock(&fixture.roots)?;
+        settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
+        let output = fixture.rig.execute(
+            &git,
+            &["rev-parse", "--verify", "refs/remotes/origin/resumed-lane"],
+            None,
+        )?;
+        assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        drop(collection);
+        Ok(())
+    }
+
+    #[test]
+    fn adopted_writer_refresh_failure_does_not_change_receipt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::adopted_writer_refresh_failure_does_not_change_receipt")?
+        {
+            return Ok(());
+        }
+        let fixture = SettlementFixture::resumed()?;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        worktrees::with_context(
+            &fixture.roots,
+            &fixture.rig.home,
+            &fixture.rig.project,
+            &clock,
+            &cancel,
+            |context| {
+                let tree = provenant_confinement::verify_worktree(context.repo, &fixture.worktree)?;
+                let mut owner = provenant_confinement::worktrees::load_owner(&tree)?
+                    .ok_or(provenant_confinement::worktrees::WorktreeError::InvalidOutput)?;
+                owner.origin = provenant_confinement::worktrees::WorktreeOrigin::Adopted;
+                provenant_confinement::worktrees::save_owner(&tree, &owner)?;
+                Ok(())
+            },
+        )?;
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        let output = fixture.rig.execute(
+            &git,
+            &["remote", "add", "origin", "/nonexistent/provenant-remote"],
+            None,
+        )?;
+        assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        let call = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
+        assert!(
+            fixture
+                .store
+                .worktree_settlement(fixture.settled.attempt_id, &call)?
+                .is_none()
+        );
+        let receipt = serde_json::json!({"schema_version":1, "state":"retained", "worktree":fixture.worktree, "reason":"existing reason"});
+        record_worktree_settlement(&fixture.store, fixture.settled.attempt_id, &receipt)?;
+        settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
+        assert_eq!(
+            fixture
+                .store
+                .worktree_settlement(fixture.settled.attempt_id, &call)?,
+            Some(receipt)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn settlement_records_tracking_ref_failure_without_failing_lane()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test(
+            "fabric::peer_tests::settlement_records_tracking_ref_failure_without_failing_lane",
+        )? {
+            return Ok(());
+        }
+        let fixture = SettlementFixture::resumed()?;
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        let output = fixture.rig.execute(
+            &git,
+            &["remote", "add", "origin", "/nonexistent/provenant-remote"],
+            None,
+        )?;
+        assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let call = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let receipt = fixture
+            .store
+            .worktree_settlement(fixture.settled.attempt_id, &call)?
+            .ok_or("settlement")?;
+        assert!(receipt["tracking_ref_warning"].is_string(), "{receipt}");
+        assert_eq!(receipt["state"], "pruned", "{receipt}");
+        Ok(())
+    }
+
+    #[test]
+    fn resumed_lane_settlement_prunes_and_records_its_receipt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::resumed_lane_settlement_prunes_and_records_its_receipt")?
+        {
+            return Ok(());
+        }
+        let fixture = SettlementFixture::resumed()?;
+        settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let call = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let receipt = fixture
+            .store
+            .worktree_settlement(fixture.settled.attempt_id, &call)?
+            .ok_or("missing resumed settlement receipt")?;
+        assert_eq!(receipt["state"], "pruned", "{receipt}");
+        assert!(!fixture.worktree.exists());
+        assert!(
+            fixture
+                .rig
+                .state
+                .join("runs")
+                .join(fixture.settled.run_id.to_string())
+                .join("attempts")
+                .join(fixture.settled.attempt_id.to_string())
+                .join("worktree-settlement.json")
+                .is_file()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn deliver_none_does_not_try_to_settle_a_missing_delivery()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct NoWorkers;
+        impl provenant_confinement::worktrees::WorkerObserver for NoWorkers {
+            fn observe_roots(
+                &self,
+                _: &[std::path::PathBuf],
+            ) -> std::collections::BTreeMap<
+                std::path::PathBuf,
+                provenant_confinement::worktrees::WorkerState,
+            > {
+                std::collections::BTreeMap::new()
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let home = root.join("home");
+        let assets = root.join("assets");
+        std::fs::create_dir(&home)?;
+        std::fs::create_dir(&assets)?;
+        let roots = crate::roots::child(&home, &assets, root.join("state"))?;
+        let edge = provenant_cli::run::Edge {
+            roots: &roots,
+            home: &home,
+            assets: &assets,
+            cwd: &assets,
+        };
+        let mut reply = provenant_cli::run::Reply {
+            result: provenant_records::CommandResult::new(
+                "lane deliver",
+                provenant_records::Outcome::Ok,
+                serde_json::json!({"attempt_id":"unused", "deliver":"none"}),
+            ),
+            human: "delivery disabled\n".into(),
+            summary: None,
+            read_only: false,
+        };
+        super::settle_delivered_attempt(&edge, &mut reply, &NoWorkers)?;
+        assert_eq!(reply.human, "delivery disabled\n");
+        assert!(reply.result.data["worktree_settlement"].is_null());
+        Ok(())
+    }
+
+    #[test]
+    fn unsuccessful_lanes_retain_the_worktree_even_after_delivery()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_run::{AttemptState, Outcome, WriterDeliveryReceipt, WriterDeliveryState};
+        let delivered = WriterDeliveryReceipt {
+            extra: Default::default(),
+            schema_version: 1,
+            remote: "origin".into(),
+            branch: "lane".into(),
+            head: None,
+            review_acceptance: None,
+            state: WriterDeliveryState::Delivered {
+                extra: Default::default(),
+                pull_request: None,
+            },
+        };
+        for outcome in [
+            Outcome::Failed,
+            Outcome::RateLimited,
+            Outcome::Cancelled,
+            Outcome::TimedOut,
+            Outcome::Rejected,
+        ] {
+            let state = AttemptState::Terminal {
+                extra: Default::default(),
+                outcome,
+                exit_code: Some(1),
+                finished_at: provenant_core::WallTime::from_micros(0)?,
+                reason: None,
+            };
+            assert!(super::settlement_retention_reason(&state, false, None).is_some());
+            assert!(super::settlement_retention_reason(&state, true, Some(&delivered)).is_some());
+        }
+        let succeeded = AttemptState::Terminal {
+            extra: Default::default(),
+            outcome: Outcome::Succeeded,
+            exit_code: Some(0),
+            finished_at: provenant_core::WallTime::from_micros(0)?,
+            reason: None,
+        };
+        assert!(super::settlement_retention_reason(&succeeded, false, None).is_none());
+        assert!(super::settlement_retention_reason(&succeeded, true, Some(&delivered)).is_none());
+        assert!(super::settlement_retention_reason(&succeeded, true, None).is_some());
+        let failed_delivery = WriterDeliveryReceipt {
+            state: WriterDeliveryState::NotAttempted {
+                extra: Default::default(),
+            },
+            ..delivered
+        };
+        assert!(
+            super::settlement_retention_reason(&succeeded, true, Some(&failed_delivery)).is_some()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn settlement_intent_replays_a_prune_after_a_crash() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let worktree = temp.path().join("lane");
+        std::fs::create_dir(&worktree)?;
+        let intent = serde_json::json!({
+            "schema_version":1, "state":"pruning", "worktree":worktree
+        });
+        assert!(super::replay_worktree_settlement(Some(&intent), &worktree)?.is_none());
+        std::fs::remove_dir(&worktree)?;
+        let receipt = super::replay_worktree_settlement(Some(&intent), &worktree)?
+            .ok_or("missing recovered prune receipt")?;
+        assert_eq!(receipt["state"], "pruned");
+        assert_eq!(receipt["recovered_from_intent"], true);
+        assert_eq!(
+            super::replay_worktree_settlement(Some(&receipt), &worktree)?,
+            Some(receipt)
+        );
+        assert!(
+            super::replay_worktree_settlement(Some(&intent), &temp.path().join("other"))?.is_none()
+        );
+        let retained = serde_json::json!({"state":"retained", "worktree":worktree});
+        assert!(super::replay_worktree_settlement(Some(&retained), &worktree)?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn submit_io_keeps_the_inner_operation_without_inventing_a_path() {
+        let error = super::scope_io(super::FacadeError::io("access Fabric database"), "submit");
+        assert_eq!(
+            error,
+            super::FacadeError::Io {
+                operation: "submit: access Fabric database".into(),
+                path: None,
+            }
+        );
+    }
+
+    #[test]
+    fn submit_io_retains_single_prefix_for_peer_error_and_scopes_local_error() {
+        let peer_error = super::FacadeError::Io {
+            operation: "submit: open writer repository".into(),
+            path: Some("/repo".into()),
+        };
+        let rescoped = super::scope_io(peer_error.clone(), "submit");
+        assert_eq!(
+            rescoped,
+            super::FacadeError::Io {
+                operation: "submit: open writer repository".into(),
+                path: Some("/repo".into()),
+            }
+        );
+
+        let local_error = super::FacadeError::Io {
+            operation: "open writer repository".into(),
+            path: Some("/repo".into()),
+        };
+        let scoped = super::scope_io(local_error, "submit");
+        assert_eq!(
+            scoped,
+            super::FacadeError::Io {
+                operation: "submit: open writer repository".into(),
+                path: Some("/repo".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn writer_repository_open_failure_keeps_its_operation_and_project_path()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let request = provenant_run::WriterRequest {
+            extra: Default::default(),
+            project: root.clone(),
+            worktree: root.join("writer"),
+        };
+        let project = provenant_core::ProjectId::from_bytes([1; 16]);
+        let error = match provenant_run::prepare_writer(&request, &root, project) {
+            Ok(_) => return Err("non-repository unexpectedly opened".into()),
+            Err(error) => super::run_error(error),
+        };
+        assert_eq!(
+            serde_json::to_value(error)?,
+            serde_json::json!({
+                "code": "io",
+                "operation": "open writer repository",
+                "path": root,
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn typed_run_errors_keep_their_codes() {
+        for (error, expected) in [
+            (provenant_run::RunError::Nonterminal, "not_terminal"),
+            (
+                provenant_run::RunError::OperationConflict,
+                "operation_conflict",
+            ),
+            (provenant_run::RunError::Conflict, "conflict"),
+            (
+                provenant_run::RunError::ProviderStateExpired,
+                "provider_state_expired",
+            ),
+            // The CLI and MCP share one categorisation.
+            (
+                provenant_run::RunError::Validation("input"),
+                "invalid_input",
+            ),
+            (
+                provenant_run::RunError::ArtifactMismatch(provenant_run::ArtifactProvenance {
+                    check: provenant_run::ArtifactCheck::RecordedDigest,
+                    artifact: "result.md".into(),
+                    expected: None,
+                    actual: None,
+                }),
+                "state_corrupt",
+            ),
+            (provenant_run::RunError::Refused, "confinement_refused"),
+            (provenant_run::RunError::Capacity, "busy"),
+        ] {
+            assert_eq!(super::run_error(error).code(), expected);
+        }
+    }
+    #[test]
+    fn peer_run_errors_stay_typed_through_cli_rendering() -> Result<(), Box<dyn std::error::Error>>
+    {
+        for error in [
+            super::FacadeError::NotTerminal,
+            super::FacadeError::OperationConflict,
+            super::FacadeError::OwnerUnavailable,
+            super::FacadeError::Io {
+                operation: "openat directory".into(),
+                path: Some("/state/worktrees".into()),
+            },
+            super::FacadeError::WorktreeUnregistered {
+                path: "/repo/.worktrees/writer".into(),
+            },
+        ] {
+            let expected = error.clone();
+            let response = super::peer_result::<()>(Err(error), |()| super::PeerResult::Error {
+                data: provenant_fabric_runtime::hosts::PeerResultError {
+                    extra: Default::default(),
+                    error: super::FacadeError::io("test"),
+                },
+                extra: Default::default(),
+            });
+            let response: super::PeerResult =
+                serde_json::from_slice(&serde_json::to_vec(&response)?)?;
+            let super::PeerResult::Error {
+                data: provenant_fabric_runtime::hosts::PeerResultError { error, .. },
+                ..
+            } = response
+            else {
+                return Err("expected error".into());
+            };
+            let (status, kind) = provenant_cli::fabric::facade_outcome(&error);
+            let fail = provenant_cli::run::Fail {
+                status,
+                kind,
+                message: error.to_string(),
+                detail: Some(error),
+            };
+            assert_eq!(super::fail_error(fail), expected);
+        }
+        Ok(())
+    }
+    #[test]
+    fn submit_lane_refusal_maps_to_dispatch_refused() -> Result<(), Box<dyn std::error::Error>> {
+        // Access resolution refuses before any state tree is touched, so an
+        // unknown capability is refused without reaching a spawn.
+        let fail = provenant_cli::run::lane_access(
+            &provenant_cli::Access {
+                mode: None,
+                worktree: None,
+                read_root: Vec::new(),
+                write_root: Vec::new(),
+                network: None,
+                capability: vec!["bogus".to_owned()],
+            },
+            Path::new("never-opened-state"),
+            Path::new("/fixture/host-home"),
+        )
+        .err()
+        .ok_or("unknown capability refuses")?;
+        let (kind, message) = (fail.kind, fail.message.clone());
+        match super::dispatch_refused(fail) {
+            FacadeError::DispatchRefused { reason } => assert_eq!(reason, message),
+            error => panic!("a refused submit kept no reason: {error:?}"),
+        }
+        // The kind alone renders as invalid input; the dispatch edge must not
+        // lose the refusal by rerendering it.
+        assert_eq!(super::kind_error(kind), FacadeError::InvalidInput);
+        Ok(())
+    }
+    #[test]
+    fn events_within_trims_whole_events_and_counts_separators() {
+        // Serialised sizes are 4, 12 and 3 bytes; the array adds brackets and commas.
+        let events = ["aa", "bbbbbbbbbb", "c"];
+        for (max_bytes, kept) in [
+            (65536, 3),
+            // Two events are 2 + 4 + 1 + 12 = 19 bytes; the comma counts.
+            (19, 2),
+            (18, 1),
+            // One event is 2 + 4 bytes.
+            (6, 1),
+            (5, 0),
+            (0, 0),
+        ] {
+            assert_eq!(
+                super::events_within(&events, max_bytes).unwrap(),
+                kept,
+                "{max_bytes}"
+            );
+        }
+        // A large event stops the page even when a later small one would fit.
+        assert_eq!(super::events_within(&events, 10).unwrap(), 1);
+        assert_eq!(super::events_within::<&str>(&[], 2).unwrap(), 0);
+    }
+    #[test]
+    fn host_probe_budget_is_shared_fairly() {
+        assert_eq!(super::fair_probe_micros(10_000_000, 4), Some(2_500_000));
+        assert_eq!(super::fair_probe_micros(55_000_000, 100), Some(550_000));
+    }
+    #[test]
+    fn forwarded_unobservable_cancel_keeps_its_operation() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let error = super::FacadeError::LaunchUnknown {
+            operation_id: provenant_core::OperationId::parse("stop")?,
+        };
+        let reply = super::peer_result::<()>(Err(error), |()| super::PeerResult::Error {
+            data: provenant_fabric_runtime::hosts::PeerResultError {
+                extra: Default::default(),
+                error: super::FacadeError::io("test"),
+            },
+            extra: Default::default(),
+        });
+        let super::PeerResult::Error {
+            data: provenant_fabric_runtime::hosts::PeerResultError { error, .. },
+            ..
+        } = reply
+        else {
+            return Err("expected error".into());
+        };
+        assert!(
+            matches!(error, super::FacadeError::LaunchUnknown { operation_id } if operation_id.as_str() == "stop")
+        );
+        Ok(())
+    }
+}

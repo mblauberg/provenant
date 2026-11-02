@@ -294,18 +294,24 @@ set -eu
 test -n "$PROVENANT_PROCESS_TREE"
 /bin/sh -c '/bin/sleep 15 & wait' &
 child=$!
-for attempt in 1 2 3 4 5 6 7 8 9 10; do
-    if "$1" process-tree --root "$$" --json > "$TMPDIR/sample.json"; then
-        printf '%s\n' "$PROVENANT_PROCESS_TREE"
-        /bin/cat "$TMPDIR/sample.json"
-        exit 0
+# Ready only when a published sample shows the child's own child (the sleep);
+# the sampler publishes on its own cadence, so poll that condition, not a delay.
+# Only "sample unavailable" (exit 4) is retried; any other CLI failure fails now.
+attempt=0
+while :; do
+    status=0
+    "$1" process-tree --root "$$" --json > "$TMPDIR/sample.json" || status=$?
+    if test "$status" = 0; then
+        /usr/bin/grep -Eq "\"ppid\":$child[,}]" "$TMPDIR/sample.json" && break
     else
-        status=$?
         test "$status" = 4
     fi
+    attempt=$((attempt + 1))
+    test "$attempt" -lt 50
     /bin/sleep 0.2
 done
-exit 90
+printf '%s\n' "$PROVENANT_PROCESS_TREE"
+/bin/cat "$TMPDIR/sample.json"
 "#;
     let command = json!({"argv":["/bin/sh","-c",script,"memory",binary], "runtimes":[binary]});
     let mut rig = rig(json!({"memory":command.clone(), "memory-foreign":command}))?;
@@ -362,10 +368,18 @@ exit 90
                 .any(|process| process["ppid"] == child["pid"]),
             "{value}"
         );
+        // A short-lived helper (grep, sleep) can be sampled as an unreaped
+        // zombie with no resident pages, so only the live lane shell must
+        // report memory; every process must still carry a byte count.
         assert!(
             processes
                 .iter()
-                .all(|process| process["rss_bytes"].as_u64().is_some_and(|rss| rss > 0))
+                .all(|process| process["rss_bytes"].as_u64().is_some()),
+            "{value}"
+        );
+        assert!(
+            child["rss_bytes"].as_u64().is_some_and(|rss| rss > 0),
+            "{value}"
         );
     }
     Ok(())

@@ -357,7 +357,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 |---|---|
 | `default` | `false` |
 | `effect` | `"Opt-in. Let worktree-write lanes with open network read gh configuration, use a git credential helper, push branches and open pull requests."` |
-| `reader` | `"tools/front-door/crates/cli/src/run/provider.rs"` |
+| `reader` | `"tools/front-door/crates/cli/src/run/provider/confinement.rs"` |
 | `status` | `"wired"` |
 | `strict` | `true` |
 | `trade_off` | `"Off (default) keeps publishing with the chair through host-side delivery. On gives every networked writer lane your GitHub credential, so a malicious lane can extract the token and act outside the wrapper."` |

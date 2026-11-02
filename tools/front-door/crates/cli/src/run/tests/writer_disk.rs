@@ -1,0 +1,179 @@
+use super::*;
+
+#[test]
+fn dispatch_policy_refusal_preserves_launched_sibling() -> Result<(), String> {
+    check_launch_policy(&[
+        run::Started::Refused {
+            attempt: AttemptId::from_bytes([1; 16]),
+            kind: run::RefusalKind::Policy,
+            reason: "insufficient disk space".into(),
+        },
+        run::Started::Launched(AttemptId::from_bytes([2; 16])),
+    ])
+    .map_err(|error| error.message)
+}
+
+#[test]
+fn policy_refusal_preserves_uncertain_sibling_handoff() -> Result<(), String> {
+    let refused = || run::Started::Refused {
+        attempt: AttemptId::from_bytes([1; 16]),
+        kind: run::RefusalKind::Policy,
+        reason: "insufficient disk space".into(),
+    };
+    let error = check_launch_policy(&[refused()])
+        .err()
+        .ok_or("policy refusal was ignored")?;
+    assert_eq!(error.status, Status::Refused);
+    assert_eq!(error.kind, ErrorKind::Refused);
+    // Let the existing unknown-handoff handling retain the full receipt.
+    check_launch_policy(&[
+        refused(),
+        run::Started::Unknown {
+            attempt: AttemptId::from_bytes([2; 16]),
+            error: "handoff unconfirmed".into(),
+        },
+    ])
+    .map_err(|error| error.message)?;
+    Ok(())
+}
+
+#[test]
+fn writer_requires_space_on_every_output_volume() -> Result<(), String> {
+    let settings = provenant_config::GcSettings {
+        free_floor: Some("100B".into()),
+        ..Default::default()
+    };
+    let state = Path::new("/state");
+    let worktree = Path::new("/worktree");
+    let home = Path::new("/home");
+    let cache = home.join("Library/Caches/provenant-lane-cargo");
+    for low in [worktree, state, cache.as_path()] {
+        let mut observed = Vec::new();
+        let result = check_writer_disk_with(&settings, state, worktree, home, |path| {
+            observed.push(path.to_path_buf());
+            Ok(if path == low { 99 } else { 1000 })
+        });
+        let error = result
+            .err()
+            .ok_or_else(|| format!("writer accepted low volume {}", low.display()))?;
+        assert!(
+            matches!(error, DiskCheck::Low { ref path, available: 99, floor: 100, .. } if path == low)
+        );
+        assert!(observed.contains(&low.to_path_buf()));
+    }
+    check_writer_disk_with(&settings, state, worktree, home, |_| Ok(100))?;
+    Ok(())
+}
+
+#[test]
+fn writer_disk_observation_failure_is_not_low_disk() -> Result<(), String> {
+    let settings = provenant_config::GcSettings {
+        free_floor: Some("100B".into()),
+        ..Default::default()
+    };
+    let result = check_writer_disk_with(
+        &settings,
+        Path::new("/state"),
+        Path::new("/worktree"),
+        Path::new("/home"),
+        |_| Err("Not a directory".into()),
+    );
+    match result {
+        Err(DiskCheck::Unobserved(message)) => {
+            assert!(message.contains("Not a directory"), "{message}");
+            Ok(())
+        }
+        other => Err(format!("observation failure misclassified: {other:?}")),
+    }
+}
+
+#[test]
+fn writer_rechecks_once_after_collection_and_reports_reclaimed_bytes() -> Result<(), String> {
+    use std::cell::Cell;
+    let settings = provenant_config::GcSettings {
+        free_floor: Some("100B".into()),
+        ..Default::default()
+    };
+    for remaining in [99, 100] {
+        let collected = Cell::new(false);
+        let samples = Cell::new(0);
+        let result = check_writer_disk_with_collection(
+            &settings,
+            Path::new("/state"),
+            Path::new("/tree"),
+            Path::new("/home"),
+            |_| {
+                samples.set(samples.get() + 1);
+                Ok(if collected.get() { remaining } else { 50 })
+            },
+            || {
+                assert!(!collected.replace(true));
+                49
+            },
+        );
+        assert_eq!(samples.get(), 6);
+        if remaining == 100 {
+            result?;
+        } else {
+            let error = result.err().ok_or("writer accepted low disk")?;
+            assert!(matches!(
+                error,
+                DiskCheck::Low {
+                    available: 99,
+                    floor: 100,
+                    reclaimed: 49,
+                    ..
+                }
+            ));
+        }
+    }
+    let calls = Cell::new(0);
+    check_writer_disk_with_collection(
+        &settings,
+        Path::new("/state"),
+        Path::new("/tree"),
+        Path::new("/home"),
+        |_| Ok(100),
+        || {
+            calls.set(calls.get() + 1);
+            0
+        },
+    )?;
+    assert_eq!(calls.get(), 0);
+    let disabled = provenant_config::GcSettings {
+        schedule: false,
+        ..settings
+    };
+    assert!(
+        check_writer_disk_with_collection(
+            &disabled,
+            Path::new("/state"),
+            Path::new("/tree"),
+            Path::new("/home"),
+            |_| Ok(1),
+            || {
+                calls.set(calls.get() + 1);
+                99
+            }
+        )
+        .is_err()
+    );
+    assert_eq!(calls.get(), 0);
+
+    Ok(())
+}
+
+#[test]
+fn writer_samples_missing_roots_without_creating_them() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let settings = provenant_config::GcSettings {
+        free_floor: Some("1B".into()),
+        ..Default::default()
+    };
+    let state = base.join("missing/state");
+    let home = base.join("missing/home");
+    check_writer_disk(&settings, &state, &base, &base, &home).map_err(String::from)?;
+    assert!(!base.join("missing").exists());
+    Ok(())
+}
