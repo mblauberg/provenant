@@ -1464,8 +1464,8 @@ fn duration_seconds(value: &str) -> Result<u64, &'static str> {
 }
 #[derive(Debug, Args)]
 pub struct Status {
-    /// Show this run, task or attempt ID, including settled lanes
-    pub id: Option<Target>,
+    /// Show this run, task, attempt or graph ID, including settled records
+    pub id: Option<String>,
     /// Maximum full records per page
     #[arg(long, hide = true, default_value = "50", value_parser = clap::value_parser!(u64).range(1..=100))]
     pub limit: u64,

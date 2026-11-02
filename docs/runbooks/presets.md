@@ -552,6 +552,12 @@ A planner fragment cannot widen what its planner node holds. Each child
 `role` and `source` must equal the planner's, and each child `read_roots` entry
 must already be one of the planner's.
 
+Planner fragment inputs may use the full graph shape, such as
+`{"node":"writer","outputs":["result"]}`, or the shorthand `"writer"`,
+which selects that node's `result` output. The planner prompt describes both
+forms. This shorthand applies to fragments; static graph documents keep the
+full `GraphInput` shape.
+
 ## Planner patterns
 
 A plan node can also offer known-good patterns to its fragment. The plan node
@@ -671,10 +677,14 @@ inherits `[plan]` without the stage it replaces, the preset runs its
 deterministic defaults and the reason is recorded in the graph provenance and
 printed as a warning.
 
-If a planner node fails at run time, the graph runs the preset's deterministic
-static stage and records `plan.fallback_reason` in the run output. The static
-stage must settle successfully for the graph to succeed; `provenant output`
-shows the fallback and its reason.
+If a planner node fails at run time, or succeeds with a fragment that cannot be
+parsed, validated or admitted, the graph runs the preset's deterministic static
+stage when one is configured and records `plan.fallback_reason` in the run
+output. Without a fallback, an invalid fragment pauses the graph with its
+reason. The static stage must settle successfully for the graph to succeed;
+`provenant output` shows the fallback and its reason. Human
+`provenant status <graph-id>`, `fabric graph status` and `fabric graph resume`
+output include the bounded pause reason when a graph is paused.
 
 A preset opts in with a `[plan]` table: `replaces` (the stage to swap),
 `explicit` (parameters that, when set, keep the static graph), `guidance` and

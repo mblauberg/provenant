@@ -9,8 +9,20 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             let clock = SystemClock::new();
             let cancel = CancelToken::new();
             let call = request(&clock, &cancel)?;
-            let resolved = command
+            if let Some(graph_id) = command.id.as_deref().filter(|id| graph_identifier(id))
+                && let Some((data, human)) = paused_graph_status(edge, &call, graph_id)?
+            {
+                return Ok((data, human));
+            }
+            let id_target = command
                 .id
+                .as_deref()
+                .map(|id| {
+                    id.parse::<Target>()
+                        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error))
+                })
+                .transpose()?;
+            let resolved = id_target
                 .as_ref()
                 .map(|target| targets::resolve(edge, target, true))
                 .transpose()?;
@@ -154,6 +166,101 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
     out.summary = summary;
     out.read_only = true;
     out
+}
+
+fn paused_graph_status(
+    edge: &Edge<'_>,
+    call: &run::Request<'_>,
+    graph_id: &str,
+) -> Result<Option<(serde_json::Value, String)>, Fail> {
+    use provenant_fabric_runtime::graph::FileJournal;
+    let (context, _) = open_read_only(edge, call)?;
+    let checkpoint =
+        match FileJournal::read_checkpoint(&context.state_root, context.project_id, graph_id) {
+            Ok(Some(checkpoint)) => checkpoint,
+            Ok(None) => return Ok(None),
+            Err(error) => {
+                return Err(Fail::new(Status::Error, ErrorKind::Io, error.to_string()));
+            }
+        };
+    Ok(paused_graph_reply(graph_id, checkpoint))
+}
+
+/// Any valid graph id is probed first; a graph checkpoint wins over a lane
+/// target with the same text, and a missing checkpoint falls back to lanes.
+fn graph_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn paused_graph_reply(
+    graph_id: &str,
+    checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint,
+) -> Option<(serde_json::Value, String)> {
+    use provenant_fabric_runtime::graph::NodeState;
+    let unfinished =
+        checkpoint.nodes.iter().any(|node| {
+            node.expansion_pause.is_some()
+                || matches!(node.state, NodeState::Pending | NodeState::Running)
+        }) || (checkpoint.delivery_required && !checkpoint.delivered && checkpoint.successful());
+    let status = if checkpoint.cancelled {
+        "cancelled"
+    } else if !unfinished {
+        "complete"
+    } else if checkpoint.pause_reason.is_some() {
+        "paused"
+    } else {
+        "pending"
+    };
+    let label = match status {
+        "cancelled" => "Cancelled",
+        "complete" => "Complete",
+        "paused" => "Paused",
+        _ => "Pending",
+    };
+    let mut human = format!("Graph {graph_id}: {label}\n");
+    let reason = (status == "paused")
+        .then_some(checkpoint.pause_reason.as_deref())
+        .flatten()
+        .map(|reason| provenant_fabric_runtime::hosts::plain_text(reason, 1024));
+    if let Some(reason) = &reason {
+        human.push_str(&format!("Pause reason: {reason}\n"));
+    }
+    Some((
+        json!({"graph_id": graph_id, "status": status, "pause_reason": reason, "checkpoint": checkpoint}),
+        human,
+    ))
+}
+
+#[cfg(test)]
+mod graph_status_tests {
+    #[test]
+    fn graph_target_status_shows_a_bounded_sanitised_pause_reason() {
+        let reason = format!("invalid planner fragment \u{1b}[31m{}", "x".repeat(2048));
+        let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1,
+                "graph_id": "graph-123",
+                "plan_digest": "digest",
+                "delivery_required": true,
+                "nodes": [],
+                "pause_reason": reason,
+            }))
+            .unwrap();
+        let (data, human) = super::paused_graph_reply("graph-123", checkpoint).unwrap();
+        assert!(
+            human.starts_with(
+                "Graph graph-123: Paused\nPause reason: invalid planner fragment [31m"
+            )
+        );
+        assert!(!human.contains('\u{1b}'));
+        assert!(human.lines().nth(1).unwrap().chars().count() <= 1024 + "Pause reason: ".len());
+        assert_eq!(data["status"], "paused");
+        assert_eq!(data["pause_reason"].as_str().unwrap().len(), 1024);
+    }
 }
 
 /// One lane as the compact views show it.

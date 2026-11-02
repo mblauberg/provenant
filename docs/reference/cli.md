@@ -2526,7 +2526,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
-| `id` | `{"description": "Show this run, task or attempt ID, including settled lanes", "name": "id", "positional": true}` |
+| `id` | `{"description": "Show this run, task, attempt or graph ID, including settled records", "name": "id", "positional": true}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "description": "Maximum full records per page", "name": "limit"}` |
 | `--cursor` | `{"description": "Continue a full-record page from its cursor", "name": "cursor"}` |
 | `--all` | `{"defaults": ["false"], "description": "Include full records and older lanes", "name": "all", "values": ["true", "false"]}` |

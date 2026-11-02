@@ -90,7 +90,7 @@ pub(super) fn output_summary(data: &Value, text: &str, headed: bool) -> crate::S
         lines.push(format!(
             "planner fallback: {} (reason: {})",
             fallback["stage"].as_str().unwrap_or("static"),
-            crate::bounded_text(fallback["reason"].as_str().unwrap_or_default(), 160)
+            plain_text(fallback["reason"].as_str().unwrap_or_default(), 160)
         ));
     }
     if headed && let Some(files) = data.get("changed_files") {
@@ -576,7 +576,8 @@ pub const PLANNER_FALLBACK_KEY: &str = "planner_fallback";
 /// for local and peer output.
 pub(super) fn add_planner_fallback(data: &mut Value, text: &mut String, reason: String) {
     text.push_str(&format!(
-        "\nPlanner fallback: static stage\nReason: {reason}\n"
+        "\nPlanner fallback: static stage\nReason: {}\n",
+        plain_text(&reason, 1024)
     ));
     data["planner_fallback"] = json!({"stage":"static", "reason":reason});
 }
@@ -955,7 +956,9 @@ pub fn attempt_provider(
 
 #[cfg(test)]
 mod tests {
-    use super::{fallback_reason_for_graph, output_summary, provider_error_from_stderr};
+    use super::{
+        add_planner_fallback, fallback_reason_for_graph, output_summary, provider_error_from_stderr,
+    };
     use serde_json::json;
 
     #[test]
@@ -971,13 +974,35 @@ mod tests {
     }
 
     #[test]
+    fn output_summary_sanitises_planner_fallback_reason() {
+        let data = json!({
+            "planner_fallback":{"stage":"static", "reason":"fragment \u{1b}[31minvalid"}
+        });
+        let summary = output_summary(&data, "fallback completed", true);
+        let text = summary.lines.join("\n");
+        assert!(text.contains("planner fallback: static (reason: fragment [31minvalid)"));
+        assert!(!text.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn planner_fallback_text_sanitises_reason_and_keeps_json_value() {
+        let reason = "invalid fragment \u{1b}[31mpattern";
+        let mut data = serde_json::Value::Null;
+        let mut text = String::new();
+        add_planner_fallback(&mut data, &mut text, reason.into());
+        assert!(text.contains("Reason: invalid fragment [31mpattern"));
+        assert!(!text.contains('\u{1b}'));
+        assert_eq!(data["planner_fallback"]["reason"], reason);
+    }
+
+    #[test]
     fn output_finds_fallback_reason_for_every_node_of_the_graph() {
         // `synthesis` depends on the expansion but is not part of it.
         let checkpoint = serde_json::from_value(serde_json::json!({
             "schema_version":1,"graph_id":"graph","plan_digest":"digest","nodes":[
                 {"id":"planner", "state":"succeeded", "attempts":[],
                  "outputs":{"schema_version":2,"result":null,"verdict":null,"findings":[],"branch":null,"commit":null,"warnings":[],
-                    "plan":{"fallback_reason":"planner route failed"}}},
+                    "plan":{"fallback_reason":"planner fragment invalid: invalid fragment"}}},
                 {"id":"planner--fallback--static", "state":"succeeded", "attempts":[]},
                 {"id":"synthesis", "state":"succeeded", "attempts":[]}
             ],
@@ -988,7 +1013,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             fallback_reason_for_graph(&checkpoint).as_deref(),
-            Some("planner route failed")
+            Some("planner fragment invalid: invalid fragment")
         );
     }
 
