@@ -233,8 +233,8 @@ repository. An `ExecOptions` that runs Git sets `env` explicitly; `tests/workspa
 fails on one that inherits the environment.
 
 A root-package `cargo` command run inside a lane has failed in `build.rs` with
-`cannot resolve source inventory git index`. Setting `GIT_CONFIG_GLOBAL=/dev/null`
-avoided it in the lane that hit it. The cause is unconfirmed: it was not reproduced
-outside a lane sandbox. `build.rs` removes `GIT_*` before it runs Git, so the likely
+`cannot resolve source inventory git index`. The lane that hit it reported
+`GIT_CONFIG_GLOBAL=/dev/null` as a workaround. The cause is unconfirmed: it was not
+reproduced outside a lane sandbox. `build.rs` removes `GIT_*` before it runs Git, so the likely
 reason is that it then loses the lane's binding. Track it in a separate issue before
 relying on this workaround.
