@@ -29,11 +29,6 @@ Set these in `[domains.fabric.lanes]` in the host configuration. Omit a key for 
 
 Set these in `[domains.fabric.graph]` in the host configuration. Omit a key for its default.
 
-`limits.graph_timeout_seconds` is the default deadline for every graph lane and
-the upper bound for per-node `deadline_seconds`. A node can set a shorter
-deadline; its run is cancelled when that deadline expires. Planned big-batch
-lanes use their `budget_seconds` parameter as this per-node deadline.
-
 | Key | Default | Effect |
 |---|---|---|
 | `ci_poll_backoff.initial_seconds` | 0 | Initial delay after a pending CI observation. Each later observation doubles the delay up to max_seconds; the remaining CI timeout takes precedence. Zero makes the gate eligible at the next tick. (seconds, 0 or more). |
