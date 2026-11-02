@@ -74,7 +74,6 @@
 (deny syscall-unix (syscall-number SYS_shmget SYS_semget SYS_shmsys SYS_semsys))
 (deny syscall-unix (syscall-number SYS_msgget SYS_msgsys))
 (allow file-read* (subpath "/fixture/repo"))
-(allow file-read* (literal "/fixture/git/bin/git"))
 (allow file-read* (literal "/opt/homebrew/Cellar/provider/1.0/bin/provider"))
 (allow file-read* (literal "/usr/bin/security"))
 (allow file-read* (literal "/fixture/git/bin/git"))

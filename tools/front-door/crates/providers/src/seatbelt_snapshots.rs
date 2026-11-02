@@ -483,12 +483,14 @@ fn agy_read_only_compiled_profile_denies_read_root_write() -> Result<(), Box<dyn
     let route = route("agy", "fixture-model");
     let account = super::tests::agy_account_at(&root);
     let prompt = Prompt::new("fixture".into());
-    let input = PrepareInput {
+    let mut input = PrepareInput {
         executable: &executable,
         home: &root,
         account: Some(&account),
         ..fixture_input(&route, &plan, &prompt, &repo, None)
     };
+    // Read-only plans grant the host Git, which anchors must find on disk.
+    input.provenant.git = Path::new("/usr/bin/git");
     let adapter = REGISTRY
         .iter()
         .find(|entry| entry.adapter.id() == "agy")

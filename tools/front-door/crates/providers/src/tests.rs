@@ -2052,7 +2052,7 @@ fn claude_network_on_enables_web_tools_and_codex_toolchain_without_writer_grants
                 assert!(launch.env.iter().all(|(key, _)| key != "CARGO_HOME"));
                 assert_eq!(
                     launch.env.iter().find(|(key, _)| key == "PATH").unwrap().1,
-                    "/fixture/scratch/bin:/usr/bin:/bin"
+                    "/fixture/scratch/read-only-git:/fixture/scratch/bin:/usr/bin:/bin"
                 );
                 continue;
             }
@@ -2977,7 +2977,7 @@ fn agy_writers_exec_what_codex_writers_exec() -> Result<(), ProviderError> {
         );
         assert_eq!(
             spec.profile.spec.process_executables.len(),
-            if access == Access::ReadOnly { 2 } else { 4 }
+            if access == Access::ReadOnly { 3 } else { 4 }
         );
         let exec = &spec.profile.spec.tool_exec_roots;
         if access == Access::ReadOnly {
@@ -2992,7 +2992,7 @@ fn agy_writers_exec_what_codex_writers_exec() -> Result<(), ProviderError> {
             assert!(spec.profile.spec.tool_writes.is_empty());
             assert!(plan.permissions().write_roots.is_empty());
             for (key, value) in [
-                ("PATH", "/usr/bin:/bin"),
+                ("PATH", "/fixture/scratch/read-only-git:/usr/bin:/bin"),
                 ("GIT_CONFIG_GLOBAL", "/dev/null"),
                 ("GIT_CONFIG_NOSYSTEM", "1"),
             ] {
@@ -3121,11 +3121,9 @@ fn cursor_reads_and_execs_only_its_resolved_version_payload() -> Result<(), Prov
         let spec = cursor::Cursor.prepare(input)?.profile.spec;
         let mut executables = vec![crate::launch::exact(&launcher)];
         if access == Access::WorktreeWrite {
-            executables.extend([
-                crate::launch::exact("/bin/sh"),
-                crate::launch::exact("/fixture/git/bin/git"),
-            ]);
+            executables.push(crate::launch::exact("/bin/sh"));
         }
+        executables.push(crate::launch::exact("/fixture/git/bin/git"));
         assert_eq!(spec.process_executables, executables);
         assert!(
             spec.runtime_reads

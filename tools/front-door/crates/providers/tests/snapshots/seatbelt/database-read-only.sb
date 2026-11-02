@@ -88,7 +88,6 @@
 (allow file-read* (literal "/fixture/state/fabric/fabric.sqlite3-wal"))
 (allow file-read* (literal "/fixture/state/fabric/fabric.sqlite3-shm"))
 (allow file-read* (literal "/fixture/state/fabric/fabric.sqlite3-journal"))
-(allow file-read* (literal "/fixture/git/bin/git"))
 (allow file-read* (literal "/opt/homebrew/Cellar/provider/1.0/bin/provider"))
 (allow file-read* (literal "/fixture/provenant/bin/provenant"))
 (allow file-read* (literal "/fixture/git/bin/git"))

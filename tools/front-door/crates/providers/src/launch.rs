@@ -205,7 +205,6 @@ pub(crate) fn private_git_objects(
             *path = value;
         }
         spec.profile.spec.process_executables.push(exact(git));
-        spec.profile.spec.runtime_reads.push(exact(git));
         spec.profile
             .spec
             .runtime_reads
