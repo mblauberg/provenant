@@ -1259,6 +1259,19 @@ esac
     let cp = fake_bin.join("cp");
     fs::write(
         &cp,
+        "#!/bin/sh\ncase \"$3\" in */agent.plist.tmp) printf partial > \"$3\"; exit 1 ;; esac\nexec /bin/cp \"$@\"\n",
+    )?;
+    fs::set_permissions(&cp, fs::Permissions::from_mode(0o755))?;
+    let failed_copy = rig.execute_os(
+        Path::new("/bin/sh"),
+        &guided_args,
+        Some(b"n\ny\nn\nn\nn\nn\nappend\nskip\n"),
+    )?;
+    assert_eq!(code(&failed_copy), 4, "{failed_copy:?}");
+    assert_eq!(fs::read_to_string(&agent)?, "fake LaunchAgent");
+    assert!(installed_app.join("old-build").exists());
+    fs::write(
+        &cp,
         "#!/bin/sh\ncase \"$2\" in */agent.plist) exit 1 ;; esac\nexec /bin/cp \"$@\"\n",
     )?;
     fs::set_permissions(&cp, fs::Permissions::from_mode(0o755))?;
@@ -1289,6 +1302,44 @@ esac
     );
     fs::remove_dir_all(retained)?;
     fs::remove_file(cp)?;
+    fs::write(
+        &plutil,
+        "#!/bin/sh\ncase \"$1\" in -replace) printf '%s' \"$4\" > \"$5\" ;; -extract) cat \"$6\" ;; esac\n",
+    )?;
+    fs::write(&launchctl, "#!/bin/sh\nexit 0\n")?;
+    let rm = fake_bin.join("rm");
+    fs::write(
+        &rm,
+        "#!/bin/sh\ncase \"$2\" in */.provenant-upgrade.*/Provenant\\ Console.app) exit 1 ;; esac\nexec /bin/rm \"$@\"\n",
+    )?;
+    fs::set_permissions(&rm, fs::Permissions::from_mode(0o755))?;
+    let retained_backup = rig.execute_os(
+        Path::new("/bin/sh"),
+        &guided_args,
+        Some(b"n\ny\nn\nn\nn\nn\nappend\nskip\n"),
+    )?;
+    assert_eq!(code(&retained_backup), 0, "{retained_backup:?}");
+    assert!(String::from_utf8_lossy(&retained_backup.stderr.bytes).contains("staging remains"));
+    assert!(!installed_app.join("old-build").exists());
+    assert!(fs::read_to_string(&agent)?.contains("quota-menubar"));
+    let retained = fs::read_dir(rig.home.join("Applications"))?
+        .collect::<io::Result<Vec<_>>>()?
+        .into_iter()
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".provenant-upgrade.")
+        })
+        .ok_or("retained staging directory")?
+        .path();
+    assert_eq!(
+        fs::read_to_string(retained.join("agent.plist"))?,
+        "fake LaunchAgent"
+    );
+    assert!(retained.join("Provenant Console.app/old-build").exists());
+    fs::remove_dir_all(retained)?;
+    fs::remove_file(rm)?;
     fs::remove_file(&recorded)?;
     fs::remove_file(agent)?;
     fs::remove_file(plutil)?;

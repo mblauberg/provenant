@@ -221,7 +221,7 @@ pub(crate) fn local(
     Ok(Report {
         claude,
         peer_agent: provenant_fabric_runtime::peer_agent::status(state, home),
-        tick_agent: crate::tick_agent::diagnosis(home),
+        tick_agent: crate::tick_agent::diagnosis(state, home),
         managed,
         managed_error,
         warnings: crate::pool_effort_warnings(roots),

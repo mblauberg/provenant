@@ -28,8 +28,8 @@ impl Default for Diagnosis {
     }
 }
 
-pub fn diagnosis(home: &Path) -> Diagnosis {
-    if !cfg!(target_os = "macos") {
+pub fn diagnosis(state: &Path, home: &Path) -> Diagnosis {
+    if !cfg!(target_os = "macos") || !eligible(state, home) {
         return Diagnosis {
             state: "not_applicable".into(),
             ..Default::default()
@@ -349,6 +349,15 @@ fn stop_with(
 mod tests {
     #[allow(unused_imports)]
     use super::*;
+
+    #[test]
+    fn tick_diagnosis_is_not_applicable_for_ineligible_state() {
+        let home = tempfile::tempdir().unwrap();
+        let diagnosis = diagnosis(&home.path().join("custom-state"), home.path());
+        assert_eq!(diagnosis.state, "not_applicable");
+        assert!(diagnosis.warning.is_none());
+        assert!(diagnosis.repair.is_none());
+    }
 
     #[test]
     fn tick_diagnosis_distinguishes_idle_success_from_constraint_kills_and_crashes() {

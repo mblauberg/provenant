@@ -64,12 +64,17 @@ app=
 agent=
 service=
 app_agent_stopped=false
+app_upgrade_committed=false
 swap_helper=
 helper_executable='Contents/Library/LoginItems/Provenant Menu.app/Contents/MacOS/quota-menubar'
 agent_backup=
 instruction_count=0
 instructions_committed=false
 cleanup() {
+    if "$app_upgrade_committed" && [ -n "$app_backup" ] && [ -e "$app_backup" ]; then
+        printf '%s\n' "Warning: previous Provenant app backup remains at $app_backup" >&2
+        app_stage=
+    fi
     if ! "$instructions_committed"; then
         while [ "$instruction_count" -gt 0 ]; do
             record=$scratch/instructions/$instruction_count
@@ -81,7 +86,7 @@ cleanup() {
             instruction_count=$((instruction_count - 1))
         done
     fi
-    if [ -n "$app_backup" ] && [ -e "$app_backup" ]; then
+    if ! "$app_upgrade_committed" && [ -n "$app_backup" ] && [ -e "$app_backup" ]; then
         recovered=true
         if [ -e "$HOME/Applications/$app" ]; then
             "$swap_helper" --swap-path "$app_backup" "$HOME/Applications/$app" || recovered=false
@@ -95,13 +100,13 @@ cleanup() {
             printf '%s\n' "Could not restore the previous Provenant app; backup remains at $app_backup" >&2
         fi
     fi
-    if [ -n "$agent_backup" ] && [ -f "$agent_backup" ]; then
+    if ! "$app_upgrade_committed" && [ -n "$agent_backup" ] && [ -f "$agent_backup" ]; then
         if ! cp -p "$agent_backup" "$agent"; then
             printf '%s\n' "Could not restore the menu bar LaunchAgent; keeping staging directory at $app_stage (backup: $agent_backup)" >&2
             app_stage=
         fi
     fi
-    if "$app_agent_stopped" && [ -f "$agent" ] && [ -d "$HOME/Applications/$app" ]; then
+    if ! "$app_upgrade_committed" && "$app_agent_stopped" && [ -f "$agent" ] && [ -d "$HOME/Applications/$app" ]; then
         launchctl bootout "$service" </dev/null >/dev/null 2>&1 || :
         launchctl bootstrap "gui/$(id -u)" "$agent" </dev/null >/dev/null 2>&1 || :
         launchctl kickstart -k "$service" </dev/null >/dev/null 2>&1 || :
@@ -313,8 +318,9 @@ if [ -n "$app_stage" ]; then
     fi
     if [ -f "$agent" ]; then
         # Migrate the agent in place: its executable becomes the nested menu helper app (#2473, #2469).
+        cp -p "$agent" "$app_stage/agent.plist.tmp" || die 4 'Could not back up the Provenant menu bar LaunchAgent'
+        mv "$app_stage/agent.plist.tmp" "$app_stage/agent.plist" || die 4 'Could not publish the Provenant menu bar LaunchAgent backup'
         agent_backup=$app_stage/agent.plist
-        cp -p "$agent" "$agent_backup" || die 4 'Could not back up the Provenant menu bar LaunchAgent'
         helper_path="$HOME/Applications/$app/$helper_executable"
         plutil -replace ProgramArguments.0 -string "$helper_path" "$agent" || die 4 'Could not update the Provenant menu bar LaunchAgent'
         [ "$(plutil -extract ProgramArguments.0 raw -o - "$agent")" = "$helper_path" ] || die 4 'Could not verify the Provenant menu bar LaunchAgent'
@@ -328,13 +334,20 @@ if [ -n "$app_stage" ]; then
         launchctl kickstart -k "$service" </dev/null || die 4 'Could not restart the Provenant menu bar app'
         launchctl print "$service" </dev/null >/dev/null || die 4 'Could not verify the Provenant menu bar app'
     fi
-    rm -f "$agent_backup"
-    agent_backup=
-    rm -rf "$app_backup" || die 4 'Could not remove the previous Provenant app backup'
-    app_backup=
-    app_agent_stopped=false
-    rmdir "$app_stage" || die 4 'Could not remove the empty Provenant app stage'
-    app_stage=
+    # The new app and migrated agent are now committed; cleanup must not roll them back.
+    app_upgrade_committed=true
+    if [ -n "$app_backup" ] && ! rm -rf "$app_backup"; then
+        printf '%s\n' "Warning: could not remove the previous Provenant app backup; staging remains at $app_stage" >&2
+        app_backup=
+        agent_backup=
+        app_stage=
+    else
+        app_backup=
+        rm -f "$agent_backup"
+        agent_backup=
+        rmdir "$app_stage" || die 4 'Could not remove the empty Provenant app stage'
+        app_stage=
+    fi
 fi
 if "$guided"; then
     case " $providers " in *' claude '*)
