@@ -1685,6 +1685,20 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+        #[cfg(target_os = "macos")]
+        let observation = {
+            let mut observation = None;
+            for _ in 0..500 {
+                let current = occupancy(child.0.id() as i32);
+                if current.complete {
+                    observation = Some(current);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            observation.unwrap_or_else(|| occupancy(child.0.id() as i32))
+        };
+        #[cfg(target_os = "linux")]
         let observation = occupancy(child.0.id() as i32);
         let paths: Vec<_> = observation
             .paths
