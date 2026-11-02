@@ -996,7 +996,10 @@ fn fill(value: &Value, parameters: &serde_json::Map<String, Value>) -> Value {
 fn planned_big_batch_expands_to_its_static_composite_and_records_the_patterns() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../assets/presets/fixtures/big-batch.plan.json");
-    let text = std::fs::read_to_string(&path).unwrap();
+    // The CLI pins `HEAD` to a commit before a graph runs; do the same here.
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("\"commit\": \"HEAD\"", "\"commit\": \"0123456789abcdef0123456789abcdef01234567\"");
     let mut doc: GraphDocument = serde_json::from_str(&text).unwrap();
     // Run the planner node alone, ahead of one consumer.
     doc.nodes.retain(|node| node.id == "plan");
@@ -1077,7 +1080,12 @@ fn planned_big_batch_expands_to_its_static_composite_and_records_the_patterns() 
 fn planned_big_batch_refuses_overlapping_waves_and_budgets_over_the_lane_deadline() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../assets/presets/fixtures/big-batch.plan.json");
-    let mut doc: GraphDocument = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let mut doc: GraphDocument = serde_json::from_str(
+        &std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("\"commit\": \"HEAD\"", "\"commit\": \"0123456789abcdef0123456789abcdef01234567\""),
+    )
+    .unwrap();
     doc.nodes.retain(|node| node.id == "plan");
     doc.nodes[0].depends_on.clear();
     doc.nodes[0].inputs.clear();

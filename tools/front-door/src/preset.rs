@@ -2377,6 +2377,15 @@ fn visit_nodes(
                 visit_nodes(children, visitor)?;
             }
         }
+        // A planner's catalogue templates bind the same run context as static
+        // nodes, so a planned lane starts from the pinned commit and read roots.
+        if let Some(patterns) = node.pointer_mut("/plan/patterns").and_then(Value::as_array_mut) {
+            for pattern in patterns {
+                if let Some(children) = pattern.get_mut("nodes").and_then(Value::as_array_mut) {
+                    visit_nodes(children, visitor)?;
+                }
+            }
+        }
     }
     Ok(())
 }
