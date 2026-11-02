@@ -18,8 +18,9 @@ Classify every action before designing its control.
   refund or reversal. It never edits the original.
 - **Irreversible.** Preview the exact effect (what, how much, to whom), then
   commit. The commit control names its effect ("Send 12 reminders"), never
-  "OK" or "Confirm". It is not the default focus and Enter alone does not
-  trigger it.
+  "OK" or "Confirm". Prevent implicit form submission and keep it out of the
+  initial focus; once focused, it activates by the button's normal Enter and
+  Space keys.
 
 High-stakes actions (moving money, sending outside the product, legal or
 regulatory submissions, permission changes) are never optimistic. They show a
@@ -52,20 +53,25 @@ denied and long or extreme content.
   spinner by roughly 150 to 300 ms and, once shown, keep it long enough not to
   flash. Use a skeleton that matches the final layout for page-shaped loads, so
   content does not shift on arrival. Use determinate progress when the duration
-  is known; past about ten seconds, let the work continue in the background.
-  Keep the rest of the surface usable.
+  is known. Around ten seconds is a point where attention drifts, not a
+  threshold: move work to the background only when it can safely continue on
+  its own, with persistent progress and completion feedback. Keep the rest of
+  the surface usable.
 - **Empty.** First use says what will appear and offers the one action that
   creates it, using the same noun. Filtered to zero says so and offers to
   clear the filters, never to create a first item. An empty section inside a
   page stays compact.
-- **Error.** Say what happened, why if known, and what to do next, at the point
-  of failure. Keep everything the person entered. Never blame them. A code
-  never stands alone: a support reference may follow the message in secondary
-  text. On a form, show each error beside its field, summarise long forms at
-  the top in the same words, and move focus to the first error on submit.
+- **Error.** Write the message as the [engineering-writing](../../engineering-writing/references/artefacts.md#error-message)
+  guidance says, at the point of failure, and keep everything the person
+  entered. A code never stands alone: a support reference may follow the message
+  in secondary text. On a form, show each error beside its field, summarise
+  long forms at the top in the same words, and move focus to the first error on
+  submit.
 - **Degraded.** When the primary content still works, show it with a banner and
-  in-context notes rather than an error page. Never imply data loss, hide
-  counts that cannot be computed and keep critical controls available.
+  in-context notes rather than an error page. Preserve unaffected content and
+  report confirmed data loss accurately. Describe known impact, mark counts
+  that cannot be computed as unavailable, and gate actions whose prerequisites
+  are unavailable, saying why.
 - **Offline.** Say what still works, queue or refuse writes explicitly, show
   sync state, and mark cached data with its as-at time.
 
@@ -90,9 +96,11 @@ belong in the URL.
 
 - **Column kinds.** Declare each column's kind once (text, number, amount,
   date, status, identifier). The kind sets alignment, formatter, figure style
-  and sort comparator. Numbers and their headers align right with tabular
-  figures and consistent decimals; text aligns left; nothing is centred. A unit
-  shared by the whole column goes in the header.
+  and sort comparator. Numbers and their headers use tabular
+  figures and consistent decimals and align to the end edge, so digits line
+  up in the reading direction (a locale decides the direction); text aligns to
+  the start edge; nothing is centred. A unit shared by the whole column goes in
+  the header.
 - **Density.** Density is a table-level token set (row height, cell padding,
   type step) with at least a comfortable and a compact option. Header and
   toolbar heights follow the row height. Targets stay at least 24 px in compact
@@ -116,11 +124,13 @@ belong in the URL.
 - **Shortcuts.** Never override browser, operating-system or
   assistive-technology shortcuts. Single-key shortcuts have an off switch, or
   are remappable or active only while their component has focus.
-- **Focus.** Focus is always visible and never hidden by sticky chrome. It
-  enters an opened overlay, stays inside a modal one and returns to its trigger
-  on close. After a deletion it moves to the next sensible item. Composite
-  widgets (grids, menus, listboxes, tabs) follow the WAI-ARIA Authoring
-  Practices patterns.
+- **Focus.** Focus is always visible and never hidden by sticky chrome. Entry,
+  containment and restoration follow the widget's pattern: dialogs and sheets
+  take focus, contain it while modal and return it to the trigger on close,
+  while tooltips and combobox popups leave focus on the trigger or input. After
+  a deletion focus moves to the next sensible item. Composite widgets (grids,
+  menus, listboxes, tabs) follow the WAI-ARIA Authoring Practices patterns;
+  [craft](craft.md) owns the evidence for both.
 
 ## Accessibility
 
@@ -129,7 +139,7 @@ area, name how it is tested, or record it as not yet tested.
 
 | Area | Typical test |
 |---|---|
-| Text and non-text contrast | Computed from tokens in an automated check |
+| Text and non-text contrast | Computed numerically on the rendered colour pairs, including opacity and compositing |
 | Keyboard operation, focus order, focus visible and not obscured | Scripted keyboard paths in a browser test, plus a manual pass |
 | Target size (24 by 24 px) and alternatives to dragging | Measured in the rendered page |
 | Reflow at 320 px, text resize and text spacing | Rendered at those settings and inspected |
@@ -156,10 +166,11 @@ forced-colours mode because they also use borders, outlines or text.
   Components use semantic tokens only, so a raw value in a component is a
   finding.
 - **Ramps.** Build ramps in a perceptual space such as OKLCH, with one
-  lightness curve across hues, so contrast follows step distance (for example,
-  text at least a fixed number of steps from its surface). Verify the ratios
-  numerically anyway, and keep values inside the sRGB gamut or supply
-  fallbacks.
+  lightness curve across hues, so step distance guides contrast (for example,
+  text at least a fixed number of steps from its surface). Step distance does
+  not guarantee WCAG ratios: verify them numerically on the rendered colour
+  pairs, including opacity, compositing and the actual adjacent backgrounds,
+  and keep values inside the sRGB gamut or supply fallbacks.
 - **Themes.** Design light and dark separately, each with its own ramps and
   elevation, rather than inverting one. Check each theme with increased
   contrast and forced colours.
@@ -173,9 +184,10 @@ forced-colours mode because they also use borders, outlines or text.
 - **Voice and tone.** The voice stays fixed and the tone follows context: calm
   and exact for errors and risk, brief for confirmations, plain for newcomers
   and outside readers, precise domain terms for expert users.
-- **Word list.** Keep one canonical noun per object and one verb per lifecycle
-  step. Use them in buttons, menus, the command menu, notifications, history
-  and any visible API. Buttons are verbs that name the result ("Archive
+- **Word list.** Keep canonical terms as the
+  [writing guidance](../../engineering-writing/SKILL.md) says, with one verb per
+  lifecycle step. Use them in buttons, menus, the command menu, notifications,
+  history and any visible API. Buttons are verbs that name the result ("Archive
   client"), with an ellipsis when more input follows.
 - **Capitalisation and spelling.** Apply one capitalisation rule everywhere;
   sentence case is the usual default. Spelling follows the project's locale.

@@ -144,7 +144,7 @@
         "primary_skill": "ui-ux-design",
         "companion_skills": []
       },
-      "note": "Design-defaults case: the spec should separate first use from filtered to zero, delay loading indicators, use a layout-matched skeleton, give errors what happened and what next, and put bulk actions through the action safety classes from references/principles.md."
+      "note": "Design-defaults routing case: a pre-build table spec routes to ui-ux-design with no companion skill. It checks routing only, not the content of the resulting spec."
     }
   ]
 }
