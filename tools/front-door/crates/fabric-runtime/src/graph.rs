@@ -1505,13 +1505,18 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             attempt.attempt_ref = attempt_ref;
                             // Provider success alone does not satisfy an explicit result contract.
                             let warned = result_warning.is_some();
-                            let outputs = make_outputs(
+                            let mut outputs = make_outputs(
                                 result.as_deref(),
                                 result_warning,
                                 result_path,
                                 branch,
                                 commit,
                             );
+                            if outcome == AttemptOutcome::QuotaLimited {
+                                outputs
+                                    .warnings
+                                    .retain(|warning| warning != FINDINGS_INVALID);
+                            }
                             let disposition_error =
                                 disposition_error(&node.dispositions, &upstream_findings, &outputs);
                             let outcome = if warned {
@@ -1547,10 +1552,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 }
                                 AttemptOutcome::AuthRequired
                                 | AttemptOutcome::UsageLimited
+                                | AttemptOutcome::QuotaLimited
                                 | AttemptOutcome::AdapterUnavailable => {
                                     if !outcome.allows_route_fallback(node.access, launched)
                                         || route_index + 1 == node.routes.len()
                                     {
+                                        if outcome == AttemptOutcome::QuotaLimited {
+                                            progress.advance_error_code =
+                                                Some("quota_limited".into());
+                                            progress.advance_error = Some("Provider quota exhausted; wait for the allowance to reset or choose an eligible route.".into());
+                                        }
                                         progress.state = NodeState::Failed;
                                         false
                                     } else {

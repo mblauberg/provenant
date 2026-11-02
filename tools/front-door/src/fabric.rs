@@ -4351,9 +4351,8 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                             }
                             Outcome::Succeeded => AttemptOutcome::Succeeded,
                             Outcome::AuthRequired => AttemptOutcome::AuthRequired,
-                            Outcome::RateLimited | Outcome::QuotaLimited => {
-                                AttemptOutcome::UsageLimited
-                            }
+                            Outcome::RateLimited => AttemptOutcome::UsageLimited,
+                            Outcome::QuotaLimited => AttemptOutcome::QuotaLimited,
                             // A route refused before launch leaves the next route free to try.
                             Outcome::ModelUnavailable => AttemptOutcome::AdapterUnavailable,
                             Outcome::Rejected if !launched => AttemptOutcome::AdapterUnavailable,
