@@ -288,6 +288,7 @@ pub(super) fn lane_access_checked(
         database_ipc: postgres,
         read_roots: resolve(&access.read_root, "--read-root")?,
         write_roots,
+        inputs_root: None,
     })
 }
 

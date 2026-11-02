@@ -2151,7 +2151,8 @@ impl RunStore {
     }
 
     /// Queue recovery for each run of this project that holds a running
-    /// attempt, or a starting attempt with a cancel request, so a lane whose
+    /// attempt, a starting attempt with a cancel request, or a rejected
+    /// writer with deferred cleanup, so a lane whose
     /// guardian died is settled by the next read instead of waiting for a
     /// `reconcile`. Queuing already leaves a live holder alone and takes no
     /// writer lock. Best effort: a run that cannot be queued is skipped.
@@ -2169,7 +2170,7 @@ impl RunStore {
         let runs: Vec<String> = {
             let mut query = self
                 .db
-                .prepare("SELECT DISTINCT run FROM attempts WHERE project=?1 AND terminal=0")?;
+                .prepare("SELECT DISTINCT run FROM attempts WHERE project=?1 AND (terminal=0 OR tmp_retained=1)")?;
             let rows =
                 query.query_map(params![self.context.project_id.to_string()], |r| r.get(0))?;
             rows.collect::<std::result::Result<_, _>>()?
@@ -2181,7 +2182,7 @@ impl RunStore {
             };
             let ids: Vec<String> = {
                 let mut query = self.db.prepare(
-                    "SELECT id FROM attempts WHERE run=?1 AND project=?2 AND terminal=0",
+                    "SELECT id FROM attempts WHERE run=?1 AND project=?2 AND (terminal=0 OR tmp_retained=1)",
                 )?;
                 let rows = query.query_map(
                     params![run.to_string(), self.context.project_id.to_string()],
@@ -2202,6 +2203,16 @@ impl RunStore {
                         .attempt_dir(run, attempt.attempt_id, false)
                         .and_then(|dir| read_sealed(&dir, "cancel.json", RECORD_LIMIT))
                         .is_ok_and(|found| found.is_some()),
+                    AttemptState::Terminal {
+                        outcome: Outcome::Rejected,
+                        ..
+                    } if attempt.provider_launched == Some(false) => {
+                        self.request(run, call).is_ok_and(|request| {
+                            request.tasks.iter().any(|task| {
+                                task.task_id == attempt.task_id && task.writer.is_some()
+                            })
+                        })
+                    }
                     _ => false,
                 });
             if reapable && self.queue_reconcile_with(run, call, &spawn).is_ok() {
@@ -2572,6 +2583,84 @@ impl RunStore {
             }
             None => {}
         }
+        let pending_writer = record.provider_launched == Some(false)
+            && matches!(
+                record.state,
+                AttemptState::Terminal {
+                    outcome: Outcome::Rejected,
+                    ..
+                }
+            )
+            && self
+                .request(record.run_id, call)?
+                .tasks
+                .iter()
+                .any(|task| task.task_id == record.task_id && task.writer.is_some())
+            && !record.settlement_receipts.as_ref().is_some_and(|receipts| {
+                matches!(receipts.cleanup_custody_release, EffectDisposition::Done)
+            });
+        // An unreadable reservation cannot establish absence of custody.
+        if let Some(issue) = listing.issues.first() {
+            let temporary = self
+                .attempt_dir(record.run_id, id, false)
+                .and_then(|attempt| {
+                    attempt
+                        .metadata_at(std::ffi::OsStr::new("tmp"), false)
+                        .map_err(Into::into)
+                });
+            if !pending_writer
+                && matches!(temporary, Err(RunError::Filesystem(ref error)) if error.is_not_found())
+            {
+                self.set_temporary_retained(id, false, call)?;
+                return Ok(None);
+            }
+            return Ok(Some(Reconciled::TemporaryRetained {
+                path,
+                reason: TemporaryReason::new(
+                    TemporaryReasonKind::ReservationUnreadable,
+                    format!(
+                        "writer reservation unreadable at {}: {}",
+                        issue.reservation.display(),
+                        issue.reason
+                    ),
+                ),
+            }));
+        }
+        // Starting writer refusals defer Git cleanup so launch can report the
+        // terminal result without waiting for Git. Keep the retained marker
+        // until the independently retried effect actually succeeds.
+        if pending_writer {
+            let attempt = self.attempt_dir(record.run_id, id, false)?;
+            if crate::holder::object_import_refused(&attempt, scope)?.is_some() {
+                return Ok(Some(Reconciled::TemporaryRetained {
+                    path,
+                    reason: "Git object import was refused; retain its evidence".into(),
+                }));
+            }
+            if !self.import_release_permitted(record, call)? {
+                return Ok(Some(Reconciled::TemporaryRetained {
+                    path,
+                    reason: "Git import still holds custody".into(),
+                }));
+            }
+            let receipts = self.retry_git_cleanup(record, call)?;
+            if !matches!(receipts.cleanup_custody_release, EffectDisposition::Done) {
+                return Ok(Some(Reconciled::TemporaryRetained {
+                    path,
+                    reason: format!(
+                        "Git cleanup remains pending: {:?}",
+                        receipts.cleanup_custody_release
+                    )
+                    .into(),
+                }));
+            }
+            let _ = crate::retention::prune_caches(
+                &attempt,
+                record,
+                false,
+                &mut crate::ProviderStateGc::default(),
+            );
+        }
         if matches!(
             record.state,
             AttemptState::Terminal {
@@ -2624,21 +2713,6 @@ impl RunStore {
                 }));
             }
         };
-        // An unreadable reservation cannot establish absence of
-        // custody for this attempt, so leave temporary data alone.
-        if let Some(issue) = listing.issues.first() {
-            return Ok(Some(Reconciled::TemporaryRetained {
-                path,
-                reason: TemporaryReason::new(
-                    TemporaryReasonKind::ReservationUnreadable,
-                    format!(
-                        "writer reservation unreadable at {}: {}",
-                        issue.reservation.display(),
-                        issue.reason
-                    ),
-                ),
-            }));
-        }
         let remove = || -> Result<()> {
             match attempt.metadata_at(std::ffi::OsStr::new("tmp"), false) {
                 Err(error) if error.is_not_found() => return Ok(()),

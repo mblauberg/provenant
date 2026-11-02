@@ -1,5 +1,6 @@
 //! Fabric process composition: MCP, fixed peer ingress and host observations.
 mod graph_human;
+mod graph_inputs;
 mod graph_status;
 mod peer;
 mod preset_graph;
@@ -4038,6 +4039,21 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         self.writer_families(attempts)
     }
 
+    fn materialise_inputs(
+        &mut self,
+        key: &provenant_fabric_runtime::graph::AttemptKey,
+        requests: &[provenant_fabric_runtime::graph::InputRequest],
+        cap: usize,
+    ) -> Option<provenant_fabric_runtime::graph::MaterialisedInputs> {
+        Some(graph_inputs::materialise(
+            self.factory,
+            self.cancel,
+            key,
+            requests,
+            cap,
+        ))
+    }
+
     fn observe_or_start(
         &mut self,
         key: &provenant_fabric_runtime::graph::AttemptKey,
@@ -4260,7 +4276,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 provenant_core::ActorId::parse(replay.launch_actor)
                     .map_err(|_| FacadeError::StateCorrupt)?,
             );
-            let grants = provenant_cli::run::lane_access(
+            let mut grants = provenant_cli::run::lane_access(
                 &provenant_cli::Access {
                     mode: Some(provenant_cli::Mode::ReadOnly),
                     worktree: None,
@@ -4284,6 +4300,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 &self.factory.home,
             )
             .map_err(dispatch_refused)?;
+            grants.inputs_root = node.inputs_dir.map(Path::to_path_buf);
             let legacy_input = prepared_without_request.then(|| {
                 let mut legacy = input.clone();
                 let SubmitInput::Submit { tasks, .. } = &mut legacy;

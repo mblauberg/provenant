@@ -235,6 +235,17 @@ every node supplies `result`, `findings`, `verdict` and `remaining`, while
 `commit` needs write access or a pinned source (inherited from an enclosing composite), `branch` needs write access, and loops supply neither.
 Expansion refuses a mismatch and names both nodes.
 
+A node's prompt carries a bounded excerpt of each selected `result`. When the
+upstream result is on this host, the full text is also written, redacted as
+`provenant output --full` shows it, to a read-only file in the node's own
+inputs directory, and the prompt lists the path beside the excerpt. A selected
+composite stands for its exported members; a partial composite offers only
+those that succeeded. The node may read that directory and nothing else of
+another attempt's state. A node's files share a 2 MiB total; a result cut at
+the limit ends with a marker, and the prompt names every capped result. An
+upstream on another host is named unavailable and the node still runs (remote
+materialisation is tracked in #2665).
+
 Stages run in order and receive the preceding result. An entry can select
 other preceding outputs with `outputs = ["result", "findings", "commit"]`.
 `parallel` contains heterogeneous entries, each with its own role or preset;
@@ -552,6 +563,12 @@ A planner fragment cannot widen what its planner node holds. Each child
 `role` and `source` must equal the planner's, and each child `read_roots` entry
 must already be one of the planner's.
 
+Planner fragment inputs may use the full graph shape, such as
+`{"node":"writer","outputs":["result"]}`, or the shorthand `"writer"`,
+which selects that node's `result` output. The planner prompt describes both
+forms. This shorthand applies to fragments; static graph documents keep the
+full `GraphInput` shape.
+
 ## Planner patterns
 
 A plan node can also offer known-good patterns to its fragment. The plan node
@@ -671,10 +688,14 @@ inherits `[plan]` without the stage it replaces, the preset runs its
 deterministic defaults and the reason is recorded in the graph provenance and
 printed as a warning.
 
-If a planner node fails at run time, the graph runs the preset's deterministic
-static stage and records `plan.fallback_reason` in the run output. The static
-stage must settle successfully for the graph to succeed; `provenant output`
-shows the fallback and its reason.
+If a planner node fails at run time, or succeeds with a fragment that cannot be
+parsed, validated or admitted, the graph runs the preset's deterministic static
+stage when one is configured and records `plan.fallback_reason` in the run
+output. Without a fallback, an invalid fragment pauses the graph with its
+reason. The static stage must settle successfully for the graph to succeed;
+`provenant output` shows the fallback and its reason. Human
+`provenant status <graph-id>`, `fabric graph status` and `fabric graph resume`
+output include the bounded pause reason when a graph is paused.
 
 A preset opts in with a `[plan]` table: `replaces` (the stage to swap),
 `explicit` (parameters that, when set, keep the static graph), `guidance` and

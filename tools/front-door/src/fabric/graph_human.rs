@@ -14,6 +14,11 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
         .flat_map(|node| node.children.iter())
         .collect();
     let mut human = format!("Graph {}: {:?}\n", run.checkpoint.graph_id, run.status);
+    if run.status == provenant_fabric_runtime::graph::GraphStatus::Paused
+        && let Some(reason) = &run.checkpoint.pause_reason
+    {
+        human.push_str(&format!("Pause reason: {}\n", bounded_reason(reason)));
+    }
     for node in &run.checkpoint.nodes {
         let waiting_ci = node.ci.as_ref().filter(|ci| {
             node.state == provenant_fabric_runtime::graph::NodeState::Running
@@ -166,7 +171,7 @@ pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
     action.sort_by_key(|(_, state, _)| rank(state));
     let mut rows: Vec<String> = Vec::new();
     if let Some(reason) = text(checkpoint, "pause_reason") {
-        rows.push(format!("paused: {reason}"));
+        rows.push(format!("paused: {}", bounded_reason(&reason)));
     }
     if let Some(error) = text(run, "advance_error") {
         rows.push(format!("advance error: {error}"));
@@ -185,4 +190,9 @@ pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
         rows,
         next,
     )
+}
+
+/// Sanitise and bound even pause reasons from older checkpoints before printing.
+fn bounded_reason(reason: &str) -> String {
+    provenant_fabric_runtime::hosts::plain_text(reason, 1024)
 }

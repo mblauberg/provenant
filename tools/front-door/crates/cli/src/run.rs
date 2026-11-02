@@ -48,6 +48,7 @@ pub use children::HostHolder;
 pub use dispatch::*;
 pub use output::*;
 pub(crate) use provider::find_executable as provider_executable;
+pub use provider::{graph_inputs_directory, graph_node_inputs_directory};
 #[cfg(feature = "fixture")]
 pub use provider::{prepare_fixture, writer_fixture_plan};
 pub use reconcile::*;

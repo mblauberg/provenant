@@ -90,6 +90,15 @@ writer custody is free. Dirty trees, held locks and observed live writers still 
 the branch contains that base; otherwise the refusal says to omit `--base`. If the branch
 exists without a worktree, omit `--base` to check it out.
 
+A refusal that says repository authority could not be revalidated includes the
+underlying repository error and its reason. Inspect that reason and the
+worktree's Git registration and configuration before submitting again.
+Git tracking entries for other branches do not invalidate an unchanged
+worktree. Other configuration changes still require a fresh probe.
+After an unlaunched writer is rejected, reconciliation removes its retained
+Git pin. Status and wait queue recovery. To retry directly, run
+`provenant reconcile --id <run>` after resolving any reported cause.
+
 Choose `--deliver none`, `push`, `integrate:integration` or `pr`. Push and PR
 use origin and the lane branch. Integration targets must already exist;
 `integrate:origin/integration` selects a remote branch. Local targets must be

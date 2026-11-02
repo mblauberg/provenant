@@ -341,6 +341,15 @@ impl LaunchConfinement {
         let Some(writer) = self.writer.as_mut() else {
             return Ok(None);
         };
+        writer
+            .worktree
+            .repo()
+            .revalidate_identity()
+            .map_err(|error| {
+                RunError::Confinement(provenant_confinement::permissions::PermissionError::from(
+                    error,
+                ))
+            })?;
         let AccessMode::WorktreeWrite(authority) = &self.plan.permissions().mode else {
             return Ok(None);
         };

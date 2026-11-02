@@ -633,6 +633,40 @@ mod result_tests {
     }
 
     #[test]
+    fn paused_graph_status_and_resume_show_the_pause_reason() {
+        let mut run = graph_status_fixture();
+        run.checkpoint.pause_reason = Some("invalid planner fragment: missing nodes".into());
+        run.status = provenant_fabric_runtime::graph::GraphStatus::Paused;
+        let globals = provenant_cli::Globals::default();
+        for command in ["fabric graph status", "fabric graph resume"] {
+            let human = super::graph_display(&run, command, &globals);
+            assert!(
+                human.contains("Pause reason: invalid planner fragment: missing nodes"),
+                "{command}: {human}"
+            );
+        }
+        let summary = super::graph_human::graph_summary(&serde_json::to_value(&run).unwrap());
+        assert!(summary.lines.iter().any(|row| {
+            row == "paused: invalid planner fragment: missing nodes"
+        }));
+
+        run.checkpoint.pause_reason = Some("x".repeat(2048));
+        let human = super::graph_display(&run, "fabric graph status", &globals);
+        let reason_line = human
+            .lines()
+            .find(|line| line.starts_with("Pause reason: "))
+            .unwrap_or_default();
+        assert!(reason_line.chars().count() <= 1024 + "Pause reason: ".chars().count() + 1);
+
+        run.checkpoint.pause_reason = Some("before\u{1b}[31mafter".into());
+        let human = super::graph_display(&run, "fabric graph status", &globals);
+        assert!(human.contains("Pause reason: before[31mafter"));
+        assert!(!human.contains('\u{1b}'));
+        let summary = super::graph_human::graph_summary(&serde_json::to_value(&run).unwrap());
+        assert!(summary.lines.iter().any(|line| line == "paused: before[31mafter"));
+    }
+
+    #[test]
     fn graph_status_reads_without_advancing_checkpoint() -> Result<(), Box<dyn std::error::Error>> {
         use super::*;
         use provenant_fabric_runtime::graph::{
@@ -705,6 +739,97 @@ mod result_tests {
         assert_eq!(
             FileJournal::read_checkpoint(&roots.state, project, "fixture")?.unwrap(),
             before
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn labels_differing_only_by_case_get_distinct_lowercase_files() {
+        use super::graph_inputs::file_name;
+        let (upper, lower) = (file_name("Review"), file_name("review"));
+        assert_ne!(upper, lower);
+        for name in [&upper, &lower] {
+            let stem = name.strip_suffix(".md").expect("markdown file");
+            assert!(
+                stem.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            );
+        }
+        assert_eq!(file_name("review"), lower, "stable across calls");
+    }
+
+    #[test]
+    fn upstream_results_on_other_hosts_are_named_unavailable_without_a_fetch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use provenant_fabric_runtime::graph::{
+            AttemptKey, InputRequest, MaterialisedInput, MaterialisedInputs,
+        };
+        struct FreeWorkers;
+        impl WorkerObserver for FreeWorkers {
+            fn observe_roots(
+                &self,
+                _roots: &[PathBuf],
+            ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::WorkerState>
+            {
+                Default::default()
+            }
+        }
+        let rig = crate::worktree_tests::support::TestRig::new()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project)
+                .map_err(|error| format!("open fixture context: {error}"))?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &FreeWorkers,
+        };
+        let request = |label: &str, attempt_ref: Option<&str>| InputRequest {
+            label: label.into(),
+            attempt_ref: attempt_ref.map(str::to_owned),
+        };
+        let key = AttemptKey {
+            extra: Default::default(),
+            graph_id: "g".into(),
+            node_id: "consumer".into(),
+            route_index: 0,
+        };
+        let inputs = graph_inputs::materialise(
+            &factory,
+            &CancelToken::new(),
+            &key,
+            &[
+                request("review", Some("workshop/abc123")),
+                request("never-ran", None),
+            ],
+            1024,
+        );
+        assert_eq!(
+            inputs,
+            MaterialisedInputs {
+                directory: None,
+                entries: vec![
+                    MaterialisedInput::Unavailable {
+                        label: "review".into(),
+                        reason: "on host workshop; remote materialisation tracked in #2665".into(),
+                    },
+                    MaterialisedInput::Unavailable {
+                        label: "never-ran".into(),
+                        reason: "no attempt was recorded for it".into(),
+                    },
+                ],
+            }
+        );
+        assert!(
+            !rig.state.join("fabric").join("graph-inputs").exists(),
+            "no directory is made when nothing is local"
         );
         Ok(())
     }

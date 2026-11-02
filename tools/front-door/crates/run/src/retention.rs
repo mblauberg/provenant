@@ -270,7 +270,45 @@ impl RunStore {
                     let temporary = path.with_file_name("tmp");
                     let collection = (|| -> Result<()> {
                         collect_temporary(&attempt, &temporary, dry_run, &mut report)?;
-                        if !dry_run {
+                        let pending_writer_cleanup = if record.provider_launched == Some(false)
+                            && matches!(
+                                record.state,
+                                AttemptState::Terminal {
+                                    outcome: Outcome::Rejected,
+                                    ..
+                                }
+                            )
+                            && crate::artifacts::read_sealed(
+                                &attempt,
+                                "writer-git-pins.json",
+                                crate::RECORD_LIMIT,
+                            )?
+                            .is_some()
+                        {
+                            let raw: Option<Vec<u8>> = rusqlite::OptionalExtension::optional(
+                                self.db.query_row(
+                                    "SELECT record FROM settlement_receipts WHERE attempt=?1 AND generation=?2",
+                                    rusqlite::params![id, crate::db::sql_int(record.generation)?],
+                                    |row| row.get(0),
+                                ),
+                            )?;
+                            // Without a receipt the cleanup state is unknown: keep the
+                            // attempt for reconciliation rather than failing collection.
+                            match raw {
+                                Some(raw) => {
+                                    let receipts: provenant_records::run::SettlementReceipts =
+                                        crate::db::decode_unversioned(&raw)?;
+                                    !matches!(
+                                        receipts.cleanup_custody_release,
+                                        provenant_records::run::EffectDisposition::Done
+                                    )
+                                }
+                                None => true,
+                            }
+                        } else {
+                            false
+                        };
+                        if !dry_run && !pending_writer_cleanup {
                             self.write(call, |tx| {
                                 tx.execute(
                                     "UPDATE attempts SET tmp_retained=0 WHERE id=?1 AND run=?2 AND project=?3 AND terminal=1",

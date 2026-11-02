@@ -2,6 +2,8 @@
 use super::*;
 use std::collections::BTreeMap;
 
+const FALLBACK_RETRY_CONTEXT: &str = "\n[planner-fragment-retry-context:";
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanSpec {
     #[serde(flatten)]
@@ -181,9 +183,9 @@ pub(super) fn prompt(node: &GraphNode) -> String {
     if let Some(spec) = &node.plan {
         let kinds = serde_json::to_string(&spec.kinds).unwrap_or_default();
         if spec.patterns.is_empty() {
-            prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes: {{\"schema_version\":1,\"nodes\":[...]}}. Emit 1..{} nodes, using only {kinds}. Each agent node requires id, goal or brief, access, `acceptance_checks` and local depends_on. Writers also require `write_scope` (relative literal files/directories) and the `worktree` key naming an existing registered worktree; read-only agents may omit `write_scope`. Route defaults to {{\"alias\":\"senior\"}}. Synthesise nodes require `inputs` selecting dependency outputs. Gate nodes use the graph gate condition schema; decide nodes use the graph decide schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 64 bytes. Do not emit presets or review shapes.", spec.max_nodes));
+            prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes: {{\"schema_version\":1,\"nodes\":[...]}}. Emit 1..{} nodes, using only {kinds}. Each agent node requires id, goal or brief, access, `acceptance_checks` and local depends_on. Writers also require `write_scope` (relative literal files/directories) and the `worktree` key naming an existing registered worktree; read-only agents may omit `write_scope`. Route defaults to {{\"alias\":\"senior\"}}. Synthesise nodes require `inputs` selecting dependency outputs, either as `{{\"node\":\"id\",\"outputs\":[\"result\"]}}` or the shorthand `\"id\"` (which selects `result`). Gate nodes use the graph gate condition schema; decide nodes use the graph decide schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 64 bytes. Do not emit presets or review shapes.", spec.max_nodes));
         } else {
-            prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes: {{\"schema_version\":1,\"nodes\":[...],\"patterns\":[...]}}. Emit 1..{} nodes or pattern instances, using only {kinds}. Allowed patterns: {}. Instantiate them in a `patterns` array with id, pattern, parameters, depends_on and inputs; pattern parameters are validated against their schemas and pattern nodes are fixed. Do not emit other presets or review shapes. Each agent node requires id, goal or brief, access, `acceptance_checks` and local depends_on. Writers also require `write_scope` (relative literal files/directories) and the `worktree` key naming an existing registered worktree; read-only agents may omit `write_scope`. Route defaults to {{\"alias\":\"senior\"}}. Synthesise nodes require `inputs` selecting dependency outputs. Gate nodes use the graph gate condition schema; decide nodes use the graph decide schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 64 bytes.", spec.max_nodes, pattern_summary(spec)));
+            prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes: {{\"schema_version\":1,\"nodes\":[...],\"patterns\":[...]}}. Emit 1..{} nodes or pattern instances, using only {kinds}. Allowed patterns: {}. Instantiate them in a `patterns` array with id, pattern, parameters, depends_on and inputs; pattern parameters are validated against their schemas and pattern nodes are fixed. Do not emit other presets or review shapes. Each agent node requires id, goal or brief, access, `acceptance_checks` and local depends_on. Writers also require `write_scope` (relative literal files/directories) and the `worktree` key naming an existing registered worktree; read-only agents may omit `write_scope`. Route defaults to {{\"alias\":\"senior\"}}. Synthesise nodes require `inputs` selecting dependency outputs using `{{\"node\":\"id\",\"outputs\":[\"result\"]}}` or the shorthand `\"id\"` (which selects `result`). Gate nodes use the graph gate condition schema; decide nodes use the graph decide schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 64 bytes.", spec.max_nodes, pattern_summary(spec)));
         }
     }
     prompt
@@ -585,6 +587,7 @@ fn fragment(
     let spec = node.plan.as_ref().ok_or("missing plan configuration")?;
     let mut value: serde_json::Value =
         serde_json::from_str(json).map_err(|e| format!("invalid fragment: {e}"))?;
+    normalise_input_shorthand(&mut value);
     if let Some(instances) = value
         .get_mut("patterns")
         .and_then(serde_json::Value::as_array_mut)
@@ -771,6 +774,35 @@ fn fragment(
         nodes,
         patterns: instantiations,
     })
+}
+
+/// Planner fragments commonly abbreviate a result input as its local node ID.
+/// Normalise only this untrusted fragment JSON; persisted graphs remain typed.
+fn normalise_input_shorthand(value: &mut serde_json::Value) {
+    if let Some(fields) = value.as_object_mut() {
+        for key in ["nodes", "patterns"] {
+            if let Some(items) = fields
+                .get_mut(key)
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for item in items {
+                    if let Some(inputs) = item
+                        .get_mut("inputs")
+                        .and_then(serde_json::Value::as_array_mut)
+                    {
+                        for input in inputs {
+                            if let Some(node) = input.as_str() {
+                                *input = serde_json::json!({
+                                    "node": node,
+                                    "outputs": ["result"]
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Refuse a wave whose units write overlapping scopes. A unit is a fragment
@@ -1147,6 +1179,86 @@ pub(super) fn settle(
             Some((preview, plan, positions))
         }
         Err(reason) => {
+            if let Some(spec) = node.plan.as_ref().filter(|spec| spec.fallback.is_some()) {
+                let fragment_error = checkpoint.nodes[index]
+                    .expansion_pause
+                    .as_deref()
+                    .and_then(retry_fragment_error)
+                    .unwrap_or_else(|| bounded(&reason, NOTE_BYTES));
+                let fallback_reason = bounded(
+                    &format!("planner fragment invalid: {fragment_error}"),
+                    NOTE_BYTES,
+                );
+                let fallback = (|| {
+                    let addition = fallback_expansion(&node.id, spec, source)?;
+                    let mut preview = document.clone();
+                    append(&mut preview, &addition);
+                    let (plan, positions) =
+                        validate_flat_plan(&preview, &generous()).map_err(str::to_owned)?;
+                    if let Some(reason) = structural_limit_reason(&preview, &plan, limits) {
+                        return Err(reason);
+                    }
+                    let mut expansions = checkpoint.expansions.clone();
+                    expansions.push(addition.clone());
+                    if let Some(reason) =
+                        envelope::reason(source, &expansions, &checkpoint.extensions, &plan)
+                    {
+                        return Err(reason);
+                    }
+                    Ok((addition, plan, positions, preview))
+                })();
+                match fallback {
+                    Ok((addition, plan, positions, preview)) => {
+                        checkpoint.nodes[index].state = NodeState::Succeeded;
+                        checkpoint.nodes[index].expansion_pause = None;
+                        checkpoint.nodes[index].fragment = None;
+                        if checkpoint.pause_reason.as_ref().is_some_and(|reason| {
+                            reason.starts_with("node ") && reason.contains(" expansion paused:")
+                        }) {
+                            checkpoint.pause_reason = checkpoint.nodes.iter().find_map(|node| {
+                                node.expansion_pause
+                                    .as_deref()
+                                    .map(pause_reason_for_display)
+                                    .map(str::to_owned)
+                            });
+                            checkpoint.pause_code = checkpoint
+                                .pause_reason
+                                .as_ref()
+                                .map(|_| "invalid_plan_expansion".into());
+                        }
+                        let outputs = checkpoint.nodes[index].outputs.get_or_insert_with(|| {
+                            super::outputs::make_outputs(None, None, None, None, None)
+                        });
+                        outputs.plan = Some(PlanOutput {
+                            extra: Default::default(),
+                            fallback_reason,
+                        });
+                        checkpoint.expansions.push(addition);
+                        loops::reconcile(checkpoint, &plan);
+                        remaining(checkpoint, &preview, limits);
+                        return Some((preview, plan, positions));
+                    }
+                    Err(fallback_error) => {
+                        let display_reason = bounded(
+                            &format!(
+                                "node {} fallback expansion paused: {fallback_error}",
+                                node.id
+                            ),
+                            1000,
+                        );
+                        let retry_context =
+                            provenant_core::hex(bounded(&fragment_error, 1500).as_bytes());
+                        let persisted_reason = bounded(
+                            &format!("{display_reason}{FALLBACK_RETRY_CONTEXT}{retry_context}"),
+                            MAX_ADVANCE_ERROR_BYTES,
+                        );
+                        checkpoint.nodes[index].expansion_pause = Some(persisted_reason);
+                        checkpoint.pause_reason = Some(display_reason);
+                        checkpoint.pause_code = Some("invalid_plan_expansion".into());
+                        return None;
+                    }
+                }
+            }
             let reason = bounded(
                 &format!("node {} expansion paused: {reason}", node.id),
                 MAX_ADVANCE_ERROR_BYTES,
@@ -1226,4 +1338,15 @@ fn fallback_reason(progress: &NodeProgress) -> String {
         |detail| format!("planner attempt failed ({outcome}): {detail}"),
     );
     bounded(&reason, NOTE_BYTES)
+}
+
+fn retry_fragment_error(pause: &str) -> Option<String> {
+    let (_, context) = pause.rsplit_once(FALLBACK_RETRY_CONTEXT)?;
+    String::from_utf8(provenant_core::unhex(context)?).ok()
+}
+
+pub(super) fn pause_reason_for_display(reason: &str) -> &str {
+    reason
+        .rsplit_once(FALLBACK_RETRY_CONTEXT)
+        .map_or(reason, |(display, _)| display)
 }

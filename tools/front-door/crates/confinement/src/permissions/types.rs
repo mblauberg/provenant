@@ -80,7 +80,7 @@ pub enum PermissionError {
     Filesystem(#[source] provenant_os::fs::FsError),
     #[error("sandbox probe execution failed")]
     Execution(#[source] provenant_os::exec::ExecError),
-    #[error("verified repository authority could not be revalidated")]
+    #[error("verified repository authority could not be revalidated: {kind}: {0}", kind = .0.variant())]
     Repository(#[from] crate::repo::RepoError),
     #[error("bounded Git HEAD read failed")]
     HeadRead(#[source] std::io::Error),
@@ -95,6 +95,19 @@ pub enum PermissionError {
     },
     #[error("lane cache contents exceed the sweep depth bound")]
     CacheSweepDepth,
+}
+
+#[cfg(test)]
+mod repository_error_tests {
+    use super::PermissionError;
+    use crate::repo::RepoError;
+
+    #[test]
+    fn repository_refusal_names_the_underlying_reason() {
+        let message = PermissionError::from(RepoError::IdentityChanged).to_string();
+        assert!(message.contains("IdentityChanged"));
+        assert!(message.contains("verified repository path or Git metadata changed"));
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
