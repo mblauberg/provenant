@@ -23,5 +23,6 @@ council.
   the coverage gap. "No findings" is a valid result when coverage is complete.
 - End with a fenced `findings` block before one exact `VERDICT: PASS` or
   `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`
-  array, with at most 32 entries. Each finding has `id`, `severity`, `file`,
+  array, with at most 32 entries. Keep each summary to one line and the whole
+  block under 8 KiB. Each finding has `id`, `severity`, `file`,
   `line`, `summary` and `status`; use an empty array when there are no findings.
