@@ -1,9 +1,34 @@
 use super::*;
 
 /// The host directory under which every graph node's materialised upstream
-/// results live, one subdirectory per attempt key.
+/// results live, one subdirectory per project, graph and node.
 pub fn graph_inputs_directory(state_root: &Path) -> PathBuf {
     state_root.join("fabric").join("graph-inputs")
+}
+
+/// The one inputs directory a graph node may read: its own, named by the
+/// project, graph and node. `None` when an identifier is not a single path
+/// component, so no value can name a parent or another node's directory.
+pub fn graph_node_inputs_directory(
+    state_root: &Path,
+    project: impl std::fmt::Display,
+    graph_id: &str,
+    node_id: &str,
+) -> Option<PathBuf> {
+    let project = project.to_string();
+    let single = |name: &str| !matches!(name, "" | "." | "..") && !name.contains(['/', '\\', '\0']);
+    if ![project.as_str(), graph_id, node_id]
+        .into_iter()
+        .all(single)
+    {
+        return None;
+    }
+    Some(
+        graph_inputs_directory(state_root)
+            .join(project)
+            .join(graph_id)
+            .join(node_id),
+    )
 }
 
 pub(super) struct ConfinementRoots<'a> {

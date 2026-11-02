@@ -2882,3 +2882,56 @@ fn provider_setup_recovers_after_interrupted_preparation_idempotently()
     std::fs::remove_dir_all(&base)?;
     result
 }
+
+#[test]
+fn a_task_may_read_only_its_own_nodes_graph_inputs() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let state = super::canonical(temp.path())?;
+    let project = "p1";
+    let context = |graph: &str, node: &str| provenant_records::run::WorkContext {
+        graph_id: Some(graph.into()),
+        node_id: Some(node.into()),
+        ..Default::default()
+    };
+    let inputs = |graph: &str, node: &str| {
+        super::graph_node_inputs_directory(&state, project, graph, node).expect("path-safe")
+    };
+    for (graph, node) in [("g", "mine"), ("g", "sibling"), ("other", "mine")] {
+        std::fs::create_dir_all(inputs(graph, node))?;
+    }
+    let check = |context: Option<&provenant_records::run::WorkContext>, root: &Path| {
+        super::check_graph_inputs_root(&state, project, context, Some(root))
+    };
+    let mine = context("g", "mine");
+    // No grant requested, and its own directory, are accepted.
+    assert!(super::check_graph_inputs_root(&state, project, None, None).is_ok());
+    assert!(check(Some(&mine), &inputs("g", "mine")).is_ok());
+    // The shared root, every ancestor, other nodes and other graphs are not.
+    let shared = super::graph_inputs_directory(&state);
+    for refused in [
+        shared.clone(),
+        shared.join(project),
+        shared.join(project).join("g"),
+        inputs("g", "sibling"),
+        inputs("other", "mine"),
+        inputs("g", "mine").join("nested"),
+        inputs("g", "mine").join(".."),
+        state.clone(),
+    ] {
+        assert!(
+            check(Some(&mine), &refused).is_err(),
+            "{} must be refused",
+            refused.display()
+        );
+    }
+    // A task naming no graph node has no directory to be granted.
+    assert!(check(None, &inputs("g", "mine")).is_err());
+    // Identifiers that are not one path component never name a directory.
+    let traversal = context("g", "..");
+    assert!(check(Some(&traversal), &shared.join(project).join("g").join("..")).is_err());
+    // A link standing in for the node's directory is not followed.
+    std::fs::remove_dir(inputs("g", "mine"))?;
+    std::os::unix::fs::symlink(inputs("g", "sibling"), inputs("g", "mine"))?;
+    assert!(check(Some(&mine), &inputs("g", "mine")).is_err());
+    Ok(())
+}

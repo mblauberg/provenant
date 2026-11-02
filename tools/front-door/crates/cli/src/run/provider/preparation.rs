@@ -263,12 +263,6 @@ pub(super) fn prepare_candidates(
     let home = canonical(registry.home.ok_or("home directory is unavailable")?)?;
     let state_root = registry.state_root.ok_or("state root is unavailable")?;
     let assets = registry.assets.ok_or("product assets are unavailable")?;
-    // The one state-root path a lane may read is its own graph inputs.
-    if let Some(inputs) = &task.access.inputs_root
-        && !inputs.starts_with(graph_inputs_directory(state_root))
-    {
-        return Err("graph inputs root is outside the host's graph inputs directory".into());
-    }
     let provenant_executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let provenant_executable = canonical(&provenant_executable)?;
     let git = canonical(&match registry.host {
@@ -278,6 +272,12 @@ pub(super) fn prepare_candidates(
     let project_id = registry
         .project_id
         .ok_or("selected project identity is unavailable")?;
+    check_graph_inputs_root(
+        state_root,
+        project_id,
+        task.context.as_ref(),
+        task.access.inputs_root.as_deref(),
+    )?;
     let writer = match &task.writer {
         Some(request) => Some(
             run::prepare_writer(request, roots.state.as_path(), project_id)
@@ -1064,4 +1064,35 @@ pub(super) fn prepare_candidates(
             })
             .collect(),
     })
+}
+
+/// The one state-root path a lane may read is its own node's graph inputs,
+/// rebuilt here from the task's project, graph and node rather than trusted
+/// from the request. The request must name exactly that directory, and the
+/// directory must resolve to it with no link on the way, so neither the shared
+/// root, another node's directory nor a redirected path is granted.
+pub(super) fn check_graph_inputs_root(
+    state_root: &Path,
+    project: impl std::fmt::Display,
+    context: Option<&provenant_records::run::WorkContext>,
+    inputs: Option<&Path>,
+) -> Result<(), String> {
+    let Some(inputs) = inputs else {
+        return Ok(());
+    };
+    let refused = || "graph inputs root is not this task's own node directory".to_owned();
+    let (graph_id, node_id) = context
+        .and_then(|context| context.graph_id.as_deref().zip(context.node_id.as_deref()))
+        .ok_or_else(refused)?;
+    let expected =
+        graph_node_inputs_directory(state_root, &project, graph_id, node_id).ok_or_else(refused)?;
+    if inputs != expected {
+        return Err(refused());
+    }
+    let relative = expected.strip_prefix(state_root).map_err(|_| refused())?;
+    let direct = canonical(state_root)?.join(relative);
+    if canonical(&expected).map_err(|_| refused())? != direct {
+        return Err(refused());
+    }
+    Ok(())
 }

@@ -32,30 +32,22 @@ fn open_or_create(parent: &Directory, name: &str) -> Result<Directory, provenant
     }
 }
 
-/// The directory for one attempt key, created on first use. Graph and node
-/// identifiers are path-safe, so the key names it directly.
-fn attempt_directory(
-    factory: &Factory,
-    key: &AttemptKey,
-) -> Result<(PathBuf, Directory), provenant_os::fs::FsError> {
-    let base = provenant_cli::run::graph_inputs_directory(factory.context.roots.state.as_path());
-    let leaf = format!("{}-{}", key.node_id, key.route_index);
-    let relative = [
-        factory.context.identity.project.to_string(),
-        key.graph_id.clone(),
-        leaf,
-    ];
-    // `fabric` and `graph-inputs` are the base's last two components.
-    let mut directory = Directory::open_anchor(factory.context.roots.state.as_path())?;
-    for name in ["fabric", "graph-inputs"] {
-        directory = open_or_create(&directory, name)?;
+/// The directory for one graph node, created on first use. It is named by
+/// project, graph and node, which the host recomputes to grant it, so every
+/// route of a node shares it: the files are the same for each.
+fn attempt_directory(factory: &Factory, key: &AttemptKey) -> Option<(PathBuf, Directory)> {
+    let state = factory.context.roots.state.as_path();
+    let path = provenant_cli::run::graph_node_inputs_directory(
+        state,
+        factory.context.identity.project,
+        &key.graph_id,
+        &key.node_id,
+    )?;
+    let mut directory = Directory::open_anchor(state).ok()?;
+    for component in path.strip_prefix(state).ok()?.components() {
+        directory = open_or_create(&directory, &component.as_os_str().to_string_lossy()).ok()?;
     }
-    let mut path = base;
-    for name in &relative {
-        directory = open_or_create(&directory, name)?;
-        path.push(name);
-    }
-    Ok((path, directory))
+    Some((path, directory))
 }
 
 /// The longest prefix of `bytes` that is at most `max` long and whole UTF-8.
@@ -146,7 +138,7 @@ pub(super) fn materialise(
     let Ok(session) = owner.session(cancel) else {
         return failed("the run store could not be opened");
     };
-    let Ok((path, directory)) = attempt_directory(factory, key) else {
+    let Some((path, directory)) = attempt_directory(factory, key) else {
         return failed("the inputs directory could not be created");
     };
     let call = owner.call(cancel);

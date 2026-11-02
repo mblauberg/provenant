@@ -243,7 +243,7 @@ fn cases() -> Result<Vec<Case>, ProviderError> {
         false,
         |plan| {
             plan.read_roots = vec![grant(
-                "/fixture/state/fabric/graph-inputs/project/graph/consumer-0",
+                "/fixture/state/fabric/graph-inputs/project/graph/consumer",
                 PathScope::Subtree,
             )];
         },
