@@ -141,14 +141,38 @@ identifier per reviewer. Pools and selected shape names must exist. A shape may
 dispatch at most 64 reviewers.
 
 The default size bands measure added plus removed lines, changed files and
-crate roots in the subject-versus-base diff. Small is at most 150 lines,
-3 files and 1 crate; medium is at most 1,000 lines, 15 files and 3 crates;
-larger or binary changes are large. Configure these limits under
-`domains.routing.review.size`. The risk tier sets a floor. Integration heads
-select deep; docs select the readability lens; refactors prioritise correctness,
-tests and refactor-cleanup. The standard shape has three slots: correctness-spec,
-tests, then one kind lens (refactor-cleanup for refactors, otherwise
-design-fit-reuse). Risk tags add their conditional lenses.
+crate roots in the diff from the merge base of the base ref to the subject.
+Small is at most 150 lines, 3 files and 1 crate; medium is at most 1,000 lines,
+15 files and 3 crates; larger or binary changes are large. Configure these limits
+under `domains.routing.review.size`; each small limit must not exceed its medium
+limit. The risk tier sets a floor. Integration heads select deep and are not
+measured. An empty diff, or one that cannot be measured, leaves the size unknown
+and selection falls back to risk, kind and the default shape; the cause is
+reported as a warning.
+
+Lenses fill a shape's slots in the order given by `review.lenses.order`, without
+repeats. The standard shape has three slots: `correctness-spec`, `tests`, then one
+more lens in that order (`design-fit-reuse`). A kind can replace the order or add
+lenses outside the slot cap, and risk tags add their conditional lenses:
+
+```toml
+[domains.routing.review.lenses]
+order = ["correctness-spec", "tests", "design-fit-reuse", "simplicity",
+  "conventions-readability", "refactor-cleanup", "reliability", "flexibility"]
+[domains.routing.review.lenses.by_kind.docs]
+order = ["conventions-readability"]    # one base lens, however many slots
+[domains.routing.review.lenses.by_kind.refactor]
+add = ["refactor-cleanup", "design-fit-reuse"]    # additive, deduplicated
+```
+
+Docs therefore run one readability reviewer at any depth, plus any risk-tag lenses.
+A refactor runs its shape's base lenses plus `refactor-cleanup` and
+`design-fit-reuse`. Risk tags (`security`, `concurrency`, `terminal`; a terminal
+risk tier implies `terminal`) add `security-privacy`, `concurrency-data-errors`
+and `adversarial`. A risk tier alone does not add `security-privacy` or
+`concurrency-data-errors`; pass `--risk-tag` (or the `risk_tags` parameter) for
+those. A caller-supplied `lenses` list in `review-council` keeps the caller's
+order.
 
 For example, review a commit with changed paths from a Git range:
 
@@ -158,16 +182,21 @@ provenant --json review HEAD --brief-file review-brief.md --shape quick
 ```
 
 The target must resolve to a commit. `--range` supplies changed paths and size for
-selection; without it no path or size rules match. Renames are treated as a deletion
+selection; without it the range defaults to `<default branch>...TARGET` (the
+branch `origin/HEAD` names, else `origin/main`, `main`, `origin/master` or
+`master`), so size and path rules apply by default. Renames are treated as a deletion
 and an addition, so rules can match either path. `--shape` overrides selection
 and skips the range lookup; the risk floor and integration override still apply. A changed path that is not UTF-8 is rejected; use
 an explicit shape when path selection cannot represent it.
 `--wait` sets the overall wait limit, defaulting to one hour, and accepts
 seconds or durations such as `30m`, from one second to four hours.
 
-Selection uses an explicit shape first, then the most specific matching `by_paths`
-pattern, then `by_risk`, `by_kind`, `by_size` and finally `default`. Size and
-kind can raise the selected count above the risk floor. Specificity is the
+An explicit shape is applied first, then raised to the risk floor: the risk tier
+sets a minimum that an explicit `--shape` or `review_shape` can raise but not
+lower. Without an explicit shape, selection uses the most specific matching
+`by_paths` pattern, then `by_risk`, `by_kind`, `by_size` and finally `default`.
+Size and kind can raise the selected count above the risk floor, except where a
+`by_paths` rule matched. Specificity is the
 number of literal bytes, followed by fewer wildcards; lexical order breaks ties.
 In path patterns, `*` and `?` do not cross directory separators; `**` does.
 The selected shape and its source appear in the review summary. Family

@@ -25,13 +25,14 @@ tier setting the minimum. The base lenses are `correctness-spec`,
 `design-fit-reuse`, `simplicity`, `conventions-readability`, `tests`,
 `refactor-cleanup`, `reliability`, and `flexibility`; risk tags add
 `security-privacy`, `concurrency-data-errors` and `adversarial`. Integration
-heads get the full panel. A verifier tries to falsify each finding and a senior synthesis gives
+heads get the full panel; a docs change gets `conventions-readability` alone. A verifier tries to falsify each finding and a senior synthesis gives
 each a disposition. For a quick fan-out without a graph:
 `provenant review TARGET --brief-file B --shape quick|standard|deep`.
 `deliver` already runs this council on the newest head.
 
-For a native panel, launch one independent read-only sub-agent per selected
-lens in parallel. Include the cross-family leg required by the review ladder,
+For a native panel, take the lens list from `provenant review TARGET --explain`,
+which prints the selected shape, lenses and the reason without dispatching. Launch
+one independent read-only sub-agent per selected lens in parallel. Include the cross-family leg required by the review ladder,
 then have the chair synthesise findings and dispositions across the panel.
 
 ## Independence
