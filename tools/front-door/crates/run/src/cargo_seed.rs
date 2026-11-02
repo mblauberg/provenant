@@ -741,7 +741,11 @@ mod tests {
         use std::time::Duration;
 
         let run = |argv: &[OsString], cwd: &std::path::Path, overrides: &[(&str, OsString)]| {
-            let mut env: Vec<_> = std::env::vars_os().collect();
+            // A lane exports GIT_DIR and GIT_WORK_TREE for its private Git;
+            // inheriting them would make this fixture commit the lane's tree.
+            let mut env: Vec<_> = std::env::vars_os()
+                .filter(|(key, _)| !key.to_string_lossy().starts_with("GIT_"))
+                .collect();
             for (key, value) in overrides {
                 env.retain(|(existing, _)| existing != key);
                 env.push(((*key).into(), value.clone()));
