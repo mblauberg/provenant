@@ -36,11 +36,7 @@ pub(crate) fn import_cancelled(
     }
     Ok(read_sealed(attempt, "cancel.json", RECORD_LIMIT)?
         .and_then(|raw| decode::<CancellationEvidence>(&raw).ok())
-        .is_some_and(|request| {
-            request.scope == scope
-                && request.requester == owner
-                && request.reason == provenant_supervisor::machine::StopReason::ExplicitCancellation
-        }))
+        .is_some_and(|request| request.requests_stop(scope, owner)))
 }
 
 pub struct NewAttempt {
@@ -377,13 +373,7 @@ impl RunStore {
                 Some(_) => return Err(RunError::Conflict),
                 None => SettlementReceipts::default(),
             };
-            let slot = match effect {
-                SettlementEffect::GitImport => &mut receipts.git_import,
-                SettlementEffect::ManifestConflict => &mut receipts.manifest_conflict,
-                SettlementEffect::LockTimeout => &mut receipts.lock_timeout,
-                SettlementEffect::CleanupCustodyRelease => &mut receipts.cleanup_custody_release,
-                SettlementEffect::Delivery => &mut receipts.delivery,
-            };
+            let slot = receipts.slot_mut(effect);
             if matches!(slot, EffectDisposition::Done) && *slot != disposition { return Err(RunError::Conflict); }
             *slot = disposition.clone();
             tx.execute("INSERT INTO settlement_receipts(attempt,generation,record) VALUES (?1,?2,?3) ON CONFLICT(attempt) DO UPDATE SET record=excluded.record", params![id.to_string(), sql_int(generation)?, bytes(&receipts)?])?;
@@ -1034,11 +1024,10 @@ impl RunStore {
             next.cancellation_disposition = Some(CancellationDisposition::Effective);
         } else if let Some(raw) = read_sealed(&attempt, "cancel.json", RECORD_LIMIT)? {
             if let Ok(request) = decode::<CancellationEvidence>(&raw) {
-                if request.scope == Self::scope(&old)
-                    && request.requester == old.verified_owner.unwrap_or(self.context.actor_id)
-                    && request.reason
-                        == provenant_supervisor::machine::StopReason::ExplicitCancellation
-                {
+                if request.requests_stop(
+                    Self::scope(&old),
+                    old.verified_owner.unwrap_or(self.context.actor_id),
+                ) {
                     next.cancellation_disposition = Some(match cancellation_delivered {
                         Some(true) => CancellationDisposition::Effective,
                         Some(false) => CancellationDisposition::AcknowledgedIneffective,
@@ -1398,16 +1387,11 @@ impl RunStore {
                 return Err(RunError::Conflict);
             }
             for (effect, disposition) in effects.effects {
-                *match effect {
-                    SettlementEffect::GitImport => &mut receipts.git_import,
-                    SettlementEffect::ManifestConflict => &mut receipts.manifest_conflict,
-                    SettlementEffect::LockTimeout => &mut receipts.lock_timeout,
-                    SettlementEffect::CleanupCustodyRelease => {
-                        &mut receipts.cleanup_custody_release
-                    }
-                    SettlementEffect::Delivery => &mut receipts.delivery,
-                } = disposition;
+                *receipts.slot_mut(effect) = disposition;
             }
+        } else {
+            // A decision sealed without effects tracked no import to finish.
+            receipts.git_import = EffectDisposition::Done;
         }
         if read_sealed(&attempt, "delivery-cancelled.json", RECORD_LIMIT)?.is_some() {
             receipts.cancellation = Some(CancellationDisposition::DeliveryEffective);
@@ -1449,10 +1433,10 @@ impl RunStore {
             && let Ok(attempt) = self.attempt_dir(old.run_id, id, false)
             && let Ok(Some(raw)) = read_sealed(&attempt, "cancel.json", RECORD_LIMIT)
             && decode::<CancellationEvidence>(&raw).is_ok_and(|request| {
-                request.scope == Self::scope(old)
-                    && request.requester == old.verified_owner.unwrap_or(self.context.actor_id)
-                    && request.reason
-                        == provenant_supervisor::machine::StopReason::ExplicitCancellation
+                request.requests_stop(
+                    Self::scope(old),
+                    old.verified_owner.unwrap_or(self.context.actor_id),
+                )
             })
         {
             let _ = self.record_cancellation(
@@ -1620,6 +1604,18 @@ pub(crate) struct CancellationEvidence {
     pub(crate) scope: provenant_supervisor::custody::Scope,
     pub(crate) requester: provenant_core::ActorId,
     pub(crate) reason: provenant_supervisor::machine::StopReason,
+}
+impl CancellationEvidence {
+    /// The owner's own explicit stop request for exactly this attempt scope.
+    pub(crate) fn requests_stop(
+        &self,
+        scope: provenant_supervisor::custody::Scope,
+        owner: provenant_core::ActorId,
+    ) -> bool {
+        self.scope == scope
+            && self.requester == owner
+            && self.reason == provenant_supervisor::machine::StopReason::ExplicitCancellation
+    }
 }
 fn sealed_exit(
     dir: &provenant_os::fs::Directory,

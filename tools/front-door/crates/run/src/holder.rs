@@ -1276,8 +1276,15 @@ impl RunStore {
                 Err(RunError::Filesystem(error)) if error.is_not_found() => {}
                 Err(error) => return Err(error),
             }
+            // A conflicting manifest is itself the import failure: retention
+            // cannot help, and the conflict is a retryable effect of its own.
+            let manifest_conflicted = deferred
+                .iter()
+                .any(|(effect, _)| *effect == SettlementEffect::ManifestConflict);
             let check = match check {
-                Err(error) if crate::writer::worktree_removed(writer) => Err(error),
+                Err(error) if crate::writer::worktree_removed(writer) || manifest_conflicted => {
+                    Err(error)
+                }
                 Err(RunError::Writer(_) | RunError::WriterProjectMismatch { .. }) => {
                     Err(RunError::ObjectImportLimit(
                         "writer preconditions refused; private Git retained for host recovery",
@@ -1289,10 +1296,10 @@ impl RunStore {
                             crate::db::decode::<crate::store::CancellationEvidence>(&raw).ok()
                         })
                         .is_some_and(|request| {
-                            request.scope == exit.scope
-                                && request.requester
-                                    == record.verified_owner.unwrap_or(self.context.actor_id)
-                                && request.reason == StopReason::ExplicitCancellation
+                            request.requests_stop(
+                                exit.scope,
+                                record.verified_owner.unwrap_or(self.context.actor_id),
+                            )
                         });
                     if cancelled || requested {
                         cancelled = true;
@@ -2568,7 +2575,11 @@ mod writer_recovery_tests {
                         .any(|(_, state)| matches!(state, crate::Reconciled::Uncertain { .. })),
                     "{found:?}"
                 );
-                assert!(store.writer_fences()?.is_empty());
+                assert!(
+                    store.writer_fences()?.is_empty(),
+                    "{:?}",
+                    store.writer_fences()?
+                );
                 continue;
             }
             assert!(!first.release_permitted);

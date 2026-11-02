@@ -758,7 +758,6 @@ pub enum EffectDisposition {
 pub enum SettlementEffect {
     GitImport,
     ManifestConflict,
-    LockTimeout,
     CleanupCustodyRelease,
     /// Remote delivery of a succeeded writer lane.
     Delivery,
@@ -780,7 +779,6 @@ pub enum CancellationDisposition {
 pub struct SettlementReceipts {
     pub git_import: EffectDisposition,
     pub manifest_conflict: EffectDisposition,
-    pub lock_timeout: EffectDisposition,
     pub cleanup_custody_release: EffectDisposition,
     #[serde(default)]
     pub delivery: EffectDisposition,
@@ -789,6 +787,18 @@ pub struct SettlementReceipts {
     /// A request received after the terminal decision was acknowledged.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub late_cancellation_acknowledged: bool,
+}
+
+impl SettlementReceipts {
+    /// The receipt that tracks `effect`.
+    pub fn slot_mut(&mut self, effect: SettlementEffect) -> &mut EffectDisposition {
+        match effect {
+            SettlementEffect::GitImport => &mut self.git_import,
+            SettlementEffect::ManifestConflict => &mut self.manifest_conflict,
+            SettlementEffect::CleanupCustodyRelease => &mut self.cleanup_custody_release,
+            SettlementEffect::Delivery => &mut self.delivery,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
