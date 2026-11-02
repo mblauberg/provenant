@@ -1373,6 +1373,78 @@ esac
     assert!(fs::read_to_string(&agent)?.contains("Contents/Library/LoginItems/Provenant Menu.app"));
     fs::remove_dir_all(retained)?;
     fs::remove_file(&recorded)?;
+    // A failed install whose swap-back and plist quarantine both fail must still
+    // report the retained recovery copies and leave the agent stopped.
+    fs::write(&agent, "legacy agent")?;
+    fs::write(installed_app.join("old-build"), "preserve this app")?;
+    let restart_failed = rig.root.join("restart-failed");
+    let booted_out = rig.root.join("booted-out");
+    fs::write(
+        &launchctl,
+        format!(
+            "#!/bin/sh\ncase \"$1\" in print) touch '{}'; exit 19 ;; bootout) touch '{}' ;; esac\nexit 0\n",
+            restart_failed.display(),
+            booted_out.display()
+        ),
+    )?;
+    let mv = fake_bin.join("mv");
+    let rm = fake_bin.join("rm");
+    fs::write(
+        &mv,
+        format!(
+            "#!/bin/sh\ncase \"$1\" in */.provenant-retained.*/*) [ ! -f '{}' ] || exit 1 ;; esac\ncase \"$2\" in */LaunchAgents/*.plist) exit 1 ;; esac\nexec /bin/mv \"$@\"\n",
+            restart_failed.display()
+        ),
+    )?;
+    fs::write(
+        &rm,
+        "#!/bin/sh\ncase \"$2\" in */LaunchAgents/*.plist) exit 1 ;; esac\nexec /bin/rm \"$@\"\n",
+    )?;
+    for tool in [&mv, &rm] {
+        fs::set_permissions(tool, fs::Permissions::from_mode(0o755))?;
+    }
+    let unquarantined = rig.execute_os(
+        Path::new("/bin/sh"),
+        &guided_args,
+        Some(b"n\ny\nn\nn\nn\nn\nappend\nskip\n"),
+    )?;
+    assert_eq!(code(&unquarantined), 4, "{unquarantined:?}");
+    let message = String::from_utf8_lossy(&unquarantined.stderr.bytes);
+    let retained = fs::read_dir(rig.home.join("Applications"))?
+        .collect::<io::Result<Vec<_>>>()?
+        .into_iter()
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".provenant-retained.")
+        })
+        .ok_or("retained staging directory")?
+        .path();
+    assert!(
+        message.contains("Could not restore the previous Provenant app; agent remains stopped")
+    );
+    assert!(message.contains(&format!(
+        "previous app {}",
+        retained.join("Provenant Console.app").display()
+    )));
+    assert!(message.contains(&format!(
+        "previous LaunchAgent plist {}",
+        retained.join("agent.plist").display()
+    )));
+    assert!(message.contains(&format!("rm -f '{}'", agent.display())));
+    assert!(booted_out.exists());
+    assert_eq!(
+        fs::read_to_string(retained.join("agent.plist"))?,
+        "legacy agent"
+    );
+    assert!(retained.join("Provenant Console.app/old-build").exists());
+    assert_eq!(fs::read_to_string(&agent)?, "legacy agent");
+    fs::remove_file(&mv)?;
+    fs::remove_file(&rm)?;
+    fs::write(&launchctl, "#!/bin/sh\nexit 0\n")?;
+    fs::remove_dir_all(retained)?;
+    fs::remove_file(&recorded)?;
     fs::remove_file(agent)?;
     fs::remove_file(plutil)?;
     fs::remove_file(launchctl)?;

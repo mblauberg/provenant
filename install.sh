@@ -72,9 +72,30 @@ helper_executable='Contents/Library/LoginItems/Provenant Menu.app/Contents/MacOS
 agent_backup=
 instruction_count=0
 instructions_committed=false
+# Remove the live LaunchAgent plist from its path, keeping a copy in the app stage when possible.
+# Never fails: sets agent_note to what happened so the recovery message can say so.
+agent_note=
+quarantine_agent() {
+    agent_note=
+    if [ ! -e "$agent" ] && [ ! -L "$agent" ]; then return 0; fi
+    if [ -n "$app_stage" ] && mv -f "$agent" "$app_stage/$1" 2>/dev/null; then
+        agent_note=" The live LaunchAgent plist was moved to $app_stage/$1."
+    elif rm -f "$agent" 2>/dev/null && [ ! -e "$agent" ] && [ ! -L "$agent" ]; then
+        agent_note=' The live LaunchAgent plist was removed.'
+    else
+        agent_note=" Could not move or remove the live LaunchAgent plist at $agent; it still points at the previous app helper. Remove it with: rm -f '$agent'"
+    fi
+    return 0
+}
+# Print the manual recovery instructions, naming every retained recovery copy.
+recovery_failed() {
+    printf '%s\n' "$1; agent remains stopped. Retained recovery copies: previous app ${app_backup:-none}; previous LaunchAgent plist ${agent_backup:-none}. Restore $app_backup to $HOME/Applications/$app and $agent_backup to $agent before bootstrapping.$agent_note" >&2
+}
 cleanup() {
+    status=$?
     # Once recovery starts, finish it even if another termination signal arrives.
     trap '' INT TERM HUP
+    # Every step below is best effort: set -e must not cut recovery or its report short.
     if "$app_upgrade_committed" && [ -n "$app_backup" ] && [ -e "$app_backup" ]; then
         printf '%s\n' "Warning: previous Provenant app backup remains at $app_backup" >&2
         app_stage=
@@ -82,34 +103,37 @@ cleanup() {
     if ! "$instructions_committed"; then
         while [ "$instruction_count" -gt 0 ]; do
             record=$scratch/instructions/$instruction_count
-            file=$(cat "$record/path")
-            rm -f "$file"
-            if [ -e "$record/original" ] || [ -L "$record/original" ]; then
-                cp -Pp "$record/original" "$file"
+            file=$(cat "$record/path") || file=
+            if [ -n "$file" ]; then
+                rm -f "$file" || :
+                if [ -e "$record/original" ] || [ -L "$record/original" ]; then
+                    cp -Pp "$record/original" "$file" || printf '%s\n' "Could not restore $file from $record/original" >&2
+                fi
             fi
             instruction_count=$((instruction_count - 1))
         done
     fi
-    if [ -n "$agent_temp" ]; then rm -f "$agent_temp"; fi
+    if [ -n "$agent_temp" ]; then rm -f "$agent_temp" || :; fi
     if ! "$app_upgrade_committed"; then
         recovered=true
         if "$app_agent_stopped"; then launchctl bootout "$service" </dev/null >/dev/null 2>&1 || :; fi
         if [ -n "$agent_backup" ] && [ -f "$agent_backup" ]; then
-            agent_temp=$(mktemp "${agent}.restore.XXXXXX") || recovered=false
+            agent_temp=$(mktemp "${agent}.restore.XXXXXX") || { recovered=false; agent_temp=; }
             if "$recovered" && ! { cp -p "$agent_backup" "$agent_temp" && mv -f "$agent_temp" "$agent"; }; then recovered=false; fi
             if ! "$recovered"; then
-                [ -z "$agent_temp" ] || rm -f "$agent_temp"
-                if [ -f "$agent" ]; then
-                    mv -f "$agent" "$app_stage/agent.unrecovered.plist" || rm -f "$agent" || :
-                fi
-                printf '%s\n' "Could not restore the menu bar LaunchAgent; agent remains stopped. Restore $app_backup to $HOME/Applications/$app and $agent_backup to $agent before bootstrapping." >&2
+                [ -z "$agent_temp" ] || rm -f "$agent_temp" || :
+                quarantine_agent agent.unrecovered.plist
+                recovery_failed 'Could not restore the menu bar LaunchAgent'
                 app_stage=
             fi
         fi
         if "$recovered" && [ -n "$app_backup" ] && [ -e "$app_backup" ]; then
-            backup_inode=$(ls -di "$app_backup")
-            backup_inode=${backup_inode%% *}
             # The marker precedes the helper; exchange only if it moved the old app.
+            if backup_inode=$(ls -di "$app_backup"); then
+                backup_inode=${backup_inode%% *}
+            else
+                backup_inode=$old_app_inode
+            fi
             if [ "$backup_inode" = "$old_app_inode" ]; then
                 if [ -e "$HOME/Applications/$app" ]; then
                     "$swap_helper" --swap-path "$app_backup" "$HOME/Applications/$app" || recovered=false
@@ -117,8 +141,9 @@ cleanup() {
                     mv "$app_backup" "$HOME/Applications/$app" || recovered=false
                 fi
                 if ! "$recovered"; then
-                    if [ -f "$agent" ]; then mv -f "$agent" "$app_stage/agent.recovery.plist" || rm -f "$agent"; fi
-                    printf '%s\n' "Could not restore the previous Provenant app; agent remains stopped. Restore $app_backup to $HOME/Applications/$app and $agent_backup to $agent before bootstrapping." >&2
+                    # The restored plist points at a helper the new app lacks; take it off the live path.
+                    quarantine_agent agent.recovery.plist
+                    recovery_failed 'Could not restore the previous Provenant app'
                     app_stage=
                 fi
             fi
@@ -129,8 +154,9 @@ cleanup() {
             launchctl kickstart -k "$service" </dev/null >/dev/null 2>&1 || :
         fi
     fi
-    if [ -n "$app_stage" ]; then rm -rf "$app_stage"; fi
-    rm -rf "$scratch"
+    if [ -n "$app_stage" ]; then rm -rf "$app_stage" || :; fi
+    rm -rf "$scratch" || :
+    exit "$status"
 }
 trap cleanup 0
 trap 'exit 130' INT
