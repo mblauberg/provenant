@@ -2087,6 +2087,76 @@ fn merge_proof_scenario() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[test]
+fn gc_managed_fallback_keeps_fresh_trees_at_the_tip_or_first_parent() -> Result<(), Box<dyn Error>>
+{
+    // Two ways a managed tree reaches the foreign fallback: no terminal lane,
+    // or a writer reported unknown. Neither may bypass the managed protections.
+    for entry in ["no-terminal-lane", "unknown-writer"] {
+        for shape in ["at-tip", "first-parent"] {
+            let fixture = Fixture::new()?;
+            let test_context = TestContext::new(&fixture)?;
+            let context = test_context.context();
+            let name = format!("gc-fallback-{entry}-{shape}");
+            let created = create(
+                &context,
+                WorktreeCreate {
+                    branch: name.clone(),
+                    base: None,
+                },
+                &cancel(),
+            )?;
+            if shape == "first-parent" {
+                run_in_worktree(
+                    &fixture,
+                    &created.path,
+                    &["commit", "--allow-empty", "-m", "lane"],
+                )?;
+                fixture.run(&["merge", "--ff-only", &name])?;
+                fixture.run(&["commit", "--allow-empty", "-m", "main moves on"])?;
+            }
+            let mut lane = list(&context, &cancel())?
+                .into_iter()
+                .find(|lane| lane.path == created.path)
+                .ok_or("missing lane")?;
+            if entry == "unknown-writer" {
+                lane.writer = WriterState::Unknown;
+            }
+            let report = collect(
+                &context,
+                &[lane],
+                &WorktreeGcPolicy {
+                    foreign_merged_clean: true,
+                    upstream: Some(fixture.head()?),
+                    terminal: &|_| entry == "unknown-writer",
+                    no_live_lanes: &|_| true,
+                    regenerable: &[],
+                    keep: &[],
+                    written_before_ns: i128::MAX,
+                    dry_run: false,
+                },
+                &cancel(),
+            )?;
+            let expected = if shape == "at-tip" {
+                RetainReason::AtIntegrationTip
+            } else {
+                RetainReason::NoUniqueCommit
+            };
+            assert_eq!(
+                report.worktrees.retained,
+                vec![RetainedBranch {
+                    branch: name.clone(),
+                    reason: expected,
+                }],
+                "{entry} {shape}: {report:?}"
+            );
+            assert!(report.worktrees.removed.is_empty(), "{entry} {shape}");
+            assert!(created.path.is_dir() && branch_exists(&fixture, &name));
+        }
+    }
+    Ok(())
+}
+
 /// Free until the `unknown_from`th call (1-based), then unobservable.
 struct FlippingWorkers {
     calls: std::sync::atomic::AtomicUsize,

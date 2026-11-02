@@ -85,6 +85,23 @@ pub fn collect(
         }
         let foreign = policy.foreign_merged_clean && !(policy.terminal)(&lane.path);
         if foreign || (policy.foreign_merged_clean && lane.writer == WriterState::Unknown) {
+            // The fallback proves ancestry and a free census, not that a managed
+            // lane is finished: keep a fresh tree at the tip or on its first parent.
+            if lane.path.starts_with(&managed)
+                && let Some(upstream) = policy.upstream
+            {
+                match integration_protection(context, lane, upstream, cancel) {
+                    Ok(None) => {}
+                    Ok(Some(reason)) => {
+                        retain(&mut report.worktrees, &branch, reason);
+                        continue;
+                    }
+                    Err(error) => {
+                        retain(&mut report.worktrees, &branch, retain_reason(&error));
+                        continue;
+                    }
+                }
+            }
             match collect_foreign(
                 context,
                 entry,
@@ -188,14 +205,6 @@ pub fn collect(
         let Some(upstream) = policy.upstream else {
             continue;
         };
-        if lane.head == upstream {
-            retain(
-                &mut report.worktrees,
-                &branch,
-                RetainReason::AtIntegrationTip,
-            );
-            continue;
-        }
         match is_ancestor(context, lane.head, upstream, cancel) {
             Ok(true) => {}
             Ok(false) => {
@@ -207,10 +216,10 @@ pub fn collect(
                 continue;
             }
         }
-        match is_first_parent_commit(context, upstream, lane.head, cancel) {
-            Ok(false) => {}
-            Ok(true) => {
-                retain(&mut report.worktrees, &branch, RetainReason::NoUniqueCommit);
+        match integration_protection(context, lane, upstream, cancel) {
+            Ok(None) => {}
+            Ok(Some(reason)) => {
+                retain(&mut report.worktrees, &branch, reason);
                 continue;
             }
             Err(error) => {
@@ -292,6 +301,21 @@ pub fn collect(
         }
     }
     Ok(report)
+}
+
+/// Managed trees are kept while they sit at the integration tip or are a
+/// first-parent commit of it: a fresh lane has no unique work to prove merged.
+fn integration_protection(
+    context: &WorktreeContext<'_>,
+    lane: &WorktreeInfo,
+    upstream: GitOid,
+    cancel: &CancelToken,
+) -> Result<Option<RetainReason>, WorktreeError> {
+    if lane.head == upstream {
+        return Ok(Some(RetainReason::AtIntegrationTip));
+    }
+    Ok(is_first_parent_commit(context, upstream, lane.head, cancel)?
+        .then_some(RetainReason::NoUniqueCommit))
 }
 
 /// Removal needs a fresh positive census. Custody accepts an unobservable
