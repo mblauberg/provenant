@@ -4150,6 +4150,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 }
                 provenant_run::HostDeliveryContext::destination(mode.clone(), &branch)
                     .map_err(run_error)?
+                    .map(|mut request| {
+                        request.fast_forward_only = replay.fast_forward_only;
+                        request
+                    })
             } else {
                 None
             };
@@ -4462,9 +4466,7 @@ impl Factory {
                     },
                 )
                 .map_err(|_| {
-                    FacadeError::io(
-                        "prepare project scratch .provenant/scratch/graphs or .agent-run/graphs",
-                    )
+                    FacadeError::io("prepare project scratch .provenant/scratch/graphs")
                 })?;
                 let path = if document.is_absolute() {
                     document.clone()
@@ -4474,7 +4476,7 @@ impl Factory {
                     self.cwd.join(document)
                 };
                 let path = provenant_os::fs::canonicalize(&path)
-                    .map_err(|_| FacadeError::io("read project-local graph document; use .provenant/scratch/graphs or .agent-run/graphs"))?;
+                    .map_err(|_| FacadeError::io("read project-local graph document; a bare name is read only from .provenant/scratch/graphs, so pass the explicit path of a legacy .agent-run/graphs document"))?;
                 if !path.starts_with(&self.cwd) {
                     return Err(FacadeError::ConfinementRefused);
                 }
@@ -4528,6 +4530,35 @@ impl Factory {
                             writer.branch.as_str().trim_start_matches("refs/heads/"),
                         )
                         .map_err(|_| FacadeError::ConfinementRefused)?;
+                    }
+                    // A local target checked out in the writer's own worktree
+                    // cannot be advanced by compare-and-swap, so refuse the
+                    // graph before any attempt rather than at delivery.
+                    if !admitted
+                        && let Some(provenant_records::run::DeliveryMode::Integrate(target)) =
+                            &node.delivery
+                        && !target.starts_with("origin/")
+                        && let Some(path) = node.worktree.as_deref()
+                    {
+                        let writer = provenant_run::resolve_writer(
+                            self.context.roots.state.as_path(),
+                            &self.cwd,
+                            Path::new(path),
+                        )
+                        .map_err(run_error)?;
+                        let writer = provenant_run::prepare_writer(
+                            &writer,
+                            self.context.roots.state.as_path(),
+                            self.context.identity.project,
+                        )
+                        .map_err(run_error)?;
+                        if writer.branch.as_str().trim_start_matches("refs/heads/") == target {
+                            return Err(FacadeError::DispatchRefused {
+                                reason: format!(
+                                    "worktree {path} is on the integration branch {target}; create it with `git worktree add -b batch/work PATH BASE`"
+                                ),
+                            });
+                        }
                     }
                 }
                 Some(document)

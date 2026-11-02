@@ -1,6 +1,8 @@
 //! The real Rust command edge runs without Python, Node or ambient state.
 mod support;
-use provenant_fabric_runtime::hosts::{CONSOLE_DETAIL_PROTOCOL, DOCTOR_PROTOCOL, PROTOCOL};
+use provenant_fabric_runtime::hosts::{
+    CONSOLE_DETAIL_PROTOCOL, CONSOLE_INBOX_PROTOCOL, DOCTOR_PROTOCOL, PROTOCOL,
+};
 use serde_json::{Value, json};
 use std::{
     ffi::OsString,
@@ -548,6 +550,50 @@ fn peer_run_statuses_refuses_more_than_one_page() -> Result {
     let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_eq!(response["result"]["result"], "error");
     assert_eq!(response["result"]["data"]["error"]["code"], "invalid_input");
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn peer_console_inbox_is_read_only_and_refuses_an_oversized_page() -> Result {
+    let mut rig = TestRig::new()?;
+    let identity = federated_identity(&mut rig)?;
+    let host = identity["data"]["host"].as_str().ok_or("host")?;
+    let source = next_host(host.parse()?)?;
+    configure_fixture_peer(&rig, source)?;
+    let key = identity["data"]["federation"]["key"]
+        .as_str()
+        .ok_or("project key")?;
+    let ask = |protocol: u64, limit: u64| -> Result<Value> {
+        let request = json!({
+            "version": 1, "protocol":protocol,
+            "target_host": host,
+            "source_host": source,
+            "agent": "fixture",
+            "project": {"key": key, "common_dir": "repo/.git"},
+            "action": {"action":"console_inbox","state":"open","limit":limit}
+        });
+        let output = rig.execute_os(
+            Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &[
+                "--state-dir".into(),
+                rig.state.clone().into(),
+                "fabric".into(),
+                "peer".into(),
+            ],
+            Some(&serde_json::to_vec(&request)?),
+        )?;
+        assert_eq!(code(&output), 0);
+        Ok(serde_json::from_slice(&output.stdout.bytes)?)
+    };
+    let oversized = ask(CONSOLE_INBOX_PROTOCOL, 101)?;
+    assert_eq!(oversized["result"]["result"], "error");
+    assert_eq!(
+        oversized["result"]["data"]["error"]["code"],
+        "invalid_input"
+    );
+    // A peer on the previous feature fence is refused before the action decodes.
+    let old = ask(CONSOLE_DETAIL_PROTOCOL, 50)?;
+    assert_eq!(old["result"]["data"]["error"]["code"], "peer_version");
     rig.assert_legacy_unchanged()
 }
 
@@ -2907,6 +2953,408 @@ fn json_command(rig: &TestRig, args: &[&str]) -> Result<(i64, Value)> {
 }
 
 #[test]
+fn inbox_all_projects_reads_and_answers_through_peers() -> Result {
+    let mut rig = TestRig::new()?;
+    let peer = loopback_peer(&mut rig)?;
+    let (_, local_identity) = json_command(&rig, &["fabric", "identity", "--json"])?;
+    let key = local_identity["data"]["federation"]["key"]
+        .as_str()
+        .ok_or("project key")?
+        .to_owned();
+    let draft = rig.root.join("inbox-draft.json");
+    std::fs::write(
+        &draft,
+        serde_json::to_vec(&json!({
+            "kind":"question", "title":"Question", "body":"Please reply", "blocking":false,
+            "options":[], "recommended_option_id":null, "proceeding_with":null
+        }))?,
+    )?;
+    let output = rig.execute_os(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &[
+            "--state-dir".into(),
+            rig.root.join("peer-state").into(),
+            "--json".into(),
+            "ask".into(),
+            "--file".into(),
+            draft.into(),
+            "--session".into(),
+            "chair-a".into(),
+            "--operation-id".into(),
+            "peer-ask".into(),
+        ],
+        None,
+    )?;
+    assert_eq!(code(&output), 0);
+    let asked: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let id = asked["data"]["request_id"].as_str().ok_or("request id")?;
+    let output = rig.execute_os(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &[
+            "--json".into(),
+            "ask".into(),
+            "--file".into(),
+            rig.root.join("inbox-draft.json").into(),
+            "--session".into(),
+            "chair-local".into(),
+            "--operation-id".into(),
+            "local-ask".into(),
+        ],
+        None,
+    )?;
+    assert_eq!(code(&output), 0);
+    // Without --hosts the listing is exactly the local one.
+    let (status, plain) = json_command(&rig, &["inbox", "--all-projects", "--json"])?;
+    assert_eq!(status, 0, "{plain}");
+    assert!(plain["data"].get("peers").is_none(), "{plain}");
+    assert_eq!(plain["data"]["items"].as_array().ok_or("items")?.len(), 1);
+    let (status, listed) = json_command(
+        &rig,
+        &["inbox", "--all-projects", "--hosts", "all", "--json"],
+    )?;
+    assert_eq!(status, 0, "{listed}");
+    let data = &listed["data"];
+    assert!(data["coverage"].is_string());
+    assert!(
+        data["items"]
+            .as_array()
+            .ok_or("items")?
+            .iter()
+            .any(|item| item["id"] == id && item["owner_host"] == peer.to_string())
+    );
+    assert_eq!(data["peers"][0]["state"], "complete", "{listed}");
+    assert_eq!(data["peers"][0]["label"], "workshop");
+    assert_eq!(data["peers"][0]["included"], 1);
+    assert_eq!(data["items"].as_array().ok_or("items")?.len(), 2);
+    let (status, unknown) = json_command(
+        &rig,
+        &["inbox", "--all-projects", "--hosts", "nowhere", "--json"],
+    )?;
+    assert_ne!(status, 0);
+    assert_eq!(unknown["error"]["code"], "invalid_input");
+    let reply_file = rig.root.join("reply.txt");
+    std::fs::write(&reply_file, "Yes")?;
+    let reply_path = reply_file.to_str().ok_or("reply path")?;
+    let answer = |key: &str| {
+        json_command(
+            &rig,
+            &[
+                "answer",
+                "--all-projects",
+                "--host",
+                "workshop",
+                "--project-key",
+                key,
+                id,
+                "--action",
+                "reply",
+                "--text-file",
+                reply_path,
+                "--expect-revision",
+                "1",
+                "--channel",
+                "console",
+                "--operation-id",
+                "routed-answer",
+                "--json",
+            ],
+        )
+    };
+    let (status, missing) = answer("no/such/key")?;
+    assert_ne!(status, 0);
+    assert_eq!(missing["error"]["code"], "no_project", "{missing}");
+    let (status, answered) = answer(&key)?;
+    assert_eq!(status, 0, "{answered}");
+    assert_eq!(answered["data"]["operation_id"], "routed-answer");
+    let (status, close) = json_command(
+        &rig,
+        &[
+            "inbox",
+            "close",
+            "--all-projects",
+            "--host",
+            "workshop",
+            id,
+            "--state",
+            "withdrawn",
+            "--reason",
+            "obsolete",
+            "--expect-revision",
+            "1",
+            "--json",
+        ],
+    )?;
+    assert_ne!(status, 0);
+    assert_eq!(close["error"]["code"], "owner_local_only");
+    Ok(())
+}
+
+/// Ask once on this host, so the loopback peer or the local store has a row.
+fn ask_inbox(rig: &TestRig, state: Option<&Path>, session: &str, operation: &str) -> Result {
+    let draft = rig.root.join(format!("draft-{operation}.json"));
+    std::fs::write(
+        &draft,
+        serde_json::to_vec(&json!({
+            "kind":"question", "title":"Question", "body":"Please reply", "blocking":false,
+            "options":[], "recommended_option_id":null, "proceeding_with":null
+        }))?,
+    )?;
+    let mut args: Vec<OsString> = Vec::new();
+    if let Some(state) = state {
+        args.extend(["--state-dir".into(), state.into()]);
+    }
+    args.extend([
+        "--json".into(),
+        "ask".into(),
+        "--file".into(),
+        draft.into(),
+        "--session".into(),
+        session.into(),
+        "--operation-id".into(),
+        operation.into(),
+    ]);
+    let output = rig.execute_os(Path::new(env!("CARGO_BIN_EXE_provenant")), &args, None)?;
+    assert_eq!(code(&output), 0);
+    Ok(())
+}
+
+#[test]
+fn inbox_hosts_flags_are_validated_and_cursor_pages_skip_peers() -> Result {
+    let mut rig = TestRig::new()?;
+    let peer = loopback_peer(&mut rig)?;
+    let (_, identity) = json_command(&rig, &["fabric", "identity", "--json"])?;
+    let key = identity["data"]["federation"]["key"]
+        .as_str()
+        .ok_or("project key")?
+        .to_owned();
+    let local = identity["data"]["host"].as_str().ok_or("host")?.to_owned();
+    ask_inbox(
+        &rig,
+        Some(&rig.root.join("peer-state")),
+        "chair-a",
+        "peer-ask",
+    )?;
+    ask_inbox(&rig, None, "chair-local", "local-ask-1")?;
+    ask_inbox(&rig, None, "chair-local", "local-ask-2")?;
+    let refused = |args: &[&str], needle: &str| -> Result {
+        let (status, output) = json_command(&rig, args)?;
+        assert_ne!(status, 0, "{output}");
+        assert_eq!(output["error"]["code"], "invalid_input", "{output}");
+        let message = output["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains(needle), "{output}");
+        Ok(())
+    };
+    refused(
+        &["inbox", "--hosts", "all", "--json"],
+        "--hosts needs --all-projects",
+    )?;
+    refused(
+        &["inbox", "--all-projects", "--project-key", &key, "--json"],
+        "--project-key needs --all-projects and a remote --host",
+    )?;
+    refused(
+        &[
+            "inbox",
+            "--all-projects",
+            "--hosts",
+            "all",
+            "--session",
+            "chair-local",
+            "--json",
+        ],
+        "--session",
+    )?;
+    refused(
+        &[
+            "inbox",
+            "--all-projects",
+            "--host",
+            "workshop",
+            "--hosts",
+            "all",
+            "--json",
+        ],
+        "remote --host",
+    )?;
+    // A qualified ID naming another configured peer than --host is refused.
+    let bench = next_host(peer)?;
+    assert_ne!(bench.to_string(), local);
+    let config = rig.state.join("config.toml");
+    let original = std::fs::read_to_string(&config)?;
+    let text = original.clone();
+    std::fs::write(
+        &config,
+        format!("{text}[domains.fabric.peers.bench]\nhost='{bench}'\ndestination='bench'\n"),
+    )?;
+    let id = "1".repeat(32);
+    refused(
+        &[
+            "inbox",
+            "--all-projects",
+            "--host",
+            "workshop",
+            "--project-key",
+            &key,
+            &format!("{bench}:{id}"),
+            "--json",
+        ],
+        "request owner does not match --host",
+    )?;
+    // The same ID qualified by --host's own host passes the owner check; the
+    // call then fails on the missing request, not on the mismatch.
+    let (status, owned) = json_command(
+        &rig,
+        &[
+            "inbox",
+            "--all-projects",
+            "--host",
+            "workshop",
+            "--project-key",
+            &key,
+            &format!("{peer}:{id}"),
+            "--json",
+        ],
+    )?;
+    assert_ne!(status, 0, "{owned}");
+    assert!(
+        !owned["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("does not match --host"),
+        "{owned}"
+    );
+    std::fs::write(&config, original)?;
+    let (status, first) = json_command(
+        &rig,
+        &[
+            "inbox",
+            "--all-projects",
+            "--limit",
+            "1",
+            "--hosts",
+            "all",
+            "--json",
+        ],
+    )?;
+    assert_eq!(status, 0, "{first}");
+    assert_eq!(first["data"]["peers"][0]["state"], "complete", "{first}");
+    let cursor = first["data"]["next_cursor"].as_str().ok_or("next cursor")?;
+    // A cursor page validates the value but never reads the peer.
+    refused(
+        &[
+            "inbox",
+            "--all-projects",
+            "--cursor",
+            cursor,
+            "--hosts",
+            "nowhere",
+            "--json",
+        ],
+        "unknown peer host",
+    )?;
+    let (status, next) = json_command(
+        &rig,
+        &[
+            "inbox",
+            "--all-projects",
+            "--limit",
+            "1",
+            "--cursor",
+            cursor,
+            "--hosts",
+            "all",
+            "--json",
+        ],
+    )?;
+    assert_eq!(status, 0, "{next}");
+    assert!(next["data"].get("peers").is_none(), "{next}");
+    assert!(
+        next["data"]["items"]
+            .as_array()
+            .ok_or("items")?
+            .iter()
+            .all(|item| item["owner_host"] != peer.to_string()),
+        "{next}"
+    );
+    Ok(())
+}
+
+#[test]
+fn inbox_hosts_names_why_a_peer_gave_no_page() -> Result {
+    let mut rig = TestRig::new()?;
+    let peer = loopback_peer(&mut rig)?;
+    let (_, identity) = json_command(&rig, &["fabric", "identity", "--json"])?;
+    let key = identity["data"]["federation"]["key"]
+        .as_str()
+        .ok_or("project key")?
+        .to_owned();
+    ask_inbox(&rig, None, "chair-local", "local-ask")?;
+    let peer_state = rig.root.join("peer-state");
+    ask_inbox(&rig, Some(&peer_state), "chair-a", "peer-ask")?;
+    let peers = |rig: &TestRig| -> Result<Value> {
+        let (status, listed) = json_command(
+            rig,
+            &["inbox", "--all-projects", "--hosts", "all", "--json"],
+        )?;
+        assert_eq!(status, 0, "{listed}");
+        // Local rows always show, whatever the peer did.
+        assert_eq!(listed["data"]["items"].as_array().ok_or("items")?.len(), 1);
+        Ok(listed["data"]["peers"][0].clone())
+    };
+    // The peer refuses a page larger than its own page_rows.
+    let config = peer_state.join("config.toml");
+    let text = std::fs::read_to_string(&config)?;
+    std::fs::write(
+        &config,
+        format!("{text}[domains.fabric.limits]\npage_rows=5\n"),
+    )?;
+    let refused = peers(&rig)?;
+    assert_eq!(refused["state"], "partial", "{refused}");
+    assert_eq!(refused["reason"], "limit_refused", "{refused}");
+    std::fs::write(&config, text)?;
+    // Replace the peer with one that does not know this project.
+    let ssh = rig.root.join("ssh");
+    let real = std::fs::read_to_string(&ssh)?;
+    std::fs::write(
+        &ssh,
+        "#!/bin/sh\ncat >/dev/null\necho 'provenant: fabric peer: peer project is outside the selected home' >&2\nexit 3\n",
+    )?;
+    let unknown = peers(&rig)?;
+    assert_eq!(unknown["state"], "partial", "{unknown}");
+    assert_eq!(unknown["reason"], "project_unknown", "{unknown}");
+    // An invalid-input refusal that a one-row page does not cure is not about
+    // --limit, so it must not say so.
+    let frame = rig.root.join("invalid.json");
+    std::fs::write(
+        &frame,
+        serde_json::to_vec(&json!({
+            "version":1,"protocol":CONSOLE_INBOX_PROTOCOL,"host":peer.to_string(),"project":key,
+            "result":{"result":"error","data":{"error":{"code":"invalid_input"}}},
+        }))?,
+    )?;
+    std::fs::write(
+        &ssh,
+        format!("#!/bin/sh\ncat >/dev/null\ncat '{}'\n", frame.display()),
+    )?;
+    let invalid = peers(&rig)?;
+    assert_eq!(invalid["state"], "partial", "{invalid}");
+    assert_eq!(invalid["reason"], "invalid_request", "{invalid}");
+    // A peer that never answers inside peer_seconds stays unreachable.
+    std::fs::write(&ssh, "#!/bin/sh\nsleep 20\n")?;
+    let main = rig.state.join("config.toml");
+    let text = std::fs::read_to_string(&main)?;
+    std::fs::write(
+        &main,
+        format!("{text}[domains.fabric.limits]\npeer_seconds=1\n"),
+    )?;
+    let slow = peers(&rig)?;
+    assert_eq!(slow["state"], "unreachable", "{slow}");
+    assert_eq!(slow["reason"], "timeout", "{slow}");
+    std::fs::write(&ssh, real)?;
+    Ok(())
+}
+
+#[test]
 fn remote_inbox_owner() -> Result {
     let mut rig = TestRig::new()?;
     let peer = loopback_peer(&mut rig)?;
@@ -3347,7 +3795,7 @@ fn peer_refusal_codes_and_protocol_mismatches_reach_cli_and_mcp() -> Result {
         .ok_or("local")?;
     assert_eq!(local_health["available"], true);
     assert_eq!(local_health["protocol"], PROTOCOL);
-    assert_eq!(local_health["features"], CONSOLE_DETAIL_PROTOCOL);
+    assert_eq!(local_health["features"], CONSOLE_INBOX_PROTOCOL);
     let calls = std::fs::read_to_string(calls)?;
     assert_eq!(calls.lines().count(), 3);
     let actions = calls

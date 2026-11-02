@@ -483,6 +483,7 @@ fn launch_retry_kind(error: &(dyn Error + 'static)) -> bool {
             | FacadeError::HomeUnavailable
             | FacadeError::Io { .. }
             | FacadeError::DispatchUnobserved { .. }
+            | FacadeError::HostDeliveryIo { .. }
             | FacadeError::LaunchUnknown { .. }
     )
 }
@@ -1255,6 +1256,47 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         journal.save(&checkpoint).map_err(GraphError::Journal)?;
                         break;
                     }
+                    // A loop round integrates by fast-forward from the head the
+                    // previous writer in its worktree delivered, so a target
+                    // that moved since then stops the loop before the round.
+                    if node.round.is_some()
+                        && plans::writer(node)
+                        && matches!(
+                            node.delivery,
+                            Some(provenant_records::run::DeliveryMode::Integrate(_))
+                        )
+                        && checkpoint.nodes[node_index].attempts.is_empty()
+                        && let Some(delivered) = plan.nodes[..node_index]
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .filter(|(_, earlier)| {
+                                plans::writer(earlier)
+                                    && earlier.worktree == node.worktree
+                                    && matches!(
+                                        earlier.delivery,
+                                        Some(provenant_records::run::DeliveryMode::Integrate(_))
+                                    )
+                            })
+                            .find_map(|(index, _)| {
+                                checkpoint.nodes[index]
+                                    .outputs
+                                    .as_ref()
+                                    .and_then(|outputs| outputs.commit.clone())
+                            })
+                        && let Some(head) = owner.integration_head().map_err(GraphError::Run)?
+                        && head != delivered
+                    {
+                        let progress = &mut checkpoint.nodes[node_index];
+                        progress.state = NodeState::Failed;
+                        progress.advance_error_code = Some("integration_head_moved".into());
+                        progress.advance_error = Some(format!(
+                            "node {}: the integration branch moved from the delivered {delivered} to {head}; a loop round only fast-forwards it, so rerun the graph",
+                            node.id
+                        ));
+                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        break;
+                    }
                     if node.continues.is_some()
                         && land::continued_branch(node, &checkpoint, &positions).is_none()
                     {
@@ -1371,6 +1413,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     Replay {
                         delivery: land::delivery(node),
                         branch: continued.as_deref(),
+                        fast_forward_only: node.round.is_some(),
                         stored_ref: stored_ref.as_deref(),
                         launch_actor: &launch_actor,
                     },
@@ -1505,13 +1548,18 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             attempt.attempt_ref = attempt_ref;
                             // Provider success alone does not satisfy an explicit result contract.
                             let warned = result_warning.is_some();
-                            let outputs = make_outputs(
+                            let mut outputs = make_outputs(
                                 result.as_deref(),
                                 result_warning,
                                 result_path,
                                 branch,
                                 commit,
                             );
+                            if outcome == AttemptOutcome::UsageLimited {
+                                outputs
+                                    .warnings
+                                    .retain(|warning| warning != FINDINGS_INVALID);
+                            }
                             let disposition_error =
                                 disposition_error(&node.dispositions, &upstream_findings, &outputs);
                             let outcome = if warned {
@@ -1551,6 +1599,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     if !outcome.allows_route_fallback(node.access, launched)
                                         || route_index + 1 == node.routes.len()
                                     {
+                                        if outcome == AttemptOutcome::UsageLimited {
+                                            progress.advance_error_code =
+                                                Some("usage_limited".into());
+                                            progress.advance_error = Some("Provider quota or rate limit reached; wait for the allowance to reset or choose an eligible route.".into());
+                                        }
                                         progress.state = NodeState::Failed;
                                         false
                                     } else {

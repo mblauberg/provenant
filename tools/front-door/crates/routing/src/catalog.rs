@@ -1247,6 +1247,12 @@ impl Catalogue {
             .then(|| bundled.first().map(|s| (*s).to_owned()))
             .flatten()
     }
+    /// The pools a model draws on: the free allowance and its catalogued group.
+    pub fn admission_pools(&self, model: &ModelId) -> Vec<String> {
+        let mut pools = free_pools(model.adapter(), || self.is_free_model(model));
+        pools.extend(self.quota_pool(model).map(str::to_owned));
+        pools
+    }
     /// Billing classification belongs to the model, independently of pools.
     pub fn is_free_model(&self, id: &ModelId) -> bool {
         self.model(id).is_some_and(|model| model.free)
@@ -1256,6 +1262,15 @@ impl Catalogue {
                 .flatten()
                 .any(|member| member.free && member.model == *id)
     }
+}
+
+/// Only OpenCode draws on the keyless free allowance, whatever a pool lists.
+pub fn free_pools(adapter: &str, free: impl FnOnce() -> bool) -> Vec<String> {
+    provenant_records::AdapterSpec::get(adapter)
+        .and_then(|spec| spec.free_pool)
+        .filter(|_| free())
+        .map(|pool| vec![pool.to_owned()])
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1278,6 +1293,8 @@ mod tests {
             availability: &[],
             quota: &[],
             capacity_cooldowns: &[],
+            accounts: &[],
+            quota_policies: &[],
             access: &[],
             now: provenant_core::WallTime::from_micros(0)?,
             host: "test-host",
@@ -1356,6 +1373,8 @@ mod tests {
             availability: &[],
             quota: &[],
             capacity_cooldowns: &[],
+            accounts: &[],
+            quota_policies: &[],
             access: &[],
             now: provenant_core::WallTime::from_micros(0)?,
             host: "test-host",
@@ -1446,6 +1465,8 @@ mod tests {
             availability: &[],
             quota: &[],
             capacity_cooldowns: &[],
+            accounts: &[],
+            quota_policies: &[],
             access: &[],
             now: provenant_core::WallTime::from_micros(0)?,
             host: "test-host",
@@ -1605,6 +1626,8 @@ mod tests {
             availability: &availability,
             quota: &[],
             capacity_cooldowns: &[],
+            accounts: &[],
+            quota_policies: &[],
             access: &access,
             now: provenant_core::WallTime::from_micros(100_000_000)?,
             host: "test-host",

@@ -175,6 +175,10 @@ pub struct Answer {
     pub channel: Channel,
     #[arg(long)]
     pub operation_id: Option<OperationId>,
+    /// With --all-projects and a remote --host: the project key (as in a listed
+    /// request's project_key) that selects the local project to route through
+    #[arg(long)]
+    pub project_key: Option<String>,
 }
 #[derive(Debug, Args)]
 pub struct Steer {
@@ -217,6 +221,14 @@ pub struct Inbox {
     pub limit: u64,
     #[arg(long)]
     pub cursor: Option<String>,
+    /// With --all-projects (list only): also read these peers' first pages;
+    /// `all` or comma-separated host labels
+    #[arg(long)]
+    pub hosts: Option<String>,
+    /// With --all-projects and a remote --host: the project key (as in a listed
+    /// request's project_key) that selects the local project to route through
+    #[arg(long)]
+    pub project_key: Option<String>,
 }
 #[derive(Debug, Subcommand)]
 pub enum InboxCommand {
@@ -554,6 +566,207 @@ fn is_local_host(name: &str, own: Option<provenant_core::HostId>) -> bool {
     name == "local" || own.is_some_and(|id| name == id.to_string())
 }
 
+fn owner_local_only(host: &str) -> Error {
+    Error::Remote {
+        code: "owner_local_only".into(),
+        message: format!(
+            "inbox owner {host}: run this operation on the owner host or from the owning chair session"
+        ),
+        operation_id: None,
+    }
+}
+
+/// The peers a `--hosts` value names, as sorted `(label, host)` pairs, and the
+/// peer deadline in seconds. `local` is skipped; an unknown label is refused.
+fn chosen_peers(
+    roots: &provenant_core::Roots,
+    hosts: &str,
+) -> Result<(Vec<(String, provenant_core::HostId)>, u64), Error> {
+    let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+        .map_err(crate::fabric::EdgeError::from)?
+        .domains
+        .fabric;
+    let mut chosen: Vec<(String, provenant_core::HostId)> = Vec::new();
+    for name in hosts.split(',') {
+        let selected: Vec<_> = if name == "all" {
+            config
+                .peers
+                .iter()
+                .map(|(l, p)| (l.clone(), p.host))
+                .collect()
+        } else if name == "local" {
+            continue;
+        } else if let Some(peer) = config.peers.get(name) {
+            vec![(name.to_owned(), peer.host)]
+        } else if let Some((label, peer)) = provenant_core::HostId::parse(name)
+            .ok()
+            .and_then(|id| config.peers.iter().find(|(_, p)| p.host == id))
+        {
+            vec![(label.clone(), peer.host)]
+        } else {
+            return Err(Error::Input("unknown peer host"));
+        };
+        for entry in selected {
+            if !chosen.iter().any(|(_, host)| *host == entry.1) {
+                chosen.push(entry);
+            }
+        }
+    }
+    chosen.sort();
+    Ok((chosen, config.limits.peer_seconds))
+}
+
+/// Why one attempt at a peer did not produce a page.
+#[derive(Clone, Copy, PartialEq)]
+enum Miss {
+    /// The peer does not know that project, so another may be tried.
+    ProjectUnknown,
+    /// An invalid-input refusal: the page size exceeds the peer's `page_rows`,
+    /// or the request itself is unusable. The caller tells the two apart.
+    Invalid,
+    Timeout,
+    Error,
+}
+
+fn classify_miss(failure: &crate::fabric::PeerFailure) -> Miss {
+    use provenant_fabric_runtime::coordination::facade::FacadeError;
+    let detail = failure.detail.as_deref().unwrap_or_default();
+    match failure.error {
+        FacadeError::InvalidInput => Miss::Invalid,
+        FacadeError::Timeout => Miss::Timeout,
+        _ if detail.contains(&provenant_fabric_runtime::hosts::PeerError::Project.to_string()) => {
+            Miss::ProjectUnknown
+        }
+        _ if detail.contains("timed out") => Miss::Timeout,
+        _ => Miss::Error,
+    }
+}
+
+/// Add the first pages of the chosen peers to a local listing. A peer is
+/// addressed through a registered project, which it must also know, so each
+/// project is tried until one is answered. The attempts of one peer share a
+/// single `peer_seconds` budget; a peer that does not answer inside it is
+/// reported unreachable, with a reason, and never fails the listing.
+#[allow(clippy::disallowed_methods)] // The real-time deadline bounds the peer reads.
+fn fan_out(
+    roots: &provenant_core::Roots,
+    home: &Path,
+    hosts: &str,
+    state: provenant_fabric_runtime::inbox::InboxFilter,
+    limit: u64,
+    local: InboxResult,
+) -> Result<InboxResult, Error> {
+    use crate::console::peer_inbox::{InboxObservation, PeerInbox, compose_inbox};
+    use provenant_core::Clock;
+    use provenant_fabric_runtime::{
+        coordination::facade::FacadeError,
+        hosts::{PeerAction, PeerResult},
+    };
+    let (chosen, seconds) = chosen_peers(roots, hosts)?;
+    let bindings =
+        provenant_config::registered_projects(roots).map_err(crate::fabric::EdgeError::from)?;
+    let budget_for = |remaining: std::time::Duration| {
+        let whole = remaining
+            .as_secs()
+            .saturating_add(u64::from(remaining.subsec_nanos() > 0));
+        let clock = provenant_os::clock::SystemClock::new();
+        WaitBudget::cli(clock.mono_now(), whole.clamp(1, seconds.max(1)))
+    };
+    let read = |host: provenant_core::HostId| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+        let (mut unknown, mut other) = (0usize, None);
+        for binding in &bindings {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                other = Some(Miss::Timeout);
+                break;
+            }
+            let clock = provenant_os::clock::SystemClock::new();
+            let (Ok(context), Ok(budget)) = (
+                Context::open_for_project(roots.clone(), home, binding),
+                budget_for(remaining),
+            ) else {
+                continue;
+            };
+            let ask = |limit: u64, budget, remaining| {
+                context.peer_within(
+                    &clock,
+                    host,
+                    PeerAction::ConsoleInbox {
+                        extra: Default::default(),
+                        state,
+                        limit,
+                    },
+                    budget,
+                    &provenant_core::CancelToken::new(),
+                    remaining,
+                )
+            };
+            match ask(limit, budget, remaining) {
+                Ok(PeerResult::Console { data, .. }) => return InboxObservation::Page(data),
+                Ok(_) => return InboxObservation::Refused("invalid_page"),
+                Err(failure)
+                    if matches!(
+                        failure.error,
+                        FacadeError::PeerVersion | FacadeError::PeerProtocolMismatch { .. }
+                    ) =>
+                {
+                    return InboxObservation::Unsupported;
+                }
+                Err(failure) => match classify_miss(&failure) {
+                    Miss::Invalid => {
+                        // The refusal carries no cause, so ask for the smallest
+                        // page: if that is served, only the page size was refused.
+                        let left = deadline.saturating_duration_since(std::time::Instant::now());
+                        let served = limit > 1
+                            && !left.is_zero()
+                            && budget_for(left).is_ok_and(|budget| {
+                                matches!(ask(1, budget, left), Ok(PeerResult::Console { .. }))
+                            });
+                        return InboxObservation::Refused(if served {
+                            "limit_refused"
+                        } else {
+                            "invalid_request"
+                        });
+                    }
+                    Miss::ProjectUnknown => unknown += 1,
+                    miss => {
+                        // A timeout outranks a generic error in the report.
+                        other = Some(match (other, miss) {
+                            (Some(Miss::Timeout), _) | (_, Miss::Timeout) => Miss::Timeout,
+                            _ => Miss::Error,
+                        });
+                    }
+                },
+            }
+        }
+        match other {
+            Some(Miss::Timeout) => InboxObservation::Unreachable("timeout"),
+            Some(_) => InboxObservation::Unreachable("error"),
+            None if unknown != 0 => InboxObservation::Refused("project_unknown"),
+            None => InboxObservation::Unreachable("no_project"),
+        }
+    };
+    let peers: Vec<PeerInbox> = std::thread::scope(|scope| {
+        let workers: Vec<_> = chosen
+            .iter()
+            .map(|(_, host)| scope.spawn(|| read(*host)))
+            .collect();
+        chosen
+            .iter()
+            .zip(workers)
+            .map(|((label, host), worker)| PeerInbox {
+                host: *host,
+                label: label.clone(),
+                observation: worker
+                    .join()
+                    .unwrap_or(InboxObservation::Unreachable("error")),
+            })
+            .collect()
+    });
+    compose_inbox(local, peers).map_err(Error::Input)
+}
+
 fn remote_error(code: String, message: String, operation_id: Option<OperationId>) -> Error {
     let operation_id =
         operation_id.filter(|_| matches!(code.as_str(), "ambiguous_outcome" | "owner_unavailable"));
@@ -598,6 +811,71 @@ fn project_label(common_dir: &Path) -> Option<String> {
         .map(str::to_owned)
 }
 
+type HostListing = (
+    Vec<HumanRequest>,
+    Option<provenant_fabric_runtime::inbox::InboxCursor>,
+    serde_json::Map<String, serde_json::Value>,
+);
+
+/// This host's requests across the given registered projects, with each
+/// listed project's label and path. Shared by the local listing and the peer
+/// action, so both read the same rows.
+fn host_listing(
+    roots: &provenant_core::Roots,
+    bindings: &[provenant_config::ProjectBinding],
+    session: Option<&str>,
+    state: provenant_fabric_runtime::inbox::InboxFilter,
+    limit: u64,
+    cursor: Option<provenant_fabric_runtime::inbox::InboxCursor>,
+) -> Result<HostListing, InboxError> {
+    let clock = provenant_os::clock::SystemClock;
+    let cancel = provenant_core::CancelToken::new();
+    let mut project_ids: Vec<_> = bindings.iter().map(|b| b.project_id()).collect();
+    project_ids.sort();
+    project_ids.dedup();
+    let (items, next_cursor) = provenant_fabric_runtime::inbox::host_open_requests(
+        &roots.state,
+        &project_ids,
+        session,
+        state,
+        limit,
+        cursor,
+        &provenant_fabric_store::Request {
+            clock: &clock,
+            cancel: &cancel,
+        },
+    )?;
+    let projects = items
+        .iter()
+        .map(|item| item.project_id)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(|project| {
+            let binding = bindings.iter().find(|b| b.project_id() == project);
+            (
+                project.to_string(),
+                serde_json::json!({
+                    "label": binding.and_then(|b| project_label(b.common_dir())),
+                    "path": binding.map(|b| b.common_dir().display().to_string()),
+                }),
+            )
+        })
+        .collect();
+    Ok((items, next_cursor, projects))
+}
+
+/// The first page of this host's requests for `PeerAction::ConsoleInbox`:
+/// `{items, projects, truncated}`. It reads existing state only.
+pub fn console_inbox_page(
+    roots: &provenant_core::Roots,
+    state: provenant_fabric_runtime::inbox::InboxFilter,
+    limit: u64,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let bindings = provenant_config::registered_projects(roots)?;
+    let (items, next_cursor, projects) = host_listing(roots, &bindings, None, state, limit, None)?;
+    Ok(serde_json::json!({"items":items,"projects":projects,"truncated":next_cursor.is_some()}))
+}
+
 /// Serve an inbox call whose working directory is in no project. A list reads
 /// the open requests of every project on this host, each tagged with its
 /// project in `projects`; an action by request ID runs in the owning project.
@@ -607,7 +885,7 @@ fn host_wide(
     home: &Path,
     cwd: &Path,
 ) -> Result<HostWide, Error> {
-    use provenant_fabric_runtime::inbox::{host_open_requests, locate_request};
+    use provenant_fabric_runtime::inbox::locate_request;
     let clock = provenant_os::clock::SystemClock;
     let cancel = provenant_core::CancelToken::new();
     let bindings =
@@ -621,38 +899,9 @@ fn host_wide(
             cursor,
             ..
         } => {
-            let mut project_ids: Vec<_> = bindings.iter().map(|b| b.project_id()).collect();
-            project_ids.sort();
-            project_ids.dedup();
-            let (items, next_cursor) = host_open_requests(
-                &roots.state,
-                &project_ids,
-                session.as_deref(),
-                state,
-                limit,
-                cursor,
-                &provenant_fabric_store::Request {
-                    clock: &clock,
-                    cancel: &cancel,
-                },
-            )?;
+            let (items, next_cursor, projects) =
+                host_listing(&roots, &bindings, session.as_deref(), state, limit, cursor)?;
             let truncated = next_cursor.is_some();
-            let projects: serde_json::Map<_, _> = items
-                .iter()
-                .map(|item| item.project_id)
-                .collect::<std::collections::BTreeSet<_>>()
-                .into_iter()
-                .map(|project| {
-                    let binding = bindings.iter().find(|b| b.project_id() == project);
-                    (
-                        project.to_string(),
-                        serde_json::json!({
-                            "label": binding.and_then(|b| project_label(b.common_dir())),
-                            "path": binding.map(|b| b.common_dir().display().to_string()),
-                        }),
-                    )
-                })
-                .collect();
             let mut extra = provenant_records::ExtraFields::default();
             extra.insert("projects".into(), projects.into());
             Ok(HostWide::Done(InboxResult::Listed {
@@ -724,6 +973,16 @@ fn execute(
         },
         _ => None,
     };
+    let (hosts, project_key, paged, session) = match &command {
+        HumanCommand::Answer(args) => (None, args.project_key.clone(), false, None),
+        HumanCommand::Inbox(args) if args.command.is_none() => (
+            args.hosts.clone(),
+            args.project_key.clone(),
+            args.cursor.is_some(),
+            args.session.clone(),
+        ),
+        _ => (None, None, false, None),
+    };
     let mut input = command.input()?;
     if input.is_mutation() && crate::fabric::in_lane() {
         return Err(InboxError::LaneMutation.into());
@@ -739,17 +998,72 @@ fn execute(
     let remote_owner = selected
         .as_deref()
         .is_some_and(|name| !is_local_host(name, own));
+    if hosts.is_some()
+        && (!all_projects || remote_owner || !matches!(input, InboxInput::List { id: None, .. }))
+    {
+        return Err(Error::Input(
+            "--hosts needs --all-projects and a listing of this host; it cannot combine with a remote --host",
+        ));
+    }
+    if hosts.is_some() && session.is_some() {
+        // A peer's page is not filtered by session, so the listing would mix scopes.
+        return Err(Error::Input(
+            "--hosts cannot combine with --session: peer pages are not session-filtered",
+        ));
+    }
+    if project_key.is_some() && !(all_projects && remote_owner) {
+        return Err(Error::Input(
+            "--project-key needs --all-projects and a remote --host",
+        ));
+    }
+    // The value is checked on every page, though only the first page reads peers.
+    if let Some(hosts) = &hosts {
+        chosen_peers(&roots, hosts)?;
+    }
+    let list_page = match &input {
+        InboxInput::List { state, limit, .. } => Some((*state, *limit)),
+        _ => None,
+    };
     let context = if all_projects {
         if remote_owner {
-            return Err(Error::Input(
-                "--all-projects is only available for the local host",
-            ));
-        }
-        match host_wide(input, roots, home, cwd)? {
-            HostWide::Done(result) => return Ok(result),
-            HostWide::Project(context, next) => {
-                input = next;
-                *context
+            if matches!(input, InboxInput::Close { .. }) {
+                return Err(owner_local_only(selected.as_deref().unwrap_or_default()));
+            }
+            let key = project_key.ok_or(Error::Input(
+                "--all-projects with a remote owner needs --project-key",
+            ))?;
+            let bindings = provenant_config::registered_projects(&roots)
+                .map_err(crate::fabric::EdgeError::from)?;
+            let mut matching = bindings.iter().filter(|binding| {
+                provenant_fabric_runtime::identity::CrossHostProjectKey::from_home(
+                    home,
+                    binding.common_dir(),
+                )
+                .is_ok_and(|found| found.as_str() == key)
+            });
+            let binding = matching
+                .next()
+                .ok_or_else(|| no_project(cwd, "no registered project has that --project-key"))?;
+            if matching.next().is_some() {
+                return Err(Error::Input(
+                    "--project-key matches more than one registered project",
+                ));
+            }
+            Context::open_for_project(roots.clone(), home, binding)?
+        } else {
+            match host_wide(input, roots.clone(), home, cwd)? {
+                HostWide::Done(result) => {
+                    return match (hosts, list_page) {
+                        (Some(hosts), Some((state, limit))) if !paged => {
+                            fan_out(&roots, home, &hosts, state, limit, result)
+                        }
+                        _ => Ok(result),
+                    };
+                }
+                HostWide::Project(context, next) => {
+                    input = next;
+                    *context
+                }
             }
         }
     } else {
@@ -789,13 +1103,7 @@ fn execute(
             input,
             InboxInput::Close { .. } | InboxInput::Acknowledge { .. }
         ) {
-            return Err(Error::Remote {
-                code: "owner_local_only".into(),
-                message: format!(
-                    "inbox owner {host}: run this operation on the owner host or from the owning chair session"
-                ),
-                operation_id: None,
-            });
+            return Err(owner_local_only(&host));
         }
         input.freeze_operation()?;
         let operation_id = input.operation_id().cloned();

@@ -96,30 +96,38 @@ pub(super) fn capacity_reason(reason: &str) -> bool {
 /// its session after a growing backoff, or redraws when it has none, and a
 /// quota stop redraws at once, where admission skips the spent account.
 /// Whether another registered account for `model`'s adapter, other than
-/// `spent_key`, serves the model and is not known to be spent: no live provider
-/// refusal for the model, and no reading that routing's rule calls spent.
+/// `spent_key`, serves the model and is not known to be spent: no persisted
+/// mismatch or live refusal, as quota's `account_block` assesses them, and no
+/// reading that routing's rule calls spent. Invalid evidence is not ready.
 pub(super) fn unspent_alternative<'k>(
     keys: impl IntoIterator<Item = &'k str>,
     quota: &[provenant_quota::AccountRecord],
+    policies: &[provenant_quota::QuotaPolicy],
     spent_key: &str,
     model: &ModelId,
-    model_pool: Option<&str>,
+    catalogue: &provenant_routing::Catalogue,
     now: i64,
 ) -> bool {
     let adapter = model.adapter();
+    let model_pool = catalogue.quota_pool(model);
+    let pools = catalogue.admission_pools(model);
+    let admission = provenant_quota::Admission {
+        policies,
+        now_unix_seconds: now,
+        records: quota,
+        pools: &pools,
+    };
     let spent = |key: &str| {
-        quota.iter().any(|record| {
-            record.account.adapter == adapter
-                && record.account.account_key == key
-                && (record.snapshot.as_ref().is_some_and(|snapshot| {
-                    provenant_routing::quota_reading_spent(snapshot, model, model_pool, now)
-                }) || record.refusals.iter().any(|refusal| {
-                    refusal.model == model.model()
-                        && refusal
-                            .expires_unix_seconds()
-                            .is_ok_and(|expires| expires > now)
-                }))
-        })
+        admission
+            .account_block(adapter, key, model.model())
+            .map_or(true, |block| block.is_some())
+            || quota.iter().any(|record| {
+                record.account.adapter == adapter
+                    && record.account.account_key == key
+                    && record.snapshot.as_ref().is_some_and(|snapshot| {
+                        provenant_routing::quota_reading_spent(snapshot, model, model_pool, now)
+                    })
+            })
     };
     keys.into_iter().any(|key| {
         key != spent_key

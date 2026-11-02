@@ -80,8 +80,8 @@ live process and names its pid and command when available.
 Choose `--deliver none`, `push`, `integrate:integration` or `pr`. Push and PR
 use origin and the lane branch. Integration targets must already exist;
 `integrate:origin/integration` selects a remote branch. Local targets must be
-checked out nowhere. Integration conflicts leave checkouts and destination
-refs intact. Inspect the failure and resolve it through the owning lane.
+checked out nowhere, including the delivering lane's own worktree. Integration
+conflicts leave checkouts and destination refs intact. Inspect the failure and resolve it through the owning lane.
 Legacy `--deliver-remote`, `--deliver-branch` and `--open-pr` remain available
 as an alternative to `--deliver`.
 
@@ -177,19 +177,22 @@ when no provider ran; `provenant output ATTEMPT` can still address it.
 `provenant cancel ATTEMPT` generates and prints its operation ID. Cancel and
 `provenant reconcile --id RUN` infer project scope from the run record.
 
-Put graph documents and briefs in `.provenant/scratch/`, or `.agent-run/` when
-that root already exists. Graph setup creates `graphs/` and excludes the
-scratch root through `.git/info/exclude`. Every lane can read it:
-read-only lanes through their working directory, writers through a read grant on
-the primary checkout's scratch, since their linked worktree lacks untracked
-files. Scratch read grants use canonical paths and must remain under the
-canonical primary checkout. `--read-root DIR` grants any other directory;
-`--prompt-file` grants its file. A bare `--document plan.json` resolves
-there when no current-directory file exists. Explicit project-local paths
-also work. A graph can use node `delivery: "integrate:integration"` with
-top-level `integration_branch: "integration"` and `delivery: "pr"` for one
+Put graph documents and briefs in `.provenant/scratch/`. A legacy `.agent-run/`
+is never used for new documents; Provenant does not migrate it. Graph setup
+creates `graphs/` and excludes the scratch root through `.git/info/exclude`.
+Every lane can read it: read-only lanes through their working directory, writers
+through a read grant on the primary checkout's scratch, since their linked
+worktree lacks untracked files. Scratch read grants use canonical paths and must
+remain under the canonical primary checkout. `--read-root DIR` grants any other
+directory; `--prompt-file` grants its file. A bare `--document plan.json`
+resolves there when no current-directory file exists. Explicit project-local
+paths also work. A graph can use node `delivery: "integrate:integration"`
+with top-level `integration_branch: "integration"` and `delivery: "pr"` for one
 final PR. Delivery failures block dependants or retain the graph advance error;
-`fabric graph resume --document PATH` retries final delivery.
+`fabric graph resume --document PATH` retries final delivery. Loop rounds
+integrate fast-forward only. If a loop round's delivery fails at the Integrate
+stage, the integration branch moved after the round launched; rerun the graph
+from the new head rather than resuming it.
 
 Drain writer lanes before upgrading, as described in the
 [upgrade procedure](install.md#bootstrap-and-upgrade). Upgrading does not
@@ -223,3 +226,18 @@ a launch or become write-denied; only Git control files with another name do.
 See the [writer limits](providers.md#writer-lanes).
 The hard-link fixtures remain enabled in macOS CI because lane sandboxes can
 deny their `hard_link` calls before the launch check runs.
+
+## Tests and Git
+
+Tests run Git only through `provenant_os::fixture`: `git_command()` for a
+`std::process::Command`, or `run_git(cwd, args)` through the executor. Both
+drop the lane's `GIT_*` binding, so a fixture never commits into the lane's own
+repository. An `ExecOptions` that runs Git sets `env` explicitly; `tests/workspace_policy.rs`
+fails on one that inherits the environment.
+
+A root-package `cargo` command run inside a lane has failed in `build.rs` with
+`cannot resolve source inventory git index`. The lane that hit it reported
+`GIT_CONFIG_GLOBAL=/dev/null` as a workaround. The cause is unconfirmed: it was not
+reproduced outside a lane sandbox. `build.rs` removes `GIT_*` before it runs Git, so the likely
+reason is that it then loses the lane's binding. Track it in a separate issue before
+relying on this workaround.

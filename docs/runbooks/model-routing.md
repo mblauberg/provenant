@@ -49,6 +49,15 @@ disabled members are excluded. If only disabled members remain, resolution
 returns their exclusions. The receipt records candidate readiness and
 exclusions. Operation ID and task index seed selection so retries repeat the
 same choice. Only OpenCode `*-free` entries are marked free. Agy Gemini Flash is a paid subscription model.
+
+OpenCode quota refusals come from its structured quota and free-limit events,
+and from stderr diagnostics naming `AI.Error.QuotaExceeded` or `usage limit
+exceeded`. Stderr evidence is read from the matching line and the one after
+it, only for a run that did not succeed. It is scoped to `opencode-go`, or
+`opencode-free` when that text names the free tier or free usage; a retry
+interval with a unit (or a bare `retry-after` header value, in seconds) sets
+the refusal expiry. A pool alias is one route entry, so quota on its last
+member reports `usage_limited` rather than re-dispatching.
 Omit `--effort` on OpenCode free routes: their recorded model controls do not
 support effort, so an explicit value is refused before launch.
 `--confidential` excludes members and fallbacks that train on or retain prompts, or are unclassified.

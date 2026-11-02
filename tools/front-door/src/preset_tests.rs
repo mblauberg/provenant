@@ -531,6 +531,8 @@ struct PresetOwner {
     prompts: Vec<(String, String)>,
     contexts: Vec<provenant_records::run::WorkContext>,
     integration_pins: usize,
+    /// Integration head once a writer has integrated; the pin until then.
+    integration: Option<String>,
 }
 
 impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
@@ -542,7 +544,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
 
     fn integration_head(&mut self) -> Result<Option<String>, Self::Error> {
         self.integration_pins += 1;
-        Ok(Some("0123456789abcdef0123456789abcdef01234567".into()))
+        Ok(Some(self.integration.clone().unwrap_or_else(|| {
+            "0123456789abcdef0123456789abcdef01234567".into()
+        })))
     }
 
     fn observe_or_start(
@@ -552,7 +556,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
         _: &provenant_fabric_runtime::graph::GraphRoute,
         access: provenant_fabric_runtime::graph::AccessMode,
         _: Option<&str>,
-        _: provenant_fabric_runtime::graph::Replay<'_>,
+        replay: provenant_fabric_runtime::graph::Replay<'_>,
     ) -> Result<provenant_fabric_runtime::graph::AttemptObservation, Self::Error> {
         use provenant_fabric_runtime::graph::{AccessMode, AttemptObservation, AttemptOutcome};
         self.launched.push(key.node_id.clone());
@@ -571,6 +575,19 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
             .leak()
                 .as_bytes()
         });
+        let commit = if access == AccessMode::WorktreeWrite {
+            Some(format!("{:040x}", self.launched.len()))
+        } else {
+            node.source_commit.map(str::to_owned)
+        };
+        if access == AccessMode::WorktreeWrite
+            && matches!(
+                replay.delivery,
+                Some(provenant_records::run::DeliveryMode::Integrate(_))
+            )
+        {
+            self.integration = commit.clone();
+        }
         Ok(AttemptObservation::Terminal {
             attempt_ref: Some(format!("fixture/{}", key.node_id)),
             outcome: AttemptOutcome::Succeeded,
@@ -579,11 +596,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
             result_warning: None,
             result_path: None,
             branch: (access == AccessMode::WorktreeWrite).then(|| format!("lane/{}", key.node_id)),
-            commit: if access == AccessMode::WorktreeWrite {
-                Some(format!("{:040x}", self.launched.len()))
-            } else {
-                node.source_commit.map(str::to_owned)
-            },
+            commit,
         })
     }
 }
@@ -657,8 +670,9 @@ fn bundled_presets_complete_through_the_real_scheduler_and_replay() {
                 .all(|node| node.attempts.is_empty())
         );
         if name == "big-batch" {
-            // One resolution, then the moved-head check before synthesis and the refactor writer.
-            assert_eq!(owner.integration_pins, 3);
+            // One resolution, then the moved-head check before synthesis and the
+            // refactor writer, and the delivered-head check before the repairer.
+            assert_eq!(owner.integration_pins, 4);
             let fix = run
                 .checkpoint
                 .nodes
@@ -946,6 +960,24 @@ fn graph_publication_is_private_and_idempotent() -> Result<(), Box<dyn std::erro
     std::fs::write(&first, serde_json::to_vec(&graph)?)?;
     std::fs::set_permissions(&first, std::fs::Permissions::from_mode(0o644))?;
     assert!(super::fabric::publish_preset_graph(temp.path(), &graph).is_err());
+    Ok(())
+}
+
+#[test]
+fn graph_publication_repairs_owned_loose_directory() -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir()?;
+    let graphs = temp.path().join("graphs");
+    std::fs::create_dir(&graphs)?;
+    std::fs::set_permissions(&graphs, std::fs::Permissions::from_mode(0o755))?;
+    let graph = expand(&Layers::empty(), "single", "brief", &[])?.document;
+    let published = super::fabric::publish_preset_graph(temp.path(), &graph)?;
+    assert_eq!(
+        std::fs::metadata(&graphs)?.permissions().mode() & 0o777,
+        0o700
+    );
+    assert!(published.starts_with(&graphs));
+    assert_eq!(std::fs::read(&published)?, serde_json::to_vec(&graph)?);
     Ok(())
 }
 

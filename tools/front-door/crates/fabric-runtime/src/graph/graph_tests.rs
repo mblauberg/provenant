@@ -37,6 +37,7 @@ impl GraphJournal for MemoryJournal {
 struct FakeOwner {
     deliveries: usize,
     delivery_modes: Vec<Option<provenant_records::run::DeliveryMode>>,
+    fast_forward_only: Vec<bool>,
     observations: VecDeque<AttemptObservation>,
     calls: Vec<(AttemptKey, GraphRoute)>,
     titles: Vec<String>,
@@ -155,6 +156,7 @@ impl AttemptOwner for FakeOwner {
         self.titles.push(node.title.to_owned());
         self.prompts.push(node.prompt.to_owned());
         self.delivery_modes.push(replay.delivery.cloned());
+        self.fast_forward_only.push(replay.fast_forward_only);
         self.stored_refs.push(replay.stored_ref.map(str::to_owned));
         self.launch_actors.push(replay.launch_actor.to_owned());
         self.calls.push((key.clone(), route.clone()));
@@ -2766,6 +2768,34 @@ fn writer_limit_after_launch_never_tries_a_second_route() {
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
 }
 
+#[test]
+fn usage_limit_failure_reports_cause_instead_of_missing_findings() {
+    let document = graph(vec![node("task", route("senior"))]);
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([terminal_with_result(AttemptOutcome::UsageLimited, "")]),
+        ..FakeOwner::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let node = &run.checkpoint.nodes[0];
+    assert_eq!(node.state, NodeState::Failed);
+    assert_eq!(node.advance_error_code.as_deref(), Some("usage_limited"));
+    assert!(
+        node.advance_error
+            .as_deref()
+            .unwrap()
+            .contains("quota or rate limit")
+    );
+    assert!(
+        !node
+            .outputs
+            .as_ref()
+            .unwrap()
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("findings block missing"))
+    );
+}
+
 fn check_fallback(access: AccessMode, launched: bool, outcome: AttemptOutcome, expected: bool) {
     let mut task = node("node", route("first"));
     task.access = access;
@@ -3997,6 +4027,41 @@ fn an_unobserved_writer_disk_check_is_a_retryable_launch_error() {
             .contains("disk observation failed")
     );
     assert_eq!(retry.wake_at, Some(at(5)));
+}
+
+#[test]
+fn a_host_git_limit_reason_reaches_the_graph_retry_and_the_blocked_node() {
+    let reason = "host writer delivery failed at Prepare (worktree): git worktree list output exceeded the 8388608-byte host limit";
+    let error = || crate::coordination::facade::FacadeError::HostDeliveryIo {
+        reason: reason.into(),
+    };
+    let document = graph(vec![node("one", route("first"))]);
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: [(1, error())].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    advance(&document, &mut owner, &mut journal).unwrap();
+    let retry = retry_of(journal.0.as_ref().unwrap());
+    assert_eq!(retry.failures, 1);
+    assert_eq!(retry.reason.as_deref(), Some(reason));
+
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: (1..=4).map(|call| (call, error())).collect(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    advance(&document, &mut owner, &mut journal).unwrap();
+    for now in [6, 17, 38] {
+        owner.now = Some(at(now));
+        advance(&document, &mut owner, &mut journal).unwrap();
+    }
+    let progress = &journal.0.as_ref().unwrap().nodes[0];
+    assert_eq!(progress.state, NodeState::Blocked);
+    let text = progress.advance_error.as_deref().unwrap();
+    assert!(text.contains(reason), "{text}");
 }
 
 #[test]

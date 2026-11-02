@@ -648,6 +648,7 @@ mod peer_tests {
                 graph::Replay {
                     delivery: None,
                     branch: None,
+                    fast_forward_only: false,
                     stored_ref: None,
                     launch_actor: &actor,
                 },
@@ -1466,6 +1467,158 @@ mod peer_tests {
             matches!(result, Err(FacadeError::ConfinementRefused)),
             "{result:?}"
         );
+        Ok(())
+    }
+
+    fn integrate_graph(
+        fixture: &SettlementFixture,
+        id: &str,
+        target: &str,
+    ) -> Result<
+        (
+            Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
+            bool,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        use provenant_fabric_runtime::graph::FileJournal;
+        let cancel = CancelToken::new();
+        let factory = Factory {
+            context: Context::open(
+                fixture.roots.clone(),
+                &fixture.rig.home,
+                &fixture.rig.project,
+            )?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: fixture.rig.home.clone(),
+            cwd: fixture.rig.project.clone(),
+            assets: fixture.rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &FreeWorkers,
+        };
+        let document = fixture.rig.project.join(format!("{id}-graph.json"));
+        let route = serde_json::json!({"adapter":"fixture","model":"fixture/model"});
+        std::fs::write(
+            &document,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version":1, "graph_id":id,
+                "nodes":[
+                    {"id":"one","prompt":"reply OK","access":"worktree_write",
+                        "worktree":fixture.worktree,"delivery":format!("integrate:{target}"),
+                        "route":route},
+                    // An unrelated writer on the same worktree that never integrates.
+                    {"id":"two","prompt":"reply OK","access":"worktree_write",
+                        "worktree":fixture.worktree,"after":["one"],
+                        "route":route}
+                ]
+            }))?,
+        )?;
+        let result = factory.graph(
+            GraphInput::Run {
+                extra: Default::default(),
+                document,
+            },
+            WaitBudget::cli(factory.clock.mono_now(), 30)?,
+            &cancel,
+        );
+        let admitted = FileJournal::read_checkpoint(
+            &fixture.roots.state,
+            fixture.settled.project_id,
+            id,
+        )?
+        .is_some();
+        Ok((result, admitted))
+    }
+
+    #[test]
+    fn graph_submission_refuses_a_worktree_on_its_integration_branch_before_admission()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test(
+            "fabric::peer_tests::graph_submission_refuses_a_worktree_on_its_integration_branch_before_admission",
+        )? {
+            return Ok(());
+        }
+        let fixture = SettlementFixture::resumed()?;
+        let (result, admitted) = integrate_graph(&fixture, "integrate-own-branch", "resumed-lane")?;
+        assert!(!admitted, "graph was admitted: {result:?}");
+        let Err(FacadeError::DispatchRefused { reason }) = result else {
+            return Err(format!("expected a dispatch refusal: {result:?}").into());
+        };
+        assert!(
+            reason.contains("is on the integration branch resumed-lane")
+                && reason.contains("git worktree add -b batch/work PATH BASE"),
+            "{reason}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn graph_submission_admits_a_worktree_on_a_separate_branch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::graph_submission_admits_a_worktree_on_a_separate_branch")?
+        {
+            return Ok(());
+        }
+        let fixture = SettlementFixture::resumed()?;
+        let (result, admitted) = integrate_graph(&fixture, "integrate-separate", "batch/graph")?;
+        assert!(admitted, "graph was refused: {result:?}");
+        assert!(result.is_ok(), "{result:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn bare_graph_miss_names_the_scratch_root_and_searches_no_legacy_root()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test(
+            "fabric::peer_tests::bare_graph_miss_names_the_scratch_root_and_searches_no_legacy_root",
+        )? {
+            return Ok(());
+        }
+        let fixture = SettlementFixture::resumed()?;
+        // A readable document under the legacy root must not be found by a bare name.
+        let legacy = fixture.rig.project.join(".agent-run/graphs");
+        std::fs::create_dir_all(&legacy)?;
+        std::fs::write(legacy.join("legacy-plan.json"), b"not a graph")?;
+        let factory = Factory {
+            context: Context::open(
+                fixture.roots.clone(),
+                &fixture.rig.home,
+                &fixture.rig.project,
+            )?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: fixture.rig.home.clone(),
+            cwd: fixture.rig.project.clone(),
+            assets: fixture.rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &FreeWorkers,
+        };
+        let result = factory.graph(
+            GraphInput::Run {
+                extra: Default::default(),
+                document: "legacy-plan.json".into(),
+            },
+            WaitBudget::cli(factory.clock.mono_now(), 30)?,
+            &CancelToken::new(),
+        );
+        match result {
+            Err(FacadeError::Io { operation, .. }) => {
+                assert!(
+                    operation.starts_with("read project-local graph document")
+                        && operation.contains(".provenant/scratch/graphs")
+                        && operation.contains("explicit path"),
+                    "{operation}"
+                );
+            }
+            other => panic!("bare-name miss must not read a legacy document: {other:?}"),
+        }
         Ok(())
     }
 

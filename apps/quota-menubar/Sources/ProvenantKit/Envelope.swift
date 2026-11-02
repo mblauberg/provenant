@@ -67,13 +67,17 @@ public final class CLIClient: @unchecked Sendable {
 
     /// Runs `arguments` plus `--json` and decodes the envelope, which must name `command` (such as "console board")
     /// at envelope version 1. Error envelopes throw `ClientError.command`, whether or not the CLI exited cleanly.
-    public func call<Payload: Decodable & Sendable>(_ arguments: [String], command: String,
+    /// `limit` overrides the client's time limit for this call, for a call that legitimately waits on peers.
+    public func call<Payload: Decodable & Sendable>(_ arguments: [String], command: String, limit: Double? = nil,
                                                     as _: Payload.Type = Payload.self) async throws -> Payload {
-        try await Task.detached(priority: .userInitiated) { [self] in try callSync(arguments, command: command, as: Payload.self) }.value
+        try await Task.detached(priority: .userInitiated) { [self] in
+            try callSync(arguments, command: command, limit: limit, as: Payload.self)
+        }.value
     }
 
-    func callSync<Payload: Decodable & Sendable>(_ arguments: [String], command: String, as _: Payload.Type) throws -> Payload {
-        let run = try execute(arguments + ["--json"])
+    func callSync<Payload: Decodable & Sendable>(_ arguments: [String], command: String, limit: Double? = nil,
+                                                 as _: Payload.Type) throws -> Payload {
+        let run = try execute(arguments + ["--json"], limit: limit ?? self.limit)
         return try Self.decode(run, command: command, as: Payload.self)
     }
 
@@ -84,6 +88,12 @@ public final class CLIClient: @unchecked Sendable {
         if run.signalled { throw ClientError.signalled(run.status) }
         if let command, let header = try? JSONDecoder().decode(Header.self, from: run.out),
            header.schemaVersion != 1 || header.command != command {
+            // The CLI answers an argument it cannot parse with a `parse` error envelope, such as an old CLI that
+            // does not know a flag. Surface it as the command error it is.
+            if header.schemaVersion == 1, header.command == "parse",
+               let error = (try? Envelope<Payload>.decode(run.out))?.error {
+                throw ClientError.command(error)
+            }
             throw ClientError.malformed("unexpected command envelope")
         }
         let envelope: Envelope<Payload>
@@ -112,7 +122,7 @@ public final class CLIClient: @unchecked Sendable {
         enum CodingKeys: String, CodingKey { case schemaVersion = "schema_version", command }
     }
 
-    private func execute(_ arguments: [String]) throws -> CLI.Output {
+    private func execute(_ arguments: [String], limit: Double) throws -> CLI.Output {
         if let runner { return try runner(arguments, limit) }
         let known = lock.withLock { launcher }
         guard let found = known ?? CLI.resolve() else { throw ClientError.notFound }
@@ -140,17 +150,20 @@ public struct Page<Item: Sendable>: Sendable {
     public var items: [Item]
     public var nextCursor: String?
     public var truncated: Bool
+    /// What each peer host contributed, when the listing asked for peers. Only the first page carries it.
+    public var peers: [PeerCoverage]? = nil
 }
 
 /// Reads pages until the cursor runs out or `maxPages` is reached. `truncated` is set when pages remain.
 public func collectPages<Item: Sendable>(maxPages: Int = 10, _ fetch: (String?) async throws -> Page<Item>) async throws -> Page<Item> {
-    var all: [Item] = [], cursor: String?, more = false
+    var all: [Item] = [], cursor: String?, more = false, peers: [PeerCoverage]?
     for _ in 0..<maxPages {
         let page = try await fetch(cursor)
+        peers = peers ?? page.peers
         all += page.items
         cursor = page.nextCursor
         more = page.truncated || cursor != nil
         if cursor == nil { break }
     }
-    return Page(items: all, nextCursor: cursor, truncated: more)
+    return Page(items: all, nextCursor: cursor, truncated: more, peers: peers)
 }

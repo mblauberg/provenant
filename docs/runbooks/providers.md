@@ -166,6 +166,76 @@ Read-only lanes gain no workspace or shared-cache writes. Credential and
 keychain restrictions, including the existing networked read-only `gh` policy,
 still apply.
 
+## Agy accounts
+
+Agy has no account switch, so a second Google account gets its own `HOME`
+holding its own login keychain. The registered `directory` is that home. A
+directory other than your own home is an isolated account: the lane's private
+home links its `Library/Keychains/login.keychain-db` instead of the user's login
+keychain, the grant covers exactly that path, and registration and the quota
+probe run `agy -p /usage` with `HOME=<directory>`. If that file is missing or is
+not a regular file (a symlink does not count, nor does a symlinked `Library`
+or `Library/Keychains` along the way, a hard-linked file, or a file that is the
+same inode as your own login keychain, which is only stat'ed), registration,
+launch and the quota probe fail with an error naming the path rather than fall
+back to the login keychain. Both probes re-check the keychain (same device and
+inode) immediately before spawning agy and again when it returns, and discard
+the result if it changed. The probe is not sandboxed, so that guarantee covers
+a keychain that is missing or changed when checked. The residual window is any
+temporary replacement, absence or symlink swap while agy runs that is undone,
+with the original inode restored, before the second check. Registering your own home directory keeps the shared
+login keychain.
+
+Unregistered and registered agy behave differently at launch:
+
+- With no agy registration, agy runs on the user's login keychain as before.
+  Routes use the synthetic `local` account: nothing is probed or pinned, so a
+  user who never registers an account sees no change.
+- With a registration, agy accounts are pinned: a launch verifies the signed-in
+  Google account against the registered key and skips the route if it differs
+  (`changed identity; re-register it`). Register every account you route to.
+
+Register the first account, the one signed in on your own login keychain,
+with the home directory itself:
+
+```text
+provenant accounts register --adapter agy --directory ~ <label>
+```
+
+Add a second account (macOS; the empty keychain password and no lock timeout
+are deliberate, so a headless lane never prompts). Every `security` command
+below names the isolated keychain file explicitly, and none changes the real
+default keychain:
+
+1. `D=~/.agy-second; mkdir -p $D/Library/Keychains; chmod 700 $D`
+2. `HOME=$D security create-keychain -p '' $D/Library/Keychains/login.keychain-db`
+3. `HOME=$D security set-keychain-settings $D/Library/Keychains/login.keychain-db`
+   (no lock timeout, no lock on sleep), then
+   `HOME=$D security unlock-keychain -p '' $D/Library/Keychains/login.keychain-db`.
+4. `HOME=$D agy`, run `/login`, finish the browser sign-in with the second
+   Google account, then exit.
+5. Check `HOME=$D agy -p /usage --output-format json` returns `SUCCESS`, and
+   `HOME=$D security find-generic-password -s gemini -a antigravity $D/Library/Keychains/login.keychain-db`
+   finds the item. The keychain path is the final argument, so the search does
+   not fall through to another keychain on the search list; omit `-w` so no
+   secret prints. Check the first account separately against the real login
+   keychain with
+   `security find-generic-password -s gemini -a antigravity ~/Library/Keychains/login.keychain-db`.
+   The real login keychain is unchanged.
+6. `provenant accounts register --adapter agy --directory $D <label>`, then
+   `provenant quota`. Registration refuses a directory that has no regular
+   `Library/Keychains/login.keychain-db` (a symlink does not count), so the
+   second account can never be recorded under the first account's key.
+
+The keychain file is plaintext-equivalent credential material: anyone who can
+read it and unlock it holds the OAuth token, as with the shared login keychain.
+Keep the account directory at mode 700 and out of backups and synced folders.
+
+The isolated keychain locks again after a reboot. Repeat
+`HOME=$D security unlock-keychain -p '' $D/Library/Keychains/login.keychain-db`
+before routing to the account, or its launches fail the identity check. If the
+sign-in is lost (revocation or Workspace re-authentication), repeat step 4.
+
 ## OpenCode
 
 ```text

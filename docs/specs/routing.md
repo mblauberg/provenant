@@ -99,6 +99,7 @@ The lane's reason names the retry and its attempt number.
   `crates/cli/src/run.rs::tests::an_alternate_account_is_spent_only_by_routing_rule_or_a_live_refusal`;
   `crates/cli/src/run.rs::tests::capacity_and_quota_settlements_retry_within_their_bounds`;
   `crates/cli/src/route.rs::tests::refused_account_falls_through_to_another_for_the_same_model`;
+  `crates/cli/src/route.rs::tests::review_substitution_skips_refused_unused_families`;
   `tests/dispatch_provider.rs::capacity_settlement_resumes_the_same_session`
 - Owner: `crates/cli/src/run.rs`
 
@@ -233,12 +234,15 @@ adapter, session, account, host, model and controls.
 memory; only a redacted summary persists, and there is no raw caller argv.
 Each adapter is subordinate to the outer profile: Codex's own sandbox is
 off; Claude gets its token on a descriptor closed before spawn, never in the
-environment; Agy's private home links only the login keychain; Cursor
+environment; Agy's private home links only one keychain, the selected account's own
+(`Library/Keychains/login.keychain-db` in its registered directory, refused when
+missing) or, for the user's own home, the login keychain; Cursor
 executes only its resolved version; OpenCode denies shell and web fetch.
 Exact argv is pinned by `tests/fixtures/providers/<adapter>/recordings.json`.
 - Why: the launch spec carries credentials and authority.
 - Test: `crates/providers/src/tests.rs::selected_accounts_control_provider_environment_and_exact_authentication_grants`;
-  `::agy_runs_in_a_private_home_that_links_only_the_login_keychain`
+  `::agy_runs_in_a_private_home_that_links_only_the_login_keychain`;
+  `::agy_isolated_account_links_its_own_keychain_and_grants_only_that_path`
 - Owner: `crates/providers/src/`
 
 ### Agy read-only commands and denials
@@ -334,11 +338,32 @@ is fresh, by rank when it is stale. Only a quota-limited outcome cools an accoun
 auth failures never switch accounts. Provider capacity errors settle as
 `model_unavailable` with the provider's reason visible in lanes and record a
 separate, advisory capacity cooldown on the host.
+
+One quota function, `Admission::account_block`, assesses persisted account
+mismatch and live provider refusals (including the free-pool refusal) with their
+expiry and clearing rules. Resolution applies it to each otherwise eligible
+account before choosing one, so a blocked account yields to another serving the
+same model; blocks surface as the reason codes `account_mismatch`,
+`free_tier_refused` and `provider_refused`. Admission reuses the same function on
+freshly reloaded records immediately before launch, so a refusal written after
+resolution still prevents it. Invalid evidence excludes only the account it
+belongs to (`invalid_account_evidence`) and fails admission; absent evidence is
+not proof of readiness. Cooldown stays a selection preference, never a block.
+Compatibility: the four reason codes are new `RouteExclusionReason` variants;
+older readers that reject unknown variants cannot read records carrying them.
 - Why: one probe outage or model limit must not take a provider offline.
 - Test: `crates/quota/src/admission.rs::unknown_and_stale_do_not_manufacture_exhaustion`;
   `::independent_pool_reset_and_refusal_scope`;
   `tests/dispatch_provider.rs::codex_capacity_settles_without_quota_refusal`;
-  `crates/routing/src/tests.rs::spent_account_is_skipped_for_an_available_one_even_when_its_reading_is_stale`
+  `crates/routing/src/tests.rs::spent_account_is_skipped_for_an_available_one_even_when_its_reading_is_stale`;
+  `crates/quota/src/admission.rs::admission_tests::account_block_types_mismatch_free_and_scoped_refusals`;
+  `crates/routing/src/tests.rs::persisted_mismatch_excludes_account_and_selects_another`;
+  `::invalid_account_evidence_excludes_only_that_account`;
+  `::free_pool_refusal_excludes_the_account_for_every_free_model`;
+  `::live_scoped_refusal_excludes_only_the_matching_account_and_model`;
+  `crates/cli/src/route.rs::tests::refused_account_falls_through_to_another_for_the_same_model`;
+  `crates/cli/src/route.rs::tests::review_substitution_skips_refused_unused_families`;
+  `crates/records/tests/forward_compatibility.rs::route_exclusion_reason_codes_round_trip`
 - Owner: `crates/quota/src/admission.rs`
 
 ### Revisioned, bounded refresh

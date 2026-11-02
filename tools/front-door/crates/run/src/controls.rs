@@ -719,8 +719,27 @@ mod lineage_tests {
         self, WorktreeCreate, WorktreeGcPolicy, WorktreeOrigin, WorktreeOwner,
     };
     use provenant_core::Clock;
-    use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
-    use std::{ffi::OsString, time::Duration};
+    use provenant_os::fixture::run_git;
+    use std::path::Path;
+
+    /// Initialise `project` with one empty commit, through the scrubbed fixture Git.
+    fn init_base_repository(project: &Path) -> std::io::Result<()> {
+        run_git(project, &["init", "-q"])?;
+        run_git(
+            project,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "Base",
+            ],
+        )?;
+        Ok(())
+    }
 
     #[test]
     fn resume_preserves_explicit_unowned_and_adopted_worktrees()
@@ -738,30 +757,7 @@ mod lineage_tests {
             roots.state.as_path(),
             std::fs::Permissions::from_mode(0o700),
         )?;
-        let git = provenant_os::git::git_executable().ok_or("git")?;
-        for args in [
-            vec!["init", "-q"],
-            vec![
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.invalid",
-                "commit",
-                "--allow-empty",
-                "-qm",
-                "Base",
-            ],
-        ] {
-            let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
-                .chain(args.into_iter().map(OsString::from))
-                .collect();
-            let outcome = SystemExecutor::new(1)?.execute(ExecOptions::new(
-                &argv,
-                &project,
-                Duration::from_secs(5),
-            ))?;
-            assert_eq!(outcome.termination, Termination::Exit(0));
-        }
+        init_base_repository(&project)?;
         let clock = provenant_os::clock::SystemClock;
         let cancel = provenant_core::CancelToken::new();
         for (index, origin) in [None, Some(WorktreeOrigin::Adopted)]
@@ -900,30 +896,7 @@ mod lineage_tests {
             roots.state.as_path(),
             std::fs::Permissions::from_mode(0o700),
         )?;
-        let git = provenant_os::git::git_executable().ok_or("git")?;
-        for args in [
-            vec!["init", "-q"],
-            vec![
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.invalid",
-                "commit",
-                "--allow-empty",
-                "-qm",
-                "Base",
-            ],
-        ] {
-            let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
-                .chain(args.into_iter().map(OsString::from))
-                .collect();
-            let outcome = SystemExecutor::new(1)?.execute(ExecOptions::new(
-                &argv,
-                &project,
-                Duration::from_secs(5),
-            ))?;
-            assert_eq!(outcome.termination, Termination::Exit(0));
-        }
+        init_base_repository(&project)?;
         let clock = provenant_os::clock::SystemClock;
         let cancel = provenant_core::CancelToken::new();
         let mut original = crate::tests::input();
@@ -933,6 +906,7 @@ mod lineage_tests {
             remote: "origin".into(),
             branch: "old-lane".into(),
             open_pr: true,
+            fast_forward_only: false,
         });
         let prior = original.attempts[0].attempt_id;
         let (project_id, info) =

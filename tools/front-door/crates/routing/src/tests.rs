@@ -257,6 +257,8 @@ fn context<'a>(
         availability: &[],
         quota: &[],
         capacity_cooldowns: &[],
+        accounts: &[],
+        quota_policies: &[],
         access: &[],
         now,
         host: "test-host",
@@ -4199,5 +4201,217 @@ fn read_only_policy_model_stays_in_junior_and_senior_pools_for_read_only_work()
         resolve(&query, &context),
         Err(RoutingError::ReadOnlyPolicy)
     ));
+    Ok(())
+}
+
+fn account_scope(key: &str) -> provenant_quota::AccountScope {
+    provenant_quota::AccountScope {
+        adapter: "codex".into(),
+        account_key: key.into(),
+        label: "test".into(),
+    }
+}
+fn two_accounts() -> [AvailabilityRecord; 2] {
+    let mut other = availability();
+    other.account_key = Some("other-account".into());
+    [availability(), other]
+}
+const ACCESS: [AccessContext<'static>; 1] = [AccessContext {
+    adapter: "codex",
+    disclosure_ref: "policy",
+    confinement_ref: "grant",
+}];
+
+#[test]
+fn persisted_mismatch_excludes_account_and_selects_another()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let availability = two_accounts();
+    let mut bad = provenant_quota::AccountRecord::empty(account_scope("opaque-account"));
+    bad.last_error = Some(provenant_quota::ProbeFailure::AccountMismatch);
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &availability;
+    ctx.access = &ACCESS;
+    let records = [bad.clone()];
+    ctx.accounts = &records;
+    let route = resolve(&request("codex/test")?, &ctx)?;
+    assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+    assert_eq!(route.account_key.as_deref(), Some("other-account"));
+    // Every serving account mismatched: the typed reason is reported.
+    let mut other = provenant_quota::AccountRecord::empty(account_scope("other-account"));
+    other.last_error = Some(provenant_quota::ProbeFailure::AccountMismatch);
+    let both = [bad, other];
+    ctx.accounts = &both;
+    let route = resolve(&request("codex/test")?, &ctx)?;
+    assert!(matches!(
+        route.readiness,
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::AccountMismatch,
+            ..
+        }
+    ));
+    Ok(())
+}
+
+#[test]
+fn invalid_account_evidence_excludes_only_that_account() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let availability = two_accounts();
+    let mut broken = provenant_quota::AccountRecord::empty(account_scope("opaque-account"));
+    broken.refusals.push(provenant_quota::Refusal {
+        extra: Default::default(),
+        account: account_scope("opaque-account"),
+        model: "test".into(),
+        pool: None,
+        observed_unix_seconds: i64::MAX,
+        resets_unix_seconds: None,
+    });
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &availability;
+    ctx.access = &ACCESS;
+    let records = [broken];
+    ctx.accounts = &records;
+    let route = resolve(&request("codex/test")?, &ctx)?;
+    assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+    assert_eq!(route.account_key.as_deref(), Some("other-account"));
+    // Alone, the broken account is unavailable for a reason that names the evidence.
+    let single = [availability[0].clone()];
+    ctx.availability = &single;
+    let route = resolve(&request("codex/test")?, &ctx)?;
+    assert!(matches!(
+        route.readiness,
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::InvalidAccountEvidence,
+            ..
+        }
+    ));
+    Ok(())
+}
+
+#[test]
+fn account_evidence_reasons_carry_their_repair_text() {
+    for (reason, text) in [
+        (RouteExclusionReason::AccountMismatch, "re-register"),
+        (RouteExclusionReason::FreeTierRefused, "paid route"),
+        (
+            RouteExclusionReason::ProviderRefused,
+            "scoped provider refusal",
+        ),
+        (RouteExclusionReason::InvalidAccountEvidence, "invalid"),
+    ] {
+        assert!(exclusion_detail(&reason).contains(text), "{reason:?}");
+    }
+    assert_eq!(
+        exclusion_detail(&RouteExclusionReason::Exhausted),
+        "Exhausted"
+    );
+}
+
+#[test]
+fn free_pool_refusal_excludes_the_account_for_every_free_model()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let free = "opencode/opencode/deepseek-v4.1-flash-free";
+    let mut record = availability();
+    record.adapter = "opencode".into();
+    record.account_key = Some("zen".into());
+    let records = [record];
+    let access = [AccessContext {
+        adapter: "opencode",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    let scope = provenant_quota::AccountScope {
+        adapter: "opencode".into(),
+        account_key: "zen".into(),
+        label: "test".into(),
+    };
+    // The refusal names a different free model: the keyless pool spans models.
+    let refused = [provenant_quota::record_refusal(
+        None,
+        &scope,
+        "opencode/opencode/other-free",
+        Some("opencode-free"),
+        90,
+        Some(200),
+    )?
+    .replacement
+    .ok_or("record")?];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    assert!(matches!(
+        resolve(&request(free)?, &ctx)?.readiness,
+        RouteReadiness::Ready { .. }
+    ));
+    ctx.accounts = &refused;
+    assert!(matches!(
+        resolve(&request(free)?, &ctx)?.readiness,
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::FreeTierRefused,
+            ..
+        }
+    ));
+    Ok(())
+}
+
+#[test]
+fn live_scoped_refusal_excludes_only_the_matching_account_and_model()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let availability = two_accounts();
+    let refused = |account: &str, model: &str| -> Result<_, Box<dyn std::error::Error>> {
+        let scope = account_scope(account);
+        Ok(provenant_quota::record_refusal(
+            None,
+            &scope,
+            &format!("codex/{model}"),
+            None,
+            90,
+            Some(200),
+        )?
+        .replacement
+        .ok_or("record")?)
+    };
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &availability;
+    ctx.access = &ACCESS;
+    let records = [refused("opaque-account", "test")?];
+    ctx.accounts = &records;
+    let route = resolve(&request("codex/test")?, &ctx)?;
+    assert_eq!(route.account_key.as_deref(), Some("other-account"));
+    assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+    // The same account still serves an unrelated model.
+    let route = resolve(&request("codex/other")?, &ctx)?;
+    assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+    // With no other account, the refusal is the typed reason.
+    let single = [availability[0].clone()];
+    ctx.availability = &single;
+    let route = resolve(&request("codex/test")?, &ctx)?;
+    assert!(matches!(
+        route.readiness,
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::ProviderRefused,
+            ..
+        }
+    ));
+    // A refusal that has lapsed no longer blocks.
+    let lapsed = [provenant_quota::record_refusal(
+        None,
+        &account_scope("opaque-account"),
+        "codex/test",
+        None,
+        90,
+        Some(95),
+    )?
+    .replacement
+    .ok_or("record")?];
+    ctx.accounts = &lapsed;
+    let route = resolve(&request("codex/test")?, &ctx)?;
+    assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
     Ok(())
 }

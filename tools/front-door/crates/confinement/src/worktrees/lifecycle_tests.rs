@@ -369,6 +369,60 @@ fn source_fast_forward_advances_clean_tree_and_preserves_ignored_output()
 }
 
 #[test]
+fn batch_worktree_on_a_private_branch_follows_an_integration_ref_by_fast_forward()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let start = fixture.head()?;
+    fixture.run(&["branch", "batch/graph"])?;
+    let batch = create(
+        &context,
+        WorktreeCreate {
+            branch: "batch/work".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let lane = create(
+        &context,
+        WorktreeCreate {
+            branch: "lane".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    run_in_worktree(
+        &fixture,
+        &lane.path,
+        &["commit", "--allow-empty", "-m", "lane work"],
+    )?;
+    let entry = |path: &Path| {
+        list(&context, &cancel())?
+            .into_iter()
+            .find(|entry| entry.path == path)
+            .ok_or_else(|| Box::<dyn Error>::from("missing worktree"))
+    };
+    let lane_head = entry(&lane.path)?.head;
+    // Delivery advances the integration ref without touching any checkout.
+    fixture.run(&[
+        "update-ref",
+        "refs/heads/batch/graph",
+        &lane_head.to_string(),
+        &start.to_string(),
+    ])?;
+    let before = entry(&batch.path)?;
+    assert_eq!(before.head, start);
+    assert_eq!(before.dirty, WorktreeCondition::Clean);
+    fast_forward(&context, &batch.path, lane_head, &cancel())?;
+    let after = entry(&batch.path)?;
+    assert_eq!(after.head, lane_head);
+    assert_eq!(after.dirty, WorktreeCondition::Clean);
+    assert_eq!(after.branch.as_deref(), Some("refs/heads/batch/work"));
+    Ok(())
+}
+
+#[test]
 fn fallback_writer_after_a_partial_commit_continues_past_the_pin() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;

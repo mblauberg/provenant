@@ -43,6 +43,7 @@ fn peer_read_only(action: &PeerAction) -> bool {
         PeerAction::ConsoleBoard { .. }
         | PeerAction::ConsoleTree { .. }
         | PeerAction::ConsoleDetail { .. }
+        | PeerAction::ConsoleInbox { .. }
         | PeerAction::Doctor { .. } => true,
         PeerAction::Inbox { input, .. } => !matches!(
             input,
@@ -309,6 +310,26 @@ pub fn peer(
                             },
                             extra: Default::default(),
                         },
+                    }
+                }
+            }
+            PeerAction::ConsoleInbox { state, limit, .. } => {
+                let error = |error| PeerResult::Error {
+                    data: provenant_fabric_runtime::hosts::PeerResultError {
+                        extra: Default::default(),
+                        error,
+                    },
+                    extra: Default::default(),
+                };
+                if *limit > context.config.limits.page_rows {
+                    error(FacadeError::InvalidInput)
+                } else {
+                    match provenant_cli::inbox::console_inbox_page(&context.roots, *state, *limit) {
+                        Ok(data) => PeerResult::Console {
+                            data,
+                            extra: Default::default(),
+                        },
+                        Err(_) => error(FacadeError::StateCorrupt),
                     }
                 }
             }

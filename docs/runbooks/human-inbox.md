@@ -57,6 +57,59 @@ by request ID. Without it, these commands use the current project; if no project
 resolves, `no_project` reports the cause and names `--all-projects` as a repair.
 Close and acknowledgement must run on the owner host or in the owning chair
 session; remote attempts return `owner_local_only`.
+
+`provenant inbox --all-projects --hosts all|LABEL,… --json` also reads each
+chosen peer's first page of requests (`local` is skipped; an unknown label is
+refused as in `console board --hosts`, on a cursor page too). Peer rows are
+appended after the local rows, each with its `owner_host`; the local
+`next_cursor` and the string `coverage` are unchanged (the string does not
+describe peers; read `data.peers`), and `data.projects` gains
+`"<host>:<project_id>"` entries with `label` (display text, at most 128
+characters, or null) and `host`. Without `--hosts` the output is unchanged.
+`--hosts` needs `--all-projects` and a listing of this host. It is refused with
+a remote `--host`, and with `--session`, because a peer page is not
+session-filtered. With `--cursor` the peer read is skipped: `peers` is absent
+and the Console keeps the first page's peer data.
+
+`data.peers` has one entry per peer: `{host, label, state, included,
+invalid_rows, duplicate_rows, truncated, reason?}`. `state` is:
+
+- `complete`: the whole first page was read and every row was valid.
+- `partial`: the page was truncated, or rows were duplicate, invalid, or named
+  another host or no `project_key`; or the peer answered but gave no page, with
+  `reason` `project_unknown` (the peer knows none of this host's registered
+  projects), `limit_refused` (`--limit` exceeds the peer's `page_rows`; lower
+  it), `invalid_request` (the peer refused the request for another reason, so
+  lowering `--limit` will not help), `invalid_page` (an unexpected reply) or
+  `duplicate_host`. `project_unknown` is best-effort: it is recognised from the
+  first line of the peer's error output, so an unrecognised message reads as
+  `unreachable` with reason `error`.
+- `unreachable`: no usable answer, with `reason` `timeout` (the shared
+  `peer_seconds` budget ran out), `error` (any other transport or peer
+  failure) or `no_project` (no registered project to ask through). Local rows
+  still show.
+- `unsupported`: the peer predates this listing, so update it.
+
+A peer that is down never fails the listing. All attempts at one peer share a
+single `peer_seconds` budget.
+
+To answer or show a peer's request under `--all-projects`, pass `--host H` (or
+a qualified ID) and `--project-key KEY`, the listed request's `project_key`. The
+CLI routes through the local project with that key, so the answer reaches the
+owner through the normal remote path with a frozen operation ID, and an unknown
+key returns `no_project`. A key that matches more than one registered project is
+refused, and `--host` must name the same host as a qualified ID. Close stays
+`owner_local_only`.
+
+The Console shows peer requests labelled by host and groups projects by host
+and project ID. It asks for peers on the first page only. A peer that gave no
+page (`unreachable`, or `partial` with a `reason` and no rows) keeps its last
+rows, marked "stale since" the last good read, and answering stays allowed; an
+`owner_unavailable` failure is shown if the owner cannot be reached. A `partial`
+peer without a `reason` shows the rows it gave, with a note that some are
+missing. The Console drops a peer's kept rows when the peer is `complete` or
+`unsupported` (a line says to update it), or no longer listed. Each non-complete
+peer gets one coverage line.
 The MCP `fabric_inbox` tool accepts `host` for list, answer, close and
 acknowledge; list with an ID shows one request. The same owner-local restriction
 applies to close and acknowledgement.

@@ -111,6 +111,129 @@ final class InboxModelTests: XCTestCase {
         XCTAssertEqual(model.selection, model.visibleRequests.first?.id)
     }
 
+    private static let peer = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+
+    private func peerModel(_ first: String = "inbox-peers-complete") async -> (InboxModel, Replay, [Date]) {
+        let replay = Replay([(["inbox"], first, 0)])
+        let clock = Clock()
+        let model = InboxModel(client: replay.inbox, now: { clock.tick() })
+        await model.refresh()
+        return (model, replay, clock.times)
+    }
+
+    func testProjectsWithTheSameIDOnDifferentHostsGroupSeparately() async {
+        let (model, _, _) = await peerModel()
+        XCTAssertEqual(model.requests.count, 3)
+        XCTAssertEqual(model.projectGroups.map(\.name), ["alpha", "alpha on studio"])
+        XCTAssertEqual(model.projectGroups.map(\.count), [1, 2])
+        XCTAssertEqual(Set(model.projectGroups.map(\.id)).count, 2)
+        let studio = model.projectGroups.first { $0.name == "alpha on studio" }
+        model.show(.project(studio?.id ?? ""))
+        XCTAssertEqual(model.visibleRequests.map(\.request.title), ["Peer decision", "Peer question"])
+        XCTAssertEqual(model.visibleRequests.first?.projectPrefix, "alpha on studio · ")
+        model.searchText = "studio"
+        XCTAssertEqual(model.visibleRequests.count, 2)
+        // Complete peers add no coverage line; an unsupported one says to update it.
+        XCTAssertEqual(model.peerNotes.map(\.id), ["f".repeated(32)])
+        XCTAssertEqual(model.peerNotes.first?.text, "Update laptop: it is too old to list requests here.")
+    }
+
+    func testAnUnreachablePeerKeepsItsLastRowsStaleAndAnswersStillGoToTheOwner() async throws {
+        let (model, replay, _) = await peerModel()
+        let before = model.requests.filter { $0.peerHost != nil }
+        XCTAssertEqual(before.count, 2)
+        XCTAssertTrue(model.staleSince.isEmpty)
+
+        replay.set([(["inbox"], "inbox-peers-unreachable", 0)])
+        await model.refresh()
+        XCTAssertEqual(model.requests.map(\.id.first), ["1", "5", "6"])
+        XCTAssertNotNil(model.staleSince(for: before[0]))
+        XCTAssertNil(model.staleSince(for: model.requests[0]))
+        let note = try XCTUnwrap(model.peerNotes.first { $0.id == Self.peer })
+        XCTAssertTrue(note.text.hasPrefix("studio is unreachable (timed out). Showing 2 from its last read, stale since"), note.text)
+        // The peer is still unreachable on the next refresh: the same rows stay, with the same read time.
+        let since = model.staleSince[Self.peer]
+        await model.refresh()
+        XCTAssertEqual(model.requests.count, 3)
+        XCTAssertEqual(model.staleSince[Self.peer], since)
+
+        replay.set([(["answer"], "answer-owner-unavailable", 1), (["inbox"], "inbox-peers-unreachable", 0)])
+        await model.answer(before[0], action: .reply, text: "go")
+        let call = try XCTUnwrap(replay.recorded.first { $0.first == "answer" })
+        XCTAssertTrue(call.starts(with: ["answer", "--all-projects", before[0].id, "--host", Self.peer, "--project-key", "peer/key"]), "\(call)")
+        let result = try XCTUnwrap(model.results[before[0].id])
+        XCTAssertEqual(result.kind, .failed)
+        XCTAssertTrue(result.message.contains("not reachable"), result.message)
+        XCTAssertEqual(model.requests.count, 3)
+    }
+
+    func testACompleteOrUnsupportedPeerDropsItsKeptRows() async {
+        let (model, replay, _) = await peerModel()
+        replay.set([(["inbox"], "inbox-peers-unreachable", 0)])
+        await model.refresh()
+        XCTAssertEqual(model.requests.count, 3)
+
+        replay.set([(["inbox"], "inbox-peers-complete", 0)])
+        await model.refresh()
+        XCTAssertEqual(model.requests.count, 3)
+        XCTAssertTrue(model.staleSince.isEmpty)
+
+        replay.set([(["inbox"], "inbox-peers-unreachable", 0)])
+        await model.refresh()
+        XCTAssertFalse(model.staleSince.isEmpty)
+        replay.set([(["inbox"], "inbox-peers-unsupported", 0)])
+        await model.refresh()
+        XCTAssertEqual(model.requests.map(\.id.first), ["1"])
+        XCTAssertTrue(model.staleSince.isEmpty)
+        XCTAssertEqual(model.peerNotes.first?.text, "Update studio: it is too old to list requests here.")
+
+        // A peer that vanished from the configuration is dropped too.
+        replay.set([(["inbox"], "inbox-peers-complete", 0)])
+        await model.refresh()
+        replay.set([(["inbox"], "inbox-peers-dropped", 0)])
+        await model.refresh()
+        XCTAssertEqual(model.requests.map(\.id.first), ["1"])
+        XCTAssertTrue(model.peerNotes.isEmpty)
+    }
+
+    func testPartialWithoutAReasonShowsItsRowsAndPartialWithAReasonKeepsTheLastOnes() async throws {
+        let (model, replay, _) = await peerModel()
+        XCTAssertEqual(model.requests.count, 3)
+
+        // Gaps: the page is fresh, so it replaces the old rows, and the note says more exist.
+        replay.set([(["inbox"], "inbox-peers-gaps", 0)])
+        await model.refresh()
+        XCTAssertEqual(model.requests.map(\.id.first), ["1", "5"])
+        XCTAssertTrue(model.staleSince.isEmpty)
+        XCTAssertEqual(model.peerNotes.first?.text, "1+ requests on studio; more are not loaded; 1 row from studio could not be used.")
+
+        // No page with a reason: treated as unreachable, so the last good rows stay, stale.
+        replay.set([(["inbox"], "inbox-peers-nopage", 0)])
+        await model.refresh()
+        XCTAssertEqual(model.requests.map(\.id.first), ["1", "5"])
+        XCTAssertNotNil(model.staleSince[Self.peer])
+        let note = try XCTUnwrap(model.peerNotes.first?.text)
+        XCTAssertTrue(note.hasPrefix("studio gave no requests: it knows none of this Mac’s projects. Showing 1 from its last read"), note)
+
+        // Without prior rows there is nothing to keep.
+        let (fresh, _, _) = await peerModel("inbox-peers-nopage")
+        XCTAssertEqual(fresh.requests.count, 1)
+        XCTAssertTrue(fresh.staleSince.isEmpty)
+        XCTAssertTrue(fresh.peerNotes.first?.text.hasSuffix("Its requests are not shown.") == true)
+    }
+
+    func testAnUnknownPeerStateWithRowsShowsThemWithANote() async {
+        let (model, _, _) = await peerModel("inbox-peers-future")
+        XCTAssertEqual(model.requests.count, 2)
+        XCTAssertEqual(model.peerNotes.first?.text, "studio: coverage is degraded.")
+    }
+
+    func testAnOldCLIListingHasNoPeerNotes() async {
+        let model = await InboxModel.consoleFixture()
+        XCTAssertTrue(model.peerNotes.isEmpty)
+        XCTAssertTrue(model.staleSince.isEmpty)
+    }
+
     func testSearchNarrowsTheCurrentScopeWithoutChangingTheCounts() async {
         let model = await InboxModel.consoleFixture()
         let counts = InboxFilter.allCases.map { model.count(for: $0) }
@@ -258,4 +381,21 @@ final class InboxSelectionTests: XCTestCase {
         XCTAssertEqual(RequestKind("review"), .other("review"))
         XCTAssertEqual(RequestKind("review").title, "Review")
     }
+}
+
+private final class Clock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var next = Date(timeIntervalSince1970: 1_800_000_000)
+    private(set) var times: [Date] = []
+    func tick() -> Date {
+        lock.withLock {
+            next = next.addingTimeInterval(600)
+            times.append(next)
+            return next
+        }
+    }
+}
+
+private extension String {
+    func repeated(_ count: Int) -> String { String(repeating: self, count: count) }
 }

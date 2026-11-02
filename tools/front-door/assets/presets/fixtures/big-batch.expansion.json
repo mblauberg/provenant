@@ -3,7 +3,7 @@
     "pattern": "big-batch",
     "preset": "big-batch"
   },
-  "graph_id": "preset-ee4e704b605deff16ead1298b315197b",
+  "graph_id": "preset-139ae32ef4e11714765e8f7030aa0d8c",
   "integration_branch": "batch/graph",
   "nodes": [
     {
@@ -1017,6 +1017,7 @@
               "Run targeted checks and commit"
             ],
             "access": "worktree_write",
+            "delivery": "integrate:batch/graph",
             "depends_on": [],
             "id": "fix",
             "inputs": [
@@ -1030,7 +1031,7 @@
             ],
             "prompt": "Repair accepted batch findings for: brief\nUse the serial batch worktree advanced by the principal and earlier repairs.\nInspect preceding review evidence, preserve scope, run targeted checks and\ncommit. Reviewers will pin and review this round's changed head.\n\n\nWrite scope (relative literal paths):\n- .\n\nAcceptance checks:\n- Resolve accepted findings\n- Run targeted checks and commit",
             "role": "repairer",
-            "role_digest": "sha256:3b94c78aa9d4e2ac8797cc2a33f8215933d4844975940f17a60c5ecb4043f177",
+            "role_digest": "sha256:48bd9b141b12a80448fc7f69b5d5a9a6fee0883fc16f2ea917034edbf8a23106",
             "route": {
               "alias": "senior"
             },
@@ -1762,6 +1763,7 @@
       "roles.repairer": "preset",
       "roles.repairer.acceptance_checks": "bundled",
       "roles.repairer.access": "bundled",
+      "roles.repairer.delivery": "bundled",
       "roles.repairer.inputs": "bundled",
       "roles.repairer.prompt": "bundled",
       "roles.repairer.tier": "bundled",
@@ -1964,7 +1966,7 @@
         "references": []
       },
       "repairer": {
-        "digest": "sha256:3b94c78aa9d4e2ac8797cc2a33f8215933d4844975940f17a60c5ecb4043f177",
+        "digest": "sha256:48bd9b141b12a80448fc7f69b5d5a9a6fee0883fc16f2ea917034edbf8a23106",
         "extends": [
           "repairer"
         ],

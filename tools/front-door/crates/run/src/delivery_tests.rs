@@ -1769,6 +1769,47 @@ fn local_integration_fast_forwards_merges_and_replays()
 }
 
 #[test]
+fn fast_forward_only_integration_advances_but_never_merges()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    fixture.git(&["branch", "integration"])?;
+    fixture.request =
+        HostDeliveryContext::destination(DeliveryMode::Integrate("integration".into()), "lane")?
+            .ok_or("destination")?;
+    fixture.request.fast_forward_only = true;
+    let host = fixture.prepare()?;
+    let rev = |fixture: &PrepareFixture, name: &str| {
+        host.command(
+            &fixture.writer.project,
+            "git",
+            &["rev-parse", name],
+            WriterDeliveryStage::Verify,
+        )
+    };
+    // A descendant of the target fast-forwards it.
+    fixture.commit(&fixture.writer.worktree, "round one")?;
+    let first = host.head(&fixture.writer)?;
+    host.integrate(&fixture.writer, &fixture.request, first)?;
+    assert_eq!(rev(&fixture, "integration")?, first.to_string());
+    // A head the target already contains integrates nothing and is not an error.
+    host.integrate(&fixture.writer, &fixture.request, first)?;
+    // The target moved elsewhere: the round is refused instead of merged.
+    fixture.commit(&fixture.writer.project, "someone else")?;
+    fixture.git(&["branch", "-f", "integration", "HEAD"])?;
+    let moved = rev(&fixture, "integration")?;
+    fixture.commit(&fixture.writer.worktree, "round two")?;
+    let second = host.head(&fixture.writer)?;
+    let refused = host
+        .integrate(&fixture.writer, &fixture.request, second)
+        .unwrap_err();
+    assert!(matches!(refused, RunError::IntegrationHeadMoved));
+    assert!(refused.to_string().contains("integration_head_moved"));
+    assert!(refused.to_string().contains("rerun"));
+    assert_eq!(rev(&fixture, "integration")?, moved);
+    Ok(())
+}
+
+#[test]
 fn local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut fixture = PrepareFixture::new()?;
@@ -1855,6 +1896,168 @@ fn concise_delivery_preserves_alias_contract_and_refuses_injection() -> Result<(
     ] {
         assert!(invalid.parse::<DeliveryMode>().is_err(), "{invalid}");
     }
+    Ok(())
+}
+
+#[test]
+fn a_late_host_limit_fails_the_receipt_at_its_stage_and_keeps_the_reason()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    struct Free;
+    impl provenant_confinement::worktrees::WorkerObserver for Free {
+        fn observe_roots(
+            &self,
+            roots: &[std::path::PathBuf],
+        ) -> std::collections::BTreeMap<
+            std::path::PathBuf,
+            provenant_confinement::worktrees::WorkerState,
+        > {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, provenant_confinement::worktrees::WorkerState::Free))
+                .collect()
+        }
+    }
+    use provenant_core::{CancelToken, Clock, RootInputs};
+    use provenant_os::clock::SystemClock;
+    let mut fixture = PrepareFixture::new()?;
+    let mut execution = tests::context(&fixture.root)?;
+    let mut inputs = RootInputs::new(fixture.root.join("home"), fixture.root.join("checkout"));
+    inputs.state_dir = Some(execution.state_root.as_path().into());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    std::fs::create_dir_all(roots.state.as_path())?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(
+        roots.state.as_path(),
+        std::fs::Permissions::from_mode(0o700),
+    )?;
+    let clock = SystemClock;
+    let cancel = CancelToken::new();
+    execution.project_id = provenant_confinement::worktrees::with_context(
+        &roots,
+        &fixture.root.join("home"),
+        &fixture.writer.project,
+        &clock,
+        &cancel,
+        |context| {
+            let context = provenant_confinement::worktrees::WorktreeContext {
+                workers: &Free,
+                ..*context
+            };
+            let owner = provenant_confinement::worktrees::WorktreeOwner {
+                attempt_id: None,
+                operation_id: None,
+                branch: "lane".into(),
+                base: String::new(),
+                host: provenant_core::HostId::from_bytes([3; 16]),
+                created_at: clock
+                    .wall_now()
+                    .map_err(|_| provenant_confinement::worktrees::WorktreeError::InvalidOutput)?,
+                origin: provenant_confinement::worktrees::WorktreeOrigin::Adopted,
+                label: None,
+            };
+            let head = provenant_confinement::run_utility(
+                context.executor,
+                provenant_confinement::GitRead::RevParseHead,
+                context.repo,
+                context.utility,
+                context.utility_budget,
+                &cancel,
+            )?;
+            let owner = provenant_confinement::worktrees::WorktreeOwner {
+                base: String::from_utf8_lossy(&head.stdout.bytes).trim().into(),
+                ..owner
+            };
+            provenant_confinement::worktrees::save_owner(
+                &provenant_confinement::repo::verify_worktree(
+                    context.repo,
+                    &fixture.writer.worktree,
+                )?,
+                &owner,
+            )?;
+            Ok(context.binding.project_id())
+        },
+    )?;
+    let call = Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let store = RunStore::open(&execution, &call)?;
+    let mut input = tests::input();
+    input.request.tasks[0].writer = Some(fixture.writer.clone());
+    input.request.tasks[0].deliver = Some(fixture.request.clone());
+    store.create(&input, &call)?;
+    let id = input.attempts[0].attempt_id;
+    let host = fixture.prepare()?;
+    let head = host.head(&fixture.writer)?;
+    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let path = provenant_records::PathWire::from_relative(&provenant_core::RelativePath::parse(
+        ".github/workflows/ci.yml",
+    )?)?;
+    artifacts::seal(
+        &attempt,
+        "writer-terminal.json",
+        &db::bytes(&writer::WriterTerminal {
+            schema_version: 1,
+            head,
+            protected_paths: vec![path.clone()],
+        })?,
+        RECORD_LIMIT,
+    )?;
+    let exit = tests::exit();
+    tests::seal_observation(&store, &input, &exit)?;
+    let lock = attempt.lock(
+        std::ffi::OsStr::new(provenant_records::AttemptFile::CustodyLock.name()),
+        provenant_os::fs::LockMode::Exclusive,
+        call.lock_budget(),
+        &cancel,
+        &clock,
+    )?;
+    drop(lock);
+    let mut publication = tests::publication();
+    publication.outcome = Outcome::ReviewRequired;
+    publication.reason = Some("protected changes require review".into());
+    store.publish_terminal(id, 1, &publication, &exit, &call)?;
+    // The first `log` marks the commit body as built; after it, `rev-parse
+    // --verify HEAD` (the push stage's head check) overruns its bound.
+    let git = fixture.root.join("late-limit-git");
+    let flag = fixture.root.join("late-limit-enabled");
+    let payload = fixture.root.join("late-limit-output");
+    std::fs::write(&payload, vec![b'a'; 16 * 1024 + 1])?;
+    let real_git = provenant_os::git::git_executable().ok_or("git executable")?;
+    fixture.executable(
+        &git,
+        &format!(
+            "#!/bin/sh\ncase \"$*\" in\n*' log '*) : > '{flag}';;\n*'rev-parse --verify HEAD'*) if [ -e '{flag}' ]; then cat '{payload}'; exit 0; fi;;\nesac\nexec '{real}' \"$@\"\n",
+            flag = flag.display(),
+            payload = payload.display(),
+            real = real_git.display()
+        ),
+    )?;
+    fixture
+        .environment
+        .push(("PROVENANT_GIT".into(), git.into_os_string()));
+    let deliver = |accept_review| {
+        store.deliver(
+            id,
+            None,
+            HostDeliveryContext::new(fixture.environment.clone()),
+            accept_review,
+            &call,
+        )
+    };
+    let receipt = deliver(true)?;
+    assert!(flag.exists(), "the commit body was never built");
+    let WriterDeliveryState::Failed { stage, extra } = &receipt.state else {
+        panic!("expected a failed delivery, got {:?}", receipt.state);
+    };
+    assert_eq!(*stage, WriterDeliveryStage::Head);
+    let reason = extra
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("reason")?;
+    assert!(reason.contains("rev-parse"), "{reason}");
+    assert!(reason.contains("16384"), "{reason}");
     Ok(())
 }
 
@@ -2237,6 +2440,7 @@ impl PrepareFixture {
                 remote: "origin".into(),
                 branch: "published/lane".into(),
                 open_pr: false,
+                fast_forward_only: false,
             },
         };
         fixture.git(&["init", "-q"])?;
@@ -2879,6 +3083,183 @@ fn prepare_failures_name_step_and_bound_git_stderr()
     Ok(())
 }
 
+/// A prepared host whose Git prints `bytes` of output for any call containing
+/// `pattern`, once prepared. Every other call goes to the real Git. Preparing
+/// lists worktrees too, so the fake stays inert until the flag file exists.
+fn oversize_host(
+    pattern: &str,
+    bytes: usize,
+) -> std::result::Result<(PrepareFixture, HostDeliveryContext), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    let git = fixture.root.join("oversize-git");
+    let payload = fixture.root.join("oversize-output");
+    let flag = fixture.root.join("oversize-enabled");
+    std::fs::write(&payload, vec![b'a'; bytes])?;
+    let real_git = provenant_os::git::git_executable().ok_or("git executable")?;
+    fixture.executable(
+        &git,
+        &format!(
+            "#!/bin/sh\ncase \"$*\" in\n*'{pattern}'*)\nif [ -e '{}' ]; then cat '{}'; exit 0; fi;;\nesac\nexec '{}' \"$@\"\n",
+            flag.display(),
+            payload.display(),
+            real_git.display()
+        ),
+    )?;
+    fixture
+        .environment
+        .push(("PROVENANT_GIT".into(), git.into_os_string()));
+    let host = fixture.prepare()?;
+    std::fs::write(&flag, b"")?;
+    Ok((fixture, host))
+}
+
+#[test]
+fn many_linked_worktrees_do_not_block_protection_checks()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    // Each entry is about 155 bytes, so 200 linked worktrees exceed 16 KiB.
+    for index in 0..200 {
+        let path = fixture.root.join(format!("tree-{index}"));
+        fixture.git(&[
+            "worktree",
+            "add",
+            "--no-checkout",
+            "--detach",
+            path.to_str().ok_or("tree")?,
+        ])?;
+    }
+    let project = &fixture.writer.project;
+    HostDeliveryContext::validate_integration_target(project, "feature/unprotected")?;
+    HostDeliveryContext::check_delivery_branch(project, "feature/unprotected")?;
+    Ok(())
+}
+
+#[test]
+fn worktree_listing_over_the_capture_default_is_refused_at_every_stage()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let limit = provenant_os::exec::DEFAULT_CAPTURE_LIMIT;
+    let (fixture, host) = oversize_host("worktree list", limit + 1)?;
+    for stage in [WriterDeliveryStage::Prepare, WriterDeliveryStage::Integrate] {
+        let error = host
+            .command(
+                &fixture.writer.project,
+                "git",
+                &["worktree", "list", "--porcelain"],
+                stage,
+            )
+            .expect_err("an oversized listing must be refused");
+        assert!(
+            matches!(error, RunError::DeliveryLimit { .. }),
+            "{stage:?}: {error:?}"
+        );
+        let message = error.to_string();
+        assert!(message.contains("worktree list"), "{message}");
+        assert!(message.contains(&limit.to_string()), "{message}");
+    }
+    Ok(())
+}
+
+#[test]
+fn non_listing_host_output_over_its_bound_names_the_command()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let (fixture, host) = oversize_host("oversize-probe", 16 * 1024 + 1)?;
+    let error = host
+        .command(
+            &fixture.writer.project,
+            "git",
+            &["symbolic-ref", "--quiet", "refs/heads/oversize-probe"],
+            WriterDeliveryStage::Prepare,
+        )
+        .expect_err("oversized output must be refused");
+    let message = error.to_string();
+    assert!(message.contains("symbolic-ref"), "{message}");
+    assert!(message.contains("16384"), "{message}");
+    Ok(())
+}
+
+#[test]
+fn host_forge_output_over_its_bound_names_gh_not_git()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    fixture.request.open_pr = true;
+    let bin = fixture.root.join("gh-bin");
+    std::fs::create_dir(&bin)?;
+    let payload = fixture.root.join("gh-output");
+    std::fs::write(&payload, vec![b'a'; 16 * 1024 + 1])?;
+    fixture.executable(
+        &bin.join("gh"),
+        &format!("#!/bin/sh\ncat '{}'\n", payload.display()),
+    )?;
+    fixture.environment.retain(|(key, _)| key != "PATH");
+    fixture.environment.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    // Preparing for a pull request needs a hosted remote URL.
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let wrapper = fixture.root.join("git-wrapper");
+    fixture.executable(&wrapper, &format!("#!/bin/sh\nif [ \"$5\" = remote ] && [ \"$6\" = get-url ]; then printf 'https://github.com/fixture/repo.git\\n'; exit 0; fi\nexec '{}' \"$@\"\n", git.display()))?;
+    fixture
+        .environment
+        .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+    let host = fixture.prepare()?;
+    let error = host
+        .command(
+            &fixture.writer.project,
+            "gh",
+            &["pr", "view", "1"],
+            WriterDeliveryStage::PullRequest,
+        )
+        .expect_err("oversized forge output must be refused");
+    assert!(
+        matches!(error, RunError::DeliveryLimit { tool: "gh", .. }),
+        "{error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "host writer delivery failed at PullRequest: gh pr output exceeded the 16384-byte host limit"
+    );
+    Ok(())
+}
+
+#[test]
+fn worktree_listing_keeps_the_raised_limit_and_others_keep_theirs() {
+    assert_eq!(
+        stdout_limit(false, &["worktree", "list", "--porcelain"]),
+        provenant_os::exec::DEFAULT_CAPTURE_LIMIT
+    );
+    assert_eq!(stdout_limit(false, &["remote"]), 16 * 1024);
+    assert_eq!(stdout_limit(true, &["log"]), 56_000);
+}
+
+#[test]
+fn git_subcommand_skips_global_option_values() {
+    for (args, expected) in [
+        (&["worktree", "list", "--porcelain"][..], "worktree list"),
+        (&["-c", "core.hooksPath=/dev/null", "remote"], "remote"),
+        (
+            &["-C", "relative/dir", "symbolic-ref", "--quiet"],
+            "symbolic-ref",
+        ),
+        (
+            &["--git-dir", "rel", "--work-tree", "tree", "status"],
+            "status",
+        ),
+        (
+            &["--git-dir=rel", "--work-tree=tree", "worktree", "list"],
+            "worktree list",
+        ),
+        (
+            &["-c", "a=b", "-C", "x", "worktree", "list"],
+            "worktree list",
+        ),
+        (&["pr", "view", "1"], "pr"),
+        (&[], "git"),
+    ] {
+        assert_eq!(git_subcommand(args), expected, "{args:?}");
+    }
+}
+
 #[test]
 fn prepare_refuses_unavailable_and_unsafe_credential_helpers()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -3018,6 +3399,7 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
         remote: "origin".into(),
         branch: "published/lane".into(),
         open_pr: false,
+        fast_forward_only: false,
     };
     let host = host.prepare(&writer, &request)?;
     assert!(
@@ -3649,6 +4031,7 @@ fn host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch()
         remote: "origin".into(),
         branch: "published/lane".into(),
         open_pr: false,
+        fast_forward_only: false,
     };
     let host = host.prepare(&writer, &request)?;
     std::fs::write(lane.join("change"), "a repair on a stale base")?;

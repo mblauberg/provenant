@@ -107,6 +107,11 @@ impl From<run::RunError> for Fail {
     fn from(error: run::RunError) -> Self {
         use provenant_fabric_runtime::coordination::facade::FacadeError;
         let detail = match &error {
+            run::RunError::DeliveryPrepare { .. } | run::RunError::DeliveryLimit { .. } => {
+                Some(FacadeError::HostDeliveryIo {
+                    reason: error.to_string(),
+                })
+            }
             run::RunError::GenerationConflict { current_generation } => {
                 Some(FacadeError::GenerationConflict {
                     current_generation: *current_generation,
@@ -329,7 +334,8 @@ impl run::Providers for Registry<'_> {
                     .map_err(|error| error.to_string())
             })
             .transpose()?;
-        let (routing, accounts, quota) = match context_roots.as_ref().or(self.roots) {
+        let (routing, accounts, quota, quota_settings) = match context_roots.as_ref().or(self.roots)
+        {
             Some(roots) => {
                 let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
                     .map_err(|error| error.to_string())?;
@@ -338,6 +344,7 @@ impl run::Providers for Registry<'_> {
                     config.domains.accounts.with_derived_accounts(),
                     // Unreadable quota is unknown, and unknown is not spent.
                     crate::quota::read_cache_at(roots.state.as_path()).unwrap_or_default(),
+                    config.domains.quota,
                 )
             }
             None => Default::default(),
@@ -360,9 +367,12 @@ impl run::Providers for Registry<'_> {
         if assessment.refusal.is_some() || assessment.retry.is_some() {
             return Ok(assessment);
         }
-        let model_pool = provenant_routing::Catalogue::bundled()
-            .ok()
-            .and_then(|catalogue| catalogue.quota_pool(&model).map(str::to_owned));
+        let catalogue =
+            provenant_routing::Catalogue::bundled().map_err(|error| error.to_string())?;
+        // The same calibrated records and configured polling intervals that
+        // resolution and the admission recheck read.
+        let (quota, policies) =
+            crate::route::account_evidence(&quota_settings, quota, now.unix_seconds());
         let other_account = |adapter: &str, key: &str| {
             unspent_alternative(
                 accounts
@@ -371,9 +381,10 @@ impl run::Providers for Registry<'_> {
                     .filter(|entry| entry.adapter == adapter)
                     .map(|entry| entry.key.as_str()),
                 &quota,
+                &policies,
                 key,
                 &model,
-                model_pool.as_deref(),
+                &catalogue,
                 now.unix_seconds(),
             )
         };
@@ -422,14 +433,18 @@ impl run::Providers for Registry<'_> {
             .adapter
             .failure_diagnostic(stderr)
     }
-    fn decode_with_context(
+    fn decode_captures(
         &self,
         route: &run::RouteRecord,
         stdout: &[u8],
+        stderr: &[u8],
         exit: &ExitObservation,
         provider_state: &Path,
-        context: &run::HolderContext,
+        context: Option<&run::HolderContext>,
     ) -> Result<run::Decoded, String> {
+        let Some(context) = context else {
+            return self.decode_inner(route, stdout, stderr, exit, provider_state, false);
+        };
         let (configuration_root, _) = context.disk_roots();
         // Every branch carries the holder home: without it the OpenCode
         // identity lookup has no `.local/share` fallback and decodes capture
@@ -441,7 +456,7 @@ impl run::Providers for Registry<'_> {
                 home: holder_home,
                 ..Default::default()
             }
-            .decode(route, stdout, exit, provider_state);
+            .decode_inner(route, stdout, stderr, exit, provider_state, false);
         }
         let mut inputs = provenant_core::RootInputs::new(
             context.roots.home.clone(),
@@ -457,7 +472,14 @@ impl run::Providers for Registry<'_> {
                     home: holder_home,
                     ..Default::default()
                 }
-                .decode(route, stdout, exit, provider_state)?;
+                .decode_inner(
+                    route,
+                    stdout,
+                    stderr,
+                    exit,
+                    provider_state,
+                    false,
+                )?;
                 if decoded.reason.as_deref().is_some_and(capacity_reason) {
                     let reason = decoded.reason.get_or_insert_with(String::new);
                     let mut end = reason
@@ -478,7 +500,7 @@ impl run::Providers for Registry<'_> {
             state_root: Some(configuration_root),
             ..Default::default()
         };
-        registry.decode_inner(route, stdout, exit, provider_state, true)
+        registry.decode_inner(route, stdout, stderr, exit, provider_state, true)
     }
     fn prepare(
         &self,
@@ -497,7 +519,7 @@ impl run::Providers for Registry<'_> {
         exit: &ExitObservation,
         provider_state: &Path,
     ) -> Result<run::Decoded, String> {
-        self.decode_inner(route, stdout, exit, provider_state, false)
+        self.decode_inner(route, stdout, &[], exit, provider_state, false)
     }
 }
 impl Registry<'_> {
@@ -505,6 +527,7 @@ impl Registry<'_> {
         &self,
         route: &run::RouteRecord,
         stdout: &[u8],
+        stderr: &[u8],
         exit: &ExitObservation,
         provider_state: &Path,
         host_settlement: bool,
@@ -548,6 +571,14 @@ impl Registry<'_> {
             return Ok(failed("provider outcome is malformed"));
         };
         events.extend(outcome.final_events().iter().cloned());
+        // Stderr quota text is evidence only for a run the adapter did not
+        // accept; a successful run may print incidental quota wording.
+        if adapter.id() == "opencode"
+            && !matches!(outcome.status(), OutcomeStatus::Success)
+            && let Some(event) = provenant_providers::opencode::stderr_quota(stderr)
+        {
+            events.push(event);
+        }
         let rollout = (adapter.id() == "codex").then(|| {
             outcome
                 .session()

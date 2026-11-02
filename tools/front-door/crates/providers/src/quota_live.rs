@@ -38,6 +38,10 @@ fn command_error(program: &str, error: ExecError) -> ProbeFailure {
             ..
         } => ProbeFailure::ProbeDirectory,
         ExecError::Io {
+            operation: crate::agy::KEYCHAIN_OPERATION,
+            ..
+        } => ProbeFailure::Auth,
+        ExecError::Io {
             operation: "spawn",
             source,
         } if source.raw_os_error() == Some(ENOEXEC)
@@ -78,6 +82,9 @@ pub struct LiveQuota {
     refresh_expired: bool,
     claude_default: RefCell<Option<claude::Identity>>,
     clock: SystemClock,
+    /// Stands in for the system executor so tests can see each probe's command.
+    #[cfg(test)]
+    executor: Option<Box<dyn Executor>>,
 }
 fn read(path: &Path) -> Result<Vec<u8>, ProbeFailure> {
     let mut bytes = Vec::new();
@@ -161,6 +168,8 @@ impl LiveQuota {
             refresh_expired: true,
             claude_default: RefCell::new(None),
             clock: SystemClock::new(),
+            #[cfg(test)]
+            executor: None,
         })
     }
     fn now(&self) -> i64 {
@@ -175,17 +184,51 @@ impl LiveQuota {
         deadline: i64,
         max_seconds: u64,
     ) -> Result<ExecOutcome, ProbeFailure> {
+        self.command_as(
+            &self.home,
+            None,
+            program,
+            args,
+            selector,
+            stdin,
+            deadline,
+            max_seconds,
+        )
+    }
+    /// Runs a probe with `home` as its `HOME`.
+    #[allow(clippy::too_many_arguments)]
+    fn command_as(
+        &self,
+        home: &Path,
+        keychain: Option<&crate::agy::ProbeHome>,
+        program: &str,
+        args: &[&str],
+        selector: Option<(&str, &Path)>,
+        stdin: Option<&[u8]>,
+        deadline: i64,
+        max_seconds: u64,
+    ) -> Result<ExecOutcome, ProbeFailure> {
         let remaining = deadline.saturating_sub(self.now());
         if remaining <= 0 {
             return Err(ProbeFailure::Network);
         }
         let system = SystemExecutor::new(1).map_err(|_| ProbeFailure::Network)?;
-        let executor = crate::host::HostProbeExecutor::new(&system, &self.state)
+        #[cfg(test)]
+        let base: &dyn Executor = self.executor.as_deref().unwrap_or(&system);
+        #[cfg(not(test))]
+        let base: &dyn Executor = &system;
+        let host = crate::host::HostProbeExecutor::new(base, &self.state)
             .map_err(|_| ProbeFailure::ProbeDirectory)?;
+        // An isolated agy keychain is re-checked around the spawn.
+        let guarded = keychain.map(|keychain| keychain.guard(&host));
+        let executor: &dyn Executor = match &guarded {
+            Some(guarded) => guarded,
+            None => &host,
+        };
         let mut argv = vec![OsString::from(program)];
         argv.extend(args.iter().map(OsString::from));
         let mut env = vec![
-            (OsString::from("HOME"), self.home.as_os_str().to_owned()),
+            (OsString::from("HOME"), home.as_os_str().to_owned()),
             ("PATH".into(), std::env::var_os("PATH").unwrap_or_default()),
         ];
         // Claude Code uses the OS login name when selecting its Keychain item.
@@ -214,13 +257,23 @@ impl LiveQuota {
     }
     fn json_command(
         &self,
+        home: &crate::agy::ProbeHome,
         program: &str,
         args: &[&str],
         selector: Option<(&str, &Path)>,
         deadline: i64,
         seconds: u64,
     ) -> Result<Value, ProbeFailure> {
-        let out = self.command(program, args, selector, None, deadline, seconds)?;
+        let out = self.command_as(
+            home.path(),
+            Some(home),
+            program,
+            args,
+            selector,
+            None,
+            deadline,
+            seconds,
+        )?;
         if !clean(&out) || out.termination != Termination::Exit(0) {
             return Err(ProbeFailure::Network);
         }
@@ -452,11 +505,17 @@ impl LiveQuota {
         deadline: i64,
         details: &mut QuotaDetails,
     ) -> Result<Value, ProbeFailure> {
+        // An isolated agy account is signed in under its own directory as
+        // `HOME`. A missing isolated keychain is a login problem, never the
+        // shared login, and the probe re-checks it around the spawn.
+        let probe_home = crate::agy::ProbeHome::select(&account.identity_dir, &self.home)
+            .map_err(|_| ProbeFailure::Auth)?;
         let scratch = crate::host::HostProbeDir::create(&self.state)
             .map_err(|_| ProbeFailure::ProbeDirectory)?;
         let log = scratch.path().join("cli.log");
         let log_arg = log.to_str().ok_or(ProbeFailure::Malformed)?;
         let payload = self.json_command(
+            &probe_home,
             "agy",
             &[
                 "-p",
@@ -538,6 +597,7 @@ mod tests {
             refresh_expired: false,
             claude_default: RefCell::new(None),
             clock: SystemClock::new(),
+            executor: None,
         }
     }
 
@@ -574,6 +634,184 @@ mod tests {
             agy_signed_in_account(&registered, true, None),
             Err(ProbeFailure::Auth)
         );
+    }
+
+    /// A fake `agy` that signs in as one Google account per `HOME`, recording
+    /// the `HOME` of each `-p /usage` probe the quota path runs.
+    struct AgyUsage {
+        sign_ins: Vec<(PathBuf, &'static str)>,
+        homes: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>>,
+    }
+    impl Executor for AgyUsage {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            assert_eq!(options.argv[0], "agy");
+            assert_eq!(options.argv[1], "-p");
+            assert_eq!(options.argv[2], "/usage");
+            let home: PathBuf = options
+                .env
+                .unwrap_or_default()
+                .iter()
+                .find(|(key, _)| key == "HOME")
+                .map(|(_, value)| value.into())
+                .expect("probe sets HOME");
+            let log = options
+                .argv
+                .iter()
+                .position(|arg| arg == "--log-file")
+                .map(|index| PathBuf::from(&options.argv[index + 1]))
+                .expect("probe names a log file");
+            let email = self
+                .sign_ins
+                .iter()
+                .find(|(directory, _)| *directory == home)
+                .expect("probe HOME is a known sign-in")
+                .1;
+            fs::write(
+                log,
+                format!("OAuth: authenticated successfully as {email}\n"),
+            )
+            .unwrap();
+            self.homes.lock().unwrap().push(home);
+            Ok(ExecOutcome {
+                termination: Termination::Exit(0),
+                stdout: provenant_os::exec::CapturedStream {
+                    bytes: br#"{"status":"SUCCESS"}"#.to_vec(),
+                    ..Default::default()
+                },
+                stderr: Default::default(),
+                timed_out: false,
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: false,
+                elapsed_micros: 0,
+            })
+        }
+    }
+
+    #[test]
+    fn agy_quota_probe_runs_under_the_accounts_own_home_and_never_falls_back_to_the_login() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let state = root.path().join("state");
+        let isolated = root.path().join("agy-second");
+        let legacy = root.path().join("gemini");
+        fs::create_dir_all(&state).unwrap();
+        fs::create_dir_all(isolated.join("Library/Keychains")).unwrap();
+        fs::write(isolated.join("Library/Keychains/login.keychain-db"), "").unwrap();
+        fs::create_dir_all(&legacy).unwrap();
+        // A keychain that is only a symlink is not the account's own.
+        let linked = root.path().join("agy-linked");
+        fs::create_dir_all(linked.join("Library/Keychains")).unwrap();
+        std::os::unix::fs::symlink(
+            isolated.join("Library/Keychains/login.keychain-db"),
+            linked.join("Library/Keychains/login.keychain-db"),
+        )
+        .unwrap();
+        let homes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut quota = quota(&home, state);
+        quota.executor = Some(Box::new(AgyUsage {
+            sign_ins: vec![
+                (home.clone(), "first@example.test"),
+                (isolated.clone(), "second@example.test"),
+            ],
+            homes: homes.clone(),
+        }));
+        let account = |dir: &Path, email: &str| Account {
+            scope: AccountScope {
+                adapter: "agy".into(),
+                account_key: format!(
+                    "agy-{}",
+                    agy_fingerprint(
+                        format!("OAuth: authenticated successfully as {email}\n").as_bytes()
+                    )
+                    .unwrap()
+                ),
+                label: "test".into(),
+            },
+            identity_dir: dir.to_owned(),
+            options: Value::Null,
+        };
+        let probe = |dir: &Path, email: &str| {
+            quota.agy(
+                &account(dir, email),
+                quota.now() + 60,
+                &mut QuotaDetails::default(),
+            )
+        };
+        // The isolated account is probed under its own directory, and its
+        // identity check matches the second sign-in, not the login keychain's.
+        probe(&isolated, "second@example.test").unwrap();
+        // The user's own login is registered at the home directory itself.
+        probe(&home, "first@example.test").unwrap();
+        assert_eq!(*homes.lock().unwrap(), [isolated.clone(), home.clone()]);
+        // Any other directory without a regular keychain file (absent, no file,
+        // or a symlink) is refused without a probe, never run under the login.
+        for dir in [&legacy, &root.path().join("absent"), &linked] {
+            assert_eq!(
+                probe(dir, "first@example.test").unwrap_err(),
+                ProbeFailure::Auth
+            );
+        }
+        // The keychain vanishing after a successful probe fails closed too.
+        fs::remove_file(isolated.join("Library/Keychains/login.keychain-db")).unwrap();
+        assert_eq!(
+            probe(&isolated, "second@example.test").unwrap_err(),
+            ProbeFailure::Auth
+        );
+        assert_eq!(*homes.lock().unwrap(), [isolated, home]);
+    }
+
+    /// Runs the wrapped fake, then removes `keychain` as a competing process
+    /// would while the probe is running.
+    struct VanishingKeychain {
+        inner: AgyUsage,
+        keychain: PathBuf,
+    }
+    impl Executor for VanishingKeychain {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            let outcome = self.inner.execute(options);
+            fs::remove_file(&self.keychain).unwrap();
+            outcome
+        }
+    }
+
+    #[test]
+    fn agy_quota_probe_refuses_a_keychain_that_vanishes_while_it_runs() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let state = root.path().join("state");
+        let isolated = root.path().join("agy-second");
+        let keychain = isolated.join("Library/Keychains/login.keychain-db");
+        fs::create_dir_all(&state).unwrap();
+        fs::create_dir_all(keychain.parent().unwrap()).unwrap();
+        fs::write(&keychain, "").unwrap();
+        let homes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut quota = quota(&home, state);
+        quota.executor = Some(Box::new(VanishingKeychain {
+            inner: AgyUsage {
+                sign_ins: vec![(isolated.clone(), "second@example.test")],
+                homes: homes.clone(),
+            },
+            keychain,
+        }));
+        let email = "OAuth: authenticated successfully as second@example.test\n";
+        let account = Account {
+            scope: AccountScope {
+                adapter: "agy".into(),
+                account_key: format!("agy-{}", agy_fingerprint(email.as_bytes()).unwrap()),
+                label: "test".into(),
+            },
+            identity_dir: isolated,
+            options: Value::Null,
+        };
+        // The probe ran, but its result is not trusted once the keychain is gone.
+        assert_eq!(
+            quota
+                .agy(&account, quota.now() + 60, &mut QuotaDetails::default())
+                .unwrap_err(),
+            ProbeFailure::Auth
+        );
+        assert_eq!(homes.lock().unwrap().len(), 1);
     }
 
     #[test]

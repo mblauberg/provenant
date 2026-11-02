@@ -5,6 +5,8 @@ use provenant_core::{CancelToken, Clock, WaitBudget};
 use provenant_os::fs::{Directory, LockMode, PublishMode};
 use std::{ffi::OsStr, path::PathBuf};
 
+/// Create (if needed) and exclude `.provenant/scratch`, the only project scratch
+/// root. A legacy `.agent-run` is never probed, created, moved or deleted.
 pub fn ensure(
     repo: &VerifiedRepo,
     clock: &dyn Clock,
@@ -19,17 +21,9 @@ pub fn ensure(
         Ok(parent.open_verified_directory(OsStr::new(name))?)
     }
     repo.revalidate()?;
-    let legacy = match repo.root_dir().metadata_at(OsStr::new(".agent-run"), false) {
-        Ok(_) => true,
-        Err(error) if error.is_not_found() => false,
-        Err(error) => return Err(error.into()),
-    };
-    let (relative, scratch) = if legacy {
-        (".agent-run", child(repo.root_dir(), ".agent-run")?)
-    } else {
-        let parent = child(repo.root_dir(), ".provenant")?;
-        (".provenant/scratch", child(&parent, "scratch")?)
-    };
+    let relative = ".provenant/scratch";
+    let parent = child(repo.root_dir(), ".provenant")?;
+    let scratch = child(&parent, "scratch")?;
     let info = child(repo.common_dir(), "info")?;
     let _lock = info.lock(
         OsStr::new("provenant-exclude.lock"),
@@ -99,6 +93,10 @@ mod tests {
                 !worker.is_finished(),
                 "scratch contender must wait for exclusion"
             );
+            assert!(
+                !fixture.root.join(".provenant/scratch/locks").exists(),
+                "scratch must not split its lock while the exclude lock is held"
+            );
             drop(held);
             worker.join().unwrap()
         })?;
@@ -122,11 +120,61 @@ mod tests {
         std::fs::create_dir(fixture.root.join(".agent-run"))?;
         assert_eq!(
             ensure(&fixture.repo, &SystemClock, &CancelToken::new())?,
-            fixture.root.join(".agent-run")
+            fixture.root.join(".provenant/scratch")
         );
-        std::fs::remove_dir_all(fixture.root.join(".agent-run"))?;
-        std::os::unix::fs::symlink(&scratch, fixture.root.join(".agent-run"))?;
+        std::fs::remove_dir_all(&scratch)?;
+        let elsewhere = fixture.root.join("elsewhere");
+        std::fs::create_dir(&elsewhere)?;
+        std::os::unix::fs::symlink(&elsewhere, &scratch)?;
         assert!(ensure(&fixture.repo, &SystemClock, &CancelToken::new()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn scratch_ignores_legacy_root_and_never_touches_it() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Path, mode and file bytes for every entry under the legacy root.
+        fn snapshot(root: &std::path::Path) -> std::io::Result<Vec<(PathBuf, u32, Vec<u8>)>> {
+            let mut entries = Vec::new();
+            let mut pending = vec![root.to_path_buf()];
+            while let Some(path) = pending.pop() {
+                let meta = std::fs::symlink_metadata(&path)?;
+                let bytes = if meta.is_file() {
+                    std::fs::read(&path)?
+                } else {
+                    Vec::new()
+                };
+                entries.push((path.clone(), meta.permissions().mode(), bytes));
+                if meta.is_dir() {
+                    for entry in std::fs::read_dir(&path)? {
+                        pending.push(entry?.path());
+                    }
+                }
+            }
+            entries.sort();
+            Ok(entries)
+        }
+        let fixture = Fixture::new()?;
+        let legacy = fixture.root.join(".agent-run");
+        std::fs::create_dir_all(legacy.join("graphs"))?;
+        std::fs::write(legacy.join("graphs/old-plan.json"), b"{\"legacy\":true}")?;
+        std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::set_permissions(
+            legacy.join("graphs"),
+            std::fs::Permissions::from_mode(0o755),
+        )?;
+        let before = snapshot(&legacy)?;
+        let scratch = ensure(&fixture.repo, &SystemClock, &CancelToken::new())?;
+        assert_eq!(scratch, fixture.root.join(".provenant/scratch"));
+        assert_eq!(
+            std::fs::metadata(scratch.join("graphs"))?
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(snapshot(&legacy)?, before);
         Ok(())
     }
 }

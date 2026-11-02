@@ -791,13 +791,24 @@ containing `body`, `until` and a positive `max_rounds`. Optional
 `max_extension_rounds` caps each extension decision and defaults to five
 (allowed range 1 to 1024). The body is a
 self-contained DAG of task, synthesise and gate nodes. `until` names a body
-gate that follows every other body node, directly or transitively. Nested loops,
-body `on_fail` routes and body delivery are rejected. The wrapper has no
+gate that follows every other body node, directly or transitively. Nested loops
+and body `on_fail` routes are rejected. A body writer may deliver only by
+`integrate:TARGET`, never by `push` or `pr`. The wrapper has no
 prompt, route, worktree, inputs, condition or delivery configuration. All body
 writers must name the same existing worktree; every round continues on its
 branch without creating a checkout. Body writer worktrees, including no-op
 rounds, remain available through exhaustion, acceptance and cancellation for
 explicit delivery or later collection.
+
+A body writer that integrates delivers every round that settles with a new
+commit, by compare-and-swap fast-forward of `TARGET` onto that commit. It never
+merges: before a round launches, the graph checks that `TARGET` is still at the
+head the previous writer in that worktree delivered, and otherwise fails the
+round with `integration_head_moved`, which stops the loop. The host also
+refuses a round delivery whose head does not descend from the target. A round
+with no new commit integrates nothing and is not an error. Because every round
+continues the same worktree and branch, round N+1 descends from round N's
+integrated head.
 
 The runtime expands the full allowance before admission. Node, edge, prompt,
 depth and fan-out limits therefore cover every possible round, including rounds
@@ -864,7 +875,12 @@ remain in use. Existing graph budget and limit extensions still apply.
   `::loop_replay_mid_round_keeps_attempt_actor_and_input`;
   `::loop_admission_counts_every_round_before_any_launch`;
   `::loop_decisions_stop_or_accept_exhausted_outputs`;
-  `::loop_writers_keep_one_worktree_and_never_deliver_between_rounds`;
+  `::loop_writers_keep_one_worktree_when_the_body_does_not_deliver`;
+  `::loop_body_delivers_only_by_integrate`;
+  `::loop_body_integrate_requires_the_graph_integration_branch`;
+  `::loop_rounds_integrate_from_the_head_the_previous_round_delivered`;
+  `::loop_stops_when_the_target_moved_after_the_previous_delivery`;
+  `crates/run/src/delivery_tests.rs::fast_forward_only_integration_advances_but_never_merges`;
   `::loop_body_failure_blocks_later_rounds_and_dependants`.
 - Owner: `crates/fabric-runtime/src/graph/loops.rs`, `src/fabric.rs`
 
@@ -1434,20 +1450,31 @@ Peer changes need exact-head CI and a chair-run smoke between two real hosts.
 
 ### Project-local scratch
 
-Operator graph documents default to `.provenant/scratch/graphs/`; an existing
-`.agent-run/` is reused as the scratch root. Bare document names resolve there
-when no explicitly named file exists in the current directory. Explicit project-local
-paths remain supported. Scratch setup appends its anchored directory pattern to
-Git's common `info/exclude` under a stable lock, preserving existing bytes and
-never editing tracked `.gitignore`. Symlinked scratch roots and exclude files
-are refused. Writer lanes get a
-read-only grant on the primary checkout's scratch root (never a symlink), so
-briefs there stay readable from a linked worktree. The graph path error and CLI help name these directories. Scratch
-is disposable operator data, separate from authoritative run state; expiry is
-owned by GC rather than graph execution.
+`.provenant/scratch/` is the only project scratch root that Provenant selects or
+creates. A legacy `.agent-run/` is never preferred, created, migrated, moved or
+deleted, and no document is copied from it. Its documents stay readable only by
+explicit path, and writer lanes keep their read grant on it. Operator graph
+documents default to `.provenant/scratch/graphs/`. Bare document names resolve
+there when no explicitly named file exists in the current directory; a missing
+bare name is reported with that path and the explicit-path hint. Explicit
+project-local paths remain supported. A preset graph directory owned by the
+current user that is not mode 0700 is narrowed to 0700 when a graph is
+published; any other loose directory is refused, and the error names its path,
+its octal mode and the `chmod 700` repair. Scratch setup appends its anchored
+directory pattern to Git's common `info/exclude` under a stable lock, preserving
+existing bytes and never editing tracked `.gitignore`. Symlinked scratch roots
+and exclude files are refused. Writer lanes get a read-only grant on the primary
+checkout's scratch root (never a symlink), so briefs there stay readable from a
+linked worktree. The graph path error and CLI help name
+`.provenant/scratch/graphs`. Scratch is disposable operator data, separate from
+authoritative run state; expiry is owned by GC rather than graph execution.
 - Why: graph documents and lane briefs need a discoverable project-local home
   without creating tracked configuration changes.
 - Test: `crates/confinement/src/scratch.rs::scratch_is_local_excluded_idempotent_and_refuses_links`;
+  `crates/confinement/src/scratch.rs::scratch_ignores_legacy_root_and_never_touches_it`;
+  `src/preset_tests.rs::graph_publication_repairs_owned_loose_directory`;
+  `src/fabric/preset_graph.rs::refusal_names_the_path_mode_and_repair`;
+  `src/fabric/facade_tests.rs::bare_graph_miss_names_the_scratch_root_and_searches_no_legacy_root`;
   `crates/cli/src/run/provider.rs::writers_read_the_primary_checkouts_untracked_scratch`.
 - Owner: `crates/confinement/src/scratch.rs`, `crates/cli/src/run/provider.rs`, `src/fabric.rs`
 

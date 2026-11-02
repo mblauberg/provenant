@@ -7,7 +7,12 @@ extension HumanRequest {
     /// The chair session that asked, shortened for the list.
     var sessionTitle: String { String(chairSessionId.prefix(8)) }
     /// "Project · " before the session, or nothing when the project is unknown.
-    var projectPrefix: String { projectName.map { "\($0) · " } ?? "" }
+    var projectPrefix: String { projectDisplayName.map { "\($0) · " } ?? "" }
+    /// The project's name, with the host it lives on when a peer owns it: "api on studio".
+    var projectDisplayName: String? {
+        guard let peerLabel else { return projectName }
+        return "\(projectName ?? "Project") on \(peerLabel)"
+    }
     var createdAtDate: Date? { Stamp.parse(createdAt) }
 
     var kindSymbol: String {
