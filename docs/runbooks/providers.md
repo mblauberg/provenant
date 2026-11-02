@@ -149,6 +149,13 @@ refreshes tokens. This is an accepted limit. A lane is not granted other
 providers' credential stores, and GitHub CLI configuration stays denied
 ([#2432](https://github.com/mblauberg/provenant/issues/2432)).
 
+Codex scans `$HOME/.agents/skills` at startup, independently of `CODEX_HOME`.
+`HOME` is unchanged for the lane, so HOME-derived defaults keep working. A
+Codex lane (read-only or worktree-write) is granted the host's
+`~/.agents/skills` directory read-only when it exists at prepare time, so the
+scan succeeds. There is no write grant for it. Repository-local skills remain
+discoverable.
+
 ## Claude network access
 
 With open network (the default, or `--network on`), Claude enables `WebFetch`

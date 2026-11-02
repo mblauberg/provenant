@@ -600,12 +600,41 @@ pub(super) fn provider_error_line(
             call,
         )
         .ok()?;
-    let text = String::from_utf8_lossy(&tail.bytes);
-    let line = text.lines().rev().find(|line| !line.trim().is_empty())?;
+    provider_error_from_stderr(&tail.bytes)
+}
+
+/// Select a cause from captured stderr without promoting known Codex skill
+/// discovery and other warning-level diagnostics to the failure headline.
+fn provider_error_from_stderr(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    let line = text
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty() && !warning_level_stderr_line(line))?;
     let redacted = provenant_confinement::redact::known_shapes(line.as_bytes())
         .ok()
         .and_then(|bytes| String::from_utf8(bytes).ok())?;
     Some(crate::bounded_text(&redacted, 160))
+}
+
+/// Warning-level lines start with `warn`/`warning` (optionally bracketed or
+/// followed by a colon), or are tracing-formatted: an RFC3339 timestamp, then
+/// exactly `WARN`.
+fn warning_level_stderr_line(line: &str) -> bool {
+    let mut tokens = line.split_whitespace();
+    let Some(first) = tokens.next() else {
+        return false;
+    };
+    let level = first.trim_matches(['[', ']', ':']).to_ascii_lowercase();
+    if matches!(level.as_str(), "warn" | "warning") {
+        return true;
+    }
+    let bytes = first.as_bytes();
+    let timestamp = bytes.len() > 4
+        && bytes[..4].iter().all(u8::is_ascii_digit)
+        && bytes[4] == b'-'
+        && first.contains('T');
+    timestamp && tokens.next() == Some("WARN")
 }
 
 /// The exact bytes of a read, from the lossless encoding `output` reports.
@@ -832,4 +861,48 @@ pub fn attempt_provider(
         .into_iter()
         .flatten()
         .find_map(|route| route.provider.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_error_from_stderr;
+
+    #[test]
+    fn provider_error_uses_failure_before_trailing_tracing_warning() {
+        let stderr = b"provider process failed: exit code 1\n\
+2026-11-02T00:00:00.123456Z  WARN codex_core: skill scan failed\n";
+        assert_eq!(
+            provider_error_from_stderr(stderr).as_deref(),
+            Some("provider process failed: exit code 1")
+        );
+    }
+
+    #[test]
+    fn provider_error_keeps_non_warning_lines_that_mention_warn() {
+        assert_eq!(
+            provider_error_from_stderr(b"test-failed WARN: assertion failed\n").as_deref(),
+            Some("test-failed WARN: assertion failed")
+        );
+    }
+
+    #[test]
+    fn provider_error_skips_warning_level_lines() {
+        assert_eq!(
+            provider_error_from_stderr(
+                b"warning: retrying request\nreal failure\n2026-11-02T00:00:00Z WARN cleanup failed\n"
+            )
+            .as_deref(),
+            Some("real failure")
+        );
+    }
+
+    #[test]
+    fn provider_error_does_not_headline_a_warning_without_a_failure_line() {
+        assert_eq!(
+            provider_error_from_stderr(
+                b"WARN: skill scan failed\n2026-11-02T00:00:00Z WARN cleanup failed\n"
+            ),
+            None
+        );
+    }
 }

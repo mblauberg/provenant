@@ -96,6 +96,12 @@ fn prepare(
     ];
     let mut runtime_reads = vec![subtree(package)];
     let tool_writes = Vec::new();
+    // Codex scans `$HOME/.agents/skills` at startup independently of
+    // CODEX_HOME. Grant the host's user skills read-only so the scan succeeds.
+    let user_skills = input.home.join(".agents/skills");
+    if user_skills.is_dir() {
+        runtime_reads.push(subtree(user_skills));
+    }
     let mut setup = vec![SetupStep::Symlink {
         link: codex_home.join("auth.json"),
         target: credential.clone(),
