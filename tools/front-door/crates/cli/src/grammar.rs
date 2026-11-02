@@ -222,6 +222,9 @@ pub struct Review {
     /// Git range whose changed paths select the shape
     #[arg(long)]
     pub range: Option<String>,
+    /// Show the selected panel without dispatching reviewers
+    #[arg(long)]
+    pub explain: bool,
     /// Overall wait limit (seconds or a duration such as 30m)
     #[arg(long, default_value = "3600", value_parser = duration_seconds)]
     pub wait: u64,

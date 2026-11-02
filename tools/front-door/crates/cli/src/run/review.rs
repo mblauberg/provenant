@@ -4,14 +4,16 @@ use provenant_records::{result_capture::CapturedResult, workflow::ReviewVerdict}
 /// Admit reviewers through the ordinary run scheduler and collate their results.
 pub fn review(command: crate::Review, edge: &Edge<'_>) -> Reply {
     let mut data = json!({"reviewers": []});
+    let explain = command.explain;
     let outcome = review_inner(command, edge, &mut data);
-    let collected = review_collect(edge, &mut data);
+    let collected = if explain { Ok(()) } else { review_collect(edge, &mut data) };
     let verdicts = aggregate_verdicts(&data);
     data["verdicts"] = verdicts;
     let human = review_text(&data);
     let (status, error) = match (outcome, collected) {
         (Err(error), _) | (Ok(_), Err(error)) => (error.status, Some(error)),
         (Ok(true), Ok(())) => (Status::Timeout, None),
+        (Ok(false), Ok(())) if explain => (Status::Ok, None),
         (Ok(false), Ok(()))
             if data["reviewers"].as_array().is_some_and(|rows| {
                 rows.iter()
@@ -35,7 +37,7 @@ pub fn review(command: crate::Review, edge: &Edge<'_>) -> Reply {
         result,
         human,
         summary: None,
-        read_only: false,
+        read_only: explain,
     }
 }
 
@@ -126,6 +128,15 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
     data["kind"] = json!(command.kind);
     data["risk"] = json!(command.risk);
     data["target"] = json!(head);
+
+    if command.explain {
+        for group in &panel_shape.reviewers {
+            for lens in &group.lenses {
+                data["reviewers"].as_array_mut().ok_or_else(|| invalid("invalid review result".into()))?.push(json!({"lens": lens, "pool": group.pool, "state": "planned"}));
+            }
+        }
+        return Ok(false);
+    }
 
     let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| invalid(e.to_string()))?;
     let clock = SystemClock::new();
@@ -669,6 +680,10 @@ fn aggregate_verdicts(data: &Value) -> Value {
     let mut counts = json!({"approve": 0, "approve_with_nits": 0, "request_changes": 0, "inconclusive": 0, "unknown": 0, "not_submitted": 0});
     if let Some(rows) = data["reviewers"].as_array() {
         for row in rows {
+            if row["state"] == "planned" {
+                text.push_str(&format!("  lens={} pool={}\n", row["lens"].as_str().unwrap_or("general"), row["pool"].as_str().unwrap_or("unknown")));
+                continue;
+            }
             let verdict = row["verdict"].as_str().unwrap_or("unknown");
             let key = if row["state"] == "not_submitted" {
                 "not_submitted"
@@ -1059,7 +1074,7 @@ mod review_shape_tests {
     }
     #[test]
     fn text_snapshots_panel_and_reason() {
-        let data = json!({"shape":"quick","selection_source":"by_size","size":"small","kind":"code","risk":"routine","reviewers":[{"lens":"correctness-spec","run_id":"a","operation_id":"op","state":"succeeded","verdict":"approve"}]});
-        assert_eq!(review_text(&data), "review quick (by_size; size=small; kind=code; risk=routine)\n  lens=correctness-spec run=a operation=op unresolved state=succeeded verdict=approve output=none\n");
+        let data = json!({"shape":"quick","selection_source":"by_size","size":"small","kind":"code","risk":"routine","reviewers":[{"lens":"correctness-spec","pool":"junior","state":"planned"}]});
+        assert_eq!(review_text(&data), "review quick (by_size; size=small; kind=code; risk=routine)\n  lens=correctness-spec pool=junior\n");
     }
 }
