@@ -269,6 +269,9 @@ impl ReviewConfig {
         paths: &[String],
         size: Option<&str>,
     ) -> Result<ReviewSelection<'a>, String> {
+        if let Some(name) = override_name && !self.shapes.contains_key(name) {
+            return Err(format!("unknown review shape '{name}'"));
+        }
         let integration = (kind == Some("integration"))
             .then(|| self.select.by_kind.get("integration"))
             .flatten();
