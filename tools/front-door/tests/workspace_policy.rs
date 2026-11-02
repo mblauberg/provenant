@@ -350,6 +350,8 @@ fn test_scopes(source: &str, test_file: bool) -> Vec<&str> {
         for token in &tokens[index + 7..] {
             match *token {
                 "(" | "[" => nesting += 1,
+                // Leaving the enclosing group (a parameter or field attribute) ends the item.
+                ")" | "]" | "," if depth + nesting == 0 => break,
                 ")" | "]" => nesting -= 1,
                 ";" if depth + nesting == 0 => break,
                 "{" => depth += 1,
