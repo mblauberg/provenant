@@ -121,6 +121,7 @@ def main():
         with open(output_path, "a", encoding="utf-8") as output:
             output.write(f"nextest_filter={expression}\n")
             output.write(f"run_provider_example={str(provider_affected).lower()}\n")
+        print(f"nextest filter: {expression or '(full workspace)'}")
     else:
         print(expression)
 

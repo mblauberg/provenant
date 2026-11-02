@@ -1,7 +1,11 @@
 #!/bin/sh
 set -eu
 
-script=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)/select-affected-crate-tests
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+# shellcheck source=scripts/test-git-env.sh disable=SC1091
+. "$script_dir/test-git-env.sh"
+unset GITHUB_OUTPUT
+script=$script_dir/select-affected-crate-tests
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/provenant-affected-crates.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 root=$tmp/repo
@@ -48,7 +52,8 @@ export PATH="$tmp/bin:$PATH" GITHUB_WORKSPACE="$root" BASE_SHA="$base" IS_MAIN=f
 
 printf 'pub fn changed() {}\n' >> tools/front-door/crates/leaf/src/lib.rs
 git commit -qam leaf-change
-export HEAD_SHA=$(git rev-parse HEAD)
+HEAD_SHA=$(git rev-parse HEAD)
+export HEAD_SHA
 filter=$("$script" 2>"$tmp/reason")
 if [ "$filter" != 'rdeps(=leaf)' ]; then
   echo "leaf change: expected 'rdeps(=leaf)', got '$filter'" >&2
@@ -63,20 +68,23 @@ mkdir -p tools/front-door
 printf 'lock' > tools/front-door/Cargo.lock
 git add tools/front-door/Cargo.lock
 git commit -qm lockfile
-export HEAD_SHA=$(git rev-parse HEAD)
+HEAD_SHA=$(git rev-parse HEAD)
+export HEAD_SHA
 filter=$("$script" 2>"$tmp/reason")
 if [ -n "$filter" ] || ! grep -q 'full-run trigger' "$tmp/reason"; then
   echo "lockfile change did not select the full workspace" >&2
   exit 1
 fi
 
+git reset -q --hard "$base"
 printf 'notes' > README.md
 git add README.md
 git commit -qm outside
-export HEAD_SHA=$(git rev-parse HEAD)
+HEAD_SHA=$(git rev-parse HEAD)
+export HEAD_SHA
 filter=$("$script" 2>"$tmp/reason")
 if [ -n "$filter" ] || ! grep -q 'outside a workspace crate' "$tmp/reason"; then
-  echo "outside path did not select the full workspace" >&2
+  echo "outside path did not select the full workspace: filter='$filter'; $(cat "$tmp/reason")" >&2
   exit 1
 fi
 
