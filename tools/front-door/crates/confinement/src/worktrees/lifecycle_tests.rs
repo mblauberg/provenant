@@ -1960,6 +1960,122 @@ fn gc_merged_tree_previews_and_removes_recent_declared_output() -> Result<(), Bo
 }
 
 #[test]
+fn gc_merge_proof_requires_containment_in_the_pinned_default() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test_context = TestContext::new(&fixture)?;
+    let context = test_context.context();
+    let new_lane = |name: &str| -> Result<WorktreeInfo, Box<dyn Error>> {
+        let created = create(
+            &context,
+            WorktreeCreate {
+                branch: name.to_owned(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        fs::write(created.path.join(format!("{name}.txt")), name)?;
+        run_in_worktree(&fixture, &created.path, &["add", "."])?;
+        run_in_worktree(&fixture, &created.path, &["commit", "-m", name])?;
+        list(&context, &cancel())?
+            .into_iter()
+            .find(|lane| lane.path == created.path)
+            .ok_or_else(|| "missing lane".into())
+    };
+    let batch = new_lane("proof-batch")?;
+    let via_batch = new_lane("proof-via-batch")?;
+    let local_only = new_lane("proof-local-only")?;
+    let squashed = new_lane("proof-squashed")?;
+    let unmerged = new_lane("proof-unmerged")?;
+    let advanced = new_lane("proof-advanced")?;
+    // lane -> batch preserves ancestry; the batch itself lands later.
+    run_in_worktree(
+        &fixture,
+        &batch.path,
+        &[
+            "merge",
+            "--no-ff",
+            "proof-via-batch",
+            "-m",
+            "lane into batch",
+        ],
+    )?;
+    run_in_worktree(
+        &fixture,
+        &batch.path,
+        &["merge", "--no-ff", "proof-local-only", "-m", "local lane"],
+    )?;
+    // A pin taken before the batch lands: the batch is merged only locally.
+    let stale_pin = fixture.head()?;
+    fixture.run(&["merge", "--no-ff", "proof-batch", "-m", "land batch"])?;
+    fixture.run(&["merge", "--squash", "proof-squashed"])?;
+    fixture.run(&["commit", "-m", "squash lane"])?;
+    fixture.run(&["merge", "--no-ff", "proof-advanced", "-m", "land advanced"])?;
+    let pin = fixture.head()?;
+    // The tip moves after the lane list was read.
+    run_in_worktree(
+        &fixture,
+        &advanced.path,
+        &["commit", "--allow-empty", "-m", "after listing"],
+    )?;
+    let policy = |upstream, dry_run| WorktreeGcPolicy {
+        foreign_merged_clean: false,
+        upstream: Some(upstream),
+        terminal: &|_| true,
+        no_live_lanes: &|_| true,
+        regenerable: &[],
+        keep: &[],
+        written_before_ns: 0,
+        dry_run,
+    };
+    let local = collect(
+        &context,
+        &[via_batch.clone(), local_only.clone()],
+        &policy(stale_pin, false),
+        &cancel(),
+    )?;
+    assert!(local.worktrees.removed.is_empty(), "{local:?}");
+    assert!(
+        local
+            .worktrees
+            .retained
+            .iter()
+            .all(|retained| matches!(retained.reason, RetainReason::NotMerged))
+    );
+    assert!(via_batch.path.is_dir() && branch_exists(&fixture, "proof-via-batch"));
+    let lanes = [via_batch.clone(), squashed, unmerged, advanced.clone()];
+    let preview = collect(&context, &lanes, &policy(pin, true), &cancel())?;
+    let mut previewed = preview.worktrees.pruned_refs.clone();
+    previewed.sort();
+    assert_eq!(previewed, ["proof-via-batch"], "{preview:?}");
+    assert!(branch_exists(&fixture, "proof-via-batch"));
+    let applied = collect(&context, &lanes, &policy(pin, false), &cancel())?;
+    let retained: BTreeMap<_, _> = applied
+        .worktrees
+        .retained
+        .iter()
+        .map(|retained| (retained.branch.as_str(), &retained.reason))
+        .collect();
+    assert!(!via_batch.path.exists());
+    assert!(!branch_exists(&fixture, "proof-via-batch"));
+    for name in ["proof-squashed", "proof-unmerged", "proof-advanced"] {
+        assert!(branch_exists(&fixture, name), "{name}");
+        assert!(retained.contains_key(name), "{name}: {applied:?}");
+    }
+    assert!(matches!(
+        retained["proof-squashed"],
+        RetainReason::NotMerged
+    ));
+    assert!(matches!(
+        retained["proof-unmerged"],
+        RetainReason::NotMerged
+    ));
+    // Advanced after the listing: the expected head no longer matches.
+    assert!(matches!(retained["proof-advanced"], RetainReason::Changed));
+    assert!(advanced.path.is_dir());
+    Ok(())
+}
+
+#[test]
 fn gc_dry_run_retains_merged_worktree_with_unknown_writer() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let test_context = TestContext::new(&fixture)?;
