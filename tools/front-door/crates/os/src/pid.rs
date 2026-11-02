@@ -257,30 +257,70 @@ impl CwdObserver for SystemCwdObserver {
 mod tests {
     use super::*;
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    struct Reaped(std::process::Child);
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
     #[test]
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    fn native_occupancy_reports_image_and_open_file() {
+    fn native_occupancy_reports_image_and_open_file_with_identity_completeness() {
+        // A single-threaded child keeps its descriptor table still, so the
+        // two identity snapshots can agree.
         let file = tempfile::NamedTempFile::new().unwrap();
-        let observation = SystemCwdObserver.occupancy(i64::from(std::process::id()));
-        assert!(
-            !observation.complete,
-            "object identity is not yet rechecked"
+        let child = Reaped(
+            std::process::Command::new("sleep")
+                .arg("30")
+                .stdin(std::fs::File::open(file.path()).unwrap())
+                .spawn()
+                .unwrap(),
         );
+        let pid = i64::from(child.0.id());
         let file_path = std::fs::canonicalize(file.path()).unwrap();
-        assert!(
-            observation
-                .paths
+        let canonical = |paths: &[PathBuf]| -> Vec<PathBuf> {
+            paths
                 .iter()
-                .any(|path| std::fs::canonicalize(path).ok().as_ref() == Some(&file_path))
-        );
-        let executable = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+                .filter_map(|path| std::fs::canonicalize(path).ok())
+                .collect()
+        };
+        // The child may still be between fork and exec; wait for its image.
+        let mut observation = SystemCwdObserver.occupancy(pid);
+        for _ in 0..200 {
+            if canonical(&observation.paths).contains(&file_path) && observation.complete {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            observation = SystemCwdObserver.occupancy(pid);
+        }
+        let paths = canonical(&observation.paths);
+        assert!(paths.contains(&file_path), "{observation:?}");
         assert!(
-            observation
-                .paths
+            paths
                 .iter()
-                .any(|path| std::fs::canonicalize(path).ok().as_ref() == Some(&executable))
+                .any(|path| path.file_name().is_some_and(|name| name == "sleep")),
+            "{observation:?}"
         );
-        assert!(!SystemCwdObserver.occupancy(0).complete);
+        assert!(observation.complete, "{observation:?}");
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn native_occupancy_never_proves_an_unqueryable_process_empty() {
+        for pid in [0, -1, i64::MAX] {
+            let observation = SystemCwdObserver.occupancy(pid);
+            assert!(!observation.complete && observation.paths.is_empty());
+        }
+        // A reaped pid has no listing to prove empty.
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = i64::from(child.id());
+        child.wait().unwrap();
+        let observation = SystemCwdObserver.occupancy(pid);
+        assert!(!observation.complete, "{observation:?}");
     }
 
     #[test]

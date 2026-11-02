@@ -3,82 +3,121 @@ use std::io;
 
 const MAX_EINTR_RETRIES: u64 = 8;
 
-/// A bounded snapshot. Every failure leaves completeness false while preserving
-/// any paths already obtained for positive occupancy evidence.
+/// Bounded executable and descriptor occupancy. Two snapshots must agree on
+/// every object identity before the result is complete; any failure keeps the
+/// paths already obtained as positive evidence but cannot prove non-occupancy.
 pub(crate) fn occupancy(pid: i32) -> crate::pid::OccupancyObservation {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        return linux_occupancy(pid);
+        let first = occupancy_snapshot(pid);
+        let second = occupancy_snapshot(pid);
+        let mut paths = first.paths;
+        for path in second.paths {
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+        crate::pid::OccupancyObservation {
+            paths,
+            complete: first.complete && second.complete && first.identities == second.identities,
+        }
     }
-    #[cfg(target_os = "macos")]
-    {
-        return darwin_occupancy(pid);
-    }
-    #[allow(unreachable_code)]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = pid;
         crate::pid::OccupancyObservation::default()
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const OCCUPANCY_LIMIT: usize = 16_384;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Default)]
+struct OccupancySnapshot {
+    paths: Vec<std::path::PathBuf>,
+    /// (descriptor or image label, device, inode, path bytes)
+    identities: Vec<(i64, u64, u64, Vec<u8>)>,
+    complete: bool,
+}
+
 #[cfg(target_os = "linux")]
-fn linux_occupancy(pid: i32) -> crate::pid::OccupancyObservation {
-    const LIMIT: usize = 16_384;
-    let mut result = crate::pid::OccupancyObservation::default();
-    let image = std::fs::read_link(format!("/proc/{pid}/exe"));
-    let list = || -> io::Result<Vec<std::ffi::OsString>> {
-        let mut entries = Vec::new();
-        for entry in std::fs::read_dir(format!("/proc/{pid}/fd"))? {
-            if entries.len() == LIMIT {
+fn occupancy_snapshot(pid: i32) -> OccupancySnapshot {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+
+    const DELETED: &[u8] = b" (deleted)";
+    let mut snapshot = OccupancySnapshot::default();
+    let mut complete = true;
+    let proc = std::path::PathBuf::from(format!("/proc/{pid}"));
+    let mut record = |label: i64, link: &std::path::Path, snapshot: &mut OccupancySnapshot| {
+        let target = std::fs::read_link(link).ok();
+        let identity = std::fs::metadata(link).ok();
+        let Some(target) = target else { return false };
+        let bytes = target.as_os_str().as_bytes();
+        if !bytes.starts_with(b"/") {
+            // Kernel pseudo-objects hold no filesystem location.
+            let pseudo = [&b"socket:["[..], b"pipe:[", b"anon_inode:", b"net:["]
+                .iter()
+                .any(|prefix| bytes.starts_with(prefix));
+            if pseudo {
+                snapshot.identities.push((label, 0, 0, bytes.to_vec()));
+            }
+            return pseudo;
+        }
+        let Some(identity) = identity else {
+            return false;
+        };
+        snapshot
+            .identities
+            .push((label, identity.dev(), identity.ino(), bytes.to_vec()));
+        // An unlinked object still names its former parent; keep that location
+        // as positive evidence rather than guessing it cannot matter.
+        let trimmed = bytes.strip_suffix(DELETED).unwrap_or(bytes);
+        if !trimmed.starts_with(b"/memfd:") {
+            snapshot
+                .paths
+                .push(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(
+                    trimmed,
+                )));
+        }
+        true
+    };
+    complete &= record(-1, &proc.join("exe"), &mut snapshot);
+    let listing = || -> io::Result<Vec<std::ffi::OsString>> {
+        let mut names = Vec::new();
+        for entry in std::fs::read_dir(proc.join("fd"))? {
+            if names.len() == OCCUPANCY_LIMIT {
                 return Err(io::Error::other("descriptor limit exceeded"));
             }
-            entries.push(entry?.file_name());
+            names.push(entry?.file_name());
         }
-        entries.sort();
-        Ok(entries)
+        names.sort();
+        Ok(names)
     };
-    let mut complete = true;
-    match image {
-        Ok(path) if path.is_absolute() => {
-            if path.as_os_str().as_encoded_bytes().ends_with(b" (deleted)") {
-                complete = false;
-            }
-            result.paths.push(path);
-        }
-        _ => complete = false,
-    }
-    let Ok(before) = list() else { return result };
-    for fd in &before {
-        let path = std::path::Path::new("/proc")
-            .join(pid.to_string())
-            .join("fd")
-            .join(fd);
-        match std::fs::read_link(path) {
-            Ok(path) if path.is_absolute() => {
-                if path.as_os_str().as_encoded_bytes().ends_with(b" (deleted)") {
+    match listing() {
+        Ok(names) => {
+            for name in &names {
+                let Some(fd) = name.to_str().and_then(|text| text.parse::<i64>().ok()) else {
                     complete = false;
-                }
-                result.paths.push(path);
+                    continue;
+                };
+                complete &= record(fd, &proc.join("fd").join(name), &mut snapshot);
             }
-            Ok(path)
-                if path.as_os_str().as_encoded_bytes().starts_with(b"socket:[")
-                    || path.as_os_str().as_encoded_bytes().starts_with(b"pipe:[")
-                    || path
-                        .as_os_str()
-                        .as_encoded_bytes()
-                        .starts_with(b"anon_inode:") => {}
-            _ => complete = false,
+            // Descriptors opened or closed during the walk make it unprovable.
+            complete &= listing().is_ok_and(|after| after == names);
         }
+        Err(_) => complete = false,
     }
-    // Matching descriptor numbers do not prove that the same objects remain
-    // open. Until object identities are rechecked, this is only positive data.
-    let _ = complete && list().is_ok_and(|after| before == after);
-    result.complete = false;
-    result
+    snapshot.complete = complete;
+    snapshot
 }
 
 #[cfg(target_os = "macos")]
-fn darwin_occupancy(pid: i32) -> crate::pid::OccupancyObservation {
+fn occupancy_snapshot(pid: i32) -> OccupancySnapshot {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+
     #[repr(C)]
     struct FileInfo {
         open_flags: u32,
@@ -92,9 +131,8 @@ fn darwin_occupancy(pid: i32) -> crate::pid::OccupancyObservation {
         file: FileInfo,
         vnode: libc::vnode_info_path,
     }
-    const LIMIT: usize = 16_384;
     let list = || -> Option<Vec<(i32, u32)>> {
-        let mut records = vec![0u64; LIMIT];
+        let mut records = vec![0u64; OCCUPANCY_LIMIT];
         let size = i32::try_from(records.len() * std::mem::size_of::<u64>()).ok()?;
         // SAFETY: the aligned buffer has size writable bytes; libproc borrows it.
         let count = unsafe {
@@ -106,7 +144,8 @@ fn darwin_occupancy(pid: i32) -> crate::pid::OccupancyObservation {
                 size,
             )
         };
-        if count <= 0
+        // A full buffer may be truncated; a partial record is malformed.
+        if count < 0
             || count >= size
             || !(count as usize).is_multiple_of(std::mem::size_of::<libc::proc_fdinfo>())
         {
@@ -126,18 +165,38 @@ fn darwin_occupancy(pid: i32) -> crate::pid::OccupancyObservation {
         values.sort_unstable();
         Some(values)
     };
-    let mut result = crate::pid::OccupancyObservation::default();
+    let mut snapshot = OccupancySnapshot::default();
     let mut complete = true;
     match darwin_executable_path(pid) {
-        Some(path) => result.paths.push(path),
+        Some(path) => match std::fs::metadata(&path) {
+            Ok(meta) => {
+                snapshot.identities.push((
+                    -1,
+                    meta.dev(),
+                    meta.ino(),
+                    path.as_os_str().as_bytes().to_vec(),
+                ));
+                snapshot.paths.push(path);
+            }
+            Err(_) => {
+                snapshot.paths.push(path);
+                complete = false;
+            }
+        },
         None => complete = false,
     }
-    let Some(before) = list() else { return result };
+    let Some(before) = list() else {
+        return snapshot;
+    };
     for (fd, kind) in &before {
         if *kind != libc::PROX_FDTYPE_VNODE as u32 {
+            // Sockets, pipes, kqueues and shared memory carry no file location.
             if !matches!(*kind, 0 | 2..=7 | 9..=11) {
                 complete = false;
             }
+            snapshot
+                .identities
+                .push((i64::from(*fd), u64::from(*kind), 0, Vec::new()));
             continue;
         }
         let mut info = std::mem::MaybeUninit::<VnodePath>::zeroed();
@@ -150,17 +209,32 @@ fn darwin_occupancy(pid: i32) -> crate::pid::OccupancyObservation {
         }
         // SAFETY: the full record was initialized by libproc.
         let info = unsafe { info.assume_init() };
+        let stat = info.vnode.vip_vi.vi_stat;
         let raw: Vec<_> = info.vnode.vip_path.into_iter().flatten().collect();
+        let bytes: Vec<u8> = raw
+            .iter()
+            .map(|byte| *byte as u8)
+            .take_while(|byte| *byte != 0)
+            .collect();
+        snapshot.identities.push((
+            i64::from(*fd),
+            u64::from(stat.vst_dev),
+            stat.vst_ino,
+            bytes.clone(),
+        ));
+        if bytes.is_empty() && stat.vst_nlink == 0 {
+            // Unlinked object: it cannot be inside any tree being removed.
+            continue;
+        }
         match decode_darwin_path(pid, &raw) {
-            Ok(path) => result.paths.push(path),
+            Ok(path) => snapshot.paths.push(path),
             Err(_) => complete = false,
         }
     }
-    // Descriptor numbers and types can be reused between the two listings.
-    // Do not infer non-occupancy without rechecking each object's identity.
-    let _ = complete && list().is_some_and(|after| before == after);
-    result.complete = false;
-    result
+    // Descriptor numbers can be reused; the caller compares object identities.
+    complete &= list().is_some_and(|after| before == after);
+    snapshot.complete = complete;
+    snapshot
 }
 
 #[cfg(test)]
