@@ -13,7 +13,7 @@ The menu follows the first-party menu extras of macOS 26, such as Wi-Fi and Batt
 - **Icons.** A use ring shows the binding window's use: green below the alert threshold, orange above it. A full red ring is a spent allowance, whose subtitle says when it is back; a full blue ring is an account drawing on credits ("On credits until Sat 3:41 am"). Neither shows a figure, since the ring already does. A grey ring is a stale or unknown reading, whose dimmed figure is the last reading and whose subtitle says when it was checked. An orange ring around "!" asks for sign-in. A fresh reading carries no age; one older than 30 minutes adds "checked 2h ago".
 - **Submenu.** Each account's submenu opens level with its row. It lists every reported window with its use bar and exact reset time, then the plan, credits, banked resets, when the reading was taken, priority and identity, then any note or error. It does not repeat the row's state, and no row with a submenu has a tooltip, which would cover the submenu.
 - **Needs attention.** Lanes that need attention, each with its kind and how long ago it began.
-- **Commands.** Refresh, Open Report Folder and Quit Quota. ⌘R and ⌘Q work while the menu is open, but no shortcut column is drawn, as in first-party menu extras, so the figures stay beside the arrows.
+- **Commands.** Open Console, Refresh, Open Report Folder and Quit Quota. Open Console opens `Provenant Console.app`. ⌘R and ⌘Q work while the menu is open, but no shortcut column is drawn, as in first-party menu extras, so the figures stay beside the arrows.
 - **Customise.** A submenu in the footer. "Row figure" chooses which window each account row leads with: Automatic (the longest window unless a shorter one is at the alert level), 5-hour (the shortest current window of the binding group) or Weekly (the longest). "Menu bar figure" chooses the account the status item follows, or Most constrained, which skips hidden accounts. "Show accounts" has one checkmark per registered account. "Edit Names and Order…" opens the state directory's `config.toml`. The last line reminds you that `provenant accounts register --plan` adds accounts. Choices run `provenant quota display` and `provenant accounts set`, then reload `quota show`, so the menu follows at once.
 - **Names, order and hiding.** An account's `display_name` replaces the title and its qualifier. Accounts with an `order` come first, by that number with ties kept in menu order, then the rest by provider. A hidden account is left out of the menu and the status item unless it is the chosen menu bar account. A per-account `headline` overrides the global row figure. Reports without these fields display as before.
 
@@ -31,25 +31,64 @@ The menu shows local requests and lanes needing attention from `provenant consol
 
 ## Packages
 
-The package has three targets. `ProvenantKit` is the shared client: it runs the CLI off the main thread with bounded output, decodes the `{schema_version, command, status, data, error}` envelope, reports typed errors, and follows list cursors. Both executables use it. `QuotaMenuBar` is the menu agent and stays on macOS 14. `ProvenantConsole` is a separate process for the larger windows and needs macOS 26; on an older system it prints a message and exits. No console code enters the menu target, and a source test checks that.
+The package has five targets:
+
+- `ProvenantKit` is the shared client. It runs the CLI off the main thread with bounded output, a timeout and a kill of the whole process group, decodes the `{schema_version, command, status, data, error}` envelope, and reports typed errors. Each call names the command it expects, so a reply for another command, or at another envelope version, is refused before its data is decoded. It holds the typed clients (`InboxClient`, `ConsoleClient`) and decoders for `console board|tree|detail|overview|projects|sessions|search|changes`, `output`, and `quota show|history`, and the `ChangeWatcher`.
+- `ProvenantDesign` is SwiftUI only: spacing and tone tokens, relative-date formatting (`Stamp`), and the loading, error and empty panels every screen shares. It imports no client code.
+- `QuotaMenuBar` is the menu agent and stays on macOS 14.
+- `ProvenantConsole` is a separate process for the window and needs macOS 26; on an older system it prints a message and exits.
+- `ProvenantTestSupport` holds the recorded CLI output (`Tests/ProvenantTestSupport/Fixtures`, as bundle resources) and the one `Replay` both test targets use to stand in for the CLI.
+
+No console code enters the menu target, and a source test checks that.
 
 ## Console
 
-`provenant-console` opens one inbox window. It reads `provenant inbox --all-projects --json` and follows cursors to list pending decisions, assumptions and questions from registered projects on the host. The Console uses `--all-projects` when reading and answering a request, regardless of its working directory. Answering also uses `--expect-revision N --channel console`, so a request that changed since it was opened is not overwritten: the window shows its current state and sends nothing. Delivery and acknowledgement state is shown as the CLI returns it.
+`provenant-console` opens one window with a sidebar (Overview, Inbox, Runs, Quota, Chairs & Projects), the chosen screen, and an inspector for one attempt.
 
-The window is a three-column `NavigationSplitView` built on the macOS 26 design language and runs unchanged on macOS 27. The sidebar holds smart filters (All, Blocking, Decisions, Questions, Assumptions) and one group per project, each with its open count. The middle column lists requests at a calm, Linear-like density: the kind's SF Symbol in its tint, the title, project and session in secondary text, relative age, and an orange Blocking marker. The detail column renders the body as Markdown with `AttributedString`, shows options as a native radio group with the recommended one marked, and keeps the reply field and one prominent primary action in place. Override and Send Reply Only are secondary actions in the toolbar.
+| Screen | Reads | Shows |
+| --- | --- | --- |
+| Overview (⌘1) | `console overview`, joined with the open inbox | Counts, the requests that need you (blocking first, with kind), lanes in progress, and what coverage could not see |
+| Inbox (⌘2) | `inbox --all-projects` | The decision, question and assumption workflow below, with smart filters and one group per project |
+| Runs (⌘3) | `console board` (paged by cursor), `console tree` | A list or a tree of lanes, finished runs on request, Load More |
+| Quota (⌘4) | `quota show`, `quota history` | Each account's windows with a trend chart; the trend is left out if history cannot be read |
+| Chairs & Projects (⌘5) | `console sessions`, `console projects` | Chair sessions and the registered projects |
+| Search Results | `console search` | Matches in prompts or results; a match opens its attempt |
+| Attempt inspector (⌥⌘I) | `console detail`, `output` | Routes, timings, usage, artifacts, linked requests, and the result or prompt text |
 
-Keyboard use is first class. j and k move through the visible list, number keys 1 to 9 pick an option, and Return sends the primary action. ⌘R refreshes, ⌘F opens search, and ⌘1 to ⌘5 choose the filters; the same shortcuts appear in the View menu. The status bar repeats the keys that have no menu equivalent. Search narrows the current filter or project without changing the counts.
+The toolbar has at most three groups (Refresh, the Runs list/tree switch, the inspector) and a search field with scopes (Requests, Prompts, Results). Each one is also a command in the menu bar. ⌘1 to ⌘5 choose the sections, ⌘F searches, ⌘R refreshes, and there is one ⌘R. Times are relative ("10 minutes ago") with the exact time in the help text. Every screen has a loading, an empty and an error state; a failed read keeps the last good content and says so.
 
-The window opens at 1040 by 680 points, has a minimum of 860 by 520, and restores its last frame. It follows light, dark and increased-contrast appearance through system materials and semantic colours. Every control has a VoiceOver label, and the blocking marker carries text as well as colour.
+**Staying current without timers.** `ProvenantKit.ChangeWatcher` watches the state directory's signal file (`$PROVENANT_STATE_DIR/changes.json`, otherwise `~/.local/share/provenant/v1/changes.json`) for writes and replacement. A change runs `console changes --since <generations>`, and only the screens whose scope moved are marked out of date and re-read: the one in front at once, the rest when chosen. A scope reported as unknown (`null`) counts as moved. Events that arrive during a read fold into one more read. The console target has no timers, `asyncAfter`, `Task.sleep` or `DispatchSource`; a source test checks that, and the file watching lives only in `ProvenantKit`. The app also refreshes the screen in front when it becomes active.
 
-When no requests are open, the list says so and explains when it refreshes. When search or a filter matches nothing, it offers Clear Search and Show All Requests. A refresh failure keeps the last list, shows the error above it and offers Try Again.
+**Window and reopen.** Closing the window does not quit the console. The Dock icon, `open -a`, Finder and the menu agent's **Open Console** all bring the window back, or make a new one if it was closed; the change watcher stops while there is no window and starts again on reopen. Quit with ⌘Q. On quit the console waits up to one second for answers still in flight. The window restores its last frame and has a minimum of 960 by 560.
 
-The console refreshes when the app comes to the front and when you choose Refresh (⌘R); it has no timers. It exits when its last window closes. On quit it waits up to one second for answers still in flight, then removes their reply files; an answer that has not returned by then may not be saved. It opens no database, credential, provider store or SSH connection (a source test checks the shared and console sources). ⌘W closes the window.
+**Inbox.** It reads `provenant inbox --all-projects --json` and follows cursors to list pending decisions, assumptions and questions from registered projects on the host, whatever the working directory. Answering uses `--all-projects --expect-revision N --channel console`, so a request that changed since it was opened is not overwritten: the window shows its current state and sends nothing. Delivery and acknowledgement state is shown as the CLI returns it. j and k move through the list, number keys pick an option, and Return sends the primary action; search narrows the current filter without changing its counts. The detail renders the body as Markdown and keeps the reply field and one prominent action in place.
 
-`provenant console open` opens `Provenant Console.app`, or prints an install hint. `./bundle` builds that app with the console as its main executable and the menu agent beside it, and compiles the brand icon (`assets/brand/Provenant.icon`) into it with `xcrun actool`. Without Xcode it warns and builds with no icon.
+The console follows light, dark and increased-contrast appearance through system materials and semantic colours, and every control has a VoiceOver label. It opens no database, credential, provider store or SSH connection (a source test checks the shared, design and console sources).
+
+`provenant console open` opens `Provenant Console.app`, or prints an install hint. `./bundle` builds that app with the console as its main executable and the menu agent beside it, and compiles the brand icon (`assets/brand/Provenant.icon`) into it with `xcrun actool`. Without Xcode it warns and builds with no icon. The menu's **Open Console** item looks for that app around the running menu agent first, then asks Launch Services for `dev.provenant.console`.
 
 Memory and launch time are not measured in CI. Measure them on a Mac with `/usr/bin/time -l .build/release/provenant-console`.
+
+## Test
+
+```bash
+swift build
+swift test
+```
+
+Tests replay recorded CLI output. The `console-*.json` fixtures are copies of `tools/front-door/tests/fixtures/console`; when the CLI's console JSON changes, refresh them from there. The `inbox-*` and `answer-*` fixtures are recorded inbox output, and `output-*`, `quota-*` and `console-tree`/`console-search` are written to the documented shapes. `Fixtures/render/` holds richer copies used only to draw the screenshots below.
+
+## Render the console
+
+`--render` draws a screen into a PNG offscreen, from the same fixtures and with no CLI:
+
+```bash
+swift build
+.build/debug/provenant-console --render overview out.png --fixtures Tests/ProvenantTestSupport/Fixtures
+.build/debug/provenant-console --render runs out-dark.png --fixtures Tests/ProvenantTestSupport/Fixtures --dark
+```
+
+Screens are `overview`, `inbox`, `runs`, `tree`, `detail`, `quota`, `chairs` and `search`. Options: `--dark`, `--now <ISO time>` (the relative dates' clock), `--size WxH` and `--scale N`. `detail` draws the attempt inspector on its own, because an offscreen window cannot draw the live inspector pane. Offscreen drawing renders translucent toolbar and selection materials as faint or solid blocks; the content and layout are right, the chrome is approximate.
 
 ## Build and run
 
@@ -121,3 +160,5 @@ The supported way to start the app at login is a LaunchAgent. Adding the bare ex
 ```
 
 Load it with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.provenant.quota-menubar.plist`. To stop it, run `launchctl bootout gui/$(id -u)/dev.provenant.quota-menubar` and delete the file. With `KeepAlive` false, quitting from the menu keeps the app closed until the next login.
+
+The console is not a login item. It is opened from the menu agent's **Open Console**, `provenant console open`, or the Dock; it stays running after its window closes (see Console), and ⌘Q quits it. Unloading the menu agent's LaunchAgent does not stop a running console.

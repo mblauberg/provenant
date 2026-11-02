@@ -152,7 +152,7 @@ public struct InboxClient: Sendable {
         try await collectPages(maxPages: maxPages) { cursor in
             var arguments = ["inbox", "--all-projects", "--state", includeClosed ? "all" : "open", "--limit", String(pageSize)]
             if let cursor { arguments += ["--cursor", cursor] }
-            let listed = try await cli.call(arguments, as: Listed.self)
+            let listed = try await cli.call(arguments, command: "inbox", as: Listed.self)
             let items = listed.items.map { request -> HumanRequest in
                 var request = request
                 request.projectLabel = request.projectId.flatMap { listed.projects?[$0]?.label }
@@ -163,7 +163,7 @@ public struct InboxClient: Sendable {
     }
 
     public func item(_ id: String) async throws -> InboxItem {
-        try await cli.call(["inbox", "--all-projects", id], as: Single.self).item
+        try await cli.call(["inbox", "--all-projects", id], command: "inbox", as: Single.self).item
     }
 
     /// `provenant answer`. A `conflict` refusal reads the request again and returns it as `.stale`.
@@ -180,7 +180,7 @@ public struct InboxClient: Sendable {
             arguments += ["--text-file", url.path]
         }
         do {
-            return .saved(try await cli.call(arguments, as: InboxReceipt.self))
+            return .saved(try await cli.call(arguments, command: "answer", as: InboxReceipt.self))
         } catch let error as ClientError where error.code == "conflict" {
             return .stale(try await item(id))
         }

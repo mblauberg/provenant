@@ -1,54 +1,12 @@
 import Foundation
 import Observation
+import ProvenantDesign
 import ProvenantKit
 
 /// What the inbox window shows. Every read and write goes through `InboxClient`, so the model holds no store handle
 /// and keeps no timer: it refreshes when told to.
 @MainActor @Observable
 final class InboxModel {
-    /// The quiet smart filters in the sidebar. Each one is a view of the same open requests.
-    enum Filter: String, CaseIterable, Identifiable, Sendable {
-        case all, blocking, decisions, questions, assumptions
-
-        var id: String { rawValue }
-
-        var title: String {
-            switch self {
-            case .all: "All"
-            case .blocking: "Blocking"
-            case .decisions: "Decisions"
-            case .questions: "Questions"
-            case .assumptions: "Assumptions"
-            }
-        }
-
-        var symbol: String {
-            switch self {
-            case .all: "tray"
-            case .blocking: "exclamationmark.octagon"
-            case .decisions: "arrow.triangle.branch"
-            case .questions: "questionmark.circle"
-            case .assumptions: "lightbulb"
-            }
-        }
-
-        func matches(_ request: HumanRequest) -> Bool {
-            switch self {
-            case .all: true
-            case .blocking: request.request.blocking
-            case .decisions: request.request.kind.lowercased() == "decision"
-            case .questions: request.request.kind.lowercased() == "question"
-            case .assumptions: request.request.kind.lowercased() == "assumption"
-            }
-        }
-    }
-
-    /// What the middle list shows: one smart filter or one project.
-    enum Scope: Hashable, Sendable {
-        case filter(Filter)
-        case project(String)
-    }
-
     struct ProjectGroup: Identifiable, Equatable, Sendable {
         let id: String
         let name: String
@@ -65,8 +23,14 @@ final class InboxModel {
     private(set) var refreshError: String?
     /// The answer, delivery and current state the CLI returned for a request this window answered or found stale.
     private(set) var results: [String: Result] = [:]
-    private(set) var scope: Scope = .filter(.all)
-    var selection: String?
+    private(set) var scope: InboxScope = .all
+    private(set) var selectionState = InboxSelection()
+
+    /// The selected request's ID. The list binds to this.
+    var selection: String? {
+        get { selectionState.id }
+        set { selectionState.id = newValue }
+    }
 
     /// The sidebar's search. It narrows the current scope and never changes the counts.
     var searchText = "" {
@@ -134,14 +98,14 @@ final class InboxModel {
             }
     }
 
-    func count(for filter: Filter) -> Int { requests.lazy.filter(filter.matches).count }
+    func count(for filter: InboxFilter) -> Int { requests.lazy.filter(filter.matches).count }
 
     var selected: HumanRequest? {
         selection.flatMap { id in visibleRequests.first { $0.id == id } ?? results[id]?.request }
     }
 
     /// Switches the middle list to a filter or project and keeps the selection inside it.
-    func show(_ scope: Scope) {
+    func show(_ scope: InboxScope) {
         guard scope != self.scope else { return }
         self.scope = scope
         reconcileSelection()
@@ -151,19 +115,7 @@ final class InboxModel {
     func beginSearch() { searching = true }
 
     /// Moves the selection through the visible list. It stops at each end, as a list should.
-    func moveSelection(by offset: Int) {
-        let visible = visibleRequests
-        guard !visible.isEmpty else {
-            selection = nil
-            return
-        }
-        guard let current = selection, let index = visible.firstIndex(where: { $0.id == current }) else {
-            selection = offset < 0 ? visible.last?.id : visible.first?.id
-            return
-        }
-        let next = min(max(index + offset, 0), visible.count - 1)
-        selection = visible[next].id
-    }
+    func moveSelection(by offset: Int) { selectionState.move(by: offset, in: visibleRequests.map(\.id)) }
 
     func selectNext() { moveSelection(by: 1) }
     func selectPrevious() { moveSelection(by: -1) }
@@ -229,7 +181,7 @@ final class InboxModel {
             case .saved(let receipt):
                 // A failed read leaves the item out, but the receipt still says what was saved and delivered.
                 let item = try? await client.item(request.id)
-                results[request.id] = Result(kind: .saved, message: Self.saved(receipt), request: request, item: item)
+                results[request.id] = Result(kind: .saved, message: saved(receipt), request: request, item: item)
             case .stale(let current):
                 results[request.id] = Result(
                     kind: .stale,
@@ -244,12 +196,7 @@ final class InboxModel {
     }
 
     private func reconcileSelection(keepingResult: Bool = false) {
-        let visible = visibleRequests
-        if let selection {
-            if visible.contains(where: { $0.id == selection }) { return }
-            if keepingResult, results[selection] != nil { return }
-        }
-        selection = visible.first?.id
+        selectionState.reconcile(visible: visibleRequests.map(\.id), pinned: Set(results.keys), keepPinned: keepingResult)
     }
 
     private func matchesSearch(_ request: HumanRequest, _ query: String) -> Bool {
@@ -272,15 +219,15 @@ final class InboxModel {
         request.projectName ?? "No project"
     }
 
-    static func saved(_ receipt: InboxReceipt) -> String {
+    func saved(_ receipt: InboxReceipt) -> String {
         guard let delivery = receipt.delivery else { return "Answer saved (\(receipt.state))." }
-        return "Answer saved (\(receipt.state)). \(deliveryLine(delivery))"
+        return "Answer saved (\(receipt.state)). \(Self.deliveryLine(delivery, now: displayNow))"
     }
 
     /// The delivery and acknowledgement state as the CLI returned it.
-    static func deliveryLine(_ delivery: AnswerDelivery) -> String {
+    static func deliveryLine(_ delivery: AnswerDelivery, now: Date) -> String {
         var line = "Delivery \(delivery.state) by \(delivery.transport.replacingOccurrences(of: "_", with: " ")), \(delivery.attempts) \(delivery.attempts == 1 ? "attempt" : "attempts")"
-        if let at = delivery.acknowledgedAt { line += ", acknowledged \(at)" }
+        if let at = delivery.acknowledgedAt { line += ", acknowledged \(Stamp.relative(at, now: now))" }
         if let error = delivery.error { line += ", error: \(error)" }
         return line + "."
     }

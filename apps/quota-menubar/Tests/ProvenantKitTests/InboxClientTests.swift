@@ -1,29 +1,7 @@
 import Foundation
 import XCTest
 @testable import ProvenantKit
-
-/// A runner that replays recorded CLI output by argument prefix and records every call.
-final class Replay: @unchecked Sendable {
-    private let lock = NSLock()
-    private(set) var calls: [[String]] = []
-    private var replies: [(prefix: [String], file: String, status: Int32)]
-    init(_ replies: [(prefix: [String], file: String, status: Int32)]) { self.replies = replies }
-
-    static func fixture(_ name: String) throws -> Data {
-        try Data(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "Fixtures/\(name).json"))
-    }
-
-    var client: CLIClient {
-        CLIClient { [self] arguments, _ in
-            lock.withLock { calls.append(arguments) }
-            let hit = lock.withLock { replies.first { arguments.starts(with: $0.prefix) } }
-            guard let hit else { throw ClientError.launch("no recorded reply for \(arguments)") }
-            return CLI.Output(status: hit.status, signalled: false, timedOut: false, truncated: false,
-                              out: try Self.fixture(hit.file), err: "")
-        }
-    }
-    var recorded: [[String]] { lock.withLock { calls } }
-}
+import ProvenantTestSupport
 
 final class InboxClientTests: XCTestCase {
     func testListFollowsTheCursorAndKeepsKindBlockingAndSession() async throws {
@@ -87,7 +65,7 @@ final class InboxClientTests: XCTestCase {
     func testErrorEnvelopeBecomesTypedError() async throws {
         let replay = Replay([(["answer"], "answer-conflict", 1)])
         do {
-            _ = try await replay.client.call(["answer"], as: InboxReceipt.self)
+            _ = try await replay.client.call(["answer"], command: "answer", as: InboxReceipt.self)
             XCTFail("expected an error")
         } catch let error as ClientError {
             XCTAssertEqual(error.code, "conflict")
@@ -112,7 +90,7 @@ final class InboxClientTests: XCTestCase {
         let big = CLIClient { _, _ in CLI.Output(status: 0, signalled: false, timedOut: false, truncated: true, out: Data(), err: "") }
         let failed = CLIClient { _, _ in CLI.Output(status: 2, signalled: false, timedOut: false, truncated: false, out: Data(), err: "boom\n") }
         for (client, expected) in [(garbage, "malformed"), (big, "outputTooLarge"), (failed, "exited")] {
-            do { _ = try await client.call(["inbox"], as: InboxReceipt.self); XCTFail("expected an error") } catch let error as ClientError {
+            do { _ = try await client.call(["inbox"], command: "inbox", as: InboxReceipt.self); XCTFail("expected an error") } catch let error as ClientError {
                 XCTAssertTrue("\(error)".hasPrefix(expected), "\(error)")
             } catch { XCTFail("\(error)") }
         }
@@ -175,5 +153,31 @@ final class InboxClientTests: XCTestCase {
         let run = try CLI.exec(URL(fileURLWithPath: "/usr/bin/yes"), [], path: nil, limit: 0.3, maxOutput: 1024)
         XCTAssertTrue(run.truncated)
         XCTAssertLessThanOrEqual(run.out.count, 1024)
+    }
+}
+
+final class ExecTimeoutTests: XCTestCase {
+    func testOverrunIsTerminatedAndFlagged() throws {
+        let started = Date()
+        let run = try CLI.exec(URL(fileURLWithPath: "/bin/sleep"), ["30"], path: nil, limit: 0.3, grace: 0.3)
+        XCTAssertTrue(run.timedOut)
+        XCTAssertTrue(run.signalled)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 10)
+    }
+
+    func testDescendantsIgnoringTermAreKilledAfterTheGrace() throws {
+        // The shell ignores SIGTERM and so does its child; only the group SIGKILL ends them.
+        let run = try CLI.exec(URL(fileURLWithPath: "/bin/sh"), ["-c", "trap '' TERM; sleep 30 & wait"], path: nil, limit: 0.3, grace: 0.3)
+        XCTAssertTrue(run.timedOut)
+        XCTAssertTrue(run.signalled)
+    }
+
+    func testCleanExitReportsStatusAndOutput() throws {
+        let run = try CLI.exec(URL(fileURLWithPath: "/bin/sh"), ["-c", "echo hi; echo oops >&2; exit 3"], path: nil, limit: 5)
+        XCTAssertEqual(run.status, 3)
+        XCTAssertFalse(run.timedOut)
+        XCTAssertFalse(run.signalled)
+        XCTAssertEqual(String(decoding: run.out, as: UTF8.self), "hi\n")
+        XCTAssertEqual(run.err, "oops\n")
     }
 }

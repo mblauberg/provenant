@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "command": "output",
+  "status": "ok",
+  "data": {
+    "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+    "state": "running",
+    "bytes": {
+      "encoding": "utf8",
+      "data": "The overview now joins the inbox so every needs-you row carries its kind and blocking flag.\n\nCoverage warnings show above the tiles."
+    }
+  },
+  "error": null
+}

@@ -1,0 +1,26 @@
+{
+  "command": "console changes",
+  "data": {
+    "changed": {
+      "board": null,
+      "chair": null,
+      "configuration": null,
+      "inbox": null,
+      "quota": null,
+      "runs": null
+    },
+    "generations": {
+      "board": 14,
+      "chair": 2,
+      "configuration": null,
+      "epoch": 6872134465275348,
+      "inbox": 14,
+      "quota": null,
+      "runs": null
+    },
+    "schema_version": 2
+  },
+  "error": null,
+  "schema_version": 1,
+  "status": "ok"
+}

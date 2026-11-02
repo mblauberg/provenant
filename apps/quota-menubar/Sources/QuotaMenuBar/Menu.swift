@@ -3,6 +3,8 @@ import Foundation
 /// What choosing a menu item does.
 enum MenuAction: Equatable {
     case refresh, quit
+    /// Brings up the console app that contains this menu agent.
+    case openConsole
     case open(URL)
     /// Runs `provenant` with these arguments, then reloads `quota show`.
     case run([String])
@@ -109,8 +111,7 @@ enum QuotaMenu {
         entries += [
             .separator,
             .item(MenuItemSpec(title: "Refresh", icon: .symbol("arrow.clockwise"), enabled: !refreshing, action: .refresh)),
-            .item(MenuItemSpec(title: "Open Console", subtitle: "Console is not installed yet · use provenant inbox",
-                               icon: .symbol("macwindow"), enabled: false)),
+            .item(MenuItemSpec(title: "Open Console", icon: .symbol("macwindow"), action: .openConsole)),
             .item(MenuItemSpec(title: "Settings", icon: .symbol("slider.horizontal.3"), submenu:
                 (report.map { customise($0, stateRoot: stateRoot) } ?? []) + [
                     .item(MenuItemSpec(title: "Open Report Folder", enabled: report != nil,
