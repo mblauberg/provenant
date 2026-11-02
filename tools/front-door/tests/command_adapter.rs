@@ -296,9 +296,16 @@ test -n "$PROVENANT_PROCESS_TREE"
 child=$!
 # Ready only when a published sample shows the child's own child (the sleep);
 # the sampler publishes on its own cadence, so poll that condition, not a delay.
+# Only "sample unavailable" (exit 4) is retried; any other CLI failure fails now.
 attempt=0
-until "$1" process-tree --root "$$" --json > "$TMPDIR/sample.json" \
-    && /usr/bin/grep -Eq "\"ppid\":$child[,}]" "$TMPDIR/sample.json"; do
+while :; do
+    status=0
+    "$1" process-tree --root "$$" --json > "$TMPDIR/sample.json" || status=$?
+    if test "$status" = 0; then
+        /usr/bin/grep -Eq "\"ppid\":$child[,}]" "$TMPDIR/sample.json" && break
+    else
+        test "$status" = 4
+    fi
     attempt=$((attempt + 1))
     test "$attempt" -lt 50
     /bin/sleep 0.2

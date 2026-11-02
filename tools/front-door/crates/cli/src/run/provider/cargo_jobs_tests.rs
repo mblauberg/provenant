@@ -1,4 +1,3 @@
-
 use super::set_cargo_jobs;
 #[test]
 fn cargo_jobs_respect_supplied_environment() {

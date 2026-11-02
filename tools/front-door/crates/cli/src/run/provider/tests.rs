@@ -1,4 +1,3 @@
-
 #[test]
 fn command_lookup_is_literal_and_preserves_symlink_invocation()
 -> Result<(), Box<dyn std::error::Error>> {
