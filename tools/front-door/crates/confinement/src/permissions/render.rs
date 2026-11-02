@@ -715,6 +715,19 @@ pub(super) fn render_profile(
         }
     }
 
+    // Writers' fixtures bind and connect to Unix-domain sockets in their own
+    // scratch; the path is evaluated after the `TMPDIR` alias resolves.
+    if matches!(plan.mode, AccessMode::WorktreeWrite(_)) {
+        let scratch = sbpl_path(&plan.scratch.path)?;
+        for operation in ["network-bind", "network-inbound"] {
+            source.push_str(&format!(
+                "(allow {operation} (local unix-socket (subpath \"{scratch}\")))\n"
+            ));
+        }
+        source.push_str(&format!(
+            "(allow network-outbound (remote unix-socket (subpath \"{scratch}\")))\n"
+        ));
+    }
     if let Some(socket) = &profile.spec.fabric_socket {
         push_rule(
             &mut source,

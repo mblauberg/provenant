@@ -2005,6 +2005,7 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
         deadline_unix_ms: u64::MAX,
         scratch: attempt.join("scratch"),
         temporary: attempt.join("tmp"),
+        temporary_alias: None,
         provider_state: attempt.join("provider-state"),
     };
     for path in [&paths.scratch, &paths.temporary, &paths.provider_state] {

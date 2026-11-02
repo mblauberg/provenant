@@ -118,6 +118,8 @@ pub fn main() -> std::process::ExitCode {
         }
         Some("exec" | "-p") => exit("lane provider", lane_provider()),
         Some("--writer-provider") => exit("writer provider", provider(&args)),
+        // Bind a Unix-domain socket at the given path and connect to it.
+        Some("--bind-socket") => exit("bind socket", bind_socket(&args)),
         // The fake `gh` of the `land` fixtures.
         Some("pr" | "repo" | "api") => {
             let args: Vec<String> = std::env::args().skip(1).collect();
@@ -169,6 +171,23 @@ pub fn main() -> std::process::ExitCode {
             suite(&args).map_err(|error| error.into()),
         ),
     }
+}
+
+/// The lane probe's socket step: `sun_path` on Darwin holds 103 bytes and a
+/// terminator, so a lane `TMPDIR` that is too long fails here.
+fn bind_socket(args: &[std::ffi::OsString]) -> Result {
+    use std::os::unix::net::{UnixListener, UnixStream};
+    let path = Path::new(args.get(1).ok_or("socket path")?);
+    let length = path.as_os_str().len();
+    if length >= 104 {
+        return Err(format!("socket path is {length} bytes").into());
+    }
+    let listener = UnixListener::bind(path)?;
+    drop(UnixStream::connect(path)?);
+    listener.accept()?;
+    fs::remove_file(path)?;
+    writeln!(std::io::stdout().lock(), "lane-socket: PASS {length}")?;
+    Ok(())
 }
 
 fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
@@ -3016,6 +3035,18 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             "runs/{}/attempts/{}",
             prepared.run_id, prepared.attempts[0].attempt_id
         ));
+        // Launch preparation links a short alias to `tmp` on macOS. The name
+        // is unique to this process and attempt, and the rig unlinks it.
+        let temporary_alias = cfg!(target_os = "macos").then(|| {
+            let id = u128::from_be_bytes(*prepared.attempts[0].attempt_id.as_bytes());
+            let alias = PathBuf::from(format!(
+                "/private/tmp/pv-{:08x}{:024x}",
+                std::process::id(),
+                id & ((1 << 96) - 1)
+            ));
+            let _ = std::os::unix::fs::symlink(attempt.join("tmp"), &alias);
+            alias
+        });
         let paths = provenant_run::LaunchPaths {
             attempt_id: prepared.attempts[0].attempt_id,
             lane_depth: 1,
@@ -3026,6 +3057,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             scratch: attempt.join("scratch"),
             provider_state: attempt.join("provider-state"),
             temporary: attempt.join("tmp"),
+            temporary_alias,
         };
         // The active release root is its own directory, never the project.
         let release = rig.state.with_file_name("release");
@@ -3649,9 +3681,9 @@ fn verify_lane_profile(
             "import XCTest\n@testable import LaneProbe\nfinal class LaneProbeTests: XCTestCase { func testAnswer() { XCTAssertEqual(answer(), 42) } }\n",
         )?;
         let command = if probe == Some(Probe::SwiftReadOnly) {
-            "set -eu; test \"$(command -v swift)\" = \"$TMPDIR/bin/swift\"; cd .swift-probe; swift build; swift test; test ! -e .build; printf 'lane-swift-read-only: PASS\\n'"
+            "set -eu; tmp=$(cd \"$TMPDIR\" && pwd -P); test \"$(command -v swift)\" = \"$tmp/bin/swift\"; cd .swift-probe; swift build; swift test; test ! -e .build; printf 'lane-swift-read-only: PASS\\n'"
         } else {
-            "set -eu; test \"$(command -v swift)\" = \"$TMPDIR/bin/swift\"; cd .swift-probe; swift build; swift test; printf 'lane-swift: PASS\\n'"
+            "set -eu; tmp=$(cd \"$TMPDIR\" && pwd -P); test \"$(command -v swift)\" = \"$tmp/bin/swift\"; cd .swift-probe; swift build; swift test; printf 'lane-swift: PASS\\n'"
         };
         let argv = ["/bin/sh", "-c", command].map(OsString::from);
         let command = compiled.command(&argv, &provenant_core::AttemptId::from_bytes([0; 16]))?;
@@ -3694,7 +3726,7 @@ fn verify_lane_profile(
         let argv = [
             "/bin/sh",
             "-c",
-            "set -eu; test \"$CARGO_TARGET_DIR\" = \"$TMPDIR/target\"; cd .cargo-probe; PATH=\"$HOME/.cargo/bin:$PATH\" cargo test -p lane-probe --offline; cmp Cargo.lock \"$TMPDIR/cargo-probe.lock\"; test ! -e target; printf 'lane-cargo-read-only: PASS\\n'",
+            "set -eu; tmp=$(cd \"$TMPDIR\" && pwd -P); test \"$CARGO_TARGET_DIR\" = \"$tmp/target\"; cd .cargo-probe; PATH=\"$HOME/.cargo/bin:$PATH\" cargo test -p lane-probe --offline; cmp Cargo.lock \"$TMPDIR/cargo-probe.lock\"; test ! -e target; printf 'lane-cargo-read-only: PASS\\n'",
         ]
         .map(OsString::from);
         let command = compiled.command(&argv, &provenant_core::AttemptId::from_bytes([0; 16]))?;
@@ -3783,6 +3815,11 @@ if (process.argv[2] === 'child') {
         )?;
         let argv = ["/bin/sh", "-c", concat!(
             "set -eu; ",
+            // The lane's TMPDIR is the short alias: it must resolve inside the
+            // sandbox, take files, and hold a Unix-domain socket (#2661).
+            "case \"$TMPDIR\" in /private/tmp/pv-*) ;; *) exit 16;; esac; ",
+            ": > \"$TMPDIR/alias-file\"; test -f \"$TMPDIR/alias-file\"; ",
+            "\"$LANE_FIXTURE\" --bind-socket \"$TMPDIR/alias.sock\"; ",
             "if /usr/bin/security help >/dev/null 2>&1; then exit 11; fi; ",
             "if /bin/cat \"$HOME/Library/Keychains/login.keychain-db\" >/dev/null 2>&1; then exit 12; fi; ",
             "for f in credentials.toml credentials; do ",
@@ -3799,7 +3836,7 @@ if (process.argv[2] === 'child') {
             "cmp \"$TMPDIR/index-before-fixture\" \"$TMPDIR/git-common/index\"; ",
             "unlink \"$lane_root/.fixture-git-probe\"; ",
             "git -c user.name=lane -c user.email=lane@example.test commit -q --allow-empty -m probe && ",
-            "test \"$(command -v git)\" = \"$TMPDIR/bin/git\" && ",
+            "test \"$(command -v git)\" = \"$(cd \"$TMPDIR\" && pwd -P)/bin/git\" && ",
             "git --version && git status --porcelain && ",
             "cargo test -j2 --lib --offline --manifest-path \"$TMPDIR/cargo-probe/Cargo.toml\"; ",
             "if command -v node >/dev/null && command -v pnpm >/dev/null; then ",
@@ -3820,6 +3857,7 @@ if (process.argv[2] === 'child') {
             "PROVENANT_LANE_TOOLS_REQUIRED".into(),
             if tools_required { "1" } else { "0" }.into(),
         ));
+        tool_env.push(("LANE_FIXTURE".into(), launch.argv[0].clone()));
         options.env = Some(&tool_env);
         let output = executor.execute(options)?;
         assert_eq!(
@@ -3828,7 +3866,18 @@ if (process.argv[2] === 'child') {
             "shell probe: {}",
             String::from_utf8_lossy(&output.stderr.bytes)
         );
-        assert!(String::from_utf8_lossy(&output.stdout.bytes).contains("1 passed"));
+        // The confined child bound a socket through the alias TMPDIR.
+        assert!(
+            String::from_utf8_lossy(&output.stdout.bytes).contains("lane-socket: PASS"),
+            "{}",
+            String::from_utf8_lossy(&output.stdout.bytes)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout.bytes).contains("1 passed"),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout.bytes),
+            String::from_utf8_lossy(&output.stderr.bytes)
+        );
         if tools_required {
             assert!(
                 String::from_utf8_lossy(&output.stdout.bytes)

@@ -75,6 +75,19 @@ SwiftPM build output to a scratch-only path and keeps the Clang module cache and
 (where SwiftPM runs the compiled package manifest) in the lane scratch as well. Both toolchains stay read-only, and the worktree,
 Git metadata and shared caches retain the read-only profile.
 
+On macOS the state-root path of a lane's `TMPDIR` can exceed Darwin's 104-byte
+`sun_path` limit, so tools that bind Unix sockets fail. At launch preparation
+the attempt gets a symlink `/private/tmp/pv-<32 hex>` to its `tmp` directory
+(the hex is the first 16 bytes of SHA-256 over a fixed domain string and the
+canonical attempt path), and `TMPDIR`, `TMPPREFIX` and `CLAUDE_CODE_TMPDIR`
+name `<alias>/candidate-N`. Only that string changes: grants, staging,
+settlement and retention use the real `tmp`, and the sandbox resolves the
+link to it, so no grant names the alias. A writer's profile also lets it bind
+and connect to Unix-domain sockets under its own scratch. A name already taken
+by anything other than our own link owned by the same user is left alone and
+the lane uses the real path. Terminal commit, unreserved reconciliation and
+retention unlink the alias (never recursively) when they remove `tmp`.
+
 The receipt names the worktree. `--worktree PATH` uses an existing checkout
 without taking over its lifecycle. A missing branch name creates an owned
 checkout; for an absolute path or a path below `.worktrees/`, use

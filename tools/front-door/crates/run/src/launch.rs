@@ -179,6 +179,9 @@ pub struct LaunchPaths {
     /// Private temporary directory for a lane, never a shared system
     /// one. Terminal commit and withdrawal remove it best-effort.
     pub temporary: PathBuf,
+    /// Short symlink to `temporary` on macOS, for a `TMPDIR` that fits
+    /// `sun_path`. Absent when unavailable; grants always use `temporary`.
+    pub temporary_alias: Option<PathBuf>,
 }
 
 /// A fresh continuation prepared before its operation and attempt are recorded.
@@ -194,6 +197,24 @@ pub struct PreparedStart {
 impl Drop for PreparedStart {
     fn drop(&mut self) {
         if !self.retained {
+            // No attempt record survives for retention to find the alias by,
+            // so unlink it before its attempt directory is deleted.
+            let attempt = crate::artifacts::subdir(
+                &self.runs,
+                std::ffi::OsStr::new(&self.run.to_string()),
+                false,
+            )
+            .and_then(|run| crate::artifacts::subdir(&run, std::ffi::OsStr::new("attempts"), false))
+            .and_then(|attempts| {
+                crate::artifacts::subdir(
+                    &attempts,
+                    std::ffi::OsStr::new(&self.attempt.to_string()),
+                    false,
+                )
+            });
+            if let Ok(attempt) = attempt {
+                crate::short_temporary::remove(&attempt);
+            }
             let _ = crate::artifacts::remove_entry_tree(
                 &self.runs,
                 std::ffi::OsStr::new(&self.run.to_string()),
@@ -304,6 +325,7 @@ impl RunStore {
             scratch: base.join("scratch"),
             provider_state: base.join("provider-state"),
             temporary: base.join("tmp"),
+            temporary_alias: crate::short_temporary::ensure(&directory),
         };
         let prompt = output_prompt(&base, &attempt.prompt);
         let plan = providers
@@ -1431,6 +1453,7 @@ impl RunStore {
                 scratch: base.join("scratch"),
                 provider_state: base.join("provider-state"),
                 temporary: base.join("tmp"),
+                temporary_alias: crate::short_temporary::ensure(&attempt),
             };
             let prepared = providers
                 .priority(task)

@@ -901,6 +901,13 @@ pub(super) fn prepare_candidates(
                 continue;
             }
         };
+        if let Some(alias) = &paths.temporary_alias {
+            alias_temporary_env(
+                &mut spec.env,
+                scratch,
+                &alias.join(format!("candidate-{candidate}")),
+            );
+        }
         spec.profile.spec.allow_database_ipc = task.access.database_ipc;
         configure_process_tree(&mut spec, paths)?;
         let build_settings = config.domains.fabric.lanes.build_settings();

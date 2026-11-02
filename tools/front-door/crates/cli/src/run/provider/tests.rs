@@ -542,6 +542,7 @@ fn prompt_paths(attempt: &Path) -> Result<run::LaunchPaths, Box<dyn std::error::
         scratch: attempt.join("scratch"),
         provider_state: attempt.join("provider-state"),
         temporary: attempt.join("tmp"),
+        temporary_alias: None,
     })
 }
 
@@ -1025,6 +1026,7 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         scratch: attempt.join("scratch"),
         provider_state: attempt.join("provider-state"),
         temporary: attempt.join("tmp"),
+        temporary_alias: None,
     };
     for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
         std::fs::DirBuilder::new()
@@ -1353,6 +1355,7 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         scratch: attempt.join("publishing-scratch"),
         provider_state: attempt.join("publishing-provider-state"),
         temporary: attempt.join("publishing-tmp"),
+        temporary_alias: None,
     };
     for path in [
         &publishing_paths.scratch,
@@ -1495,6 +1498,7 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         scratch: attempt.join("fallback-scratch"),
         provider_state: attempt.join("fallback-provider-state"),
         temporary: attempt.join("fallback-tmp"),
+        temporary_alias: None,
     };
     for path in [
         &fallback_paths.scratch,
@@ -1526,6 +1530,7 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         scratch: attempt.join("review-scratch"),
         provider_state: attempt.join("review-provider-state"),
         temporary: attempt.join("review-tmp"),
+        temporary_alias: None,
         ..fallback_paths
     };
     for path in [
@@ -1627,6 +1632,7 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         scratch: attempt.join("continued-scratch"),
         provider_state: attempt.join("continued-provider-state"),
         temporary: attempt.join("continued-tmp"),
+        temporary_alias: None,
     };
     for path in [
         &continued_paths.scratch,
@@ -1848,6 +1854,7 @@ fn credential_authority_never_follows_links_below_the_host_root()
         scratch: attempt.join("scratch"),
         provider_state: attempt.join("provider-state"),
         temporary: attempt.join("tmp"),
+        temporary_alias: None,
     };
     let login = provenant_providers::claude::Login {
         executable: Path::new("/fixture/claude"),
