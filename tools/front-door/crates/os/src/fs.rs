@@ -312,10 +312,13 @@ impl From<FsError> for io::Error {
 /// a small bounded retry absorbs the race without hiding that case. The caller
 /// still verifies the opened inode against the directory entry.
 fn open_lock_creating(dir: &File, name: &OsStr) -> io::Result<File> {
+    open_lock_creating_with(|| os::open_lock(dir, name))
+}
+fn open_lock_creating_with(mut open: impl FnMut() -> io::Result<File>) -> io::Result<File> {
     const ATTEMPTS: usize = 5;
     let mut attempt = 1;
     loop {
-        match os::open_lock(dir, name) {
+        match open() {
             Err(source) if source.kind() == io::ErrorKind::NotFound && attempt < ATTEMPTS => {
                 attempt += 1;
             }

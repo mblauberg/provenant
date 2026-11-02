@@ -794,6 +794,20 @@ fn concurrent_owner_lock_creation_of_one_new_name_succeeds_for_every_caller() {
 }
 
 #[test]
+fn creating_owner_lock_stops_after_five_persistent_not_found_errors() {
+    let mut attempts = 0;
+    let error = open_lock_creating_with(|| {
+        attempts += 1;
+        assert!(attempts <= 5, "lock open retried beyond its limit");
+        Err(io::Error::from_raw_os_error(errno::ENOENT))
+    })
+    .unwrap_err();
+
+    assert_eq!(attempts, 5);
+    assert_eq!(error.raw_os_error(), Some(errno::ENOENT));
+}
+
+#[test]
 fn owner_lock_refuses_symlinked_lock_entries() {
     let temp = tempfile::tempdir().unwrap();
     let dir = Directory::open_anchor(temp.path()).unwrap();
