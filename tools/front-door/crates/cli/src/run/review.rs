@@ -85,6 +85,10 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
     let domains = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
         .map_err(|e| invalid(e.to_string()))?
         .domains;
+    let size = if let Some(range) = selection_range(command.shape.as_deref(), command.range.as_deref())? {
+        let numstat = git(&["diff", "--numstat", "--no-renames", range, "--"])?;
+        Some(domains.routing.review.size.classify_numstat(&numstat))
+    } else { None };
     let selected = domains
         .routing
         .review
@@ -93,9 +97,19 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
             command.risk.as_deref(),
             command.kind.as_deref(),
             &paths,
-            None,
+            size,
         )
         .map_err(invalid)?;
+    let mut panel_shape = selected.shape.clone();
+    let priority = provenant_routing::lens_priority(command.kind.as_deref());
+    let mut lens_index = 0;
+    for group in &mut panel_shape.reviewers {
+        group.lenses = (0..group.count).map(|_| {
+            let lens = priority.get(lens_index).or_else(|| priority.last()).copied().unwrap_or("correctness-spec");
+            lens_index += 1;
+            lens.to_owned()
+        }).collect();
+    }
     if selected
         .shape
         .reviewers
@@ -108,6 +122,9 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
     }
     data["shape"] = json!(selected.name);
     data["selection_source"] = json!(selected.source);
+    data["size"] = json!(size);
+    data["kind"] = json!(command.kind);
+    data["risk"] = json!(command.risk);
     data["target"] = json!(head);
 
     let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| invalid(e.to_string()))?;
@@ -129,13 +146,13 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
         })
     };
     let mut slots = Vec::new();
-    for (group_index, group) in selected.shape.reviewers.iter().enumerate() {
+    for (group_index, group) in panel_shape.reviewers.iter().enumerate() {
         for index in 0..group.count {
             let lens = group.lenses.get(index).cloned();
             let (operation_id, task_id) = review_identity(
                 &head,
                 selected.name,
-                selected.shape,
+                &panel_shape,
                 &brief,
                 group_index,
                 index,
@@ -170,7 +187,7 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
         let choice = recover_slot(
             &head,
             selected.name,
-            selected.shape,
+            &panel_shape,
             &brief,
             slot.group,
             slot.index,
@@ -668,9 +685,12 @@ fn aggregate_verdicts(data: &Value) -> Value {
 }
 fn review_text(data: &Value) -> String {
     let mut text = format!(
-        "review {} ({})\n",
+        "review {} ({}; size={}; kind={}; risk={})\n",
         data["shape"].as_str().unwrap_or("unknown"),
-        data["selection_source"].as_str().unwrap_or("unknown")
+        data["selection_source"].as_str().unwrap_or("unknown"),
+        data["size"].as_str().unwrap_or("unknown"),
+        data["kind"].as_str().unwrap_or("unknown"),
+        data["risk"].as_str().unwrap_or("unknown")
     );
     if let Some(rows) = data["reviewers"].as_array() {
         for row in rows {
@@ -682,7 +702,8 @@ fn review_text(data: &Value) -> String {
                 .map(|e| format!("@{e}"))
                 .unwrap_or_default();
             text.push_str(&format!(
-                "  run={} operation={} {}{} state={} verdict={} output={}{}\n",
+                "  lens={} run={} operation={} {}{} state={} verdict={} output={}{}\n",
+                row["lens"].as_str().unwrap_or("general"),
                 row["run_id"].as_str().unwrap_or("unknown"),
                 row["operation_id"].as_str().unwrap_or("unknown"),
                 model,

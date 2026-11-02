@@ -94,6 +94,14 @@ impl<T: Default> Default for Select<T> {
     }
 }
 pub type ReviewSelect = Select<String>;
+/// Base lens order. Conditional risk lenses are selected separately.
+pub fn lens_priority(kind: Option<&str>) -> &'static [&'static str] {
+    match kind {
+        Some("docs") => &["conventions-readability"],
+        Some("refactor") => &["correctness-spec", "refactor-cleanup", "design-fit-reuse", "tests", "simplicity", "conventions-readability", "reliability", "flexibility"],
+        _ => &["correctness-spec", "tests", "design-fit-reuse", "simplicity", "conventions-readability", "refactor-cleanup", "reliability", "flexibility"],
+    }
+}
 impl Default for ReviewConfig {
     fn default() -> Self {
         bundled()

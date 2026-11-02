@@ -1695,11 +1695,7 @@ impl StageBuilder<'_> {
     /// against the shape's reviewer total; a tier set in the preset is an override.
     fn select_items(&self, mut list: Vec<Value>) -> Result<Vec<Value>, String> {
         let kind = self.parameters.get("kind").and_then(Value::as_str).unwrap_or_default();
-        let priority: &[&str] = match kind {
-            "docs" => &["conventions-readability"],
-            "refactor" => &["correctness-spec", "refactor-cleanup", "design-fit-reuse", "tests"],
-            _ => &["correctness-spec", "tests"],
-        };
+        let priority = provenant_routing::lens_priority(Some(kind));
         if kind == "docs" {
             list.retain(|item| item.get("when").and_then(Value::as_str).is_some_and(|when| !when.is_empty()) || item["name"] == "conventions-readability");
         }
