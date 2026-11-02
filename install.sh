@@ -72,24 +72,36 @@ helper_executable='Contents/Library/LoginItems/Provenant Menu.app/Contents/MacOS
 agent_backup=
 instruction_count=0
 instructions_committed=false
-# Remove the live LaunchAgent plist from its path, keeping a copy in the app stage when possible.
+# Take the live LaunchAgent plist off its path, but only while a backup copy of it exists.
 # Never fails: sets agent_note to what happened so the recovery message can say so.
 agent_note=
 quarantine_agent() {
     agent_note=
     if [ ! -e "$agent" ] && [ ! -L "$agent" ]; then return 0; fi
-    if [ -n "$app_stage" ] && mv -f "$agent" "$app_stage/$1" 2>/dev/null; then
+    if [ -z "$agent_backup" ] || [ ! -f "$agent_backup" ]; then
+        agent_note=" The live LaunchAgent plist at $agent was left in place because no backup of it exists."
+    elif [ -n "$app_stage" ] && mv -f "$agent" "$app_stage/$1" 2>/dev/null; then
         agent_note=" The live LaunchAgent plist was moved to $app_stage/$1."
     elif rm -f "$agent" 2>/dev/null && [ ! -e "$agent" ] && [ ! -L "$agent" ]; then
         agent_note=' The live LaunchAgent plist was removed.'
     else
-        agent_note=" Could not move or remove the live LaunchAgent plist at $agent; it still points at the previous app helper. Remove it with: rm -f '$agent'"
+        agent_note=" Could not move or remove the live LaunchAgent plist at $agent; remove it with: rm -f '$agent'."
     fi
     return 0
 }
 # Print the manual recovery instructions, naming every retained recovery copy.
 recovery_failed() {
-    printf '%s\n' "$1; agent remains stopped. Retained recovery copies: previous app ${app_backup:-none}; previous LaunchAgent plist ${agent_backup:-none}. Restore $app_backup to $HOME/Applications/$app and $agent_backup to $agent before bootstrapping.$agent_note" >&2
+    retained=
+    steps=
+    if [ -n "$app_backup" ]; then
+        retained="previous app $app_backup"
+        steps="restore $app_backup to $HOME/Applications/$app"
+    fi
+    if [ -n "$agent_backup" ]; then
+        retained="${retained:+$retained; }previous LaunchAgent plist $agent_backup"
+        steps="${steps:+$steps and }restore $agent_backup to $agent"
+    fi
+    printf '%s\n' "$1; agent remains stopped. Retained recovery copies: ${retained:-none}.$agent_note${steps:+ Before bootstrapping, $steps.}" >&2
 }
 cleanup() {
     status=$?
@@ -132,20 +144,20 @@ cleanup() {
             if backup_inode=$(ls -di "$app_backup"); then
                 backup_inode=${backup_inode%% *}
             else
-                backup_inode=$old_app_inode
+                recovered=false
             fi
-            if [ "$backup_inode" = "$old_app_inode" ]; then
+            if "$recovered" && [ "$backup_inode" = "$old_app_inode" ]; then
                 if [ -e "$HOME/Applications/$app" ]; then
                     "$swap_helper" --swap-path "$app_backup" "$HOME/Applications/$app" || recovered=false
                 else
                     mv "$app_backup" "$HOME/Applications/$app" || recovered=false
                 fi
-                if ! "$recovered"; then
-                    # The restored plist points at a helper the new app lacks; take it off the live path.
-                    quarantine_agent agent.recovery.plist
-                    recovery_failed 'Could not restore the previous Provenant app'
-                    app_stage=
-                fi
+            fi
+            if ! "$recovered"; then
+                # Never leave a plist for a helper the new app may lack on its live path.
+                quarantine_agent agent.recovery.plist
+                recovery_failed 'Could not restore the previous Provenant app'
+                app_stage=
             fi
         fi
         if "$recovered" && "$app_agent_stopped" && [ -f "$agent" ] && [ -d "$HOME/Applications/$app" ]; then

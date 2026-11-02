@@ -1440,9 +1440,60 @@ esac
     );
     assert!(retained.join("Provenant Console.app/old-build").exists());
     assert_eq!(fs::read_to_string(&agent)?, "legacy agent");
-    fs::remove_file(&mv)?;
+    // The remove hint precedes the restore instructions.
+    assert!(
+        message.find("remove it with: rm -f").ok_or("hint")?
+            < message.find("Before bootstrapping").ok_or("restore")?
+    );
     fs::remove_file(&rm)?;
     fs::write(&launchctl, "#!/bin/sh\nexit 0\n")?;
+    fs::remove_dir_all(retained)?;
+    fs::remove_file(&recorded)?;
+    // If the plist backup copy fails after the swap and the swap-back fails too,
+    // the live plist is the only copy and must survive even when it cannot be moved.
+    fs::write(&agent, "only copy")?;
+    fs::write(installed_app.join("old-build"), "preserve this app")?;
+    let backup_failed = rig.root.join("backup-copy-failed");
+    let cp = fake_bin.join("cp");
+    fs::write(
+        &cp,
+        format!(
+            "#!/bin/sh\ncase \"$3\" in */agent.plist.tmp) touch '{}'; exit 1 ;; esac\nexec /bin/cp \"$@\"\n",
+            backup_failed.display()
+        ),
+    )?;
+    fs::write(
+        &mv,
+        format!(
+            "#!/bin/sh\ncase \"$1\" in */.provenant-retained.*/*) [ ! -f '{}' ] || exit 1 ;; esac\ncase \"$2\" in */LaunchAgents/*.plist) exit 1 ;; esac\nexec /bin/mv \"$@\"\n",
+            backup_failed.display()
+        ),
+    )?;
+    fs::set_permissions(&cp, fs::Permissions::from_mode(0o755))?;
+    let no_backup = rig.execute_os(
+        Path::new("/bin/sh"),
+        &guided_args,
+        Some(b"n\ny\nn\nn\nn\nn\nappend\nskip\n"),
+    )?;
+    assert_eq!(code(&no_backup), 4, "{no_backup:?}");
+    let message = String::from_utf8_lossy(&no_backup.stderr.bytes);
+    let retained = fs::read_dir(rig.home.join("Applications"))?
+        .collect::<io::Result<Vec<_>>>()?
+        .into_iter()
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".provenant-retained.")
+        })
+        .ok_or("retained staging directory")?
+        .path();
+    assert!(message.contains("left in place because no backup of it exists"));
+    assert!(!message.contains("previous LaunchAgent plist"));
+    assert!(retained.join("Provenant Console.app/old-build").exists());
+    assert_eq!(fs::read_to_string(&agent)?, "only copy");
+    fs::remove_file(&mv)?;
+    fs::remove_file(&cp)?;
     fs::remove_dir_all(retained)?;
     fs::remove_file(&recorded)?;
     fs::remove_file(agent)?;
