@@ -37,6 +37,9 @@ const REQUEST: Duration = Duration::from_secs(90);
 /// which the agent exits so launchd restarts it.
 const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
 const ACCEPT_FAILURES: u32 = 50;
+const KICKSTART_DEADLINE: Duration = Duration::from_secs(3);
+const BOOTSTRAP_RETRY_INTERVAL: Duration = Duration::from_millis(300);
+const BOOTSTRAP_ATTEMPTS: usize = 5;
 /// Maximum accepted requests running concurrently. Excess connections are
 /// closed immediately; the client reports its stable empty-reply error.
 const MAX_CONNECTIONS: usize = 64;
@@ -468,7 +471,15 @@ fn service_tool(
 
 /// Start the receipt-owned plist after managed publication has succeeded.
 fn bootstrap(state: &Path, home: &Path, changed: bool) -> Result<(), AgentError> {
-    bootstrap_with(state, home, changed, launchctl)
+    bootstrap_with(
+        state,
+        home,
+        changed,
+        KICKSTART_DEADLINE,
+        BOOTSTRAP_RETRY_INTERVAL,
+        BOOTSTRAP_ATTEMPTS,
+        launchctl,
+    )
 }
 
 // LaunchAgent bootstrap retries are bounded real-time OS operations.
@@ -477,6 +488,9 @@ fn bootstrap_with(
     state: &Path,
     home: &Path,
     changed: bool,
+    kickstart_deadline: Duration,
+    retry_interval: Duration,
+    bootstrap_attempts: usize,
     mut run: impl FnMut(&[&OsStr], &Path) -> Result<(bool, String), AgentError>,
 ) -> Result<(), AgentError> {
     fs::DirBuilder::new()
@@ -500,7 +514,7 @@ fn bootstrap_with(
         )?;
         // launchctl can report failure after actually restarting the agent.
         // A running service with a different pid proves the restart happened.
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + kickstart_deadline;
         loop {
             let (printed, status) = run(&["print".as_ref(), service.as_ref()], home)?;
             if printed
@@ -513,7 +527,7 @@ fn bootstrap_with(
             if remaining.is_zero() {
                 break;
             }
-            std::thread::park_timeout(remaining.min(Duration::from_millis(300)));
+            std::thread::park_timeout(remaining.min(retry_interval));
         }
         // A replaced binary can leave launchd's lightweight code requirement
         // stale. Boot out and bootstrap to refresh it when kickstart stalls.
@@ -523,7 +537,7 @@ fn bootstrap_with(
     }
     // A just-booted-out service can refuse bootstrap briefly while it exits.
     let mut last = String::new();
-    for _ in 0..5 {
+    for _ in 0..bootstrap_attempts {
         let (ok, error) = run(
             &["bootstrap".as_ref(), domain.as_ref(), plist.as_os_str()],
             home,
@@ -532,7 +546,7 @@ fn bootstrap_with(
             return Ok(());
         }
         last = error;
-        std::thread::park_timeout(Duration::from_millis(300));
+        std::thread::park_timeout(retry_interval);
     }
     Err(AgentError::Launchctl("bootstrap", last))
 }
@@ -988,11 +1002,19 @@ mod tests {
             (true, "state = running\n pid = 42"),
         ]
         .into_iter();
-        bootstrap_with(root.path(), root.path(), false, |args, _| {
-            calls.push(args[0].to_owned());
-            let (ok, detail) = replies.next().expect("unexpected launchctl call");
-            Ok((ok, detail.into()))
-        })
+        bootstrap_with(
+            root.path(),
+            root.path(),
+            false,
+            Duration::from_secs(3),
+            Duration::ZERO,
+            5,
+            |args, _| {
+                calls.push(args[0].to_owned());
+                let (ok, detail) = replies.next().expect("unexpected launchctl call");
+                Ok((ok, detail.into()))
+            },
+        )
         .unwrap();
         assert!(replies.next().is_none());
         assert_eq!(
@@ -1009,30 +1031,38 @@ mod tests {
             let mut prints = 0;
             let mut bootouts = 0;
             let mut bootstraps = 0;
-            let error = bootstrap_with(root.path(), root.path(), false, |args, _| {
-                if args[0] == OsStr::new("kickstart") {
-                    assert_eq!(args[1], OsStr::new("-k"));
-                    return Ok((kickstart_ok, "exit 113".into()));
-                }
-                if args[0] == OsStr::new("bootout") {
-                    bootouts += 1;
-                    return Ok((true, String::new()));
-                }
-                if args[0] == OsStr::new("bootstrap") {
-                    assert_eq!(bootouts, 1);
-                    bootstraps += 1;
-                    return Ok((false, "bootstrap refused".into()));
-                }
-                assert_eq!(args[0], OsStr::new("print"));
-                prints += 1;
-                let status = match prints {
-                    2 => "state = running", // No pid is not proof of a restart.
-                    3 => "state = running\n pid = 0",
-                    4 => "state = waiting\n pid = 42",
-                    _ => "state = running\n pid = 41",
-                };
-                Ok((true, status.into()))
-            })
+            let error = bootstrap_with(
+                root.path(),
+                root.path(),
+                false,
+                Duration::ZERO,
+                Duration::ZERO,
+                5,
+                |args, _| {
+                    if args[0] == OsStr::new("kickstart") {
+                        assert_eq!(args[1], OsStr::new("-k"));
+                        return Ok((kickstart_ok, "exit 113".into()));
+                    }
+                    if args[0] == OsStr::new("bootout") {
+                        bootouts += 1;
+                        return Ok((true, String::new()));
+                    }
+                    if args[0] == OsStr::new("bootstrap") {
+                        assert_eq!(bootouts, 1);
+                        bootstraps += 1;
+                        return Ok((false, "bootstrap refused".into()));
+                    }
+                    assert_eq!(args[0], OsStr::new("print"));
+                    prints += 1;
+                    let status = match prints {
+                        2 => "state = running", // No pid is not proof of a restart.
+                        3 => "state = running\n pid = 0",
+                        4 => "state = waiting\n pid = 42",
+                        _ => "state = running\n pid = 41",
+                    };
+                    Ok((true, status.into()))
+                },
+            )
             .unwrap_err()
             .to_string();
             assert_eq!(error, "launchctl bootstrap failed: bootstrap refused");
@@ -1046,10 +1076,18 @@ mod tests {
         use super::*;
         let root = tempfile::tempdir().unwrap();
         let mut calls = Vec::new();
-        bootstrap_with(root.path(), root.path(), false, |args, _| {
-            calls.push(args[0].to_owned());
-            Ok((true, "state = spawn scheduled\n last exit code = 78".into()))
-        })
+        bootstrap_with(
+            root.path(),
+            root.path(),
+            false,
+            Duration::ZERO,
+            Duration::ZERO,
+            5,
+            |args, _| {
+                calls.push(args[0].to_owned());
+                Ok((true, "state = spawn scheduled\n last exit code = 78".into()))
+            },
+        )
         .unwrap();
         assert_eq!(calls[0], OsStr::new("print"));
         assert_eq!(calls[1], OsStr::new("kickstart"));
@@ -1058,6 +1096,14 @@ mod tests {
             &calls[calls.len() - 2..],
             ["bootout", "bootstrap"].map(OsString::from)
         );
+    }
+
+    #[test]
+    fn bootstrap_production_retry_defaults_are_preserved() {
+        use super::*;
+        assert_eq!(KICKSTART_DEADLINE, Duration::from_secs(3));
+        assert_eq!(BOOTSTRAP_RETRY_INTERVAL, Duration::from_millis(300));
+        assert_eq!(BOOTSTRAP_ATTEMPTS, 5);
     }
 
     /// A stand-in for the worktree owner's registry entry name.

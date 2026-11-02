@@ -274,10 +274,13 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
             .ok_or("lanes.max_depth missing")?;
         // The lane can write every record this scan reads, so a read
         // failure is reported, never fatal: the stop below must still run.
-        let queued = session.store.queued_runs(&call).unwrap_or_else(|error| {
-            launch_error = Some(error.to_string());
-            Vec::new()
-        });
+        let queued = session
+            .store
+            .queued_runs(&call, run::QUEUED_RUNS_PAGE_SIZE)
+            .unwrap_or_else(|error| {
+                launch_error = Some(error.to_string());
+                Vec::new()
+            });
         let scan = scan_queued(
             &session.store,
             queued,
@@ -323,6 +326,7 @@ fn serve(context: run::HolderContext, cancel: CancelToken, reason: Stop) -> Resu
                 accepted,
                 stop_reason,
                 &call,
+                run::QUEUED_RUNS_PAGE_SIZE,
             ) {
                 launch_error = Some(error);
             }
@@ -465,6 +469,7 @@ fn finish_children(
     accepted: std::collections::BTreeSet<(AttemptId, u64)>,
     reason: Option<StopReason>,
     call: &run::Request<'_>,
+    page_size: usize,
 ) -> Vec<String> {
     let mut errors = Vec::new();
     let refusal = if matches!(
@@ -518,7 +523,7 @@ fn finish_children(
     };
     let mut processed = std::collections::BTreeSet::new();
     loop {
-        let queued = match store.queued_runs(call) {
+        let queued = match store.queued_runs(call, page_size) {
             Ok(queued) => queued,
             Err(error) => {
                 errors.push(error.to_string());
@@ -1456,7 +1461,7 @@ mod tests {
                 )
                 .is_err()
         );
-        let queued = store.queued_runs(&call)?;
+        let queued = store.queued_runs(&call, run::QUEUED_RUNS_PAGE_SIZE)?;
         assert_eq!(queued, vec![first, second]);
         let mut launches = Vec::new();
         let scan = scan_queued(
@@ -1484,7 +1489,10 @@ mod tests {
             );
             assert_eq!(record.generation, 0);
         }
-        assert_eq!(store.queued_runs(&call)?, vec![first, second]);
+        assert_eq!(
+            store.queued_runs(&call, run::QUEUED_RUNS_PAGE_SIZE)?,
+            vec![first, second]
+        );
         Ok(())
     }
 
@@ -1576,9 +1584,9 @@ mod tests {
         });
         let task_id = child.request.tasks[0].task_id;
         let running = child.attempts[0].attempt_id;
-        // Two running rows keep the tail beyond the first discovery window
-        // even after stop_children cancels one accepted queued attempt.
-        for index in 0_u8..2 {
+        // A running row keeps the tail beyond the first discovery window
+        // while an earlier queued attempt is refused.
+        for index in 0_u8..1 {
             child.run_id = RunId::from_bytes([index + 4; 16]);
             child.operation_id = OperationId::parse(&format!("running-child-{index}"))?;
             child.attempts[0].attempt_id = AttemptId::from_bytes([index + 6; 16]);
@@ -1620,17 +1628,17 @@ mod tests {
                 }
             );
         }
-        // Admission permits 256 queued attempts in addition to active ones.
-        // Put the last queued run beyond queued_runs' 256-row scan window.
+        // Put the tail queued run beyond a two-row discovery window while
+        // keeping the running row and first queued run inside it.
         let template = child.request.tasks[0].clone();
         let mut deferred = Vec::new();
-        for batch in 0_u8..4 {
+        for batch in 0_u8..1 {
             child.run_id = RunId::from_bytes([batch + 10; 16]);
             child.operation_id = OperationId::parse(&format!("queued-batch-{batch}"))?;
             child.request.tasks.clear();
             child.attempts.clear();
-            let first = u128::from(batch) * 64 + 1;
-            for index in first..(first + 64).min(256) {
+            let first = u128::from(batch) + 1;
+            for index in first..first + 1 {
                 let task_id = TaskId::from_bytes(index.to_be_bytes());
                 child.request.tasks.push(run::TaskRequest {
                     context: None,
@@ -1657,7 +1665,7 @@ mod tests {
         }];
         store.create(&child, &call)?;
         deferred.push(child.attempts[0].attempt_id);
-        assert!(!store.queued_runs(&call)?.contains(&child.run_id));
+        assert!(!store.queued_runs(&call, 2)?.contains(&child.run_id));
         let stopped = reason.is_some().then(|| deferred.remove(0));
         let mut accepted = std::collections::BTreeSet::from([(stopped.unwrap_or(running), 1)]);
         if unobservable_child {
@@ -1665,7 +1673,7 @@ mod tests {
             // diagnostic must survive the drain without hiding later proposals.
             accepted.insert((running, 1));
         }
-        let errors = finish_children(&store, &context, accepted, reason, &call);
+        let errors = finish_children(&store, &context, accepted, reason, &call, 2);
         assert_eq!(errors.len(), usize::from(unobservable_child), "{errors:?}");
         if unobservable_child {
             assert_eq!(
@@ -1716,7 +1724,11 @@ mod tests {
                 extra: Default::default()
             }
         );
-        assert!(store.queued_runs(&call)?.is_empty());
+        assert!(
+            store
+                .queued_runs(&call, run::QUEUED_RUNS_PAGE_SIZE)?
+                .is_empty()
+        );
         Ok(())
     }
 
