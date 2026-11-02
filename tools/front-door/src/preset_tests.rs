@@ -1222,7 +1222,7 @@ fn shapes() -> super::preset::ShapeSelector {
             name: name.into(),
             source: source.into(),
             slots: vec!["junior".into(); count],
-            plan: provenant_routing::ReviewConfig::default().lens_plan(query.kind),
+            plan: provenant_routing::ReviewConfig::default().lens_plan(query.kind, &[], false),
             ..Default::default()
         })
     })
@@ -1897,6 +1897,15 @@ fn roles_view_lists_the_library_and_one_role() {
             .unwrap()
             .starts_with("sha256:")
     );
+    let tests = layers.roles_view(Some("lens.tests")).unwrap();
+    let refs: Vec<_> = tests["references"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|reference| reference["ref"].as_str())
+        .collect();
+    assert!(refs.contains(&"skill:test-design/references/judgement.md"));
+    assert!(refs.contains(&"skill:test-design/references/boundaries.md"));
 }
 
 #[test]

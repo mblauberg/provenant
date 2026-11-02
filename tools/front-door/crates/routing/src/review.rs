@@ -19,6 +19,7 @@ pub struct ReviewConfig {
 pub struct ReviewLenses {
     pub order: Vec<String>,
     pub by_kind: BTreeMap<String, KindLenses>,
+    pub by_paths: BTreeMap<String, PathLenses>,
 }
 impl Default for ReviewLenses {
     fn default() -> Self {
@@ -33,6 +34,12 @@ pub struct KindLenses {
     /// Lenses added outside the shape's slot cap.
     pub add: Vec<String>,
 }
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PathLenses {
+    /// Lenses added outside the shape's slot cap when a changed path matches.
+    pub add: Vec<String>,
+}
 /// The lens order, exclusivity and additions that apply to one change kind.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LensPlan {
@@ -40,6 +47,10 @@ pub struct LensPlan {
     /// The kind names its own base order, so other lenses are not base lenses.
     pub exclusive: bool,
     pub add: Vec<String>,
+    /// Matching path rules that added lenses, in config key order.
+    pub matched_paths: Vec<String>,
+    /// Whether changed diff hunks contain a recognised test marker.
+    pub test_marker: bool,
 }
 /// Conditional risk tags and the lens each one adds. The single source for the
 /// CLI flag values, the native panel and the council's `when` triggers.
@@ -267,6 +278,8 @@ fn bundled() -> ReviewConfig {
     struct LensesAsset {
         order: Vec<String>,
         by_kind: BTreeMap<String, KindLenses>,
+        #[serde(default)]
+        by_paths: BTreeMap<String, PathLenses>,
     }
     #[derive(Deserialize)]
     struct SelectAsset {
@@ -285,6 +298,7 @@ fn bundled() -> ReviewConfig {
         lenses: ReviewLenses {
             order: asset.review.lenses.order,
             by_kind: asset.review.lenses.by_kind,
+            by_paths: asset.review.lenses.by_paths,
         },
         select: ReviewSelect {
             default: select.default,
@@ -361,13 +375,31 @@ impl<T: Clone> Select<T> {
 }
 impl ReviewConfig {
     /// The lens order and additions for one change kind.
-    pub fn lens_plan(&self, kind: Option<&str>) -> LensPlan {
+    pub fn lens_plan(&self, kind: Option<&str>, paths: &[String], test_marker: bool) -> LensPlan {
         let entry = kind.and_then(|kind| self.lenses.by_kind.get(kind));
         let own = entry.filter(|entry| !entry.order.is_empty());
+        let matched_paths: Vec<_> = self
+            .lenses
+            .by_paths
+            .iter()
+            .filter(|(pattern, _)| paths.iter().any(|path| path_matches(pattern, path)))
+            .map(|(pattern, _)| pattern.clone())
+            .collect();
+        let mut add = entry.map(|entry| entry.add.clone()).unwrap_or_default();
+        for pattern in &matched_paths {
+            if let Some(rule) = self.lenses.by_paths.get(pattern) {
+                add.extend(rule.add.iter().cloned());
+            }
+        }
+        if test_marker && !add.iter().any(|lens| lens == "tests") {
+            add.push("tests".into());
+        }
         LensPlan {
             order: own.map_or(&self.lenses.order, |entry| &entry.order).clone(),
             exclusive: own.is_some(),
-            add: entry.map(|entry| entry.add.clone()).unwrap_or_default(),
+            add,
+            matched_paths,
+            test_marker,
         }
     }
 
@@ -375,8 +407,15 @@ impl ReviewConfig {
     /// other slots take the kind's order without repeats, and a slot with no
     /// lens left is dropped. Kind additions and risk-tag lenses follow outside
     /// the slot cap, in the pool of the last group.
-    pub fn panel(&self, shape: &ReviewShape, kind: Option<&str>, extra: &[&str]) -> ReviewShape {
-        let plan = self.lens_plan(kind);
+    pub fn panel(
+        &self,
+        shape: &ReviewShape,
+        kind: Option<&str>,
+        paths: &[String],
+        test_marker: bool,
+        extra: &[&str],
+    ) -> ReviewShape {
+        let plan = self.lens_plan(kind, paths, test_marker);
         let mut used: Vec<String> = shape
             .reviewers
             .iter()
@@ -576,6 +615,9 @@ impl ReviewConfig {
                     (format!("review.lenses.by_kind.{kind}.add"), &entry.add),
                 ]
             }))
+            .chain(self.lenses.by_paths.iter().map(|(pattern, entry)| {
+                (format!("review.lenses.by_paths.{pattern}.add"), &entry.add)
+            }))
         {
             if lens.iter().any(|name| !identifier(name)) {
                 error(field, "invalid_lenses");
@@ -599,6 +641,14 @@ impl ReviewConfig {
                 if !self.shapes.contains_key(shape) {
                     error(format!("review.select.{field}.{key}"), "unknown_shape");
                 }
+            }
+        }
+        for (pattern, rule) in &self.lenses.by_paths {
+            if pattern.is_empty() || pattern.len() > 512 {
+                error(format!("review.lenses.by_paths.{pattern}"), "selector");
+            }
+            if rule.add.len() > 64 {
+                error(format!("review.lenses.by_paths.{pattern}.add"), "limit");
             }
         }
     }
@@ -651,6 +701,24 @@ fn path_matches(pattern: &str, path: &str) -> bool {
         pattern.len(),
         path.len(),
     )
+}
+
+/// Detect test declarations or common test-runner calls on added or removed
+/// diff hunk lines. File headers and hunk metadata are ignored.
+pub fn diff_has_test_markers(diff: &str) -> bool {
+    const ATTRIBUTES: [&str; 3] = ["#[test]", "#[cfg(test)]", "#[tokio::test]"];
+    diff.lines().any(|line| {
+        ((line.starts_with('+') && !line.starts_with("+++"))
+            || (line.starts_with('-') && !line.starts_with("---")))
+            && (ATTRIBUTES.iter().any(|marker| line.contains(marker))
+                || ["describe(", "it("].iter().any(|call| {
+                    line.match_indices(call).any(|(index, _)| {
+                        line[..index].chars().next_back().is_none_or(|character| {
+                            !character.is_ascii_alphanumeric() && character != '_'
+                        })
+                    })
+                }))
+    })
 }
 
 #[cfg(test)]
@@ -747,7 +815,7 @@ mod tests {
         let review = ReviewConfig::default();
         let shape = &review.shapes["standard"];
         assert_eq!(
-            lens_names(&review.panel(shape, None, &[])),
+            lens_names(&review.panel(shape, None, &[], false, &[])),
             ["correctness-spec", "tests", "design-fit-reuse"]
         );
     }
@@ -756,7 +824,7 @@ mod tests {
     fn kind_lenses_are_additive_outside_the_slot_cap() {
         let review = ReviewConfig::default();
         let standard = &review.shapes["standard"];
-        let refactor = review.panel(standard, Some("refactor"), &[]);
+        let refactor = review.panel(standard, Some("refactor"), &[], false, &[]);
         assert_eq!(
             lens_names(&refactor),
             [
@@ -767,14 +835,74 @@ mod tests {
             ]
         );
         // The quick slot is filled first; the kind lenses still follow it.
-        let quick = review.panel(&review.shapes["quick"], Some("refactor"), &[]);
+        let quick = review.panel(&review.shapes["quick"], Some("refactor"), &[], false, &[]);
         assert_eq!(
             lens_names(&quick),
             ["correctness-spec", "refactor-cleanup", "design-fit-reuse"]
         );
         // At deep every lens is already a base lens, so nothing is added twice.
-        let deep = review.panel(&review.shapes["deep"], Some("refactor"), &[]);
+        let deep = review.panel(&review.shapes["deep"], Some("refactor"), &[], false, &[]);
         assert_eq!(lens_names(&deep).len(), 8);
+    }
+
+    #[test]
+    fn quick_panel_adds_test_paths_and_markers_without_changing_other_diffs() {
+        let review = ReviewConfig::default();
+        let paths = vec!["crates/x/tests/a.rs".to_owned()];
+        assert_eq!(
+            lens_names(&review.panel(&review.shapes["quick"], None, &paths, false, &[])),
+            ["correctness-spec", "tests"]
+        );
+        assert_eq!(
+            lens_names(&review.panel(
+                &review.shapes["quick"],
+                None,
+                &["src/lib.rs".to_owned()],
+                false,
+                &[]
+            )),
+            ["correctness-spec"]
+        );
+        assert_eq!(
+            lens_names(&review.panel(
+                &review.shapes["quick"],
+                None,
+                &["src/lib.rs".to_owned()],
+                true,
+                &[]
+            )),
+            ["correctness-spec", "tests"]
+        );
+        assert_eq!(
+            lens_names(&review.panel(&review.shapes["standard"], None, &paths, false, &[])),
+            ["correctness-spec", "tests", "design-fit-reuse"]
+        );
+    }
+
+    #[test]
+    fn test_marker_scan_only_reads_added_or_removed_hunk_lines() {
+        assert!(diff_has_test_markers(
+            "@@ -1 +1 @@\n-#[cfg(test)]\n+#[tokio::test]\n"
+        ));
+        assert!(diff_has_test_markers(
+            "@@ -1,0 +2 @@\n+describe(\"suite\", () => {})\n"
+        ));
+        assert!(!diff_has_test_markers("@@ -1 +1 @@\n context #[test]\n"));
+        assert!(!diff_has_test_markers(
+            "@@ -1 +1 @@\n+let result = source.split(',');\n"
+        ));
+        assert!(diff_has_test_markers(
+            "@@ -1 +1 @@\n+    it(\"works\", () => {});\n"
+        ));
+        assert!(!diff_has_test_markers(
+            "+++ b/src/lib.rs\n--- a/src/lib.rs\n"
+        ));
+    }
+
+    #[test]
+    fn empty_path_lens_table_disables_bundled_path_rules() {
+        let config: RoutingConfig = toml_edit::de::from_str("[review.lenses.by_paths]\n").unwrap();
+        assert!(config.review.lenses.by_paths.is_empty());
     }
 
     #[test]
@@ -782,11 +910,11 @@ mod tests {
         let review = ReviewConfig::default();
         let deep = &review.shapes["deep"];
         assert_eq!(
-            lens_names(&review.panel(deep, Some("docs"), &[])),
+            lens_names(&review.panel(deep, Some("docs"), &[], false, &[])),
             ["conventions-readability"]
         );
         assert_eq!(
-            lens_names(&review.panel(deep, Some("docs"), &["security-privacy"])),
+            lens_names(&review.panel(deep, Some("docs"), &[], false, &["security-privacy"])),
             ["conventions-readability", "security-privacy"]
         );
     }
@@ -823,7 +951,7 @@ mod tests {
             ],
         };
         assert_eq!(
-            lens_names(&review.panel(&shape, None, &[])),
+            lens_names(&review.panel(&shape, None, &[], false, &[])),
             ["tests", "correctness-spec", "design-fit-reuse"]
         );
     }

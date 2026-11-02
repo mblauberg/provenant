@@ -16,6 +16,7 @@ pub mod planner;
 
 mod panel;
 #[cfg(test)]
+#[allow(unused_imports, reason = "preset tests construct a selector result")]
 pub use panel::ShapeHint;
 pub use panel::{ShapeSelector, review_selector};
 

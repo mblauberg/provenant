@@ -25,6 +25,7 @@ pub struct ShapeQuery<'a> {
 /// Picks a review shape for a review stage. The host owns routing, so it
 /// supplies this from its review configuration.
 pub type ShapeSelector = Box<dyn Fn(&ShapeQuery<'_>) -> Result<ShapeHint, String>>;
+type GitRunner = dyn Fn(&std::path::Path, &[&str]) -> Result<String, String>;
 
 /// The review shape selected for one review stage. Review shapes are canonical
 /// for who reviews; presets compose them, so lens counts and tiers default from here.
@@ -49,9 +50,51 @@ pub fn review_selector(
     directory: PathBuf,
     task_kind: Option<String>,
 ) -> ShapeSelector {
+    review_selector_with_git(review, directory, task_kind, Box::new(git))
+}
+
+fn review_selector_with_git(
+    review: ReviewConfig,
+    directory: PathBuf,
+    task_kind: Option<String>,
+    run_git: Box<GitRunner>,
+) -> ShapeSelector {
     Box::new(move |query| {
         let kind = query.kind.or(task_kind.as_deref());
         let mut warnings = Vec::new();
+        let mut paths = Vec::new();
+        let mut test_marker = false;
+        let cwd = query
+            .worktree
+            .map_or_else(|| directory.clone(), |tree| directory.join(tree));
+        let base = query
+            .base
+            .map(str::to_owned)
+            .or_else(|| default_base(&run_git, &cwd));
+        if let Some(base) = base.as_deref() {
+            let tip = query.head.unwrap_or("HEAD");
+            let range = format!("{base}...{tip}");
+            match run_git(
+                &cwd,
+                &["diff", "--no-renames", "--name-only", "-z", &range, "--"],
+            ) {
+                Ok(out) => {
+                    paths = out
+                        .split('\0')
+                        .filter(|path| !path.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                }
+                Err(error) => warnings.push(format!("cannot read changed paths: {error}")),
+            }
+            match run_git(
+                &cwd,
+                &["diff", "--no-ext-diff", "--unified=0", &range, "--"],
+            ) {
+                Ok(out) => test_marker = provenant_routing::diff_has_test_markers(&out),
+                Err(error) => warnings.push(format!("cannot scan test markers: {error}")),
+            }
+        }
         let size = match (query.size, query.shape, query.base) {
             (Some(size), _, _) => {
                 if !["small", "medium", "large"].contains(&size) {
@@ -60,14 +103,11 @@ pub fn review_selector(
                 Some(size)
             }
             (None, None, Some(base)) => {
-                let cwd = query
-                    .worktree
-                    .map_or_else(|| directory.clone(), |tree| directory.join(tree));
                 let measured =
                     review
                         .size
                         .measure(kind, base, query.head.unwrap_or("HEAD"), &mut |args| {
-                            git(&cwd, args)
+                            run_git(&cwd, args)
                         });
                 warnings.extend(measured.warning);
                 measured.size
@@ -75,16 +115,28 @@ pub fn review_selector(
             _ => None,
         };
         let selected = review.select_shape(query.shape, query.risk, kind, &[], size)?;
+        let plan = review.lens_plan(kind, &paths, test_marker);
+        let lens_reason = plan
+            .matched_paths
+            .iter()
+            .map(|pattern| format!("by_paths:{pattern}"))
+            .chain(test_marker.then(|| "test-marker".to_owned()))
+            .collect::<Vec<_>>();
         let mut hint = ShapeHint {
             name: selected.name.to_owned(),
             source: format!(
-                "{}; size={}; kind={}; risk={}",
+                "{}{}; size={}; kind={}; risk={}",
                 selected.source,
+                if lens_reason.is_empty() {
+                    String::new()
+                } else {
+                    format!("; lenses={}", lens_reason.join(","))
+                },
                 size.unwrap_or("unknown"),
                 kind.unwrap_or("unknown"),
                 query.risk.unwrap_or("unknown")
             ),
-            plan: review.lens_plan(kind),
+            plan,
             warnings,
             ..Default::default()
         };
@@ -96,6 +148,37 @@ pub fn review_selector(
             }
         }
         Ok(hint)
+    })
+}
+
+fn default_base(run_git: &GitRunner, cwd: &std::path::Path) -> Option<String> {
+    let mut candidates = Vec::new();
+    if let Ok(name) = run_git(
+        cwd,
+        &[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    ) {
+        candidates.push(name.trim().to_owned());
+    }
+    candidates.extend(["origin/main", "main", "origin/master", "master"].map(str::to_owned));
+    candidates.into_iter().find(|name| {
+        !name.is_empty()
+            && !name.starts_with('-')
+            && run_git(
+                cwd,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    "--end-of-options",
+                    &format!("{name}^{{commit}}"),
+                ],
+            )
+            .is_ok()
     })
 }
 
@@ -193,6 +276,9 @@ impl StageBuilder<'_> {
         let hint = self.shape_hint()?;
         let shape = hint.as_ref();
         let plan = shape.map(|shape| &shape.plan);
+        if let Some(plan) = plan {
+            append_plan_additions(&mut list, &plan.add);
+        }
         let caller_supplied = self
             .origins
             .get("parameters.lenses")
@@ -264,5 +350,72 @@ impl StageBuilder<'_> {
             return Err("for_each selected no items".into());
         }
         Ok(selected)
+    }
+}
+
+fn append_plan_additions(list: &mut Vec<Value>, additions: &[String]) {
+    for name in additions {
+        if !list.iter().any(|item| item["name"] == *name) {
+            list.push(json!({"name": name}));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[allow(unused_imports, reason = "used by the panel unit tests")]
+    use super::{ShapeQuery, append_plan_additions, review_selector_with_git};
+    #[allow(unused_imports, reason = "used by the panel unit test")]
+    use provenant_routing::ReviewConfig;
+    #[allow(unused_imports, reason = "used by the panel unit test")]
+    use std::path::PathBuf;
+
+    #[test]
+    fn default_preset_scans_test_paths_without_changing_shape_selection() {
+        let mut review = ReviewConfig::default();
+        review
+            .select
+            .by_paths
+            .insert("**/tests/**".into(), "deep".into());
+        let selector = review_selector_with_git(
+            review,
+            PathBuf::from("/repo"),
+            None,
+            Box::new(|_, args| {
+                Ok(match args[0] {
+                    "symbolic-ref" => "main\n".into(),
+                    "rev-parse" => "main\n".into(),
+                    "diff" if args.contains(&"--name-only") => "crates/x/tests/a.rs\0".into(),
+                    "diff" if args.contains(&"--unified=0") => "@@ -1,0 +2 @@\n+#[test]\n".into(),
+                    _ => String::new(),
+                })
+            }),
+        );
+        let hint = selector(&ShapeQuery {
+            risk: Some("routine"),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(hint.name, "quick");
+        assert!(
+            hint.source.contains("by_paths:**/tests/**"),
+            "{}",
+            hint.source
+        );
+        assert!(hint.source.contains("test-marker"), "{}", hint.source);
+        assert_eq!(hint.plan.add, ["tests"]);
+    }
+
+    #[test]
+    fn plan_additions_are_included_once_even_when_lenses_are_caller_supplied() {
+        let mut lenses = vec![serde_json::json!({"name": "review"})];
+        append_plan_additions(&mut lenses, &["tests".into(), "review".into()]);
+        assert_eq!(
+            lenses,
+            [
+                serde_json::json!({"name": "review"}),
+                serde_json::json!({"name": "tests"})
+            ]
+        );
     }
 }

@@ -185,6 +185,20 @@ and `adversarial`. A risk tier alone does not add `security-privacy` or
 those. A caller-supplied `lenses` list in `review-council` keeps the caller's
 order.
 
+The bundled `review.lenses.by_paths` rules add `tests` outside the slot cap for
+common test paths and runner config files. Changed diff hunks also add `tests`
+when added or removed lines contain `#[test]`, `#[cfg(test)]`,
+`#[tokio::test]`, `describe(` or `it(`. Repos replace the bundled table by
+declaring their own patterns; an empty table disables the path rules:
+
+```toml
+[domains.routing.review.lenses.by_paths."**/specs/**"]
+add = ["tests"]
+```
+
+The explanation and review report include the matched `by_paths:<pattern>`
+reason. Marker-triggered additions report `test-marker`.
+
 For example, review a commit with changed paths from a Git range:
 
 ```sh
@@ -196,8 +210,10 @@ The target must resolve to a commit. `--range` supplies changed paths and size f
 selection; without it the range defaults to `<default branch>...TARGET` (the
 branch `origin/HEAD` names, else `origin/main`, `main`, `origin/master` or
 `master`), so size and path rules apply by default. Renames are treated as a deletion
-and an addition, so rules can match either path. `--shape` overrides selection
-and skips the range lookup; the risk floor and integration override still apply. A changed path that is not UTF-8 is rejected; use
+and an addition, so rules can match either path. `--shape` overrides shape
+selection and keeps size unknown; changed paths may still be read for lens
+additions. The risk floor and integration override still apply. A changed path
+that is not UTF-8 is rejected; use
 an explicit shape when path selection cannot represent it.
 `--wait` sets the overall wait limit, defaulting to one hour, and accepts
 seconds or durations such as `30m`, from one second to four hours.

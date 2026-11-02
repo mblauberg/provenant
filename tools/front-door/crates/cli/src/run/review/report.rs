@@ -28,6 +28,19 @@ pub(super) fn review_text(data: &Value) -> String {
         data["kind"].as_str().unwrap_or("unknown"),
         data["risk"].as_str().unwrap_or("unknown")
     );
+    if let Some(reasons) = data["lens_reasons"]
+        .as_array()
+        .filter(|rows| !rows.is_empty())
+    {
+        text.push_str(&format!(
+            "  lens reasons: {}\n",
+            reasons
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     for warning in data["warnings"].as_array().into_iter().flatten() {
         text.push_str(&format!("  warning: {}\n", warning.as_str().unwrap_or("")));
     }

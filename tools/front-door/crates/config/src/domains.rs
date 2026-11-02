@@ -72,7 +72,8 @@ impl FieldMetadata {
 
 /// One domain's immutable entry. Assets contain section-local keys: config
 /// nests them under `[domains.<name>]`. Defaults include every accepted key.
-/// Arrays replace as a whole; tables (including inline tables) merge recursively.
+/// Arrays replace as a whole; tables merge recursively unless the owner marks
+/// a section-local table for replacement.
 pub struct DomainSection {
     pub name: &'static str,
     pub defaults: fn(Profile) -> &'static str,
@@ -83,6 +84,8 @@ pub struct DomainSection {
     pub boundary: fn(&SectionError) -> bool,
     /// Owner-published types, bounds and variants for the settings editor.
     pub fields: &'static [FieldMetadata],
+    /// Section-local table paths whose user value replaces the compiled table.
+    pub replace_tables: &'static [&'static str],
 }
 impl DomainSection {
     /// Erase only the registration function, never the resolved section type.
@@ -97,10 +100,15 @@ impl DomainSection {
             advisories: |_| Vec::new(),
             boundary: |_| false,
             fields: &[],
+            replace_tables: &[],
         }
     }
     pub const fn with_fields(mut self, fields: &'static [FieldMetadata]) -> Self {
         self.fields = fields;
+        self
+    }
+    pub const fn replacing_tables(mut self, paths: &'static [&'static str]) -> Self {
+        self.replace_tables = paths;
         self
     }
     pub const fn with_boundary_checks(mut self) -> Self {
