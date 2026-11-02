@@ -7,7 +7,18 @@
 //! `[[plan.patterns]]` entries are lowered through the ordinary role path, so a
 //! planned lane runs the same role as a static one. The runtime owns the
 //! bounded expansion; nothing here widens what it allows.
-use super::{Layers, Value, flatten_parameters, interpolate, json, lower_leaf, stage_id};
+//!
+//! `after` lists stages inserted behind the planner, for a reconciliation the
+//! static stage ran inside itself.
+//!
+//! A catalogue entry with `enabled_by = "param"` is offered only while that
+//! parameter is non-zero. A catalogue entry with `for_each = "lenses"` stands for one pattern per lens
+//! the routing review panel selects for the subject, so a planner can only
+//! choose lenses that panel allows, at a tier it may lower or raise but never
+//! at a lens the panel left out.
+use super::{
+    Layers, StageBuilder, Value, flatten_parameters, interpolate, json, lower_leaf, stage_id,
+};
 use provenant_fabric_runtime::config::{PlanAuto, PlanMode};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -201,6 +212,7 @@ fn auto_rule(
     origins: &BTreeMap<String, String>,
     brief: &str,
     parameters: &Value,
+    size: Option<&str>,
 ) -> (bool, String) {
     let shaped: Vec<&str> = catalogue
         .get("explicit")
@@ -211,6 +223,20 @@ fn auto_rule(
         .collect();
     if let Some(parameter) = shaped.iter().find(|name| explicit(origins, name)) {
         return (false, format!("{parameter} given explicitly"));
+    }
+    // A review panel is scaled by the subject's size: only a large one plans,
+    // however long the brief.
+    if catalogue.get("by_size").and_then(Value::as_bool) == Some(true) {
+        return match size {
+            Some("large") => (true, "review subject is large".into()),
+            other => (
+                false,
+                format!(
+                    "review subject is not large (size={})",
+                    other.unwrap_or("unknown")
+                ),
+            ),
+        };
     }
     let items = acceptance_items(brief);
     if items > ctx.auto.acceptance_items {
@@ -248,6 +274,7 @@ fn auto_rule(
 /// Decide whether this run plans. `None` means the preset declares no
 /// catalogue and the run is unchanged.
 pub fn decide(
+    layers: &Layers,
     ctx: &PlanContext,
     name: &str,
     config: &Value,
@@ -257,7 +284,7 @@ pub fn decide(
     let Some(catalogue) = config.get("plan") else {
         return match ctx.mode {
             PlanMode::On if ctx.from_cli => Err(format!(
-                "preset {name} declares no planner patterns: catalogues for it are pending (#2531 follow-up); run it with --plan auto or --plan off"
+                "preset {name} declares no planner patterns; run it with --plan auto or --plan off"
             )),
             PlanMode::On => Ok(Some(Decision {
                 requested: ctx.mode,
@@ -279,7 +306,16 @@ pub fn decide(
     let (wanted, reason) = match ctx.mode {
         PlanMode::Off => (false, "planning turned off".to_owned()),
         PlanMode::On => (true, "planning requested".to_owned()),
-        PlanMode::Auto => auto_rule(ctx, catalogue, origins, brief, &parameters),
+        PlanMode::Auto => {
+            let size = if catalogue.get("by_size").and_then(Value::as_bool) == Some(true) {
+                with_builder(layers, name, config, origins, brief, |builder| {
+                    Ok(builder.shape_hint()?.and_then(|hint| hint.size))
+                })?
+            } else {
+                None
+            };
+            auto_rule(ctx, catalogue, origins, brief, &parameters, size.as_deref())
+        }
     };
     let mut decision = Decision {
         requested: ctx.mode,
@@ -305,6 +341,22 @@ pub fn decide(
     if wanted && let Some(replaces) = missing {
         decision.applied = false;
         let why = format!("plan.replaces names no top-level stage: {replaces}");
+        decision.reason = format!(
+            "{why}; running the preset's deterministic defaults. Wanted: {}",
+            decision.reason
+        );
+        decision.degraded = Some(why);
+        return Ok(Some(decision));
+    }
+    // Lens legs pin the subject themselves, which only a commit can do from
+    // inside a planned fragment.
+    let subject = parameters.pointer("/subject/type").and_then(Value::as_str);
+    if wanted
+        && let Some(allowed) = catalogue.get("subject_types").and_then(Value::as_array)
+        && let Some(kind) = subject.filter(|kind| !allowed.iter().any(|a| a == kind))
+    {
+        decision.applied = false;
+        let why = format!("a {kind} subject cannot be pinned from a planned fragment");
         decision.reason = format!(
             "{why}; running the preset's deterministic defaults. Wanted: {}",
             decision.reason
@@ -417,6 +469,16 @@ pub fn apply(
     ] {
         parameters.insert(key.into(), value);
     }
+    let plan_values = flatten_parameters(
+        name,
+        config.get("parameters").unwrap_or(&json!({})),
+        "",
+        origins,
+    )?;
+    let extra_roots = plan_values
+        .get("read_roots")
+        .filter(|roots| roots.as_array().is_some_and(|roots| !roots.is_empty()))
+        .cloned();
     let stages = config
         .get_mut("stages")
         .and_then(Value::as_array_mut)
@@ -428,24 +490,83 @@ pub fn apply(
         .ok_or_else(|| {
             format!("preset {name}: plan.replaces names no top-level stage: {replaces}")
         })?;
-    stages[position] = json!({
+    let mut planner = json!({
         "id": "plan",
         "role": "plan.shape",
         "tier": ctx.route,
         "access": "read_only",
         "plan": {"kinds": ["task", "synthesise"], "max_nodes": ctx.max_nodes, "patterns": []},
     });
-    let plan_values = flatten_parameters(
-        name,
-        config.get("parameters").unwrap_or(&json!({})),
-        "",
-        origins,
-    )?;
+    // A fragment cannot widen its planner's read roots, so a preset whose
+    // planned scouts read the caller's extra roots gives the planner the same.
+    if let Some(roots) = extra_roots {
+        planner["read_roots"] = roots;
+    }
+    stages[position] = planner;
+    // Stages the planned fragment needs after it, for example the synthesis
+    // that reconciles the evidence the static stage reconciled in itself.
+    if let Some(after) = catalogue.get("after") {
+        let after = after
+            .as_array()
+            .ok_or_else(|| format!("preset {name}: plan.after must be a list of stages"))?;
+        for (offset, stage) in after.iter().enumerate() {
+            let id = stage
+                .as_object()
+                .and_then(|stage| stage.get("id"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("preset {name}: plan.after stages need an id"))?;
+            if stages
+                .iter()
+                .enumerate()
+                .any(|(at, existing)| stage_id(existing, at) == id)
+            {
+                return Err(format!(
+                    "preset {name}: plan.after stage {id} repeats a stage id"
+                ));
+            }
+            stages.insert(position + 1 + offset, stage.clone());
+        }
+    }
     let patterns = catalogue
         .get("patterns")
         .and_then(Value::as_array)
         .ok_or_else(|| format!("preset {name}: plan.patterns must list patterns"))?;
-    let lowered = patterns
+    let mut entries = Vec::new();
+    for pattern in patterns {
+        // A pattern gated by a parameter the chair turned off is not offered.
+        if let Some(gate) = pattern.get("enabled_by") {
+            let gate = gate.as_str().ok_or_else(|| {
+                format!("preset {name}: plan pattern enabled_by must name a parameter")
+            })?;
+            let value = plan_values.get(gate).ok_or_else(|| {
+                format!("preset {name}: plan pattern enabled_by names no parameter: {gate}")
+            })?;
+            let off = match value {
+                Value::Null | Value::Bool(false) => true,
+                Value::Number(number) => number.as_f64() == Some(0.0),
+                Value::String(text) => text.is_empty(),
+                Value::Array(items) => items.is_empty(),
+                Value::Object(_) | Value::Bool(true) => false,
+            };
+            if off {
+                continue;
+            }
+        }
+        match pattern.get("for_each").and_then(Value::as_str) {
+            Some(list) => entries.extend(each_item(
+                layers,
+                name,
+                config,
+                origins,
+                brief,
+                &plan_values,
+                pattern,
+                list,
+            )?),
+            None => entries.push(pattern.clone()),
+        }
+    }
+    let lowered = entries
         .iter()
         .map(|pattern| lower_pattern(layers, config.get("roles"), &plan_values, brief, pattern))
         .collect::<Result<Vec<_>, _>>()?;
@@ -455,7 +576,127 @@ pub fn apply(
         "patterns": lowered,
         "patterns_only": true,
         "disjoint_waves": true,
+        "wire_exports": true,
     }))
+}
+
+/// Run `f` with a stage builder over the preset's final parameters, for the
+/// selections a static stage would make: the review shape and its lenses.
+fn with_builder<T>(
+    layers: &Layers,
+    name: &str,
+    config: &Value,
+    origins: &BTreeMap<String, String>,
+    brief: &str,
+    f: impl FnOnce(&StageBuilder<'_>) -> Result<T, String>,
+) -> Result<T, String> {
+    let parameters = flatten_parameters(
+        name,
+        config.get("parameters").unwrap_or(&json!({})),
+        "",
+        origins,
+    )?;
+    let (mut stack, mut origins, mut files) = (Vec::new(), origins.clone(), Vec::new());
+    let builder = StageBuilder {
+        layers,
+        name,
+        prompt: brief,
+        parameters,
+        roles: config.get("roles"),
+        stack: &mut stack,
+        origins: &mut origins,
+        repo_files: &mut files,
+        scope: "",
+    };
+    f(&builder)
+}
+
+/// Replace `${item.name}` and `${item.tier}` through a catalogue entry.
+fn bind_item(value: &Value, item: &Value) -> Value {
+    match value {
+        Value::String(text) => {
+            let mut text = text.clone();
+            for key in ["name", "tier"] {
+                if let Some(replacement) = item.get(key).and_then(Value::as_str) {
+                    text = text.replace(&format!("${{item.{key}}}"), replacement);
+                }
+            }
+            Value::String(text)
+        }
+        Value::Array(values) => Value::Array(values.iter().map(|v| bind_item(v, item)).collect()),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, v)| (key.clone(), bind_item(v, item)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// One catalogue entry per item of `list`. The `lenses` list is first narrowed
+/// by the review panel exactly as a static review stage narrows it, so the
+/// entries name only the lenses the panel selects for this subject.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the panel needs the preset's state"
+)]
+fn each_item(
+    layers: &Layers,
+    name: &str,
+    config: &Value,
+    origins: &BTreeMap<String, String>,
+    brief: &str,
+    values: &Value,
+    pattern: &Value,
+    list: &str,
+) -> Result<Vec<Value>, String> {
+    let items = values
+        .get(list)
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| format!("preset {name}: plan pattern for_each names no list: {list}"))?;
+    let items = if list == "lenses" {
+        with_builder(layers, name, config, origins, brief, |builder| {
+            builder.select_items(items)
+        })?
+    } else {
+        items
+    };
+    let mut entries = Vec::new();
+    for item in items {
+        let mut entry = bind_item(pattern, &item);
+        if let Some(map) = entry.as_object_mut() {
+            map.remove("for_each");
+            // The lens role prompt reads its own item.
+            for node in map
+                .get_mut("nodes")
+                .and_then(Value::as_array_mut)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_object_mut)
+            {
+                node.entry("item").or_insert_with(|| item.clone());
+            }
+            // A tier the panel chose stays a legal choice for the planner.
+            for parameter in map
+                .get_mut("parameters")
+                .and_then(Value::as_object_mut)
+                .into_iter()
+                .flat_map(|parameters| parameters.values_mut())
+            {
+                let default = parameter.get("default").cloned();
+                if let (Some(default), Some(allowed)) = (
+                    default,
+                    parameter.get_mut("enum").and_then(Value::as_array_mut),
+                ) && !allowed.contains(&default)
+                {
+                    allowed.push(default);
+                }
+            }
+        }
+        entries.push(entry);
+    }
+    Ok(entries)
 }
 
 /// One catalogue entry as a runtime `PatternSpec`. Pattern parameters stay as

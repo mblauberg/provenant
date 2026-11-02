@@ -32,7 +32,7 @@ envelope. `single`, `chain` and the fan-out primitives default to read-only.
 Inspect `provenant preset list`, `provenant preset show P` and `provenant preset explain P`.
 Preview `provenant run --preset scout-swarm --prompt-file brief.md --set 'parameters.width=3' --explain`.
 Submit the same command without `--explain`; add `--params-file lanes.toml`, `--concurrency N` or `--wait 30m` as needed.
-For large batches leave `--plan` at its `auto` default or pass `--plan on`: a principal planner shapes `big-batch` lanes and waves from its catalogue, and `--explain` shows `plan: auto -> on|off (reason)`; `--plan off` keeps the static graph.
+For large batches leave `--plan` at its `auto` default or pass `--plan on`: a principal planner shapes `big-batch` lanes and waves, `scout-swarm`, `fan-out*` and `scope-then-run` scouts or workers (question, route, width, or no scout) and a large `review-council`'s lenses (only the panel's, with tiers) from the preset's catalogue, and `--explain` shows `plan: auto -> on|off (reason)`; `--plan off` keeps the static graph. Pass `width`, `lanes` or `lenses` yourself when the brief already fixes the shape: the chair plans what it states, the planner what is left open. `deliver` has no catalogue.
 Use `provenant status`, `provenant output TARGET` and the returned graph continuation command to collect evidence.
 
 The CLI expands presets; MCP `fabric_graph` accepts graph documents, not preset

@@ -17,7 +17,8 @@ use std::{
 const CHILD_ID_ENV: &str = "PROVENANT_WORKFLOW_STORE_CHILD";
 const BASE_ENV: &str = "PROVENANT_WORKFLOW_STORE_BASE";
 const SOCKET_ENV: &str = "PROVENANT_WORKFLOW_STORE_SOCKET";
-const CHILD_FILTER: &str = "store::tests::concurrency::concurrent_writer_fixture_process";
+const CHILD_FILTER: &str =
+    "store::tests::concurrency::concurrent_process_writers_on_one_revision_have_one_winner";
 const REVISION_DEADLINE: Duration = Duration::from_secs(10);
 const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(15);
 
@@ -25,6 +26,7 @@ const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(15);
 #[test]
 fn concurrent_process_writers_on_one_revision_have_one_winner() {
     if std::env::var_os(CHILD_ID_ENV).is_some() {
+        concurrent_writer_fixture_process();
         return;
     }
 
@@ -75,8 +77,7 @@ fn concurrent_process_writers_on_one_revision_have_one_winner() {
     assert_eq!(saved.subject(), candidate.subject());
 }
 
-/// The test runner re-enters this exact test in each isolated fixture process.
-#[test]
+/// Run in each isolated fixture process after the parent test re-enters.
 fn concurrent_writer_fixture_process() {
     let Some(id) = std::env::var_os(CHILD_ID_ENV) else {
         return;

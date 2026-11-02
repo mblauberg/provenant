@@ -202,17 +202,21 @@ impl WorkerObserver for LandWorkers<'_> {
         &self,
         roots: &[PathBuf],
         entries: &[provenant_os::pid::CensusIgnoreEntry],
+        excused_executables: &[String],
         _: bool,
     ) -> provenant_confinement::worktrees::WorkerObservations {
-        self.0.observe_roots_with_policy(roots, entries, true)
+        self.0
+            .observe_roots_with_policy(roots, entries, excused_executables, true)
     }
     fn live_process_with_policy(
         &self,
         root: &std::path::Path,
         entries: &[provenant_os::pid::CensusIgnoreEntry],
+        excused_executables: &[String],
         _: bool,
     ) -> Option<ObservedProcess> {
-        self.0.live_process_with_policy(root, entries, true)
+        self.0
+            .live_process_with_policy(root, entries, excused_executables, true)
     }
     fn requires_complete_census(&self) -> bool {
         true

@@ -1428,7 +1428,8 @@ fn gc_foreign_merged_clean_is_opt_in_immediate_and_requires_complete_census()
                 .into_iter()
                 .map(|reason| RetainedBranch {
                     branch: "native".into(),
-                    reason
+                    reason,
+                    detail: None,
                 })
                 .collect::<Vec<_>>(),
             "{scenario}"
@@ -1584,6 +1585,7 @@ fn gc_foreign_rechecks_changes_before_removal() -> Result<(), Box<dyn Error>> {
                 } else {
                     RetainReason::Changed
                 },
+                detail: None,
             }],
             "{report:?}"
         );
@@ -1676,7 +1678,8 @@ pub(super) fn gc_foreign_retains_a_process_with_cwd_inside_the_worktree()
         report.worktrees.retained,
         vec![RetainedBranch {
             branch: "native-cwd".into(),
-            reason: RetainReason::LiveWriter
+            reason: RetainReason::LiveWriter,
+            detail: None,
         }]
     );
     assert!(report.worktrees.removed.is_empty());
@@ -1786,6 +1789,7 @@ pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck()
                 vec![RetainedBranch {
                     branch: "native-no-state".into(),
                     reason: RetainReason::UnknownWriter,
+                    detail: None,
                 }]
             );
             assert!(path.is_dir());
@@ -2199,6 +2203,7 @@ fn gc_managed_fallback_keeps_fresh_trees_at_the_tip_or_first_parent() -> Result<
                 vec![RetainedBranch {
                     branch: name.clone(),
                     reason: expected,
+                    detail: None,
                 }],
                 "{entry} {shape}: {report:?}"
             );
@@ -2288,6 +2293,21 @@ impl WorkerObserver for FlippingWorkers {
         };
         roots.iter().cloned().map(|root| (root, state)).collect()
     }
+
+    fn observe_roots_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
+        let states = self.observe_roots(roots);
+        let details = states
+            .iter()
+            .filter(|(_, state)| **state != WorkerState::Free)
+            .map(|(root, _)| {
+                (
+                    root.clone(),
+                    "process 968: cwd unreadable; policy_condition=gc.census_excused_executables entry required; path=\"/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Resources/bin/simdiskimaged\"".into(),
+                )
+            })
+            .collect();
+        (states, details)
+    }
 }
 
 #[test]
@@ -2343,6 +2363,7 @@ fn gc_managed_removal_needs_a_fresh_free_census_under_custody() -> Result<(), Bo
             vec![RetainedBranch {
                 branch: "gc-census-flip".into(),
                 reason: RetainReason::UnknownWriter,
+                detail: None,
             }]
         );
         assert!(lane.path.is_dir());
@@ -2385,6 +2406,7 @@ fn gc_preview_and_apply_both_retain_a_managed_tree_with_an_unknown_census()
             vec![RetainedBranch {
                 branch: "gc-census-unknown".into(),
                 reason: RetainReason::UnknownWriter,
+                detail: dry_run.then(|| "process 968: cwd unreadable; policy_condition=gc.census_excused_executables entry required; path=\"/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Resources/bin/simdiskimaged\"".into()),
             }],
             "dry_run={dry_run}"
         );

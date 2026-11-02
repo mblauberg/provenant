@@ -39,6 +39,8 @@ pub struct ShapeHint {
     pub named: Vec<(String, String)>,
     /// Which lenses fill the slots for the stage's change kind.
     pub plan: LensPlan,
+    /// The review size, measured or given; `None` when unknown.
+    pub size: Option<String>,
     /// Measurement problems; the size was left unknown.
     pub warnings: Vec<String>,
 }
@@ -137,6 +139,7 @@ fn review_selector_with_git(
                 query.risk.unwrap_or("unknown")
             ),
             plan,
+            size: size.map(str::to_owned),
             warnings,
             ..Default::default()
         };

@@ -1128,7 +1128,6 @@ impl AtomicWriteOperations for PauseAtAtomicWritePhase {
 }
 
 #[cfg(any(test, feature = "fixture"))]
-#[test]
 fn atomic_write_crash_fixture() {
     let (Some(root), Some(socket), Some(phase)) = (
         std::env::var_os("PROVENANT_TEST_ATOMIC_ROOT"),
@@ -1192,6 +1191,11 @@ fn kill_fixture(
 #[cfg(any(test, feature = "fixture"))]
 #[test]
 fn process_crash_at_publication_boundaries_leaves_old_or_new_complete_bytes() {
+    if std::env::var_os("PROVENANT_TEST_ATOMIC_ROOT").is_some() {
+        atomic_write_crash_fixture();
+        return;
+    }
+
     for (phase, expected) in [
         ("write", &b"old complete receipt"[..]),
         ("file-sync", &b"old complete receipt"[..]),
@@ -1216,7 +1220,8 @@ fn process_crash_at_publication_boundaries_leaves_old_or_new_complete_bytes() {
         let argv = [
             current_exe.into_os_string(),
             "--exact".into(),
-            "fs::tests::atomic_write_crash_fixture".into(),
+            "fs::tests::process_crash_at_publication_boundaries_leaves_old_or_new_complete_bytes"
+                .into(),
             "--nocapture".into(),
         ];
         let env = [

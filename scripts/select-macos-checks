@@ -1,0 +1,40 @@
+#!/bin/sh
+set -eu
+
+set_output() {
+  printf 'run_macos=%s\n' "$1" >> "$GITHUB_OUTPUT"
+  printf 'Selected run_macos=%s\n' "$1"
+}
+
+run_conservatively() {
+  echo "$1; running macOS checks conservatively."
+  set_output true
+}
+
+if [ "$IS_MAIN" = true ]; then
+  set_output true
+  exit 0
+fi
+
+if [ -z "$BASE_SHA" ] || ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+  run_conservatively 'Base commit unavailable'
+  exit 0
+fi
+
+if [ -z "$HEAD_SHA" ] || ! git cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null; then
+  run_conservatively 'Head commit unavailable'
+  exit 0
+fi
+
+if ! git merge-base "$BASE_SHA" "$HEAD_SHA" >/dev/null 2>&1; then
+  run_conservatively 'No merge base found'
+  exit 0
+fi
+
+changed=$(git diff --name-only "$BASE_SHA...$HEAD_SHA")
+printf 'Changed paths since merge base:\n%s\n' "$changed"
+if printf '%s\n' "$changed" | grep -Eq '^(tools/front-door/|apps/|\.github/workflows/ci\.yml$)'; then
+  set_output true
+else
+  set_output false
+fi

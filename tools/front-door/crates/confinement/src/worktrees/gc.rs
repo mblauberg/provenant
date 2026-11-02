@@ -126,20 +126,23 @@ pub fn collect(
                 }
                 Ok(Some(_)) => {}
                 Ok(None) => retain(&mut report.worktrees, &branch, RetainReason::NotMerged),
-                Err(error) => retain(&mut report.worktrees, &branch, retain_reason(&error)),
+                Err(error) => retain_error(&mut report.worktrees, &branch, error),
             }
             continue;
         }
         if lane.writer != WriterState::Free {
-            retain(
-                &mut report.worktrees,
-                &branch,
-                match lane.writer {
-                    WriterState::Busy => RetainReason::LockBusy,
-                    WriterState::Live => RetainReason::LiveWriter,
-                    _ => RetainReason::UnknownWriter,
-                },
-            );
+            let reason = match lane.writer {
+                WriterState::Busy => RetainReason::LockBusy,
+                WriterState::Live => RetainReason::LiveWriter,
+                _ => RetainReason::UnknownWriter,
+            };
+            if reason == RetainReason::UnknownWriter
+                && let Some(detail) = census_refusal_detail(context, &lane.path)
+            {
+                retain_with_detail(&mut report.worktrees, &branch, reason, detail);
+            } else {
+                retain(&mut report.worktrees, &branch, reason);
+            }
             continue;
         }
         if !matches!(
@@ -245,8 +248,8 @@ pub fn collect(
                     }
                     // Applying needs a fresh Free census; a preview must not
                     // report a removal that applying would refuse.
-                    if !census_free(context, &lane.path) {
-                        return Err(WorktreeError::UnknownWriter);
+                    if let Some(detail) = census_refusal_detail(context, &lane.path) {
+                        return Err(WorktreeError::IncompleteCensus { detail });
                     }
                     precheck_removal(
                         context,
@@ -259,7 +262,7 @@ pub fn collect(
                 match precheck() {
                     Ok(()) => {}
                     Err(error) => {
-                        retain(&mut report.worktrees, &branch, retain_reason(&error));
+                        retain_error(&mut report.worktrees, &branch, error);
                         continue;
                     }
                 }
@@ -320,11 +323,47 @@ fn integration_protection(
 /// Removal needs a fresh positive census. Custody accepts an unobservable
 /// process for ordinary removal; deleting a tree automatically does not.
 fn census_free(context: &WorktreeContext<'_>, path: &Path) -> bool {
-    context
+    census_refusal_detail(context, path).is_none()
+}
+
+fn census_refusal_detail(context: &WorktreeContext<'_>, path: &Path) -> Option<String> {
+    let (states, details) = context
         .workers
-        .observe_roots(std::slice::from_ref(&path.to_path_buf()))
-        .get(path)
-        == Some(&WorkerState::Free)
+        .observe_roots_with_details(std::slice::from_ref(&path.to_path_buf()));
+    match states.get(path) {
+        Some(WorkerState::Free) => None,
+        Some(_) => Some(
+            details
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| "worker census did not prove the tree free".into()),
+        ),
+        None => Some("worker census did not return the requested tree".into()),
+    }
+}
+
+fn retain_error(outcome: &mut RemoveOutcome, branch: &GitRefName, error: WorktreeError) {
+    let detail = match &error {
+        WorktreeError::IncompleteCensus { detail } => Some(detail.clone()),
+        _ => None,
+    };
+    if let Some(detail) = detail {
+        retain_with_detail(outcome, branch, retain_reason(&error), detail);
+    } else {
+        retain(outcome, branch, retain_reason(&error));
+    }
+}
+
+fn retain_with_detail(
+    outcome: &mut RemoveOutcome,
+    branch: &GitRefName,
+    reason: RetainReason,
+    detail: String,
+) {
+    retain(outcome, branch, reason);
+    if let Some(retained) = outcome.retained.last_mut() {
+        retained.detail = Some(detail);
+    }
 }
 
 /// One tree's removal: what it is, and the fences rechecked around it.
@@ -939,7 +978,10 @@ fn preview_foreign(
     let recheck = || -> Result<(), WorktreeError> {
         verified.repo().revalidate()?;
         tree_unchanged(&read_worktrees(context, cancel)?, entry, lane.head)?;
-        if !census_free(context, &lane.path) || !(policy.no_live_lanes)(&lane.path) {
+        if let Some(detail) = census_refusal_detail(context, &lane.path) {
+            return Err(WorktreeError::IncompleteCensus { detail });
+        }
+        if !(policy.no_live_lanes)(&lane.path) {
             return Err(WorktreeError::UnknownWriter);
         }
         match worktree_dirty_at(context, verified.repo(), cancel)? {

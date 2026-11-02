@@ -1,0 +1,7 @@
+Graph <id>
+Preset selection: fan-out (override)
+plan: on -> on (planning requested)
+Planner route: principal
+plan  role=plan.shape tier=principal family=any kind=plan access=read_only worktree=-
+Roles:
+  plan.shape  origin=bundled digest=<digest>

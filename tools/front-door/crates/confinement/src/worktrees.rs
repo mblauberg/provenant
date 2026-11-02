@@ -359,6 +359,8 @@ impl AbsolutePathWire {
 pub struct RetainedBranch {
     pub branch: String,
     pub reason: RetainReason,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
