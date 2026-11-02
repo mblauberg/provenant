@@ -93,6 +93,7 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
             command.risk.as_deref(),
             command.kind.as_deref(),
             &paths,
+            None,
         )
         .map_err(invalid)?;
     if selected

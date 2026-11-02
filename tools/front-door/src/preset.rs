@@ -2867,7 +2867,7 @@ pub fn run(
         layers.known_routes = Some(config.domains.routing.routes.keys().cloned().collect());
         let review = config.domains.routing.review.clone();
         layers.review = Some(Box::new(move |named, risk| {
-            let selected = review.select_shape(named, risk, None, &[])?;
+            let selected = review.select_shape(named, risk, None, &[], None)?;
             let mut hint = ShapeHint {
                 name: selected.name.to_owned(),
                 source: selected.source.to_owned(),

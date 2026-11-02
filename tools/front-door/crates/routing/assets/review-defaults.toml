@@ -18,7 +18,7 @@ reviewers = [{ pool = "junior", count = 2, distinct_families = true }]
 [review.shapes.deep]
 reviewers = [
   { pool = "junior", count = 4, lenses = ["correctness-spec", "security-privacy", "concurrency-data-errors", "tests"], distinct_families = true },
-  { pool = "senior", count = 2, distinct_families = true },
+  { pool = "senior", count = 4, distinct_families = true },
 ]
 [review.select]
 default = "standard"
@@ -28,4 +28,10 @@ substantial = "standard"
 crucial = "deep"
 terminal = "deep"
 [review.select.by_kind]
+integration = "deep"
+docs = "quick"
 [review.select.by_paths]
+[review.select.by_size]
+small = "quick"
+medium = "standard"
+large = "deep"

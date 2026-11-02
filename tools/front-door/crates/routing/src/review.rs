@@ -70,6 +70,7 @@ fn bundled() -> ReviewConfig {
         by_risk: BTreeMap<String, String>,
         by_kind: BTreeMap<String, String>,
         by_paths: BTreeMap<String, String>,
+        by_size: BTreeMap<String, String>,
     }
     let asset: Asset = toml_edit::de::from_str(include_str!("../assets/review-defaults.toml"))
         .unwrap_or_else(|error| panic!("invalid bundled review defaults: {error}"));
@@ -81,7 +82,7 @@ fn bundled() -> ReviewConfig {
             by_risk: select.by_risk,
             by_kind: select.by_kind,
             by_paths: select.by_paths,
-            by_size: BTreeMap::new(),
+            by_size: select.by_size,
             by_readiness: BTreeMap::new(),
         },
     }
@@ -156,13 +157,14 @@ impl ReviewConfig {
         risk: Option<&str>,
         kind: Option<&str>,
         paths: &[String],
+        size: Option<&str>,
     ) -> Result<ReviewSelection<'a>, String> {
         let selected = self.select.select(
             override_name.map(str::to_owned).as_ref(),
             risk,
             kind,
             paths,
-            None,
+            size,
             Some(true),
         );
         let shape = self
@@ -228,6 +230,7 @@ impl ReviewConfig {
             ("by_risk", &self.select.by_risk),
             ("by_kind", &self.select.by_kind),
             ("by_paths", &self.select.by_paths),
+            ("by_size", &self.select.by_size),
         ] {
             for (key, shape) in map {
                 if (field != "by_paths" && !identifier(key))
@@ -306,7 +309,7 @@ mod tests {
             ("crucial", "deep"),
             ("terminal", "deep"),
         ] {
-            let selected = review.select_shape(None, Some(tier), None, &[]).unwrap();
+            let selected = review.select_shape(None, Some(tier), None, &[], None).unwrap();
             assert_eq!(selected.name, expected, "risk tier {tier}");
             assert_eq!(selected.source, "by_risk", "risk tier {tier}");
         }
@@ -323,7 +326,7 @@ mod tests {
         let paths = vec![".github/workflows/nested/test.yml".into()];
         let select = |shape, risk, kind, paths: &[String]| {
             review
-                .select_shape(shape, risk, kind, paths)
+                .select_shape(shape, risk, kind, paths, None)
                 .unwrap()
                 .source
         };
@@ -340,7 +343,7 @@ mod tests {
         assert_eq!(select(None, None, None, &[]), "default");
         assert!(
             review
-                .select_shape(Some("missing"), None, None, &[])
+                .select_shape(Some("missing"), None, None, &[], None)
                 .is_err()
         );
         assert!(path_matches("src/**/test?.rs", "src/test1.rs"));
@@ -356,7 +359,7 @@ mod tests {
             .insert("src/auth/**".into(), "deep".into());
         let paths = vec!["src/auth/login.rs".into()];
         assert_eq!(
-            review.select_shape(None, None, None, &paths).unwrap().name,
+            review.select_shape(None, None, None, &paths, None).unwrap().name,
             "deep"
         );
     }
