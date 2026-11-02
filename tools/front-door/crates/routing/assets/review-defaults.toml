@@ -43,3 +43,20 @@ refactor = "standard"
 small = "quick"
 medium = "standard"
 large = "deep"
+# Base lenses fill a shape's slots in this order. A kind may replace the order
+# (docs) or add lenses outside the slot cap (refactor); risk tags add more.
+[review.lenses]
+order = [
+  "correctness-spec",
+  "tests",
+  "design-fit-reuse",
+  "simplicity",
+  "conventions-readability",
+  "refactor-cleanup",
+  "reliability",
+  "flexibility",
+]
+[review.lenses.by_kind.docs]
+order = ["conventions-readability"]
+[review.lenses.by_kind.refactor]
+add = ["refactor-cleanup", "design-fit-reuse"]
