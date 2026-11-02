@@ -7883,7 +7883,7 @@ fn lane_waits_report_a_running_lane_waiting_for_a_build_slot() -> TestResult {
     std::fs::write(&marker, "slot 0 0 2 3")?;
     assert_eq!(
         store.lane_waits(&records, &call)[0].waiting_for,
-        "build slot: queued 1 of 1; 2 of 3 slots held"
+        "build slot: waiting 1 of 1 (longest first); 2 of 3 slots held"
     );
     // Implausible counts fall back to the plain wait.
     for forged in [
@@ -7927,8 +7927,8 @@ fn lane_waits_report_a_running_lane_waiting_for_a_build_slot() -> TestResult {
     assert_eq!(
         places,
         [
-            Some("build slot: queued 1 of 2; 3 of 3 slots held".to_owned()),
-            Some("build slot: queued 2 of 2; 3 of 3 slots held".to_owned())
+            Some("build slot: waiting 1 of 2 (longest first); 3 of 3 slots held".to_owned()),
+            Some("build slot: waiting 2 of 2 (longest first); 3 of 3 slots held".to_owned())
         ]
     );
     std::fs::remove_file(&other_marker)?;

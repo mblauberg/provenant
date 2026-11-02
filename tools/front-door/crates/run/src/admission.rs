@@ -412,7 +412,7 @@ impl RunStore {
                     Some(index) => {
                         let wait = queue[index].1;
                         format!(
-                            "build slot: queued {} of {}; {} of {} slots held",
+                            "build slot: waiting {} of {} (longest first); {} of {} slots held",
                             index + 1,
                             queue.len(),
                             wait.held,
