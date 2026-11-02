@@ -123,12 +123,14 @@ reviewers = [{ pool = "junior", count = 2, distinct_families = true }]
 [domains.routing.review.shapes.deep]
 reviewers = [
   { pool = "junior", count = 4, lenses = ["correctness-spec", "security-privacy", "concurrency-data-errors", "tests"], distinct_families = true },
-  { pool = "senior", count = 2, distinct_families = true },
+  { pool = "senior", count = 4, distinct_families = true },
 ]
 
 [domains.routing.review.select]
 default = "standard"
 by_risk = { routine = "quick", substantial = "standard", crucial = "deep", terminal = "deep" }
+by_kind = { integration = "deep", docs = "quick" }
+by_size = { small = "quick", medium = "standard", large = "deep" }
 by_paths = { ".github/workflows/**" = "deep" }
 ```
 
@@ -137,6 +139,14 @@ bundled configuration; a `reviewers` array replaces the earlier array. Each
 count must be between 1 and 32, and a non-empty `lenses` array must have one
 identifier per reviewer. Pools and selected shape names must exist. A shape may
 dispatch at most 64 reviewers.
+
+The default size bands measure added plus removed lines, changed files and
+crate roots in the subject-versus-base diff. Small is at most 150 lines,
+3 files and 1 crate; medium is at most 1,000 lines, 15 files and 3 crates;
+larger or binary changes are large. Configure these limits under
+`domains.routing.review.size`. The risk tier sets a floor. Integration heads
+select deep; docs select the readability lens; refactors prioritize correctness,
+refactor-cleanup and design fit. Risk tags add their conditional lenses.
 
 For example, review a commit with changed paths from a Git range:
 

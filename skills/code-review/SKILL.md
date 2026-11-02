@@ -5,9 +5,9 @@ description: "Use for independent read-only review of PRs, diffs, commits and re
 
 # Code review
 
-With little or no human diff review, a clean verdict from a fresh reviewer plus
-CI on the exact head is the check on the code. So the reviewer must be
-independent and must prove its coverage, and "clean" must mean something.
+With little or no human diff review, an independent review panel plus CI on
+the exact head is the check on the code. The panel must prove its coverage,
+and "clean" must mean something.
 
 Conventions and the review ladder come from the repo's own `AGENTS.md`,
 `CONTRIBUTING` and runbooks. Look there first.
@@ -20,14 +20,19 @@ provenant run --preset review-council --prompt-file BRIEF.md \
   --set 'parameters.spec="#N"' --set 'parameters.risk_tags=["security"]' --explain
 ```
 
-Lenses are `correctness-spec` (always), `design-fit-reuse`, `simplicity`,
-`conventions-readability`, `tests`, then `security-privacy`,
-`concurrency-data-errors` and `adversarial` by risk tag. The routing review
-shape (`quick`, `standard`, `deep`, chosen from `risk_tier`) decides who
-reviews. A verifier tries to falsify each finding and a senior synthesis gives
+The default is a panel scaled to the change's size and kind, with the risk
+tier setting the minimum. The base lenses are `correctness-spec`,
+`design-fit-reuse`, `simplicity`, `conventions-readability`, `tests`,
+`refactor-cleanup`, `reliability`, and `flexibility`; risk tags add
+`security-privacy`, `concurrency-data-errors` and `adversarial`. Integration
+heads get the full panel. A verifier tries to falsify each finding and a senior synthesis gives
 each a disposition. For a quick fan-out without a graph:
 `provenant review TARGET --brief-file B --shape quick|standard|deep`.
 `deliver` already runs this council on the newest head.
+
+For a native panel, launch one independent read-only sub-agent per selected
+lens in parallel. Include the cross-family leg required by the review ladder,
+then have the chair synthesize findings and dispositions across the panel.
 
 ## Independence
 
