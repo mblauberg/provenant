@@ -1,0 +1,487 @@
+use super::*;
+
+pub(super) struct ConfinementRoots<'a> {
+    pub(super) cwd: &'a Path,
+    pub(super) home: &'a Path,
+    pub(super) scratch: &'a Path,
+    pub(super) private_state: &'a Path,
+    pub(super) assets: &'a Path,
+    pub(super) prompt_file: Option<&'a Path>,
+}
+
+pub(super) fn host_indexes_protected(
+    state: &Path,
+    grants: &[provenant_confinement::permissions::WriteGrant],
+) -> bool {
+    let resolve = |path: &Path| {
+        provenant_core::PathResolver::resolve_existing_ancestor(
+            &provenant_os::fs::SystemPathResolver,
+            path,
+        )
+        .ok()
+    };
+    [
+        "fabric/fabric.sqlite3",
+        "fabric/host.sqlite3",
+        run::WORK_INDEX_FILE,
+    ]
+    .iter()
+    .flat_map(|file| {
+        ["", "-wal", "-shm", "-journal", ".lock"].map(|suffix| format!("{file}{suffix}"))
+    })
+    .all(|file| {
+        let Some(path) = resolve(&state.join(file)) else {
+            return false;
+        };
+        grants.iter().all(|grant| {
+            resolve(&grant.path).is_some_and(|root| match grant.scope {
+                PathScope::Exact => root != path && !(root.is_dir() && path.starts_with(root)),
+                PathScope::Subtree => !path.starts_with(root),
+            })
+        })
+    })
+}
+
+pub(super) fn target_seeds_protected(
+    state: &Path,
+    grants: &[provenant_confinement::permissions::WriteGrant],
+) -> bool {
+    let resolve = |path: &Path| {
+        provenant_core::PathResolver::resolve_existing_ancestor(
+            &provenant_os::fs::SystemPathResolver,
+            path,
+        )
+        .ok()
+    };
+    let Some(store) = resolve(&run::target_seed::store_path(state)) else {
+        return false;
+    };
+    grants.iter().all(|grant| {
+        resolve(&grant.path).is_some_and(|root| {
+            !root.starts_with(&store)
+                && !(store.starts_with(&root)
+                    && (grant.scope == PathScope::Subtree || root.is_dir()))
+        })
+    })
+}
+
+/// Read access to the primary checkout's project scratch (`.provenant/scratch`, or
+/// `.agent-run`), where briefs and graph documents live. Git excludes it, so a
+/// writer's linked worktree does not hold it. Final-component links are refused;
+/// parent links may only resolve within the canonical primary checkout.
+pub(super) fn project_scratch_reads(project: &Path) -> Vec<PathGrant> {
+    let Ok(project) = std::fs::canonicalize(project) else {
+        return Vec::new();
+    };
+    [".provenant/scratch", ".agent-run"]
+        .map(|name| project.join(name))
+        .into_iter()
+        .filter(|path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()))
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .filter(|path| path.starts_with(&project))
+        .map(|path| PathGrant {
+            path,
+            scope: PathScope::Subtree,
+        })
+        .collect()
+}
+
+/// Dispatch write roots, plus host-configured shared run state for writers only.
+pub(super) fn write_roots(
+    access: &run::LaneAccess,
+    host_writes: &provenant_confinement::run_config::RunConfig,
+    writer: bool,
+) -> Vec<PathGrant> {
+    access
+        .write_roots
+        .iter()
+        .map(PathBuf::as_path)
+        .chain(
+            writer
+                .then(|| host_writes.writer_write_roots())
+                .into_iter()
+                .flatten(),
+        )
+        .map(|path| PathGrant {
+            path: path.to_owned(),
+            scope: PathScope::Subtree,
+        })
+        .collect()
+}
+
+pub(super) fn confinement_request(
+    project_id: ProjectId,
+    roots: ConfinementRoots<'_>,
+    writer: Option<&run::WriterLaunch>,
+    access: &run::LaneAccess,
+    host_writes: &provenant_confinement::run_config::RunConfig,
+    adapter: &str,
+    publishing: bool,
+) -> Result<PlanRequest, String> {
+    let mode = match writer {
+        Some(writer) => {
+            let mut authority =
+                WorktreeWriteAuthority::for_worktree(&writer.worktree, &writer.branch, roots.home)
+                    .map_err(|error| error.to_string())?;
+            authority.set_publishing(publishing);
+            AccessMode::WorktreeWrite(Box::new(authority))
+        }
+        None => AccessMode::ReadOnly,
+    };
+    let grant = |path: &Path| PathGrant {
+        path: path.to_owned(),
+        scope: PathScope::Subtree,
+    };
+    Ok(PlanRequest {
+        scope: WorkScope::Project(project_id),
+        permissions: PlanPermissions {
+            read_only: None,
+            mode,
+            scratch: grant(roots.scratch),
+            private_state: Some(grant(roots.private_state)),
+            read_roots: std::iter::once(grant(roots.assets))
+                .chain(writer.is_none().then(|| grant(roots.cwd)))
+                .chain(
+                    writer
+                        .and_then(|writer| writer.worktree.repo().common_git_dir().parent())
+                        .into_iter()
+                        .flat_map(project_scratch_reads),
+                )
+                .chain(access.read_roots.iter().map(|path| grant(path)))
+                .chain(roots.prompt_file.map(|path| PathGrant {
+                    path: path.to_owned(),
+                    scope: PathScope::Exact,
+                }))
+                .collect(),
+            protected_roots: vec![PathGrant {
+                path: roots.cwd.join("AGENTS.md"),
+                scope: PathScope::Exact,
+            }],
+            secret_roots: Vec::new(),
+            selected_authentication: AdapterSpec::get(adapter)
+                .and_then(|spec| spec.authentication)
+                .map(Into::into),
+            include_continuation: false,
+            write_roots: write_roots(access, host_writes, writer.is_some()),
+            network: access.network(writer.is_some()),
+            nested_confinement: false,
+        },
+        codex: CodexPolicy::Clean,
+        extensions: ExtensionPolicy::Deny,
+        agy_state: None,
+    })
+}
+
+/// Home and TMPDIR for the host's Git utility: a fresh private directory under
+/// the host root, never the run state root. Inside a lane that is the
+/// lane-writable child store, where the lane could pre-create or populate it.
+pub(super) fn host_git_home(
+    host_root: &Path,
+) -> Result<provenant_providers::host::HostProbeDir, String> {
+    provenant_providers::host::HostProbeDir::create(host_root).map_err(|error| error.to_string())
+}
+
+/// Verify the selected repository on the host and match the persisted dispatch
+/// project before deriving any Git read authority from that binding.
+pub(super) type PreparedReadPlan = (
+    ConfinedPlan,
+    Option<provenant_core::GitOid>,
+    Option<provenant_records::AbsolutePath>,
+);
+
+pub(super) fn read_only_plan(
+    roots: &provenant_core::Roots,
+    project: ProjectId,
+    cwd: &Path,
+    git: &Path,
+    request: PlanRequest,
+) -> Result<PreparedReadPlan, String> {
+    use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility};
+    use provenant_os::exec::SystemExecutor;
+
+    // The host-pinned Git, the same one the lane receives as PROVENANT_GIT.
+    let utility_home = host_git_home(roots.state.as_path())?;
+    let utility =
+        UtilityRuntime::new(git, utility_home.path()).map_err(|error| error.to_string())?;
+    let executor = SystemExecutor::new(1).map_err(|error| error.to_string())?;
+    let budget = UtilityBudget::bounded(std::time::Duration::from_secs(5))
+        .map_err(|error| error.to_string())?;
+    let cancel = provenant_core::CancelToken::new();
+    // Find the root without opening a protected-history repo: read-only
+    // repositories may use native object alternates. A malformed Git marker
+    // must refuse, never fall through to a non-Git workspace.
+    let mut repository = None;
+    for ancestor in cwd.ancestors() {
+        let directory = Directory::open_anchor(ancestor).map_err(|error| error.to_string())?;
+        match directory.metadata_at(std::ffi::OsStr::new(".git"), false) {
+            Ok(_) => {
+                repository = Some(
+                    utility
+                        .open_read_repo(&executor, ancestor, budget, &cancel)
+                        .map_err(|error| error.to_string())?,
+                );
+                break;
+            }
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    let location = provenant_config::ProjectLocation::new(
+        repository
+            .as_ref()
+            .map_or(cwd, |repo| repo.common_git_dir()),
+    )
+    .map_err(|error| error.to_string())?;
+    let binding = provenant_config::lookup_project(roots, &location)
+        .map_err(|error| error.to_string())?
+        .ok_or("dispatch project binding missing")?;
+    if binding.project_id() != project {
+        return Err("repository does not match dispatch project binding".into());
+    }
+    match repository {
+        Some(repo) => {
+            // The host's own read of the checkout HEAD is the only reviewed
+            // head a read-only lane can claim; an unreadable HEAD stays unproven.
+            let head = run_read_utility(
+                &executor,
+                GitRead::RevParseHead,
+                &repo,
+                &utility,
+                budget,
+                &cancel,
+            )
+            .ok()
+            .and_then(|out| String::from_utf8(out.stdout.bytes).ok())
+            .and_then(|text| provenant_core::GitOid::parse(text.trim()).ok());
+            run::read_only_plan(&roots.state, &repo, &binding, request)
+                .map(|plan| {
+                    (
+                        plan,
+                        head,
+                        provenant_records::AbsolutePath::new(repo.common_git_dir()).ok(),
+                    )
+                })
+                .map_err(|error| error.to_string())
+        }
+        // Non-Git workspaces have no Git metadata or repository exceptions.
+        None => ConfinedPlan::new(request)
+            .map(|plan| (plan, None, None))
+            .map_err(|error| error.to_string()),
+    }
+}
+
+/// Publishing hands the lane the GitHub credential, so it needs the explicit
+/// `lanes.publish=true` opt-in as well as a networked writer.
+pub(super) fn publishing_requested(
+    writer: bool,
+    open_network: bool,
+    knobs: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> bool {
+    writer
+        && open_network
+        && knobs
+            .get("lanes.publish")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+}
+
+pub(super) fn publishing_executable(
+    home: &Path,
+    locate: &impl Fn(&str) -> Result<PathBuf, String>,
+) -> Option<PathBuf> {
+    if !home.join(".config/gh").is_dir() {
+        return None;
+    }
+    // Resolve links before adding exact executable grants or writing wrappers.
+    let executable = canonical(&locate("gh").ok()?).ok()?;
+    (executable.is_file() && provenant_os::sys::is_executable(&executable)).then_some(executable)
+}
+
+pub(crate) fn resolve_executable(name: &str) -> Result<PathBuf, String> {
+    canonical(&find_executable(name)?)
+}
+
+pub(super) fn host_executable(
+    host: &run::HostLaunchContext,
+    name: &str,
+) -> Result<PathBuf, String> {
+    // The caller holds this provider's lease. Retry only an omitted entry,
+    // using host-sealed directories rather than the guardian's environment.
+    let path = match host.executables.get(name) {
+        Some(path) => path.clone(),
+        None => find_executable_on_path(name, &host.executable_search_path)?,
+    };
+    canonical(&path)
+}
+
+pub(crate) fn find_executable(name: &str) -> Result<PathBuf, String> {
+    let path = std::env::var_os("PATH").ok_or("PATH is unavailable")?;
+    find_executable_on_path(name, &std::env::split_paths(&path).collect::<Vec<_>>())
+}
+
+pub(super) fn find_executable_on_path(
+    name: &str,
+    search_path: &[PathBuf],
+) -> Result<PathBuf, String> {
+    let name = AdapterSpec::get(name).map_or(name, |spec| spec.binary);
+    find_command_on_path(name, search_path)
+}
+
+pub(super) fn find_command_on_path(name: &str, search_path: &[PathBuf]) -> Result<PathBuf, String> {
+    for directory in search_path
+        .iter()
+        .filter(|directory| directory.is_absolute())
+    {
+        let candidate = directory.join(name);
+        if candidate.is_file() && provenant_os::sys::is_executable(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    Err(format!("{name} executable was not found on PATH"))
+}
+
+pub(super) fn canonical(path: &Path) -> Result<PathBuf, String> {
+    provenant_os::fs::canonicalize(path).map_err(|error| error.to_string())
+}
+
+/// Generated files stay in scratch and links in scratch or private state.
+/// Directories may use any run-owned root, including trusted shared state, and
+/// the selected Claude account's `projects/` tree. Traversal never follows links.
+pub(super) fn apply_setup(
+    steps: &[SetupStep],
+    roots: &[&Path],
+    claude_account: Option<&Path>,
+) -> Result<(), String> {
+    for step in steps {
+        match step {
+            SetupStep::CreateDir(path) => {
+                let transcript_root =
+                    claude_account.filter(|directory| path.starts_with(directory.join("projects")));
+                match transcript_root {
+                    Some(directory) => apply_setup_directory(&[directory], path)?,
+                    None => apply_setup_directory(roots, path)?,
+                };
+            }
+            SetupStep::WriteFile { path, bytes } => write_setup_file(roots, path, bytes, false)?,
+            SetupStep::WriteExecutable { path, bytes } => {
+                write_setup_file(roots, path, bytes, true)?;
+            }
+            SetupStep::Symlink { link, target } => {
+                let (parent, name) = setup_parent(&roots[..roots.len().min(2)], link, false)?;
+                let matches = match parent.metadata_at(name, false) {
+                    Ok(metadata) if metadata.kind == FileKind::Symlink => {
+                        let matches =
+                            parent.read_link(name).map_err(|error| error.to_string())? == *target;
+                        if matches {
+                            parent.sync().map_err(|error| error.to_string())?;
+                        }
+                        matches
+                    }
+                    Ok(_) => false,
+                    Err(error) if error.is_not_found() => false,
+                    Err(error) => return Err(error.to_string()),
+                };
+                if !matches {
+                    parent
+                        .replace_link(name, target)
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn write_setup_file(
+    roots: &[&Path],
+    path: &Path,
+    bytes: &[u8],
+    executable: bool,
+) -> Result<(), String> {
+    let (parent, name) = setup_parent(&roots[..1], path, false)?;
+    let matches = match parent.metadata_at(name, false) {
+        Ok(metadata) if metadata.kind == FileKind::Regular => {
+            let mut file = parent.open_read(name).map_err(|error| error.to_string())?;
+            match file.read_bounded(bytes.len() as u64) {
+                Ok(existing) if existing == *bytes => {
+                    file.sync().map_err(|error| error.to_string())?;
+                    parent.sync().map_err(|error| error.to_string())?;
+                    true
+                }
+                Ok(_) | Err(FsError::TooLarge { .. }) => false,
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        Ok(_) => false,
+        Err(error) if error.is_not_found() => false,
+        Err(error) => return Err(error.to_string()),
+    };
+    if !matches {
+        parent
+            .atomic_write(name, ".provider-setup.", bytes, PublishMode::Replace)
+            .map_err(|error| error.to_string())?;
+    }
+    if executable {
+        parent
+            .open_read(name)
+            .and_then(|file| file.make_owner_executable())
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+pub(super) fn apply_setup_directory(roots: &[&Path], path: &Path) -> Result<Directory, String> {
+    let (parent, name) = setup_parent(roots, path, true)?;
+    setup_directory(&parent, name)
+}
+
+pub(super) fn setup_parent<'a>(
+    roots: &[&Path],
+    path: &'a Path,
+    create: bool,
+) -> Result<(Directory, &'a std::ffi::OsStr), String> {
+    let (root, relative) = roots
+        .iter()
+        .find_map(|root| Some((root, path.strip_prefix(root).ok()?)))
+        .ok_or("provider setup path is outside run-owned state")?;
+    let mut names = Vec::new();
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(name) => names.push(name),
+            _ => return Err("provider setup path is not normalised".into()),
+        }
+    }
+    let name = names.pop().ok_or("provider setup path names its root")?;
+    let mut directory = Directory::open_anchor(root).map_err(|error| error.to_string())?;
+    for component in names {
+        directory = if create {
+            setup_directory(&directory, component)?
+        } else {
+            directory
+                .open_verified_directory(component)
+                .map_err(|error| error.to_string())?
+        };
+    }
+    Ok((directory, name))
+}
+
+// Existing shared ancestors need only read access in a confined MCP.
+pub(super) fn setup_directory(
+    parent: &Directory,
+    name: &std::ffi::OsStr,
+) -> Result<Directory, String> {
+    match parent.open_verified_directory(name) {
+        Ok(directory) => Ok(directory),
+        Err(error) if error.is_not_found() => {
+            match parent.mkdir(name, 0o700) {
+                Ok(()) => parent.sync().map_err(|error| error.to_string())?,
+                Err(error) if error.is_exists() => {}
+                Err(error) => return Err(error.to_string()),
+            }
+            parent
+                .open_verified_directory(name)
+                .map_err(|error| error.to_string())
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
