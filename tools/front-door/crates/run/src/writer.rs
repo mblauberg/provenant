@@ -1123,6 +1123,34 @@ pub(crate) fn worktree_removed(writer: &WriterRequest) -> bool {
 /// A retained reservation, including an exact path for chair recovery.
 pub use provenant_supervisor::custody::WriterReservation as WriterFence;
 impl crate::RunStore {
+    pub(crate) fn retained_import_fence(
+        &self,
+        scope: provenant_supervisor::custody::Scope,
+    ) -> Result<bool> {
+        let Some(fence) = self
+            .writer_fences()?
+            .into_iter()
+            .find(|fence| fence.scope == scope)
+        else {
+            return Ok(false);
+        };
+        let parent = fence
+            .reservation
+            .parent()
+            .ok_or(RunError::Validation("writer evidence missing"))?;
+        let evidence = Directory::open_anchor(parent)?;
+        let Some(raw) =
+            crate::artifacts::read_sealed(&evidence, "import-retained.json", crate::RECORD_LIMIT)?
+        else {
+            return Ok(false);
+        };
+        let marker: ImportFence = crate::db::decode(&raw)?;
+        if marker.schema_version != 1 || marker.scope != scope {
+            return Err(RunError::Conflict);
+        }
+        Ok(true)
+    }
+
     pub(crate) fn retain_import_fence(&self, record: &crate::AttemptRecord) -> Result<()> {
         let fence = self
             .writer_fences()?

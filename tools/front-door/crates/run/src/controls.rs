@@ -2725,15 +2725,30 @@ impl RunStore {
             return Ok(Some(Reconciled::uncertain(UncertainReason::HostStalled)));
         }
         if matches!(record.state, AttemptState::Terminal { .. }) {
-            if !self.import_release_permitted(&record, call)? {
-                let directory = self.attempt_dir(record.run_id, id, false)?;
+            let directory = self.attempt_dir(record.run_id, id, false)?;
+            let scope = Self::scope(&record);
+            let effects_retained = read_sealed(&directory, "terminal-effects.json", RECORD_LIMIT)?
+                .is_some()
+                && record.exit_evidence.is_some()
+                && (custody::reservation_present(&directory, scope)?
+                    || self
+                        .writer_fences()?
+                        .iter()
+                        .any(|fence| fence.scope == scope));
+            if !self.import_release_permitted(&record, call)?
+                || self.retained_import_fence(Self::scope(&record))?
+                || effects_retained
+            {
                 let handle = custody::reattach(directory.try_clone()?, Self::scope(&record))
                     .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
                 if let Observation::Exited(exit) =
                     custody::observe(&handle, call.lock_budget(), call.cancel, call.clock)
                         .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?
                 {
-                    self.finish(id, &directory, &exit, providers, call)?;
+                    let recovery = self.orphan_recovery(&record, directory.try_clone()?, call)?;
+                    self.finish_recovered_terminal(
+                        id, &directory, &exit, recovery, providers, call,
+                    )?;
                 }
                 let current = self.record(id, call)?;
                 if !self.import_release_permitted(&current, call)? {

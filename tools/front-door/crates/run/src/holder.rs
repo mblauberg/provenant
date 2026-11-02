@@ -377,6 +377,31 @@ pub(crate) fn release_and_reclaim(
 }
 
 impl RunStore {
+    pub(crate) fn finish_recovered_terminal(
+        &self,
+        id: AttemptId,
+        attempt: &Directory,
+        exit: &ExitObservation,
+        mut recovery: custody::Recovery,
+        providers: &dyn Providers,
+        call: &Request<'_>,
+    ) -> Result<bool> {
+        recovery
+            .prepare_settlement()
+            .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
+        let finished = self.finish_in_custody(
+            id,
+            attempt,
+            exit,
+            Completion::Recovered(Some(&recovery)),
+            providers,
+            call,
+        )?;
+        if finished.release_permitted {
+            self.settle_recovered(attempt, recovery)?;
+        }
+        Ok(finished.release_permitted)
+    }
     /// Commit the terminal record for an exited attempt from supervisor's
     /// durable exit and the sealed stdout capture. Idempotent.
     pub fn finish(
@@ -681,6 +706,61 @@ impl RunStore {
         Ok(())
     }
 
+    fn delivery_applicable(&self, record: &AttemptRecord, attempt: &Directory) -> Result<bool> {
+        if !matches!(
+            record.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Succeeded,
+                ..
+            }
+        ) && !(matches!(
+            record.state,
+            AttemptState::Terminal {
+                outcome: Outcome::ReviewRequired,
+                ..
+            }
+        ) && record.protected_paths.is_empty()
+            && record
+                .partial_signals
+                .contains(&PartialSignal::DeclaredStop))
+        {
+            return Ok(false);
+        }
+        if let Some(raw) = read_sealed(attempt, "terminal-effects.json", RECORD_LIMIT)? {
+            let initial: crate::store::TerminalEffects = crate::db::decode(&raw)?;
+            if initial.schema_version != 1 || initial.scope != Self::scope(record) {
+                return Err(RunError::Conflict);
+            }
+            if initial.effects.iter().any(|(effect, disposition)| {
+                *effect == SettlementEffect::Delivery
+                    && matches!(disposition, EffectDisposition::Done)
+            }) {
+                return Ok(false);
+            }
+        }
+        #[derive(Deserialize)]
+        struct DeliveryExit {
+            scope: custody::Scope,
+            termination: Option<Termination>,
+            never_spawned: bool,
+            stop_reason: Option<StopReason>,
+            unresolved_cleanup: bool,
+            #[serde(default)]
+            cancel_delivered_before_exit: Option<bool>,
+        }
+        let Some(exit) = &record.exit_evidence else {
+            return Ok(false);
+        };
+        let evidence: DeliveryExit =
+            crate::db::decode(&self.artifact_bytes(record.run_id, exit, RECORD_LIMIT)?)?;
+        Ok(evidence.scope == Self::scope(record)
+            && evidence.termination == Some(Termination::Exit(0))
+            && !evidence.never_spawned
+            && evidence.stop_reason.is_none()
+            && !evidence.unresolved_cleanup
+            && evidence.cancel_delivered_before_exit != Some(true))
+    }
+
     fn retry_terminal_effects(
         &self,
         record: &AttemptRecord,
@@ -736,6 +816,16 @@ impl RunStore {
                     ..
                 }
         ) {
+            if !self.delivery_applicable(record, attempt)? {
+                self.record_effect(
+                    record.attempt_id,
+                    record.generation,
+                    SettlementEffect::Delivery,
+                    EffectDisposition::Done,
+                    call,
+                )?;
+                return Ok(());
+            }
             let request = self.request(record.run_id, call)?;
             let task = request
                 .tasks
@@ -1130,7 +1220,25 @@ impl RunStore {
                 std::ffi::OsStr::new("quarantine"),
                 false,
             ) {
-                Ok(archive) => read_sealed(&archive, "manifest.json", RECORD_LIMIT)?.is_some(),
+                Ok(archive) => {
+                    let saved = read_sealed(&archive, "manifest.json", RECORD_LIMIT)?;
+                    let intended = read_sealed(&archive, "manifest-intended.json", RECORD_LIMIT)?;
+                    if saved
+                        .as_ref()
+                        .zip(intended.as_ref())
+                        .is_some_and(|(saved, intended)| saved != intended)
+                    {
+                        deferred.push((
+                            SettlementEffect::ManifestConflict,
+                            EffectDisposition::Failed {
+                                reason: "manifest conflicts with sealed intended disposition"
+                                    .into(),
+                                retryable: true,
+                            },
+                        ));
+                    }
+                    saved.is_some()
+                }
                 Err(RunError::Filesystem(error)) if error.is_not_found() => false,
                 Err(error) => return Err(error),
             };
@@ -1651,16 +1759,25 @@ impl RunStore {
             session: decoded.session,
             partial_signals: partial,
         };
-        crate::artifacts::seal(
-            attempt,
-            "terminal-effects.json",
-            &crate::db::bytes(&crate::store::TerminalEffects {
-                schema_version: 1,
-                scope: exit.scope,
-                effects: deferred,
-            })?,
-            RECORD_LIMIT,
-        )?;
+        if let Some(raw) = read_sealed(attempt, "terminal-effects.json", RECORD_LIMIT)? {
+            let saved: crate::store::TerminalEffects = crate::db::decode(&raw)?;
+            if saved.schema_version != 1 || saved.scope != exit.scope {
+                return Err(RunError::Conflict);
+            }
+            // An effects/result orphan predates the decision. Keep its initial
+            // receipts; post-commit driving reconciles them with durable effects.
+        } else {
+            crate::artifacts::seal(
+                attempt,
+                "terminal-effects.json",
+                &crate::db::bytes(&crate::store::TerminalEffects {
+                    schema_version: 1,
+                    scope: exit.scope,
+                    effects: deferred,
+                })?,
+                RECORD_LIMIT,
+            )?;
+        }
         // A result sealed without intent predates a crash: keep its bytes.
         if !import_failed && let Some(driver) = &mut settlement {
             driver.advance(crate::settlement::Phase::Record)?;
@@ -2244,155 +2361,286 @@ mod writer_recovery_tests {
     #[test]
     fn settlement_import_fault_seals_retains_fence_and_resumes_without_provider()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
-        use std::ffi::OsStr;
-        let fixture = PrepareFixture::new()?;
-        let execution = registered_landed_writer_fixture(&fixture)?;
-        let (clock, cancel) = (clock(), CancelToken::new());
-        let call = call(&clock, &cancel);
-        let store = RunStore::open(&execution, &call)?;
-        let mut run = input();
-        run.request.tasks[0].writer = Some(fixture.writer.clone());
-        store.create(&run, &call)?;
-        let id = run.attempts[0].attempt_id;
-        store.mark_starting(
-            &store.record(id, &call)?,
-            &route(),
-            &[],
-            &Default::default(),
-            None,
-            &call,
-        )?;
-        let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
-        let scope = RunStore::scope(&record);
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
-        let mut launch = crate::prepare_writer(
-            &fixture.writer,
-            execution.state_root.as_path(),
-            execution.project_id,
-        )?;
-        launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
-        let candidate = store.temporary_path(id, &call)?.join("candidate-0");
-        std::fs::create_dir_all(&candidate)?;
-        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-        crate::objects::prepare_bound(
-            &git,
-            launch.worktree.repo(),
-            &attempt,
-            &candidate,
-            launch.branch.as_str(),
-            launch.base,
-        )?;
-        let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
-        let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
-            directory,
-            scope,
-            binding,
-            call.lock_budget(),
-            &cancel,
-            &clock,
-        )?;
-        let mut recovery =
-            provenant_supervisor::fixture::bind_writer_attempt(lease, &attempt)?.into_recovery()?;
-        recovery.prepare_settlement()?;
-        let mut observed = crate::tests::exit();
-        observed.scope = scope;
-        crate::dispatch_tests::seal_exit(&store, &observed)?;
+        for mode in ["normal", "orphan", "release_boundary", "manifest_conflict"] {
+            use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
+            use std::ffi::OsStr;
+            let fixture = PrepareFixture::new()?;
+            let execution = registered_landed_writer_fixture(&fixture)?;
+            let (clock, cancel) = (clock(), CancelToken::new());
+            let call = call(&clock, &cancel);
+            let store = RunStore::open(&execution, &call)?;
+            let mut run = input();
+            run.request.tasks[0].writer = Some(fixture.writer.clone());
+            store.create(&run, &call)?;
+            let id = run.attempts[0].attempt_id;
+            store.mark_starting(
+                &store.record(id, &call)?,
+                &route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+            let scope = RunStore::scope(&record);
+            let attempt = store.attempt_dir(run.run_id, id, false)?;
+            let mut launch = crate::prepare_writer(
+                &fixture.writer,
+                execution.state_root.as_path(),
+                execution.project_id,
+            )?;
+            launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+            let candidate = store.temporary_path(id, &call)?.join("candidate-0");
+            std::fs::create_dir_all(&candidate)?;
+            let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+            crate::objects::prepare_bound(
+                &git,
+                launch.worktree.repo(),
+                &attempt,
+                &candidate,
+                launch.branch.as_str(),
+                launch.base,
+            )?;
+            let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
+            let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+                directory,
+                scope,
+                binding,
+                call.lock_budget(),
+                &cancel,
+                &clock,
+            )?;
+            let mut recovery = provenant_supervisor::fixture::bind_writer_attempt(lease, &attempt)?
+                .into_recovery()?;
+            recovery.prepare_settlement()?;
+            let mut observed = crate::tests::exit();
+            observed.scope = scope;
+            crate::dispatch_tests::seal_exit(&store, &observed)?;
 
-        let providers = crate::dispatch_tests::Fake::default();
-        crate::writer::FAIL_IMPORT.with(|fault| fault.set(true));
-        let first = store.finish_in_custody(
-            id,
-            &attempt,
-            &observed,
-            Completion::Recovered(Some(&recovery)),
-            &providers,
-            &call,
-        );
-        crate::writer::FAIL_IMPORT.with(|fault| fault.set(false));
-        let first = first?;
-        assert!(!first.release_permitted);
-        assert!(matches!(
-            first
-                .record
-                .settlement_receipts
-                .as_ref()
-                .unwrap()
-                .git_import,
-            EffectDisposition::Failed {
-                retryable: true,
-                ..
+            let providers = crate::dispatch_tests::Fake::default();
+            crate::artifacts::seal(
+                &attempt,
+                "launch.json",
+                &crate::db::bytes(&serde_json::json!({
+                    "schema_version":1,"scope":scope,"requester":execution.actor_id
+                }))?,
+                RECORD_LIMIT,
+            )?;
+            if mode == "orphan" {
+                store.retain_import_fence(&record)?;
+                crate::artifacts::seal(
+                    &attempt,
+                    "terminal-effects.json",
+                    &crate::db::bytes(&crate::store::TerminalEffects {
+                        schema_version: 1,
+                        scope,
+                        effects: vec![(
+                            SettlementEffect::GitImport,
+                            EffectDisposition::Failed {
+                                reason: "pre-crash import failure".into(),
+                                retryable: true,
+                            },
+                        )],
+                    })?,
+                    RECORD_LIMIT,
+                )?;
+                crate::artifacts::seal(&attempt, "result.md", b"orphan result", RESULT_LIMIT)?;
             }
-        ));
-        let decision = read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?
-            .ok_or("sealed decision")?;
-        assert!(!store.writer_fences()?.is_empty());
-        assert!(
-            store.settle_recovered(&attempt, recovery).is_err(),
-            "unresolved import cannot release"
-        );
-        assert!(candidate.join("git-common/HEAD").is_file());
-        let mut competing = crate::prepare_writer(
-            &fixture.writer,
-            execution.state_root.as_path(),
-            execution.project_id,
-        )?;
-        let (directory, binding) = competing.custody.take().ok_or("competing custody")?;
-        let other = custody::Scope {
-            attempt: provenant_core::AttemptId::from_bytes([99; 16]),
-            ..scope
-        };
-        assert!(
-            store
-                .acquire_writer_fenced(
-                    directory,
-                    other,
-                    binding,
-                    &|directory, scope, binding| {
-                        provenant_supervisor::fixture::acquire_writer_with_binding(
-                            directory,
-                            scope,
-                            binding,
-                            provenant_core::WaitBudget::nonblocking(clock.mono_now()),
-                            &cancel,
-                            &clock,
-                        )
-                    },
-                    &call
-                )
-                .is_err(),
-            "retained reservation excludes competing writer"
-        );
-        drop(store);
-        let store = RunStore::open(&execution, &call)?;
-        let journal_name = OsStr::new("settlement-progress.json");
-        let mut journal: serde_json::Value =
-            crate::db::decode(&attempt.read_stable(journal_name, RECORD_LIMIT)?)?;
-        journal["retry_after_ms"] = 0.into();
-        attempt
-            .atomic_write(
-                journal_name,
-                ".retry-fixture-",
-                &crate::db::bytes(&journal)?,
-                provenant_os::fs::PublishMode::Replace,
-            )?
-            .require_durable()?;
-        store.finish(id, &attempt, &observed, &providers, &call)?;
-        assert_eq!(
-            providers.decoded.get(),
-            1,
-            "recovery never reruns decoding or the provider"
-        );
-        assert_eq!(
-            read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?.unwrap(),
-            decision
-        );
-        let completed = store.record(id, &call)?;
-        assert!(matches!(
-            completed.settlement_receipts.unwrap().git_import,
-            EffectDisposition::Done
-        ));
-        assert!(store.writer_fences()?.is_empty());
+            if mode == "manifest_conflict" {
+                let archive = crate::artifacts::subdir(&attempt, OsStr::new("quarantine"), true)?;
+                crate::artifacts::seal(
+                    &archive,
+                    "manifest.json",
+                    b"conflicting writer manifest",
+                    RECORD_LIMIT,
+                )?;
+            }
+            crate::writer::FAIL_IMPORT
+                .with(|fault| fault.set(matches!(mode, "normal" | "release_boundary")));
+            let first = store.finish_in_custody(
+                id,
+                &attempt,
+                &observed,
+                Completion::Recovered(Some(&recovery)),
+                &providers,
+                &call,
+            );
+            crate::writer::FAIL_IMPORT.with(|fault| fault.set(false));
+            let first = first?;
+            if mode == "manifest_conflict" {
+                assert!(matches!(
+                    first.record.settlement_receipts.unwrap().manifest_conflict,
+                    EffectDisposition::Failed {
+                        retryable: true,
+                        ..
+                    }
+                ));
+                let archive = crate::artifacts::subdir(&attempt, OsStr::new("quarantine"), false)?;
+                let path = execution
+                    .state_root
+                    .as_path()
+                    .join(format!("runs/{}/attempts/{id}/quarantine", run.run_id));
+                drop(recovery);
+                drop(store);
+                let store = RunStore::open(&execution, &call)?;
+                store.reconcile_terminal_effects(&store.record(id, &call)?, &call)?;
+                assert_eq!(
+                    read_sealed(&archive, "manifest.json", RECORD_LIMIT)?.unwrap(),
+                    b"conflicting writer manifest"
+                );
+                assert!(matches!(
+                    store
+                        .record(id, &call)?
+                        .settlement_receipts
+                        .unwrap()
+                        .manifest_conflict,
+                    EffectDisposition::Failed {
+                        retryable: true,
+                        ..
+                    }
+                ));
+                std::fs::rename(
+                    path.join("manifest.json"),
+                    path.join("manifest.conflict.json"),
+                )?;
+                store.reconcile_terminal_effects(&store.record(id, &call)?, &call)?;
+                assert!(matches!(
+                    store
+                        .record(id, &call)?
+                        .settlement_receipts
+                        .unwrap()
+                        .manifest_conflict,
+                    EffectDisposition::Done
+                ));
+                let found = store.reconcile_with_observer(
+                    run.run_id,
+                    &providers,
+                    &call,
+                    &provenant_supervisor::census::SystemProcessObserver,
+                )?;
+                assert!(
+                    !found
+                        .iter()
+                        .any(|(_, state)| matches!(state, crate::Reconciled::Uncertain { .. })),
+                    "{found:?}"
+                );
+                assert!(store.writer_fences()?.is_empty());
+                continue;
+            }
+            assert!(!first.release_permitted);
+            assert!(matches!(
+                first
+                    .record
+                    .settlement_receipts
+                    .as_ref()
+                    .unwrap()
+                    .git_import,
+                EffectDisposition::Failed {
+                    retryable: true,
+                    ..
+                }
+            ));
+            let decision = read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?
+                .ok_or("sealed decision")?;
+            assert!(!store.writer_fences()?.is_empty());
+            assert!(
+                store.settle_recovered(&attempt, recovery).is_err(),
+                "unresolved import cannot release"
+            );
+            assert!(candidate.join("git-common/HEAD").is_file());
+            let mut competing = crate::prepare_writer(
+                &fixture.writer,
+                execution.state_root.as_path(),
+                execution.project_id,
+            )?;
+            let (directory, binding) = competing.custody.take().ok_or("competing custody")?;
+            let other = custody::Scope {
+                attempt: provenant_core::AttemptId::from_bytes([99; 16]),
+                ..scope
+            };
+            assert!(
+                store
+                    .acquire_writer_fenced(
+                        directory,
+                        other,
+                        binding,
+                        &|directory, scope, binding| {
+                            provenant_supervisor::fixture::acquire_writer_with_binding(
+                                directory,
+                                scope,
+                                binding,
+                                provenant_core::WaitBudget::nonblocking(clock.mono_now()),
+                                &cancel,
+                                &clock,
+                            )
+                        },
+                        &call
+                    )
+                    .is_err(),
+                "retained reservation excludes competing writer"
+            );
+            drop(store);
+            let store = RunStore::open(&execution, &call)?;
+            let journal_name = OsStr::new("settlement-progress.json");
+            let mut journal: serde_json::Value =
+                crate::db::decode(&attempt.read_stable(journal_name, RECORD_LIMIT)?)?;
+            journal["retry_after_ms"] = 0.into();
+            attempt
+                .atomic_write(
+                    journal_name,
+                    ".retry-fixture-",
+                    &crate::db::bytes(&journal)?,
+                    provenant_os::fs::PublishMode::Replace,
+                )?
+                .require_durable()?;
+            if mode == "release_boundary" {
+                let directory = store.writer_custody_directory(&first.record, &fixture.writer)?;
+                let mut recovery = store
+                    .recover_writer_exit(directory, scope, &call)?
+                    .ok_or("recovery")?;
+                recovery.prepare_settlement()?;
+                let finished = store.finish_in_custody(
+                    id,
+                    &attempt,
+                    &observed,
+                    Completion::Recovered(Some(&recovery)),
+                    &providers,
+                    &call,
+                )?;
+                assert!(finished.release_permitted);
+                assert!(store.retained_import_fence(scope)?);
+                drop(recovery);
+                let found = store.reconcile_with_observer(
+                    run.run_id,
+                    &providers,
+                    &call,
+                    &provenant_supervisor::census::SystemProcessObserver,
+                )?;
+                assert!(
+                    !found
+                        .iter()
+                        .any(|(_, state)| matches!(state, crate::Reconciled::Uncertain { .. })),
+                    "{found:?}"
+                );
+            } else {
+                store.finish(id, &attempt, &observed, &providers, &call)?;
+            }
+            assert_eq!(
+                providers.decoded.get(),
+                1,
+                "recovery never reruns decoding or the provider"
+            );
+            assert_eq!(
+                read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?.unwrap(),
+                decision
+            );
+            let completed = store.record(id, &call)?;
+            assert!(matches!(
+                completed.settlement_receipts.unwrap().git_import,
+                EffectDisposition::Done
+            ));
+            assert!(store.writer_fences()?.is_empty());
+        }
         Ok(())
     }
 

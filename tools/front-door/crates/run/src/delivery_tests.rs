@@ -15,6 +15,8 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
         "uncertain",
         "cancelled",
         "late_cancel",
+        "failed_legacy",
+        "cancelled_legacy",
     ] {
         let fixture = PrepareFixture::new()?;
         let execution = registered_landed_writer_fixture(&fixture)?;
@@ -56,27 +58,38 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
         } else {
             EffectDisposition::Pending
         };
-        artifacts::seal(
-            &attempt,
-            "terminal-effects.json",
-            &db::bytes(&store::TerminalEffects {
-                schema_version: 1,
-                scope,
-                effects: vec![
-                    (SettlementEffect::GitImport, EffectDisposition::Done),
-                    (SettlementEffect::ManifestConflict, EffectDisposition::Done),
-                    (SettlementEffect::Delivery, initial),
-                ],
-            })?,
-            RECORD_LIMIT,
-        )?;
+        if !mode.ends_with("_legacy") {
+            artifacts::seal(
+                &attempt,
+                "terminal-effects.json",
+                &db::bytes(&store::TerminalEffects {
+                    schema_version: 1,
+                    scope,
+                    effects: vec![
+                        (SettlementEffect::GitImport, EffectDisposition::Done),
+                        (SettlementEffect::ManifestConflict, EffectDisposition::Done),
+                        (SettlementEffect::Delivery, initial),
+                    ],
+                })?,
+                RECORD_LIMIT,
+            )?;
+        }
         let lock = attempt.try_lock(
             std::ffi::OsStr::new("custody.lock"),
             provenant_os::fs::LockMode::Exclusive,
         )?;
         drop(lock);
-        dispatch_tests::seal_exit(&store, &tests::exit())?;
-        let record = store.publish_terminal(id, 1, &tests::publication(), &tests::exit(), &call)?;
+        let mut observed = tests::exit();
+        let mut publication = tests::publication();
+        if mode == "failed_legacy" {
+            publication.outcome = Outcome::Failed;
+        }
+        if mode == "cancelled_legacy" {
+            publication.outcome = Outcome::Cancelled;
+            observed.cancel_delivered_before_exit = Some(true);
+        }
+        dispatch_tests::seal_exit(&store, &observed)?;
+        let record = store.publish_terminal(id, 1, &publication, &observed, &call)?;
         let decision =
             artifacts::read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?.unwrap();
         if mode == "uncertain" {
@@ -130,10 +143,11 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
         }
         drop(store);
         let store = RunStore::open(&execution, &call)?;
-        assert!(
+        assert_eq!(
             store
                 .pending_effect_attempts(input.run_id, &call)?
-                .contains(&id)
+                .contains(&id),
+            !mode.ends_with("_legacy")
         );
         store.reconcile_terminal_effects(&record, &call)?;
         let recovered = store.record(id, &call)?;
@@ -160,6 +174,15 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                 "--verify",
                 &format!("refs/heads/{}", fixture.request.branch),
             ])?;
+        } else if mode.ends_with("_legacy") {
+            assert!(matches!(receipts.delivery, EffectDisposition::Done));
+            assert!(
+                !fixture
+                    .root
+                    .join("remote.git/refs/heads/published/lane")
+                    .exists(),
+                "ineligible legacy receipt must not deliver"
+            );
         } else {
             assert!(
                 !fixture
@@ -408,7 +431,10 @@ fn terminal_outcomes_remove_the_launch_base_pin_and_interrupted_import_ref()
         input.request.tasks[0].writer = Some(fixture.writer.clone());
         store.create(&input, &call)?;
         let id = input.attempts[0].attempt_id;
-        let exit = tests::exit();
+        let mut exit = tests::exit();
+        if outcome == Outcome::Cancelled {
+            exit.cancel_delivered_before_exit = Some(true);
+        }
         let attempt = store.attempt_dir(input.run_id, id, false)?;
         let launch = crate::prepare_writer(
             &fixture.writer,
