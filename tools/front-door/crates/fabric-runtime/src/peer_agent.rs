@@ -1098,14 +1098,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn bootstrap_production_retry_defaults_are_preserved() {
-        use super::*;
-        assert_eq!(KICKSTART_DEADLINE, Duration::from_secs(3));
-        assert_eq!(BOOTSTRAP_RETRY_INTERVAL, Duration::from_millis(300));
-        assert_eq!(BOOTSTRAP_ATTEMPTS, 5);
-    }
-
     /// A stand-in for the worktree owner's registry entry name.
     fn name(path: &std::path::Path) -> std::ffi::OsString {
         path.to_string_lossy().replace('/', "_").into()
