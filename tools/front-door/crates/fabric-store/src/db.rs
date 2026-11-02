@@ -86,7 +86,7 @@ impl Store {
     /// Release the initial snapshot for a long-lived lane reader. Each SQL
     /// observation sees fresh WAL commits and request budgets bound operations.
     /// Call only on a store returned by `open_read_only`.
-    pub fn live_read_only(self) -> Result<Self> {
+    pub fn live_read_only(mut self) -> Result<Self> {
         if !self.db.is_readonly("main")? {
             return Err(Error::Invalid("expected read-only store"));
         }
@@ -147,7 +147,7 @@ impl Store {
             Error::UnsafePath(path.join(name))
         })?;
         let path = path.join(database);
-        let db = if writable {
+        let mut db = if writable {
             provenant_sqlite::open_connection(&path, false)?
         } else if read_only_wal {
             provenant_sqlite::open_read_only_connection(&path)?

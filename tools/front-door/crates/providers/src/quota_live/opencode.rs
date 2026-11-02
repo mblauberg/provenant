@@ -43,7 +43,7 @@ pub(super) fn capture(
     let frames = frames(options, now).ok_or(ProbeFailure::Malformed)?;
     let providers = providers(options);
     let database = identity_dir.join("opencode.db");
-    let db = Connection::open_with_flags(
+    let mut db = Connection::open_with_flags(
         database,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
