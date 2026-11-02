@@ -908,7 +908,7 @@ fn review_council_explain_shows_lenses_tiers_families_and_the_verifier()
 fn scout_swarm_and_generator_evaluator_explain_goldens() -> Result<(), Box<dyn std::error::Error>> {
     golden(
         "scout-swarm.explain.txt",
-        &explain_text("scout-swarm", &[])?,
+        &explain_text("scout-swarm", &["--plan", "off"])?,
     )?;
     golden(
         "generator-evaluator.explain.txt",
@@ -922,7 +922,7 @@ fn scout_swarm_and_generator_evaluator_explain_goldens() -> Result<(), Box<dyn s
 
 #[test]
 fn remaining_bundled_patterns_have_explain_goldens() -> Result<(), Box<dyn std::error::Error>> {
-    let worktree = ["--set", "parameters.worktree=\".\""];
+    let worktree = ["--plan", "off", "--set", "parameters.worktree=\".\""];
     let batch = ["--plan", "off", "--set", "parameters.batch_worktree=\".\""];
     // The review stage measures the last commit against its parent.
     let deliver = [
@@ -934,8 +934,8 @@ fn remaining_bundled_patterns_have_explain_goldens() -> Result<(), Box<dyn std::
     for (name, extra) in [
         ("single", &[][..]),
         ("chain", &[]),
-        ("fan-out", &[]),
-        ("fan-out-synthesise", &[]),
+        ("fan-out", &["--plan", "off"][..]),
+        ("fan-out-synthesise", &["--plan", "off"]),
         ("big-batch", &batch[..]),
         ("scope-then-run", &worktree[..]),
         ("deliver", &deliver[..]),
@@ -1389,6 +1389,26 @@ fn explicit_preset_and_no_task_id_never_read_experiments() -> Result<(), Box<dyn
     );
     let output = fixture.run(&["--preset", "gate-only", "--task-id", WORK_ITEM])?;
     assert!(!output.status.success());
+    Ok(())
+}
+
+#[test]
+fn research_presets_have_plan_on_explain_goldens() -> Result<(), Box<dyn std::error::Error>> {
+    let worktree = ["--plan", "on", "--set", "parameters.worktree=\".\""];
+    for (name, extra) in [
+        ("scout-swarm", &["--plan", "on"][..]),
+        ("fan-out", &["--plan", "on"]),
+        ("fan-out-synthesise", &["--plan", "on"]),
+        ("scope-then-run", &worktree[..]),
+    ] {
+        let text = explain_text(name, extra)?;
+        assert!(
+            text.contains("plan: on -> on (planning requested)"),
+            "{text}"
+        );
+        assert!(text.contains("Planner route: principal"), "{text}");
+        golden(&format!("{name}.plan-on.explain.txt"), &text)?;
+    }
     Ok(())
 }
 

@@ -868,7 +868,7 @@ pub fn expand_with(
     let mut plan = None;
     let mut catalogue = None;
     if let Some(context) = &layers.plan {
-        plan = planner::decide(context, name, &config, &origins, prompt)?;
+        plan = planner::decide(layers, context, name, &config, &origins, prompt)?;
         if plan.as_ref().is_some_and(|decision| decision.applied) {
             catalogue = Some(planner::apply(
                 layers,

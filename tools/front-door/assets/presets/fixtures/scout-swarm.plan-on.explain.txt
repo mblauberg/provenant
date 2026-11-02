@@ -1,0 +1,13 @@
+Graph <id>
+Preset selection: scout-swarm (override)
+plan: on -> on (planning requested)
+Planner route: principal
+plan  role=plan.shape tier=principal family=any kind=plan access=read_only worktree=-
+synthesis  role=plan.research tier=senior family=any kind=synthesise access=read_only worktree=-
+  inputs: [{"node":"plan","outputs":["result"]}]
+Roles:
+  plan.research  origin=bundled digest=<digest>
+  plan.shape  origin=bundled digest=<digest>
+  scout.codebase  origin=bundled digest=<digest>
+  scout.external  origin=bundled digest=<digest>
+Substituted scout: web -> junior (route web is not defined in the routing configuration)
