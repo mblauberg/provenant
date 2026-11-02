@@ -2562,7 +2562,14 @@ mod planner_front_end {
             "lanes".into(),
             json!([{"name":"one","worktree":"/w","scope":["src"],"spec":""}]),
         )];
-        let cases: Vec<(&str, String, Vec<(String, Value)>, bool, &str)> = vec![
+        type Case = (
+            &'static str,
+            String,
+            Vec<(String, Value)>,
+            bool,
+            &'static str,
+        );
+        let cases: Vec<Case> = vec![
             (
                 "large spec",
                 acceptance(7),
