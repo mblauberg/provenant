@@ -530,6 +530,25 @@ mod tests {
     }
 
     #[test]
+    fn detail_codes_are_snake_case_and_unique() {
+        let mut seen = std::collections::BTreeSet::new();
+        for code in codes::ALL {
+            assert!(
+                !code.is_empty()
+                    && !code.starts_with('_')
+                    && !code.ends_with('_')
+                    && !code.contains("__")
+                    && code.bytes().all(|byte| byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || byte == b'_'),
+                "{code} is not snake_case"
+            );
+            assert!(seen.insert(*code), "{code} is listed twice");
+        }
+        assert!(codes::ALL.len() > 40);
+    }
+
+    #[test]
     fn target_selection_and_fallbacks() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");

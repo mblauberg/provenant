@@ -1206,23 +1206,40 @@ mod cargo_setup_tests {
         std::fs::create_dir_all(worktree.join(".cargo")).unwrap();
         let config = worktree.join(".cargo/config.toml");
         // Selecting a compiler, directly or through include or [env], is refused.
-        for text in [
-            "[build]\nrustc = 'evil'\n",
-            "[build]\nrustc-wrapper = 'evil'\n",
-            "build.rustc-workspace-wrapper = 'evil'\n",
-            "include = 'elsewhere.toml'\n",
-            "[env]\nRUSTUP_TOOLCHAIN = 'nightly'\n",
-            "[env]\nPATH = { value = '/tmp', force = true }\n",
-            "build = 'rustc'\n",
-            "[build\n",
+        for (text, expected) in [
+            (
+                "[build]\nrustc = 'evil'\n",
+                codes::CARGO_CONFIG_SELECTS_COMPILER,
+            ),
+            (
+                "[build]\nrustc-wrapper = 'evil'\n",
+                codes::CARGO_CONFIG_SELECTS_COMPILER,
+            ),
+            (
+                "build.rustc-workspace-wrapper = 'evil'\n",
+                codes::CARGO_CONFIG_SELECTS_COMPILER,
+            ),
+            (
+                "include = 'elsewhere.toml'\n",
+                codes::CARGO_CONFIG_SELECTS_COMPILER,
+            ),
+            (
+                "[env]\nRUSTUP_TOOLCHAIN = 'nightly'\n",
+                codes::CARGO_CONFIG_SELECTS_COMPILER,
+            ),
+            (
+                "[env]\nPATH = { value = '/tmp', force = true }\n",
+                codes::CARGO_CONFIG_SELECTS_COMPILER,
+            ),
+            ("build = 'rustc'\n", codes::CARGO_CONFIG_SELECTS_COMPILER),
+            // Only text that is not TOML is "invalid".
+            ("[build\n", codes::CARGO_CONFIG_INVALID),
         ] {
             std::fs::write(&config, text).unwrap();
-            assert!(
-                matches!(
-                    verified_cargo_config(&worktree, &cache, &env),
-                    Err(codes::CARGO_CONFIG_SELECTS_COMPILER | codes::CARGO_CONFIG_INVALID)
-                ),
-                "{text}"
+            assert_eq!(
+                verified_cargo_config(&worktree, &cache, &env),
+                Err(expected),
+                "{text:?}"
             );
         }
         std::fs::write(worktree.join(".cargo/config"), "[build]\nrustc = 'evil'\n").unwrap();
