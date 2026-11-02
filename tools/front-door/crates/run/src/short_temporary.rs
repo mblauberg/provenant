@@ -13,8 +13,22 @@ use std::{
 const DOMAIN: &[u8] = b"provenant-short-temporary-root-v1\0";
 
 /// The directory holding aliases, on the platform that needs them.
-fn parent() -> Option<&'static Path> {
-    cfg!(target_os = "macos").then(|| Path::new("/private/tmp"))
+#[cfg(not(test))]
+fn parent() -> Option<PathBuf> {
+    cfg!(target_os = "macos").then(|| PathBuf::from("/private/tmp"))
+}
+
+// Unit tests create no alias unless a test opts in, so that fixture launches
+// never leave links in the shared system directory.
+#[cfg(test)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+thread_local! {
+    static TEST_PARENT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn parent() -> Option<PathBuf> {
+    TEST_PARENT.with(|parent| parent.borrow().clone())
 }
 
 fn alias_in(parent: &Path, attempt: &Path) -> PathBuf {
@@ -71,14 +85,14 @@ fn remove_in(parent: &Path, attempt: &Path) {
 /// off macOS, and whenever the name is taken by anything but our own link: the
 /// launch then uses the long real path.
 pub(crate) fn ensure(attempt: &Directory) -> Option<PathBuf> {
-    ensure_in(parent()?, &attempt.current_path().ok()?)
+    ensure_in(&parent()?, &attempt.current_path().ok()?)
 }
 
 /// Unlink the alias if it is our link to this attempt's `tmp`. Never
 /// recursive; a missing or foreign name is left alone.
 pub(crate) fn remove(attempt: &Directory) {
     if let (Some(parent), Ok(path)) = (parent(), attempt.current_path()) {
-        remove_in(parent, &path);
+        remove_in(&parent, &path);
     }
 }
 
@@ -153,6 +167,7 @@ mod tests {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
         }
         let attempt = Directory::open_anchor(&attempts)?;
+        TEST_PARENT.with(|parent| *parent.borrow_mut() = Some(PathBuf::from("/private/tmp")));
 
         let alias = ensure(&attempt).ok_or("alias created")?;
         // Cleanup runs on every exit, so a failed assertion leaks nothing.
