@@ -544,7 +544,9 @@ fn claude_shell(env: &[(OsString, OsString)]) -> Result<Vec<u8>, ProviderError> 
 /// the checkout when its physical working directory (moved by any leading
 /// `-C`) lies inside the worktree and the nearest `.git` entry walking up from
 /// there is the worktree's own marker. `init` and `clone` create a repository,
-/// so they never bind.
+/// so they never bind. The leading global options are Git's own list (`git help
+/// git`); an option the parser does not know, or a missing value, means it
+/// cannot tell where the subcommand starts, so it does not bind.
 fn bound_exports(bound: &BoundGit) -> Result<String, ProviderError> {
     let worktree = bound.worktree.to_str().ok_or(ProviderError::InvalidPath)?;
     if worktree.chars().any(char::is_control) {
@@ -574,8 +576,12 @@ fn bound_exports(bound: &BoundGit) -> Result<String, ProviderError> {
             "  while [ \"$#\" -gt 0 ]; do\n",
             "    case \"$1\" in\n",
             "      -C) [ \"$#\" -ge 2 ] || break; lane_d=$(cd \"$lane_d\" 2>/dev/null && cd \"$2\" 2>/dev/null && pwd -P) || return 1; shift 2 ;;\n",
-            "      -c|--git-dir|--work-tree|--namespace) [ \"$#\" -ge 2 ] || break; shift 2 ;;\n",
-            "      -*) shift ;;\n",
+            "      -c|--git-dir|--work-tree|--namespace|--config-env|--attr-source|--super-prefix) [ \"$#\" -ge 2 ] || return 1; shift 2 ;;\n",
+            "      --git-dir=*|--work-tree=*|--namespace=*|--config-env=*|--attr-source=*|--super-prefix=*|--exec-path|--exec-path=*|--list-cmds=*) shift ;;\n",
+            "      -v|--version|-h|--help|--html-path|--man-path|--info-path|-p|--paginate|-P|--no-pager) shift ;;\n",
+            "      --no-replace-objects|--no-lazy-fetch|--no-optional-locks|--no-advice|--bare) shift ;;\n",
+            "      --literal-pathspecs|--glob-pathspecs|--noglob-pathspecs|--icase-pathspecs) shift ;;\n",
+            "      -*) return 1 ;;\n",
             "      *) break ;;\n",
             "    esac\n",
             "  done\n",
@@ -1418,11 +1424,35 @@ mod tests {
             bound(&format!("-c a=b -C {inside} log"))
         );
         // Options with a separate value do not hide a later -C.
-        for option in ["--git-dir", "--work-tree", "--namespace"] {
+        for option in [
+            "--git-dir",
+            "--work-tree",
+            "--namespace",
+            "--config-env",
+            "--attr-source",
+            "--super-prefix",
+        ] {
             assert_eq!(
                 run(&outside, &[option, "v", "-C", inside, "log"]),
                 bound(&format!("{option} v -C {inside} log"))
             );
+        }
+        let fixture = inner.to_str().unwrap();
+        assert_eq!(
+            run(&worktree, &["--config-env", "x=Y", "-C", fixture, "commit"]),
+            unbound(&format!("--config-env x=Y -C {fixture} commit"))
+        );
+        assert_eq!(
+            run(&outside, &["--config-env", "x=Y", "-C", inside, "commit"]),
+            bound(&format!("--config-env x=Y -C {inside} commit"))
+        );
+        // Known valueless and `=` options are skipped; unknown ones do not bind.
+        assert_eq!(
+            run(&worktree, &["--no-pager", "--git-dir=v", "-p", "log"]),
+            bound("--no-pager --git-dir=v -p log")
+        );
+        for args in [&["--future-option", "log"][..], &["-X", "log"], &["-c"]] {
+            assert_eq!(run(&worktree, args), unbound(&args.join(" ")), "{args:?}");
         }
         assert_eq!(
             run(&worktree, &["-C", outside_path, "log"]),

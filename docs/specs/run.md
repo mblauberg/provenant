@@ -834,7 +834,13 @@ only when Git acts on the checkout: its physical working directory (after any
 leading `-C`) is inside the checkout and the nearest `.git` entry walking up
 from there is the checkout's own marker. `init` and `clone` never bind. In every
 other case the shim unsets those variables before running Git, so a binding
-inherited from a parent process, such as a hook, cannot leak. A fixture that
+inherited from a parent process, such as a hook, cannot leak. The shim skips
+Git's documented global options, with their separate values, to find the
+subcommand; an option it does not recognise means it does not bind. Git
+children inherit the bound selectors, so a hook that changes directory and
+calls Git by absolute path stays bound to the lane. The threat model is
+accidental fixture commits; the sandbox is the boundary, and a lane can only
+affect its own branch. A fixture that
 runs `git init` and commits in a temporary directory, even one under the
 checkout, therefore acts on that directory with its own `-c user.name` and
 cannot read or write the lane's index or branch (#2601). That private object
