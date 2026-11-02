@@ -760,6 +760,40 @@ fn owner_lock_refuses_cancelled_requests_hardlinks_and_writable_anchors() {
 }
 
 #[test]
+fn concurrent_owner_lock_creation_of_one_new_name_succeeds_for_every_caller() {
+    // Regression for #2671: macOS can fail the loser of a concurrent
+    // openat(O_CREAT) of one new name with ENOENT.
+    const ROUNDS: usize = 500;
+    const CALLERS: usize = 3;
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    let barrier = std::sync::Barrier::new(CALLERS);
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..CALLERS)
+            .map(|_| {
+                scope.spawn(|| {
+                    for round in 0..ROUNDS {
+                        let name = OsString::from(format!("round-{round}.lock"));
+                        barrier.wait();
+                        dir.lock(
+                            &name,
+                            LockMode::Shared,
+                            one_second_budget(),
+                            &CancelToken::new(),
+                            &FixedClock(provenant_core::MonoTime::from_micros(0)),
+                        )
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    });
+}
+
+#[test]
 fn owner_lock_refuses_symlinked_lock_entries() {
     let temp = tempfile::tempdir().unwrap();
     let dir = Directory::open_anchor(temp.path()).unwrap();
