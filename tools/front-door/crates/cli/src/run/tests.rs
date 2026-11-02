@@ -1220,14 +1220,8 @@ fn dispatch_existing_worktree_checks_custody_and_replays() -> Result<(), Box<dyn
                     command
                 })
             };
-            let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
             let switch = |args: &[&str]| -> Result<(), Box<dyn std::error::Error>> {
-                let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
-                    .chain(args.iter().map(OsString::from))
-                    .collect();
-                let out =
-                    executor.execute(ExecOptions::new(&argv, &tree, Duration::from_secs(5)))?;
-                assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+                provenant_os::fixture::run_git(&tree, args)?;
                 Ok(())
             };
             switch(&["switch", "--detach"])?;
@@ -1403,7 +1397,6 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
     let mut inputs = RootInputs::new(home.clone(), project.clone());
     inputs.state_dir = Some(root.join("state"));
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
     for args in [
         vec!["init", "-q"],
         vec![
@@ -1417,14 +1410,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
             "base",
         ],
     ] {
-        let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
-            .chain(args.into_iter().map(OsString::from))
-            .collect();
-        let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(10));
-        options.stdout = StreamPolicy::Capture { limit: 65_536 };
-        options.stderr = StreamPolicy::Capture { limit: 65_536 };
-        let out = executor.execute(options)?;
-        assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+        provenant_os::fixture::run_git(&project, &args)?;
     }
     let edge = Edge {
         roots: &roots,
@@ -1453,17 +1439,12 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
             &cancel,
         )
     })?;
-    let primary = {
-        let argv = vec![
-            git.as_os_str().to_owned(),
-            "symbolic-ref".into(),
-            "--short".into(),
-            "HEAD".into(),
-        ];
-        let output = executor.execute(ExecOptions::new(&argv, &project, Duration::from_secs(5)))?;
-        assert_eq!(output.termination, Termination::Exit(0));
-        String::from_utf8(output.stdout.bytes)?.trim().to_owned()
-    };
+    let primary = String::from_utf8(provenant_os::fixture::run_git(
+        &project,
+        &["symbolic-ref", "--short", "HEAD"],
+    )?)?
+    .trim()
+    .to_owned();
     for (index, (target, placement, delivery)) in ["main", "master", primary.as_str()]
         .into_iter()
         .flat_map(|target| {
@@ -1746,16 +1727,7 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
     let mut inputs = RootInputs::new(home.clone(), project.clone());
     inputs.state_dir = Some(root.join("state"));
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    let run_git = |args: &[&str]| -> Result<_, Box<dyn std::error::Error>> {
-        let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
-            .chain(args.iter().map(OsString::from))
-            .collect();
-        let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(10));
-        options.stdout = StreamPolicy::Capture { limit: 65_536 };
-        options.stderr = StreamPolicy::Capture { limit: 65_536 };
-        Ok(executor.execute(options)?)
-    };
+    let run_git = |args: &[&str]| provenant_os::fixture::run_git(&project, args);
     for args in [
         &["init", "-q"][..],
         &[
@@ -1769,8 +1741,7 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
             "base",
         ][..],
     ] {
-        let out = run_git(args)?;
-        assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+        run_git(args)?;
     }
     let edge = Edge {
         roots: &roots,
@@ -1829,17 +1800,20 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
             "{:?}",
             reply.result
         );
-        let branch = run_git(&[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            "refs/heads/preflight-lane",
-        ])?;
-        assert_ne!(branch.termination, Termination::Exit(0), "{branch:?}");
+        // `rev-parse --verify --quiet` exits non-zero when the branch does not exist.
+        assert!(
+            run_git(&[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "refs/heads/preflight-lane",
+            ])
+            .is_err()
+        );
     }
     // A relative base is resolved in the source checkout exactly once.
     // The new tree has no HEAD^, so admission must use creation's receipt.
-    let out = run_git(&[
+    run_git(&[
         "-c",
         "user.name=Fixture",
         "-c",
@@ -1849,7 +1823,6 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
         "-qm",
         "second",
     ])?;
-    assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
