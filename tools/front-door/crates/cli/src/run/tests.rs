@@ -281,7 +281,7 @@ fn render_run_renders_warnings_from_data_and_does_not_scrape_text()
         "dispatch",
         Ok((
             json!({
-                "lanes": [],
+                "lanes": [{"attempt_id":"01010101010101010101010101010101", "state":"succeeded"}],
                 "warnings": ["brief references /elsewhere/rubric.md outside the lane's read roots"]
             }),
             "warning: brief references /scraped outside the lane's read roots\n".into(),

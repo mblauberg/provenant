@@ -10,6 +10,7 @@ use crate::{
 use provenant_confinement::valid_read_only_writable;
 use provenant_core::retry::Backoff;
 use provenant_core::{AttemptId, CancelToken, Clock, DurationMicros, GitOid, WallTime};
+use provenant_os::build_slots::{SlotWait, WaitKind};
 use provenant_os::{
     fs::Directory,
     sys::resources::{self, MemorySample},
@@ -210,6 +211,7 @@ impl RunStore {
             .map(|settings| settings.memory_pressure_threshold)
             .unwrap_or_default();
         let mut stalled_cache = std::collections::HashMap::new();
+        let slot_queue = self.slot_queue(lanes, call);
         lanes
             .iter()
             .filter(|lane| {
@@ -232,7 +234,7 @@ impl RunStore {
                     "host_stalled: supervisor is in uninterruptible sleep".to_owned()
                 } else if matches!(lane.state, AttemptState::Running { .. }) {
                     self.disk_pause_wait(lane)
-                        .or_else(|| self.build_slot_wait(lane, call))
+                        .or_else(|| self.build_slot_wait(lane, call, &slot_queue))
                         .or_else(|| {
                             lane.provider_silent_for_ms.0
                                 .map(provenant_records::run::provider_silence_reason)
@@ -338,9 +340,14 @@ impl RunStore {
     /// A gated build in the lane says it waits by writing a marker in the
     /// lane's scratch directory. The lane writes it, so it is read
     /// without following links, bounded, and trusted only for which of two
-    /// fixed waits it names and that it is fresh.
-    fn build_slot_wait(&self, lane: &AttemptRecord, call: &Request<'_>) -> Option<String> {
-        use provenant_os::build_slots::{WAIT_MARKER, WaitKind};
+    /// fixed waits it names, that it is fresh and, for a slot wait, plausible
+    /// slot counts and a start time.
+    fn wait_marker(
+        &self,
+        lane: &AttemptRecord,
+        call: &Request<'_>,
+    ) -> Option<(WaitKind, Option<SlotWait>)> {
+        use provenant_os::build_slots::WAIT_MARKER;
         let attempt = self.attempt_dir(lane.run_id, lane.attempt_id, false).ok()?;
         match attempt.metadata_at("process-exit.json".as_ref(), false) {
             Err(error) if error.is_not_found() => {}
@@ -350,7 +357,7 @@ impl RunStore {
         let now = u64::try_from(call.clock.wall_now().ok()?.as_micros() / 1_000_000).ok()?;
         // The marker sits in the lane's scratch (`tmp/candidate-N`), one file
         // per waiting command. Bound how much a lane can make the host scan.
-        let kind = temporary
+        temporary
             .entries()
             .ok()?
             .map_while(|entry| entry.ok())
@@ -365,13 +372,57 @@ impl RunStore {
                     .take(32)
                     .find_map(|name| {
                         let raw = scratch.read_stable(&name, 64).ok()?;
-                        WaitKind::from_marker(std::str::from_utf8(&raw).ok()?, now)
+                        let text = std::str::from_utf8(&raw).ok()?;
+                        Some((
+                            WaitKind::from_marker(text, now)?,
+                            WaitKind::slot_wait(text, now),
+                        ))
                     })
-            })?;
+            })
+    }
+    /// The running lanes waiting for a build slot, oldest wait first, with the
+    /// slot counts they last saw. Only lanes of this project are visible; the
+    /// slots are shared by every project on the host.
+    fn slot_queue(
+        &self,
+        lanes: &[AttemptRecord],
+        call: &Request<'_>,
+    ) -> Vec<(AttemptId, SlotWait)> {
+        let mut queue: Vec<_> = lanes
+            .iter()
+            .filter(|lane| matches!(lane.state, AttemptState::Running { .. }))
+            .filter_map(|lane| match self.wait_marker(lane, call)? {
+                (WaitKind::Slot, Some(wait)) => Some((lane.attempt_id, wait)),
+                _ => None,
+            })
+            .collect();
+        queue.sort_by_key(|(attempt, wait)| (wait.since, attempt.to_string()));
+        queue
+    }
+    fn build_slot_wait(
+        &self,
+        lane: &AttemptRecord,
+        call: &Request<'_>,
+        queue: &[(AttemptId, SlotWait)],
+    ) -> Option<String> {
+        let (kind, _) = self.wait_marker(lane, call)?;
         match kind {
-            WaitKind::Slot => {
-                Some("build slot: a cargo build waits for one of the host's build slots".to_owned())
-            }
+            WaitKind::Slot => Some(
+                match queue.iter().position(|(id, _)| *id == lane.attempt_id) {
+                    Some(index) => {
+                        let wait = queue[index].1;
+                        format!(
+                            "build slot: waiting {} of {} (longest first); {} of {} slots held",
+                            index + 1,
+                            queue.len(),
+                            wait.held,
+                            wait.limit
+                        )
+                    }
+                    None => "build slot: a cargo build waits for one of the host's build slots"
+                        .to_owned(),
+                },
+            ),
             WaitKind::CargoLock => Some(
                 "build slot: a cargo build waits for another build's lock in its target directory"
                     .to_owned(),

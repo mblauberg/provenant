@@ -1679,3 +1679,25 @@ fn retired_disk_guard_configuration_warns_and_uses_defaults() {
     assert_warning(&config, "unknown_key");
     assert_eq!(config.gc, GcSettings::default());
 }
+
+#[test]
+fn read_knobs_ignores_domain_sections_it_does_not_know() {
+    let fixture = Files::new();
+    let state = fixture.roots.state.as_path();
+    std::fs::create_dir(state).unwrap();
+    std::fs::write(
+        fixture.config(),
+        "schema_version = 1\n[domains.fabric.lanes.cargo_seed]\nenabled = false\n",
+    )
+    .unwrap();
+    // Without the domain sections every configured domain is an unknown key.
+    // `read_knobs` is `config_show`: it never prints that advisory.
+    let loud = config_show(&fixture.roots, &DomainSections::<NoDomains>::new(&[])).unwrap();
+    assert!(
+        loud.warnings.iter().any(|w| w.rule == "unknown_key"),
+        "{:?}",
+        loud.warnings
+    );
+    let quiet = read_knobs(&fixture.roots).unwrap();
+    assert!(quiet.census_ignore_unreadable().unwrap().is_empty());
+}

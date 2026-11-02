@@ -54,13 +54,7 @@ pub fn run(mut command: Dispatch, edge: &Edge<'_>) -> Reply {
             command.route.effort = catalogue.model_default_effort(&config.domains.routing, &id);
         }
     }
-    let explain = command.explain;
-    let result = dispatch(command, edge);
-    if explain {
-        result
-    } else {
-        render_run(result, edge)
-    }
+    render_run(dispatch(command, edge), edge)
 }
 
 // A run that names neither a mode nor a target, from a linked worktree, is the
@@ -135,6 +129,11 @@ pub(super) fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
         .as_array()
         .cloned()
         .unwrap_or_default();
+    if rows.is_empty() {
+        // A route explanation has no lane rows; keep the preview text returned
+        // by dispatch instead of rendering an empty run summary over it.
+        return result;
+    }
     let mut human = format!(
         "operation {}\n",
         result.result.data["operation_id"]
@@ -562,6 +561,59 @@ pub(super) fn dispatch_inner(
     created: &mut Option<(PathBuf, String)>,
     workers: &dyn provenant_confinement::worktrees::WorkerObserver,
 ) -> Result<(Value, String, bool), Fail> {
+    // Explain is a preview-only operation. Return before worktree preflight,
+    // operation replay, or any preparation that could lead to submission.
+    if command.explain {
+        if command.input.manifest.is_some() {
+            return Err(Fail::new(
+                Status::Invalid,
+                ErrorKind::Invalid,
+                "--explain applies to one --route or --model, or to --preset",
+            ));
+        }
+        // The brief scan only reads the prompt file and resolves the roots; it
+        // never prepares anything that could lead to a submission.
+        let warnings = match command.input.prompt_file.as_deref() {
+            Some(path) => {
+                let prompt = read_bounded(path)?;
+                let access = lane_access(&command.access, edge.roots.state.as_path(), edge.home)?;
+                brief_read_root_warnings(
+                    &prompt,
+                    edge.cwd,
+                    command.access.worktree.as_deref(),
+                    &access.read_roots,
+                    edge.home,
+                )
+            }
+            None => Vec::new(),
+        };
+        return crate::route::explain_dispatch(&command.route, edge.roots)
+            .map(|(mut data, mut text)| {
+                record_warnings(&mut data, warnings);
+                text.push_str(&warnings_text(&data));
+                (data, text, false)
+            })
+            .map_err(|error| {
+                let refused = matches!(
+                    &error,
+                    crate::route::EdgeError::Routing(routing)
+                        if routing.code() == "no_eligible_pool_member"
+                );
+                Fail::new(
+                    if refused {
+                        Status::Refused
+                    } else {
+                        Status::Invalid
+                    },
+                    if refused {
+                        ErrorKind::Refused
+                    } else {
+                        ErrorKind::Invalid
+                    },
+                    error.to_string(),
+                )
+            });
+    }
     // Check explicit placement before local aliases are normalised away and
     // before writer validation or peer discovery can act on the request.
     if command.host.is_some() && crate::fabric::in_lane() {
@@ -660,56 +712,6 @@ pub(super) fn dispatch_inner(
     let call = request(&clock, &cancel)?;
     if command.route.read_heavy {
         command.knobs.push("routing.workload=read_heavy".into());
-    }
-    if command.explain {
-        if command.input.manifest.is_some() {
-            return Err(Fail::new(
-                Status::Invalid,
-                ErrorKind::Invalid,
-                "--explain applies to one --route or --model, or to --preset",
-            ));
-        }
-        let warnings = command
-            .input
-            .prompt_file
-            .as_deref()
-            .map(|path| {
-                let prompt = read_bounded(path)?;
-                Ok::<Vec<String>, Fail>(brief_read_root_warnings(
-                    &prompt,
-                    edge.cwd,
-                    command.access.worktree.as_deref(),
-                    &lane_access.read_roots,
-                    edge.home,
-                ))
-            })
-            .transpose()?;
-        return crate::route::explain_dispatch(&command.route, edge.roots)
-            .map(|(mut data, mut text)| {
-                record_warnings(&mut data, warnings.unwrap_or_default());
-                text.push_str(&warnings_text(&data));
-                (data, text, false)
-            })
-            .map_err(|error| {
-                let refused = matches!(
-                    &error,
-                    crate::route::EdgeError::Routing(routing)
-                        if routing.code() == "no_eligible_pool_member"
-                );
-                Fail::new(
-                    if refused {
-                        Status::Refused
-                    } else {
-                        Status::Invalid
-                    },
-                    if refused {
-                        ErrorKind::Refused
-                    } else {
-                        ErrorKind::Invalid
-                    },
-                    error.to_string(),
-                )
-            });
     }
     if !command.route.exclude.is_empty() {
         // Refuse an unknown selector before anything is submitted.

@@ -115,10 +115,8 @@ fn checkout_commit(project: &Path, checkout: &Path, commit: &str) -> Result<()> 
     Ok(())
 }
 
-pub fn build(state: &Path, project: &Path) -> Result<String> {
-    if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some() {
-        return Err(io::Error::other("target seeds can only be built on the host").into());
-    }
+/// The pinned remote-tracking commit every seed build starts from.
+fn origin_main(project: &Path) -> Result<String> {
     let output = git(
         project,
         &[
@@ -131,52 +129,204 @@ pub fn build(state: &Path, project: &Path) -> Result<String> {
     if !matches!(commit.len(), 40 | 64) || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(io::Error::other("invalid origin/main commit").into());
     }
-    publish(state, |stage| {
-        let checkout = stage.join("checkout");
-        checkout_commit(project, &checkout, &commit)?;
-        let worktree = checkout.join("tools/front-door");
-        let target = stage.join("target");
-        fs::create_dir(&target)?;
-        let (rustc_vv, host_triple) = target_seed::rustc_metadata(&worktree)?;
-        let mut flags = vec![
-            "cargo build --locked --all-targets".to_owned(),
-            "cargo test --locked --no-run".to_owned(),
-        ];
-        flags.extend(
-            [
-                "RUSTFLAGS",
-                "CARGO_ENCODED_RUSTFLAGS",
-                "CARGO_BUILD_RUSTFLAGS",
-                "CARGO_BUILD_TARGET",
-            ]
-            .into_iter()
-            .filter_map(|key| std::env::var(key).ok().map(|v| format!("{key}={v}"))),
-        );
-        for args in [
-            &["build", "--locked", "--all-targets"][..],
-            &["test", "--locked", "--no-run"][..],
-        ] {
-            let argv: Vec<OsString> = std::iter::once(OsString::from("cargo"))
-                .chain(args.iter().map(OsString::from))
-                .collect();
-            run(
-                &worktree,
-                &argv,
-                &[
-                    ("CARGO_TARGET_DIR".into(), target.as_os_str().into()),
-                    ("CARGO_BUILD_BUILD_DIR".into(), target.as_os_str().into()),
-                ],
-            )?;
+    Ok(commit)
+}
+
+/// What a refresh did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Refresh {
+    /// The newest complete generation already builds this `origin/main`.
+    Current,
+    /// Another host seed build holds the build lock; nothing was started.
+    Busy,
+    /// A new generation was published.
+    Built(String),
+    /// The last build of this commit (named here) failed for this project; it
+    /// is not retried until `origin/main` moves.
+    BackedOff(String),
+}
+
+/// Rebuild the seed when `origin/main` has moved past the newest complete
+/// generation, at most one build at a time. Call after a fetch that may have
+/// advanced `origin/main`; it does nothing when the seed is current or a build
+/// is running, and never builds from a lane checkout (the build uses a scratch
+/// clone of the pinned `origin/main`).
+// The detached seed worker (`internal tick-seed`) calls this once per project
+// after the daily collection's fetch. The harness-free worktree driver
+// includes this module without that caller.
+#[allow(dead_code)]
+pub fn refresh(state: &Path, project: &Path) -> Result<Refresh> {
+    refuse_in_lane()?;
+    let commit = origin_main(project)?;
+    refresh_with(state, &marker_name(project), &commit, |stage| {
+        build_into(stage, project, &commit)
+    })
+}
+
+/// Raised under the build lock when another refresher published this commit
+/// while we waited for it.
+#[derive(Debug)]
+struct AlreadyCurrent;
+impl std::fmt::Display for AlreadyCurrent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("seed already current")
+    }
+}
+impl Error for AlreadyCurrent {}
+
+/// The back-off marker file for one project, so one project's broken build
+/// neither blocks nor clears another's.
+fn marker_name(project: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+    // A toolchain change may rename every marker, which only ends a back-off.
+    let mut hasher = std::hash::DefaultHasher::new();
+    project.hash(&mut hasher);
+    format!("last-failed-{:012x}", hasher.finish() & 0xffff_ffff_ffff)
+}
+
+/// The commit whose build last failed for this project, so a broken
+/// `origin/main` is not rebuilt every tick. A new commit differs and so clears
+/// the back-off.
+fn failed_commit(state: &Path, marker: &str) -> Option<String> {
+    fs::read_to_string(target_seed::store_path(state).join(marker))
+        .ok()
+        .map(|text| text.trim().to_owned())
+}
+
+fn refresh_with(
+    state: &Path,
+    marker: &str,
+    head: &str,
+    build: impl FnOnce(&Path) -> Result<Manifest>,
+) -> Result<Refresh> {
+    refresh_racing(state, marker, head, || {}, build)
+}
+
+/// `between` runs after the unlocked staleness check and before the build
+/// lock: the window another refresher can publish in.
+fn refresh_racing(
+    state: &Path,
+    marker: &str,
+    head: &str,
+    between: impl FnOnce(),
+    build: impl FnOnce(&Path) -> Result<Manifest>,
+) -> Result<Refresh> {
+    if newest_generation_commit(state).as_deref() == Some(head) {
+        return Ok(Refresh::Current);
+    }
+    if failed_commit(state, marker).as_deref() == Some(head) {
+        return Ok(Refresh::BackedOff(head.to_owned()));
+    }
+    // Another refresher may publish this commit between the check above and
+    // our taking the build lock, so look again once we hold it.
+    between();
+    let result = publish(state, |stage| {
+        if newest_generation_commit(state).as_deref() == Some(head) {
+            return Err(AlreadyCurrent.into());
         }
-        fs::remove_dir_all(checkout)?;
-        Ok(Manifest {
-            rustc_vv,
-            host_triple,
-            commit,
-            profile: "dev".into(),
-            features: vec!["default".into()],
-            flags,
-        })
+        build(stage)
+    });
+    match result {
+        Ok(id) => {
+            let _ = fs::remove_file(target_seed::store_path(state).join(marker));
+            Ok(Refresh::Built(id))
+        }
+        Err(error) if error.is::<AlreadyCurrent>() => Ok(Refresh::Current),
+        Err(error)
+            if matches!(
+                error.downcast_ref::<provenant_os::fs::FsError>(),
+                Some(provenant_os::fs::FsError::LockTimeout { .. })
+            ) =>
+        {
+            Ok(Refresh::Busy)
+        }
+        Err(error) => {
+            let _ = fs::write(
+                target_seed::store_path(state).join(marker),
+                format!("{head}\n"),
+            );
+            Err(error)
+        }
+    }
+}
+
+/// The commit the newest complete generation was built from.
+fn newest_generation_commit(state: &Path) -> Option<String> {
+    let generations = target_seed::store_path(state).join("generations");
+    let mut names: Vec<_> = fs::read_dir(generations)
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+        .map(|entry| entry.path())
+        .collect();
+    names.sort();
+    names.into_iter().rev().find_map(|path| {
+        (fs::read(path.join("complete")).ok()? == b"complete\n")
+            .then(|| fs::read(path.join("manifest.json")).ok())
+            .flatten()
+            .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok())
+            .map(|manifest| manifest.commit)
+    })
+}
+
+fn refuse_in_lane() -> Result<()> {
+    if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some() {
+        return Err(io::Error::other("target seeds can only be built on the host").into());
+    }
+    Ok(())
+}
+
+pub fn build(state: &Path, project: &Path) -> Result<String> {
+    refuse_in_lane()?;
+    let commit = origin_main(project)?;
+    publish(state, |stage| build_into(stage, project, &commit))
+}
+
+fn build_into(stage: &Path, project: &Path, commit: &str) -> Result<Manifest> {
+    let checkout = stage.join("checkout");
+    checkout_commit(project, &checkout, commit)?;
+    let worktree = checkout.join("tools/front-door");
+    let target = stage.join("target");
+    fs::create_dir(&target)?;
+    let (rustc_vv, host_triple) = target_seed::rustc_metadata(&worktree)?;
+    let mut flags = vec![
+        "cargo build --locked --all-targets".to_owned(),
+        "cargo test --locked --no-run".to_owned(),
+    ];
+    flags.extend(
+        [
+            "RUSTFLAGS",
+            "CARGO_ENCODED_RUSTFLAGS",
+            "CARGO_BUILD_RUSTFLAGS",
+            "CARGO_BUILD_TARGET",
+        ]
+        .into_iter()
+        .filter_map(|key| std::env::var(key).ok().map(|v| format!("{key}={v}"))),
+    );
+    for args in [
+        &["build", "--locked", "--all-targets"][..],
+        &["test", "--locked", "--no-run"][..],
+    ] {
+        let argv: Vec<OsString> = std::iter::once(OsString::from("cargo"))
+            .chain(args.iter().map(OsString::from))
+            .collect();
+        run(
+            &worktree,
+            &argv,
+            &[
+                ("CARGO_TARGET_DIR".into(), target.as_os_str().into()),
+                ("CARGO_BUILD_BUILD_DIR".into(), target.as_os_str().into()),
+            ],
+        )?;
+    }
+    fs::remove_dir_all(checkout)?;
+    Ok(Manifest {
+        rustc_vv,
+        host_triple,
+        commit: commit.to_owned(),
+        profile: "dev".into(),
+        features: vec!["default".into()],
+        flags,
     })
 }
 
@@ -339,6 +489,147 @@ mod tests {
             0
         );
     }
+    #[allow(dead_code)] // The harness-free target includes this module without its tests.
+    fn manifest(commit: &str) -> Manifest {
+        Manifest {
+            rustc_vv: "version".into(),
+            host_triple: "host".into(),
+            commit: commit.into(),
+            profile: "dev".into(),
+            features: vec![],
+            flags: vec![],
+        }
+    }
+    #[allow(dead_code)] // The harness-free target includes this module without its tests.
+    fn built(stage: &Path, commit: &str) -> Result<Manifest> {
+        fs::create_dir(stage.join("target"))?;
+        Ok(manifest(commit))
+    }
+    #[allow(dead_code)] // The harness-free target includes this module without its tests.
+    fn freeze(state: &Path) {
+        let generations = target_seed::store_path(state).join("generations");
+        for entry in fs::read_dir(generations).unwrap() {
+            make_directories_writable(&entry.unwrap().path()).unwrap();
+        }
+    }
+
+    #[test]
+    fn refresh_builds_only_when_origin_main_has_advanced() {
+        let state = tempfile::tempdir().unwrap();
+        let builds = std::cell::Cell::new(0);
+        let run = |head: &str| {
+            refresh_with(state.path(), "p", head, |stage| {
+                builds.set(builds.get() + 1);
+                built(stage, head)
+            })
+            .unwrap()
+        };
+        assert!(matches!(run("aaa"), Refresh::Built(_)));
+        assert_eq!(run("aaa"), Refresh::Current);
+        assert_eq!(builds.get(), 1, "a current seed is not rebuilt");
+        // An incomplete newer generation does not count as current.
+        let generations = target_seed::store_path(state.path()).join("generations");
+        fs::create_dir(generations.join("99999999999999999999-partial")).unwrap();
+        assert_eq!(
+            newest_generation_commit(state.path()).as_deref(),
+            Some("aaa")
+        );
+        assert!(matches!(run("bbb"), Refresh::Built(_)));
+        assert_eq!(run("bbb"), Refresh::Current);
+        assert_eq!(builds.get(), 2);
+        freeze(state.path());
+    }
+
+    #[test]
+    fn refresh_runs_one_build_at_a_time_and_failure_publishes_nothing() {
+        let state = tempfile::tempdir().unwrap();
+        {
+            // Another host build holds the build lock: no second build starts.
+            target_seed::lock_store(state.path()).map(drop).unwrap();
+            let _running = target_seed::lock_build(state.path()).unwrap();
+            let outcome = refresh_with(state.path(), "p", "aaa", |_| panic!("must not build"));
+            assert_eq!(outcome.unwrap(), Refresh::Busy);
+        }
+        // A sibling test thread can fork while the lock above is released and
+        // briefly hold a copy of its descriptor, so Busy is retried for 2 s.
+        let mut tries = 0;
+        let failed = loop {
+            let attempt = refresh_with(state.path(), "p", "aaa", |_| {
+                Err(io::Error::other("build failed").into())
+            });
+            tries += 1;
+            if !matches!(attempt, Ok(Refresh::Busy)) || tries >= 100 {
+                break attempt;
+            }
+            #[allow(clippy::disallowed_methods)] // Test-only: bounded 2 s retry.
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(failed.is_err(), "{failed:?}");
+        assert_eq!(newest_generation_commit(state.path()), None);
+        // The failed commit is backed off; a newer commit builds again.
+        assert_eq!(
+            refresh_with(state.path(), "p", "aaa", |_| panic!(
+                "must not rebuild a failed commit"
+            ))
+            .unwrap(),
+            Refresh::BackedOff("aaa".into())
+        );
+        assert!(matches!(
+            refresh_with(state.path(), "p", "bbb", |stage| built(stage, "bbb")).unwrap(),
+            Refresh::Built(_)
+        ));
+        assert_eq!(
+            failed_commit(state.path(), "p"),
+            None,
+            "success clears the back-off"
+        );
+        freeze(state.path());
+    }
+
+    #[test]
+    fn one_projects_failure_never_clears_another_projects_back_off() {
+        let state = tempfile::tempdir().unwrap();
+        let (a, b) = (marker_name(Path::new("/a")), marker_name(Path::new("/b")));
+        assert_ne!(a, b);
+        let fail = |marker: &str, head: &str| {
+            refresh_with(state.path(), marker, head, |_| {
+                Err(io::Error::other("build failed").into())
+            })
+            .unwrap_err()
+        };
+        fail(&a, "aaa");
+        // B is not backed off by A's failure, and B's success leaves A's marker.
+        assert!(matches!(
+            refresh_with(state.path(), &b, "bbb", |stage| built(stage, "bbb")).unwrap(),
+            Refresh::Built(_)
+        ));
+        assert_eq!(failed_commit(state.path(), &a).as_deref(), Some("aaa"));
+        assert_eq!(failed_commit(state.path(), &b), None);
+        assert_eq!(
+            refresh_with(state.path(), &a, "aaa", |_| panic!("backed off")).unwrap(),
+            Refresh::BackedOff("aaa".into())
+        );
+        freeze(state.path());
+    }
+
+    #[test]
+    fn refresh_rechecks_staleness_after_taking_the_build_lock() {
+        let state = tempfile::tempdir().unwrap();
+        let outcome = refresh_racing(
+            state.path(),
+            "p",
+            "aaa",
+            || {
+                publish(state.path(), |stage| built(stage, "aaa")).unwrap();
+            },
+            |_| panic!("the racing publisher already built this commit"),
+        )
+        .unwrap();
+        assert_eq!(outcome, Refresh::Current);
+        assert_eq!(failed_commit(state.path(), "p"), None);
+        freeze(state.path());
+    }
+
     #[test]
     fn success_publishes_read_only_generation() {
         let state = tempfile::tempdir().unwrap();

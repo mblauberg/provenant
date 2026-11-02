@@ -1,22 +1,99 @@
 //! Best-effort, private Cargo registry seed for writer lanes.
 use std::path::Path;
 
+/// Every `detail` a toolchain-verification refusal can report in
+/// `cargo-target-setup.json`. One list, so a typo cannot invent a code and a
+/// test can hold the set to snake_case without duplicates.
+macro_rules! detail_codes {
+    ($($name:ident = $text:literal),* $(,)?) => {
+        // Toolchain verification runs only on macOS, where seeds are cloned.
+        #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+        pub(crate) mod codes {
+            $(pub(crate) const $name: &str = $text;)*
+            #[cfg(test)]
+            pub(crate) const ALL: &[&str] = &[$($name),*];
+        }
+    };
+}
+detail_codes! {
+    WORKTREE_LAYOUT_UNEXPECTED = "worktree_layout_unexpected",
+    CARGO_HOME_ENV_MISSING = "cargo_home_env_missing",
+    CARGO_HOME_ENV_UNEXPECTED = "cargo_home_env_unexpected",
+    CARGO_HOME_CONFIG_PRESENT = "cargo_home_config_present",
+    CARGO_CONFIG_UNREADABLE = "cargo_config_unreadable",
+    CARGO_CONFIG_TOO_LARGE = "cargo_config_too_large",
+    CARGO_CONFIG_INVALID = "cargo_config_invalid",
+    CARGO_CONFIG_SELECTS_COMPILER = "cargo_config_selects_compiler",
+    WORKTREE_UNRESOLVABLE = "worktree_unresolvable",
+    RUSTUP_HOME_WRITABLE = "rustup_home_writable",
+    CARGO_BIN_WRITABLE = "cargo_bin_writable",
+    PATH_MISSING = "path_missing",
+    PATH_DUPLICATED = "path_duplicated",
+    RUSTUP_SHIM_UNRESOLVABLE = "rustup_shim_unresolvable",
+    RUSTUP_SHIM_WRITABLE = "rustup_shim_writable",
+    PATH_ENTRY_RELATIVE = "path_entry_relative",
+    PATH_ENTRY_WRITABLE = "path_entry_writable",
+    RUSTC_NOT_RUSTUP_SHIM = "rustc_not_rustup_shim",
+    RUSTC_PATH_UNRESOLVABLE = "rustc_path_unresolvable",
+    RUSTC_NOT_ON_PATH = "rustc_not_on_path",
+    RUSTUP_HOME_UNEXPECTED = "rustup_home_unexpected",
+    RUSTUP_AUTO_INSTALL_UNEXPECTED = "rustup_auto_install_unexpected",
+    TOOLCHAIN_ENV_OVERRIDE = "toolchain_env_override",
+    RUSTUP_HOME_MISSING = "rustup_home_missing",
+    TOOLCHAIN_DIR_UNREADABLE = "toolchain_dir_unreadable",
+    RELEASE_TOOLCHAIN_AMBIGUOUS_OR_MISSING = "release_toolchain_ambiguous_or_missing",
+    TOOLCHAIN_NOT_DIRECTORY = "toolchain_not_directory",
+    COMPILER_UNRESOLVABLE = "compiler_unresolvable",
+    TOOLCHAIN_UNRESOLVABLE = "toolchain_unresolvable",
+    COMPILER_ESCAPES_HOST_TOOLCHAIN = "compiler_escapes_host_toolchain",
+    COMPILER_PROBE_FAILED = "compiler_probe_failed",
+    COMPILER_PROBE_INVALID = "compiler_probe_invalid",
+    COMPILER_PIN_MISMATCH = "compiler_pin_mismatch",
+    COMPILER_HOST_MISMATCH = "compiler_host_mismatch",
+    TOOLCHAIN_CONFIG_TOO_LARGE = "toolchain_config_too_large",
+    TOOLCHAIN_CONFIG_INVALID = "toolchain_config_invalid",
+    RUSTUP_OVERRIDES_PRESENT = "rustup_overrides_present",
+    TOOLCHAIN_PIN_NON_REGULAR = "toolchain_pin_non_regular",
+    TOOLCHAIN_PIN_UNREADABLE = "toolchain_pin_unreadable",
+    TOOLCHAIN_PIN_CUSTOM = "toolchain_pin_custom",
+    TOOLCHAIN_PIN_ABSENT_OR_AMBIGUOUS = "toolchain_pin_absent_or_ambiguous",
+    TOOLCHAIN_NOT_FIXED_RELEASE = "toolchain_not_fixed_release",
+    RELEASE_TOOLCHAIN_MISSING = "release_toolchain_missing",
+    COMPILER_HOST_MISSING = "compiler_host_missing",
+    TOOLCHAIN_PIN_INVALID = "toolchain_pin_invalid",
+    TOOLCHAIN_PIN_CHANNEL_MISSING = "toolchain_pin_channel_missing",
+}
+
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct Outcome {
     status: &'static str,
     reason: &'static str,
+    /// Stable snake_case code for the specific refusal behind `reason`. Never
+    /// an environment value or path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<&'static str>,
 }
 impl Outcome {
     pub(crate) fn skipped(reason: &'static str) -> Self {
         Self {
             status: "skipped",
             reason,
+            detail: None,
         }
     }
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn fallback(reason: &'static str) -> Self {
         Self {
             status: "fallback",
             reason,
+            detail: None,
+        }
+    }
+    pub(crate) fn fallback_detail(reason: &'static str, detail: &'static str) -> Self {
+        Self {
+            status: "fallback",
+            reason,
+            detail: Some(detail),
         }
     }
 }
@@ -73,11 +150,11 @@ pub(crate) fn seed_target(
     }
     #[cfg(target_os = "macos")]
     {
-        let Ok((version, triple)) =
-            crate::target_seed::lane_rustc_metadata(worktree, home, environment)
-        else {
-            return Outcome::fallback("toolchain_unverified");
-        };
+        let (version, triple) =
+            match crate::target_seed::lane_rustc_metadata(worktree, home, environment) {
+                Ok(metadata) => metadata,
+                Err(detail) => return Outcome::fallback_detail("toolchain_unverified", detail),
+            };
         seed_target_with(state, cache, &version, &triple, clone_target)
     }
     #[cfg(not(target_os = "macos"))]
@@ -186,6 +263,7 @@ fn seed_target_with(
         Ok(()) => Outcome {
             status: "seeded",
             reason: "cloned",
+            detail: None,
         },
         Err(reason) => {
             if crate::artifacts::remove_entry_tree(&cache_dir, &stage).is_err() {
@@ -356,6 +434,7 @@ fn seed_store_with(
             } else {
                 "durability_unconfirmed"
             },
+            detail: None,
         },
         Err(reason) => {
             if crate::artifacts::remove_entry_tree(&cargo_dir, &stage_name).is_err() {
@@ -458,6 +537,25 @@ mod tests {
     }
 
     #[test]
+    fn detail_codes_are_snake_case_and_unique() {
+        let mut seen = std::collections::BTreeSet::new();
+        for code in codes::ALL {
+            assert!(
+                !code.is_empty()
+                    && !code.starts_with('_')
+                    && !code.ends_with('_')
+                    && !code.contains("__")
+                    && code.bytes().all(|byte| byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || byte == b'_'),
+                "{code} is not snake_case"
+            );
+            assert!(seen.insert(*code), "{code} is listed twice");
+        }
+        assert!(codes::ALL.len() > 40);
+    }
+
+    #[test]
     fn target_selection_and_fallbacks() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
@@ -534,6 +632,52 @@ mod tests {
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
         assert_eq!(run(), Outcome::fallback("manifest_invalid"));
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    // Acceptance 2 of #2484: on APFS, an enabled writer with a matching host
+    // generation and a verified fixed-release pin reports `seeded`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn enabled_writer_with_a_verified_pin_is_seeded_on_apfs() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let worktree = tmp.path().join("writer");
+        let cache = tmp.path().join("cache");
+        let state = tmp.path().join("state");
+        let bin = home.join(".rustup/toolchains/1.99.1-test-host/bin");
+        std::fs::create_dir_all(worktree.join("tools/front-door")).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(home.join(".rustup/settings.toml"), "[overrides]\n").unwrap();
+        std::fs::write(
+            worktree.join("tools/front-door/rust-toolchain.toml"),
+            "[toolchain]\nchannel = '1.99.1'\n",
+        )
+        .unwrap();
+        let report = "rustc 1.99.1\nhost: test-host\nrelease: 1.99.1\n";
+        let rustc = bin.join("rustc");
+        std::fs::write(
+            &rustc,
+            format!("#!/bin/sh\nprintf '{}'\n", report.replace('\n', "\\n")),
+        )
+        .unwrap();
+        std::fs::set_permissions(&rustc, std::fs::Permissions::from_mode(0o755)).unwrap();
+        generation(&state, "001", report, "test-host");
+        let env = [
+            ("RUSTUP_HOME".into(), home.join(".rustup").into_os_string()),
+            ("RUSTUP_AUTO_INSTALL".into(), "0".into()),
+        ];
+        let outcome = seed_target(true, &state, &cache, &worktree, &home, &env);
+        assert_eq!((outcome.status, outcome.reason), ("seeded", "cloned"));
+        assert!(cache.join("target").is_dir());
+        // A refusal records its code and nothing from the environment.
+        let refused = [("RUSTC".into(), "/secret/rustc".into())];
+        let outcome = seed_target(true, &state, &cache, &worktree, &home, &refused);
+        assert_eq!(
+            outcome,
+            Outcome::fallback_detail("toolchain_unverified", codes::TOOLCHAIN_ENV_OVERRIDE)
+        );
     }
 
     #[cfg(target_os = "macos")]

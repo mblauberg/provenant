@@ -1,4 +1,6 @@
 //! Host-owned Cargo target seed store, shared by publication, cloning and GC.
+#[cfg(any(target_os = "macos", test))]
+use crate::cargo_seed::codes;
 use provenant_os::fs::{Directory, LockGuard, LockMode};
 use std::{
     ffi::OsStr,
@@ -82,35 +84,38 @@ pub fn rustc_metadata(worktree: &Path) -> io::Result<(String, String)> {
 /// Inspect the lane's explicit front-door pin as data, then run only the
 /// corresponding host-owned compiler directly, outside the writer tree.
 /// Rustup overrides and non-release/custom toolchains are deliberately refused.
+/// A refusal is a stable snake_case code: it names the path taken and never
+/// carries an environment value, so it is safe to record.
 #[cfg(any(target_os = "macos", test))]
 pub(crate) fn lane_rustc_metadata(
     worktree: &Path,
     home: &Path,
     environment: &[(std::ffi::OsString, std::ffi::OsString)],
-) -> io::Result<(String, String)> {
+) -> Result<(String, String), &'static str> {
     let rustup_home = home.join(".rustup");
     let mut saw_home = false;
     for (key, value) in environment {
         let key = key.to_string_lossy();
         if key == "RUSTUP_HOME" {
             if saw_home || Path::new(value) != rustup_home {
-                return Err(io::Error::other("unexpected rustup home"));
+                return Err(codes::RUSTUP_HOME_UNEXPECTED);
             }
             saw_home = true;
         } else if key == "RUSTUP_AUTO_INSTALL" {
             if value != "0" {
-                return Err(io::Error::other("unexpected rustup environment"));
+                return Err(codes::RUSTUP_AUTO_INSTALL_UNEXPECTED);
             }
         } else if key.starts_with("RUSTUP_") || key == "RUSTC" || key == "CARGO_BUILD_RUSTC" {
-            return Err(io::Error::other("toolchain environment is not verifiable"));
+            return Err(codes::TOOLCHAIN_ENV_OVERRIDE);
         }
     }
     if !saw_home {
-        return Err(io::Error::other("missing rustup home"));
+        return Err(codes::RUSTUP_HOME_MISSING);
     }
     let channel = lane_release_pin(worktree, home)?;
     let toolchains = home.join(".rustup/toolchains");
-    let mut candidates = std::fs::read_dir(&toolchains)?
+    let mut candidates = std::fs::read_dir(&toolchains)
+        .map_err(|_| codes::TOOLCHAIN_DIR_UNREADABLE)?
         .filter_map(Result::ok)
         .filter(|entry| {
             entry
@@ -120,25 +125,28 @@ pub(crate) fn lane_rustc_metadata(
         })
         .collect::<Vec<_>>();
     if candidates.len() != 1 {
-        return Err(io::Error::other(
-            "release toolchain is ambiguous or unavailable",
-        ));
+        return Err(codes::RELEASE_TOOLCHAIN_AMBIGUOUS_OR_MISSING);
     }
-    let candidate = candidates
-        .pop()
-        .ok_or_else(|| io::Error::other("missing release toolchain"))?;
-    if !candidate.file_type()?.is_dir() {
-        return Err(io::Error::other("toolchain is not a directory"));
+    let candidate = candidates.pop().ok_or(codes::RELEASE_TOOLCHAIN_MISSING)?;
+    if !candidate.file_type().is_ok_and(|kind| kind.is_dir()) {
+        return Err(codes::TOOLCHAIN_NOT_DIRECTORY);
     }
     let rustc = candidate.path().join("bin/rustc");
-    let resolved = rustc.canonicalize()?;
-    let candidate_path = candidate.path().canonicalize()?;
-    let worktree_path = worktree.canonicalize()?;
+    let resolved = rustc
+        .canonicalize()
+        .map_err(|_| codes::COMPILER_UNRESOLVABLE)?;
+    let candidate_path = candidate
+        .path()
+        .canonicalize()
+        .map_err(|_| codes::TOOLCHAIN_UNRESOLVABLE)?;
+    let worktree_path = worktree
+        .canonicalize()
+        .map_err(|_| codes::WORKTREE_UNRESOLVABLE)?;
     if !resolved.starts_with(&candidate_path)
         || candidate_path.starts_with(&worktree_path)
         || worktree_path.starts_with(&candidate_path)
     {
-        return Err(io::Error::other("compiler escapes host toolchain"));
+        return Err(codes::COMPILER_ESCAPES_HOST_TOOLCHAIN);
     }
     use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
     let argv = [resolved.into_os_string(), "-vV".into()];
@@ -147,57 +155,66 @@ pub(crate) fn lane_rustc_metadata(
     options.env = Some(&env);
     let output = SystemExecutor::new(1)
         .and_then(|e| e.execute(options))
-        .map_err(io::Error::other)?;
+        .map_err(|_| codes::COMPILER_PROBE_FAILED)?;
     if output.termination != Termination::Exit(0)
         || output.timed_out
         || output.stdout.truncated
         || output.stdout.read_failed
     {
-        return Err(io::Error::other("trusted compiler probe failed"));
+        return Err(codes::COMPILER_PROBE_FAILED);
     }
-    let version = String::from_utf8(output.stdout.bytes).map_err(io::Error::other)?;
+    let version =
+        String::from_utf8(output.stdout.bytes).map_err(|_| codes::COMPILER_PROBE_INVALID)?;
     if !version
         .lines()
         .any(|line| line == format!("release: {channel}"))
     {
-        return Err(io::Error::other("compiler does not match pin"));
+        return Err(codes::COMPILER_PIN_MISMATCH);
     }
     let host = version
         .lines()
         .find_map(|line| line.strip_prefix("host: "))
-        .ok_or_else(|| io::Error::other("compiler has no host triple"))?
+        .ok_or(codes::COMPILER_HOST_MISSING)?
         .to_owned();
     if candidate.file_name() != std::ffi::OsStr::new(&format!("{channel}-{host}")) {
-        return Err(io::Error::other(
-            "compiler host does not match installation",
-        ));
+        return Err(codes::COMPILER_HOST_MISMATCH);
     }
     Ok((version, host))
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn lane_release_pin(worktree: &Path, home: &Path) -> io::Result<String> {
-    fn read(path: &Path) -> io::Result<String> {
+fn lane_release_pin(worktree: &Path, home: &Path) -> Result<String, &'static str> {
+    fn read(path: &Path, unreadable: &'static str) -> Result<String, &'static str> {
         use std::io::Read;
         let mut bytes = Vec::new();
-        std::fs::File::open(path)?
+        std::fs::File::open(path)
+            .map_err(|_| unreadable)?
             .take(16385)
-            .read_to_end(&mut bytes)?;
+            .read_to_end(&mut bytes)
+            .map_err(|_| unreadable)?;
         if bytes.len() > 16384 {
-            return Err(io::Error::other("toolchain configuration too large"));
+            return Err(codes::TOOLCHAIN_CONFIG_TOO_LARGE);
         }
-        String::from_utf8(bytes).map_err(io::Error::other)
+        String::from_utf8(bytes).map_err(|_| codes::TOOLCHAIN_CONFIG_INVALID)
     }
-    fn parse(path: &Path) -> io::Result<toml_edit::DocumentMut> {
-        read(path)?.parse().map_err(io::Error::other)
+    fn parse(
+        path: &Path,
+        unreadable: &'static str,
+    ) -> Result<toml_edit::DocumentMut, &'static str> {
+        read(path, unreadable)?
+            .parse()
+            .map_err(|_| codes::TOOLCHAIN_CONFIG_INVALID)
     }
-    let settings = parse(&home.join(".rustup/settings.toml"))?;
+    let settings = parse(
+        &home.join(".rustup/settings.toml"),
+        "rustup_settings_unreadable",
+    )?;
     if settings
         .get("overrides")
         .and_then(|v| v.as_table())
         .is_none_or(|t| !t.is_empty())
     {
-        return Err(io::Error::other("rustup overrides cannot be verified"));
+        return Err(codes::RUSTUP_OVERRIDES_PRESENT);
     }
     let dir = worktree.join("tools/front-door");
     let modern = dir.join("rust-toolchain.toml");
@@ -205,31 +222,33 @@ fn lane_release_pin(worktree: &Path, home: &Path) -> io::Result<String> {
     let regular = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file());
     for path in [&modern, &legacy] {
         match std::fs::symlink_metadata(path) {
-            Ok(metadata) if !metadata.is_file() => {
-                return Err(io::Error::other("non-regular toolchain pin"));
+            Ok(metadata) if !metadata.is_file() => return Err(codes::TOOLCHAIN_PIN_NON_REGULAR),
+            Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                return Err(codes::TOOLCHAIN_PIN_UNREADABLE);
             }
-            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
             _ => {}
         }
     }
     let channel = match (regular(&modern), regular(&legacy)) {
         (true, false) => {
-            let doc = parse(&modern)?;
+            let doc = parse(&modern, codes::TOOLCHAIN_PIN_UNREADABLE)?;
             let toolchain = doc
                 .get("toolchain")
                 .and_then(|v| v.as_table())
-                .ok_or_else(|| io::Error::other("invalid pin"))?;
+                .ok_or(codes::TOOLCHAIN_PIN_INVALID)?;
             if toolchain.contains_key("path") {
-                return Err(io::Error::other("custom toolchain"));
+                return Err(codes::TOOLCHAIN_PIN_CUSTOM);
             }
             toolchain
                 .get("channel")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| io::Error::other("missing channel"))?
+                .ok_or(codes::TOOLCHAIN_PIN_CHANNEL_MISSING)?
                 .to_owned()
         }
-        (false, true) => read(&legacy)?.trim().to_owned(),
-        _ => return Err(io::Error::other("toolchain pin missing or ambiguous")),
+        (false, true) => read(&legacy, codes::TOOLCHAIN_PIN_UNREADABLE)?
+            .trim()
+            .to_owned(),
+        _ => return Err(codes::TOOLCHAIN_PIN_ABSENT_OR_AMBIGUOUS),
     };
     let parts: Vec<_> = channel.split('.').collect();
     if parts.len() != 3
@@ -237,7 +256,7 @@ fn lane_release_pin(worktree: &Path, home: &Path) -> io::Result<String> {
             .iter()
             .any(|part| part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()))
     {
-        return Err(io::Error::other("toolchain is not a fixed release"));
+        return Err(codes::TOOLCHAIN_NOT_FIXED_RELEASE);
     }
     Ok(channel)
 }

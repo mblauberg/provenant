@@ -16,7 +16,9 @@
 //! live under the host state directory shared by every project, so
 //! `max_concurrent_builds` bounds builds across the host, not per project.
 use provenant_core::CancelToken;
-use provenant_os::build_slots::{BuildSlots, SlotError, Wait, WaitKind, wait_for_cargo_lock};
+use provenant_os::build_slots::{
+    BuildSlots, SlotError, SlotWait, Wait, WaitKind, wait_for_cargo_lock,
+};
 use provenant_supervisor::census::{ProcessObservation, ProcessObserver, SystemProcessObserver};
 use std::{
     ffi::{OsStr, OsString},
@@ -257,7 +259,7 @@ fn acquire(
         Wait::new(settings.wait.saturating_sub(began.elapsed())),
         &CancelToken::new(),
         &mut |busy, waited| {
-            mark(settings, WaitKind::Slot);
+            mark_slot(settings, busy, waited);
             waiting(busy, settings.slots, waited);
         },
     );
@@ -296,11 +298,29 @@ fn mark(settings: &Settings, kind: WaitKind) {
     let Some(marker) = &settings.marker else {
         return;
     };
-    let now = u64::try_from(provenant_core::Clock::unix_seconds(
+    let _ = std::fs::write(own_marker(marker), kind.marker(now_seconds()));
+}
+
+/// Tell the host this build waits for a slot, with when it began and how many
+/// of the slots are held, so `provenant lanes` can show its place in the queue.
+fn mark_slot(settings: &Settings, held: u64, waited: Duration) {
+    let Some(marker) = &settings.marker else {
+        return;
+    };
+    let now = now_seconds();
+    let wait = SlotWait {
+        since: now.saturating_sub(waited.as_secs()),
+        held,
+        limit: settings.slots,
+    };
+    let _ = std::fs::write(own_marker(marker), WaitKind::slot_marker(now, wait));
+}
+
+fn now_seconds() -> u64 {
+    u64::try_from(provenant_core::Clock::unix_seconds(
         &provenant_os::clock::SystemClock::new(),
     ))
-    .unwrap_or(0);
-    let _ = std::fs::write(own_marker(marker), kind.marker(now));
+    .unwrap_or(0)
 }
 
 /// One marker per command, so a sibling that gets a slot cannot remove the

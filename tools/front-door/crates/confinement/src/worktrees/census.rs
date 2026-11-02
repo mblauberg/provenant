@@ -83,7 +83,7 @@ impl<'a> CensusPolicyWorkers<'a> {
     ) -> Result<Self, WorktreeError> {
         Ok(Self {
             inner,
-            entries: provenant_config::read(roots)?.census_ignore_unreadable()?,
+            entries: provenant_config::read_knobs(roots)?.census_ignore_unreadable()?,
         })
     }
 }
