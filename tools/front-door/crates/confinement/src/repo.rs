@@ -511,14 +511,18 @@ impl VerifiedRepo {
         });
         let head = match verified_head {
             Some(head) => head.to_vec(),
-            None => read_optional_bounded(&self.private, OsStr::new("HEAD"), GITFILE_LIMIT)?
-                .ok_or(RepoError::InvalidGitDirectory)?,
+            // A missing or malformed HEAD is reported by the caller's own HEAD
+            // read with its path; here it only means no branch is checked out.
+            None => read_optional_bounded(&self.private, OsStr::new("HEAD"), GITFILE_LIMIT)
+                .ok()
+                .flatten()
+                .unwrap_or_default(),
         };
         Ok(ConfigDigest {
             config_head: head.clone(),
             base: digest.finalize().into(),
             included: self.included_digest(files, head_sensitive)?,
-            common_config: common_config_digest(&self.common, &head, &self.root_path)?,
+            common_config: common_config_digest(&self.common, &head)?,
         })
     }
 
@@ -712,37 +716,34 @@ fn included_files_digest(files: &[PathBuf]) -> Result<[u8; 32], RepoError> {
 }
 
 // Git parses the bounded snapshot; included files have their own digest.
-fn common_config_digest(
-    common: &Directory,
-    head: &[u8],
-    cwd: &Path,
-) -> Result<Option<[u8; 32]>, RepoError> {
+fn common_config_digest(common: &Directory, head: &[u8]) -> Result<Option<[u8; 32]>, RepoError> {
     use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
     let Some(bytes) = read_common_config(common)? else {
         return Ok(None);
     };
-    let line = head
+    // Only a valid checked-out branch keeps its own tracking keys; a detached,
+    // missing or malformed HEAD keeps none.
+    let branch = head
         .strip_suffix(b"\n")
-        .ok_or(RepoError::InvalidGitDirectory)?;
-    let branch = if let Some(branch) = line.strip_prefix(b"ref: refs/heads/") {
-        let name = std::str::from_utf8(branch).map_err(|_| RepoError::InvalidGitDirectory)?;
-        GitRefName::branch(name).map_err(|_| RepoError::InvalidGitDirectory)?;
-        Some(branch)
-    } else if matches!(line.len(), 40 | 64) && line.iter().all(u8::is_ascii_hexdigit) {
-        None
-    } else {
-        return Err(RepoError::InvalidGitDirectory);
-    };
+        .and_then(|line| line.strip_prefix(b"ref: refs/heads/"))
+        .filter(|branch| {
+            std::str::from_utf8(branch).is_ok_and(|name| GitRefName::branch(name).is_ok())
+        });
     let git = provenant_os::git::git_executable().ok_or(RepoError::InvalidGitDirectory)?;
     let argv = [
         git.into_os_string(),
         "config".into(),
         "--file".into(),
         "-".into(),
+        // Git refuses relative includes from stdin; included files have their
+        // own digest, so the snapshot is parsed without following them.
+        "--no-includes".into(),
         "--null".into(),
         "--list".into(),
     ];
-    let mut options = ExecOptions::new(&argv, cwd, std::time::Duration::from_secs(2));
+    // Parsing needs no repository; running outside the worktree keeps Git's
+    // discovery from failing on the damaged metadata this check exists to report.
+    let mut options = ExecOptions::new(&argv, Path::new("/"), std::time::Duration::from_secs(2));
     options.stdin = Some(&bytes);
     options.env = Some(&[]);
     options.stdout = StreamPolicy::Capture {

@@ -613,23 +613,13 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
         &call,
         &observer,
     )?;
-    let argv = [
-        git.into_os_string(),
-        "--git-dir".into(),
-        common.into_os_string(),
-        "show-ref".into(),
-        "--verify".into(),
-        "--quiet".into(),
-        pin.into(),
-    ];
-    let status = SystemExecutor::new(1)?.execute(ExecOptions::new(
-        &argv,
+    let common = common.to_str().ok_or("non-UTF-8 common Git dir")?;
+    let remaining = provenant_os::fixture::run_git(
         &fixture.root,
-        Duration::from_secs(2),
-    ))?;
-    assert_eq!(
-        status.termination,
-        Termination::Exit(1),
+        &["--git-dir", common, "for-each-ref", &pin],
+    )?;
+    assert!(
+        remaining.is_empty(),
         "{second:?} {:?}",
         store.record(id, &call)?.settlement_receipts
     );
