@@ -128,16 +128,15 @@ fn valid_pairs_and_policy_preview_are_pure() -> Result {
             .as_f64()
             .is_some()
     );
-    let restricted = call(
+    let resolved = call(
         &rig,
         &["route", "resolve", "agy/gemini-3.8-flash", "--writes"],
-        2,
+        0,
     )?;
-    assert!(
-        restricted["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("read-only"))
-    );
+    assert_eq!(resolved["data"]["eligibility"], "eligible");
+    let text = rig.command(&["route", "resolve", "agy/gemini-3.8-flash"])?;
+    let stdout = String::from_utf8_lossy(&text.stdout.bytes);
+    assert!(!stdout.contains("must include these exact section lines"));
     assert!(!rig.state.exists());
     Ok(())
 }
@@ -147,7 +146,7 @@ fn account_override_is_applied_before_preview_write_admission() -> Result {
     let rig = rig()?;
     fs::write(
         rig.state.join("config.toml"),
-        "schema_version=1\n[[domains.routing.model_policy.rules]]\naccount='agy/work'\n[domains.routing.model_policy.rules.policy.lane]\nread_only=false\n",
+        "schema_version=1\n[[domains.routing.model_policy.rules]]\nmodel='agy/gemini-3.8-flash'\n[domains.routing.model_policy.rules.policy.lane]\nread_only=true\n[[domains.routing.model_policy.rules]]\naccount='agy/work'\n[domains.routing.model_policy.rules.policy.lane]\nread_only=false\n",
     )?;
     let preview = call(
         &rig,
@@ -165,7 +164,7 @@ fn account_override_is_applied_before_preview_write_admission() -> Result {
     // A preview hint never supplies observed account identity or readiness.
     assert!(preview["data"]["account_key"].is_null());
     assert_eq!(preview["data"]["readiness"]["status"], "unavailable");
-    call(
+    let refused = call(
         &rig,
         &[
             "route",
@@ -177,6 +176,11 @@ fn account_override_is_applied_before_preview_write_admission() -> Result {
         ],
         2,
     )?;
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("read-only"))
+    );
     Ok(())
 }
 #[test]

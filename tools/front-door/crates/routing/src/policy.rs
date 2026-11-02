@@ -197,7 +197,9 @@ impl ModelPolicy {
         if self.lane.stop_early_ok == Some(false) {
             lines.push("Carry the task to completion. Keep the schema v2 handoff current and repeat it as the final fenced handoff block. Use status done when finished, stopped_early when work remains, or blocked when a decision or external change is needed.".into());
         }
-        if let Some(sections) = &self.result.sections {
+        if let Some(sections) = &self.result.sections
+            && !sections.is_empty()
+        {
             lines.push(format!(
                 "Your final answer must include these exact section lines: {}",
                 sections.join(", ")
@@ -1471,9 +1473,20 @@ mod tests {
             .effective(&ModelId::parse("agy/gemini-3.8-flash")?, None, at(0))
             .policy;
         assert!(!gemini.result_valid(" \n"));
-        assert!(!gemini.result_valid("the words ## Findings and ## Evidence"));
-        assert!(gemini.result_valid("## Findings\nClean.\n## Evidence\nChecked the diff."));
-        assert!(!gemini.permits(RouteIntent {
+        assert!(gemini.result_valid("Done."));
+        assert!(gemini.permits(RouteIntent {
+            writes: true,
+            ..Default::default()
+        }));
+        let with_sections: ModelPolicies = toml_edit::de::from_str(
+            "[[rules]]\nmodel='agy/gemini-3.8-flash'\n[rules.policy.result]\nsections=['## Findings', '## Evidence']\n[rules.policy.lane]\nread_only=true\n",
+        )?;
+        let configured = with_sections
+            .effective(&ModelId::parse("agy/gemini-3.8-flash")?, None, at(0))
+            .policy;
+        assert!(!configured.result_valid("the words ## Findings and ## Evidence"));
+        assert!(configured.result_valid("## Findings\nClean.\n## Evidence\nChecked the diff."));
+        assert!(!configured.permits(RouteIntent {
             writes: true,
             ..Default::default()
         }));
@@ -1537,5 +1550,16 @@ mod tests {
                 .is_none()
         );
         Ok(())
+    }
+
+    #[test]
+    fn guidance_omits_sections_line_when_sections_is_empty() {
+        let mut policy = ModelPolicy::default();
+        policy.result.sections = Some(vec![]);
+        assert!(
+            !policy
+                .guidance()
+                .contains("must include these exact section lines")
+        );
     }
 }

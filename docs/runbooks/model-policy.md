@@ -114,7 +114,7 @@ table. These are adjustable operating defaults:
 | DeepSeek v4.1 Flash on Go | 1M context, cache read 0.02x, no cache-write fee, output 4x input, read-heavy multiplier 3; 800k task-boundary window after at least 20 turns |
 | DeepSeek weekday peak | 2x price multiplier at 01–04 and 06–10 UTC, reducing its read-heavy preference to 1.5x |
 | Terra | Flagged as prone to stopping early; up to two continuations when it explicitly reports unfinished work |
-| Gemini Flash and OpenCode free routes | Read-only; non-empty result with exact `## Findings` and `## Evidence` section lines; one fallback to Luna at high effort |
+| Gemini Flash and OpenCode free routes | Non-empty result check; one fallback to Luna at high effort for an empty answer |
 | All models | Advisory cache-read share target 90% |
 
 Free routes are absent from bundled pools. Exact IDs and user-configured pools

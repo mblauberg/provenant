@@ -417,7 +417,7 @@ fn model_policy_results_check_sections_and_bound_continuations()
     let policies = provenant_routing::ModelPolicies::default();
     let mut decoded = run::Decoded {
         outcome: run::Outcome::Succeeded,
-        result: "unstructured answer".into(),
+        result: "   \n".into(),
         complete: true,
         observed_route: None,
         usage: Default::default(),
@@ -444,8 +444,27 @@ fn model_policy_results_check_sections_and_bound_continuations()
             .is_none()
     );
     record.continuation = None;
-    decoded.result = "## Findings\nClean.\n## Evidence\nChecked.".into();
+    decoded.result = "unstructured answer".into();
     let decision = model_assessment(&gemini, task, &record, &decoded, record.attempt_number)?;
+    assert!(decision.refusal.is_none() && decision.retry.is_none());
+    let mut with_sections = gemini.clone();
+    with_sections.result.sections = Some(vec!["## Findings".into(), "## Evidence".into()]);
+    let decision = model_assessment(
+        &with_sections,
+        task,
+        &record,
+        &decoded,
+        record.attempt_number,
+    )?;
+    assert!(decision.refusal.is_some());
+    decoded.result = "## Findings\nClean.\n## Evidence\nChecked.".into();
+    let decision = model_assessment(
+        &with_sections,
+        task,
+        &record,
+        &decoded,
+        record.attempt_number,
+    )?;
     assert!(decision.refusal.is_none() && decision.retry.is_none());
     // Typed quota and stop outcomes retain their own recovery semantics,
     // even when their result is empty.

@@ -80,21 +80,15 @@ price_multiplier = 2.0
 
 [[rules]]
 model = "agy/gemini-3.8-flash"
-[rules.policy.lane]
-read_only = true
 [rules.policy.result]
 check = true
-sections = ["## Findings", "## Evidence"]
 fallback = "codex/gpt-6-luna"
 fallback_effort = "high"
 
 [[rules]]
 adapter = "opencode"
 model_suffix = "-free"
-[rules.policy.lane]
-read_only = true
 [rules.policy.result]
 check = true
-sections = ["## Findings", "## Evidence"]
 fallback = "codex/gpt-6-luna"
 fallback_effort = "high"
