@@ -18,6 +18,63 @@ fn command_lookup_is_literal_and_preserves_symlink_invocation()
     assert!(super::find_executable_on_path("cursor", &[root]).is_err());
     Ok(())
 }
+
+#[cfg(unix)]
+#[test]
+fn writer_dependency_preparation_installs_skips_and_reports_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir()?;
+    let bin = temp.path().join("bin");
+    std::fs::create_dir_all(&bin)?;
+    let pnpm = bin.join("pnpm");
+    std::fs::write(
+        &pnpm,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PWD/pnpm.log\"\nif [ \"$(basename \"$PWD\")\" = failing ]; then echo 'fixture stderr tail' >&2; exit 7; fi\nmkdir -p node_modules\ntouch node_modules/.modules.yaml\n",
+    )?;
+    std::fs::set_permissions(&pnpm, std::fs::Permissions::from_mode(0o700))?;
+    let locate = |name: &str| {
+        super::find_command_on_path(name, std::slice::from_ref(&bin))
+            .map_err(|error| error.to_string())
+    };
+    let cancel = provenant_core::CancelToken::new();
+    let worktree = |name: &str| -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let path = temp.path().join(name);
+        std::fs::create_dir_all(&path)?;
+        std::fs::write(path.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n")?;
+        Ok(path)
+    };
+    let log = |path: &Path| std::fs::read_to_string(path.join("pnpm.log")).unwrap_or_default();
+
+    let fresh = worktree("fresh")?;
+    let disabled = super::prepare_writer_dependencies(&fresh, false, &locate, &cancel)?;
+    assert_eq!(disabled["reason"], "disabled");
+    assert_eq!(log(&fresh), "");
+    let installed = super::prepare_writer_dependencies(&fresh, true, &locate, &cancel)?;
+    assert_eq!(installed["outcome"], "installed");
+    assert_eq!(installed["command"], "pnpm install --frozen-lockfile");
+    assert_eq!(log(&fresh), "install --frozen-lockfile\n");
+
+    // The completion marker marks an installed tree, so a second call skips.
+    let skipped = super::prepare_writer_dependencies(&fresh, true, &locate, &cancel)?;
+    assert_eq!(skipped["reason"], "already_installed");
+    assert_eq!(log(&fresh), "install --frozen-lockfile\n");
+
+    // A `node_modules` without the marker is a partial install and is repaired.
+    let partial = worktree("partial")?;
+    std::fs::create_dir_all(partial.join("node_modules"))?;
+    let repaired = super::prepare_writer_dependencies(&partial, true, &locate, &cancel)?;
+    assert_eq!(repaired["outcome"], "installed");
+    assert!(partial.join("node_modules/.modules.yaml").is_file());
+
+    let failing = worktree("failing")?;
+    let error = super::prepare_writer_dependencies(&failing, true, &locate, &cancel)
+        .expect_err("fake pnpm failure is refused");
+    assert!(error.contains("pnpm install --frozen-lockfile"));
+    assert!(error.contains("exited with status 7"));
+    assert!(error.contains("fixture stderr tail"));
+    Ok(())
+}
 #[test]
 fn nested_result_policy_uses_a_reliable_route_without_broadening_authority()
 -> Result<(), Box<dyn std::error::Error>> {

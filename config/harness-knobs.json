@@ -282,6 +282,12 @@
       "effect": "Default number of lanes one batch runs at once when no lane in it writes a worktree, resolved from the profile. A lanes.max_concurrency you set yourself also caps it unless you set this knob too. An explicit dispatch concurrency wins.",
       "trade_off": "Lower paces quota and memory and lengthens wall time; total tokens are unchanged. Read-only lanes start 2 s apart whatever this value."
     },
+    "lanes.prepare_deps": {
+      "type": "bool", "default": true, "status": "wired",
+      "reader": "tools/front-door/crates/cli/src/run/provider/preparation.rs",
+      "effect": "Run pnpm install --frozen-lockfile on the host for a writer worktree with a pnpm lockfile and no completed install (node_modules/.modules.yaml), after head and route checks and before the provider starts.",
+      "trade_off": "false skips automatic dependency installation; the writer may then lack dependencies needed to work."
+    },
     "lanes.max_depth": {
       "strict": true,
       "type": "int", "min": 1, "default": 2, "status": "wired",
