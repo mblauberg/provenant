@@ -588,10 +588,12 @@ mod tests {
         assert_eq!(queue_gc(&reopened, deadline, || Ok(())).unwrap(), "queued");
     }
 
+    #[allow(dead_code)] // The worktree driver includes this module without libtest.
     fn seed_clock() -> provenant_os::clock::SystemClock {
         provenant_os::clock::SystemClock
     }
 
+    #[allow(dead_code)]
     fn seed_state_of(directory: &Directory) -> (&'static str, Option<String>) {
         let bytes = directory
             .read_bounded(SEED_RESULT.as_ref(), 64 * 1024)
@@ -603,7 +605,9 @@ mod tests {
     #[test]
     fn seed_refresh_is_queued_without_running_inline_and_a_spawn_failure_is_recorded() {
         let temp = tempfile::tempdir().unwrap();
-        let directory = provenant_config::private_directory(temp.path(), true).unwrap();
+        // macOS temp roots sit behind a /var symlink, which private_directory refuses.
+        let root = temp.path().canonicalize().unwrap();
+        let directory = provenant_config::private_directory(&root, true).unwrap();
         let now = WallTime::from_micros(1_000_000).unwrap();
         assert_eq!(seed_state(&directory), "idle");
         let mut spawned = 0;
@@ -628,7 +632,9 @@ mod tests {
     fn seed_pass_treats_busy_as_a_noop_and_isolates_project_failures() {
         use crate::target_seed_build::Refresh;
         let temp = tempfile::tempdir().unwrap();
-        let directory = provenant_config::private_directory(temp.path(), true).unwrap();
+        // macOS temp roots sit behind a /var symlink, which private_directory refuses.
+        let root = temp.path().canonicalize().unwrap();
+        let directory = provenant_config::private_directory(&root, true).unwrap();
         let projects = vec![
             std::path::PathBuf::from("/a"),
             std::path::PathBuf::from("/b"),
@@ -680,7 +686,9 @@ mod tests {
     fn seed_pass_is_single_flight_and_respects_a_disabled_seed() {
         use crate::target_seed_build::Refresh;
         let temp = tempfile::tempdir().unwrap();
-        let directory = provenant_config::private_directory(temp.path(), true).unwrap();
+        // macOS temp roots sit behind a /var symlink, which private_directory refuses.
+        let root = temp.path().canonicalize().unwrap();
+        let directory = provenant_config::private_directory(&root, true).unwrap();
         let held = directory
             .try_lock("seed-worker.lock".as_ref(), LockMode::Exclusive)
             .unwrap();

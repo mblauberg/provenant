@@ -643,6 +643,9 @@ Collection runs in a detached one-shot worker, with its latest result in
 `<state>/tick/gc-result.json`, so a slow collection does not hold up graph wakes.
 It discovers registered projects without requiring a checkout as its working
 directory. Unobservable projects keep their caches.
+When a collection finishes it queues a second detached worker that refreshes
+each project's Cargo target seed from the freshly fetched `origin/main`, with
+its latest result in `<state>/tick/seed-result.json`; see `docs/worktrees.md`.
 Manual `provenant gc --dry-run --free-floor 20G` previews the selected
 project's cleanup, including oldest-first pressure removals. Live writers and
 reservations remain protected.
