@@ -17,6 +17,9 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
         "late_cancel",
         "failed_legacy",
         "cancelled_legacy",
+        "definite_failed",
+        "binding_mismatch",
+        "head_mismatch",
     ] {
         let fixture = PrepareFixture::new()?;
         let execution = registered_landed_writer_fixture(&fixture)?;
@@ -40,6 +43,21 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
         driver.set_head(head)?;
         driver.advance(crate::settlement::Phase::Record)?;
         drop(driver);
+        host.seal_launch_binding(&attempt, scope)?;
+        if mode == "binding_mismatch" {
+            let other = fixture.root.join("other.git");
+            fixture.git(&["init", "--bare", "-q", other.to_str().ok_or("other")?])?;
+            fixture.git(&[
+                "remote",
+                "set-url",
+                "--push",
+                "origin",
+                other.to_str().ok_or("other")?,
+            ])?;
+        }
+        if mode == "head_mismatch" {
+            fixture.commit(&fixture.writer.worktree, "after the sealed head")?;
+        }
         artifacts::seal(
             &attempt,
             "writer-terminal.json",
@@ -106,6 +124,24 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                     state: WriterDeliveryState::Failed {
                         extra: Default::default(),
                         stage: WriterDeliveryStage::Interrupted,
+                    },
+                })?,
+                RECORD_LIMIT,
+            )?;
+        } else if mode == "definite_failed" {
+            artifacts::seal(
+                &attempt,
+                "delivery.json",
+                &db::bytes(&WriterDeliveryReceipt {
+                    extra: Default::default(),
+                    schema_version: 1,
+                    remote: fixture.request.remote.clone(),
+                    branch: fixture.request.branch.clone(),
+                    head: Some(head),
+                    review_acceptance: None,
+                    state: WriterDeliveryState::Failed {
+                        extra: Default::default(),
+                        stage: WriterDeliveryStage::Push,
                     },
                 })?,
                 RECORD_LIMIT,
@@ -224,13 +260,22 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                     EffectDisposition::Done
                 ));
             } else {
-                assert!(matches!(
-                    receipts.delivery,
-                    EffectDisposition::Failed {
-                        retryable: false,
-                        ..
-                    }
-                ));
+                let EffectDisposition::Failed { reason, retryable } = &receipts.delivery else {
+                    panic!("{mode}: {receipts:?}");
+                };
+                assert!(!retryable, "{mode}: {reason}");
+                // Only a start marker without a result is uncertain.
+                assert_eq!(
+                    reason.contains("uncertain"),
+                    mode == "uncertain",
+                    "{reason}"
+                );
+                match mode {
+                    "binding_mismatch" => assert!(reason.contains("launch binding"), "{reason}"),
+                    "head_mismatch" => assert!(reason.contains("sealed delivery head"), "{reason}"),
+                    "definite_failed" => assert!(reason.contains("Push"), "{reason}"),
+                    _ => {}
+                }
             }
         }
     }

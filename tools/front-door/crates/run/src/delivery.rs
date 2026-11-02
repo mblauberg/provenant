@@ -47,6 +47,41 @@ struct BoundDelivery {
     /// Destination sealed at launch; a later request edit cannot redirect it.
     destination: WriterDeliveryRequest,
 }
+const BINDING_FILE: &str = "delivery-binding.json";
+pub(crate) const HEAD_MISMATCH: &str = "worktree head differs from sealed delivery head";
+const BINDING_MISMATCH: &str = "delivery destination differs from the launch binding";
+const BINDING_MISSING: &str = "delivery launch binding was not sealed";
+
+/// Recovery cannot repair these; retrying them cannot change the answer.
+pub(crate) fn recovery_refused(error: &RunError) -> bool {
+    matches!(
+        error,
+        RunError::Validation(HEAD_MISMATCH | BINDING_MISMATCH | BINDING_MISSING)
+    )
+}
+
+/// The destination the host bound before the lane ran.
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
+struct LaunchBinding {
+    schema_version: u64,
+    scope: provenant_supervisor::custody::Scope,
+    push_url: String,
+    lane_branch: String,
+    pull_request_repo: Option<String>,
+    destination: WriterDeliveryRequest,
+}
+impl LaunchBinding {
+    fn new(scope: provenant_supervisor::custody::Scope, bound: &BoundDelivery) -> Self {
+        Self {
+            schema_version: 1,
+            scope,
+            push_url: bound.push_url.clone(),
+            lane_branch: bound.lane_branch.clone(),
+            pull_request_repo: bound.pull_request_repo.clone(),
+            destination: bound.destination.clone(),
+        }
+    }
+}
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct HostTools {
     git: PathBuf,
@@ -106,24 +141,64 @@ impl std::fmt::Debug for HostDeliveryContext {
 }
 
 impl HostDeliveryContext {
+    /// Rebuild the delivery binding after a restart. The destination sealed at
+    /// launch and the sealed head must both still hold; a mismatch is final.
     pub(crate) fn prepare_recovery(
         self,
         writer: &WriterRequest,
         request: &WriterDeliveryRequest,
+        attempt: &Directory,
+        scope: provenant_supervisor::custody::Scope,
         head: GitOid,
         base: GitOid,
     ) -> Result<Self> {
         let mut host = self.prepare(writer, request)?;
+        host.verify_launch_binding(attempt, scope)?;
         if host.head(writer)? != head {
-            return Err(RunError::Validation(
-                "worktree head differs from sealed delivery head",
-            ));
+            return Err(RunError::Validation(HEAD_MISMATCH));
         }
         host.bound
             .as_mut()
             .ok_or(RunError::Validation("delivery binding missing"))?
             .base_head = base;
         Ok(host)
+    }
+    /// Seal the destination bound at launch, replacing an earlier launch's.
+    pub(crate) fn seal_launch_binding(
+        &self,
+        attempt: &Directory,
+        scope: provenant_supervisor::custody::Scope,
+    ) -> Result<()> {
+        let bound = self
+            .bound
+            .as_ref()
+            .ok_or(RunError::Validation("delivery binding missing"))?;
+        attempt
+            .atomic_write(
+                OsStr::new(BINDING_FILE),
+                ".binding-",
+                &crate::db::bytes(&LaunchBinding::new(scope, bound))?,
+                provenant_os::fs::PublishMode::Replace,
+            )?
+            .require_durable()
+            .map_err(RunError::from)
+    }
+    fn verify_launch_binding(
+        &self,
+        attempt: &Directory,
+        scope: provenant_supervisor::custody::Scope,
+    ) -> Result<()> {
+        let sealed = crate::artifacts::read_sealed(attempt, BINDING_FILE, crate::RECORD_LIMIT)?
+            .ok_or(RunError::Validation(BINDING_MISSING))?;
+        let sealed: LaunchBinding = crate::db::decode(&sealed)?;
+        let bound = self
+            .bound
+            .as_ref()
+            .ok_or(RunError::Validation("delivery binding missing"))?;
+        if sealed != LaunchBinding::new(scope, bound) {
+            return Err(RunError::Validation(BINDING_MISMATCH));
+        }
+        Ok(())
     }
     pub(crate) fn cancellable(&self, cancel: &provenant_core::CancelToken) -> Self {
         let mut context = self.clone();

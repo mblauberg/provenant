@@ -128,7 +128,9 @@ impl RunStore {
                     .host_delivery
                     .take()
                     .ok_or(RunError::Validation("delivery lacks host context"))?;
-                holder.host_delivery = Some(host.prepare(writer, deliver)?);
+                let host = host.prepare(writer, deliver)?;
+                host.seal_launch_binding(&self.attempt_dir(record.run_id, id, false)?, scope)?;
+                holder.host_delivery = Some(host);
                 holder.encode()
             };
             match prepare() {

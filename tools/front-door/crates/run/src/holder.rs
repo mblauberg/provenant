@@ -882,7 +882,14 @@ impl RunStore {
                                         Self::scope(record),
                                     )?
                                     .ok_or(RunError::Validation("sealed delivery base missing"))?;
-                                    host.prepare_recovery(writer, delivery, head, base)
+                                    host.prepare_recovery(
+                                        writer,
+                                        delivery,
+                                        attempt,
+                                        Self::scope(record),
+                                        head,
+                                        base,
+                                    )
                                 })
                         }
                     }
@@ -931,6 +938,16 @@ impl RunStore {
                             retryable: true,
                         }
                     }
+                    // A sealed result is definite; automatic recovery will not
+                    // repeat it, and explicit pickup remains available.
+                    Ok(WriterDeliveryReceipt {
+                        state: WriterDeliveryState::Failed { stage, .. },
+                        ..
+                    }) if stage != WriterDeliveryStage::Interrupted => EffectDisposition::Failed {
+                        reason: format!("delivery failed at the {stage:?} stage"),
+                        retryable: false,
+                    },
+                    // A start marker without a result: the remote effect is unknown.
                     Ok(_) => EffectDisposition::Failed {
                         reason: "delivery outcome is uncertain; explicit host pickup required"
                             .into(),
@@ -938,7 +955,7 @@ impl RunStore {
                     },
                     Err(error) => EffectDisposition::Failed {
                         reason: error.to_string().chars().take(1024).collect(),
-                        retryable: true,
+                        retryable: !crate::delivery::recovery_refused(&error),
                     },
                 };
                 self.record_effect(
@@ -1215,11 +1232,7 @@ impl RunStore {
                 )
             };
             let last_failure = check.as_ref().err().map(ToString::to_string);
-            match crate::artifacts::subdir(
-                attempt,
-                std::ffi::OsStr::new("quarantine"),
-                false,
-            ) {
+            match crate::artifacts::subdir(attempt, std::ffi::OsStr::new("quarantine"), false) {
                 Ok(archive) => {
                     let saved = read_sealed(&archive, "manifest.json", RECORD_LIMIT)?;
                     let intended = read_sealed(&archive, "manifest-intended.json", RECORD_LIMIT)?;
@@ -2460,8 +2473,7 @@ mod writer_recovery_tests {
                     RECORD_LIMIT,
                 )?;
             }
-            crate::writer::FAIL_IMPORT
-                .with(|fault| {
+            crate::writer::FAIL_IMPORT.with(|fault| {
                 fault.set(matches!(
                     mode,
                     "normal" | "release_boundary" | "archived_fault"
