@@ -530,7 +530,7 @@ mod tests {
         );
         assert_eq!(
             size.classify_numstat(
-                "20\t3\tapps/a/src/main.rs\01\t1\tapps/b/src/lib.rs\0",
+                "20\t3\tapps/a/src/main.rs\x001\t1\tapps/b/src/lib.rs\0",
                 trees
             ),
             "medium"
