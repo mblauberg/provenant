@@ -717,10 +717,12 @@ that, naming the omitted bytes); `--full` reads the full byte window and
 their objects remain readable; peer summaries report this evidence as
 unavailable rather than guessing a diff.
 
-Foreground `run --preset` prepares `.provenant/scratch` once before its first
-graph poll. A failure there names the preparation step, path and cause. A
-transient scratch failure on a later poll is retried while the admitted graph
-is pending; if the wait budget expires during retries, the error includes the
+Foreground `run --preset` prepares and retains the graph document in
+`.provenant/scratch` before its first graph poll, using one preparation per
+wait. A failure there names the preparation step, path and cause. If an
+already-admitted graph encounters a transient scratch setup failure, the wait
+retries while the graph is pending; scratch lock waits are capped by the preset
+wait budget. If that budget expires during retries, the error includes the
 graph ID so operators can continue with `fabric graph status`.
 
 `--tail N` works locally and on peers, is clamped to 500 lines and retains at

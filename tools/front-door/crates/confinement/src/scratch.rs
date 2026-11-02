@@ -12,13 +12,26 @@ pub fn ensure(
     clock: &dyn Clock,
     cancel: &CancelToken,
 ) -> Result<PathBuf, WorktreeError> {
-    ensure_inner(repo, clock, cancel, || {})
+    let budget =
+        WaitBudget::cli(clock.mono_now(), 30).map_err(|_| WorktreeError::InvalidRequest)?;
+    ensure_with_budget(repo, clock, cancel, budget)
+}
+
+/// Ensure scratch while respecting a caller-owned wait deadline.
+pub fn ensure_with_budget(
+    repo: &VerifiedRepo,
+    clock: &dyn Clock,
+    cancel: &CancelToken,
+    budget: WaitBudget,
+) -> Result<PathBuf, WorktreeError> {
+    ensure_inner(repo, clock, cancel, budget, || {})
 }
 
 fn ensure_inner(
     repo: &VerifiedRepo,
     clock: &dyn Clock,
     cancel: &CancelToken,
+    budget: WaitBudget,
     before_lock: impl FnOnce(),
 ) -> Result<PathBuf, WorktreeError> {
     fn child(parent: &Directory, name: &str) -> Result<Directory, WorktreeError> {
@@ -38,7 +51,7 @@ fn ensure_inner(
     let _lock = info.lock(
         OsStr::new("provenant-exclude.lock"),
         LockMode::Exclusive,
-        WaitBudget::cli(clock.mono_now(), 30).map_err(|_| WorktreeError::InvalidRequest)?,
+        budget,
         cancel,
         clock,
     )?;
@@ -120,7 +133,9 @@ mod tests {
             let (sender, receiver) = std::sync::mpsc::channel();
             let repo = &fixture.repo;
             let worker = scope.spawn(move || {
-                ensure_inner(repo, &SystemClock, &CancelToken::new(), || {
+                let budget = WaitBudget::cli(SystemClock.mono_now(), 30)
+                    .map_err(|_| WorktreeError::InvalidRequest)?;
+                ensure_inner(repo, &SystemClock, &CancelToken::new(), budget, || {
                     sender.send(()).unwrap();
                 })
             });
@@ -136,6 +151,31 @@ mod tests {
             drop(held);
             worker.join().unwrap()
         })?;
+        Ok(())
+    }
+
+    #[test]
+    fn scratch_ensure_respects_the_callers_lock_budget() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        ensure(&fixture.repo, &SystemClock, &CancelToken::new())?;
+        let info = Directory::open_anchor(&fixture.repo.common_git_dir().join("info"))?;
+        let held = info.lock(
+            OsStr::new("provenant-exclude.lock"),
+            LockMode::Exclusive,
+            WaitBudget::nonblocking(SystemClock.mono_now()),
+            &CancelToken::new(),
+            &SystemClock,
+        )?;
+        let budget = WaitBudget::up_to(
+            SystemClock.mono_now(),
+            provenant_core::DurationMicros::from_micros(100_000),
+        );
+        let started = std::time::Instant::now();
+        assert!(
+            ensure_with_budget(&fixture.repo, &SystemClock, &CancelToken::new(), budget).is_err()
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        drop(held);
         Ok(())
     }
 

@@ -14,9 +14,9 @@ use graph_status::{graph_snapshot, graph_status_elapsed};
 pub use peer::{hosts, peer};
 #[allow(unused_imports)]
 pub(crate) use preset_graph::publish_preset_graph;
+pub(crate) use preset_graph::run_preset_graph;
 #[cfg(test)]
-pub(crate) use preset_graph::{PreparedScratch, retry_scratch_poll};
-pub(crate) use preset_graph::{retain_preset_graph, run_preset_graph};
+pub(crate) use preset_graph::{PreparedScratch, retry_scratch_poll, scratch_prepare_error_message};
 
 #[cfg(test)]
 include!("fabric/facade_tests.rs");
@@ -4672,7 +4672,11 @@ impl Factory {
             GraphInput::Run { document, .. } | GraphInput::Resume { document, .. } => {
                 let scratch = match prepared_scratch {
                     Some(scratch) => scratch.to_path_buf(),
-                    None => self.prepare_scratch(cancel)?,
+                    None => self.prepare_scratch(
+                        cancel,
+                        WaitBudget::cli(self.clock.mono_now(), 30)
+                            .map_err(|_| FacadeError::InvalidInput)?,
+                    )?,
                 };
                 let document = if resume {
                     self.resolve_graph(&document.to_string_lossy())?
@@ -5019,7 +5023,11 @@ impl Factory {
         Ok(graph_snapshot(checkpoint))
     }
 
-    fn prepare_scratch(&self, cancel: &CancelToken) -> Result<PathBuf, FacadeError> {
+    fn prepare_scratch(
+        &self,
+        cancel: &CancelToken,
+        budget: WaitBudget,
+    ) -> Result<PathBuf, FacadeError> {
         provenant_confinement::worktrees::with_context(
             &self.context.roots,
             &self.home,
@@ -5033,7 +5041,12 @@ impl Factory {
                     context.utility_budget,
                     cancel,
                 )?;
-                provenant_confinement::scratch::ensure(&repo, &self.clock, cancel)
+                provenant_confinement::scratch::ensure_with_budget(
+                    &repo,
+                    &self.clock,
+                    cancel,
+                    budget,
+                )
             },
         )
         .map_err(scratch_prepare_error)

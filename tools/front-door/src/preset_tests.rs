@@ -674,6 +674,20 @@ fn preset_wait_retries_an_injected_scratch_failure_after_graph_admission() {
     assert!(!super::fabric::retry_scratch_poll(&scratch_error, false));
     let other_error = provenant_fabric_runtime::coordination::facade::FacadeError::Conflict;
     assert!(!super::fabric::retry_scratch_poll(&other_error, true));
+
+    let exhausted =
+        super::fabric::scratch_prepare_error_message(&scratch_error, Some("admitted-graph"), true);
+    assert!(
+        exhausted
+            .as_deref()
+            .is_some_and(|message| message.contains("admitted-graph")
+                && message.contains(".provenant/scratch")
+                && message.contains("exclude lock timed out"))
+    );
+    assert_eq!(
+        super::fabric::scratch_prepare_error_message(&scratch_error, Some("admitted-graph"), false,),
+        None
+    );
 }
 
 #[test]

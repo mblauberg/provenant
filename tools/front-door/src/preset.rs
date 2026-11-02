@@ -3416,22 +3416,13 @@ pub fn run(
                     expansion.repo_files.join(", ")
                 );
             }
-            match crate::fabric::retain_preset_graph(&expansion.document, globals, workers) {
-                Ok(document) => crate::fabric::run_preset_graph(
-                    document,
-                    request.wait.unwrap_or(240),
-                    &brief_warnings,
-                    globals,
-                    workers,
-                ),
-                Err(error) => crate::fail(
-                    "run",
-                    provenant_records::Outcome::Error,
-                    "preset_graph",
-                    &error.to_string(),
-                    globals,
-                ),
-            }
+            crate::fabric::run_preset_graph(
+                expansion.document,
+                request.wait.unwrap_or(240),
+                &brief_warnings,
+                globals,
+                workers,
+            )
         }
     }
 }
