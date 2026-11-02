@@ -2842,19 +2842,34 @@ fn receipt_lost_recovery_converges_on_a_sealed_non_lost_decision() -> TestResult
         store.create(&input, &call)?;
         let blocker = rusqlite::Connection::open(context.state_root.as_path().join("run.sqlite3"))?;
         blocker.execute_batch("BEGIN IMMEDIATE")?;
-        let finished = clock.wall_now()?;
+        crate::dispatch_tests::seal_exit(&store, &exit())?;
         assert!(
             store
-                .settle_unsettled(id, 1, "validated decision", finished, &call)
+                .publish_terminal(id, 1, &publication(), &exit(), &call)
                 .is_err()
         );
         blocker.execute_batch("ROLLBACK")?;
+        let conflicting = TerminalPublication {
+            result: "conflicting result",
+            ..publication()
+        };
+        assert!(
+            store
+                .publish_terminal(id, 1, &conflicting, &exit(), &call)
+                .is_err()
+        );
+        let attempt = store.attempt_dir(input.run_id, id, false)?;
+        let intent =
+            attempt.read_stable(std::ffi::OsStr::new("terminal-pending.json"), RECORD_LIMIT)?;
+        assert!(!intent.is_empty());
         let scope = RunStore::scope(&store.record(id, &call)?);
         store.commit_lost(scope, "holder lost", &call)?;
         assert!(matches!(
             store.record(id, &call)?.state,
-            AttemptState::Terminal { outcome: Outcome::Unsettled, reason: Some(ref reason), .. }
-                if reason == "validated decision"
+            AttemptState::Terminal {
+                outcome: Outcome::Succeeded,
+                ..
+            }
         ));
         let rows: i64 = blocker.query_row(
             "SELECT count(*) FROM events WHERE attempt=?1 AND revision=2",

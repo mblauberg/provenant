@@ -4599,9 +4599,15 @@ fn publication_cleanup_never_removes_another_import_pin()
         .ok_or("old driver")?;
     driver.set_head(head)?;
     drop(driver);
-    store.retry_git_cleanup(&record, &call)?;
+    assert!(store.retry_git_cleanup(&record, &call).is_err());
     fixture.git(&["show-ref", "--verify", &reference])?;
     lease.withdraw_unlaunched()?;
+    assert!(matches!(
+        store
+            .retry_git_cleanup(&record, &call)?
+            .cleanup_custody_release,
+        EffectDisposition::Done
+    ));
     Ok(())
 }
 

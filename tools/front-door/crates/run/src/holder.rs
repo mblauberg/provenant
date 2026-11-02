@@ -1788,6 +1788,22 @@ impl RunStore {
         } else {
             self.publish_terminal(id, record.revision, &publication, exit, call)?
         };
+        if !import_failed {
+            let disposition = match object_import_refused(attempt, exit.scope)? {
+                Some(reason) => EffectDisposition::Failed {
+                    reason: reason.chars().take(1024).collect(),
+                    retryable: false,
+                },
+                None => EffectDisposition::Done,
+            };
+            self.record_effect(
+                id,
+                terminal.generation,
+                SettlementEffect::GitImport,
+                disposition,
+                call,
+            )?;
+        }
         if import_failed {
             return Ok(Finished {
                 record: terminal,
@@ -2540,6 +2556,21 @@ mod writer_recovery_tests {
                     "{:?}",
                     store.writer_fences()?
                 );
+                continue;
+            }
+            if mode == "orphan" {
+                assert!(first.release_permitted);
+                assert_eq!(
+                    first
+                        .record
+                        .settlement_receipts
+                        .as_ref()
+                        .unwrap()
+                        .git_import,
+                    EffectDisposition::Done
+                );
+                store.settle_recovered(&attempt, recovery)?;
+                assert!(store.writer_fences()?.is_empty());
                 continue;
             }
             assert!(!first.release_permitted);
