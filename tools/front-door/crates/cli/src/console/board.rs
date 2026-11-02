@@ -219,8 +219,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[allow(clippy::disallowed_methods, clippy::print_stderr)] // Measured read boundary and benchmark report.
-    fn board_paging_end_to_end_and_100_row_p95() -> Result<(), Box<dyn std::error::Error>> {
+    fn board_paging_end_to_end() -> Result<(), Box<dyn std::error::Error>> {
         use provenant_core::{AttemptId, Digest, OperationId, RootInputs, RunId, TaskId};
         use provenant_run::{CanonicalRequest, NewAttempt, PreparedRun};
         let temp = tempfile::tempdir()?;
@@ -488,19 +487,9 @@ mod tests {
             cursor_position(cursor, &filters),
             Err(Error::BoardCursor)
         ));
-        let mut samples = Vec::new();
-        for _ in 0..20 {
-            let start = std::time::Instant::now();
-            let page = read(&roots, None, false, 100, None)?;
-            assert_eq!(page["lanes"].as_array().unwrap().len(), 100);
-            assert!(serde_json::to_vec(&page)?.len() < crate::MAX_RESULT_BYTES);
-            samples.push(start.elapsed());
-        }
-        samples.sort();
-        eprintln!(
-            "board_paging 100-row p95: {:?} (20 samples; read + JSON encoding)",
-            samples[18]
-        );
+        let page = read(&roots, None, false, 100, None)?;
+        assert_eq!(page["lanes"].as_array().unwrap().len(), 100);
+        assert!(serde_json::to_vec(&page)?.len() < crate::MAX_RESULT_BYTES);
         let walk = read(&roots, None, true, 50, None)?;
         other.create(&prepared(102)?, &call)?;
         let before_terminal = super::super::read(

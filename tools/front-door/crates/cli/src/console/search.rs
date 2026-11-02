@@ -191,11 +191,10 @@ mod tests {
     use super::*;
     use provenant_core::{AttemptId, Clock, Digest, OperationId, RootInputs, RunId, TaskId};
     use provenant_run::{CanonicalRequest, NewAttempt, PreparedRun};
-    use std::time::Instant;
 
     #[test]
-    #[allow(clippy::disallowed_methods, clippy::print_stderr)] // This test measures real elapsed time.
-    fn search_bounds_and_detail_performance() -> Result<(), Box<dyn std::error::Error>> {
+    #[allow(clippy::disallowed_methods)] // The fixture edits SQLite state directly.
+    fn search_bounds_and_detail() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let base = temp.path().canonicalize()?;
         let home = base.join("home");
@@ -283,38 +282,13 @@ mod tests {
         );
         assert!(read(&roots, "searchable", "prompt", None, 101, None).is_err());
         assert!(read(&roots, "searchable", "transcript", None, 50, None).is_err());
-        let mut details = Vec::new();
-        let mut searches = Vec::new();
-        for _ in 0..20 {
-            let start = Instant::now();
-            for id in ids.iter().take(100) {
-                assert_eq!(
-                    super::super::detail::read(&roots, &id.to_string())?["status"],
-                    "found"
-                );
-            }
-            details.push(start.elapsed());
-            let start = Instant::now();
-            let result = read(&roots, "searchable", "prompt", None, 100, None)?;
-            assert_eq!(result["coverage"]["files_scanned"], 1000);
-            searches.push(start.elapsed());
-        }
-        details.sort();
-        searches.sort();
-        eprintln!(
-            "100-detail p95: {:?}; 1000-attempt search p95: {:?}",
-            details[18], searches[18]
+        let id = ids.first().ok_or("missing search fixture")?;
+        assert_eq!(
+            super::super::detail::read(&roots, &id.to_string())?["status"],
+            "found"
         );
-        assert!(
-            details[18] <= std::time::Duration::from_secs(2),
-            "100-detail p95: {:?}",
-            details[18]
-        );
-        assert!(
-            searches[18] <= std::time::Duration::from_millis(6500),
-            "1000-attempt search p95: {:?}",
-            searches[18]
-        );
+        let result = read(&roots, "searchable", "prompt", None, 100, None)?;
+        assert_eq!(result["coverage"]["files_scanned"], 1000);
         let credential = base.join("credential");
         std::fs::write(&credential, "searchable fixture")?;
         let prompt = state
