@@ -829,12 +829,17 @@ copies the initial linked index and ref snapshot before launch. Plain
 `GIT_DIR` and `GIT_COMMON_DIR` select that directory, `GIT_WORK_TREE` selects
 the lane checkout, and `GIT_OBJECT_DIRECTORY` selects `scratch/git-objects`.
 The lane's ambient environment exports none of these selectors, nor the
-`GIT_AUTHOR_*` and `GIT_COMMITTER_*` identity: the Git shim on `PATH` sets them
-only when the physical working directory (after any leading `-C`) is inside the
-lane checkout. A fixture that runs `git init` and commits in a temporary
-directory therefore acts on that directory, with its own `-c user.name`, and
-cannot read or write the lane's index or branch (#2601). That private
-object store reads the shared store through `objects/info/alternates`. Stash, rebase, merge and garbage collection operate
+`GIT_AUTHOR_*` and `GIT_COMMITTER_*` identity. The Git shim on `PATH` sets them
+only when Git acts on the checkout: its physical working directory (after any
+leading `-C`) is inside the checkout and the nearest `.git` entry walking up
+from there is the checkout's own marker. `init` and `clone` never bind. In every
+other case the shim unsets those variables before running Git, so a binding
+inherited from a parent process, such as a hook, cannot leak. A fixture that
+runs `git init` and commits in a temporary directory, even one under the
+checkout, therefore acts on that directory with its own `-c user.name` and
+cannot read or write the lane's index or branch (#2601). That private object
+store reads the shared store through
+`objects/info/alternates`. Stash, rebase, merge and garbage collection operate
 on private Git state without individual metadata grants. Launch pins the base
 as `refs/provenant/lane-base/<attempt>` until terminal publication, so shared
 garbage collection cannot discard a base that a private rebase no longer names.
@@ -843,16 +848,17 @@ The original worktree gitfile stays unchanged so the host retains its verified
 repository identity. Seatbelt denies writes throughout both the shared Git
 directory and the linked admin directory, including refs, config, hooks, info
 and the original index. Inside the checkout the shim's selectors intentionally
-select the lane repository. The sandbox, not the shim, is the hard boundary: Git
-run by absolute path inside the checkout bypasses the shim, finds the original
-gitfile and can only read the shared metadata, never write it, so it cannot
-reach other lanes or change the host repository. Outside the checkout `git`
-discovers its repository from the directory as usual.
+select the lane repository. The sandbox, not the shim, is the hard boundary:
+Git run by absolute path inside the checkout bypasses the shim, finds the
+original gitfile and can only read the shared metadata, never write it, so it
+cannot reach other lanes or change the host repository. Outside the checkout
+`git` discovers its repository from the directory as usual.
 The small Git wrapper has one source and one installation path for the pinned
 executable and its configuration. It applies the lane binding and the lane's
 commit identity inside the checkout, whether or not a subprocess cleared its
-environment, and supplies publishing credentials when the lane may publish; it does not inspect Git commands or
-route their objects. It stays because environment variables alone do not
+environment, and supplies publishing credentials when the lane may publish. It
+reads only the leading options needed to find the directory Git will act on and
+does not route objects. It stays because environment variables alone do not
 survive `env -i`-style subprocesses. The restore needs `git` to resolve to the
 wrapper: a subprocess that also drops `PATH` reaches system Git, which finds
 the shared repository through the worktree's `.git` file. That Git can read

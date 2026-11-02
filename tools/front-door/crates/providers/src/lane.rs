@@ -207,11 +207,7 @@ impl crate::LaunchSpec {
     }
 }
 
-fn git_wrapper(
-    git: &Path,
-    env: &[(OsString, OsString)],
-    options: &GitWrapper,
-) -> Result<Vec<u8>, ProviderError> {
+fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, ProviderError> {
     let git = git.to_str().ok_or(ProviderError::InvalidPath)?;
     if git.chars().any(char::is_control) {
         return Err(ProviderError::InvalidPath);
@@ -219,7 +215,6 @@ fn git_wrapper(
     let mut bytes = b"#!/bin/sh\n".to_vec();
     if options.scrub {
         bytes.extend_from_slice(b"GIT_CONFIG_GLOBAL=/dev/null\nGIT_CONFIG_NOSYSTEM=1\nexport GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM\n");
-        bytes.extend_from_slice(identity_exports(env)?.as_bytes());
         if let Some(bound) = &options.bound {
             bytes.extend_from_slice(bound_exports(bound)?.as_bytes());
         }
@@ -248,7 +243,7 @@ fn install_git(
     let step = if wrapper {
         SetupStep::WriteExecutable {
             path: path.clone(),
-            bytes: git_wrapper(git, env, options)?,
+            bytes: git_wrapper(git, options)?,
         }
     } else {
         SetupStep::Symlink {
@@ -530,7 +525,7 @@ impl LaneRuntime<'_> {
 }
 
 fn claude_shell(env: &[(OsString, OsString)]) -> Result<Vec<u8>, ProviderError> {
-    let mut exports = identity_exports(env)?;
+    let mut exports = String::new();
     for name in [
         "CARGO_BUILD_JOBS",
         "CARGO_INCREMENTAL",
@@ -544,70 +539,79 @@ fn claude_shell(env: &[(OsString, OsString)]) -> Result<Vec<u8>, ProviderError> 
     Ok(format!("#!/bin/sh\n{exports}exec /bin/bash -c \"$1\"\n").into_bytes())
 }
 
-/// Shell that applies the private binding only when Git will run inside the
-/// worktree: the physical working directory, moved by any leading `-C`.
+/// Shell that applies the private binding only when Git acts on the lane
+/// checkout itself, and otherwise clears every inherited binding. Git acts on
+/// the checkout when its physical working directory (moved by any leading
+/// `-C`) lies inside the worktree and the nearest `.git` entry walking up from
+/// there is the worktree's own marker. `init` and `clone` create a repository,
+/// so they never bind.
 fn bound_exports(bound: &BoundGit) -> Result<String, ProviderError> {
     let worktree = bound.worktree.to_str().ok_or(ProviderError::InvalidPath)?;
     if worktree.chars().any(char::is_control) {
         return Err(ProviderError::InvalidPath);
     }
     let mut exports = String::new();
+    let mut names = Vec::new();
     for (key, value) in &bound.env {
         let value = value.to_str().ok_or(ProviderError::InvalidPath)?;
-        exports.push_str(&format!(
-            "  export {}={}\n",
-            key.to_str().ok_or(ProviderError::InvalidPath)?,
-            shell_quote(value)
-        ));
+        let key = key.to_str().ok_or(ProviderError::InvalidPath)?;
+        names.push(key);
+        exports.push_str(&format!("  export {key}={}\n", shell_quote(value)));
     }
+    // Whatever the lane does not bind is cleared in both branches, so an
+    // inherited index or identity cannot redirect Git inside the checkout.
+    let others: Vec<&str> = UNBOUND
+        .into_iter()
+        .filter(|name| !names.contains(name))
+        .collect();
+    let others = others.join(" ");
+    names.extend(others.split(' ').filter(|name| !name.is_empty()));
     Ok(format!(
         concat!(
-            "lane_git_dir() {{\n",
-            "  d=$(pwd -P) || return\n",
+            "lane_worktree={}\n",
+            "lane_git_bound() {{\n",
+            "  lane_d=$(pwd -P) || return 1\n",
             "  while [ \"$#\" -gt 0 ]; do\n",
             "    case \"$1\" in\n",
-            "      -C) [ \"$#\" -ge 2 ] || break; d=$(cd \"$d\" 2>/dev/null && cd \"$2\" 2>/dev/null && pwd -P) || return; shift 2 ;;\n",
-            "      -c) [ \"$#\" -ge 2 ] || break; shift 2 ;;\n",
+            "      -C) [ \"$#\" -ge 2 ] || break; lane_d=$(cd \"$lane_d\" 2>/dev/null && cd \"$2\" 2>/dev/null && pwd -P) || return 1; shift 2 ;;\n",
+            "      -c|--git-dir|--work-tree|--namespace) [ \"$#\" -ge 2 ] || break; shift 2 ;;\n",
             "      -*) shift ;;\n",
             "      *) break ;;\n",
             "    esac\n",
             "  done\n",
-            "  printf '%s/' \"$d\"\n",
+            "  case \"$1\" in init|clone) return 1 ;; esac\n",
+            "  case \"$lane_d\" in \"$lane_worktree\"|\"$lane_worktree\"/*) ;; *) return 1 ;; esac\n",
+            "  while [ \"$lane_d\" != \"$lane_worktree\" ]; do\n",
+            "    if [ -e \"$lane_d/.git\" ] || [ -L \"$lane_d/.git\" ]; then return 1; fi\n",
+            "    lane_d=${{lane_d%/*}}\n",
+            "  done\n",
             "}}\n",
-            "case \"$(lane_git_dir \"$@\")\" in\n",
-            "{}/*)\n",
+            "if lane_git_bound \"$@\"; then\n",
+            "  unset {}\n",
             "{}",
-            "  ;;\n",
-            "esac\n",
+            "else\n",
+            "  unset {}\n",
+            "fi\n",
         ),
         shell_quote(worktree),
+        others,
         exports,
+        names.join(" "),
     ))
 }
 
-/// Carry host identity past an environment scrub.
-fn identity_exports(env: &[(OsString, OsString)]) -> Result<String, ProviderError> {
-    let mut identity = String::new();
-    for (key, value) in env {
-        if [
-            "GIT_AUTHOR_NAME",
-            "GIT_AUTHOR_EMAIL",
-            "GIT_COMMITTER_NAME",
-            "GIT_COMMITTER_EMAIL",
-        ]
-        .iter()
-        .any(|candidate| key == candidate)
-        {
-            let value = value.to_str().ok_or(ProviderError::InvalidPath)?;
-            identity.push_str(&format!(
-                "export {}='{}'\n",
-                key.to_string_lossy(),
-                value.replace('\'', "'\\''")
-            ));
-        }
-    }
-    Ok(identity)
-}
+/// Selectors and identity a non-lane Git must not inherit.
+const UNBOUND: [&str; 9] = [
+    "GIT_DIR",
+    "GIT_COMMON_DIR",
+    "GIT_WORK_TREE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_INDEX_FILE",
+    "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_COMMITTER_NAME",
+    "GIT_COMMITTER_EMAIL",
+];
 
 #[cfg(test)]
 mod tests {
@@ -942,8 +946,6 @@ mod tests {
                 Path::new("/fixture/repo"),
                 (id == "claude").then_some(&token),
             ))?;
-            spec.env
-                .push(("GIT_AUTHOR_NAME".into(), "Fixture Author".into()));
             let result = spec.configure_publishing(
                 &plan.permissions().scratch.path,
                 Path::new("/fixture/git/bin/git"),
@@ -962,12 +964,6 @@ mod tests {
                 })
                 .ok_or(ProviderError::InvalidPath)?;
             let wrapper_text = String::from_utf8_lossy(bytes);
-            let identity = wrapper_text
-                .find("export GIT_AUTHOR_NAME='Fixture Author'")
-                .ok_or(ProviderError::Malformed)?;
-            assert!(identity < wrapper_text.find("exec ").ok_or(ProviderError::Malformed)?);
-            assert!(spec.env.iter().all(|(key, _)| key != "GIT_DIR"));
-            assert!(wrapper_text.contains("export GIT_DIR="));
             assert!(wrapper_text.contains("include.path="));
         }
         Ok(())
@@ -1319,7 +1315,6 @@ mod tests {
                 ("CARGO_BUILD_JOBS".into(), "4".into()),
                 ("CARGO_INCREMENTAL".into(), "0".into()),
                 ("CARGO_PROFILE_DEV_DEBUG".into(), "line-tables-only".into()),
-                ("GIT_AUTHOR_NAME".into(), "O'Brien".into()),
             ])
             .unwrap(),
         )
@@ -1327,58 +1322,11 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         let result = std::process::Command::new(path)
             .env_clear()
-            .arg("printf '%s\\n' \"$CARGO_BUILD_JOBS\" \"$CARGO_INCREMENTAL\" \"$CARGO_PROFILE_DEV_DEBUG\" \"$GIT_AUTHOR_NAME\" 'quoted argument'")
+            .arg("printf '%s\\n' \"$CARGO_BUILD_JOBS\" \"$CARGO_INCREMENTAL\" \"$CARGO_PROFILE_DEV_DEBUG\" 'quoted argument'")
             .output()
             .unwrap();
         assert!(result.status.success());
-        assert_eq!(
-            result.stdout,
-            b"4\n0\nline-tables-only\nO'Brien\nquoted argument\n"
-        );
-    }
-
-    #[test]
-    #[allow(clippy::disallowed_methods)]
-    fn wrapper_restores_identity_after_scrub() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let git = dir.path().join("git");
-        std::fs::write(&git, "#!/bin/sh\nprintf '%s\\n' \"$GIT_AUTHOR_NAME\" \"$GIT_COMMITTER_EMAIL\" \"$GIT_CONFIG_GLOBAL\"\n").unwrap();
-        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let lane = LaneRuntime {
-            executable: Path::new("/fixture/provenant"),
-            git: &git,
-            state: Path::new("/fixture/state"),
-            child_state: Path::new("/fixture/children"),
-            home: Path::new("/fixture/home"),
-            depth: 1,
-            attempt: AttemptId::from_bytes([1; 16]),
-            assets: Path::new("/fixture/assets"),
-        };
-        let wrapper = dir.path().join("wrapper");
-        std::fs::write(
-            &wrapper,
-            git_wrapper(
-                lane.git,
-                &[
-                    ("GIT_AUTHOR_NAME".into(), "O'Brien".into()),
-                    ("GIT_COMMITTER_EMAIL".into(), "lane@example.org".into()),
-                ],
-                &GitWrapper {
-                    scrub: true,
-                    ..Default::default()
-                },
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let output = std::process::Command::new(wrapper)
-            .env_clear()
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        assert_eq!(output.stdout, b"O'Brien\nlane@example.org\n/dev/null\n");
+        assert_eq!(result.stdout, b"4\n0\nline-tables-only\nquoted argument\n");
     }
 
     #[test]
@@ -1391,13 +1339,20 @@ mod tests {
         let nested = worktree.join("a");
         let sibling = root.join("work tree2");
         let outside = root.join("outside");
-        for path in [&nested, &sibling, &outside] {
+        // A repository created under the checkout, and a plain directory in it.
+        let inner = nested.join("fixture");
+        let inner_deep = inner.join("sub/deeper");
+        let inner_file = nested.join("gitfile");
+        for path in [&inner_deep, &sibling, &outside, &inner_file] {
             std::fs::create_dir_all(path).unwrap();
         }
+        std::fs::write(worktree.join(".git"), "gitdir: /host/admin\n").unwrap();
+        std::fs::create_dir(inner.join(".git")).unwrap();
+        std::fs::write(inner_file.join(".git"), "gitdir: /elsewhere\n").unwrap();
         let git = root.join("git");
         std::fs::write(
             &git,
-            "#!/bin/sh\nprintf '%s|%s|%s\\n' \"$GIT_DIR\" \"$GIT_AUTHOR_NAME\" \"$*\"\n",
+            "#!/bin/sh\nprintf '%s|%s|%s|%s\\n' \"$GIT_DIR\" \"$GIT_AUTHOR_NAME\" \"$GIT_INDEX_FILE\" \"$*\"\n",
         )
         .unwrap();
         std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1406,7 +1361,6 @@ mod tests {
             &wrapper,
             git_wrapper(
                 &git,
-                &[],
                 &GitWrapper {
                     scrub: true,
                     bound: Some(BoundGit {
@@ -1423,9 +1377,13 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Selectors inherited from a parent, such as a hook's Git, are cleared.
         let run = |cwd: &Path, args: &[&str]| {
             let output = std::process::Command::new(&wrapper)
                 .env_clear()
+                .env("GIT_DIR", "/inherited")
+                .env("GIT_AUTHOR_NAME", "Inherited")
+                .env("GIT_INDEX_FILE", "/inherited/index")
                 .current_dir(cwd)
                 .args(args)
                 .output()
@@ -1433,25 +1391,52 @@ mod tests {
             assert!(output.status.success());
             String::from_utf8(output.stdout).unwrap()
         };
-        let bound = "/private/it's|Lane|";
-        assert_eq!(run(&worktree, &["status"]), format!("{bound}status\n"));
-        assert_eq!(run(&nested, &["status"]), format!("{bound}status\n"));
+        let bound = |args: &str| format!("/private/it's|Lane||{args}\n");
+        let unbound = |args: &str| format!("|||{args}\n");
+        assert_eq!(run(&worktree, &["status"]), bound("status"));
+        assert_eq!(run(&nested, &["status"]), bound("status"));
         for cwd in [&outside, &sibling] {
-            assert_eq!(run(cwd, &["status"]), "||status\n", "{cwd:?}");
+            assert_eq!(run(cwd, &["status"]), unbound("status"), "{cwd:?}");
         }
+        // A repository nested in the checkout is not the lane's.
+        for cwd in [&inner, &inner.join("sub"), &inner_deep, &inner_file] {
+            assert_eq!(run(cwd, &["commit"]), unbound("commit"), "{cwd:?}");
+        }
+        // `init` and `clone` create a repository, so they never bind.
+        let plain = nested.join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        assert_eq!(run(&plain, &["status"]), bound("status"));
+        assert_eq!(run(&plain, &["init", "-q"]), unbound("init -q"));
+        assert_eq!(
+            run(&plain, &["-C", ".", "clone", "x"]),
+            unbound("-C . clone x")
+        );
         let inside = nested.to_str().unwrap();
+        let outside_path = outside.to_str().unwrap();
         assert_eq!(
             run(&outside, &["-c", "a=b", "-C", inside, "log"]),
-            format!("{bound}-c a=b -C {inside} log\n")
+            bound(&format!("-c a=b -C {inside} log"))
         );
+        // Options with a separate value do not hide a later -C.
+        for option in ["--git-dir", "--work-tree", "--namespace"] {
+            assert_eq!(
+                run(&outside, &[option, "v", "-C", inside, "log"]),
+                bound(&format!("{option} v -C {inside} log"))
+            );
+        }
         assert_eq!(
-            run(&worktree, &["-C", outside.to_str().unwrap(), "log"]),
-            format!("||-C {} log\n", outside.display())
+            run(&worktree, &["-C", outside_path, "log"]),
+            unbound(&format!("-C {outside_path} log"))
+        );
+        let nested_repo = inner.to_str().unwrap();
+        assert_eq!(
+            run(&worktree, &["-C", nested_repo, "log"]),
+            unbound(&format!("-C {nested_repo} log"))
         );
         // A symlink into the worktree is judged by its physical path.
         let link = outside.join("link");
         std::os::unix::fs::symlink(&worktree, &link).unwrap();
-        assert_eq!(run(&link, &["status"]), format!("{bound}status\n"));
+        assert_eq!(run(&link, &["status"]), bound("status"));
     }
 
     #[test]
