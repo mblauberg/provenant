@@ -2940,38 +2940,16 @@ pub fn run(
                     use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
                     let git =
                         provenant_os::git::git_executable().ok_or("Git executable unavailable")?;
-                    let argv = vec![
-                        git.into_os_string(),
-                        "diff".into(),
-                        "--numstat".into(),
-                        "--no-renames".into(),
-                        base.into(),
-                        subject.into(),
-                        "--".into(),
-                    ];
-                    let output = SystemExecutor::new(1)
-                        .map_err(|e| e.to_string())?
-                        .execute(ExecOptions::new(
-                            &argv,
-                            &review_directory,
-                            std::time::Duration::from_secs(30),
-                        ))
-                        .map_err(|e| e.to_string())?;
-                    if output.termination != Termination::Exit(0)
-                        || output.timed_out
-                        || output.stdout.truncated
-                    {
-                        return Err("cannot measure review diff".into());
-                    }
-                    Some(
-                        review
-                            .size
-                            .classify_numstat(
-                                std::str::from_utf8(&output.stdout.bytes)
-                                    .map_err(|e| e.to_string())?,
-                            )
-                            .to_owned(),
-                    )
+                    let run_git = |args: &[&str]| -> Result<String, String> {
+                        let mut argv = vec![git.clone().into_os_string()];
+                        argv.extend(args.iter().map(std::ffi::OsString::from));
+                        let output = SystemExecutor::new(1).map_err(|e| e.to_string())?.execute(ExecOptions::new(&argv, &review_directory, std::time::Duration::from_secs(30))).map_err(|e| e.to_string())?;
+                        if output.termination != Termination::Exit(0) || output.timed_out || output.stdout.truncated { return Err("cannot measure review diff".into()); }
+                        String::from_utf8(output.stdout.bytes).map_err(|e| e.to_string())
+                    };
+                    let numstat = run_git(&["diff", "--numstat", "--no-renames", "-z", base, subject, "--"])?;
+                    let tree = format!("{}{}", run_git(&["ls-tree", "-r", "-z", "--name-only", base])?, run_git(&["ls-tree", "-r", "-z", "--name-only", subject])?);
+                    Some(review.size.classify_numstat(&numstat, &tree).to_owned())
                 } else {
                     None
                 }

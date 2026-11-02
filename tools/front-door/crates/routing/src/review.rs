@@ -46,13 +46,16 @@ impl ReviewSize {
         }
     }
 
-    /// Classify a `git diff --numstat --no-renames` report. Binary changes
-    /// have no line count, so conservatively classify them as large.
-    pub fn classify_numstat(&self, numstat: &str) -> &'static str {
+    /// Classify NUL-delimited Git numstat and tree paths. Binary changes have
+    /// no line count, so conservatively classify them as large.
+    pub fn classify_numstat(&self, numstat: &str, tree: &str) -> &'static str {
         let mut lines = 0usize;
         let mut files = 0usize;
         let mut crates = std::collections::BTreeSet::new();
-        for row in numstat.lines() {
+        let roots: Vec<&str> = tree.split('\0').filter_map(|path| {
+            if path == "Cargo.toml" { Some("") } else { path.strip_suffix("/Cargo.toml") }
+        }).collect();
+        for row in numstat.split('\0').filter(|row| !row.is_empty()) {
             let mut fields = row.splitn(3, '\t');
             let (Some(added), Some(removed), Some(path)) =
                 (fields.next(), fields.next(), fields.next())
@@ -65,13 +68,9 @@ impl ReviewSize {
             };
             lines = lines.saturating_add(added).saturating_add(removed);
             files += 1;
-            let parts: Vec<_> = path.split('/').collect();
-            let root = parts
-                .iter()
-                .position(|p| *p == "crates")
-                .and_then(|i| parts.get(i + 1).map(|_| parts[..=i + 1].join("/")))
-                .unwrap_or_default();
-            crates.insert(root);
+            if let Some(root) = roots.iter().filter(|root| root.is_empty() || path.strip_prefix(**root).is_some_and(|suffix| suffix.starts_with('/'))).max_by_key(|root| root.len()) {
+                crates.insert(*root);
+            }
         }
         self.classify(lines, files, crates.len())
     }
@@ -477,6 +476,15 @@ mod tests {
                 .name,
             "deep"
         );
+    }
+
+    #[test]
+    fn numstat_counts_manifest_roots_and_binary_changes() {
+        let size = ReviewSize::default();
+        let trees = "Cargo.toml\0apps/a/Cargo.toml\0apps/b/Cargo.toml\0";
+        assert_eq!(size.classify_numstat("20\t3\tapps/a/src/main.rs\0", trees), "small");
+        assert_eq!(size.classify_numstat("20\t3\tapps/a/src/main.rs\01\t1\tapps/b/src/lib.rs\0", trees), "medium");
+        assert_eq!(size.classify_numstat("-\t-\timage.png\0", trees), "large");
     }
 
     #[test]

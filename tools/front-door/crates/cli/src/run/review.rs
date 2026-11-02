@@ -93,8 +93,10 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
         .domains;
     let size =
         if let Some(range) = selection_range(command.shape.as_deref(), command.range.as_deref())? {
-            let numstat = git(&["diff", "--numstat", "--no-renames", range, "--"])?;
-            Some(domains.routing.review.size.classify_numstat(&numstat))
+            let numstat = git(&["diff", "--numstat", "--no-renames", "-z", range, "--"])?;
+            let base = range.split("..").next().filter(|s| !s.is_empty()).unwrap_or("HEAD");
+            let tree = format!("{}{}", git(&["ls-tree", "-r", "-z", "--name-only", base])?, git(&["ls-tree", "-r", "-z", "--name-only", &head])?);
+            Some(domains.routing.review.size.classify_numstat(&numstat, &tree))
         } else {
             None
         };
