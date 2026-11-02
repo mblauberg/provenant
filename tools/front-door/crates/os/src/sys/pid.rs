@@ -37,13 +37,21 @@ pub(crate) fn occupancy(pid: i32) -> crate::pid::OccupancyObservation {
 /// table that never settles stays incomplete with the paths found so far.
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn occupancy_with_retries(
+    attempt: impl FnMut() -> crate::pid::OccupancyObservation,
+) -> crate::pid::OccupancyObservation {
+    occupancy_with_retries_and_backoff(attempt, std::thread::sleep)
+}
+
+fn occupancy_with_retries_and_backoff(
     mut attempt: impl FnMut() -> crate::pid::OccupancyObservation,
+    mut backoff: impl FnMut(std::time::Duration),
 ) -> crate::pid::OccupancyObservation {
     use crate::pid::OccupancyGap;
     const ATTEMPTS: usize = 4;
+    const RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(80);
     let mut paths: Vec<std::path::PathBuf> = Vec::new();
     let mut last = crate::pid::OccupancyObservation::default();
-    for _ in 0..ATTEMPTS {
+    for attempt_number in 0..ATTEMPTS {
         last = attempt();
         for path in &last.paths {
             if !paths.contains(path) {
@@ -52,6 +60,10 @@ fn occupancy_with_retries(
         }
         if last.gap != Some(OccupancyGap::Churn) {
             break;
+        }
+        if attempt_number + 1 < ATTEMPTS {
+            // Three pauses cap the added time per churning process at 240 ms.
+            backoff(RETRY_BACKOFF);
         }
     }
     last.paths = paths;
@@ -513,35 +525,55 @@ fn startup_churn_is_retried_but_a_table_that_never_settles_stays_incomplete() {
         gap,
     };
     // Churn that settles on the second attempt is complete and keeps the
-    // paths seen on the churned attempt.
+    // paths seen on the churned attempt, after one bounded backoff.
     let mut calls = 0;
-    let settled = occupancy_with_retries(|| {
-        calls += 1;
-        if calls == 1 {
-            observation(&["/a", "/transient"], Some(OccupancyGap::Churn))
-        } else {
-            observation(&["/a"], None)
-        }
-    });
+    let mut backoffs = Vec::new();
+    let settled = occupancy_with_retries_and_backoff(
+        || {
+            calls += 1;
+            if calls == 1 {
+                observation(&["/a", "/transient"], Some(OccupancyGap::Churn))
+            } else {
+                observation(&["/a"], None)
+            }
+        },
+        |delay| backoffs.push(delay),
+    );
     assert_eq!(calls, 2);
+    assert_eq!(backoffs, [std::time::Duration::from_millis(80)]);
     assert!(settled.complete && settled.gap.is_none());
     assert_eq!(settled.paths.len(), 2);
     // Never settling is bounded and stays Churn.
     let mut calls = 0;
-    let churning = occupancy_with_retries(|| {
-        calls += 1;
-        observation(&["/a"], Some(OccupancyGap::Churn))
-    });
+    let mut backoffs = Vec::new();
+    let churning = occupancy_with_retries_and_backoff(
+        || {
+            calls += 1;
+            observation(&["/a"], Some(OccupancyGap::Churn))
+        },
+        |delay| backoffs.push(delay),
+    );
     assert_eq!(calls, 4);
+    assert_eq!(backoffs.len(), 3);
+    assert_eq!(
+        backoffs.iter().sum::<std::time::Duration>(),
+        std::time::Duration::from_millis(240)
+    );
+    assert!(backoffs.iter().sum::<std::time::Duration>() <= std::time::Duration::from_millis(250));
     assert!(!churning.complete);
     assert_eq!(churning.gap, Some(OccupancyGap::Churn));
     // Any other gap is reported at once, without retries.
     let mut calls = 0;
-    let denied = occupancy_with_retries(|| {
-        calls += 1;
-        observation(&[], Some(OccupancyGap::DescriptorsDenied))
-    });
+    let mut backoffs = Vec::new();
+    let denied = occupancy_with_retries_and_backoff(
+        || {
+            calls += 1;
+            observation(&[], Some(OccupancyGap::DescriptorsDenied))
+        },
+        |delay| backoffs.push(delay),
+    );
     assert_eq!(calls, 1);
+    assert!(backoffs.is_empty());
     assert_eq!(denied.gap, Some(OccupancyGap::DescriptorsDenied));
 }
 
