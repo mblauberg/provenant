@@ -136,6 +136,12 @@
       "effect": "Describe the task for model policy. Read-heavy and review work give cheap-cache, million-token models a configurable preference in pools.",
       "trade_off": "A preference preserves model choice and readiness gates; it does not force every read-heavy task onto one model."
     },
+    "routing.exclude": {
+      "type": "string_list", "default": [], "status": "wired",
+      "reader": "tools/front-door/crates/cli/src/route.rs",
+      "effect": "Keep each listed provider (claude), account (label, entry or adapter/key) or exact model (adapter/id) out of named-route pools for a task. Set per dispatch with `--exclude`; a pinned `--model` is never affected.",
+      "trade_off": "Selection still weighs pacing and readiness over the remaining members, but an exclusion that empties a pool refuses the dispatch rather than widening it."
+    },
     "domains.routing.capacity_cooldown_seconds": {
       "type": "int", "min": 0, "default": 600, "status": "wired",
       "reader": "tools/front-door/crates/cli/src/run.rs",

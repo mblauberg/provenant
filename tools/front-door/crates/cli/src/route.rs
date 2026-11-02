@@ -211,6 +211,11 @@ pub struct RouteRequest {
     /// Fallback models in ADAPTER/ID form, comma separated
     #[arg(long, value_delimiter = ',', action = clap::ArgAction::Set)]
     pub fallback: Vec<Model>,
+    /// Keep a provider (claude), account (label, entry or ADAPTER/KEY) or
+    /// exact model (ADAPTER/ID) out of a named route's pool (repeatable).
+    /// A pinned --model is never affected.
+    #[arg(long = "exclude", value_name = "SELECTOR")]
+    pub exclude: Vec<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Model(pub String);
@@ -263,6 +268,77 @@ impl RouteRequest {
             fallback,
         })
     }
+}
+/// Parse `--exclude` selectors into routing rules, refusing an unknown one
+/// with the valid forms. Accounts resolve like `route override --account`.
+pub(crate) fn exclusion_rules(
+    texts: &[String],
+    source: provenant_routing::ExclusionSource,
+    roots: &Roots,
+) -> Result<Vec<provenant_routing::ExclusionRule>, EdgeError> {
+    if texts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let settings = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
+        .domains
+        .accounts;
+    let models: Vec<ModelId> = Catalogue::bundled()?
+        .models()
+        .iter()
+        .map(|entry| entry.model.clone())
+        .collect();
+    let providers: Vec<&str> = REGISTRY
+        .iter()
+        .map(|provider| provider.adapter.id())
+        .collect();
+    texts
+        .iter()
+        .map(|text| {
+            let selector =
+                provenant_routing::ExclusionSelector::parse(text, &providers, &models, |name| {
+                    match resolve_account_reference(name, "--exclude", &settings) {
+                        Ok(key) => Ok(key
+                            .split_once('/')
+                            .map(|(adapter, key)| (adapter.to_owned(), key.to_owned()))),
+                        Err(EdgeError::AccountProfile {
+                            kind: AccountProfileError::Unknown,
+                            ..
+                        }) => Ok(None),
+                        Err(error) => Err(error.to_string()),
+                    }
+                })?;
+            Ok::<_, EdgeError>(provenant_routing::ExclusionRule { selector, source })
+        })
+        .collect()
+}
+/// The exclusions a task carries in its `routing.exclude` knob: from
+/// `--exclude` when the dispatch set it, otherwise from the configuration.
+pub(crate) fn task_exclusion_rules(
+    profile: &provenant_records::run::HarnessProfile,
+    roots: &Roots,
+) -> Result<Vec<provenant_routing::ExclusionRule>, EdgeError> {
+    let texts: Vec<String> = profile
+        .knobs
+        .get("routing.exclude")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let source = if profile
+        .overrides
+        .iter()
+        .any(|entry| entry.starts_with("routing.exclude="))
+    {
+        provenant_routing::ExclusionSource::Flag
+    } else {
+        provenant_routing::ExclusionSource::Config
+    };
+    exclusion_rules(&texts, source, roots)
 }
 /// What a `route resolve` name stands for.
 #[derive(Debug, PartialEq, Eq)]
@@ -974,6 +1050,7 @@ pub(crate) fn resolve_dispatch(
     access: &[AccessContext<'_>],
     host: &str,
     excluded_families: Option<(&[String], bool)>,
+    rules: &[provenant_routing::ExclusionRule],
 ) -> Result<provenant_records::ResolvedRoute, DispatchError> {
     let catalogue = Catalogue::bundled()?;
     let (excluded_families, required) = match excluded_families {
@@ -998,6 +1075,7 @@ pub(crate) fn resolve_dispatch(
         access,
         host,
         &excluded,
+        rules,
     );
     // The unused families have no member to take: none is eligible, or the one
     // chosen is blocked by persisted account evidence (mismatch or refusal). A
@@ -1028,6 +1106,7 @@ pub(crate) fn resolve_dispatch(
             access,
             host,
             &[],
+            rules,
         );
         match (relaxed, selected) {
             // Relaxing must not trade a spent route for another one.
@@ -1055,6 +1134,7 @@ fn resolve_dispatch_excluding(
     access: &[AccessContext<'_>],
     host: &str,
     initial_exclusions: &[ModelId],
+    rules: &[provenant_routing::ExclusionRule],
 ) -> Result<provenant_records::ResolvedRoute, EdgeError> {
     let mut requested_models = Vec::new();
     if let RouteChoice::Model(model) = &request.choice {
@@ -1083,6 +1163,7 @@ fn resolve_dispatch_excluding(
                 seed.0,
                 seed.1,
                 &excluded_members,
+                rules,
             )?;
             loop {
                 let model = ModelId::parse(&format!("{}/{}", resolved.adapter, resolved.model))?;
@@ -1140,6 +1221,7 @@ fn resolve_dispatch_excluding(
                                 seed.0,
                                 seed.1,
                                 &excluded_members,
+                                rules,
                             )
                             && matches!(&replacement.readiness, RouteReadiness::Ready { .. })
                             && replacement.adapter == resolved.adapter
@@ -1171,6 +1253,7 @@ fn resolve_dispatch_excluding(
                             seed.0,
                             seed.1,
                             &excluded_members,
+                            rules,
                         ) {
                             Ok(route)
                                 if matches!(&route.readiness, RouteReadiness::Ready { .. }) =>
@@ -1835,7 +1918,20 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
                     ..*context
                 };
                 let request = resolve_request(query, context)?;
-                let route = provenant_routing::resolve(&request, context)?;
+                let rules = exclusion_rules(
+                    &query.request.exclude,
+                    provenant_routing::ExclusionSource::Flag,
+                    roots,
+                )?;
+                let route = provenant_routing::resolve_for_account_with_seed_excluding(
+                    &request,
+                    context,
+                    None,
+                    "route-preview",
+                    0,
+                    &[],
+                    &rules,
+                )?;
                 let model = ModelId::parse(&format!("{}/{}", route.adapter, route.model))?;
                 let model_policy = context.config.model_policy.effective(
                     &model,
@@ -1960,6 +2056,95 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
             })))
         }
     }
+}
+/// Preview a dispatch's route without launching: the pick, each pool candidate
+/// and every exclusion that removed one, with its source.
+pub(crate) fn explain_dispatch(
+    request: &RouteRequest,
+    roots: &Roots,
+) -> Result<(serde_json::Value, String), EdgeError> {
+    let now = SystemClock::new().wall_now()?;
+    let query = RouteResolve {
+        writes: false,
+        account: None,
+        name: None,
+        request: request.clone(),
+    };
+    let data = execute(&Route::Resolve(query), roots, now)?;
+    let Data::Resolved(preview) = &data else {
+        return Err(RoutingError::Catalogue.into());
+    };
+    let text = resolved_text(preview);
+    Ok((
+        serde_json::to_value(&data).map_err(|_| RoutingError::Catalogue)?,
+        text,
+    ))
+}
+/// The human report for a resolved route preview, naming each exclusion that
+/// removed a pool candidate and where it came from.
+pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
+    let route = &preview.route;
+    let diagnostics = preview
+        .pacing
+        .iter()
+        .map(|p| {
+            format!(
+                "\n  account={} policy={:?} factor={} {}",
+                p.account.as_deref().unwrap_or("unknown"),
+                p.policy,
+                p.factor_basis_points,
+                p.detail
+            )
+        })
+        .collect::<String>();
+    let mut text = format!(
+        "{}/{} effort={} {:?}{}{}\n",
+        route.adapter,
+        route.model,
+        route.effort.as_deref().unwrap_or("unspecified"),
+        route.readiness,
+        route
+            .pool_selection
+            .as_ref()
+            .map_or_else(String::new, |receipt| {
+                let details = receipt
+                    .candidates
+                    .iter()
+                    .flat_map(|candidate| {
+                        candidate
+                            .exclusion
+                            .iter()
+                            .chain(candidate.pacing_detail.iter())
+                            .map(|detail| format!("\n  {}: {detail}", candidate.model))
+                    })
+                    .collect::<String>();
+                format!(
+                    " pool={} roll={} pick={}{}",
+                    receipt.pool, receipt.roll, receipt.pick, details
+                )
+            }),
+        diagnostics
+    );
+    text.push_str(&format!("model policy sources={}\n{}\ncompaction break-even turns (15k summary, zero rework): {:?}\n", preview.model_policy.sources.join(", "), preview.model_policy.policy.guidance(), preview.compaction_break_even_turns));
+    match &preview.supported_efforts {
+        Some(efforts) if efforts.is_empty() => text.push_str("supported efforts: none\n"),
+        Some(efforts) => text.push_str(&format!("supported efforts: {}\n", efforts.join(", "))),
+        None => {
+            text.push_str("model is not in the catalogue; effort support is unrecorded\n");
+            if !preview.nearest_models.is_empty() {
+                text.push_str(&format!(
+                    "nearest catalogued IDs: {}\n",
+                    preview.nearest_models.join(", ")
+                ));
+            }
+        }
+    }
+    if let Some(details) = preview.quota.as_ref().and_then(|q| q.details.as_ref())
+        && let (Some(source), Some(coverage)) = (&details.source, &details.coverage)
+    {
+        text.push_str(&format!("quota source: {source}, coverage: {coverage}\n"));
+    }
+    text
 }
 pub fn run(
     command: Route,
@@ -2094,75 +2279,7 @@ pub fn run(
                 }));
                 format!("{}\n", lines.join("\n"))
             }
-            Some(Data::Resolved(preview)) => {
-                let route = &preview.route;
-                let diagnostics = preview
-                    .pacing
-                    .iter()
-                    .map(|p| {
-                        format!(
-                            "\n  account={} policy={:?} factor={} {}",
-                            p.account.as_deref().unwrap_or("unknown"),
-                            p.policy,
-                            p.factor_basis_points,
-                            p.detail
-                        )
-                    })
-                    .collect::<String>();
-                let mut text = format!(
-                    "{}/{} effort={} {:?}{}{}\n",
-                    route.adapter,
-                    route.model,
-                    route.effort.as_deref().unwrap_or("unspecified"),
-                    route.readiness,
-                    route
-                        .pool_selection
-                        .as_ref()
-                        .map_or_else(String::new, |receipt| {
-                            let details = receipt
-                                .candidates
-                                .iter()
-                                .filter_map(|candidate| {
-                                    candidate
-                                        .pacing_detail
-                                        .as_ref()
-                                        .map(|detail| format!("\n  {}: {detail}", candidate.model))
-                                })
-                                .collect::<String>();
-                            format!(
-                                " pool={} roll={} pick={}{}",
-                                receipt.pool, receipt.roll, receipt.pick, details
-                            )
-                        }),
-                    diagnostics
-                );
-                text.push_str(&format!("model policy sources={}\n{}\ncompaction break-even turns (15k summary, zero rework): {:?}\n", preview.model_policy.sources.join(", "), preview.model_policy.policy.guidance(), preview.compaction_break_even_turns));
-                match &preview.supported_efforts {
-                    Some(efforts) if efforts.is_empty() => {
-                        text.push_str("supported efforts: none\n")
-                    }
-                    Some(efforts) => {
-                        text.push_str(&format!("supported efforts: {}\n", efforts.join(", ")))
-                    }
-                    None => {
-                        text.push_str(
-                            "model is not in the catalogue; effort support is unrecorded\n",
-                        );
-                        if !preview.nearest_models.is_empty() {
-                            text.push_str(&format!(
-                                "nearest catalogued IDs: {}\n",
-                                preview.nearest_models.join(", ")
-                            ));
-                        }
-                    }
-                }
-                if let Some(details) = preview.quota.as_ref().and_then(|q| q.details.as_ref())
-                    && let (Some(source), Some(coverage)) = (&details.source, &details.coverage)
-                {
-                    text.push_str(&format!("quota source: {source}, coverage: {coverage}\n"));
-                }
-                text
-            }
+            Some(Data::Resolved(preview)) => resolved_text(preview),
             Some(Data::Pacing(report)) => at.map(|now| report.human(now)).unwrap_or_default(),
             Some(Data::Overrides(report)) => {
                 let mut lines = Vec::new();
@@ -2282,6 +2399,83 @@ mod route_tests {
         RouteSelectionCandidate, RouteSelectionReceipt,
     };
     use std::error::Error;
+
+    fn exclusion_roots(temp: &tempfile::TempDir) -> Result<provenant_core::Roots, Box<dyn Error>> {
+        use std::path::Path;
+        struct Resolver;
+        impl provenant_core::PathResolver for Resolver {
+            fn resolve_existing_ancestor(
+                &self,
+                path: &Path,
+            ) -> std::io::Result<std::path::PathBuf> {
+                Ok(path.into())
+            }
+        }
+        let mut inputs =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&Resolver)?;
+        std::fs::create_dir_all(roots.state.as_path())?;
+        Ok(roots)
+    }
+
+    #[test]
+    fn exclude_selectors_parse_and_unknown_ones_list_the_valid_forms() -> Result<(), Box<dyn Error>>
+    {
+        use provenant_routing::{ExclusionSelector, ExclusionSource};
+        let temp = tempfile::tempdir()?;
+        let roots = exclusion_roots(&temp)?;
+        let parse =
+            |text: &str| super::exclusion_rules(&[text.to_owned()], ExclusionSource::Flag, &roots);
+        assert_eq!(
+            parse("claude")?[0].selector,
+            ExclusionSelector::Provider("claude".into())
+        );
+        assert!(matches!(
+            parse("codex/gpt-6-luna")?[0].selector,
+            ExclusionSelector::Model(_)
+        ));
+        let message = parse("nonesuch").unwrap_err().to_string();
+        assert!(
+            message.contains("unknown exclusion `nonesuch`"),
+            "{message}"
+        );
+        assert!(message.contains("valid forms: a provider"), "{message}");
+        Ok(())
+    }
+
+    #[test]
+    fn explain_names_exclusions_and_never_picks_the_excluded_provider() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let roots = exclusion_roots(&temp)?;
+        let request = super::RouteRequest {
+            read_heavy: false,
+            model: None,
+            route: Some("junior".into()),
+            effort: None,
+            confidential: false,
+            fallback: vec![],
+            exclude: vec!["claude".into()],
+        };
+        let (data, text) = super::explain_dispatch(&request, &roots)?;
+        assert_ne!(data["adapter"], "claude");
+        assert!(
+            text.contains("claude/claude-haiku-5-5: excluded by flag: provider claude"),
+            "{text}"
+        );
+        let all = super::RouteRequest {
+            exclude: ["claude", "codex", "opencode", "agy", "cursor"]
+                .map(String::from)
+                .to_vec(),
+            ..request
+        };
+        let message = super::explain_dispatch(&all, &roots)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("excluded by flag: provider"), "{message}");
+        Ok(())
+    }
 
     #[test]
     fn model_exclusion_commands_record_list_and_remove() -> Result<(), Box<dyn Error>> {
@@ -2611,6 +2805,7 @@ mod route_tests {
                 effort: None,
                 confidential: false,
                 fallback: vec![],
+                exclude: vec![],
             }
             .to_domain()
         };
@@ -2624,6 +2819,7 @@ mod route_tests {
                 &access,
                 "fixture",
                 None,
+                &[],
             )
         };
         let preview = super::Route::Resolve(super::RouteResolve {
@@ -2637,6 +2833,7 @@ mod route_tests {
                 effort: None,
                 confidential: false,
                 fallback: vec![],
+                exclude: vec![],
             },
         });
         match super::execute(&preview, &roots, provenant_core::WallTime::from_micros(0)?) {
@@ -2667,6 +2864,7 @@ mod route_tests {
                 fallback: vec![super::Model(
                     "opencode/opencode-go/deepseek-v4.1-flash".into(),
                 )],
+                exclude: vec![],
             };
             let resolved = resolve(&request.to_domain()?)?;
             assert!(super::check_dispatch_candidate(&roots, &resolved).is_err());
@@ -2794,6 +2992,7 @@ mod route_tests {
             effort: None,
             confidential: false,
             fallback: vec![super::Model("codex/unlisted-fallback".into())],
+            exclude: vec![],
         }
         .to_domain()?;
         let access = [provenant_routing::AccessContext {
@@ -2810,6 +3009,7 @@ mod route_tests {
             &access,
             "fixture",
             None,
+            &[],
         )?;
         assert_eq!(
             exhausted.readiness,
@@ -2834,6 +3034,7 @@ mod route_tests {
             &access,
             "fixture",
             None,
+            &[],
         )?;
         assert!(matches!(fresh.readiness, RouteReadiness::Ready { .. }));
         assert_eq!(fresh.account_key.as_deref(), Some("fresh"));
@@ -2896,6 +3097,7 @@ mod route_tests {
             effort: None,
             confidential: false,
             fallback: vec![],
+            exclude: vec![],
         }
         .to_domain()?;
         let resolve = |account: Option<&str>| {
@@ -2908,6 +3110,7 @@ mod route_tests {
                 &access,
                 "fixture",
                 None,
+                &[],
             )
         };
         let drawn = resolve(None)?;
@@ -3162,6 +3365,7 @@ mod route_tests {
             effort: None,
             confidential: false,
             fallback: vec![],
+            exclude: vec![],
         }
         .to_domain()?;
         let resolve = |excluded: &[String]| {
@@ -3174,6 +3378,7 @@ mod route_tests {
                 &access,
                 "fixture",
                 Some((excluded, false)),
+                &[],
             )
         };
         let first = resolve(&[])?;
@@ -3201,6 +3406,7 @@ mod route_tests {
             &access,
             "fixture",
             Some((&all, true)),
+            &[],
         )
         .err()
         .ok_or("a required separation must not substitute")?;
@@ -3221,6 +3427,7 @@ mod route_tests {
             &access,
             "fixture",
             Some((&["openai".into()], false)),
+            &[],
         )?;
         assert_eq!(deferred.adapter, "claude");
         assert!(matches!(
@@ -3300,6 +3507,7 @@ mod route_tests {
                 effort: None,
                 confidential: false,
                 fallback: vec![],
+                exclude: vec![],
             }
             .to_domain()?;
             Ok(Self {
@@ -3326,6 +3534,7 @@ mod route_tests {
                 &self.access,
                 "fixture",
                 Some((&used, required)),
+                &[],
             )
         }
         /// Persist the claude account's record, as the quota cache holds it.

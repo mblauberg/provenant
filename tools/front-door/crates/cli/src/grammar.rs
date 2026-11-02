@@ -222,6 +222,10 @@ pub struct Review {
     /// Git range whose changed paths select the shape
     #[arg(long)]
     pub range: Option<String>,
+    /// Keep a provider, account or exact model out of every reviewer pool
+    /// (repeatable); see `provenant route resolve --help`
+    #[arg(long = "exclude", value_name = "SELECTOR")]
+    pub exclude: Vec<String>,
     /// Overall wait limit (seconds or a duration such as 30m)
     #[arg(long, default_value = "3600", value_parser = duration_seconds)]
     pub wait: u64,
