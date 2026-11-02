@@ -123,8 +123,10 @@ fn git(dir: &Path, args: &[&str], timeout: Duration) -> Result<(bool, String), R
             format!("git {} timed out", args.join(" ")),
         ));
     }
-    // A partial listing must not look complete to the caller.
-    if out.stdout.truncated {
+    // A partial listing must not look complete to the caller. A mutating call
+    // has already run, so its chatty output is not worth reporting as failure.
+    let mutating = matches!(args.first(), Some(&("add" | "commit" | "push")));
+    if out.stdout.truncated && !mutating {
         return Err(Refusal::new(
             Outcome::Error,
             "GIT",
