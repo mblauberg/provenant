@@ -486,6 +486,7 @@ pub(super) fn prepare_candidates(
                 private_state: &paths.provider_state,
                 assets,
                 prompt_file: None,
+                temporary_alias: None,
             },
             writer.as_ref(),
             &task.access,
@@ -780,6 +781,7 @@ pub(super) fn prepare_candidates(
                 private_state,
                 assets,
                 prompt_file: prompt.file(),
+                temporary_alias: paths.temporary_alias.as_deref(),
             },
             writer.as_ref(),
             &task.access,
@@ -895,6 +897,13 @@ pub(super) fn prepare_candidates(
                 continue;
             }
         };
+        if let Some(alias) = &paths.temporary_alias {
+            alias_temporary_env(
+                &mut spec.env,
+                scratch,
+                &alias.join(format!("candidate-{candidate}")),
+            );
+        }
         spec.profile.spec.allow_database_ipc = task.access.database_ipc;
         configure_process_tree(&mut spec, paths)?;
         let build_settings = config.domains.fabric.lanes.build_settings();

@@ -76,6 +76,7 @@ pub(super) fn prepare_command(
             private_state: &paths.provider_state,
             assets,
             prompt_file: None,
+            temporary_alias: paths.temporary_alias.as_deref(),
         },
         None,
         &access,
@@ -152,6 +153,9 @@ pub(super) fn prepare_command(
             },
         })
         .map_err(|error| error.to_string())?;
+    if let Some(alias) = &paths.temporary_alias {
+        alias_temporary_env(&mut spec.env, &scratch, &alias.join("command"));
+    }
     spec.profile.spec.allow_database_ipc = task.access.database_ipc;
     configure_process_tree(&mut spec, paths)?;
     let settings = config.domains.fabric.lanes.build_settings();
