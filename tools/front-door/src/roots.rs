@@ -107,9 +107,12 @@ fn session_project(selected: Option<&Path>) -> Result<PathBuf, RootError> {
     }
     let cwd_checkout = git_checkout(&cwd).ok();
     let selected_checkout = git_checkout(&selected).ok();
-    let cwd_identity = project_identity(&cwd, cwd_checkout.as_deref())?;
-    let selected_identity = project_identity(&selected, selected_checkout.as_deref())?;
-    if cwd_identity != selected_identity {
+    // Outside a checkout an explicit project is the caller's choice; inside
+    // one, the selection must name the same project.
+    if cwd_checkout.is_some()
+        && project_identity(&cwd, cwd_checkout.as_deref())?
+            != project_identity(&selected, selected_checkout.as_deref())?
+    {
         return Err(RootError::SessionProjectMismatch { cwd, selected });
     }
     Ok(selected_checkout.unwrap_or(selected))
