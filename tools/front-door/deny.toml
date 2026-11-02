@@ -102,6 +102,7 @@ allow = [
   "provenant-sqlite",
   "provenant-supervisor",
   "provenant-telemetry",
+  "provenant-test-support",
   "provenant-workflow",
   "quote",
   "regex",
