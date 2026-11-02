@@ -15,6 +15,17 @@ pub(crate) struct GitWrapper {
     pub(crate) scrub: bool,
     include: Option<String>,
     git: Option<PathBuf>,
+    pub(crate) bound: Option<BoundGit>,
+}
+
+/// The writer's private repository binding. It is never exported into the
+/// lane's ambient environment: a `git` run in an unrelated directory (a test
+/// fixture's temporary repository) must act on that directory. The wrapper
+/// applies it only to Git run in `worktree`.
+pub(crate) struct BoundGit {
+    pub(crate) worktree: PathBuf,
+    /// Git selectors and the lane's commit identity.
+    pub(crate) env: Vec<(OsString, OsString)>,
 }
 
 impl crate::LaunchSpec {
@@ -37,8 +48,7 @@ impl crate::LaunchSpec {
             git,
             &mut self.env,
             &mut self.setup,
-            self.git_wrapper.scrub,
-            self.git_wrapper.include.as_deref(),
+            &self.git_wrapper,
             true,
         )
     }
@@ -200,20 +210,24 @@ impl crate::LaunchSpec {
 fn git_wrapper(
     git: &Path,
     env: &[(OsString, OsString)],
-    scrub: bool,
-    include: Option<&str>,
+    options: &GitWrapper,
 ) -> Result<Vec<u8>, ProviderError> {
     let git = git.to_str().ok_or(ProviderError::InvalidPath)?;
     if git.chars().any(char::is_control) {
         return Err(ProviderError::InvalidPath);
     }
     let mut bytes = b"#!/bin/sh\n".to_vec();
-    if scrub {
+    if options.scrub {
         bytes.extend_from_slice(b"GIT_CONFIG_GLOBAL=/dev/null\nGIT_CONFIG_NOSYSTEM=1\nexport GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM\n");
         bytes.extend_from_slice(identity_exports(env)?.as_bytes());
+        if let Some(bound) = &options.bound {
+            bytes.extend_from_slice(bound_exports(bound)?.as_bytes());
+        }
     }
     let executable = shell_quote(git);
-    let include = include
+    let include = options
+        .include
+        .as_deref()
         .map(|value| format!(" -c {value}"))
         .unwrap_or_default();
     bytes.extend_from_slice(format!("exec {executable}{include} \"$@\"\n").as_bytes());
@@ -227,15 +241,14 @@ fn install_git(
     git: &Path,
     env: &mut [(OsString, OsString)],
     setup: &mut Vec<SetupStep>,
-    scrub: bool,
-    include: Option<&str>,
+    options: &GitWrapper,
     wrapper: bool,
 ) -> Result<(), ProviderError> {
     let path = bin.join("git");
     let step = if wrapper {
         SetupStep::WriteExecutable {
             path: path.clone(),
-            bytes: git_wrapper(git, env, scrub, include)?,
+            bytes: git_wrapper(git, env, options)?,
         }
     } else {
         SetupStep::Symlink {
@@ -440,8 +453,10 @@ impl LaneRuntime<'_> {
             self.git,
             env,
             setup,
-            scrubbed_git_config,
-            None,
+            &GitWrapper {
+                scrub: scrubbed_git_config,
+                ..Default::default()
+            },
             scrubbed_git_config,
         )?;
         env.extend([
@@ -529,15 +544,52 @@ fn claude_shell(env: &[(OsString, OsString)]) -> Result<Vec<u8>, ProviderError> 
     Ok(format!("#!/bin/sh\n{exports}exec /bin/bash -c \"$1\"\n").into_bytes())
 }
 
-/// Carry the private repository binding and host identity past an environment scrub.
+/// Shell that applies the private binding only when Git will run inside the
+/// worktree: the physical working directory, moved by any leading `-C`.
+fn bound_exports(bound: &BoundGit) -> Result<String, ProviderError> {
+    let worktree = bound.worktree.to_str().ok_or(ProviderError::InvalidPath)?;
+    if worktree.chars().any(char::is_control) {
+        return Err(ProviderError::InvalidPath);
+    }
+    let mut exports = String::new();
+    for (key, value) in &bound.env {
+        let value = value.to_str().ok_or(ProviderError::InvalidPath)?;
+        exports.push_str(&format!(
+            "  export {}={}\n",
+            key.to_str().ok_or(ProviderError::InvalidPath)?,
+            shell_quote(value)
+        ));
+    }
+    Ok(format!(
+        concat!(
+            "lane_git_dir() {{\n",
+            "  d=$(pwd -P) || return\n",
+            "  while [ \"$#\" -gt 0 ]; do\n",
+            "    case \"$1\" in\n",
+            "      -C) [ \"$#\" -ge 2 ] || break; d=$(cd \"$d\" 2>/dev/null && cd \"$2\" 2>/dev/null && pwd -P) || return; shift 2 ;;\n",
+            "      -c) [ \"$#\" -ge 2 ] || break; shift 2 ;;\n",
+            "      -*) shift ;;\n",
+            "      *) break ;;\n",
+            "    esac\n",
+            "  done\n",
+            "  printf '%s/' \"$d\"\n",
+            "}}\n",
+            "case \"$(lane_git_dir \"$@\")\" in\n",
+            "{}/*)\n",
+            "{}",
+            "  ;;\n",
+            "esac\n",
+        ),
+        shell_quote(worktree),
+        exports,
+    ))
+}
+
+/// Carry host identity past an environment scrub.
 fn identity_exports(env: &[(OsString, OsString)]) -> Result<String, ProviderError> {
     let mut identity = String::new();
     for (key, value) in env {
         if [
-            "GIT_DIR",
-            "GIT_COMMON_DIR",
-            "GIT_WORK_TREE",
-            "GIT_OBJECT_DIRECTORY",
             "GIT_AUTHOR_NAME",
             "GIT_AUTHOR_EMAIL",
             "GIT_COMMITTER_NAME",
@@ -656,7 +708,8 @@ mod tests {
         );
         input.provenant.git = &git;
         let mut spec = registration.adapter.prepare(input)?;
-        spec.env.retain(|(key, _)| {
+        let bound = &mut spec.git_wrapper.bound.as_mut().ok_or("bound")?.env;
+        bound.retain(|(key, _)| {
             ![
                 "GIT_AUTHOR_NAME",
                 "GIT_AUTHOR_EMAIL",
@@ -666,7 +719,7 @@ mod tests {
             .iter()
             .any(|name| key == name)
         });
-        spec.env.extend([
+        bound.extend([
             ("GIT_AUTHOR_NAME".into(), "Lane Author".into()),
             ("GIT_AUTHOR_EMAIL".into(), "lane@example.com".into()),
             ("GIT_COMMITTER_NAME".into(), "Lane Committer".into()),
@@ -725,6 +778,33 @@ mod tests {
         assert!(scratch.join("git-objects").read_dir()?.next().is_some());
         let author = run(&["log", "-1", "--format=%an <%ae>"])?;
         assert_eq!(author.stdout, b"Lane Author <lane@example.com>\n");
+        let lane_head = run(&["rev-parse", "HEAD"])?.stdout;
+        let lane_index = fs::read(scratch.join("git-common/index"))?;
+        let fixture = scratch.join("fixture-repo");
+        fs::create_dir(&fixture)?;
+        fs::write(repo.join("unstaged-lane-file"), "lane content")?;
+        let fixture_commit = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "set -e; git init -q; printf fixture > file; git add -A; git -c user.name=Fixture -c user.email=fixture@example.test commit -qm base; git log -1 --format=%an",
+            ])
+            .current_dir(&fixture)
+            .env_clear()
+            .envs(spec.env.iter().cloned())
+            .output()?;
+        assert!(
+            fixture_commit.status.success(),
+            "{adapter}: {}",
+            String::from_utf8_lossy(&fixture_commit.stderr)
+        );
+        assert!(fixture.join(".git").is_dir(), "{adapter}");
+        assert_eq!(fixture_commit.stdout, b"Fixture\n", "{adapter}");
+        assert_eq!(run(&["rev-parse", "HEAD"])?.stdout, lane_head, "{adapter}");
+        assert_eq!(
+            fs::read(scratch.join("git-common/index"))?,
+            lane_index,
+            "{adapter}"
+        );
         assert!(
             !run(&["config", "--get", "fixture.poison"])?
                 .status
@@ -886,16 +966,7 @@ mod tests {
                 .find("export GIT_AUTHOR_NAME='Fixture Author'")
                 .ok_or(ProviderError::Malformed)?;
             assert!(identity < wrapper_text.find("exec ").ok_or(ProviderError::Malformed)?);
-            assert!(spec.env.iter().any(|(key, value)| {
-                key == "GIT_DIR"
-                    && value
-                        == &plan
-                            .permissions()
-                            .scratch
-                            .path
-                            .join("git-common")
-                            .into_os_string()
-            }));
+            assert!(spec.env.iter().all(|(key, _)| key != "GIT_DIR"));
             assert!(wrapper_text.contains("export GIT_DIR="));
             assert!(wrapper_text.contains("include.path="));
         }
@@ -1293,8 +1364,10 @@ mod tests {
                     ("GIT_AUTHOR_NAME".into(), "O'Brien".into()),
                     ("GIT_COMMITTER_EMAIL".into(), "lane@example.org".into()),
                 ],
-                true,
-                None,
+                &GitWrapper {
+                    scrub: true,
+                    ..Default::default()
+                },
             )
             .unwrap(),
         )
@@ -1306,6 +1379,79 @@ mod tests {
             .unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout, b"O'Brien\nlane@example.org\n/dev/null\n");
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn wrapper_binds_the_worktree_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let worktree = root.join("work tree");
+        let nested = worktree.join("a");
+        let sibling = root.join("work tree2");
+        let outside = root.join("outside");
+        for path in [&nested, &sibling, &outside] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let git = root.join("git");
+        std::fs::write(
+            &git,
+            "#!/bin/sh\nprintf '%s|%s|%s\\n' \"$GIT_DIR\" \"$GIT_AUTHOR_NAME\" \"$*\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let wrapper = root.join("wrapper");
+        std::fs::write(
+            &wrapper,
+            git_wrapper(
+                &git,
+                &[],
+                &GitWrapper {
+                    scrub: true,
+                    bound: Some(BoundGit {
+                        worktree: worktree.clone(),
+                        env: vec![
+                            ("GIT_DIR".into(), "/private/it's".into()),
+                            ("GIT_AUTHOR_NAME".into(), "Lane".into()),
+                        ],
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let run = |cwd: &Path, args: &[&str]| {
+            let output = std::process::Command::new(&wrapper)
+                .env_clear()
+                .current_dir(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap()
+        };
+        let bound = "/private/it's|Lane|";
+        assert_eq!(run(&worktree, &["status"]), format!("{bound}status\n"));
+        assert_eq!(run(&nested, &["status"]), format!("{bound}status\n"));
+        for cwd in [&outside, &sibling] {
+            assert_eq!(run(cwd, &["status"]), "||status\n", "{cwd:?}");
+        }
+        let inside = nested.to_str().unwrap();
+        assert_eq!(
+            run(&outside, &["-c", "a=b", "-C", inside, "log"]),
+            format!("{bound}-c a=b -C {inside} log\n")
+        );
+        assert_eq!(
+            run(&worktree, &["-C", outside.to_str().unwrap(), "log"]),
+            format!("||-C {} log\n", outside.display())
+        );
+        // A symlink into the worktree is judged by its physical path.
+        let link = outside.join("link");
+        std::os::unix::fs::symlink(&worktree, &link).unwrap();
+        assert_eq!(run(&link, &["status"]), format!("{bound}status\n"));
     }
 
     #[test]
