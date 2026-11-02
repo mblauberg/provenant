@@ -130,6 +130,31 @@
         "primary_skill": "code-review",
         "companion_skills": []
       }
+    },
+    {
+      "id": "q719",
+      "relation": "positive",
+      "prompt": "Advise whether deleting a saved view should ask for confirmation or offer undo, and which feedback pattern should report it; no code changes.",
+      "tags": [
+        "direct"
+      ],
+      "expected": {
+        "primary_skill": "ui-ux-design",
+        "companion_skills": []
+      }
+    },
+    {
+      "id": "q720",
+      "relation": "negative",
+      "prompt": "Rewrite this command-line tool's error messages so each says what failed and what to run next.",
+      "tags": [
+        "near-miss",
+        "adjacent"
+      ],
+      "expected": {
+        "primary_skill": "engineering-writing",
+        "companion_skills": []
+      }
     }
   ]
 }

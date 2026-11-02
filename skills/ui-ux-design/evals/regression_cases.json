@@ -131,6 +131,20 @@
         ]
       },
       "note": "A prototype awaiting the owner parks that item; other work continues."
+    },
+    {
+      "id": "r112",
+      "relation": "positive",
+      "prompt": "Specify the loading, empty, error and bulk-selection behaviour for a new data table before anyone builds it; do not edit source.",
+      "tags": [
+        "direct",
+        "design-defaults"
+      ],
+      "expected": {
+        "primary_skill": "ui-ux-design",
+        "companion_skills": []
+      },
+      "note": "Design-defaults routing case: a pre-build table spec routes to ui-ux-design with no companion skill. It checks routing only, not the content of the resulting spec."
     }
   ]
 }
