@@ -1,0 +1,58 @@
+{
+  "command": "console sessions",
+  "data": {
+    "coverage": {
+      "scope": "local"
+    },
+    "next_cursor": null,
+    "scan_truncated": false,
+    "schema_version": 2,
+    "sessions": [
+      {
+        "consistency": "current",
+        "evidence": "checkpoint_save",
+        "record": {
+          "chair_actor": "c7b11347fb1be62dc783521ee94e45bf",
+          "checkpoint": {
+            "bytes": 204,
+            "parent": 1,
+            "revision": 2,
+            "saved_at": "2026-11-02T01:58:26.745295Z",
+            "sha256": "sha256:84b0cecfaedafbbb6b1d1bf46206c239f7e8c9644ad51e8a5a09603eb0c60477"
+          },
+          "created_at": "2026-11-02T01:58:26.511922Z",
+          "host": "7249da8d9cb98a25696aa69922cc1866",
+          "host_session_id": "console-chair",
+          "last_saved_at": "2026-11-02T01:58:26.745295Z",
+          "project_id": "47e56ec3dd1b387241e80489127d81e9",
+          "schema_version": 1,
+          "summary": {
+            "needs_you": [],
+            "next": "Review",
+            "now": "Implementing console",
+            "revision": 1,
+            "risk": "none",
+            "schema_version": 1,
+            "updated_at": "2026-11-02T01:58:26.745295Z"
+          }
+        },
+        "role": "chair",
+        "summary": {
+          "needs_you": [],
+          "next": "Review",
+          "now": "Implementing console",
+          "revision": 1,
+          "risk": "none",
+          "schema_version": 1,
+          "updated_at": "2026-11-02T01:58:26.745295Z"
+        },
+        "summary_status": "available"
+      }
+    ],
+    "snapshot": "sha256:b4e73432b809f02d24350752cb700a67a7791ec11b981983ca4155a8d1df6fda",
+    "truncated": false
+  },
+  "error": null,
+  "schema_version": 1,
+  "status": "ok"
+}

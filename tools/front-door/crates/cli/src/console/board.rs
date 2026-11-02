@@ -201,17 +201,16 @@ pub(super) fn read(
                 "task_id":attempt.task_id,"attempt_id":attempt.attempt_id},
                 "chair":chair,"metadata":lane,"wait":waits.iter().find(|w| w.attempt_id == attempt.attempt_id),
                 "attention":attention,"usage_coverage":{"known":known,"missing":missing},
-                "observation_coverage":if observed.contains(&attempt.attempt_id) { "complete" } else { "unavailable" },
-                "estimated_cost":null,"verified_links":null}));
+                "observation_coverage":if observed.contains(&attempt.attempt_id) { "complete" } else { "unavailable" }}));
         }
     }
     Ok(
-        json!({"schema_version":2,"snapshot":snapshot,"high_water":high_water,"generation":generation,
+        json!({"schema_version":3,"snapshot":snapshot,"high_water":high_water,"generation":generation,
         "observed_at":clock.wall_now().map_err(|_| Error::Encode)?,"filters":filters,
         "lanes":lanes,"next_cursor":next,"truncated":next.is_some(),
         "coverage":{"scope":"local","host":host,"runs":if store.is_some() { "complete" } else { "empty" },"chairs":chair_coverage,
             "observations":if observed.len() == lanes.len() { "complete" } else if observed.is_empty() { "unavailable" } else { "partial" },
-            "nested_runs":"unavailable","estimated_cost":"unavailable","verified_links":"unavailable"}}),
+            "nested_runs":"unavailable"}}),
     )
 }
 
@@ -280,11 +279,59 @@ mod tests {
                 }],
             })
         };
+        let mut since = None;
         for n in 1..=101u8 {
             if n % 2 == 0 { &other } else { &store }.create(&prepared(n)?, &call)?;
+            if n == 1 {
+                let changes = super::super::read(
+                    &roots,
+                    None,
+                    &super::super::Console::Changes { since: None },
+                )?;
+                assert!(changes["generations"]["board"].as_u64().is_some());
+                since = Some(changes["generations"].to_string());
+            }
         }
+        let changes = super::super::read(&roots, None, &super::super::Console::Changes { since })?;
+        assert_eq!(changes["changed"]["board"], true);
+        assert_eq!(changes["changed"]["runs"], true);
+        let unchanged = super::super::read(
+            &roots,
+            None,
+            &super::super::Console::Changes {
+                since: Some(changes["generations"].to_string()),
+            },
+        )?;
+        assert_eq!(unchanged["changed"]["runs"], false);
+        let mut v1 = changes["generations"].clone();
+        v1.as_object_mut()
+            .ok_or("generations object")?
+            .remove("runs");
+        let upgraded = super::super::read(
+            &roots,
+            None,
+            &super::super::Console::Changes {
+                since: Some(v1.to_string()),
+            },
+        )?;
+        assert!(upgraded["changed"]["runs"].is_null());
+        super::super::write_fixture("changes-after-run-write", "console changes", changes, &base)?;
         let first = read(&roots, None, false, 50, None)?;
-        assert_eq!(first["schema_version"], 2);
+        assert_eq!(first["schema_version"], 3);
+        assert!(first["lanes"][0].get("estimated_cost").is_none());
+        assert!(first["lanes"][0].get("verified_links").is_none());
+        super::super::write_fixture(
+            "board",
+            "console board",
+            read(&roots, None, false, 1, None)?,
+            &base,
+        )?;
+        super::super::write_fixture(
+            "detail",
+            "console detail",
+            super::super::detail::read(&roots, &AttemptId::from_bytes([101; 16]).to_string())?,
+            &base,
+        )?;
         assert_eq!(first["coverage"]["chairs"], "unavailable");
         assert_eq!(first["lanes"].as_array().unwrap().len(), 50);
         assert_eq!(
@@ -456,6 +503,11 @@ mod tests {
         );
         let walk = read(&roots, None, true, 50, None)?;
         other.create(&prepared(102)?, &call)?;
+        let before_terminal = super::super::read(
+            &roots,
+            None,
+            &super::super::Console::Changes { since: None },
+        )?;
         store.withdraw(
             AttemptId::from_bytes([1; 16]),
             AttemptState::Queued {
@@ -466,6 +518,14 @@ mod tests {
             clock.wall_now()?,
             &call,
         )?;
+        let terminal_changes = super::super::read(
+            &roots,
+            None,
+            &super::super::Console::Changes {
+                since: Some(before_terminal["generations"].to_string()),
+            },
+        )?;
+        assert_eq!(terminal_changes["changed"]["board"], true);
         let resumed = read(&roots, None, false, 50, Some(cursor))?;
         assert_ne!(resumed["generation"], first["generation"]);
         assert_eq!(resumed["snapshot"], first["snapshot"]);
