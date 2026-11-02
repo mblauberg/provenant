@@ -35,6 +35,25 @@ impl ReviewSize {
             "large"
         }
     }
+
+    /// Classify a `git diff --numstat --no-renames` report. Binary changes
+    /// have no line count, so conservatively classify them as large.
+    pub fn classify_numstat(&self, numstat: &str) -> &'static str {
+        let mut lines = 0usize;
+        let mut files = 0usize;
+        let mut crates = std::collections::BTreeSet::new();
+        for row in numstat.lines() {
+            let mut fields = row.splitn(3, '\t');
+            let (Some(added), Some(removed), Some(path)) = (fields.next(), fields.next(), fields.next()) else { return "large"; };
+            let (Ok(added), Ok(removed)) = (added.parse::<usize>(), removed.parse::<usize>()) else { return "large"; };
+            lines = lines.saturating_add(added).saturating_add(removed);
+            files += 1;
+            let parts: Vec<_> = path.split('/').collect();
+            let root = parts.iter().position(|p| *p == "crates").and_then(|i| parts.get(i + 1).map(|_| parts[..=i + 1].join("/"))).unwrap_or_default();
+            crates.insert(root);
+        }
+        self.classify(lines, files, crates.len())
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -188,14 +207,16 @@ impl ReviewConfig {
         paths: &[String],
         size: Option<&str>,
     ) -> Result<ReviewSelection<'a>, String> {
+        let integration = (kind == Some("integration")).then(|| self.select.by_kind.get("integration")).flatten();
         let mut selected = self.select.select(
-            override_name.map(str::to_owned).as_ref(),
+            integration.or(override_name.map(str::to_owned).as_ref()),
             risk,
             kind,
             paths,
             size,
             Some(true),
         );
+        if integration.is_some() { selected.source = "by_kind"; }
         // Risk establishes a floor; size and integration can demand more coverage.
         if override_name.is_none() {
             for candidate in [

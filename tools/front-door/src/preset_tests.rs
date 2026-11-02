@@ -1178,7 +1178,7 @@ fn read_roots_are_confined_to_the_project_or_the_host_allow_list()
 /// Stand-in for the routing review configuration: low risk is one junior,
 /// high risk is six, otherwise two.
 fn shapes() -> super::preset::ShapeSelector {
-    Box::new(|named, risk| {
+    Box::new(|named, risk, _, _, _, _| {
         let (name, source, count) = match (named, risk) {
             (Some("standard"), _) => ("standard", "override", 2),
             (_, Some("crucial")) => ("deep", "by_risk", 6),
