@@ -600,12 +600,74 @@ pub(super) fn provider_error_line(
             call,
         )
         .ok()?;
-    let text = String::from_utf8_lossy(&tail.bytes);
-    let line = text.lines().rev().find(|line| !line.trim().is_empty())?;
+    provider_error_from_stderr(&tail.bytes)
+}
+
+/// Select a cause from captured stderr without promoting known Codex skill
+/// discovery and other warning-level diagnostics to the failure headline.
+fn provider_error_from_stderr(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    let line = text
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty() && !warning_level_stderr_line(line))?;
     let redacted = provenant_confinement::redact::known_shapes(line.as_bytes())
         .ok()
         .and_then(|bytes| String::from_utf8(bytes).ok())?;
     Some(crate::bounded_text(&redacted, 160))
+}
+
+fn warning_level_stderr_line(line: &str) -> bool {
+    let line = line.trim_start();
+    let lower = line.to_ascii_lowercase();
+    let mut tokens = lower.split_whitespace();
+    let first = tokens.next().unwrap_or_default();
+    let is_warning_level =
+        |token: &str| matches!(token.trim_matches(['[', ']', ':']), "warn" | "warning");
+    is_warning_level(first)
+        || (first.contains('-') && first.contains('t')
+            && tokens.take(2).any(is_warning_level))
+        // The tracing formatter used by Codex omits the level from this
+        // loader warning, so identify it by its stable target and message.
+        || lower.contains(
+            "codex_skills_extension::loader::host: failed to scan skill path",
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_error_from_stderr;
+
+    #[test]
+    fn provider_error_uses_failure_before_trailing_codex_skills_warning() {
+        let stderr = b"provider process failed: exit code 1\n\
+codex_skills_extension::loader::host: failed to scan skill path file:///Users/alice/.agents/skills: Operation not permitted\n";
+        assert_eq!(
+            provider_error_from_stderr(stderr).as_deref(),
+            Some("provider process failed: exit code 1")
+        );
+    }
+
+    #[test]
+    fn provider_error_skips_warning_level_lines() {
+        assert_eq!(
+            provider_error_from_stderr(
+                b"warning: retrying request\nreal failure\n2026-11-02T00:00:00Z WARN cleanup failed\n"
+            )
+            .as_deref(),
+            Some("real failure")
+        );
+    }
+
+    #[test]
+    fn provider_error_does_not_headline_a_warning_without_a_failure_line() {
+        assert_eq!(
+            provider_error_from_stderr(
+                b"codex_skills_extension::loader::host: failed to scan skill path: Operation not permitted\n"
+            ),
+            None
+        );
+    }
 }
 
 /// The exact bytes of a read, from the lossless encoding `output` reports.

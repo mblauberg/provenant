@@ -102,6 +102,11 @@ fn prepare(
     }];
     let path = format!("{}:/usr/bin:/bin", input.home.join(".cargo/bin").display());
     let mut env = base_env(input, &plan.scratch.path, &path);
+    // Codex discovers user skills from `$HOME/.agents/skills` independently
+    // of CODEX_HOME. Point HOME at this lane's private state so the host's
+    // user skill directory is outside discovery as well as the sandbox.
+    env.retain(|(key, _)| key != "HOME");
+    env.push(("HOME".into(), codex_home.into()));
     input
         .provenant
         .environment(&plan.scratch.path, &mut env, &mut setup, false)?;

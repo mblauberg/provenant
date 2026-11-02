@@ -149,6 +149,11 @@ refreshes tokens. This is an accepted limit. A lane is not granted other
 providers' credential stores, and GitHub CLI configuration stays denied
 ([#2432](https://github.com/mblauberg/provenant/issues/2432)).
 
+Codex receives the lane's private state directory as both `CODEX_HOME` and
+`HOME`. Codex discovers `~/.agents/skills` from `HOME` independently of
+`CODEX_HOME`; using the private directory keeps the host's user skills outside
+the lane and avoids a denied scan. Repository-local skills remain discoverable.
+
 ## Claude network access
 
 With open network (the default, or `--network on`), Claude enables `WebFetch`
