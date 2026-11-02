@@ -119,9 +119,20 @@ fn output_absolute_path() -> Value {
         }))
     }))
 }
+/// Whether `fabric_run` and `fabric_output` advertise the typed `outputSchema`
+/// from `provenant_records::wire`. Off until the catalogue tests that pin
+/// `fabric_context` as the only schema-bearing tool (`schema_tests.rs`,
+/// `protocol_tests.rs`) are updated in the same change, and until
+/// `tools::tool_error` is checked: it moves error details out of
+/// `structuredContent` for any tool that has an output schema.
+pub(crate) const TYPED_OUTPUT_PUBLISHED: bool = false;
+
 pub(crate) fn output_schema(kind: ToolKind) -> Option<Value> {
     let text_value = json!({"type":"string"});
     match kind {
+        ToolKind::Run | ToolKind::Output if TYPED_OUTPUT_PUBLISHED => {
+            provenant_records::wire::mcp_output_schema(tool_name(kind))
+        }
         ToolKind::Identity => Some(json!({"type":"object","anyOf":[
             output_object(json!({
                 "project":pattern("^[0-9a-f]{32}$"),"host":pattern("^[0-9a-f]{32}$"),
@@ -930,3 +941,118 @@ fn structural_path(root: &Value, schema: &Value, value: &Value, path: &str) -> O
 #[cfg(test)]
 #[path = "schema_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod wire_parity {
+    //! The typed schemas in `provenant_records::wire` must accept what the
+    //! runtime really serialises, including MCP's `provider_seconds` and its
+    //! path encodings.
+    use super::*;
+    use provenant_core::{AttemptId, Digest, HostId};
+    use provenant_fabric_runtime::coordination::facade::{
+        AttemptTarget, OutputBytes, OutputPart, OutputResult,
+    };
+    use provenant_fabric_runtime::runs::{AttemptPage, AttemptSummary, RunResult};
+    use provenant_records::run::AttemptRecord;
+    use provenant_records::wire::{mcp_output_schema, schema::validate};
+
+    fn attempt(provider_ms: Option<u64>) -> AttemptRecord {
+        let mut record = json!({
+            "schema_version": 1,
+            "attempt_id": AttemptId::from_bytes([1; 16]),
+            "run_id": provenant_core::RunId::from_bytes([2; 16]),
+            "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
+            "task_id": provenant_core::TaskId::from_bytes([4; 16]),
+            "operation_id": "wire-parity",
+            "attempt_number": 1, "revision": 1, "generation": 0,
+            "requested_route": {"kind":"model","provider":"fixture","model":"fixture/model"},
+            "authority_digest": Digest::from_bytes([5; 32]),
+            "queued_at": provenant_core::WallTime::from_micros(1).unwrap(),
+            "state": {"state":"running"}, "usage": {},
+            "prompt": {"path":{"encoding":"utf8","path":"prompt.txt"},
+                "digest":provenant_records::CanonicalV1::file_digest(b""),
+                "bytes":0,"complete":true,"redacted":false}
+        });
+        record["provider_ms"] = json!(provider_ms);
+        serde_json::from_value(record).unwrap()
+    }
+
+    fn check(tool: &str, value: &impl serde::Serialize) -> Value {
+        let value = serde_json::to_value(value).unwrap();
+        let schema = mcp_output_schema(tool).unwrap();
+        if let Err(error) = validate(&schema, &value) {
+            panic!("{error}\n{value:#}");
+        }
+        value
+    }
+
+    #[test]
+    fn run_results_carry_provider_seconds_and_validate() {
+        for (ms, seconds) in [(Some(1500), json!(1.5)), (None, Value::Null)] {
+            let record = attempt(ms);
+            let status = RunResult::Status {
+                extra: Default::default(),
+                attempt: record.clone(),
+            };
+            let value = check("fabric_run", &status);
+            assert_eq!(value["attempt"]["provider_seconds"], seconds);
+            assert!(value["attempt"].get("provider_ms").is_none());
+            assert_eq!(
+                provenant_records::wire::provider_seconds(ms),
+                seconds.as_f64()
+            );
+            let page = RunResult::List {
+                extra: Default::default(),
+                page: AttemptPage {
+                    extra: Default::default(),
+                    items: vec![AttemptSummary::from(record.clone())],
+                    next_after: None,
+                    truncated: false,
+                },
+            };
+            check("fabric_run", &page);
+            check(
+                "fabric_run",
+                &RunResult::Cancel {
+                    extra: Default::default(),
+                    attempt: record,
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn output_results_validate() {
+        let target = AttemptTarget {
+            extra: Default::default(),
+            attempt: AttemptId::from_bytes([1; 16]),
+            host: Some(HostId::from_bytes([7; 16])),
+        };
+        for bytes in [
+            OutputBytes::Utf8("ok".into()),
+            OutputBytes::Base64("//8=".into()),
+        ] {
+            let chunk = OutputResult::Chunk {
+                extra: Default::default(),
+                target: target.clone(),
+                part: OutputPart::Result,
+                state: "terminal".into(),
+                reason: None,
+                offset: 0,
+                next_offset: 2,
+                eof: true,
+                digest: Digest::from_bytes([0; 32]),
+                bytes,
+            };
+            check("fabric_output", &chunk);
+        }
+    }
+
+    #[test]
+    fn typed_output_stays_off_the_catalogue_until_enabled() {
+        let published = |kind| output_schema(kind).is_some();
+        assert_eq!(published(ToolKind::Run), TYPED_OUTPUT_PUBLISHED);
+        assert_eq!(published(ToolKind::Output), TYPED_OUTPUT_PUBLISHED);
+        assert!(mcp_output_schema("fabric_run").is_some());
+    }
+}

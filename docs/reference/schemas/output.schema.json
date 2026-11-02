@@ -1,0 +1,334 @@
+{
+  "$id": "https://provenant.dev/schemas/v2/output.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "command": {
+      "const": "output"
+    },
+    "data": {
+      "anyOf": [
+        {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "attempt_id": {
+                  "type": "string"
+                },
+                "grants": {},
+                "trace": {}
+              },
+              "required": [
+                "attempt_id",
+                "trace",
+                "grants"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "attempt_id": {
+                  "type": "string"
+                },
+                "part": {
+                  "enum": [
+                    "result",
+                    "prompt",
+                    "stderr",
+                    "transcript"
+                  ],
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "attempt_id",
+                "part",
+                "path"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "attempt_id": {
+                  "type": "string"
+                },
+                "events": {
+                  "items": {},
+                  "type": "array"
+                }
+              },
+              "required": [
+                "attempt_id",
+                "events"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "adapter": {},
+                "attempt_id": {
+                  "type": "string"
+                },
+                "effort": {},
+                "family": {},
+                "model": {},
+                "receipt": {
+                  "type": "string"
+                },
+                "resolved_from": {},
+                "reviewer": {},
+                "reviewer_provenance": {},
+                "role": {},
+                "run_id": {
+                  "type": "string"
+                },
+                "task_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "run_id",
+                "task_id",
+                "attempt_id",
+                "adapter",
+                "model",
+                "effort",
+                "family",
+                "role",
+                "resolved_from",
+                "receipt",
+                "reviewer",
+                "reviewer_provenance"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "attempt_id": {
+                  "type": "string"
+                },
+                "bytes": {
+                  "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "data": {
+                          "type": "string"
+                        },
+                        "encoding": {
+                          "const": "utf8"
+                        }
+                      },
+                      "required": [
+                        "encoding",
+                        "data"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "data": {
+                          "type": "string"
+                        },
+                        "encoding": {
+                          "const": "base64"
+                        }
+                      },
+                      "required": [
+                        "encoding",
+                        "data"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
+                "changed_files": {},
+                "changed_files_total": {},
+                "clipped": {
+                  "type": "boolean"
+                },
+                "complete": {
+                  "type": "boolean"
+                },
+                "digest": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "eof": {
+                  "type": "boolean"
+                },
+                "length": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "next_offset": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "offset": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "part": {
+                  "enum": [
+                    "result",
+                    "prompt",
+                    "stderr",
+                    "transcript"
+                  ],
+                  "type": "string"
+                },
+                "provider_error": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "reason": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "result_path": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "selected": {},
+                "state": {
+                  "type": "string"
+                },
+                "tail": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "tail_clamped": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "attempt_id",
+                "state",
+                "reason",
+                "part",
+                "offset",
+                "next_offset",
+                "length",
+                "eof",
+                "clipped",
+                "complete",
+                "digest",
+                "bytes"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "error": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "cause": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "repair": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "cause",
+            "repair"
+          ],
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "schema_version": {
+      "const": 2
+    },
+    "status": {
+      "enum": [
+        "ok",
+        "failed",
+        "refused",
+        "invalid",
+        "error",
+        "unavailable",
+        "timeout",
+        "cancelled",
+        "pending",
+        "waiting"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "command",
+    "status",
+    "data",
+    "error"
+  ],
+  "title": "provenant output --json",
+  "type": "object"
+}

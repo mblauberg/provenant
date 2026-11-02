@@ -25,6 +25,21 @@ pub struct CommandError {
     pub cause: Option<String>,
     pub repair: Option<String>,
 }
+impl Outcome {
+    /// Every status, in declaration order; the published schemas enumerate it.
+    pub const ALL: [Outcome; 10] = [
+        Self::Ok,
+        Self::Failed,
+        Self::Refused,
+        Self::Invalid,
+        Self::Error,
+        Self::Unavailable,
+        Self::Timeout,
+        Self::Cancelled,
+        Self::Pending,
+        Self::Waiting,
+    ];
+}
 #[derive(Debug, Serialize)]
 pub struct CommandResult<T> {
     pub schema_version: u64,

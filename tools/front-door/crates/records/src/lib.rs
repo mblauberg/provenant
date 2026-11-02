@@ -47,6 +47,7 @@ pub use install::{
 };
 
 mod command_result;
+pub mod wire;
 pub use command_result::{
     CommandError, CommandResult, HelpArgument, HelpCatalogue, HelpCommand, HelpErrorCode,
     HelpGroup, Outcome,

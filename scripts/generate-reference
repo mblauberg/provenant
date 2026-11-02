@@ -128,6 +128,44 @@ def cli_reference(data):
     return text.rstrip() + "\n"
 
 
+def wire_schemas(root):
+    """Published wire schemas, printed by the records crate that defines them."""
+    output = cargo(root, "run", "--locked", "--quiet", "-p", "provenant-records", "--bin", "print-wire-schemas")
+    data = json.loads(output)
+    if not isinstance(data, dict) or not isinstance(data.get("error-codes"), list):
+        raise ValueError("print-wire-schemas returned an unsupported document")
+    return data
+
+
+def schema_files(data):
+    """docs/reference files for the published schemas: one JSON file each plus an index."""
+    files = {}
+    names = sorted(name for name in data if name.endswith(".schema.json"))
+    for name in names:
+        files[f"schemas/{name}"] = json.dumps(data[name], ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    text = header("Published JSON Schemas", "provenant-records print-wire-schemas")
+    text += (
+        "Each file is a JSON Schema (draft 2020-12) for the `--json` envelope of one\n"
+        "command, or for an MCP tool's `structuredContent`. `schema_version` is bumped for\n"
+        "any change an existing consumer could misread; a new version replaces the old\n"
+        "one with no dual-emit period.\n\n"
+        "| Schema | Describes |\n|---|---|\n"
+    )
+    for name in names:
+        text += f"| [`{name}`](schemas/{name}) | {data[name].get('title', '')} |\n"
+    text += (
+        "\n## Edge error codes\n\n"
+        "Stable `error.code` values emitted outside the run owner (those are listed in the\n"
+        "[CLI reference](cli.md#error-codes)). `legacy_spelling` codes keep the spelling\n"
+        "consumers already match on; `umbrella` codes cover a command family until an\n"
+        "owner splits them.\n\n| Code | Kind | Meaning |\n|---|---|---|\n"
+    )
+    for entry in data["error-codes"]:
+        text += f"| `{entry['code']}` | {entry['kind']} | {entry['summary'].replace('|', '&#124;')} |\n"
+    files["schemas.md"] = text
+    return files
+
+
 def mcp_reference(data, all_tools):
     text = header("MCP tool reference", ALL_SCHEMAS.as_posix())
     for tool in data:
@@ -199,6 +237,10 @@ def generate(root, binary=None):
             files["cli.md"] = cli_reference(catalogue(root, binary))
         except (ValueError, KeyError, TypeError, AttributeError):
             gap("cli.md", "provenant help --all --json has no machine-readable catalogue")
+        try:
+            files.update(schema_files(wire_schemas(root)))
+        except (ValueError, KeyError, TypeError, AttributeError, subprocess.CalledProcessError):
+            gap("schemas.md", "provenant-records print-wire-schemas is unavailable")
     else:
         gap("cli.md", f"{WORKSPACE}/Cargo.toml is missing; CLI catalogue unavailable")
     for source, name, render in [
