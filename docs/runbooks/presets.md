@@ -526,6 +526,12 @@ through an absolute-path allow-list:
 allowed_read_roots = ["/absolute/path/to/shared-reference"]
 ```
 
+When a `run` brief, including a `--preset` brief, names an existing absolute or
+`~/` path outside the effective read roots (bound worktrees, `read_roots` and
+`--read-root`), submit and `--explain` print a warning and carry it in
+`data.warnings`. Copy the file into the worktree (for example `.agent-run/`) or
+add its directory with `--read-root`; the warning does not change confinement.
+
 A planner fragment cannot widen what its planner node holds. Each child
 `role` and `source` must equal the planner's, and each child `read_roots` entry
 must already be one of the planner's.

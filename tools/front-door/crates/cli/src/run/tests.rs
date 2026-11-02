@@ -185,6 +185,123 @@ fn explicit_read_only_from_a_linked_worktree_dispatches() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn run_explain_warns_once_for_existing_brief_paths_outside_read_roots()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let project = root.join("project");
+    std::fs::create_dir_all(&project)?;
+    std::fs::write(project.join("inside.md"), "in-root")?;
+    let outside = root.join("rubric.md");
+    std::fs::write(&outside, "rubric")?;
+    let missing = root.join("missing.md");
+    let home = root.join("home");
+    std::fs::create_dir_all(&home)?;
+    std::fs::write(home.join("home-rubric.md"), "home rubric")?;
+    let brief = root.join("brief.md");
+    std::fs::write(
+        &brief,
+        format!(
+            "Read `{}` and `{}` plus ~/home-rubric.md; also see `{}`.",
+            outside.display(),
+            outside.display(),
+            project.join("inside.md").display()
+        ),
+    )?;
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+    inputs.state_dir = Some(root.join("state"));
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let edge = Edge {
+        roots: &roots,
+        home: &home,
+        assets: &project,
+        cwd: &project,
+    };
+    let brief_arg = brief.to_string_lossy().into_owned();
+    let command = parsed_run(&[
+        "--model",
+        "codex/gpt-6-luna",
+        "--prompt-file",
+        &brief_arg,
+        "--explain",
+    ])?;
+    let reply = super::run(command, &edge);
+    assert_eq!(reply.result.status, Status::Ok, "{:?}", reply.result.error);
+    assert_eq!(reply.human.matches("warning: brief references").count(), 2);
+    assert!(reply.human.contains(&outside.display().to_string()));
+    assert!(
+        reply
+            .human
+            .contains(&home.join("home-rubric.md").display().to_string())
+    );
+    assert!(reply.human.contains("add it to --read-root"));
+    let carried = reply.result.data["warnings"]
+        .as_array()
+        .ok_or("warnings must travel as data")?;
+    assert_eq!(carried.len(), 2);
+    assert!(
+        carried
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|text| text.contains(&outside.display().to_string()))
+    );
+
+    let warnings = super::brief_read_root_warnings(
+        &format!(
+            "{} {}",
+            project.join("inside.md").display(),
+            missing.display()
+        ),
+        &project,
+        None,
+        &[],
+        &home,
+    );
+    assert!(warnings.is_empty());
+    Ok(())
+}
+
+#[test]
+fn render_run_renders_warnings_from_data_and_does_not_scrape_text()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = &std::fs::canonicalize(temp.path())?;
+    let project = root.join("project");
+    std::fs::create_dir_all(&project)?;
+    let mut inputs = provenant_core::RootInputs::new(root.join("home"), project.clone());
+    inputs.state_dir = Some(root.join("state"));
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let edge = Edge {
+        roots: &roots,
+        home: &root.join("home"),
+        assets: &project,
+        cwd: &project,
+    };
+    let result = super::reply(
+        "dispatch",
+        Ok((
+            json!({
+                "lanes": [{"attempt_id":"01010101010101010101010101010101", "state":"succeeded"}],
+                "warnings": ["brief references /elsewhere/rubric.md outside the lane's read roots"]
+            }),
+            "warning: brief references /scraped outside the lane's read roots\n".into(),
+        )),
+    );
+    let report = super::render_run(result, &edge);
+    assert!(
+        report
+            .human
+            .contains("warning: brief references /elsewhere/rubric.md")
+    );
+    assert!(!report.human.contains("/scraped"));
+    assert_eq!(
+        report.result.data["warnings"].as_array().map(Vec::len),
+        Some(1)
+    );
+    Ok(())
+}
+
+#[test]
 fn submodule_gitfile_is_not_a_linked_worktree() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let root = std::fs::canonicalize(temp.path())?;

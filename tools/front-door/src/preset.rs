@@ -2693,7 +2693,11 @@ fn explain_tree(nodes: &[Value], indent: usize, text: &mut String) {
 
 // Explain is read-only and must not publish an overflow artifact. The graph
 // was already bounded by the owner's 8 MiB document limit in expand().
-fn explain(expansion: Expansion, globals: &provenant_cli::Globals) -> u8 {
+fn explain(
+    expansion: Expansion,
+    brief_warnings: Vec<String>,
+    globals: &provenant_cli::Globals,
+) -> u8 {
     use std::io::Write;
     let inspection = (|| -> Result<_, String> {
         let roots = crate::roots::resolve(
@@ -2764,7 +2768,11 @@ fn explain(expansion: Expansion, globals: &provenant_cli::Globals) -> u8 {
     for warning in &expansion.warnings {
         human.push_str(&format!("Warning: {warning}\n"));
     }
-    let data = json!({"roles": expansion.roles, "substitutions": expansion.substitutions, "graph": expansion.document, "origins": expansion.origins, "limits":limits,"execution":metrics,"validation_error":validation_error,"review_shape":expansion.review_shape,"plan":expansion.plan.as_ref().map(planner::Decision::to_json)});
+    let mut data = json!({"roles": expansion.roles, "substitutions": expansion.substitutions, "graph": expansion.document, "origins": expansion.origins, "limits":limits,"execution":metrics,"validation_error":validation_error,"review_shape":expansion.review_shape,"plan":expansion.plan.as_ref().map(planner::Decision::to_json)});
+    if !brief_warnings.is_empty() {
+        data["warnings"] = json!(brief_warnings);
+    }
+    human.push_str(&provenant_cli::run::warnings_text(&data));
     let output = if globals.json {
         serde_json::to_vec(&provenant_records::CommandResult::new(
             "run",
@@ -2918,7 +2926,7 @@ pub fn run(
     globals: &provenant_cli::Globals,
     workers: &'static dyn provenant_confinement::worktrees::WorkerObserver,
 ) -> u8 {
-    let result = (|| -> Result<Expansion, String> {
+    let result = (|| -> Result<(Expansion, Vec<String>), String> {
         let bytes = if let Some(path) = &request.input.prompt_file {
             let mut file = provenant_os::fs::FileHandle::open_source(path)
                 .map_err(|e| format!("{}: {e}", path.display()))?;
@@ -3155,7 +3163,36 @@ pub fn run(
             selection.source.as_str(),
             placement.assignment.as_ref(),
         )?;
-        Ok(expansion)
+        // Every bound worktree and read root counts as readable; the brief's
+        // own paths are warned about, never refused.
+        let mut effective = Vec::new();
+        if let Some(worktree) = &request.access.worktree {
+            effective.push(directory.join(worktree));
+        }
+        visit_nodes(
+            expansion.document["nodes"]
+                .as_array_mut()
+                .ok_or("missing graph nodes")?,
+            &mut |node| {
+                let bound = node.get("worktree").and_then(Value::as_str).into_iter();
+                let listed = node
+                    .get("read_roots")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str);
+                effective.extend(bound.chain(listed).map(|path| directory.join(path)));
+                Ok(())
+            },
+        )?;
+        let brief_warnings = provenant_cli::run::brief_read_root_warnings(
+            prompt,
+            &directory,
+            None,
+            &effective,
+            &roots.home,
+        );
+        Ok((expansion, brief_warnings))
     })();
     match result {
         Err(error) => crate::fail(
@@ -3165,8 +3202,10 @@ pub fn run(
             &error,
             globals,
         ),
-        Ok(expansion) if request.explain => explain(expansion, globals),
-        Ok(expansion) => {
+        Ok((expansion, brief_warnings)) if request.explain => {
+            explain(expansion, brief_warnings, globals)
+        }
+        Ok((expansion, brief_warnings)) => {
             if !expansion.repo_files.is_empty() {
                 use std::io::Write;
                 let _ = writeln!(
@@ -3179,6 +3218,7 @@ pub fn run(
                 Ok(document) => crate::fabric::run_preset_graph(
                     document,
                     request.wait.unwrap_or(240),
+                    &brief_warnings,
                     globals,
                     workers,
                 ),
