@@ -600,6 +600,9 @@ pub struct DispatchInput {
 #[derive(Debug, Args)]
 #[command(group(clap::ArgGroup::new("writer_target").args(["worktree", "branch", "worktree_branch"])))]
 pub struct Dispatch {
+    /// Skip native dependency preparation for writer worktrees on this run.
+    #[arg(long)]
+    pub no_prepare_deps: bool,
     /// Expand and run a named pipeline preset
     #[arg(long, requires = "prompt_file", conflicts_with_all = ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "provider_timeout", "operation_id"])]
     pub preset: Option<String>,

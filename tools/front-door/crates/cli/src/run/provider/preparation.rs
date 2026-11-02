@@ -1,5 +1,78 @@
 use super::*;
 
+const DEPENDENCY_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+const DEPENDENCY_STDERR_TAIL: usize = 4096;
+
+pub(super) fn prepare_writer_dependencies(
+    worktree: &Path,
+    enabled: bool,
+    locate: &impl Fn(&str) -> Result<PathBuf, String>,
+) -> Result<serde_json::Value, String> {
+    let command = "pnpm install --frozen-lockfile";
+    let skipped = |reason| {
+        serde_json::json!({
+            "command": command,
+            "outcome": "skipped",
+            "reason": reason,
+            "elapsed_micros": 0,
+        })
+    };
+    if !enabled {
+        return Ok(skipped("disabled"));
+    }
+    let lockfile = worktree.join("pnpm-lock.yaml");
+    if !lockfile.is_file() {
+        return Ok(skipped("no_pnpm_lockfile"));
+    }
+    if worktree.join("node_modules").exists() {
+        return Ok(skipped("node_modules_exists"));
+    }
+
+    let executable = locate("pnpm").map_err(|error| format!("{command} failed: {error}"))?;
+    let argv = [
+        executable.as_os_str().to_owned(),
+        "install".into(),
+        "--frozen-lockfile".into(),
+    ];
+    let executor = provenant_os::exec::SystemExecutor::new(1)
+        .map_err(|error| format!("{command} failed: {error}"))?;
+    let mut options =
+        provenant_os::exec::ExecOptions::new(&argv, worktree, DEPENDENCY_INSTALL_TIMEOUT);
+    options.process_group = true;
+    options.stdout = provenant_os::exec::StreamPolicy::Discard;
+    options.stderr = provenant_os::exec::StreamPolicy::Tail {
+        limit: DEPENDENCY_STDERR_TAIL,
+    };
+    use provenant_os::exec::Executor;
+    let outcome = executor
+        .execute(options)
+        .map_err(|error| format!("{command} failed: {error}"))?;
+    let elapsed_micros = outcome.elapsed_micros;
+    let stderr = String::from_utf8_lossy(&outcome.stderr.bytes);
+    let stderr_tail = stderr.trim();
+    if outcome.termination != provenant_os::exec::Termination::Exit(0) || outcome.timed_out {
+        let detail = if stderr_tail.is_empty() {
+            String::new()
+        } else {
+            format!("; stderr tail: {stderr_tail}")
+        };
+        let reason = if outcome.timed_out {
+            format!(
+                "timed out after {} seconds",
+                DEPENDENCY_INSTALL_TIMEOUT.as_secs()
+            )
+        } else {
+            format!("exited with {:?}", outcome.termination)
+        };
+        return Err(format!("{command} failed ({reason}){detail}"));
+    }
+    Ok(serde_json::json!({
+        "command": command,
+        "outcome": "installed",
+        "elapsed_micros": elapsed_micros,
+    }))
+}
+
 pub(crate) fn prepare(
     registry: &Registry<'_>,
     task: &run::TaskRequest,
@@ -284,6 +357,27 @@ pub(super) fn prepare_candidates(
                 .map_err(|error| error.to_string())?,
         ),
         None => None,
+    };
+    let dependency_event = if let Some(writer) = &writer {
+        let run_config = provenant_confinement::run_config::RunConfig::read(roots.state.as_path())
+            .map_err(|error| format!("read host run configuration: {error}"))?;
+        let enabled = run_config.prepare_deps
+            && task
+                .profile
+                .knobs
+                .get("lanes.prepare_deps")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+        Some(prepare_writer_dependencies(
+            writer.worktree.path(),
+            enabled,
+            &|name| match registry.host {
+                Some(host) => host_executable(host, name),
+                None => resolve_executable(name),
+            },
+        )?)
+    } else {
+        None
     };
     let cwd = match writer.as_ref() {
         Some(writer) => writer.worktree.path().to_owned(),
@@ -1016,7 +1110,7 @@ pub(super) fn prepare_candidates(
             // the caller has closed its diagnostic stream.
             let _ = writeln!(std::io::stderr().lock(), "{advisory}");
         }
-        let provider = RouteRecord {
+        let mut provider = RouteRecord {
             provider: Some(route.adapter.clone()),
             model: Some(format!("{}/{}", route.adapter, route.model)),
             effort: route.effort,
@@ -1025,6 +1119,11 @@ pub(super) fn prepare_candidates(
             pool_selection: route.pool_selection.clone(),
             ..Default::default()
         };
+        if let Some(event) = &dependency_event {
+            provider
+                .extra
+                .insert("dependency_preparation".into(), event.clone());
+        }
         let stdin = match spec.stdin {
             Stdin::Bytes(bytes) => bytes,
             Stdin::Null => Vec::new(),

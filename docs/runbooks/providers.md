@@ -320,10 +320,16 @@ pnpm store unset: pnpm records the store directory in
 installed natively look stale. The default store (`~/Library/pnpm` on macOS,
 `~/.local/share/pnpm` on Linux) is readable, never writable, and
 `verify-deps-before-run` is off, so `pnpm run <script>` uses the native install
-without reinstalling. Corepack neither follows a project's `packageManager`
-field nor downloads a version, so a pinned pnpm cannot arrive as a
-non-executable `@pnpm/exe` placeholder. Install dependencies on the host before
-dispatch; a lane cannot install into the shared store.
+without reinstalling. Before a writer provider starts, Provenant runs
+`pnpm install --frozen-lockfile` on the host when the worktree has
+`pnpm-lock.yaml` and no `node_modules`; it skips worktrees that are already
+installed. The bounded preparation can be disabled for one run with
+`--no-prepare-deps` or for the host with `[domains.run] prepare_deps = false`.
+An install failure refuses the lane and includes the command and the end of
+pnpm's stderr. Corepack neither follows a project's `packageManager` field nor
+downloads a version, so a pinned pnpm cannot arrive as a non-executable
+`@pnpm/exe` placeholder. The native install uses the host's shared pnpm store
+before sandbox entry; a lane cannot write that store from inside its sandbox.
 
 Read-only lanes with a verified Git checkout use a private scratch object
 directory, with the host's common object store as a read-only alternate. The

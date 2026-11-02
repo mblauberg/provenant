@@ -18,6 +18,60 @@ fn command_lookup_is_literal_and_preserves_symlink_invocation()
     assert!(super::find_executable_on_path("cursor", &[root]).is_err());
     Ok(())
 }
+
+#[cfg(unix)]
+#[test]
+fn writer_dependency_preparation_installs_skips_and_reports_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir()?;
+    let worktree = temp.path().join("worktree");
+    let bin = temp.path().join("bin");
+    std::fs::create_dir_all(&worktree)?;
+    std::fs::create_dir_all(&bin)?;
+    std::fs::write(worktree.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n")?;
+    let pnpm = bin.join("pnpm");
+    std::fs::write(
+        &pnpm,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PWD/pnpm.log\"\nif [ \"$(basename \"$PWD\")\" = fresh ]; then echo 'fixture stderr tail' >&2; exit 7; fi\nmkdir -p node_modules\n",
+    )?;
+    std::fs::set_permissions(&pnpm, std::fs::Permissions::from_mode(0o700))?;
+    let locate = |name: &str| {
+        super::find_command_on_path(name, std::slice::from_ref(&bin))
+            .map_err(|error| error.to_string())
+    };
+
+    let disabled = super::prepare_writer_dependencies(&worktree, false, &locate)?;
+    assert_eq!(disabled["outcome"], "skipped");
+    assert_eq!(disabled["reason"], "disabled");
+    assert!(!worktree.join("pnpm.log").exists());
+    let installed = super::prepare_writer_dependencies(&worktree, true, &locate)?;
+    assert_eq!(installed["outcome"], "installed");
+    assert_eq!(installed["command"], "pnpm install --frozen-lockfile");
+    assert!(worktree.join("node_modules").is_dir());
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("pnpm.log"))?,
+        "install --frozen-lockfile\n"
+    );
+
+    // An existing install is left alone even when the fake installer would fail.
+    let skipped = super::prepare_writer_dependencies(&worktree, true, &locate)?;
+    assert_eq!(skipped["outcome"], "skipped");
+    assert_eq!(skipped["reason"], "node_modules_exists");
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("pnpm.log"))?,
+        "install --frozen-lockfile\n"
+    );
+
+    let fresh = temp.path().join("fresh");
+    std::fs::create_dir_all(&fresh)?;
+    std::fs::write(fresh.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n")?;
+    let failure = super::prepare_writer_dependencies(&fresh, true, &locate);
+    let error = failure.expect_err("fake pnpm failure is refused");
+    assert!(error.contains("pnpm install --frozen-lockfile"));
+    assert!(error.contains("fixture stderr tail"));
+    Ok(())
+}
 #[test]
 fn nested_result_policy_uses_a_reliable_route_without_broadening_authority()
 -> Result<(), Box<dyn std::error::Error>> {
