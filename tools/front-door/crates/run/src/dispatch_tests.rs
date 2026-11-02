@@ -2880,6 +2880,8 @@ pub(super) struct Fake {
     answer: Option<String>,
     /// Partial-finish signals a decode reports.
     partial: Vec<PartialSignal>,
+    /// Report `QuotaLimited` only when this exact sealed stderr arrives.
+    quota_stderr: Option<&'static [u8]>,
 }
 
 #[test]
@@ -2961,6 +2963,22 @@ impl Providers for Fake {
             reason: None,
             partial_signals: self.partial.clone(),
         })
+    }
+    fn decode_captures(
+        &self,
+        route: &RouteRecord,
+        stdout: &[u8],
+        stderr: &[u8],
+        exit: &ExitObservation,
+        provider_state: &std::path::Path,
+        _: Option<&crate::HolderContext>,
+    ) -> std::result::Result<Decoded, String> {
+        let mut decoded = self.decode(route, stdout, exit, provider_state)?;
+        if self.quota_stderr == Some(stderr) {
+            decoded.outcome = Outcome::QuotaLimited;
+            decoded.complete = false;
+        }
+        Ok(decoded)
     }
 }
 #[test]
@@ -3181,6 +3199,48 @@ fn settlement_scrubs_provider_session_history() -> TestResult {
         );
         assert!(text.contains("[REDACTED]"));
     }
+    Ok(())
+}
+
+#[test]
+fn quota_limited_empty_result_stays_quota_limited() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(&dir, "stdout.log", b"", CAPTURE_LIMIT)?;
+    // The quota evidence is only in the sealed stderr: the settlement must
+    // read it and hand it to the decoder for the outcome to be QuotaLimited.
+    artifacts::seal(&dir, "stderr.log", b"quota exhausted", CAPTURE_LIMIT)?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        quota_stderr: Some(b"quota exhausted"),
+        answer: Some(String::new()),
+        ..Fake::default()
+    };
+    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    assert!(matches!(
+        record.state,
+        AttemptState::Terminal {
+            outcome: Outcome::QuotaLimited,
+            ..
+        }
+    ));
     Ok(())
 }
 

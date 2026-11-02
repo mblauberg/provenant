@@ -3998,6 +3998,125 @@ fn clean_exit() -> ExitObservation {
 }
 
 #[test]
+fn opencode_stderr_quota_settles_and_records_refusal() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    use provenant_quota::Admission;
+    use provenant_records::{
+        ResolvedRoute, RouteConfidentiality, RouteEligibility, RouteReadiness,
+    };
+    use std::os::unix::fs::PermissionsExt;
+    if crate::fabric::in_lane() {
+        // A lane suppresses the host quota writes this test observes.
+        return Ok(());
+    }
+    let temp = tempfile::tempdir()?;
+    let state = temp.path().join("state");
+    std::fs::create_dir(&state)?;
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+    let provider_state = state.join("runs/run/attempts/attempt/provider-state");
+    let argv = ["/bin/sh", "-c", "printf '%s\\n' 'AI.Error.QuotaExceeded: Go usage limit exceeded retryAfterMs=60000' >&2; exit 1"].map(std::ffi::OsString::from);
+    let mut options = ExecOptions::new(&argv, temp.path(), Duration::from_secs(30));
+    options.stdout = StreamPolicy::Capture { limit: 8192 };
+    options.stderr = StreamPolicy::Capture { limit: 8192 };
+    let output = SystemExecutor::new(1)?.execute(options)?;
+    assert_eq!(output.termination, Termination::Exit(1));
+    let route = run::RouteRecord {
+        provider: Some("opencode".into()),
+        model: Some("opencode/opencode-go/example".into()),
+        account_key: Some("go".into()),
+        account_label: Some("go".into()),
+        ..Default::default()
+    };
+    let mut exit = clean_exit();
+    exit.termination = Some(provenant_os::exec::Termination::Exit(1));
+    let decoded = Registry::default().decode_captures(
+        &route,
+        &output.stdout.bytes,
+        &output.stderr.bytes,
+        &exit,
+        &provider_state,
+        None,
+    )?;
+    assert_eq!(decoded.outcome, run::Outcome::QuotaLimited);
+    let records = crate::quota::read_cache_at(&state)?;
+    assert_eq!(
+        records.len(),
+        1,
+        "host refusal missing; lane environment suppresses host quota writes"
+    );
+    let refusal = &records[0].refusals[0];
+    assert_eq!(refusal.pool.as_deref(), Some("opencode-go"));
+    assert_eq!(
+        refusal.resets_unix_seconds,
+        Some(refusal.observed_unix_seconds + 60)
+    );
+    let resolved = ResolvedRoute {
+        extra: Default::default(),
+        adapter: "opencode".into(),
+        model: "opencode-go/example".into(),
+        effort: None,
+        catalogue_revision: "fixture".into(),
+        account_key: Some("go".into()),
+        host: "host".into(),
+        alternatives: Default::default(),
+        exclusions: vec![],
+        eligibility: RouteEligibility::Eligible,
+        readiness: RouteReadiness::Ready {
+            extra: Default::default(),
+            availability_ref: "fixture".into(),
+            expires_unix_seconds: i64::MAX,
+        },
+        confidentiality: RouteConfidentiality {
+            extra: Default::default(),
+            evidence_ref: "fixture".into(),
+        },
+        pool_selection: None,
+    };
+    let pools = vec!["opencode-go".into()];
+    let check = |now_unix_seconds| {
+        Admission {
+            policies: &[],
+            now_unix_seconds,
+            records: &records,
+            pools: &pools,
+        }
+        .check(&resolved)
+    };
+    assert!(check(refusal.observed_unix_seconds).is_err());
+    assert!(check(refusal.observed_unix_seconds + 60).is_ok());
+    Ok(())
+}
+
+#[test]
+fn opencode_stderr_quota_text_does_not_overturn_a_successful_run()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir()?;
+    let state = temp.path().join("state");
+    std::fs::create_dir(&state)?;
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+    let provider_state = state.join("runs/run/attempts/attempt/provider-state");
+    let mut exit = clean_exit();
+    exit.termination = Some(provenant_os::exec::Termination::Exit(0));
+    let decoded = Registry::default().decode_captures(
+        &opencode_decode_route(),
+        include_bytes!("../../../../tests/fixtures/providers/opencode/v2.2.0-success.jsonl"),
+        b"AI.Error.QuotaExceeded: Go usage limit exceeded retryAfterMs=60000\n",
+        &exit,
+        &provider_state,
+        None,
+    )?;
+    assert_eq!(decoded.outcome, run::Outcome::Succeeded);
+    assert!(
+        crate::quota::read_cache_at(&state)
+            .map(|records| records.iter().all(|record| record.refusals.is_empty()))
+            .unwrap_or(true),
+        "a successful run must not persist a quota refusal"
+    );
+    Ok(())
+}
+
+#[test]
 fn opencode_unavailable_model_reaches_the_decoded_outcome() {
     let route = run::RouteRecord {
         provider: Some("opencode".into()),
@@ -4115,12 +4234,13 @@ fn capacity_store_failure_does_not_change_settlement() -> Result<(), Box<dyn std
     // The malformed on-disk record makes the store update fail after the
     // settlement path creates the lock. The lock proves it attempted the write.
     assert!(!state.join("quota/quota.lock").exists());
-    let decoded = Registry::default().decode_with_context(
+    let decoded = Registry::default().decode_captures(
         &route,
         stream,
+        &[],
         &exit,
         Path::new("/nonexistent"),
-        &context,
+        Some(&context),
     )?;
     assert!(state.join("quota/quota.lock").is_file());
     assert_eq!(std::fs::read(&bad_record)?, b"invalid quota record");
@@ -4253,8 +4373,14 @@ fn invalid_sealed_root_never_writes_to_registry_root() -> Result<(), Box<dyn std
     let stream = br#"{"type":"turn.failed","error":{"message":"at capacity","codex_error_info":"server_overloaded"}}"#;
     let mut exit = clean_exit();
     exit.termination = Some(Termination::Exit(1));
-    let decoded =
-        registry.decode_with_context(&route, stream, &exit, Path::new("/nonexistent"), &context)?;
+    let decoded = registry.decode_captures(
+        &route,
+        stream,
+        &[],
+        &exit,
+        Path::new("/nonexistent"),
+        Some(&context),
+    )?;
     assert_eq!(decoded.outcome, run::Outcome::ModelUnavailable);
     assert!(
         decoded
@@ -4376,13 +4502,14 @@ fn opencode_decode_with_context_reads_home_data_when_xdg_is_unset()
         "glm-5.3-flash-free",
     )?;
     // The success fixture's stream reports no model; the session record
-    // beside the holder home supplies it through `decode_with_context`.
-    let decoded = Registry::default().decode_with_context(
+    // beside the holder home supplies it through `decode_captures`.
+    let decoded = Registry::default().decode_captures(
         &opencode_decode_route(),
         include_bytes!("../../../../tests/fixtures/providers/opencode/v2.2.0-success.jsonl"),
+        &[],
         &clean_exit(),
         Path::new("/nonexistent"),
-        &context,
+        Some(&context),
     )?;
     assert_eq!(decoded.outcome, run::Outcome::Succeeded);
     assert_eq!(decoded.session.as_deref(), Some("ses_x"));
@@ -4422,12 +4549,13 @@ fn absolute_xdg_data_home_wins_over_home_for_decode_with_context()
         "opencode",
         "home-decoy",
     )?;
-    let decoded = Registry::default().decode_with_context(
+    let decoded = Registry::default().decode_captures(
         &opencode_decode_route(),
         include_bytes!("../../../../tests/fixtures/providers/opencode/v2.2.0-success.jsonl"),
+        &[],
         &clean_exit(),
         Path::new("/nonexistent"),
-        &context,
+        Some(&context),
     )?;
     assert_eq!(decoded.outcome, run::Outcome::Succeeded);
     assert_eq!(
@@ -4473,8 +4601,16 @@ fn capacity_guardian_context_records_and_reports_config_failure()
     let mut exit = clean_exit();
     exit.termination = Some(provenant_os::exec::Termination::Exit(1));
     let registry = Registry::default();
-    let decode =
-        || registry.decode_with_context(&route, stream, &exit, Path::new("/nonexistent"), &context);
+    let decode = || {
+        registry.decode_captures(
+            &route,
+            stream,
+            &[],
+            &exit,
+            Path::new("/nonexistent"),
+            Some(&context),
+        )
+    };
     std::fs::write(state.join("config.toml"), "invalid = [")?;
     let failed = decode()?;
     assert_eq!(failed.outcome, run::Outcome::ModelUnavailable);
@@ -4514,8 +4650,14 @@ fn capacity_guardian_context_records_and_reports_config_failure()
         #[cfg(feature = "fixture")]
         fixture_state_write: false,
     });
-    let nested_result =
-        registry.decode_with_context(&route, stream, &exit, Path::new("/nonexistent"), &nested)?;
+    let nested_result = registry.decode_captures(
+        &route,
+        stream,
+        &[],
+        &exit,
+        Path::new("/nonexistent"),
+        Some(&nested),
+    )?;
     assert_eq!(nested_result.outcome, run::Outcome::ModelUnavailable);
     assert_eq!(std::fs::read(state.join("quota/key/codex.json"))?, before);
     assert!(!nested.roots.state_root.join("quota").exists());
