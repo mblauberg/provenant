@@ -64,6 +64,7 @@ app=
 agent=
 service=
 app_agent_stopped=false
+swap_helper=
 helper_executable='Contents/Library/LoginItems/Provenant Menu.app/Contents/MacOS/quota-menubar'
 agent_backup=
 instruction_count=0
@@ -83,9 +84,8 @@ cleanup() {
     if [ -n "$app_backup" ] && [ -e "$app_backup" ]; then
         recovered=true
         if [ -e "$HOME/Applications/$app" ]; then
-            mv "$HOME/Applications/$app" "$app_stage/failed.app" || recovered=false
-        fi
-        if "$recovered"; then
+            "$swap_helper" --swap-path "$app_backup" "$HOME/Applications/$app" || recovered=false
+        else
             mv "$app_backup" "$HOME/Applications/$app" || recovered=false
         fi
         if "$recovered"; then
@@ -96,7 +96,10 @@ cleanup() {
         fi
     fi
     if [ -n "$agent_backup" ] && [ -f "$agent_backup" ]; then
-        cp -p "$agent_backup" "$agent" || printf '%s\n' "Could not restore the menu bar LaunchAgent; backup remains at $agent_backup" >&2
+        if ! cp -p "$agent_backup" "$agent"; then
+            printf '%s\n' "Could not restore the menu bar LaunchAgent; keeping staging directory at $app_stage (backup: $agent_backup)" >&2
+            app_stage=
+        fi
     fi
     if "$app_agent_stopped" && [ -f "$agent" ] && [ -d "$HOME/Applications/$app" ]; then
         launchctl bootout "$service" </dev/null >/dev/null 2>&1 || :
@@ -293,15 +296,19 @@ instructions_committed=true
 if [ -n "$app_stage" ]; then
     agent="$HOME/Library/LaunchAgents/dev.provenant.quota-menubar.plist"
     service="gui/$(id -u)/dev.provenant.quota-menubar"
-    app_backup=$app_stage/previous.app
+    # Keep the new signed executable outside both paths for swap and rollback.
+    swap_helper=$scratch/swap-path
+    cp -p "$app_stage/$app/Contents/MacOS/provenant-console" "$swap_helper" || die 4 'Could not prepare atomic app swap helper'
     if [ -f "$agent" ]; then
         app_agent_stopped=true
         launchctl bootout "$service" </dev/null >/dev/null 2>&1 || :
     fi
-    if [ -e "$HOME/Applications/$app" ] && ! mv "$HOME/Applications/$app" "$app_backup"; then
-        die 4 'Could not move the previous Provenant app into its backup stage'
-    fi
-    if ! mv "$app_stage/$app" "$HOME/Applications/$app"; then
+    if [ -e "$HOME/Applications/$app" ]; then
+        if ! "$swap_helper" --swap-path "$app_stage/$app" "$HOME/Applications/$app"; then
+            die 4 'Could not atomically swap the Provenant app'
+        fi
+        app_backup=$app_stage/$app
+    elif ! mv "$app_stage/$app" "$HOME/Applications/$app"; then
         die 4 'Could not install the refreshed Provenant app'
     fi
     if [ -f "$agent" ]; then

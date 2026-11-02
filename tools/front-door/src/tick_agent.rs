@@ -1,12 +1,101 @@
 //! Platform seam for the per-user host tick scheduler, published by the install receipt.
 use provenant_fabric_runtime::peer_agent::{self, AgentError, launchctl, systemctl, utf8, xml};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
 };
 
 pub const LABEL: &str = "dev.provenant.tick";
+
+/// launchd's interval job may be idle after a successful tick; that is healthy.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Diagnosis {
+    pub state: String,
+    pub last_exit_reason: Option<String>,
+    pub warning: Option<String>,
+    pub repair: Option<String>,
+}
+
+impl Default for Diagnosis {
+    fn default() -> Self {
+        Self {
+            state: "unknown".into(),
+            last_exit_reason: None,
+            warning: None,
+            repair: None,
+        }
+    }
+}
+
+pub fn diagnosis(home: &Path) -> Diagnosis {
+    if !cfg!(target_os = "macos") {
+        return Diagnosis {
+            state: "not_applicable".into(),
+            ..Default::default()
+        };
+    }
+    let service = format!("gui/{}/{LABEL}", provenant_os::fs::effective_uid());
+    match launchctl(&["print".as_ref(), service.as_ref()], home) {
+        Ok((true, output)) => parse_diagnosis(&output),
+        _ => Diagnosis {
+            state: "unavailable".into(),
+            warning: Some("Tick agent is not loaded or launchctl could not inspect it".into()),
+            repair: Some("provenant upgrade".into()),
+            ..Default::default()
+        },
+    }
+}
+
+fn parse_diagnosis(output: &str) -> Diagnosis {
+    let field = |key: &str| {
+        output.lines().find_map(|line| {
+            let (name, value) = line.trim().split_once(" = ")?;
+            (name == key).then(|| {
+                value
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(256)
+                    .collect::<String>()
+            })
+        })
+    };
+    let state = field("state").unwrap_or_else(|| "unknown".into());
+    let exit = field("last exit code");
+    let signal = field("last terminating signal");
+    let reason = field("last exit reason");
+    let abnormal = exit
+        .as_deref()
+        .is_some_and(|code| code != "0" && code != "(never exited)")
+        || signal.as_deref().is_some_and(|signal| signal != "0")
+        || reason.as_deref().is_some_and(|reason| {
+            let reason = reason.to_ascii_lowercase();
+            reason.contains("constraint") || reason.contains("crash") || reason.contains("kill")
+        });
+    let last_exit_reason = match (exit, signal, reason) {
+        (None, None, None) => None,
+        (exit, signal, reason) => Some(
+            [
+                exit.map(|value| format!("exit code {value}")),
+                signal.map(|value| format!("signal {value}")),
+                reason,
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("; "),
+        ),
+    };
+    Diagnosis {
+        state,
+        last_exit_reason,
+        warning: abnormal.then(|| {
+            "Tick failed or is crash-looping; a SIGKILL may indicate a launch-constraint kill"
+                .into()
+        }),
+        repair: abnormal.then(|| "provenant upgrade".into()),
+    }
+}
 const TIMER: &str = "provenant-tick.timer";
 /// Seconds between ticks on both platforms.
 const INTERVAL: u32 = 60;
@@ -260,6 +349,24 @@ fn stop_with(
 mod tests {
     #[allow(unused_imports)]
     use super::*;
+
+    #[test]
+    fn tick_diagnosis_distinguishes_idle_success_from_constraint_kills_and_crashes() {
+        let idle = parse_diagnosis("state = not running\nlast exit code = 0\n");
+        assert_eq!(idle.state, "not running");
+        assert!(idle.warning.is_none());
+        assert_eq!(idle.last_exit_reason.as_deref(), Some("exit code 0"));
+        for output in [
+            "state = spawn scheduled\nlast exit code = 1\n",
+            "state = not running\nlast terminating signal = 9\n",
+            "state = not running\nlast exit reason = Launch Constraint Violation\n",
+        ] {
+            let diagnosis = parse_diagnosis(output);
+            assert!(diagnosis.warning.is_some());
+            assert!(diagnosis.last_exit_reason.is_some());
+            assert_eq!(diagnosis.repair.as_deref(), Some("provenant upgrade"));
+        }
+    }
 
     #[test]
     fn retiring_gc_unloads_the_old_label_and_propagates_bootout_failure() {

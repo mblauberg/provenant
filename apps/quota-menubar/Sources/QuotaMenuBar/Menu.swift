@@ -83,13 +83,14 @@ enum QuotaMenu {
                 refreshing: model.isRefreshing || model.report?.isRefreshing(now: now) == true,
                 stateRoot: model.stateRoot, now: now, overview: model.overview,
                 overviewError: model.overviewError, overviewUpdatedAt: model.overviewUpdatedAt,
-                observationError: model.overviewObservationError)
+                observationError: model.overviewObservationError,
+                consoleURL: MenuBarController.consoleURL())
     }
 
     static func entries(report: QuotaReport?, error: String?, updatedAt: Date?, refreshing: Bool,
                         stateRoot: URL, now: Date, overview: ConsoleOverview? = nil,
                         overviewError: String? = nil, overviewUpdatedAt: Date? = nil,
-                        observationError: String? = nil) -> [MenuEntry] {
+                        observationError: String? = nil, consoleURL: URL? = nil) -> [MenuEntry] {
         let freshness = refreshing ? "Refreshing…" : updatedAt.map { "Updated \(Fmt.ago($0, now: now))" }
         var entries: [MenuEntry] = [.title(title, freshness)]
         entries += overviewEntries(overview, error: overviewError, updatedAt: overviewUpdatedAt, now: now,
@@ -111,7 +112,10 @@ enum QuotaMenu {
         entries += [
             .separator,
             .item(MenuItemSpec(title: "Refresh", icon: .symbol("arrow.clockwise"), enabled: !refreshing, action: .refresh)),
-            .item(MenuItemSpec(title: "Open Console", icon: .symbol("macwindow"), action: .openConsole)),
+            .item(MenuItemSpec(title: "Open Console",
+                               subtitle: consoleURL == nil ? "Console is not installed yet · use provenant inbox" : nil,
+                               icon: .symbol("macwindow"), enabled: consoleURL != nil,
+                               action: consoleURL == nil ? nil : .openConsole)),
             .item(MenuItemSpec(title: "Settings", icon: .symbol("slider.horizontal.3"), submenu:
                 (report.map { customise($0, stateRoot: stateRoot) } ?? []) + [
                     .item(MenuItemSpec(title: "Open Report Folder", enabled: report != nil,

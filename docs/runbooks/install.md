@@ -80,6 +80,19 @@ Bootstrap exits 2 for invalid arguments or interrupted prompts, 3 when a
 missing toolchain needs consent, 4 for a failed download or checksum, and 5
 for a failed build or package. Installation errors retain the CLI's exit code.
 
+App upgrades exchange the staged and installed bundles atomically with macOS
+`renamex_np(RENAME_SWAP)`. The staged console executable exposes an installer-only
+`--swap-path OLD NEW` mode before AppKit starts; a temporary copy remains available
+for rollback. The old bundle stays in the staging directory until the menu agent
+has restarted successfully. If restoring the app or its LaunchAgent plist fails,
+the installer retains that directory and reports its location for recovery.
+
+`provenant doctor` includes the tick agent's launchd state and last exit reason
+from `launchctl print gui/<uid>/dev.provenant.tick`. An idle tick with exit code
+zero is normal. Abnormal exits or terminating signals are flagged with
+`provenant upgrade` as the repair; SIGKILL can indicate a launch-constraint kill
+but does not by itself prove that cause.
+
 Tags matching `v*` trigger `.github/workflows/release.yml`. The tag commit must
 be reachable from `origin/main`. A job with read access builds and ad-hoc signs
 the arm64 binary, runs `package-release`, and checksums the archive. A separate

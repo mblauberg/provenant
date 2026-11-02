@@ -1,4 +1,8 @@
 mod support;
+// Exercise the binary-only tick rendering seam without registering a real service.
+#[path = "../src/tick_agent.rs"]
+#[allow(dead_code)]
+mod tick_agent;
 use provenant_config::{Release, ReleaseSmoke};
 use provenant_core::CancelToken;
 use provenant_records::{CommandResult, Outcome, SourceInput, VersionInfo, source_digest};
@@ -15,6 +19,10 @@ const APP_EXECUTABLES: [&str; 2] = ["Contents/MacOS/provenant-console", MENU_EXE
 const MENU_EXECUTABLE: &str =
     "Contents/Library/LoginItems/Provenant Menu.app/Contents/MacOS/quota-menubar";
 
+// Emulate the helper protocol for installer failure injection; the native
+// RENAME_SWAP implementation is exercised by the Swift Menu tests.
+const APP_FIXTURE: &str = "#!/bin/sh\nif [ \"$1\" = --swap-path ]; then\n  mv \"$2\" \"$2.swap\" && mv \"$3\" \"$2\" && mv \"$2.swap\" \"$3\"\n  exit $?\nfi\nexit 0\n";
+
 struct FixtureSmoke(VersionInfo);
 
 impl ReleaseSmoke for FixtureSmoke {
@@ -26,6 +34,15 @@ fn staged(rig: &TestRig) -> Result<PathBuf> {
     staged_named(rig, "staged", b"synthetic release")
 }
 fn staged_named(rig: &TestRig, name: &str, identity: &[u8]) -> Result<PathBuf> {
+    staged_binary(rig, name, identity, None)
+}
+
+fn staged_binary(
+    rig: &TestRig,
+    name: &str,
+    identity: &[u8],
+    signed_binary: Option<&Path>,
+) -> Result<PathBuf> {
     let stage = rig.root.join(name);
     fs::create_dir_all(stage.join("bin"))?;
     fs::create_dir_all(stage.join("skills/example"))?;
@@ -74,6 +91,9 @@ fn staged_named(rig: &TestRig, name: &str, identity: &[u8]) -> Result<PathBuf> {
     );
     let binary = stage.join("bin/provenant");
     fs::write(&binary, script)?;
+    if let Some(signed_binary) = signed_binary {
+        fs::copy(signed_binary, &binary)?;
+    }
     fs::set_permissions(binary, fs::Permissions::from_mode(0o755))?;
     let path = stage.join("skills/example/SKILL.md");
     fs::write(&path, skill)?;
@@ -91,6 +111,91 @@ fn staged_named(rig: &TestRig, name: &str, identity: &[u8]) -> Result<PathBuf> {
         &CancelToken::new(),
     )?;
     Ok(stage)
+}
+
+#[test]
+fn tick_upgrade_keeps_stable_program_path_and_valid_signature() -> Result {
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+    use provenant_core::{Clock, WaitBudget};
+    struct Reporter;
+    impl provenant_config::InstallReporter for Reporter {
+        fn preview(&mut self, _: &[provenant_config::Action]) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let rig = TestRig::new()?;
+    let roots = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone())
+        .resolve(&provenant_os::fs::SystemPathResolver)?;
+    let mut targets =
+        provenant_config::Targets::new(roots, &rig.home, &[provenant_records::Harness::Codex]);
+    let program = targets.bin_dir.join("provenant");
+    targets.tick_agent = Some(tick_agent::render(
+        &program,
+        targets.roots.state.as_path(),
+        "/usr/bin:/bin".as_ref(),
+    )?);
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let context = provenant_config::InstallContext {
+        clock: &clock,
+        cancel: &cancel,
+        budget: WaitBudget::cli(clock.mono_now(), 30)?,
+    };
+    // Signed Mach-O stand-ins exercise actual binary publication and replacement.
+    // Config owns those writes; no launchctl operation or ambient user agent is invoked.
+    for (name, source) in [
+        ("first-signed", "/usr/bin/true"),
+        ("next-signed", "/bin/echo"),
+    ] {
+        let stage = staged_binary(&rig, name, name.as_bytes(), Some(Path::new(source)))?;
+        let release = Release::read(&stage, env!("PROVENANT_TARGET_TRIPLE"))?;
+        let manifest = release.manifest();
+        let smoke = FixtureSmoke(VersionInfo {
+            extra: Default::default(),
+            source_digest: manifest.source_digest,
+            asset_digest: manifest.asset_digest,
+            target: manifest.target.clone(),
+            toolchain: manifest.toolchain.clone(),
+            record_schema_version: 1,
+            config_schema_version: 1,
+        });
+        provenant_config::plan_and_install(
+            &release,
+            &targets,
+            &context,
+            &mut Reporter,
+            &smoke,
+            false,
+        )?;
+        assert_eq!(fs::read(&program)?, fs::read(source)?);
+        let plist = tick_agent::plist(&rig.home);
+        let extracted = rig.execute_os(
+            Path::new("/usr/bin/plutil"),
+            &[
+                "-extract".into(),
+                "ProgramArguments.0".into(),
+                "raw".into(),
+                "-o".into(),
+                "-".into(),
+                plist.into(),
+            ],
+            None,
+        )?;
+        assert_eq!(code(&extracted), 0, "{extracted:?}");
+        assert_eq!(
+            String::from_utf8(extracted.stdout.bytes)?.trim(),
+            program.to_str().ok_or("program path")?
+        );
+        let verified = rig.execute_os(
+            Path::new("/usr/bin/codesign"),
+            &["--verify".into(), program.clone().into()],
+            None,
+        )?;
+        assert_eq!(code(&verified), 0, "{verified:?}");
+    }
+    Ok(())
 }
 fn args(stage: &Path, dry: bool) -> Vec<std::ffi::OsString> {
     let mut args = vec![
@@ -882,7 +987,7 @@ fi
     for binary in APP_EXECUTABLES {
         let path = app_fixture.join("Provenant Console.app").join(binary);
         fs::create_dir_all(path.parent().ok_or("app executable parent")?)?;
-        fs::write(&path, "#!/bin/sh\nexit 0\n")?;
+        fs::write(&path, APP_FIXTURE)?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
     }
     let apps_archive = fixtures.join("provenant-apps-aarch64-apple-darwin.tar.gz");
@@ -1151,6 +1256,39 @@ esac
                 .starts_with(".provenant-upgrade.")
         })
     }));
+    let cp = fake_bin.join("cp");
+    fs::write(
+        &cp,
+        "#!/bin/sh\ncase \"$2\" in */agent.plist) exit 1 ;; esac\nexec /bin/cp \"$@\"\n",
+    )?;
+    fs::set_permissions(&cp, fs::Permissions::from_mode(0o755))?;
+    let failed_restore = rig.execute_os(
+        Path::new("/bin/sh"),
+        &guided_args,
+        Some(b"n\ny\nn\nn\nn\nappend\nskip\n"),
+    )?;
+    assert_eq!(code(&failed_restore), 4, "{failed_restore:?}");
+    assert!(installed_app.join("old-build").exists());
+    assert!(
+        String::from_utf8_lossy(&failed_restore.stderr.bytes).contains("keeping staging directory")
+    );
+    let retained = fs::read_dir(rig.home.join("Applications"))?
+        .collect::<io::Result<Vec<_>>>()?
+        .into_iter()
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".provenant-upgrade.")
+        })
+        .ok_or("retained staging directory")?
+        .path();
+    assert_eq!(
+        fs::read_to_string(retained.join("agent.plist"))?,
+        "fake LaunchAgent"
+    );
+    fs::remove_dir_all(retained)?;
+    fs::remove_file(cp)?;
     fs::remove_file(&recorded)?;
     fs::remove_file(agent)?;
     fs::remove_file(plutil)?;
@@ -1296,7 +1434,7 @@ fn upgrade_pins_one_release_replays_settings_and_reports_peer_failure() -> Resul
     for binary in APP_EXECUTABLES {
         let path = apps.join("Provenant Console.app").join(binary);
         fs::create_dir_all(path.parent().ok_or("app executable parent")?)?;
-        fs::write(&path, "#!/bin/sh\nexit 0\n")?;
+        fs::write(&path, APP_FIXTURE)?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
     }
     let apps_archive = rig.root.join("apps.tar.gz");

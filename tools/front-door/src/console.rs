@@ -231,9 +231,22 @@ fn running_pid(lsappinfo: &str) -> Option<u32> {
     digits.parse().ok().filter(|pid| *pid > 0)
 }
 
-// Waiting for LaunchServices to register the launched app is a bounded real-time OS operation.
+/// A fresh console-written acknowledgement must belong to the running process.
+/// A PID alone (including an app stalled before creating its window) is insufficient.
+fn window_acknowledged(previous: Option<&str>, current: Option<&str>, pid: Option<u32>) -> bool {
+    current.is_some_and(|current| {
+        Some(current) != previous
+            && current.split_once('\n').is_some_and(|(owner, nonce)| {
+                !nonce.is_empty()
+                    && pid.is_some()
+                    && owner.parse::<u32>().ok().filter(|pid| *pid > 0) == pid
+            })
+    })
+}
+
+// Waiting for the console's window acknowledgement is a bounded real-time OS operation.
 #[allow(clippy::disallowed_methods)]
-fn console_running() -> bool {
+fn console_window_ready(marker: &std::path::Path, previous: Option<&str>) -> bool {
     for _ in 0..20 {
         if run_system(
             &[
@@ -247,7 +260,11 @@ fn console_running() -> bool {
             5,
         )
         .is_some_and(|outcome| {
-            running_pid(&String::from_utf8_lossy(&outcome.stdout.bytes)).is_some()
+            window_acknowledged(
+                previous,
+                std::fs::read_to_string(marker).ok().as_deref(),
+                running_pid(&String::from_utf8_lossy(&outcome.stdout.bytes)),
+            )
         }) {
             return true;
         }
@@ -256,14 +273,26 @@ fn console_running() -> bool {
     false
 }
 
-/// Opens the console app by bundle identifier and confirms it is running, or says how to repair it.
+/// Opens the console by bundle identifier and waits for a newly presented window.
 fn open(globals: &Globals) -> u8 {
+    // LaunchServices launches in the login account, independently of a CLI HOME override.
+    let marker = provenant_os::sys::account(provenant_os::sys::Account::Current)
+        .ok()
+        .flatten()
+        .map(|account| std::path::PathBuf::from(account.home))
+        .map(|home| home.join("Library/Caches/dev.provenant.console/window-ready"));
+    let previous = marker
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path).ok());
     let result = if cfg!(target_os = "macos") {
         if run_system(&["/usr/bin/open", "-b", BUNDLE_ID], 10).is_none() {
             unavailable(format!(
                 "{APP_NAME} is not installed. Build it with apps/quota-menubar/bundle and copy the app to /Applications or ~/Applications."
             ))
-        } else if console_running() {
+        } else if marker
+            .as_ref()
+            .is_some_and(|path| console_window_ready(path, previous.as_deref()))
+        {
             CommandResult::new(
                 "console open",
                 Outcome::Ok,
@@ -271,10 +300,10 @@ fn open(globals: &Globals) -> u8 {
             )
         } else {
             let mut result = unavailable(format!(
-                "{APP_NAME} was asked to open but no {BUNDLE_ID} process is running."
+                "{APP_NAME} was asked to open but did not acknowledge a visible window."
             ));
             if let Some(error) = result.error.as_mut() {
-                error.code = "console_app_not_running".into();
+                error.code = "console_window_not_ready".into();
                 error.repair = Some(REPAIR.into());
             }
             result
@@ -515,6 +544,23 @@ fn render(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn console_window_requires_fresh_ack_even_when_process_runs_without_window() {
+        use super::window_acknowledged;
+        assert!(!window_acknowledged(None, None, Some(4242)));
+        assert!(!window_acknowledged(
+            Some("4242\nold"),
+            Some("4242\nold"),
+            Some(4242)
+        ));
+        assert!(!window_acknowledged(None, Some("4241\nnew"), Some(4242)));
+        assert!(!window_acknowledged(None, Some("bad\nnew"), None));
+        assert!(window_acknowledged(
+            Some("4242\nold"),
+            Some("4242\nnew"),
+            Some(4242)
+        ));
+    }
     #[test]
     fn lsappinfo_pid_output_means_running_only_with_a_pid() {
         assert_eq!(super::running_pid("\"pid\"=4242 \n"), Some(4242));
