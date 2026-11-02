@@ -1146,7 +1146,17 @@ struct CatalogueAsset {
     pacing: BTreeMap<String, PacingPolicy>,
 }
 impl Catalogue {
+    /// The bundled catalogue, parsed and validated once per process. Routing
+    /// resolves it for every lane, so rebuilding it dominated a multi-lane run.
     pub fn bundled() -> Result<Self, RoutingError> {
+        static BUNDLED: std::sync::OnceLock<Catalogue> = std::sync::OnceLock::new();
+        if let Some(catalogue) = BUNDLED.get() {
+            return Ok(catalogue.clone());
+        }
+        let catalogue = Self::parse_bundled()?;
+        Ok(BUNDLED.get_or_init(|| catalogue).clone())
+    }
+    fn parse_bundled() -> Result<Self, RoutingError> {
         let asset: CatalogueAsset = toml_edit::de::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/assets/catalogue.toml"

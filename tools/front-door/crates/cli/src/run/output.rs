@@ -1,6 +1,17 @@
 use super::*;
 
 pub fn output(command: Output, edge: &Edge<'_>) -> Reply {
+    output_with(command, edge, None)
+}
+
+/// `output` for a local attempt whose store the caller already opened, so a
+/// run that tails many lanes resolves the project and opens the store once
+/// instead of once per lane.
+pub(super) fn output_with(
+    command: Output,
+    edge: &Edge<'_>,
+    local: Option<(&Session, &Target)>,
+) -> Reply {
     let receipt_tail = matches!(command.part, Part::Receipt)
         .then_some(command.tail)
         .flatten();
@@ -8,7 +19,7 @@ pub fn output(command: Output, edge: &Edge<'_>) -> Reply {
     let to = command.to.clone();
     let mut out = reply(
         "output",
-        output_inner(command, edge).and_then(|(mut data, mut text)| {
+        output_inner(command, edge, local).and_then(|(mut data, mut text)| {
             if let Some(lines) = receipt_tail {
                 text =
                     text[tail_start(text.as_bytes(), lines.min(limits::TAIL_LINES))..].to_owned();
@@ -272,7 +283,17 @@ pub(super) fn reviewer_receipt(
 /// The most lines `output --tail` returns; a larger request is clamped.
 pub(super) const TAIL_MAX: u64 = limits::TAIL_LINES;
 
-pub(super) fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Value, String), Fail> {
+pub(super) fn output_inner(
+    mut command: Output,
+    edge: &Edge<'_>,
+    local: Option<(&Session, &Target)>,
+) -> Result<(Value, String), Fail> {
+    if let Some((session, target)) = local {
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel)?;
+        return output_read(command, edge, session, target.clone(), &call);
+    }
     let site = match command.host.as_deref() {
         Some(host) => Some(remote::site(edge, host)?),
         None => command
@@ -314,7 +335,6 @@ pub(super) fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Valu
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
-    let receipt = matches!(command.part, Part::Receipt);
     // A RUN or RUN/TASK names attempts, so every part resolves runs as receipts do.
     let candidate = targets::resolve(edge, &command.attempt.0, true)?;
     command.attempt.0 = candidate.target.clone();
@@ -324,13 +344,25 @@ pub(super) fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Valu
         return remote::output(&command, &placement, edge);
     }
     let (session, target) = targets::read_resolved(edge, candidate, &call)?;
+    output_read(command, edge, &session, target, &call)
+}
+
+/// Read the selected part of an attempt in an opened local store.
+fn output_read(
+    command: Output,
+    edge: &Edge<'_>,
+    session: &Session,
+    target: Target,
+    call: &run::Request<'_>,
+) -> Result<(Value, String), Fail> {
+    let receipt = matches!(command.part, Part::Receipt);
     let mut selected = None;
     let id = match target.attempt {
         Some(id) => id,
         None if receipt => {
             let page = session.service().lanes(
-                &lane_query(&session, std::slice::from_ref(&target), true, 2, 0, &call)?,
-                &call,
+                &lane_query(session, std::slice::from_ref(&target), true, 2, 0, call)?,
+                call,
             )?;
             if page.lanes.len() != 1 || page.next.is_some() {
                 return Err(Fail::new(
@@ -342,12 +374,12 @@ pub(super) fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Valu
             page.lanes[0].attempt_id
         }
         None => {
-            let (id, attempts, rule) = newest_attempt(&session, &target, &call)?;
+            let (id, attempts, rule) = newest_attempt(session, &target, call)?;
             selected = Some(json!({ "attempts": attempts, "rule": rule }));
             id
         }
     };
-    let record = session.service().status(id, &call)?;
+    let record = session.service().status(id, call)?;
     if target.run.is_some_and(|run| record.run_id != run)
         || target.task.is_some_and(|task| task != record.task_id)
     {
@@ -364,7 +396,7 @@ pub(super) fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Valu
             "git_grants_digest": record.git_grants_digest,
         });
         let grant_lines = grants_lines(&record);
-        let trace = trace_chain(&session.store, record, &call)?;
+        let trace = trace_chain(&session.store, record, call)?;
         let human = trace
             .iter()
             .map(trace_line)
@@ -405,7 +437,7 @@ pub(super) fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Valu
         Part::Receipt => {
             let task = session
                 .store
-                .request(record.run_id, &call)?
+                .request(record.run_id, call)?
                 .tasks
                 .into_iter()
                 .find(|task| task.task_id == record.task_id)
@@ -420,12 +452,12 @@ pub(super) fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Valu
             // An attempt has a handful of revisions; offset is an event cursor.
             let mut events = session
                 .service()
-                .events(command.offset, 64, Some(id), &call)?;
+                .events(command.offset, 64, Some(id), call)?;
             if let Some(lines) = command.tail {
                 let mut cursor = events.last().map_or(command.offset, |event| event.sequence);
                 let mut more = events.len() == 64;
                 while more {
-                    let page = session.service().events(cursor, 64, Some(id), &call)?;
+                    let page = session.service().events(cursor, 64, Some(id), call)?;
                     more = page.len() == 64;
                     let next = page.last().map_or(cursor, |event| event.sequence);
                     if more && next <= cursor {
@@ -464,13 +496,13 @@ pub(super) fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Valu
         offset: command.offset,
         max_bytes: command.max_bytes,
     };
-    let mut chunk = session.service().output(id, part, range, &call)?;
+    let mut chunk = session.service().output(id, part, range, call)?;
     let tail = command.tail.map(|lines| lines.min(TAIL_MAX));
     if let Some(lines) = tail {
         range.offset = chunk.len.saturating_sub(command.max_bytes);
         // A short transcript's first page already includes the requested tail.
         if !matches!(part, run::ArtifactPart::Transcript) || range.offset != chunk.offset {
-            chunk = session.service().output(id, part, range, &call)?;
+            chunk = session.service().output(id, part, range, call)?;
         }
         let start = tail_start(&chunk.bytes, lines);
         chunk.offset += start as u64;
@@ -507,7 +539,7 @@ pub(super) fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Valu
         data["tail_clamped"] = json!(command.tail != tail);
     }
     if matches!(command.part, Part::Result) && command.tail.is_none() && command.offset == 0 {
-        let (paths, total) = changed_file_evidence(&session, &record, &call);
+        let (paths, total) = changed_file_evidence(session, &record, call);
         data["changed_files"] = paths;
         data["changed_files_total"] = total;
     }
@@ -523,7 +555,7 @@ pub(super) fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Valu
             }
         )
     {
-        data["provider_error"] = json!(provider_error_line(&session, id, &call));
+        data["provider_error"] = json!(provider_error_line(session, id, call));
         data["result_path"] = json!(record.result.as_ref().map(|_| {
             artifact(session.context.state_root.as_path(), &record, "result.md")
                 .display()

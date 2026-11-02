@@ -264,8 +264,16 @@ impl Default for ReviewConfig {
         bundled()
     }
 }
-#[allow(clippy::panic)]
+/// The bundled defaults, parsed once per process. Every deserialisation of a
+/// `#[serde(default)]` config calls `Default`, and a command reads config
+/// several times per lane, so re-parsing the asset each time dominated the
+/// cost of submitting a lane.
 fn bundled() -> ReviewConfig {
+    static BUNDLED: std::sync::OnceLock<ReviewConfig> = std::sync::OnceLock::new();
+    BUNDLED.get_or_init(parse_bundled).clone()
+}
+#[allow(clippy::panic)]
+fn parse_bundled() -> ReviewConfig {
     #[derive(Deserialize)]
     struct Asset {
         review: ReviewAsset,
