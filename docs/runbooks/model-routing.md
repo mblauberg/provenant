@@ -158,7 +158,7 @@ provenant --json review HEAD --brief-file review-brief.md --shape quick
 The target must resolve to a commit. `--range` supplies changed paths and size for
 selection; without it no path or size rules match. Renames are treated as a deletion
 and an addition, so rules can match either path. `--shape` overrides selection
-and skips the range lookup, except that integration always selects deep. A changed path that is not UTF-8 is rejected; use
+and skips the range lookup; the risk floor and integration override still apply. A changed path that is not UTF-8 is rejected; use
 an explicit shape when path selection cannot represent it.
 `--wait` sets the overall wait limit, defaulting to one hour, and accepts
 seconds or durations such as `30m`, from one second to four hours.

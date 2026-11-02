@@ -284,10 +284,11 @@ impl ReviewConfig {
             selected.source = "by_kind";
         }
         // Risk establishes a floor; size and integration can demand more coverage.
-        if override_name.is_none() {
+        {
             let candidates = [
-                (kind.is_some_and(|k| self.select.by_kind.contains_key(k))
+                (override_name.is_none() && (kind.is_some_and(|k| self.select.by_kind.contains_key(k))
                     || size.is_some_and(|s| self.select.by_size.contains_key(s)))
+                )
                 .then(|| self.select.select(None, None, kind, &[], size, Some(true))),
                 risk.filter(|r| self.select.by_risk.contains_key(*r))
                     .map(|r| {
@@ -492,6 +493,7 @@ mod tests {
                 .name,
             "deep"
         );
+        assert_eq!(review.select_shape(Some("quick"), Some("crucial"), None, &[], None).unwrap().name, "deep");
     }
 
     #[test]
