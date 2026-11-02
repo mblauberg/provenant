@@ -19,4 +19,4 @@
 - Mock only the edges in [boundaries](boundaries.md), never the unit under test.
 - Make every skip visible with a reason and an owner or issue; never use a silent early return.
 - Put timing and performance claims in an opt-in benchmark, not the default run.
-- For risky logic, judge whether mutation evidence would strengthen the review. The review-council mutation procedure is available only at crucial or terminal risk.
+- For risky logic, `cargo mutants --in-diff` or the language equivalent can expose weak tests; investigate survivors. Review councils run it only at crucial or terminal risk.
