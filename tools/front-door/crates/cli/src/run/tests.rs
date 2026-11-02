@@ -3911,6 +3911,89 @@ fn clean_exit() -> ExitObservation {
 }
 
 #[test]
+fn opencode_stderr_quota_settles_and_records_refusal() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::Admission;
+    use provenant_records::{
+        ResolvedRoute, RouteConfidentiality, RouteEligibility, RouteReadiness,
+    };
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir()?;
+    let state = temp.path().join("state");
+    std::fs::create_dir(&state)?;
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+    let provider_state = state.join("runs/run/attempts/attempt/provider-state");
+    let output = std::process::Command::new("/bin/sh")
+        .args(["-c", "printf '%s\\n' 'AI.Error.QuotaExceeded: Go usage limit exceeded retryAfterMs=60000' >&2; exit 1"])
+        .output()?;
+    assert!(!output.status.success());
+    let route = run::RouteRecord {
+        provider: Some("opencode".into()),
+        model: Some("opencode/opencode-go/example".into()),
+        account_key: Some("go".into()),
+        account_label: Some("go".into()),
+        ..Default::default()
+    };
+    let mut exit = clean_exit();
+    exit.termination = Some(provenant_os::exec::Termination::Exit(1));
+    let decoded = Registry::default().decode_captures(
+        &route,
+        &output.stdout,
+        &output.stderr,
+        &exit,
+        &provider_state,
+        None,
+    )?;
+    assert_eq!(decoded.outcome, run::Outcome::QuotaLimited);
+    let records = crate::quota::read_cache_at(&state)?;
+    assert_eq!(
+        records.len(),
+        1,
+        "host refusal missing; lane environment suppresses host quota writes"
+    );
+    let refusal = &records[0].refusals[0];
+    assert_eq!(refusal.pool.as_deref(), Some("opencode-go"));
+    assert_eq!(
+        refusal.resets_unix_seconds,
+        Some(refusal.observed_unix_seconds + 60)
+    );
+    let resolved = ResolvedRoute {
+        extra: Default::default(),
+        adapter: "opencode".into(),
+        model: "opencode-go/example".into(),
+        effort: None,
+        catalogue_revision: "fixture".into(),
+        account_key: Some("go".into()),
+        host: "host".into(),
+        alternatives: Default::default(),
+        exclusions: vec![],
+        eligibility: RouteEligibility::Eligible,
+        readiness: RouteReadiness::Ready {
+            extra: Default::default(),
+            availability_ref: "fixture".into(),
+            expires_unix_seconds: i64::MAX,
+        },
+        confidentiality: RouteConfidentiality {
+            extra: Default::default(),
+            evidence_ref: "fixture".into(),
+        },
+        pool_selection: None,
+    };
+    let pools = vec!["opencode-go".into()];
+    let check = |now_unix_seconds| {
+        Admission {
+            policies: &[],
+            now_unix_seconds,
+            records: &records,
+            pools: &pools,
+        }
+        .check(&resolved)
+    };
+    assert!(check(refusal.observed_unix_seconds).is_err());
+    assert!(check(refusal.observed_unix_seconds + 60).is_ok());
+    Ok(())
+}
+
+#[test]
 fn opencode_unavailable_model_reaches_the_decoded_outcome() {
     let route = run::RouteRecord {
         provider: Some("opencode".into()),

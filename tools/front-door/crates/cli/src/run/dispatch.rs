@@ -1375,6 +1375,18 @@ impl run::Providers for PreparedProvider<'_> {
     fn failure_diagnostic(&self, route: &run::RouteRecord, stderr: &[u8]) -> Option<String> {
         self.fallback.failure_diagnostic(route, stderr)
     }
+    fn decode_captures(
+        &self,
+        route: &run::RouteRecord,
+        stdout: &[u8],
+        stderr: &[u8],
+        exit: &ExitObservation,
+        provider_state: &Path,
+        context: Option<&run::HolderContext>,
+    ) -> Result<run::Decoded, String> {
+        self.fallback
+            .decode_captures(route, stdout, stderr, exit, provider_state, context)
+    }
 }
 
 pub(super) fn with_chair_index<T>(

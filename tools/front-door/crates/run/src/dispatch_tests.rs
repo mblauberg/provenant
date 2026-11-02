@@ -3185,6 +3185,45 @@ fn settlement_scrubs_provider_session_history() -> TestResult {
 }
 
 #[test]
+fn quota_limited_empty_result_stays_quota_limited() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(&dir, "stdout.log", b"", CAPTURE_LIMIT)?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        outcome: Some(Outcome::QuotaLimited),
+        answer: Some(String::new()),
+        ..Fake::default()
+    };
+    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    assert!(matches!(
+        record.state,
+        AttemptState::Terminal {
+            outcome: Outcome::QuotaLimited,
+            ..
+        }
+    ));
+    Ok(())
+}
+
+#[test]
 fn unredactable_result_settles_failed_with_a_placeholder() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());

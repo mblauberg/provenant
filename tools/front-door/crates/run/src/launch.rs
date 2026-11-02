@@ -385,6 +385,21 @@ pub trait Providers {
     ) -> std::result::Result<Decoded, String> {
         self.decode(route, stdout, exit, provider_state)
     }
+    /// Decode sealed captures together when a provider has stderr evidence.
+    fn decode_captures(
+        &self,
+        route: &RouteRecord,
+        stdout: &[u8],
+        _stderr: &[u8],
+        exit: &ExitObservation,
+        provider_state: &std::path::Path,
+        context: Option<&crate::HolderContext>,
+    ) -> std::result::Result<Decoded, String> {
+        match context {
+            Some(context) => self.decode_with_context(route, stdout, exit, provider_state, context),
+            None => self.decode(route, stdout, exit, provider_state),
+        }
+    }
 }
 enum HandOff {
     /// Failed before anything was sent to a guardian.

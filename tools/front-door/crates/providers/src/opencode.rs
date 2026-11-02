@@ -337,6 +337,45 @@ fn failure_diagnostic(stderr: &[u8]) -> Option<String> {
     })
 }
 
+/// Recognise OpenCode's unstructured quota errors without treating arbitrary
+/// provider output as protocol events.
+pub fn stderr_quota(stderr: &[u8]) -> Option<E> {
+    let text = std::str::from_utf8(stderr).ok()?;
+    text.lines().find(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.contains("ai.error.quotaexceeded") || lower.contains("usage limit exceeded")
+    })?;
+    let diagnostic = text.to_ascii_lowercase();
+    let pool = if diagnostic.contains("free") {
+        "opencode-free"
+    } else {
+        "opencode-go"
+    };
+    let number_after = |key: &str| {
+        let at = diagnostic.find(key)?;
+        let value = diagnostic[at + key.len()..]
+            .trim_start_matches(|c: char| c.is_ascii_whitespace() || matches!(c, '"' | ':' | '='));
+        value
+            .split(|c: char| !c.is_ascii_digit())
+            .next()?
+            .parse::<u64>()
+            .ok()
+    };
+    let retry = number_after("retryafterms")
+        .and_then(|n| parse_retry_after(Some(&serde_json::Value::from(n))))
+        .or_else(|| {
+            number_after("retry-after")
+                .or_else(|| number_after("retry after"))
+                .filter(|n| *n > 0)
+                .map(|n| n.min(86_400))
+        });
+    Some(E::QuotaLimited {
+        message: format!("OpenCode quota exhausted ({pool})"),
+        pool: Some(pool.into()),
+        resets_in_seconds: retry,
+    })
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Event {
@@ -556,6 +595,32 @@ crate::quota_source!(OpenCode, "opencode");
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stderr_quota_forms_and_retry() {
+        use super::{E, stderr_quota};
+        for (line, pool, reset) in [
+            (
+                "AI.Error.QuotaExceeded: Go usage limit exceeded",
+                "opencode-go",
+                None,
+            ),
+            (
+                "free tier usage limit exceeded retryAfterMs=1500",
+                "opencode-free",
+                Some(2),
+            ),
+            (
+                "AI.Error.QuotaExceeded\nretry-after: 60",
+                "opencode-go",
+                Some(60),
+            ),
+        ] {
+            assert!(
+                matches!(stderr_quota(line.as_bytes()), Some(E::QuotaLimited { pool: Some(actual), resets_in_seconds, .. }) if actual == pool && resets_in_seconds == reset)
+            );
+        }
+        assert!(stderr_quota(b"ordinary failure").is_none());
+    }
     use super::*;
     use crate::Adapter;
 
