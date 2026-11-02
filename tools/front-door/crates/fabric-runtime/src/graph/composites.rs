@@ -396,10 +396,9 @@ fn outputs(
     if !unavailable.is_empty() {
         // The unavailable list leads and is bounded on its own, so a long
         // review body can never truncate it away.
-        let header = bounded(
-            &format!("Unavailable lenses:\n{}", selected.warnings.join("\n")),
-            COMPOSITE_EXCERPT_BYTES / 2,
-        );
+        let full_header = format!("Unavailable lenses:\n{}", selected.warnings.join("\n"));
+        let header = bounded(&full_header, COMPOSITE_EXCERPT_BYTES / 2);
+        let header_truncated = header.len() < full_header.len();
         let (body, source_truncated) = selected
             .result
             .as_ref()
@@ -408,7 +407,7 @@ fn outputs(
             });
         let room = COMPOSITE_EXCERPT_BYTES.saturating_sub(header.len() + 2);
         let kept = bounded(&body, room);
-        let truncated = source_truncated || kept.len() < body.len();
+        let truncated = header_truncated || source_truncated || kept.len() < body.len();
         let combined = if kept.is_empty() {
             header
         } else {
