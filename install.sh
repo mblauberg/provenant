@@ -73,6 +73,8 @@ agent_backup=
 instruction_count=0
 instructions_committed=false
 cleanup() {
+    # Once recovery starts, finish it even if another termination signal arrives.
+    trap '' INT TERM HUP
     if "$app_upgrade_committed" && [ -n "$app_backup" ] && [ -e "$app_backup" ]; then
         printf '%s\n' "Warning: previous Provenant app backup remains at $app_backup" >&2
         app_stage=
