@@ -1762,7 +1762,7 @@ mod peer_tests {
         std::fs::write(
             &document,
             serde_json::to_vec(&serde_json::json!({
-                "schema_version":1, "graph_id":"pinned-base", "integration_branch":"integration", "delivery":"pr",
+                "schema_version":2, "graph_id":"pinned-base", "integration_branch":"integration", "review_base":"integration", "delivery":"pr",
                 "nodes":[{"id":"one","prompt":"reply OK","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
             }))?,
         )?;
@@ -1867,6 +1867,8 @@ mod peer_tests {
             &factory.clock,
         )?;
         assert_eq!(journal.integration_base(), Some(base));
+        let execution = FileJournal::execution(&fixture.roots.state, fixture.settled.project_id, "pinned-base")?.ok_or("execution missing")?;
+        assert_eq!(execution.review_base, Some(base));
         Ok(())
     }
 

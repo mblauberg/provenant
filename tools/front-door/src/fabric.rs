@@ -4210,6 +4210,17 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             } else {
                 None
             };
+            let review_base = if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly {
+                FileJournal::execution(
+                    &self.factory.context.roots.state,
+                    self.factory.context.identity.project,
+                    &key.graph_id,
+                )
+                .map_err(graph_journal_error)?
+                .and_then(|execution| execution.review_base)
+            } else {
+                None
+            };
             let input = SubmitInput::Submit {
                 extra: Default::default(),
                 operation_id,
@@ -4219,6 +4230,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     build_heavy: false,
                     base: node.source_commit.map(|head| {
                         self.integration_base
+                            .or(review_base)
                             .map_or_else(|| head.to_owned(), |base| base.to_string())
                     }),
                     head: node.source_commit.map(str::to_owned),
@@ -4901,9 +4913,28 @@ impl Factory {
             } else {
                 None
             };
+            let review_base = if journal.load(id).map_err(graph_journal_error)?.is_some() {
+                FileJournal::execution(&self.context.roots.state, self.context.identity.project, id)
+                    .map_err(graph_journal_error)?
+                    .and_then(|execution| execution.review_base)
+            } else if let Some(reference) = document
+                .review_base
+                .as_deref()
+                .filter(|base| !base.is_empty())
+            {
+                let git = provenant_os::git::git_executable().ok_or(FacadeError::InvalidInput)?;
+                Some(
+                    provenant_run::resolve_git_base(&git, &self.cwd, reference)
+                        .map_err(run_error)?
+                        .parse()
+                        .map_err(|_| FacadeError::StateCorrupt)?,
+                )
+            } else {
+                None
+            };
             journal
                 .bind(provenant_fabric_runtime::graph::GraphExecution {
-                    review_base: None,
+                    review_base,
                     extra: Default::default(),
                     integration_base,
                     directory: self.cwd.clone(),
