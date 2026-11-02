@@ -1535,7 +1535,6 @@ pub(crate) fn crash_at(phase: &str) {
         std::process::exit(73);
     }
 }
-#[test]
 fn publication_crash_worker() -> TestResult {
     let Ok(path) = std::env::var("PROVENANT_RUN_TEST_ROOT") else {
         return Ok(());
@@ -1591,6 +1590,10 @@ fn publication_crash_worker() -> TestResult {
 }
 #[test]
 fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResult {
+    if std::env::var_os("PROVENANT_RUN_TEST_ROOT").is_some() {
+        return publication_crash_worker();
+    }
+
     let executor = SystemExecutor::new(1)?;
     for phase in [
         "reserved",
@@ -1605,7 +1608,7 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
         let argv: Vec<OsString> = vec![
             std::env::current_exe()?.into_os_string(),
             "--exact".into(),
-            "tests::publication_crash_worker".into(),
+            "tests::publication_crashes_preserve_committed_records_and_allow_retry".into(),
         ];
         let env: Vec<(OsString, OsString)> = [
             ("HOME", temp.path().join("home").into_os_string()),

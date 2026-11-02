@@ -531,7 +531,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn updater_runner_fixture() -> Result<(), Box<dyn std::error::Error>> {
         let Some(state) = std::env::var_os("PROVENANT_TEST_UPDATER_STATE") else {
             return Ok(());
@@ -558,6 +557,10 @@ mod tests {
     #[allow(clippy::disallowed_methods)] // A separate runner must be killed without unwinding.
     fn killed_runner_keeps_exclusive_lease_until_updater_group_exits()
     -> Result<(), Box<dyn std::error::Error>> {
+        if std::env::var_os("PROVENANT_TEST_UPDATER_STATE").is_some() {
+            return updater_runner_fixture();
+        }
+
         use provenant_core::{CancelToken, Clock, DurationMicros, WaitBudget};
         let temp = tempfile::tempdir()?;
         let executable = temp.path().join("provider");
@@ -566,7 +569,7 @@ mod tests {
         let mut runner = std::process::Command::new(std::env::current_exe()?)
             .args([
                 "--exact",
-                "update::tests::updater_runner_fixture",
+                "update::tests::killed_runner_keeps_exclusive_lease_until_updater_group_exits",
                 "--nocapture",
             ])
             .env("PROVENANT_TEST_UPDATER_STATE", temp.path())

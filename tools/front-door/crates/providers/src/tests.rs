@@ -2241,7 +2241,6 @@ fn rust_less_hosts_keep_repository_execution_in_the_rendered_profile()
 #[cfg(target_os = "macos")]
 #[test]
 #[allow(clippy::disallowed_methods)]
-#[allow(clippy::print_stderr)] // Test-only sandbox skip diagnostic.
 fn claude_network_on_native_tls_files_are_readable() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::permissions::{NetworkAccess, snapshot::render};
     let prompt = Prompt::new("fixture".into());
@@ -2272,15 +2271,10 @@ fn claude_network_on_native_tls_files_are_readable() -> Result<(), Box<dyn std::
                 .env_clear()
                 .output()?;
             let diagnostic = String::from_utf8_lossy(&output.stderr);
-            if diagnostic.contains("sandbox_apply: Operation not permitted")
-                && std::env::var_os("PROVENANT_CONFINEMENT_REQUIRED").as_deref()
-                    != Some("1".as_ref())
-            {
-                eprintln!(
-                    "native TLS file probe unavailable under inherited sandbox: {diagnostic}"
-                );
-                return Ok(());
-            }
+            assert!(
+                !diagnostic.contains("sandbox_apply: Operation not permitted"),
+                "sandbox unavailable: {diagnostic}"
+            );
             assert_eq!(
                 output.status.success(),
                 network == NetworkAccess::Open,

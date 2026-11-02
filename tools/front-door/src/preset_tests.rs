@@ -1912,12 +1912,12 @@ fn big_batch_fans_out_one_lane_per_list_entry() {
         ],
     )
     .unwrap();
-    let text = expanded.document.to_string();
+    let nodes = expanded.document["nodes"].as_array().unwrap();
+    let group = nodes.iter().find(|node| node["id"] == "lanes").unwrap();
+    let lanes = group["composite"]["nodes"].as_array().unwrap();
+    assert_eq!(lanes.len(), 3);
     for lane in ["lane-a", "lane-b", "lane-c"] {
-        assert!(
-            text.contains(&format!("\"id\":\"{lane}\"")) || text.contains(lane),
-            "{lane}"
-        );
+        assert!(lanes.iter().any(|node| node["id"] == lane), "{lane}");
     }
 }
 
