@@ -1,4 +1,4 @@
-//! Build-only release staging; Cargo does not install this binary by default.
+//! Build-only release staging; release archives ship only the `provenant` binary.
 #[path = "../release_smoke.rs"]
 mod release_smoke;
 
