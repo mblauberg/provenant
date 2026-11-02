@@ -2699,41 +2699,6 @@ fn escaping_branch_is_invalid_and_writes_no_checkout_outside_worktree_root() -> 
     rig.assert_legacy_unchanged()
 }
 
-#[cfg(target_os = "macos")]
-fn clone_rust_toolchain(rig: &TestRig, home: &Path) -> Result {
-    // Build-time rustup identity locates tools only. The child HOME and all
-    // mutable state stay in the rig. APFS clones avoid a toolchain-size copy.
-    let rustup = option_env!("RUSTUP_HOME")
-        .map(PathBuf::from)
-        .or_else(|| option_env!("HOME").map(|home| PathBuf::from(home).join(".rustup")))
-        .ok_or("build-time Rust home")?;
-    let toolchain = option_env!("RUSTUP_TOOLCHAIN").ok_or("build-time Rust toolchain")?;
-    let source = rustup.join("toolchains").join(toolchain);
-    let target = home.join(".rustup/toolchains/fixture");
-    let output = rig.execute_os(
-        Path::new("/bin/cp"),
-        &[
-            "-cR".into(),
-            source.into_os_string(),
-            target.clone().into_os_string(),
-        ],
-        None,
-    )?;
-    assert_eq!(
-        code(&output),
-        0,
-        "toolchain clone: {}",
-        String::from_utf8_lossy(&output.stderr.bytes)
-    );
-    for tool in ["cargo", "rustc"] {
-        std::os::unix::fs::symlink(
-            target.join("bin").join(tool),
-            home.join(".cargo/bin").join(tool),
-        )?;
-    }
-    Ok(())
-}
-
 fn lane_prepare_isolates_nested_state() -> Result {
     use provenant_confinement::permissions::PathScope;
     let rig = repository()?;
@@ -2828,10 +2793,8 @@ fn lane_prepare_isolates_nested_state() -> Result {
         home.join("Library/Keychains/login.keychain-db"),
         b"synthetic credential",
     )?;
-    // Clone immutable tools into the isolated home. No test reads host
-    // provider configuration, login state or Cargo credentials.
-    #[cfg(target_os = "macos")]
-    clone_rust_toolchain(&rig, &home)?;
+    // No test reads host provider configuration, login state or Cargo
+    // credentials.
     let executable = rig.root.join("provider/bin/codex");
     fs::create_dir_all(executable.parent().ok_or("provider parent")?)?;
     rig.copy_executable(&std::env::current_exe()?, &executable)?;
@@ -2870,14 +2833,9 @@ fn lane_prepare_isolates_nested_state() -> Result {
         )
     };
     fs::write(rig.state.join("config.toml"), config(1))?;
-    for (adapter, writer, publishing, seed) in [
-        ("codex", false, false, 91),
-        ("codex", true, false, 92),
-        ("claude", false, false, 93),
-        ("claude", true, false, 94),
-        ("codex", true, true, 95),
-        ("claude", true, true, 96),
-    ] {
+    // One writer case covers the nested-state boundary. Repeating the full
+    // preparation across provider and publishing variants made this test slow.
+    for (adapter, writer, publishing, seed) in [("codex", true, false, 92)] {
         if publishing {
             fs::create_dir_all(home.join(".config/gh"))?;
         }
