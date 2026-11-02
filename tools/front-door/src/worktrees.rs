@@ -514,7 +514,12 @@ fn gc_data_summary(data: &GcData) -> String {
             human.push_str(&format!("{error}; merged worktrees kept\n"));
         }
         for kept in &project.worktrees.retained {
-            if retained_exception(kept.reason) {
+            if let Some(detail) = &kept.detail {
+                human.push_str(&format!(
+                    "kept worktree {} ({:?}): {detail}\n",
+                    kept.branch, kept.reason
+                ));
+            } else if retained_exception(kept.reason) {
                 human.push_str(&format!(
                     "kept worktree {} ({:?})\n",
                     kept.branch, kept.reason
@@ -844,10 +849,13 @@ pub(crate) fn land_cleanup(
                 Ok(outcome) => {
                     landed.removed = !outcome.removed.is_empty();
                     landed.branch_deleted = outcome.pruned_refs.iter().any(|name| name == branch);
-                    landed.kept = outcome
-                        .retained
-                        .first()
-                        .map(|kept| format!("branch {} kept: {:?}", kept.branch, kept.reason));
+                    landed.kept = outcome.retained.first().map(|kept| {
+                        let detail = kept
+                            .detail
+                            .as_deref()
+                            .map_or(String::new(), |detail| format!("; {detail}"));
+                        format!("branch {} kept: {:?}{detail}", kept.branch, kept.reason)
+                    });
                 }
                 Err(error) => landed.kept = Some(error.with_repair()),
             }
@@ -1513,6 +1521,12 @@ mod gc_preview_tests {
         project.worktrees.retained.push(worktrees::RetainedBranch {
             branch: "broken".into(),
             reason: RetainReason::GitFailure,
+            detail: None,
+        });
+        project.worktrees.retained.push(worktrees::RetainedBranch {
+            branch: "census-blocked".into(),
+            reason: RetainReason::UnknownWriter,
+            detail: Some("process 968: cwd unreadable; config_key=gc.census_excused_executables; path=/Library/Developer/simdiskimaged".into()),
         });
         data.worktree_cleanup.push(project);
         let human = gc_data_summary(&data);
@@ -1532,6 +1546,9 @@ mod gc_preview_tests {
         assert!(human.contains("10 cache(s), 10240 bytes freed"));
         assert!(human.contains("/state/broken: permission denied"));
         assert!(human.contains("kept worktree broken (GitFailure)"));
+        assert!(human.contains("kept worktree census-blocked (UnknownWriter): process 968"));
+        assert!(human.contains("config_key=gc.census_excused_executables"));
+        assert!(human.contains("/Library/Developer/simdiskimaged"));
         assert!(!human.contains("/home/Library/Caches"));
         assert!(serde_json::to_value(&data).unwrap_or_default()["removed"].is_array());
     }

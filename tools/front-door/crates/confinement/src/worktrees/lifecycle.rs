@@ -877,6 +877,7 @@ pub(super) fn retain(outcome: &mut RemoveOutcome, branch: &GitRefName, reason: R
     outcome.retained.push(RetainedBranch {
         branch: branch.short_name().to_owned(),
         reason,
+        detail: None,
     });
 }
 

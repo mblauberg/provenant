@@ -42,6 +42,7 @@ pub trait WorkerObserver: Send + Sync {
         &self,
         roots: &[PathBuf],
         _entries: &[CensusIgnoreEntry],
+        _excused_executables: &[String],
         for_land: bool,
     ) -> WorkerObservations {
         if for_land {
@@ -55,6 +56,7 @@ pub trait WorkerObserver: Send + Sync {
         &self,
         root: &Path,
         _entries: &[CensusIgnoreEntry],
+        _excused_executables: &[String],
         for_land: bool,
     ) -> Option<ObservedProcess> {
         if for_land {
@@ -75,15 +77,18 @@ pub trait WorkerObserver: Send + Sync {
 pub struct CensusPolicyWorkers<'a> {
     inner: &'a dyn WorkerObserver,
     pub(super) entries: Vec<CensusIgnoreEntry>,
+    pub(super) excused_executables: Vec<String>,
 }
 impl<'a> CensusPolicyWorkers<'a> {
     pub fn from_roots(
         inner: &'a dyn WorkerObserver,
         roots: &provenant_core::Roots,
     ) -> Result<Self, WorktreeError> {
+        let config = provenant_config::read_knobs(roots)?;
         Ok(Self {
             inner,
-            entries: provenant_config::read_knobs(roots)?.census_ignore_unreadable()?,
+            entries: config.census_ignore_unreadable()?,
+            excused_executables: config.gc.census_excused_executables,
         })
     }
 }
@@ -92,18 +97,21 @@ impl WorkerObserver for CensusPolicyWorkers<'_> {
         &self,
         roots: &[PathBuf],
         entries: &[CensusIgnoreEntry],
+        excused_executables: &[String],
         for_land: bool,
     ) -> WorkerObservations {
         self.inner
-            .observe_roots_with_policy(roots, entries, for_land)
+            .observe_roots_with_policy(roots, entries, excused_executables, for_land)
     }
     fn live_process_with_policy(
         &self,
         root: &Path,
         entries: &[CensusIgnoreEntry],
+        excused_executables: &[String],
         for_land: bool,
     ) -> Option<ObservedProcess> {
-        self.inner.live_process_with_policy(root, entries, for_land)
+        self.inner
+            .live_process_with_policy(root, entries, excused_executables, for_land)
     }
     fn requires_complete_census(&self) -> bool {
         self.inner.requires_complete_census()
@@ -116,19 +124,19 @@ impl WorkerObserver for CensusPolicyWorkers<'_> {
     }
     fn observe_roots_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
         self.inner
-            .observe_roots_with_policy(roots, &self.entries, false)
+            .observe_roots_with_policy(roots, &self.entries, &self.excused_executables, false)
     }
     fn observe_roots_for_land_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
         self.inner
-            .observe_roots_with_policy(roots, &self.entries, true)
+            .observe_roots_with_policy(roots, &self.entries, &self.excused_executables, true)
     }
     fn live_process(&self, root: &Path) -> Option<ObservedProcess> {
         self.inner
-            .live_process_with_policy(root, &self.entries, false)
+            .live_process_with_policy(root, &self.entries, &self.excused_executables, false)
     }
     fn live_process_for_land(&self, root: &Path) -> Option<ObservedProcess> {
         self.inner
-            .live_process_with_policy(root, &self.entries, true)
+            .live_process_with_policy(root, &self.entries, &self.excused_executables, true)
     }
     fn incomplete_census_detail(&self) -> String {
         self.inner.incomplete_census_detail()
@@ -151,17 +159,19 @@ impl WorkerObserver for SystemWorkerObserver {
         &self,
         roots: &[PathBuf],
         entries: &[CensusIgnoreEntry],
+        excused_executables: &[String],
         for_land: bool,
     ) -> WorkerObservations {
-        system_worker_roots_with_policy(roots, for_land, entries)
+        system_worker_roots_with_policy(roots, for_land, entries, excused_executables)
     }
     fn live_process_with_policy(
         &self,
         root: &Path,
         entries: &[CensusIgnoreEntry],
+        excused_executables: &[String],
         for_land: bool,
     ) -> Option<ObservedProcess> {
-        system_live_process_with_policy(root, for_land, entries)
+        system_live_process_with_policy(root, for_land, entries, excused_executables)
     }
     fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
         system_worker_roots(roots, false).0
@@ -189,13 +199,14 @@ impl WorkerObserver for SystemWorkerObserver {
 }
 
 pub(super) fn system_live_process(root: &Path, ancestors: bool) -> Option<ObservedProcess> {
-    system_live_process_with_policy(root, ancestors, &[])
+    system_live_process_with_policy(root, ancestors, &[], &[])
 }
 
 pub(super) fn system_live_process_with_policy(
     root: &Path,
     ancestors: bool,
     entries: &[CensusIgnoreEntry],
+    excused_executables: &[String],
 ) -> Option<ObservedProcess> {
     let ProcessObservation::Present(current) = current_process() else {
         return None;
@@ -204,7 +215,7 @@ pub(super) fn system_live_process_with_policy(
     observe_worker_holders(
         &roots,
         &SystemProcessObserver,
-        &PolicyCwdObserver(entries),
+        &PolicyCwdObserver(entries, excused_executables),
         &current,
         ancestors,
     )
@@ -213,10 +224,13 @@ pub(super) fn system_live_process_with_policy(
 }
 
 pub(super) fn system_worker_roots(roots: &[PathBuf], ancestors: bool) -> WorkerObservations {
-    system_worker_roots_with_policy(roots, ancestors, &[])
+    system_worker_roots_with_policy(roots, ancestors, &[], &[])
 }
 
-pub(super) struct PolicyCwdObserver<'a>(pub(super) &'a [CensusIgnoreEntry]);
+pub(super) struct PolicyCwdObserver<'a>(
+    pub(super) &'a [CensusIgnoreEntry],
+    pub(super) &'a [String],
+);
 impl CwdObserver for PolicyCwdObserver<'_> {
     fn occupancy(&self, pid: i64) -> provenant_os::pid::OccupancyObservation {
         SystemCwdObserver.occupancy(pid)
@@ -231,8 +245,12 @@ impl CwdObserver for PolicyCwdObserver<'_> {
         &self,
         pid: i64,
         _: &[CensusIgnoreEntry],
-    ) -> Result<ProcessUids, provenant_os::pid::UnreadablePolicyFailure> {
-        SystemCwdObserver.unreadable_policy_uids(pid, self.0)
+        _: &[String],
+    ) -> Result<
+        provenant_os::pid::UnreadablePolicyExcusal,
+        provenant_os::pid::UnreadablePolicyFailure,
+    > {
+        SystemCwdObserver.unreadable_policy_uids(pid, self.0, self.1)
     }
     fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
         SystemCwdObserver.cwd(pid)
@@ -249,6 +267,7 @@ pub(super) fn system_worker_roots_with_policy(
     roots: &[PathBuf],
     ancestors: bool,
     entries: &[CensusIgnoreEntry],
+    excused_executables: &[String],
 ) -> WorkerObservations {
     let ProcessObservation::Present(current) = current_process() else {
         return (
@@ -264,7 +283,7 @@ pub(super) fn system_worker_roots_with_policy(
                     (
                         root,
                         process_detail(
-                            &PolicyCwdObserver(entries),
+                            &PolicyCwdObserver(entries, excused_executables),
                             i64::from(std::process::id()),
                             "current process unavailable",
                         ),
@@ -276,7 +295,7 @@ pub(super) fn system_worker_roots_with_policy(
     observe_worker_roots(
         roots,
         &SystemProcessObserver,
-        &PolicyCwdObserver(entries),
+        &PolicyCwdObserver(entries, excused_executables),
         &current,
         ancestors,
     )
@@ -337,6 +356,7 @@ pub(super) fn observe_worker_holders_with_audit(
         .collect();
     let mut holders = BTreeMap::new();
     let mut details = BTreeMap::new();
+    let mut excused_details: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
     if roots.is_empty() {
         return (states, holders, details);
     }
@@ -413,9 +433,8 @@ pub(super) fn observe_worker_holders_with_audit(
         let cwd = observe_same_process(observer, cwd_observer, fact);
         let mut occupancy_gap = None;
         if !matches!(cwd, NativeCwd::Gone) {
-            let policy_exception = matches!(&cwd, NativeCwd::PolicyExcluded(uids)
-                if uids.all_system() && roots.iter().all(|root| std::fs::metadata(root)
-                    .is_ok_and(|metadata| uids.all_differ_from(metadata.uid()))));
+            let policy_exception = matches!(&cwd, NativeCwd::PolicyExcluded(excusal)
+                if excusal_applies(excusal, roots));
             let before = observer.observe(pid);
             let occupancy = cwd_observer.occupancy(pid);
             let after = observer.observe(pid);
@@ -487,27 +506,38 @@ pub(super) fn observe_worker_holders_with_audit(
         let mut setuid_excused = false;
         match cwd {
             NativeCwd::Gone => {}
-            NativeCwd::PolicyExcluded(uids) => {
+            NativeCwd::PolicyExcluded(excusal) => {
                 // Accepted risk for sealed Apple code, applied per root owner.
                 // All credentials must be system accounts and foreign to every
                 // candidate root, including the real uid of a setuid tool.
-                let excluded = uids.all_system()
-                    && roots.iter().all(|root| {
-                        std::fs::metadata(root)
-                            .is_ok_and(|metadata| uids.all_differ_from(metadata.uid()))
-                    });
-                if !excluded {
+                if !excusal_applies(&excusal, roots) {
                     unplaceable(
                         Some(pid),
-                        Some(
-                            "real/effective/saved system uids foreign to every root owner required",
-                        ),
+                        Some(if executable_inside_roots(&excusal, roots) {
+                            "configured excused executable outside every candidate root required"
+                        } else {
+                            "real/effective/saved system uids foreign to every root owner required"
+                        }),
                     );
                     record_unknown_all(
                         &mut states,
                         &mut details,
                         &process_detail(cwd_observer, pid, "cwd unreadable"),
                     );
+                } else if let Some(entry) = excusal.configured_entry {
+                    let detail = process_detail(
+                        cwd_observer,
+                        pid,
+                        &format!(
+                            "cwd unreadable; excused by gc.census_excused_executables entry={entry:?}"
+                        ),
+                    );
+                    for root in roots {
+                        excused_details
+                            .entry(root.clone())
+                            .or_default()
+                            .push(detail.clone());
+                    }
                 }
             }
             NativeCwd::PolicyRejected(failure) => {
@@ -526,7 +556,13 @@ pub(super) fn observe_worker_holders_with_audit(
                         &process_detail(
                             cwd_observer,
                             pid,
-                            &format!("cwd unreadable; policy_condition={condition}"),
+                            &if failure.configurable {
+                                format!(
+                                    "cwd unreadable; policy_condition={condition}; config_key=gc.census_excused_executables"
+                                )
+                            } else {
+                                format!("cwd unreadable; policy_condition={condition}")
+                            },
                         ),
                     );
                 }
@@ -615,6 +651,11 @@ pub(super) fn observe_worker_holders_with_audit(
             "process listing truncated or incomplete",
         );
     }
+    for (root, excused) in excused_details {
+        if states.get(&root) == Some(&WorkerState::Free) {
+            details.entry(root).or_insert(excused.join("; "));
+        }
+    }
     (states, holders, details)
 }
 
@@ -624,6 +665,35 @@ pub(super) fn observe_worker_holders_with_audit(
 /// ancestor and re-append the rest. A process inside a deleted subdirectory of
 /// a root therefore still counts as inside that root. Any other failure is
 /// unobservable.
+/// An excusal holds when every credential is a system account foreign to each
+/// candidate root's owner and a configured executable lies outside every root.
+fn excusal_applies(
+    excusal: &provenant_os::pid::UnreadablePolicyExcusal,
+    roots: &[PathBuf],
+) -> bool {
+    excusal.uids.all_system()
+        && !executable_inside_roots(excusal, roots)
+        && roots.iter().all(|root| {
+            std::fs::metadata(root)
+                .is_ok_and(|metadata| excusal.uids.all_differ_from(metadata.uid()))
+        })
+}
+
+fn executable_inside_roots(
+    excusal: &provenant_os::pid::UnreadablePolicyExcusal,
+    roots: &[PathBuf],
+) -> bool {
+    excusal.executable.as_ref().is_some_and(|executable| {
+        let canonical = std::fs::canonicalize(executable).ok();
+        roots.iter().any(|root| {
+            executable.starts_with(root)
+                || canonical
+                    .as_ref()
+                    .is_some_and(|canonical| canonical.starts_with(root))
+        })
+    })
+}
+
 pub(super) fn canonical_cwd(path: &Path) -> Option<PathBuf> {
     let mut existing = path;
     let mut rest = Vec::new();
@@ -641,7 +711,7 @@ pub(super) fn canonical_cwd(path: &Path) -> Option<PathBuf> {
 pub(super) enum NativeCwd {
     Path(PathBuf),
     Gone,
-    PolicyExcluded(ProcessUids),
+    PolicyExcluded(provenant_os::pid::UnreadablePolicyExcusal),
     PolicyRejected(provenant_os::pid::UnreadablePolicyFailure),
     Unknown(String),
 }
@@ -687,7 +757,7 @@ pub(super) fn observe_same_process(
         // identity recheck below distinguishes a real exit from a query gap.
         Ok(CwdObservation::Gone) => NativeCwd::Unknown("cwd unavailable".into()),
         Ok(CwdObservation::PermissionDenied) => cwd_observer
-            .unreadable_policy_uids(expected.identity.pid, &[])
+            .unreadable_policy_uids(expected.identity.pid, &[], &[])
             .map(NativeCwd::PolicyExcluded)
             .unwrap_or_else(NativeCwd::PolicyRejected),
         Ok(CwdObservation::Unsupported) => NativeCwd::Unknown("cwd unsupported".into()),

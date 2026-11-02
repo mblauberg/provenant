@@ -181,6 +181,19 @@ pub struct UnreadablePolicyFailure {
     /// None means the built-in checks passed, even if a listing-specific check
     /// failed. Native acceptance must reject an unplaceable image in that case.
     pub builtin_condition: Option<&'static str>,
+    /// True only when a system-uid process failed on its executable path or
+    /// volume alone, which `gc.census_excused_executables` could excuse.
+    pub configurable: bool,
+}
+
+/// Evidence accepted for a process whose cwd query was refused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnreadablePolicyExcusal {
+    pub uids: ProcessUids,
+    /// The exact configured entry that matched, when host GC policy excused it.
+    pub configured_entry: Option<String>,
+    /// The kernel-reported executable path, when it decided a configured match.
+    pub executable: Option<std::path::PathBuf>,
 }
 
 impl From<&'static str> for UnreadablePolicyFailure {
@@ -188,6 +201,7 @@ impl From<&'static str> for UnreadablePolicyFailure {
         Self {
             condition,
             builtin_condition: Some(condition),
+            configurable: false,
         }
     }
 }
@@ -258,8 +272,14 @@ pub trait CwdObserver: Send + Sync {
         &self,
         pid: i64,
         entries: &[CensusIgnoreEntry],
-    ) -> Result<ProcessUids, UnreadablePolicyFailure> {
+        _excused_executables: &[String],
+    ) -> Result<UnreadablePolicyExcusal, UnreadablePolicyFailure> {
         self.ignored_unreadable_uids(pid, entries)
+            .map(|uids| UnreadablePolicyExcusal {
+                uids,
+                configured_entry: None,
+                executable: None,
+            })
             .ok_or_else(|| "image policy evidence unavailable".into())
     }
 
@@ -294,12 +314,13 @@ impl CwdObserver for SystemCwdObserver {
         &self,
         pid: i64,
         entries: &[CensusIgnoreEntry],
-    ) -> Result<ProcessUids, UnreadablePolicyFailure> {
+        excused_executables: &[String],
+    ) -> Result<UnreadablePolicyExcusal, UnreadablePolicyFailure> {
         let pid = i32::try_from(pid)
             .ok()
             .filter(|pid| *pid > 0)
             .ok_or("positive OS pid unavailable")?;
-        crate::sys::pid::unreadable_policy_uids(pid, entries)
+        crate::sys::pid::unreadable_policy_uids(pid, entries, excused_executables)
     }
 
     fn sealed_platform_uids(&self, pid: i64) -> Option<ProcessUids> {
