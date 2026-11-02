@@ -1095,6 +1095,7 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
                 "operation-route-pools",
                 2,
                 std::slice::from_ref(excluded_model),
+                &[],
             )
         } else {
             resolve_with_seed(&query, &ctx, "operation-route-pools", 2)
@@ -4413,5 +4414,409 @@ fn live_scoped_refusal_excludes_only_the_matching_account_and_model()
     ctx.accounts = &lapsed;
     let route = resolve(&request("codex/test")?, &ctx)?;
     assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+    Ok(())
+}
+
+#[test]
+fn configured_model_exclusion_applies_to_pools_until_expiry()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut catalogue = Catalogue::bundled()?;
+    let member = catalogue.pools["junior"]
+        .iter()
+        .find(|m| m.model.as_str() == "codex/gpt-6-luna")
+        .ok_or("missing member")?
+        .clone();
+    catalogue.pools.insert("trial".into(), vec![member.clone()]);
+    let mut config = RoutingConfig::default();
+    config.model_exclusions.push(ModelExclusion {
+        model: member.model.clone(),
+        schedule: Schedule {
+            expires: Some(provenant_core::WallTime::from_micros(101_000_000)?),
+            ..Schedule::default()
+        },
+    });
+    let mut query = request(member.model.as_str())?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
+    let active = context(&catalogue, &config, now()?);
+    let error = resolve(&query, &active).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("codex/gpt-6-luna: excluded by config: model codex/gpt-6-luna")
+    );
+    let expired = context(
+        &catalogue,
+        &config,
+        provenant_core::WallTime::from_micros(102_000_000)?,
+    );
+    assert!(resolve(&query, &expired).is_ok());
+    query.choice = RouteChoice::Model(member.model);
+    assert!(resolve(&query, &active).is_ok());
+    Ok(())
+}
+
+/// A two-provider pool with a Claude and a Codex member, each ready on an account.
+fn exclusion_fixture() -> Result<(Catalogue, Vec<AvailabilityRecord>), Box<dyn std::error::Error>> {
+    let mut catalogue = Catalogue::bundled()?;
+    let pick = |catalogue: &Catalogue, adapter: &str| {
+        catalogue
+            .pools
+            .values()
+            .flatten()
+            .find(|m| m.model.adapter() == adapter)
+            .cloned()
+            .ok_or("missing member")
+    };
+    let members = vec![pick(&catalogue, "claude")?, pick(&catalogue, "codex")?];
+    catalogue.pools.insert("trial".into(), members);
+    let records = ["claude", "codex"]
+        .map(|adapter| {
+            let mut record = availability();
+            record.adapter = adapter.into();
+            record.account_key = Some(format!("{adapter}-key"));
+            record
+        })
+        .to_vec();
+    Ok((catalogue, records))
+}
+fn trial_picks(
+    catalogue: &Catalogue,
+    records: &[AvailabilityRecord],
+    rules: &[ExclusionRule],
+) -> Result<Vec<String>, RoutingError> {
+    let config = RoutingConfig::default();
+    let mut ctx = context(catalogue, &config, now().unwrap());
+    ctx.availability = records;
+    let mut query = request("codex/test").unwrap();
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
+    let route =
+        resolve_for_account_with_seed_excluding(&query, &ctx, None, "exclusion", 0, &[], rules)?;
+    let receipt = route.pool_selection.ok_or(RoutingError::Catalogue)?;
+    let mut adapters: Vec<String> = receipt
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.exclusion.is_none())
+        .filter_map(|candidate| candidate.model.split('/').next().map(str::to_owned))
+        .collect();
+    adapters.dedup();
+    Ok(adapters)
+}
+fn rule(selector: ExclusionSelector) -> ExclusionRule {
+    ExclusionRule {
+        selector,
+        source: ExclusionSource::Flag,
+    }
+}
+
+#[test]
+fn provider_account_and_model_selectors_remove_only_their_members()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (catalogue, records) = exclusion_fixture()?;
+    assert_eq!(trial_picks(&catalogue, &records, &[])?, ["claude", "codex"]);
+    let provider = rule(ExclusionSelector::Provider("claude".into()));
+    assert_eq!(trial_picks(&catalogue, &records, &[provider])?, ["codex"]);
+    // Excluding the only account of a provider removes the provider's members.
+    let account = rule(ExclusionSelector::Account {
+        adapter: "codex".into(),
+        key: "codex-key".into(),
+    });
+    assert_eq!(trial_picks(&catalogue, &records, &[account])?, ["claude"]);
+    // An account that shares its adapter leaves the adapter's other account.
+    let mut shared = records.clone();
+    let mut second = availability();
+    second.adapter = "codex".into();
+    second.account_key = Some("codex-spare".into());
+    shared.push(second);
+    let account = rule(ExclusionSelector::Account {
+        adapter: "codex".into(),
+        key: "codex-key".into(),
+    });
+    assert_eq!(
+        trial_picks(&catalogue, &shared, &[account])?,
+        ["claude", "codex"]
+    );
+    let codex = catalogue.pools["trial"][1].model.clone();
+    let model = rule(ExclusionSelector::Model(codex));
+    assert_eq!(trial_picks(&catalogue, &records, &[model])?, ["claude"]);
+    Ok(())
+}
+
+#[test]
+fn exclusions_that_empty_a_pool_are_named_and_pins_ignore_them()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (catalogue, records) = exclusion_fixture()?;
+    let rules = [
+        rule(ExclusionSelector::Provider("claude".into())),
+        ExclusionRule {
+            selector: ExclusionSelector::Provider("codex".into()),
+            source: ExclusionSource::Graph,
+        },
+    ];
+    let error = trial_picks(&catalogue, &records, &rules).unwrap_err();
+    assert_eq!(error.code(), "no_eligible_pool_member");
+    let text = error.to_string();
+    assert!(text.contains("excluded by flag: provider claude"), "{text}");
+    assert!(text.contains("excluded by graph: provider codex"), "{text}");
+    let config = RoutingConfig::default();
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    let pinned = resolve_for_account_with_seed_excluding(
+        &request("claude/test")?,
+        &ctx,
+        None,
+        "exclusion",
+        0,
+        &[],
+        &rules,
+    )?;
+    assert_eq!(pinned.adapter, "claude");
+    // An account rule never changes a pinned model's account or readiness, and
+    // the pin's own fallback is not filtered.
+    let account_rules = [
+        rule(ExclusionSelector::Account {
+            adapter: "claude".into(),
+            key: "claude-key".into(),
+        }),
+        rule(ExclusionSelector::Provider("codex".into())),
+    ];
+    let mut pin = request("claude/test")?;
+    pin.fallback = Fallback::Models(BoundedModels::new(vec![ModelId::parse("codex/test")?])?);
+    let pinned = resolve_for_account_with_seed_excluding(
+        &pin,
+        &ctx,
+        None,
+        "exclusion",
+        0,
+        &[],
+        &account_rules,
+    )?;
+    let plain =
+        resolve_for_account_with_seed_excluding(&pin, &ctx, None, "exclusion", 0, &[], &[])?;
+    assert_eq!(pinned.account_key, plain.account_key);
+    assert_eq!(pinned.readiness, plain.readiness);
+    assert_eq!(pinned.alternatives.as_slice().len(), 1);
+    Ok(())
+}
+
+#[test]
+fn named_route_fallback_keeps_to_the_exclusions_of_its_pool()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (catalogue, records) = exclusion_fixture()?;
+    let mut config = RoutingConfig::default();
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    let mut query = request("claude/test")?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
+    query.fallback = Fallback::Models(BoundedModels::new(vec![ModelId::parse("codex/test")?])?);
+    let none = resolve_for_account_with_seed_excluding(&query, &ctx, None, "fb", 0, &[], &[])?;
+    assert_eq!(none.alternatives.as_slice().len(), 1);
+    let rules = [rule(ExclusionSelector::Provider("codex".into()))];
+    let route = resolve_for_account_with_seed_excluding(&query, &ctx, None, "fb", 0, &[], &rules)?;
+    assert_eq!(route.alternatives.as_slice().len(), 0);
+    // A persistent model exclusion filters the fallback too.
+    config.model_exclusions.push(ModelExclusion {
+        model: ModelId::parse("codex/test")?,
+        schedule: Schedule::default(),
+    });
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    let route = resolve_for_account_with_seed_excluding(&query, &ctx, None, "fb", 0, &[], &[])?;
+    assert_eq!(route.alternatives.as_slice().len(), 0);
+    // The same fallback on a pinned model is left alone.
+    let mut pin = request("claude/test")?;
+    pin.fallback = Fallback::Models(BoundedModels::new(vec![ModelId::parse("codex/test")?])?);
+    let route = resolve_for_account_with_seed_excluding(&pin, &ctx, None, "fb", 0, &[], &rules)?;
+    assert_eq!(route.alternatives.as_slice().len(), 1);
+    Ok(())
+}
+
+#[test]
+fn an_excluded_account_is_named_when_another_account_cannot_serve_the_model()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut catalogue = Catalogue::bundled()?;
+    let free = catalogue
+        .pools
+        .values()
+        .flatten()
+        .find(|m| m.model.as_str() == "opencode/opencode/glm-5.3-flash-free")
+        .cloned()
+        .ok_or("missing free member")?;
+    catalogue.pools.insert("trial".into(), vec![free]);
+    let records: Vec<_> = ["zen", "go"]
+        .map(|key| {
+            let mut record = availability();
+            record.adapter = "opencode".into();
+            record.account_key = Some(key.into());
+            record
+        })
+        .to_vec();
+    let config = RoutingConfig::default();
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    let mut query = request("codex/test")?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
+    // The go account cannot serve a free model, so excluding zen empties it.
+    let rules = [rule(ExclusionSelector::Account {
+        adapter: "opencode".into(),
+        key: "zen".into(),
+    })];
+    let error = resolve_for_account_with_seed_excluding(&query, &ctx, None, "acct", 0, &[], &rules)
+        .unwrap_err();
+    assert_eq!(error.code(), "no_eligible_pool_member");
+    assert!(
+        error
+            .to_string()
+            .contains("excluded by flag: account opencode/zen"),
+        "{error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_single_model_route_honours_exclusions_unlike_a_pin() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (catalogue, records) = exclusion_fixture()?;
+    let claude = catalogue.pools["trial"][0].model.clone();
+    let mut config = RoutingConfig::default();
+    config.routes.insert(
+        "solo".into(),
+        NamedRoute {
+            model: claude.clone(),
+            effort: None,
+        },
+    );
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    let mut query = request(claude.as_str())?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("solo")?);
+    let rules = [rule(ExclusionSelector::Provider("claude".into()))];
+    let error = resolve_for_account_with_seed_excluding(&query, &ctx, None, "solo", 0, &[], &rules)
+        .unwrap_err();
+    assert_eq!(error.code(), "no_eligible_pool_member");
+    assert!(
+        error
+            .to_string()
+            .contains("excluded by flag: provider claude"),
+        "{error}"
+    );
+    assert!(
+        resolve_for_account_with_seed_excluding(
+            &request(claude.as_str())?,
+            &ctx,
+            None,
+            "s",
+            0,
+            &[],
+            &rules
+        )
+        .is_ok()
+    );
+    Ok(())
+}
+
+#[test]
+fn unknown_exclusion_selectors_are_refused_with_the_valid_forms()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let models: Vec<_> = catalogue.models().iter().map(|e| e.model.clone()).collect();
+    let account = |text: &str| -> Result<Option<(String, String)>, String> {
+        Ok((text == "work").then(|| ("codex".to_owned(), "work".to_owned())))
+    };
+    let parse = |text: &str| ExclusionSelector::parse(text, &["claude", "codex"], &models, account);
+    assert_eq!(
+        parse("claude")?,
+        ExclusionSelector::Provider("claude".into())
+    );
+    assert_eq!(
+        parse("work")?,
+        ExclusionSelector::Account {
+            adapter: "codex".into(),
+            key: "work".into()
+        }
+    );
+    let model = models[0].as_str().to_owned();
+    assert_eq!(
+        parse(&model)?,
+        ExclusionSelector::Model(ModelId::parse(&model)?)
+    );
+    let error = parse("claud").unwrap_err();
+    assert_eq!(error.code(), "unknown_exclusion");
+    assert!(error.to_string().contains("valid forms: a provider"));
+    Ok(())
+}
+
+#[test]
+fn configured_model_exclusion_removes_the_member_from_every_pool()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let model = ModelId::parse("codex/gpt-6-luna")?;
+    let mut config = RoutingConfig::default();
+    config.model_exclusions.push(ModelExclusion {
+        model: model.clone(),
+        schedule: Schedule::default(),
+    });
+    let ctx = context(&catalogue, &config, now()?);
+    let mut seen = 0;
+    for (name, members) in &catalogue.pools {
+        if !members.iter().any(|member| member.model == model) {
+            continue;
+        }
+        seen += 1;
+        let mut query = request("codex/test")?;
+        query.choice = RouteChoice::NamedRoute(RouteName::parse(name)?);
+        let route = resolve(&query, &ctx)?;
+        let receipt = route.pool_selection.ok_or("pool selection")?;
+        let candidate = receipt
+            .candidates
+            .iter()
+            .find(|candidate| candidate.model == model.as_str())
+            .ok_or("candidate")?;
+        assert_eq!(
+            candidate.exclusion.as_deref(),
+            Some("excluded by config: model codex/gpt-6-luna")
+        );
+        assert_ne!(receipt.pick, model.as_str());
+    }
+    assert!(seen > 0);
+    Ok(())
+}
+
+#[test]
+fn a_malformed_persisted_exclusion_fails_closed_for_its_row_only()
+-> Result<(), Box<dyn std::error::Error>> {
+    let config: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "model_exclusions": [
+            {"model": "codex/gpt-6-luna", "schedule": {"expires": "not-a-time"}},
+            {"model": "claude/unreadable", "extra": true},
+            {"model": "not a model"},
+            {"model": "codex/gpt-6-terra", "schedule": {"expires": "2030-01-01T00:00:00Z"}},
+        ],
+    }))?;
+    let models: Vec<&str> = config
+        .model_exclusions
+        .iter()
+        .map(|row| row.model.as_str())
+        .collect();
+    // The two rows whose model parses stay excluded; the unparseable one is
+    // reported, and the valid row is untouched.
+    assert_eq!(
+        models,
+        ["codex/gpt-6-luna", "claude/unreadable", "codex/gpt-6-terra"]
+    );
+    assert!(config.model_exclusions[0].schedule.expires.is_none());
+    assert!(config.model_exclusions[2].schedule.expires.is_some());
+    let notes = config.model_exclusions.notes();
+    assert_eq!(notes.len(), 3, "{notes:?}");
+    assert!(notes[0].contains("model_exclusions[0]") && notes[0].contains("stays excluded"));
+    assert!(notes[2].contains("model_exclusions[2]") && notes[2].contains("is ignored"));
+    // A repaired row excludes its model in the pools.
+    let catalogue = Catalogue::bundled()?;
+    let ctx = context(&catalogue, &config, now()?);
+    let mut query = request("codex/test")?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("junior")?);
+    let route = resolve(&query, &ctx)?;
+    let receipt = route.pool_selection.ok_or("pool selection")?;
+    assert!(receipt.candidates.iter().any(|candidate| candidate.model == "codex/gpt-6-luna"
+        && candidate.exclusion.is_some()));
     Ok(())
 }

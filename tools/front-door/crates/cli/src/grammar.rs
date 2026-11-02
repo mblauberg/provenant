@@ -225,6 +225,10 @@ pub struct Review {
     /// Git range whose changed paths select the shape
     #[arg(long)]
     pub range: Option<String>,
+    /// Keep a provider, account or exact model out of every reviewer pool
+    /// (repeatable); see `provenant route resolve --help`
+    #[arg(long = "exclude", value_name = "SELECTOR")]
+    pub exclude: Vec<String>,
     /// Show the selected panel without dispatching reviewers
     #[arg(long)]
     pub explain: bool,

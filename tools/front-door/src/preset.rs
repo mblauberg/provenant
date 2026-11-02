@@ -2291,6 +2291,11 @@ pub(crate) fn bind_run_context(
             provenant_cli::Switch::Off => "off",
         });
     }
+    // `--exclude` binds every node the graph launches; an unknown selector
+    // was refused before this point.
+    if !request.route.exclude.is_empty() {
+        expansion.document["exclude"] = json!(request.route.exclude);
+    }
     let nodes = expansion.document["nodes"]
         .as_array_mut()
         .ok_or("missing graph nodes")?;
@@ -2914,6 +2919,7 @@ pub fn run(
             &config.domains.fabric.graph.allowed_read_roots,
             &policy_roots,
         );
+        provenant_cli::route::validate_exclusions(&request.route.exclude, &roots.roots)?;
         bind_run_context(
             &mut expansion,
             &request,

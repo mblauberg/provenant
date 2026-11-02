@@ -1008,6 +1008,7 @@ pub(crate) fn tick_graphs(
                     integration_base: execution.integration_base,
                     integration_branch: execution.document.integration_branch.clone(),
                     network: graph_network(&execution.document)?,
+                    exclude: graph_exclude(&execution.document)?,
                     budget,
                     cancel: &cancel,
                     prices: None,
@@ -2526,6 +2527,9 @@ struct BoundGraphOwner<'a> {
     /// The graph's explicit network reach for every node lane, such as
     /// `run --network off` bound before automatic preset selection.
     network: Option<provenant_cli::Switch>,
+    /// The graph's route-exclusion selectors, passed to each node as the
+    /// `routing.graph_exclude` knob.
+    exclude: Vec<String>,
     budget: WaitBudget,
     cancel: &'a CancelToken,
     prices: Option<Result<provenant_telemetry::PriceTable, String>>,
@@ -3073,6 +3077,7 @@ fn advance_graphs_after_settlement(
                 integration_base: execution.integration_base,
                 integration_branch: execution.document.integration_branch.clone(),
                 network: graph_network(&execution.document)?,
+                exclude: graph_exclude(&execution.document)?,
                 budget,
                 cancel: &cancel,
                 prices: None,
@@ -4213,7 +4218,14 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     new_worktree: None,
                 }],
                 concurrency: Some(1),
-                knobs: vec![],
+                knobs: if self.exclude.is_empty() {
+                    vec![]
+                } else {
+                    vec![format!(
+                        "routing.graph_exclude={}",
+                        serde_json::Value::from(self.exclude.clone())
+                    )]
+                },
                 host: None,
             };
             // Operation replay is actor-scoped: submit under the recorded launch actor.
@@ -4398,6 +4410,25 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 attempt_ref: reference,
             }),
         }
+    }
+}
+/// A graph document's optional top-level `exclude` list of route-exclusion
+/// selectors, inherited by every node it launches.
+fn graph_exclude(
+    document: &provenant_fabric_runtime::graph::GraphDocument,
+) -> Result<Vec<String>, FacadeError> {
+    match document.extra.get("exclude") {
+        None => Ok(Vec::new()),
+        Some(value) => value
+            .as_array()
+            .ok_or(FacadeError::InvalidInput)?
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .map(str::to_owned)
+                    .ok_or(FacadeError::InvalidInput)
+            })
+            .collect(),
     }
 }
 /// A graph document's optional top-level `network` (`"on"` or `"off"`),
@@ -4698,6 +4729,7 @@ impl Factory {
                 integration_base,
                 integration_branch: document.integration_branch.clone(),
                 network: graph_network(document)?,
+                exclude: graph_exclude(document)?,
                 budget,
                 cancel,
                 prices: None,
@@ -4784,6 +4816,7 @@ impl Factory {
                 integration_base: None,
                 integration_branch: None,
                 network: None,
+                exclude: Vec::new(),
                 budget,
                 cancel,
                 prices: None,

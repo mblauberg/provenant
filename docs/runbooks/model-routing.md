@@ -247,6 +247,78 @@ prints commands to collect or cancel active runs. Active runs are not cancelled
 automatically. Use `provenant lanes --id RUN --wait 4m` to collect one, or
 `provenant cancel RUN` to cancel it.
 
+## Excluding members
+
+An exclusion keeps a provider, an account or an exact model out of named-route
+pools. It never widens a pool: if the exclusions leave a pool with no eligible
+member, the dispatch is refused and the error names each exclusion and its
+source (`flag`, `graph` or `config`).
+
+A selector takes one of three forms:
+
+| Selector | Example | Removes |
+|---|---|---|
+| Provider | `claude` | Every member served by that adapter. |
+| Account | a label, an entry, or `claude/work` | That account's availability. A member of its adapter goes only when no other serving account remains. |
+| Exact model | `codex/gpt-6-luna` | That model in every pool, including fallback members. |
+
+An unknown selector is refused with the valid forms, before anything is
+submitted.
+
+For one dispatch, pass `--exclude` to `run`, `review` or `route resolve`. Repeat
+the flag once per selector; it takes no comma-separated list:
+
+```sh
+provenant run --route junior --exclude claude --explain
+provenant review --exclude codex/gpt-6-luna
+provenant route resolve junior --exclude claude
+```
+
+`--explain` and `route resolve` list each exclusion that removed a candidate
+and where it came from. `review` keeps its family separation: it substitutes
+an unused family around the exclusions, and refuses once they exhaust the
+families left, naming the exclusions in the refusal.
+
+Three sources combine as a union, never as a replacement, and each rule keeps
+its source in refusals and `--explain`:
+
+| Source | Set by | Knob |
+|---|---|---|
+| `config` | The standing list in `[knobs]` | `routing.exclude` |
+| `flag` | `--exclude` on this dispatch | `routing.flag_exclude` |
+| `graph` | `--exclude` on a preset or automatically selected graph, inherited by every node | `routing.graph_exclude` |
+
+A list that is not a list of strings, or holds an unknown selector, is
+refused, the same as on the flag. `--explain` and `route resolve` read the
+standing and flag lists the dispatch would use; a graph's list is applied only
+when its nodes launch.
+
+An exclusion applies to named-route pools, to the fallback models of a named
+route, and to a named route that holds a single model. A pinned `--model`, and
+the fallback listed alongside it, are never filtered.
+
+To exclude an exact model from every pool until you remove it, use:
+
+```sh
+provenant route exclude add codex/gpt-6-luna --until 2h
+provenant route exclude list
+provenant route exclude remove codex/gpt-6-luna
+```
+
+`--until` accepts a future RFC 3339 timestamp or a duration; omit it to keep
+the exclusion until it is removed. `route list` and `route override list`
+also show these rules. Adding an exclusion also drops rows that have expired.
+
+A stored row that cannot be read in full does not refuse the configuration.
+If its model parses, the model stays excluded with no schedule; if not, the row
+is ignored. Either way the repair shows as a `note:` on `route exclude list`,
+`route list`, `route override list` and `--explain`, until you fix or remove
+the row.
+
+An explicit `--model` pin always selects the named model, whatever the
+exclusions. Pacing overrides keep their precedence; an exclusion removes
+members before pacing weighs the rest.
+
 ## Per-account pacing
 
 Account profiles layer over provider pacing. An active temporary override takes

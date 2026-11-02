@@ -1012,6 +1012,95 @@ fn automatic_preset_selection_submits_network_off_and_refuses_lane_only_flags()
     Ok(())
 }
 
+/// `run --exclude` on an automatically selected graph is refused when a
+/// selector is unknown, and otherwise binds the list to the graph so every
+/// node's task carries it as the graph's exclusion knob.
+#[test]
+fn graph_exclusions_are_validated_and_inherited_by_every_node()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "seed",
+        ],
+    ] {
+        let output = provenant_os::fixture::git_command()
+            .current_dir(&project)
+            .args(args)
+            .output()?;
+        assert!(output.status.success());
+    }
+    let presets = project.join(".provenant/presets");
+    std::fs::create_dir_all(&presets)?;
+    std::fs::write(
+        project.join(".provenant/preset-rules.toml"),
+        "[select]\ndefault = { preset = 'probe' }\n",
+    )?;
+    std::fs::write(
+        presets.join("probe.toml"),
+        "stages = [{ id = 'task', tier = { adapter = 'fixture', model = 'fixture/model' } }]\n",
+    )?;
+    let prompt = project.join("ready.md");
+    std::fs::write(
+        &prompt,
+        "Acceptance criteria are explicit. Surface: the run command. Risk tier: low. \
+         Verification uses cargo test. Design decision is settled.\n",
+    )?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let state = temp.path().join("state");
+    let run = |extra: &[&str]| {
+        fixture_cli()
+            .current_dir(&project)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["--json", "--state-dir"])
+            .arg(&state)
+            .args(["run", "--prompt-file"])
+            .arg(&prompt)
+            .args(extra)
+            .output()
+    };
+    let refused = run(&["--exclude", "nosuchprovider"])?;
+    assert!(!refused.status.success());
+    let refused: serde_json::Value = serde_json::from_slice(&refused.stdout)?;
+    assert_eq!(refused["status"], "invalid", "{refused}");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("adapter/id")),
+        "{refused}"
+    );
+    assert!(!state.join("runs").exists());
+
+    let output = run(&["--exclude", "claude", "--wait", "5s"])?;
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let document = result["data"]["document"]
+        .as_str()
+        .ok_or_else(|| format!("retained document: {result}"))?;
+    let document: serde_json::Value = serde_json::from_slice(&std::fs::read(document)?)?;
+    assert_eq!(document["exclude"], serde_json::json!(["claude"]));
+    let mut carried = Vec::new();
+    for run in std::fs::read_dir(state.join("runs"))? {
+        let request: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(run?.path().join("request.json"))?)?;
+        for task in request["tasks"].as_array().ok_or("tasks")? {
+            carried.push(task["profile"]["knobs"]["routing.graph_exclude"].clone());
+        }
+    }
+    assert_eq!(carried, [serde_json::json!(["claude"])], "{result}");
+    Ok(())
+}
+
 /// A project whose automatic selection picks `gate-only`, with `config` as the
 /// state's `domains.fabric` settings. Gate presets finish without a provider.
 struct ExperimentProject {

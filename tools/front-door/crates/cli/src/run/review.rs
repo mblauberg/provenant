@@ -82,6 +82,15 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
     .trim()
     .to_owned();
     let brief = read_bounded(&command.brief_file)?;
+    // Different exclusions are a different request, so a slot's identity covers them.
+    let identity_brief = if command.exclude.is_empty() {
+        brief.clone()
+    } else {
+        format!(
+            "{brief}\nexclude:{}",
+            serde_json::Value::from(command.exclude.clone())
+        )
+    };
     let domains = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
         .map_err(|e| invalid(e.to_string()))?
         .domains;
@@ -119,6 +128,21 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
     {
         return Err(invalid("review shape exceeds 64 reviewers".into()));
     }
+    // Refuse an unknown selector before any reviewer is submitted.
+    crate::route::exclusion_rules(
+        &command.exclude,
+        provenant_routing::ExclusionSource::Flag,
+        edge.roots,
+    )
+    .map_err(|e| invalid(e.to_string()))?;
+    let knobs: Vec<String> = if command.exclude.is_empty() {
+        vec![]
+    } else {
+        vec![format!(
+            "routing.flag_exclude={}",
+            serde_json::Value::from(command.exclude.clone())
+        )]
+    };
     data["shape"] = json!(selected.name);
     data["selection_source"] = json!(selected.source);
     data["size"] = json!(size);
@@ -165,7 +189,7 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
                 &head,
                 selected.name,
                 &panel_shape,
-                &brief,
+                &identity_brief,
                 group_index,
                 index,
                 0,
@@ -200,7 +224,7 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
             &head,
             selected.name,
             &panel_shape,
-            &brief,
+            &identity_brief,
             slot.group,
             slot.index,
             |id| inspect_slot(&session, id, &call),
@@ -282,7 +306,7 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
                         chair: chair.clone(),
                         operation_id: slot.operation_id.clone(),
                         concurrency: Some(1),
-                        knobs: vec![],
+                        knobs: knobs.clone(),
                         tasks: vec![review_task(slot, &head, &brief, families)],
                     },
                     &call,
