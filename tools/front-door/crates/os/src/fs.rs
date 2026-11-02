@@ -17,10 +17,13 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
-/// Sync file data and metadata, including the storage-device flush on macOS.
+/// Sync file data and metadata; on macOS this is a storage-device flush unless
+/// `PROVENANT_DURABILITY=relaxed`.
 pub fn durable_sync_file(file: &File) -> io::Result<()> {
-    os::durable_sync_file(file)
+    os::sync_file(file)
 }
+
+pub use os::{DURABILITY_ENV, durability_relaxed};
 
 #[derive(Debug, Error)]
 pub enum FsError {
@@ -965,9 +968,7 @@ impl Directory {
         os::read_link(&self.file, name).map_err(error("readlinkat", &self.path.join(name)))
     }
     pub fn sync(&self) -> Result<()> {
-        self.file
-            .sync_all()
-            .map_err(error("fsync directory", &self.path))
+        os::sync_file(&self.file).map_err(error("fsync directory", &self.path))
     }
     pub fn make_writable(&self) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
@@ -1274,9 +1275,7 @@ impl FileHandle {
             .map_err(error("fstat file", &self.path))
     }
     pub fn sync(&self) -> Result<()> {
-        self.file
-            .sync_all()
-            .map_err(error("fsync file", &self.path))
+        os::sync_file(&self.file).map_err(error("fsync file", &self.path))
     }
     /// Give the owner write permission through the open descriptor.
     pub fn make_owner_writable(&self) -> Result<()> {

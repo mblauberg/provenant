@@ -1039,6 +1039,12 @@ The run store is SQLite with write-ahead logging (WAL), foreign keys and `synchr
 The store refuses unknown or newer versions without modifying them and
 refuses unsafe companion files beside the database, and caps (1 MiB record or prompt, 64 MiB stream,
 4 MiB result) make an oversized result a typed failure, never a truncation.
+
+Every file and directory sync made by `provenant-os` flushes the storage device
+(`F_FULLFSYNC` on macOS, `fsync` elsewhere), once per sync. `PROVENANT_DURABILITY=relaxed`,
+read once per process and passed on to the guardian, makes macOS use plain `fsync`
+instead. Relaxed state survives a process crash but not power loss; it is for
+disposable test and CI state, and any other value or none keeps the full flush.
 - Why: a corrupt or foreign store must never be repaired into evidence.
 - Test: `crates/run/src/tests.rs::opens_refuse_unsafe_database_companions`;
   `::oversize_is_refused_before_publication_or_read`

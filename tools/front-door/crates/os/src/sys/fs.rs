@@ -7,17 +7,30 @@ use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 
-/// Flush a regular file through the platform's strongest available sync.
-pub fn durable_sync_file(file: &File) -> io::Result<()> {
-    file.sync_all()?;
+/// Environment variable selecting the process-wide durability level.
+pub const DURABILITY_ENV: &str = "PROVENANT_DURABILITY";
+
+fn is_relaxed(value: Option<&OsStr>) -> bool {
+    value == Some(OsStr::new("relaxed"))
+}
+
+/// True when `PROVENANT_DURABILITY=relaxed`; read once per process.
+pub fn durability_relaxed() -> bool {
+    static RELAXED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *RELAXED.get_or_init(|| is_relaxed(std::env::var_os(DURABILITY_ENV).as_deref()))
+}
+
+/// Flush a file or directory descriptor. macOS `sync_all` already issues
+/// `F_FULLFSYNC` (a storage-device flush), so it is the single sync there; the
+/// relaxed setting uses plain `fsync`, which survives a process crash but not
+/// power loss. Elsewhere `sync_all` is already plain `fsync`.
+pub fn sync_file(file: &File) -> io::Result<()> {
     #[cfg(target_os = "macos")]
-    {
+    if durability_relaxed() {
         // SAFETY: the descriptor is owned by `file` and remains open for the call.
-        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_FULLFSYNC) } == -1 {
-            return Err(io::Error::last_os_error());
-        }
+        return retry(|| unsafe { libc::fsync(file.as_raw_fd()) }).map(drop);
     }
-    Ok(())
+    file.sync_all()
 }
 
 pub fn canonicalize(path: &Path) -> io::Result<std::path::PathBuf> {
@@ -711,5 +724,18 @@ pub fn current_path(file: &File) -> io::Result<std::path::PathBuf> {
     #[cfg(not(target_os = "macos"))]
     {
         std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
+    }
+}
+
+#[cfg(test)]
+mod durability_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_exact_relaxed_value_relaxes_durability() {
+        assert!(is_relaxed(Some(OsStr::new("relaxed"))));
+        for value in [None, Some(""), Some("full"), Some("Relaxed"), Some("1")] {
+            assert!(!is_relaxed(value.map(OsStr::new)));
+        }
     }
 }
