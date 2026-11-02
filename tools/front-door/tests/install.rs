@@ -10,6 +10,11 @@ use std::{
 };
 use support::{Result, TestRig, code};
 
+/// Executables of the bundled app: the console, and the menu helper nested as a login-item app.
+const APP_EXECUTABLES: [&str; 2] = ["Contents/MacOS/provenant-console", MENU_EXECUTABLE];
+const MENU_EXECUTABLE: &str =
+    "Contents/Library/LoginItems/Provenant Menu.app/Contents/MacOS/quota-menubar";
+
 struct FixtureSmoke(VersionInfo);
 
 impl ReleaseSmoke for FixtureSmoke {
@@ -874,10 +879,9 @@ fi
         format!("{digest}  package.tar.gz\n"),
     )?;
     let app_fixture = fixtures.join("apps");
-    let app_binaries = app_fixture.join("Provenant Console.app/Contents/MacOS");
-    fs::create_dir_all(&app_binaries)?;
-    for binary in ["provenant-console", "quota-menubar"] {
-        let path = app_binaries.join(binary);
+    for binary in APP_EXECUTABLES {
+        let path = app_fixture.join("Provenant Console.app").join(binary);
+        fs::create_dir_all(path.parent().ok_or("app executable parent")?)?;
         fs::write(&path, "#!/bin/sh\nexit 0\n")?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
     }
@@ -1289,10 +1293,9 @@ fn upgrade_pins_one_release_replays_settings_and_reports_peer_failure() -> Resul
         .ok_or("digest")?
         .to_owned();
     let apps = rig.root.join("apps");
-    let app = "Provenant Console.app/Contents/MacOS";
-    fs::create_dir_all(apps.join(app))?;
-    for binary in ["provenant-console", "quota-menubar"] {
-        let path = apps.join(app).join(binary);
+    for binary in APP_EXECUTABLES {
+        let path = apps.join("Provenant Console.app").join(binary);
+        fs::create_dir_all(path.parent().ok_or("app executable parent")?)?;
         fs::write(&path, "#!/bin/sh\nexit 0\n")?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
     }
@@ -1396,7 +1399,7 @@ fn upgrade_pins_one_release_replays_settings_and_reports_peer_failure() -> Resul
     fs::write(
         &launchctl,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{0}'\nif [ \"$1\" = bootstrap ] && [ ! -f '{0}.bootstrapped' ]; then touch '{0}.bootstrapped'; exit 5; fi\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{0}'\nif [ \"$1\" = bootstrap ] && [ -n \"${{PROVENANT_TEST_BOOTSTRAP_FAIL:-}}\" ]; then exit 5; fi\nif [ \"$1\" = bootstrap ] && [ ! -f '{0}.bootstrapped' ]; then touch '{0}.bootstrapped'; exit 5; fi\n",
             launch_log.display(),
         ),
     )?;
@@ -1595,6 +1598,20 @@ esac
         })
     }));
     fs::remove_file(mv)?;
+    if cfg!(target_os = "macos") {
+        // A failed agent restart rolls back both the app and the migrated agent plist.
+        let before_plist = fs::read_to_string(&agent)?;
+        rig.env
+            .push(("PROVENANT_TEST_BOOTSTRAP_FAIL".into(), "1".into()));
+        let failed = rig.command(&["upgrade", "--json"])?;
+        let failed_value: serde_json::Value = serde_json::from_slice(&failed.stdout.bytes)?;
+        assert_eq!(failed_value["data"][0]["success"], false, "{failed_value}");
+        rig.env
+            .retain(|(key, _)| key != "PROVENANT_TEST_BOOTSTRAP_FAIL");
+        assert_eq!(fs::read_to_string(&agent)?, before_plist);
+        assert!(installed_app.join("old-build").exists());
+        assert!(!installed_app.join(MENU_EXECUTABLE).exists());
+    }
     fs::write(&curl_log, "")?;
     let result = rig.command(&["upgrade", "--hosts", "all", "--json"])?;
     let value: serde_json::Value = serde_json::from_slice(&result.stdout.bytes)?;
@@ -1626,14 +1643,14 @@ esac
             .join("Contents/MacOS/provenant-console")
             .is_file()
     );
-    assert!(installed_app.join("Contents/MacOS/quota-menubar").is_file());
+    assert!(installed_app.join(MENU_EXECUTABLE).is_file());
     if cfg!(target_os = "macos") {
         let plist = fs::read_to_string(&agent)?;
         let agent_path = agent.to_str().ok_or("agent")?;
         assert!(
             plist.contains(
                 installed_app
-                    .join("Contents/MacOS/quota-menubar")
+                    .join(MENU_EXECUTABLE)
                     .to_str()
                     .ok_or("agent path")?
             )
@@ -1658,7 +1675,12 @@ esac
     let older_value: serde_json::Value = serde_json::from_slice(&older.stdout.bytes)?;
     assert_eq!(older_value["data"][0]["success"], true, "{older_value}");
     assert!(String::from_utf8_lossy(&older.stdout.bytes).contains("no bundled app archive"));
-    assert!(installed_app.join("Contents/MacOS/quota-menubar").is_file());
+    assert!(installed_app.join(MENU_EXECUTABLE).is_file());
+    if cfg!(target_os = "macos") {
+        // A repeated upgrade leaves the already-migrated agent pointing at the same helper.
+        let again = fs::read_to_string(&agent)?;
+        assert_eq!(again.matches(MENU_EXECUTABLE).count(), 1, "{again}");
+    }
     rig.env
         .retain(|(key, _)| key != "PROVENANT_TEST_MISSING_APPS");
     let receipt: provenant_records::InstallReceipt = provenant_records::decode_v1(

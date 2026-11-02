@@ -64,6 +64,8 @@ app=
 agent=
 service=
 app_agent_stopped=false
+helper_executable='Contents/Library/LoginItems/Provenant Menu.app/Contents/MacOS/quota-menubar'
+agent_backup=
 instruction_count=0
 instructions_committed=false
 cleanup() {
@@ -92,6 +94,9 @@ cleanup() {
             app_stage=
             printf '%s\n' "Could not restore the previous Provenant app; backup remains at $app_backup" >&2
         fi
+    fi
+    if [ -n "$agent_backup" ] && [ -f "$agent_backup" ]; then
+        cp -p "$agent_backup" "$agent" || printf '%s\n' "Could not restore the menu bar LaunchAgent; backup remains at $agent_backup" >&2
     fi
     if "$app_agent_stopped" && [ -f "$agent" ] && [ -d "$HOME/Applications/$app" ]; then
         launchctl bootout "$service" </dev/null >/dev/null 2>&1 || :
@@ -178,9 +183,8 @@ else
                 mkdir "$scratch/apps"
                 tar -xzpf "$scratch/$apps_archive" -C "$scratch/apps" </dev/null || die 4 'Cannot unpack bundled app archive'
                 app='Provenant Console.app'
-                for binary in provenant-console quota-menubar; do
-                    [ -x "$scratch/apps/$app/Contents/MacOS/$binary" ] || die 4 "Bundled app executable is missing: $binary"
-                done
+                [ -x "$scratch/apps/$app/Contents/MacOS/provenant-console" ] || die 4 'Bundled app executable is missing: provenant-console'
+                [ -x "$scratch/apps/$app/$helper_executable" ] || die 4 'Bundled app executable is missing: quota-menubar'
                 mkdir -p "$HOME/Applications"
                 app_stage=$(mktemp -d "$HOME/Applications/.provenant-upgrade.XXXXXX")
                 cp -R "$scratch/apps/$app" "$app_stage/$app" ;;
@@ -301,7 +305,13 @@ if [ -n "$app_stage" ]; then
         die 4 'Could not install the refreshed Provenant app'
     fi
     if [ -f "$agent" ]; then
-        plutil -replace ProgramArguments.0 -string "$HOME/Applications/$app/Contents/MacOS/quota-menubar" "$agent" || die 4 'Could not update the Provenant menu bar LaunchAgent'
+        # Migrate the agent in place: its executable becomes the nested menu helper app (#2473, #2469).
+        agent_backup=$app_stage/agent.plist
+        cp -p "$agent" "$agent_backup" || die 4 'Could not back up the Provenant menu bar LaunchAgent'
+        helper_path="$HOME/Applications/$app/$helper_executable"
+        plutil -replace ProgramArguments.0 -string "$helper_path" "$agent" || die 4 'Could not update the Provenant menu bar LaunchAgent'
+        [ "$(plutil -extract ProgramArguments.0 raw -o - "$agent")" = "$helper_path" ] || die 4 'Could not verify the Provenant menu bar LaunchAgent'
+        [ -x "$helper_path" ] || die 4 'The installed Provenant app has no menu bar helper'
         attempts=0
         until launchctl bootstrap "gui/$(id -u)" "$agent" </dev/null; do
             attempts=$((attempts + 1))
@@ -311,6 +321,8 @@ if [ -n "$app_stage" ]; then
         launchctl kickstart -k "$service" </dev/null || die 4 'Could not restart the Provenant menu bar app'
         launchctl print "$service" </dev/null >/dev/null || die 4 'Could not verify the Provenant menu bar app'
     fi
+    rm -f "$agent_backup"
+    agent_backup=
     rm -rf "$app_backup" || die 4 'Could not remove the previous Provenant app backup'
     app_backup=
     app_agent_stopped=false

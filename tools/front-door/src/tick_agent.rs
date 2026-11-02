@@ -143,7 +143,7 @@ pub fn install(state: &Path, home: &Path, changed: bool, enabled: bool) -> Insta
             if cfg!(target_os = "linux") {
                 enable_with(changed, |args| systemctl(args, home))
             } else {
-                bootstrap_with(home, changed, launchctl)
+                bootstrap_with(home, launchctl)
             }
         });
     match result {
@@ -154,19 +154,19 @@ pub fn install(state: &Path, home: &Path, changed: bool, enabled: bool) -> Insta
     }
 }
 
+/// Always boots the agent out and back in. launchd evaluates the launch constraint
+/// against the code identity of the program it recorded at bootstrap; an upgrade replaces
+/// the ad-hoc signed `provenant` behind the stable `~/.local/bin` path, so a service left
+/// loaded across an upgrade is killed for a Launch Constraint Violation (#2469).
 // LaunchAgent bootstrap retries are bounded real-time OS operations.
 #[allow(clippy::disallowed_methods)]
 fn bootstrap_with(
     home: &Path,
-    changed: bool,
     mut run: impl FnMut(&[&OsStr], &Path) -> Result<(bool, String), AgentError>,
 ) -> Result<(), AgentError> {
     let domain = format!("gui/{}", provenant_os::fs::effective_uid());
     let service = format!("{domain}/{LABEL}");
     let loaded = run(&["print".as_ref(), service.as_ref()], home)?.0;
-    if loaded && !changed {
-        return Ok(());
-    }
     if loaded {
         let (ok, error) = run(&["bootout".as_ref(), service.as_ref()], home)?;
         if !ok {
@@ -281,16 +281,23 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_keeps_an_unchanged_service_and_retries_after_bootout() {
+    fn bootstrap_always_replaces_a_loaded_service_and_retries_after_bootout() {
         let mut calls = Vec::new();
-        bootstrap_with(Path::new("/home"), false, |args, _| {
+        bootstrap_with(Path::new("/home"), |args, _| {
             calls.push(args[0].to_owned());
             Ok((true, String::new()))
         })
         .unwrap();
-        assert_eq!(calls, [OsStr::new("print")]);
+        assert_eq!(
+            calls,
+            [
+                OsStr::new("print"),
+                OsStr::new("bootout"),
+                OsStr::new("bootstrap")
+            ]
+        );
         let mut bootstraps = 0;
-        bootstrap_with(Path::new("/home"), true, |args, _| {
+        bootstrap_with(Path::new("/home"), |args, _| {
             if args[0] == "bootstrap" {
                 bootstraps += 1;
                 Ok((bootstraps > 1, "service is exiting".into()))
