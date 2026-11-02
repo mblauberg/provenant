@@ -91,6 +91,10 @@ final class InboxClientTests: XCTestCase {
         let noReason = PeerCoverage(host: "h", label: "l", state: "partial", included: 3, truncated: true)
         XCTAssertFalse(noReason.contributedNoPage)
         XCTAssertTrue(PeerCoverage(host: "h", label: "l", state: "unreachable", reason: "timeout").contributedNoPage)
+        // An unknown state with no page needs a reason before it counts as a refused page.
+        XCTAssertFalse(PeerCoverage(host: "h", label: "l", state: "degraded").contributedNoPage)
+        XCTAssertTrue(PeerCoverage(host: "h", label: "l", state: "degraded", reason: "busy").contributedNoPage)
+        XCTAssertFalse(PeerCoverage(host: "h", label: "l", state: "degraded", included: 2, reason: "busy").contributedNoPage)
     }
 
     func testAnOldCLIWithoutPeersOrOwnerHostStillDecodes() async throws {

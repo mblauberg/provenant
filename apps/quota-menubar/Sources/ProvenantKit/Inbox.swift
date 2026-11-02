@@ -112,7 +112,9 @@ public struct PeerCoverage: Decodable, Equatable, Sendable, Identifiable {
         switch kind {
         case .unreachable: true
         case .partial: reason != nil && included == 0
-        case .other: included == 0
+        // A state this app does not know counts only when it says why, as a partial one does; one that gives
+        // neither a page nor a reason is not trusted to have replaced the host's rows.
+        case .other: reason != nil && included == 0
         case .complete, .unsupported: false
         }
     }
