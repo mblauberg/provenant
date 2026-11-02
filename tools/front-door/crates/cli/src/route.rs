@@ -3064,87 +3064,141 @@ mod route_tests {
         Ok(())
     }
 
-    #[test]
-    fn review_substitution_skips_refused_unused_families() -> Result<(), Box<dyn Error>> {
-        use std::os::unix::fs::PermissionsExt;
-        struct Resolver;
-        impl provenant_core::PathResolver for Resolver {
-            fn resolve_existing_ancestor(
-                &self,
-                path: &std::path::Path,
-            ) -> std::io::Result<std::path::PathBuf> {
-                Ok(path.into())
+    /// A codex family already used by a review and an unused claude one, each
+    /// with a single ready account.
+    struct ReviewFixture {
+        _temp: tempfile::TempDir,
+        roots: Roots,
+        availability: Vec<provenant_providers::AvailabilityRecord>,
+        access: [provenant_routing::AccessContext<'static>; 2],
+        request: provenant_routing::RouteRequest,
+        now: i64,
+    }
+    impl ReviewFixture {
+        fn new() -> Result<Self, Box<dyn Error>> {
+            use std::os::unix::fs::PermissionsExt;
+            struct Resolver;
+            impl provenant_core::PathResolver for Resolver {
+                fn resolve_existing_ancestor(
+                    &self,
+                    path: &std::path::Path,
+                ) -> std::io::Result<std::path::PathBuf> {
+                    Ok(path.into())
+                }
             }
-        }
-        let temp = tempfile::tempdir()?;
-        let mut inputs =
-            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
-        inputs.state_dir = Some(temp.path().join("state"));
-        let roots = inputs.resolve(&Resolver)?;
-        std::fs::create_dir_all(roots.state.as_path())?;
-        std::fs::set_permissions(
-            roots.state.as_path(),
-            std::fs::Permissions::from_mode(0o700),
-        )?;
-        let path = roots.state.as_path().join("config.toml");
-        std::fs::write(
-            &path,
-            "schema_version=1\n[domains.routing.pools]\ntest=[{model='codex/gpt-6-luna',weight=1,effort='high',efforts=['high']},{model='claude/claude-haiku-5-5',weight=1,effort='high',efforts=['high']}]\n",
-        )?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-        let catalogue = super::Catalogue::bundled()?;
-        let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
-        let availability: Vec<_> = [("codex", "gpt-6-luna"), ("claude", "claude-haiku-5-5")]
-            .into_iter()
-            .map(|(adapter, model)| provenant_providers::AvailabilityRecord {
-                schema_version: 1,
-                adapter: adapter.into(),
-                executable: "/fixture/provider".into(),
-                version: "fixture".into(),
-                fixture_ref: "fixture".into(),
-                catalogue_revision: catalogue.revision().into(),
-                account_key: Some(format!("{adapter}-account")),
-                observed_models: vec![model.into()],
-                observed_unix_seconds: now,
-                expires_unix_seconds: now + 300,
-                last_update: None,
+            let temp = tempfile::tempdir()?;
+            let mut inputs = provenant_core::RootInputs::new(
+                temp.path().join("home"),
+                temp.path().join("checkout"),
+            );
+            inputs.state_dir = Some(temp.path().join("state"));
+            let roots = inputs.resolve(&Resolver)?;
+            std::fs::create_dir_all(roots.state.as_path())?;
+            std::fs::set_permissions(
+                roots.state.as_path(),
+                std::fs::Permissions::from_mode(0o700),
+            )?;
+            let path = roots.state.as_path().join("config.toml");
+            std::fs::write(
+                &path,
+                "schema_version=1\n[domains.routing.pools]\ntest=[{model='codex/gpt-6-luna',weight=1,effort='high',efforts=['high']},{model='claude/claude-haiku-5-5',weight=1,effort='high',efforts=['high']}]\n",
+            )?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            let catalogue = super::Catalogue::bundled()?;
+            let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
+            let availability = [("codex", "gpt-6-luna"), ("claude", "claude-haiku-5-5")]
+                .into_iter()
+                .map(|(adapter, model)| provenant_providers::AvailabilityRecord {
+                    schema_version: 1,
+                    adapter: adapter.into(),
+                    executable: "/fixture/provider".into(),
+                    version: "fixture".into(),
+                    fixture_ref: "fixture".into(),
+                    catalogue_revision: catalogue.revision().into(),
+                    account_key: Some(format!("{adapter}-account")),
+                    observed_models: vec![model.into()],
+                    observed_unix_seconds: now,
+                    expires_unix_seconds: now + 300,
+                    last_update: None,
+                })
+                .collect();
+            let access = ["codex", "claude"].map(|adapter| provenant_routing::AccessContext {
+                adapter,
+                disclosure_ref: "fixture",
+                confinement_ref: "fixture",
+            });
+            let request = super::RouteRequest {
+                read_heavy: false,
+                model: None,
+                route: Some("test".into()),
+                effort: None,
+                confidential: false,
+                fallback: vec![],
+            }
+            .to_domain()?;
+            Ok(Self {
+                _temp: temp,
+                roots,
+                availability,
+                access,
+                request,
+                now,
             })
-            .collect();
-        let access = ["codex", "claude"].map(|adapter| provenant_routing::AccessContext {
-            adapter,
-            disclosure_ref: "fixture",
-            confinement_ref: "fixture",
-        });
-        let request = super::RouteRequest {
-            read_heavy: false,
-            model: None,
-            route: Some("test".into()),
-            effort: None,
-            confidential: false,
-            fallback: vec![],
         }
-        .to_domain()?;
-        let resolve = |used: &[String], required: bool| {
+        /// Resolve with the openai family already used by the review.
+        fn resolve(
+            &self,
+            required: bool,
+        ) -> Result<provenant_records::ResolvedRoute, super::DispatchError> {
+            let used = [String::from("openai")];
             super::resolve_dispatch(
-                &request,
-                &roots,
+                &self.request,
+                &self.roots,
                 None,
                 ("fixture", 0),
-                &availability,
-                &access,
+                &self.availability,
+                &self.access,
                 "fixture",
-                Some((used, required)),
+                Some((&used, required)),
             )
-        };
+        }
+        /// Persist the claude account's record, as the quota cache holds it.
+        fn seed_claude(
+            &self,
+            edit: impl FnOnce(&mut provenant_quota::AccountRecord),
+        ) -> Result<(), Box<dyn Error>> {
+            use std::os::unix::fs::PermissionsExt;
+            let scope = provenant_quota::AccountScope {
+                adapter: "claude".into(),
+                account_key: "claude-account".into(),
+                label: "claude-account".into(),
+            };
+            let mut record = provenant_quota::AccountRecord::empty(scope);
+            edit(&mut record);
+            let quota = self.roots.state.as_path().join("quota");
+            let account = quota.join("claude-account");
+            std::fs::create_dir_all(&account)?;
+            for dir in [&quota, &account] {
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+            }
+            let file = account.join("claude.json");
+            std::fs::write(&file, serde_json::to_vec(&record)?)?;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))?;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn review_substitution_skips_refused_unused_families() -> Result<(), Box<dyn Error>> {
+        let fixture = ReviewFixture::new()?;
         // The used family is the one codex serves, so Claude is the unused one.
-        let used = [String::from("openai")];
-        let unused = resolve(&used, false)?;
+        let unused = fixture.resolve(false)?;
         assert_eq!(unused.adapter, "claude");
         assert!(matches!(unused.readiness, RouteReadiness::Ready { .. }));
         // Its only account is refused: review relaxes to the ready, used family
         // rather than picking the refused member.
         crate::quota::persist_provider_refusal(
-            roots.state.as_path(),
+            fixture.roots.state.as_path(),
             &provenant_records::run::RouteRecord {
                 provider: Some("claude".into()),
                 model: Some("claude/claude-haiku-5-5".into()),
@@ -3153,16 +3207,70 @@ mod route_tests {
                 ..Default::default()
             },
             None,
-            now,
-            Some(now + 3_600),
+            fixture.now,
+            Some(fixture.now + 3_600),
         )?;
-        let relaxed = resolve(&used, false)?;
+        let relaxed = fixture.resolve(false)?;
         assert_eq!(relaxed.adapter, "codex");
         assert!(matches!(relaxed.readiness, RouteReadiness::Ready { .. }));
         // A required separation never relaxes.
         assert!(matches!(
-            resolve(&used, true),
+            fixture.resolve(true),
             Err(super::DispatchError::FamilySeparation(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn review_substitution_skips_a_mismatched_unused_family() -> Result<(), Box<dyn Error>> {
+        let fixture = ReviewFixture::new()?;
+        fixture.seed_claude(|record| {
+            record.last_error = Some(provenant_quota::ProbeFailure::AccountMismatch);
+        })?;
+        let relaxed = fixture.resolve(false)?;
+        assert_eq!(relaxed.adapter, "codex");
+        assert!(matches!(relaxed.readiness, RouteReadiness::Ready { .. }));
+        assert!(matches!(
+            fixture.resolve(true),
+            Err(super::DispatchError::FamilySeparation(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn review_substitution_keeps_a_snapshot_exhausted_unused_family() -> Result<(), Box<dyn Error>>
+    {
+        // Snapshot exhaustion is not an account block: an unused family whose
+        // reading is spent stays selected, as it did before account evidence.
+        let fixture = ReviewFixture::new()?;
+        let now = fixture.now;
+        fixture.seed_claude(|record| {
+            let account = record.account.clone();
+            record.snapshot = Some(provenant_quota::QuotaSnapshot {
+                schema_version: 1,
+                account,
+                revision: 0,
+                status: provenant_quota::QuotaStatus::Exhausted,
+                observed_unix_seconds: now,
+                source_ref: "fixture".into(),
+                authority_ref: None,
+                windows: vec![provenant_quota::QuotaWindow {
+                    pool: "seven_day".into(),
+                    window_seconds: Some(604_800),
+                    used_basis_points: 10_000,
+                    resets_unix_seconds: Some(now + 3_600),
+                }],
+                details: None,
+            });
+        })?;
+        let route = fixture.resolve(false)?;
+        assert_eq!(route.adapter, "claude");
+        assert!(matches!(
+            route.readiness,
+            RouteReadiness::Unavailable {
+                reason: provenant_records::RouteExclusionReason::Exhausted,
+                ..
+            }
         ));
         Ok(())
     }

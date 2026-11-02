@@ -329,7 +329,8 @@ impl run::Providers for Registry<'_> {
                     .map_err(|error| error.to_string())
             })
             .transpose()?;
-        let (routing, accounts, quota, quota_settings) = match context_roots.as_ref().or(self.roots) {
+        let (routing, accounts, quota, quota_settings) = match context_roots.as_ref().or(self.roots)
+        {
             Some(roots) => {
                 let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
                     .map_err(|error| error.to_string())?;

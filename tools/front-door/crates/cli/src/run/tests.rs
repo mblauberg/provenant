@@ -478,6 +478,82 @@ fn an_alternate_account_is_spent_only_by_routing_rule_or_a_live_refusal()
     Ok(())
 }
 #[test]
+fn settlement_alternates_read_the_configured_polling_interval_like_admission()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::{
+        AccountRecord, AccountScope, PollingIntervals, QuotaSnapshot, QuotaStatus, QuotaWindow,
+        Refusal, Settings,
+    };
+    let model = ModelId::parse("codex/gpt-6-luna")?;
+    let now = 1_800_000_000;
+    let scope = AccountScope {
+        adapter: "codex".into(),
+        account_key: "other".into(),
+        label: "other".into(),
+    };
+    // A refusal, then a comparable reading with headroom that is older than
+    // codex's default 900 s timer interval but inside a configured 3600 s one.
+    let mut record = AccountRecord::empty(scope.clone());
+    record.refusals.push(Refusal {
+        extra: Default::default(),
+        account: scope.clone(),
+        model: model.model().into(),
+        pool: Some("seven_day".into()),
+        observed_unix_seconds: now - 1_500,
+        resets_unix_seconds: None,
+    });
+    record.snapshot = Some(QuotaSnapshot {
+        schema_version: 1,
+        account: scope,
+        revision: 0,
+        status: QuotaStatus::Available,
+        observed_unix_seconds: now - 1_200,
+        source_ref: "fixture".into(),
+        authority_ref: None,
+        windows: vec![QuotaWindow {
+            pool: "seven_day".into(),
+            window_seconds: Some(604_800),
+            used_basis_points: 1_000,
+            resets_unix_seconds: Some(now + 3_600),
+        }],
+        details: None,
+    });
+    let catalogue = provenant_routing::Catalogue::bundled()?;
+    let pools = catalogue.admission_pools(&model);
+    let mut configured = Settings::default();
+    configured.polling_intervals.insert(
+        "codex".into(),
+        PollingIntervals {
+            timer_seconds: Some(3_600),
+            panel_seconds: None,
+        },
+    );
+    for (settings, cleared) in [(Settings::default(), false), (configured, true)] {
+        let (records, policies) =
+            crate::route::account_evidence(&settings, vec![record.clone()], now);
+        let blocked = provenant_quota::Admission {
+            policies: &policies,
+            now_unix_seconds: now,
+            records: &records,
+            pools: &pools,
+        }
+        .account_block("codex", "other", model.model())?
+        .is_some();
+        let alternative = unspent_alternative(
+            ["work", "other"],
+            &records,
+            &policies,
+            "work",
+            &model,
+            &catalogue,
+            now,
+        );
+        assert_eq!(blocked, !cleared);
+        assert_eq!(alternative, cleared, "assess must agree with admission");
+    }
+    Ok(())
+}
+#[test]
 fn host_native_attempts_do_not_resume_implicitly_or_explicitly()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
