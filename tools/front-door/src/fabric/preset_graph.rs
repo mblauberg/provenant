@@ -83,15 +83,22 @@ pub(crate) fn publish_preset_graph(
     Ok(scratch.join("graphs").join(filename))
 }
 
-/// `None` when a graph directory owned by `current` is private (mode 0700 after
-/// any repair). Otherwise names the path, the observed mode and the repair.
+/// `None` when the graph directory is owned by `current` and private (mode 0700
+/// after any repair). A foreign owner is told to remove or take over the
+/// directory; an owned one is told the observed mode and `chmod 700`.
 fn private_graph_directory_refusal(
     path: &std::path::Path,
     owner: u32,
     mode: u32,
     current: u32,
 ) -> Option<String> {
-    (owner != current || mode & 0o077 != 0).then(|| {
+    if owner != current {
+        return Some(format!(
+            "preset graph directory {} is owned by uid {owner}, not the current user; remove it or chown it to yourself",
+            path.display()
+        ));
+    }
+    (mode & 0o077 != 0).then(|| {
         format!(
             "preset graph directory {} has mode {:04o} and is not private to the current user; run `chmod 700 {}`",
             path.display(),
@@ -217,8 +224,11 @@ mod tests {
         let foreign = private_graph_directory_refusal(path, 0, 0o40700, 501)
             .expect("another owner is refused");
         assert!(
-            foreign.contains("0700") && foreign.contains("chmod 700"),
+            foreign.contains("/repo/.provenant/scratch/graphs"),
             "{foreign}"
         );
+        assert!(foreign.contains("owned by uid 0"), "{foreign}");
+        assert!(foreign.contains("remove it or chown"), "{foreign}");
+        assert!(!foreign.contains("chmod"), "{foreign}");
     }
 }

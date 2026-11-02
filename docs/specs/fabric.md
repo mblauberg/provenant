@@ -1427,6 +1427,10 @@ authoritative run state; expiry is owned by GC rather than graph execution.
 - Why: graph documents and lane briefs need a discoverable project-local home
   without creating tracked configuration changes.
 - Test: `crates/confinement/src/scratch.rs::scratch_is_local_excluded_idempotent_and_refuses_links`;
+  `crates/confinement/src/scratch.rs::scratch_ignores_legacy_root_and_never_touches_it`;
+  `src/preset_tests.rs::graph_publication_repairs_owned_loose_directory`;
+  `src/fabric/preset_graph.rs::refusal_names_the_path_mode_and_repair`;
+  `src/fabric/facade_tests.rs::bare_graph_miss_names_the_scratch_root_and_searches_no_legacy_root`;
   `crates/cli/src/run/provider.rs::writers_read_the_primary_checkouts_untracked_scratch`.
 - Owner: `crates/confinement/src/scratch.rs`, `crates/cli/src/run/provider.rs`, `src/fabric.rs`
 
