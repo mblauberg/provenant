@@ -192,13 +192,8 @@ forced-colours mode because they also use borders, outlines or text.
 - **Capitalisation and spelling.** Apply one capitalisation rule everywhere;
   sentence case is the usual default. Spelling follows the project's locale.
 
-## AI content and trust cues
+## Trust cues
 
-- **AI-generated or suggested content** is marked where it appears, in text as
-  well as any icon, and kept visibly distinct from data people entered or the
-  system computed. Show its basis or source where possible. A suggestion
-  becomes part of the record only through a person's accept or edit, and
-  history records who accepted it.
 - **Consequential data** carries trust cues: an as-at time on computed or
   cached figures; a history of each change (actor, human or system, time,
   before and after, and source such as the interface, an import or an

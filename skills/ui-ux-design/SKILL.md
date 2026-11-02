@@ -5,7 +5,7 @@ description: "Use for UI/UX review, design, design systems and the shadcn on Bas
 
 # UI/UX design
 
-Start from the approved outcome, existing components and tokens, supported users and actual rendered states. Preserve the existing visual language when the brief calls for it; change it deliberately when the outcome requires it. Read [craft](references/craft.md) for interaction, accessibility and visual proof. Apply the [product design defaults](references/principles.md) when designing or judging a surface: action safety, feedback, surface states, modality, tables, keyboard, accessibility, colour, tokens, content and AI trust cues. A project's own design doc overrides them.
+Start from the approved outcome, existing components and tokens, supported users and actual rendered states. Preserve the existing visual language when the brief calls for it; change it deliberately when the outcome requires it. Read [craft](references/craft.md) for interaction, accessibility and visual proof. Apply the [product design defaults](references/principles.md) when designing or judging a surface: action safety, feedback, surface states, modality, tables, keyboard, accessibility, colour, tokens, content and trust cues. A project's own design doc overrides them.
 
 Review is read-only: inspect source and rendered surfaces without changing project or external state. Store captures and reports outside the reviewed tree; recording findings as an indexed repository document is a separate companion step under `engineering-docs` authority. If a browser is unavailable, mark the rendered surface not tested. Use playwright for browser inspection. For a requested change, implement owns delivery; review the rendered result afresh after repair.
 
