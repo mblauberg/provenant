@@ -813,6 +813,7 @@ mod tests {
         assert_eq!(backoff(ProbeFailure::Auth, 1, None), 900);
         assert_eq!(backoff(ProbeFailure::MissingCli, 1, None), 86400);
         assert_eq!(backoff(ProbeFailure::ProbeDirectory, 1, None), 120);
+        assert_eq!(backoff(ProbeFailure::Disabled, 1, None), 86400);
     }
     #[test]
     fn report_shows_only_live_capacity_cooldowns() {
