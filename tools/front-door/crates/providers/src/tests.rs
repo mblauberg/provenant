@@ -3848,6 +3848,14 @@ fn agy_account_probe_reports_a_missing_probe_root_as_a_probe_failure() {
     assert_eq!(std::fs::read_dir(&host_root).unwrap().count(), 0);
 }
 
+/// An isolated agy account directory holds its own keychain as a regular file,
+/// which the probe requires before it runs.
+fn write_agy_keychain(directory: &Path) {
+    let keychain = directory.join(KEYCHAIN_FILE);
+    std::fs::create_dir_all(keychain.parent().unwrap()).unwrap();
+    std::fs::write(keychain, b"").unwrap();
+}
+
 #[test]
 fn registration_reports_probe_directory_failures_from_the_executor() {
     use provenant_os::exec::{ExecError, ExecOptions, ExecOutcome, Executor};
@@ -3868,7 +3876,9 @@ fn registration_reports_probe_directory_failures_from_the_executor() {
         // database exists, so give it one to reach the probe.
         let identity = tempfile::tempdir().unwrap();
         std::fs::write(identity.path().join("state.vscdb"), b"").unwrap();
-        let directory = if adapter == "cursor" {
+        // An isolated agy account must hold its own keychain to reach the probe.
+        write_agy_keychain(identity.path());
+        let directory = if matches!(adapter, "cursor" | "agy") {
             identity.path()
         } else {
             Path::new("/home/test/identity")
@@ -3909,7 +3919,9 @@ fn registration_names_probe_directory_failures() {
     for adapter in ["claude", "cursor", "agy"] {
         let identity = tempfile::tempdir().unwrap();
         std::fs::write(identity.path().join("state.vscdb"), b"").unwrap();
-        let directory = if adapter == "cursor" {
+        // An isolated agy account must hold its own keychain to reach the probe.
+        write_agy_keychain(identity.path());
+        let directory = if matches!(adapter, "cursor" | "agy") {
             identity.path()
         } else {
             Path::new("/home/test/identity")
@@ -3949,6 +3961,8 @@ fn registration_keeps_other_executor_failures_as_unknown_identity() {
         }
     }
     let state = tempfile::tempdir().unwrap();
+    let agy = tempfile::tempdir().unwrap();
+    write_agy_keychain(agy.path());
     for adapter in ["claude", "cursor", "agy"] {
         for busy in [false, true] {
             let result = crate::accounts::detect_with_org(
@@ -3957,13 +3971,29 @@ fn registration_keeps_other_executor_failures_as_unknown_identity() {
                 Path::new("/bin/provider"),
                 Path::new("/home/test"),
                 OsStr::new("test"),
-                Path::new("/home/test/identity"),
+                if adapter == "agy" {
+                    agy.path()
+                } else {
+                    Path::new("/home/test/identity")
+                },
                 state.path(),
             );
             assert!(matches!(result, Err(ProviderError::UnknownIdentity)));
             assert_eq!(std::fs::read_dir(state.path()).unwrap().count(), 0);
         }
     }
+    // The user's own login has no isolated keychain to guard, so the guard
+    // passes the executor's failure through unchanged.
+    let result = crate::accounts::detect_with_org(
+        &Fail { busy: false },
+        "agy",
+        Path::new("/bin/provider"),
+        Path::new("/home/test"),
+        OsStr::new("test"),
+        Path::new("/home/test"),
+        state.path(),
+    );
+    assert!(matches!(result, Err(ProviderError::UnknownIdentity)));
 }
 
 #[test]
@@ -4809,7 +4839,14 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
         };
         let outcome = replay(adapter, recording, EXIT)?.1;
         let route = route(id, outcome.model().unwrap_or("fixture-model"));
-        let account_dir = std::path::Path::new("/fixture/identities/opaque");
+        // An isolated agy account holds its own keychain as a regular file.
+        let agy_dir = tempfile::tempdir().unwrap();
+        write_agy_keychain(agy_dir.path());
+        let account_dir = if id == "agy" {
+            agy_dir.path()
+        } else {
+            std::path::Path::new("/fixture/identities/opaque")
+        };
         let account = matches!(id, "claude" | "codex" | "agy")
             .then(|| identity::RegisteredAccount::new(id, "opaque-account", account_dir.into()))
             .transpose()?;
