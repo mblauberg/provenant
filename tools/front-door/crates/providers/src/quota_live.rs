@@ -27,26 +27,45 @@ use std::{
 };
 
 const LIMIT: usize = 1_048_576;
-fn command_error(error: ExecError) -> ProbeFailure {
+/// A day's backoff is for a probe binary that is absent or cannot execute.
+/// Any other failure is the host (busy executor, process budget, a probe
+/// directory that vanished before spawn) and retries on the short `Network`
+/// schedule. No new persisted variant: older readers reject unknown values.
+fn command_error(program: &str, error: ExecError) -> ProbeFailure {
     match error {
         ExecError::Io {
             operation: PROBE_DIR_OPERATION,
             ..
         } => ProbeFailure::ProbeDirectory,
-        // Only a binary that cannot be found or executed is worth a day's
-        // backoff; anything else is the host, and clears on a short retry.
         ExecError::Io {
             operation: "spawn",
             source,
-        } if matches!(
-            source.kind(),
-            std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
-        ) =>
+        } if source.raw_os_error() == Some(libc_enoexec())
+            || (matches!(
+                source.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+            ) && !runnable(program)) =>
         {
             ProbeFailure::MissingCli
         }
-        _ => ProbeFailure::Command,
+        _ => ProbeFailure::Network,
     }
+}
+const fn libc_enoexec() -> i32 {
+    8
+}
+/// Whether `program` resolves, directly or through `PATH`, to an executable file.
+fn runnable(program: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let executable = |path: &Path| {
+        fs::metadata(path)
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    };
+    if program.contains('/') {
+        return executable(Path::new(program));
+    }
+    std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| executable(&dir.join(program))))
 }
 struct Account {
     scope: AccountScope,
@@ -161,7 +180,7 @@ impl LiveQuota {
         if remaining <= 0 {
             return Err(ProbeFailure::Network);
         }
-        let system = SystemExecutor::new(1).map_err(|_| ProbeFailure::Command)?;
+        let system = SystemExecutor::new(1).map_err(|_| ProbeFailure::Network)?;
         let executor = crate::host::HostProbeExecutor::new(&system, &self.state)
             .map_err(|_| ProbeFailure::ProbeDirectory)?;
         let mut argv = vec![OsString::from(program)];
@@ -190,7 +209,9 @@ impl LiveQuota {
         options.stdout = StreamPolicy::Capture { limit: LIMIT };
         options.stderr = StreamPolicy::Discard;
         options.stop_on_output_limit = true;
-        executor.execute(options).map_err(command_error)
+        executor
+            .execute(options)
+            .map_err(|error| command_error(program, error))
     }
     fn json_command(
         &self,
@@ -577,21 +598,43 @@ mod tests {
 
     #[test]
     fn command_names_per_command_probe_directory_failures() {
-        let failure = command_error(ExecError::Io {
-            operation: PROBE_DIR_OPERATION,
-            source: std::io::Error::other("test directory failure"),
-        });
+        let failure = command_error(
+            "/bin/sh",
+            ExecError::Io {
+                operation: PROBE_DIR_OPERATION,
+                source: std::io::Error::other("test directory failure"),
+            },
+        );
         assert_eq!(serde_json::to_value(failure).unwrap(), "probe_directory");
+        let spawn = |kind| ExecError::Io {
+            operation: "spawn",
+            source: std::io::Error::from(kind),
+        };
         for kind in [
             std::io::ErrorKind::NotFound,
             std::io::ErrorKind::PermissionDenied,
         ] {
-            let failure = command_error(ExecError::Io {
-                operation: "spawn",
-                source: std::io::Error::from(kind),
-            });
-            assert_eq!(failure, ProbeFailure::MissingCli);
+            // An absent binary backs off for a day; a present one that fails
+            // to spawn (its probe directory vanished) retries soon.
+            assert_eq!(
+                command_error("/nonexistent/provenant-probe", spawn(kind)),
+                ProbeFailure::MissingCli
+            );
+            assert_eq!(
+                command_error("provenant-probe-not-on-path", spawn(kind)),
+                ProbeFailure::MissingCli
+            );
+            assert_eq!(command_error("/bin/sh", spawn(kind)), ProbeFailure::Network);
+            assert_eq!(command_error("sh", spawn(kind)), ProbeFailure::Network);
         }
+        let not_executable = ExecError::Io {
+            operation: "spawn",
+            source: std::io::Error::from_raw_os_error(libc_enoexec()),
+        };
+        assert_eq!(
+            command_error("/bin/sh", not_executable),
+            ProbeFailure::MissingCli
+        );
         for failure in [
             ExecError::Busy,
             ExecError::ProcessBudget { used: 9, limit: 8 },
@@ -604,12 +647,8 @@ mod tests {
                 source: std::io::Error::other("test poll failure"),
             },
         ] {
-            assert_eq!(command_error(failure), ProbeFailure::Command);
+            assert_eq!(command_error("/bin/sh", failure), ProbeFailure::Network);
         }
-        assert_eq!(
-            serde_json::to_value(ProbeFailure::Command).unwrap(),
-            "command"
-        );
     }
 
     #[test]

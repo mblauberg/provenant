@@ -109,7 +109,7 @@ pub fn backoff(failure: ProbeFailure, failures: u64, retry_after_seconds: Option
         }
         ProbeFailure::Auth | ProbeFailure::AccountMismatch => 900,
         ProbeFailure::MissingCli | ProbeFailure::Disabled => 86400,
-        ProbeFailure::Malformed | ProbeFailure::ProbeDirectory | ProbeFailure::Command => 120,
+        ProbeFailure::Malformed | ProbeFailure::ProbeDirectory => 120,
     };
     base.max(retry_after_seconds.unwrap_or(0).min(86400))
 }
@@ -813,7 +813,6 @@ mod tests {
         assert_eq!(backoff(ProbeFailure::Auth, 1, None), 900);
         assert_eq!(backoff(ProbeFailure::MissingCli, 1, None), 86400);
         assert_eq!(backoff(ProbeFailure::ProbeDirectory, 1, None), 120);
-        assert_eq!(backoff(ProbeFailure::Command, 1, None), 120);
         assert_eq!(backoff(ProbeFailure::Disabled, 1, None), 86400);
     }
     #[test]
