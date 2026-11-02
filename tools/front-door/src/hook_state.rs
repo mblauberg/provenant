@@ -6,7 +6,7 @@
 use provenant_cli::Globals;
 use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
 use provenant_workflow::session::{
-    CommandPrefix, LaneLine, PrLine, PrUnread, SessionState, WorktreeLine,
+    CommandPrefix, LaneLine, PrLine, PrUnread, SessionState, Unavailable, WorktreeLine,
 };
 use serde_json::Value;
 use std::{
@@ -17,7 +17,7 @@ use std::{
 
 const OUTPUT_CAP: usize = 512 * 1024;
 const LANE_PAGE: &str = "100";
-const LISTING_TIME: Duration = Duration::from_secs(2);
+const LISTING_TIME: Duration = Duration::from_secs(3);
 const PR_TIME: Duration = Duration::from_secs(3);
 /// Outcomes after which a lane no longer runs. `input_required` is included:
 /// the lane stopped and waits for the chair.
@@ -54,9 +54,14 @@ pub struct Cli<'a> {
     executor: &'a SystemExecutor,
 }
 impl<'a> Cli<'a> {
-    pub fn new(globals: &'a Globals, cwd: &'a Path, executor: &'a SystemExecutor) -> Option<Self> {
-        Some(Self {
-            exe: std::env::current_exe().ok()?,
+    pub fn new(
+        globals: &'a Globals,
+        cwd: &'a Path,
+        executor: &'a SystemExecutor,
+    ) -> std::io::Result<Self> {
+        let exe = std::env::current_exe()?;
+        Ok(Self {
+            exe,
             state_dir: globals.state_dir.as_deref(),
             cwd,
             executor,
@@ -113,18 +118,45 @@ impl<'a> Cli<'a> {
     }
 }
 
+fn unavailable_sources(state: &mut SessionState, want: &Want, reason: String) {
+    state.unavailable.push(Unavailable {
+        source: "lanes".into(),
+        reason: reason.clone(),
+    });
+    if want.worktrees {
+        state.unavailable.push(Unavailable {
+            source: "worktrees".into(),
+            reason,
+        });
+    }
+}
+
 pub fn collect(globals: &Globals, cwd: &Path, want: &Want, deadline: Instant) -> SessionState {
     let mut state = SessionState {
         commands: CommandPrefix::new(globals.state_dir.as_deref(), cwd),
         ..Default::default()
     };
-    let executor = SystemExecutor::new(4 + want.pr_refs.len()).ok();
-    let cli = executor
-        .as_ref()
-        .and_then(|executor| Cli::new(globals, cwd, executor));
-    let Some(cli) = cli else {
-        state.unavailable.push("lanes".into());
-        return state;
+    let executor = match SystemExecutor::new(4 + want.pr_refs.len()) {
+        Ok(executor) => executor,
+        Err(error) => {
+            unavailable_sources(
+                &mut state,
+                want,
+                format!("command executor unavailable: {error}"),
+            );
+            return state;
+        }
+    };
+    let cli = match Cli::new(globals, cwd, &executor) {
+        Ok(cli) => cli,
+        Err(error) => {
+            unavailable_sources(
+                &mut state,
+                want,
+                format!("current executable unavailable: {error}"),
+            );
+            return state;
+        }
     };
     let mut terminal_args = vec!["lanes", "--all", "--limit", LANE_PAGE];
     for outcome in TERMINAL {
@@ -152,21 +184,47 @@ pub fn collect(globals: &Globals, cwd: &Path, want: &Want, deadline: Instant) ->
                 })
             })
             .collect();
-        match (active.join(), settled.join()) {
-            (Ok(Ok(active)), Ok(Ok(settled))) => {
+        match active.join() {
+            Ok(Ok(active)) => {
                 let (lanes, next) = parse_lanes(&active, None);
                 state.active = lanes;
                 state.active_more = next.map(|cursor| next_page(&cursor, false, &state.commands));
+            }
+            Ok(Err(reason)) => state.unavailable.push(Unavailable {
+                source: "active lanes".into(),
+                reason,
+            }),
+            Err(_) => state.unavailable.push(Unavailable {
+                source: "active lanes".into(),
+                reason: "listing worker panicked".into(),
+            }),
+        }
+        match settled.join() {
+            Ok(Ok(settled)) => {
                 let (lanes, next) = parse_lanes(&settled, Some(want.settled_after_unix));
                 state.settled = lanes;
                 state.settled_more = next.map(|cursor| next_page(&cursor, true, &state.commands));
             }
-            _ => state.unavailable.push("lanes".into()),
+            Ok(Err(reason)) => state.unavailable.push(Unavailable {
+                source: "settled lanes".into(),
+                reason,
+            }),
+            Err(_) => state.unavailable.push(Unavailable {
+                source: "settled lanes".into(),
+                reason: "listing worker panicked".into(),
+            }),
         }
         if let Some(handle) = worktrees {
             match handle.join() {
                 Ok(Ok(list)) => state.worktrees = parse_worktrees(&list),
-                _ => state.unavailable.push("worktrees".into()),
+                Ok(Err(reason)) => state.unavailable.push(Unavailable {
+                    source: "worktrees".into(),
+                    reason,
+                }),
+                Err(_) => state.unavailable.push(Unavailable {
+                    source: "worktrees".into(),
+                    reason: "listing worker panicked".into(),
+                }),
             }
         }
         for handle in prs {
@@ -323,6 +381,28 @@ fn pr_status(data: &Value) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn shared_cli_setup_failure_marks_each_requested_source() {
+        use super::*;
+        let want = Want {
+            worktrees: true,
+            settled_after_unix: 0,
+            pr_refs: vec![],
+        };
+        let mut state = SessionState::default();
+        unavailable_sources(&mut state, &want, "executable unavailable".into());
+
+        let names: Vec<_> = state
+            .unavailable
+            .iter()
+            .map(|unavailable| unavailable.source.as_str())
+            .collect();
+        assert_eq!(names, ["lanes", "worktrees"]);
+        let digest = state.digest(provenant_workflow::session::DIGEST_LIMIT);
+        assert!(digest.contains("lanes unavailable: executable unavailable"));
+        assert!(digest.contains("worktrees unavailable: executable unavailable"));
+    }
 
     #[test]
     fn lanes_degrade_when_fields_are_absent() {

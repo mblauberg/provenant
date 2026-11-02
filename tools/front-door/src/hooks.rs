@@ -788,7 +788,19 @@ fn autosave(
         if state.unavailable.is_empty() {
             String::new()
         } else {
-            format!(" Unavailable: {}.", state.unavailable.join(", "))
+            let reasons = state
+                .unavailable
+                .iter()
+                .map(|unavailable| {
+                    format!(
+                        "{}: {}",
+                        session::clean(&unavailable.source, 32),
+                        session::clean(&unavailable.reason, 120)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(" Unavailable: {reasons}.")
         }
     ))
 }
