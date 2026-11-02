@@ -375,12 +375,7 @@ impl ReviewConfig {
     /// other slots take the kind's order without repeats, and a slot with no
     /// lens left is dropped. Kind additions and risk-tag lenses follow outside
     /// the slot cap, in the pool of the last group.
-    pub fn panel(
-        &self,
-        shape: &ReviewShape,
-        kind: Option<&str>,
-        extra: &[&str],
-    ) -> ReviewShape {
+    pub fn panel(&self, shape: &ReviewShape, kind: Option<&str>, extra: &[&str]) -> ReviewShape {
         let plan = self.lens_plan(kind);
         let mut used: Vec<String> = shape
             .reviewers
@@ -413,7 +408,12 @@ impl ReviewConfig {
             }
         }
         let mut added = Vec::new();
-        for lens in plan.add.iter().map(String::as_str).chain(extra.iter().copied()) {
+        for lens in plan
+            .add
+            .iter()
+            .map(String::as_str)
+            .chain(extra.iter().copied())
+        {
             if !used.iter().any(|existing| existing == lens) {
                 used.push(lens.to_owned());
                 added.push(lens.to_owned());

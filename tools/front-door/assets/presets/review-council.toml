@@ -29,12 +29,14 @@ verifiers = { type = "integer", default = 1, min = 0, max = 1, doc = "Verifier s
 verifier_tier = { type = "string", default = "verifier", doc = "Route for the verifier. Define a route named verifier in another model family; without one the senior route is used and the substitution is recorded." }
 risk_tags = { type = "list", default = [], doc = "Tags that trigger conditional lenses: security, concurrency, terminal." }
 # Lens tiers left empty come from the routing review shape. Set a tier to override.
+# Slots fill in this order; routing's review.lenses.order and kind rules reorder or
+# extend it unless a caller supplies its own list, which keeps its order.
 lenses = [
   { name = "correctness-spec", tier = "", when = "" },
+  { name = "tests", tier = "", when = "" },
   { name = "design-fit-reuse", tier = "", when = "" },
   { name = "simplicity", tier = "", when = "" },
   { name = "conventions-readability", tier = "", when = "" },
-  { name = "tests", tier = "", when = "" },
   { name = "refactor-cleanup", tier = "", when = "" },
   { name = "reliability", tier = "", when = "" },
   { name = "flexibility", tier = "", when = "" },

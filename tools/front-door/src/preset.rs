@@ -11,30 +11,10 @@ const DEPTH: usize = 8;
 #[path = "preset_cli.rs"]
 mod presentation;
 
-/// The review shape selected for one review stage. Review shapes are canonical
-/// for who reviews; presets compose them, so lens counts and tiers default from here.
-/// Picks a review shape from a stage's `review_shape` and `risk_tier`. The host
-/// owns routing, so it supplies this from its review configuration.
-pub type ShapeSelector = Box<
-    dyn Fn(
-        Option<&str>,
-        Option<&str>,
-        Option<&str>,
-        Option<&str>,
-        Option<&str>,
-        Option<&str>,
-    ) -> Result<ShapeHint, String>,
->;
-
-#[derive(Clone, Debug, Default)]
-pub struct ShapeHint {
-    pub name: String,
-    pub source: String,
-    /// Reviewer pools in shape order, one entry per reviewer.
-    pub slots: Vec<String>,
-    /// Lens names a shape reviewer group names explicitly, with its pool.
-    pub named: Vec<(String, String)>,
-}
+mod panel;
+#[cfg(test)]
+pub use panel::ShapeHint;
+pub use panel::{ShapeSelector, review_selector};
 
 #[derive(Default)]
 pub struct Layers {
@@ -1677,145 +1657,6 @@ impl StageBuilder<'_> {
         Ok(incoming)
     }
 
-    /// The shape this stage's final parameters select, if shapes are configured.
-    fn shape_hint(&self) -> Result<Option<ShapeHint>, String> {
-        let Some(select) = &self.layers.review else {
-            return Ok(None);
-        };
-        let text = |key: &str| {
-            self.parameters
-                .get(key)
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-        };
-        let subject = self.parameters.get("subject");
-        let commit = subject
-            .and_then(|subject| subject.get("commit"))
-            .and_then(Value::as_str);
-        let kind = if subject
-            .and_then(|subject| subject.get("type"))
-            .and_then(Value::as_str)
-            == Some("integration")
-        {
-            Some("integration")
-        } else {
-            text("kind")
-        };
-        let hint = select(
-            text("review_shape"),
-            text("risk_tier"),
-            kind,
-            text("size"),
-            text("base"),
-            commit,
-        )?;
-        self.layers
-            .used_shapes
-            .borrow_mut()
-            .insert(format!("{} ({})", hint.name, hint.source));
-        Ok(Some(hint))
-    }
-
-    /// Apply `when` triggers and the selected review shape to a lens list.
-    /// An item without a tier takes it from the shape, and only such items count
-    /// against the shape's reviewer total; a tier set in the preset is an override.
-    fn select_items(&self, mut list: Vec<Value>) -> Result<Vec<Value>, String> {
-        let kind = self
-            .parameters
-            .get("kind")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let priority = provenant_routing::lens_priority(Some(kind));
-        if kind == "docs" {
-            list.retain(|item| {
-                item.get("when")
-                    .and_then(Value::as_str)
-                    .is_some_and(|when| !when.is_empty())
-                    || item["name"] == "conventions-readability"
-            });
-        }
-        list.sort_by_key(|item| {
-            priority
-                .iter()
-                .position(|name| item["name"] == *name)
-                .unwrap_or(priority.len())
-        });
-        let mut tags: Vec<&str> = self
-            .parameters
-            .get("risk_tags")
-            .and_then(Value::as_array)
-            .map(|tags| tags.iter().filter_map(Value::as_str).collect())
-            .unwrap_or_default();
-        if self.parameters.get("risk_tier").and_then(Value::as_str) == Some("terminal") {
-            tags.push("terminal");
-        }
-        let hint = self.shape_hint()?;
-        let shape = hint.as_ref();
-        let limit = shape.map_or(usize::MAX, |shape| shape.slots.len().max(1));
-        let mut governed = 0usize;
-        let mut selected = Vec::new();
-        for mut item in list {
-            let when = item.get("when").and_then(Value::as_str).unwrap_or_default();
-            if !when.is_empty() && !tags.contains(&when) {
-                self.layers.warnings.borrow_mut().push(format!(
-                    "preset {}: omitted lens {}: requires risk tag {when}",
-                    self.name, item["name"]
-                ));
-                continue;
-            }
-            let tier = item.get("tier").and_then(Value::as_str).unwrap_or_default();
-            if tier.is_empty() {
-                let name = item["name"].as_str().unwrap_or_default().to_owned();
-                if when.is_empty() {
-                    if governed >= limit {
-                        self.layers.warnings.borrow_mut().push(format!(
-                            "preset {}: omitted lens {name}: review shape has {limit} slots",
-                            self.name
-                        ));
-                        continue;
-                    }
-                    governed += 1;
-                }
-                let pool = shape.and_then(|shape| {
-                    shape
-                        .named
-                        .iter()
-                        .find(|(lens, _)| name == *lens || name.starts_with(&format!("{lens}-")))
-                        .map(|(_, pool)| pool.clone())
-                        .or_else(|| {
-                            shape
-                                .slots
-                                .get(governed.saturating_sub(1))
-                                .or(shape.slots.last())
-                                .cloned()
-                        })
-                });
-                item["tier"] = json!(pool.unwrap_or_else(|| "senior".into()));
-            }
-            selected.push(item);
-        }
-        if kind == "docs"
-            && shape.is_some()
-            && let Some(first) = selected
-                .iter()
-                .find(|item| item["name"] == "conventions-readability")
-                .cloned()
-        {
-            for index in 1..limit {
-                let mut item = first.clone();
-                item["_panel_slot"] = json!(index + 1);
-                if let Some(pool) = shape.and_then(|shape| shape.slots.get(index)) {
-                    item["tier"] = json!(pool);
-                }
-                selected.push(item);
-            }
-        }
-        if selected.is_empty() {
-            return Err("for_each selected no items".into());
-        }
-        Ok(selected)
-    }
-
     fn entry(
         &mut self,
         entry: &Value,
@@ -1877,11 +1718,7 @@ impl StageBuilder<'_> {
                     let name = item["name"].as_str().filter(|n| valid_name(n)).ok_or(
                         "for_each items need a name of lowercase letters, digits and dashes",
                     )?;
-                    if let Some(slot) = item.get("_panel_slot").and_then(Value::as_u64) {
-                        format!("{base}-{name}-{slot}")
-                    } else {
-                        format!("{base}-{name}")
-                    }
+                    format!("{base}-{name}")
                 }
                 None if count == 1 => base.to_owned(),
                 None => format!("{base}-{index}"),
@@ -2934,81 +2771,11 @@ pub fn run(
         };
         let mut layers = configured(globals)?;
         layers.known_routes = Some(config.domains.routing.routes.keys().cloned().collect());
-        let review = config.domains.routing.review.clone();
-        let review_directory = directory.clone();
-        let task_kind = request.task_kind.clone();
-        layers.review = Some(Box::new(move |named, risk, kind, size, base, subject| {
-            let measured = if size.is_none() {
-                if let (Some(base), Some(subject)) = (base, subject) {
-                    if base.starts_with('-') || subject.starts_with('-') {
-                        return Err("review refs must not begin with -".into());
-                    }
-                    use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
-                    let git =
-                        provenant_os::git::git_executable().ok_or("Git executable unavailable")?;
-                    let run_git = |args: &[&str]| -> Result<String, String> {
-                        let mut argv = vec![git.clone().into_os_string()];
-                        argv.extend(args.iter().map(std::ffi::OsString::from));
-                        let output = SystemExecutor::new(1)
-                            .map_err(|e| e.to_string())?
-                            .execute(ExecOptions::new(
-                                &argv,
-                                &review_directory,
-                                std::time::Duration::from_secs(30),
-                            ))
-                            .map_err(|e| e.to_string())?;
-                        if output.termination != Termination::Exit(0)
-                            || output.timed_out
-                            || output.stdout.truncated
-                        {
-                            return Err("cannot measure review diff".into());
-                        }
-                        String::from_utf8(output.stdout.bytes).map_err(|e| e.to_string())
-                    };
-                    let numstat = run_git(&[
-                        "diff",
-                        "--numstat",
-                        "--no-renames",
-                        "-z",
-                        base,
-                        subject,
-                        "--",
-                    ])?;
-                    let tree = format!(
-                        "{}{}",
-                        run_git(&["ls-tree", "-r", "-z", "--name-only", base])?,
-                        run_git(&["ls-tree", "-r", "-z", "--name-only", subject])?
-                    );
-                    Some(review.size.classify_numstat(&numstat, &tree).to_owned())
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            let kind = kind.or(task_kind.as_deref());
-            let size = size.or(measured.as_deref());
-            let selected = review.select_shape(named, risk, kind, &[], size)?;
-            let mut hint = ShapeHint {
-                name: selected.name.to_owned(),
-                source: format!(
-                    "{}; size={}; kind={}; risk={}",
-                    selected.source,
-                    size.unwrap_or("unknown"),
-                    kind.unwrap_or("unknown"),
-                    risk.unwrap_or("unknown")
-                ),
-                ..Default::default()
-            };
-            for group in &selected.shape.reviewers {
-                hint.slots
-                    .extend(std::iter::repeat_n(group.pool.clone(), group.count));
-                for lens in &group.lenses {
-                    hint.named.push((lens.clone(), group.pool.clone()));
-                }
-            }
-            Ok(hint)
-        }));
+        layers.review = Some(review_selector(
+            config.domains.routing.review.clone(),
+            directory.clone(),
+            request.task_kind.clone(),
+        ));
         // Experiments apply only to work items and never beside an explicit
         // preset. A malformed entry warns and is skipped; the others still apply.
         let placement = match (request.preset.is_none(), request.task_id.as_ref()) {

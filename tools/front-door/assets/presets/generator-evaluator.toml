@@ -27,6 +27,8 @@ base = { type = "string", default = "", doc = "Diff reference the slice is measu
 spec = { type = "string", default = "", doc = "Issue number or file holding the acceptance criteria." }
 risk_tier = { type = "string", default = "", doc = "Risk tier that selects the review shape." }
 review_shape = { type = "string", default = "", doc = "Explicit review shape override." }
+kind = { type = "string", default = "", doc = "Change kind that scales the lens panel: refactor, docs. Empty uses the task kind." }
+size = { type = "string", default = "", doc = "Review size override (small, medium, large). Empty measures the change against base in the worktree." }
 evaluator = { type = "string", default = "senior", doc = "Routing tier for the evaluator that reconciles the lens findings." }
 risk_tags = { type = "list", default = [], doc = "Tags that trigger conditional lenses." }
 lenses = [

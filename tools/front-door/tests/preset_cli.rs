@@ -689,6 +689,29 @@ fn explain_text(preset: &str, extra: &[&str]) -> Result<String, Box<dyn std::err
                 .success()
         );
     }
+    // A small change on top of the base, so a review stage can measure it.
+    std::fs::write(project.join("change.txt"), "one line\n")?;
+    for args in [
+        &["add", "change.txt"][..],
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "commit",
+            "-q",
+            "-m",
+            "change",
+        ],
+    ] {
+        assert!(
+            provenant_os::fixture::git_command()
+                .current_dir(&project)
+                .args(args)
+                .status()?
+                .success()
+        );
+    }
     let prompt = temp.path().join("brief");
     std::fs::write(&prompt, "the change")?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -815,6 +838,13 @@ fn scout_swarm_and_generator_evaluator_explain_goldens() -> Result<(), Box<dyn s
 fn remaining_bundled_patterns_have_explain_goldens() -> Result<(), Box<dyn std::error::Error>> {
     let worktree = ["--set", "parameters.worktree=\".\""];
     let batch = ["--set", "parameters.batch_worktree=\".\""];
+    // The review stage measures the last commit against its parent.
+    let deliver = [
+        "--set",
+        "parameters.worktree=\".\"",
+        "--set",
+        "parameters.base=\"HEAD~1\"",
+    ];
     for (name, extra) in [
         ("single", &[][..]),
         ("chain", &[]),
@@ -822,7 +852,7 @@ fn remaining_bundled_patterns_have_explain_goldens() -> Result<(), Box<dyn std::
         ("fan-out-synthesise", &[]),
         ("big-batch", &batch[..]),
         ("scope-then-run", &worktree[..]),
-        ("deliver", &worktree[..]),
+        ("deliver", &deliver[..]),
     ] {
         golden(&format!("{name}.explain.txt"), &explain_text(name, extra)?)?;
     }

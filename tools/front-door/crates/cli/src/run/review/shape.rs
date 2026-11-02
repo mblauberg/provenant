@@ -50,9 +50,9 @@ pub(super) fn inputs(
         Err(error) => inputs.warnings.push(error.message),
     }
     let (base, tip) = split_range(&range, head);
-    let measured = review
-        .size
-        .measure(kind, base, tip, &mut |args| git(args).map_err(|e| e.message));
+    let measured = review.size.measure(kind, base, tip, &mut |args| {
+        git(args).map_err(|e| e.message)
+    });
     inputs.size = measured.size;
     inputs.warnings.extend(measured.warning);
     Ok(inputs)
@@ -126,7 +126,10 @@ mod tests {
 
     #[test]
     fn explicit_shape_skips_range_validation() {
-        assert_eq!(selection_range(Some("quick"), Some("-invalid")).unwrap(), None);
+        assert_eq!(
+            selection_range(Some("quick"), Some("-invalid")).unwrap(),
+            None
+        );
         assert!(selection_range(None, Some("-invalid")).is_err());
         assert_eq!(
             selection_range(None, Some("main..HEAD")).unwrap(),

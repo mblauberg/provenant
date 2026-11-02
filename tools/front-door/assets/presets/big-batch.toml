@@ -4,11 +4,11 @@ stages = [
   { id = "lanes", parallel = [
     { id = "lane", for_each = "${lanes}", preset = "generator-evaluator", parameters = { worktree = "${item.worktree}", scope = "${item.scope}", spec = "${item.spec}", base = "${base}", delivery = "integrate:${integration_branch}" } },
   ] },
-  { id = "council", preset = "review-council", parameters = { subject = { type = "integration" }, worktree = "${batch_worktree}", base = "${base}", spec = "${spec}", risk_tier = "${risk_tier}", review_shape = "${review_shape}", risk_tags = "${risk_tags}" } },
+  { id = "council", preset = "review-council", parameters = { subject = { type = "integration" }, worktree = "${batch_worktree}", base = "${base}", spec = "${spec}", risk_tier = "${risk_tier}", review_shape = "${review_shape}", kind = "${kind}", size = "${size}", risk_tags = "${risk_tags}" } },
   { id = "refactor", role = "refactor-principal" },
   { id = "repair", loop = { max_rounds = 2, until = "accept", stages = [
     { id = "fix", role = "repairer" },
-    { id = "review", preset = "review-council", parameters = { subject = { type = "node", node = "fix" }, worktree = "${batch_worktree}", base = "${base}", spec = "${spec}", risk_tier = "${risk_tier}", review_shape = "${review_shape}", risk_tags = "${risk_tags}" } },
+    { id = "review", preset = "review-council", parameters = { subject = { type = "node", node = "fix" }, worktree = "${batch_worktree}", base = "${base}", spec = "${spec}", risk_tier = "${risk_tier}", review_shape = "${review_shape}", kind = "${kind}", size = "${size}", risk_tags = "${risk_tags}" } },
     { id = "accept", kind = "gate", condition = { type = "verdict", expected = "VERDICT: PASS", threshold = "all" }, inputs = [{ node = "review", outputs = ["verdict"] }] },
   ] } },
 ]
@@ -31,6 +31,8 @@ base = { type = "string", default = "", doc = "Diff reference the batch is measu
 spec = { type = "string", default = "", doc = "Issue number or file the batch answers." }
 risk_tier = { type = "string", default = "", doc = "Risk tier that selects the review shape." }
 review_shape = { type = "string", default = "", doc = "Explicit review shape override." }
+kind = { type = "string", default = "", doc = "Change kind that scales the review panel: refactor, integration, docs. Empty uses the task kind." }
+size = { type = "string", default = "", doc = "Review size override (small, medium, large). Empty measures the change against base in the worktree." }
 risk_tags = { type = "list", default = [], doc = "Tags that trigger conditional lenses." }
 # One entry per lane: name, worktree, scope and spec. Supply with --params-file.
 lanes = [
