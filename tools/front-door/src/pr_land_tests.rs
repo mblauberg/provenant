@@ -1230,6 +1230,12 @@ pub(crate) fn pr_land_from_lane_ignores_only_its_callers() -> Result {
                 value.to_string().contains("worktree writer is live"),
                 "{value}"
             );
+            assert!(
+                value
+                    .to_string()
+                    .contains("run from the main checkout or another directory"),
+                "{value}"
+            );
         }
         drop(worker);
         landing.rig.project = main;

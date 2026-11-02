@@ -44,6 +44,132 @@ fn preset_explain_warns_about_every_omitted_lens() -> Result<(), Box<dyn std::er
     Ok(())
 }
 
+#[test]
+fn bound_worktree_default_head_subject_resolves_in_that_worktree()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let invoking = temp.path().join("invoking");
+    std::fs::create_dir(&invoking)?;
+    let git = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
+        let output = provenant_os::fixture::git_command()
+            .current_dir(&invoking)
+            .args(args)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    };
+    git(&["init", "-q"])?;
+    git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "commit",
+        "--allow-empty",
+        "-qm",
+        "writer head A",
+    ])?;
+    let worktree_head = git(&["rev-parse", "HEAD"])?;
+    git(&["branch", "writer"])?;
+    git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "commit",
+        "--allow-empty",
+        "-qm",
+        "invoking head B",
+    ])?;
+    let invoking_head = git(&["rev-parse", "HEAD"])?;
+    let worktree = invoking.join(".worktrees/writer");
+    std::fs::create_dir_all(worktree.parent().ok_or("worktree parent")?)?;
+    git(&[
+        "worktree",
+        "add",
+        worktree.to_str().ok_or("worktree path")?,
+        "writer",
+    ])?;
+    assert_ne!(invoking_head, worktree_head);
+
+    let prompt = temp.path().join("brief");
+    std::fs::write(&prompt, "Implement the approved bounded change")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = fixture_cli()
+        .current_dir(&invoking)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .arg("--state-dir")
+        .arg(temp.path().join("state"))
+        .args([
+            "--json",
+            "run",
+            "--preset",
+            "generator-evaluator",
+            "--prompt-file",
+        ])
+        .arg(&prompt)
+        .args(["--explain", "--set"])
+        .arg(format!("parameters.worktree='{}'", worktree.display()))
+        .output()?;
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let graph = &result["data"]["graph"];
+    assert_eq!(graph["nodes"][0]["source"]["commit"], worktree_head);
+    assert_eq!(
+        graph["provenance"]["resolved_subject"]["commit"],
+        worktree_head
+    );
+    assert_eq!(
+        graph["provenance"]["resolved_subject"]["worktree"],
+        worktree.display().to_string()
+    );
+
+    let explicit = fixture_cli()
+        .current_dir(&invoking)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .arg("--state-dir")
+        .arg(temp.path().join("state"))
+        .args([
+            "--json",
+            "run",
+            "--preset",
+            "generator-evaluator",
+            "--prompt-file",
+        ])
+        .arg(&prompt)
+        .args(["--explain", "--set"])
+        .arg(format!("parameters.worktree='{}'", worktree.display()))
+        .args(["--set", "parameters.subject.commit='HEAD'"])
+        .output()?;
+    assert!(
+        explicit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&explicit.stderr)
+    );
+    let explicit: serde_json::Value = serde_json::from_slice(&explicit.stdout)?;
+    assert_eq!(
+        explicit["data"]["graph"]["nodes"][0]["source"]["commit"],
+        invoking_head
+    );
+    assert!(
+        explicit["data"]["graph"]["provenance"]
+            .get("resolved_subject")
+            .is_none()
+    );
+    Ok(())
+}
+
 fn fixture_cli() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_provenant"));
     provenant_os::fixture::scrub_git_env(&mut command);
