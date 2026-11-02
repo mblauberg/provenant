@@ -58,7 +58,12 @@ fn occupancy_with_retries_and_backoff(
                 paths.push(path.clone());
             }
         }
-        if last.gap != Some(OccupancyGap::Churn) {
+        // A process in exit teardown can briefly report an unreadable table
+        // before it is absent or a zombie; retrying lets the census see that.
+        if !matches!(
+            last.gap,
+            Some(OccupancyGap::Churn | OccupancyGap::DescriptorsUnavailable)
+        ) {
             break;
         }
         if attempt_number + 1 < ATTEMPTS {
@@ -575,6 +580,23 @@ fn startup_churn_is_retried_but_a_table_that_never_settles_stays_incomplete() {
     assert_eq!(calls, 1);
     assert!(backoffs.is_empty());
     assert_eq!(denied.gap, Some(OccupancyGap::DescriptorsDenied));
+
+    // An unreadable table that becomes readable after a pause settles.
+    let mut calls = 0;
+    let mut backoffs = Vec::new();
+    let recovered = occupancy_with_retries_and_backoff(
+        || {
+            calls += 1;
+            if calls == 1 {
+                observation(&[], Some(OccupancyGap::DescriptorsUnavailable))
+            } else {
+                observation(&["/a"], None)
+            }
+        },
+        |delay| backoffs.push(delay),
+    );
+    assert_eq!(backoffs.len(), 1);
+    assert_eq!(recovered.gap, None);
 }
 
 #[cfg(test)]
