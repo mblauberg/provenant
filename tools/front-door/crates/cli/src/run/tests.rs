@@ -3918,6 +3918,11 @@ fn opencode_stderr_quota_settles_and_records_refusal() -> Result<(), Box<dyn std
         ResolvedRoute, RouteConfidentiality, RouteEligibility, RouteReadiness,
     };
     use std::os::unix::fs::PermissionsExt;
+    if crate::fabric::in_lane() {
+        // A lane suppresses host quota writes, which this test observes.
+        eprintln!("skipped: running inside a lane");
+        return Ok(());
+    }
     let temp = tempfile::tempdir()?;
     let state = temp.path().join("state");
     std::fs::create_dir(&state)?;
@@ -3993,6 +3998,35 @@ fn opencode_stderr_quota_settles_and_records_refusal() -> Result<(), Box<dyn std
     };
     assert!(check(refusal.observed_unix_seconds).is_err());
     assert!(check(refusal.observed_unix_seconds + 60).is_ok());
+    Ok(())
+}
+
+#[test]
+fn opencode_stderr_quota_text_does_not_overturn_a_successful_run()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir()?;
+    let state = temp.path().join("state");
+    std::fs::create_dir(&state)?;
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+    let provider_state = state.join("runs/run/attempts/attempt/provider-state");
+    let mut exit = clean_exit();
+    exit.termination = Some(provenant_os::exec::Termination::Exit(0));
+    let decoded = Registry::default().decode_captures(
+        &opencode_decode_route(),
+        include_bytes!("../../../../tests/fixtures/providers/opencode/v2.2.0-success.jsonl"),
+        b"AI.Error.QuotaExceeded: Go usage limit exceeded retryAfterMs=60000\n",
+        &exit,
+        &provider_state,
+        None,
+    )?;
+    assert_eq!(decoded.outcome, run::Outcome::Succeeded);
+    assert!(
+        crate::quota::read_cache_at(&state)
+            .map(|records| records.iter().all(|record| record.refusals.is_empty()))
+            .unwrap_or(true),
+        "a successful run must not persist a quota refusal"
+    );
     Ok(())
 }
 
