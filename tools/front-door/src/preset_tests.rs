@@ -1293,6 +1293,12 @@ fn docs_panel_keeps_risk_floor_with_readability_lens() {
 }
 
 #[test]
+fn refactor_panel_uses_its_slots_for_kind_priorities() {
+    let document = council(&["parameters.worktree='/repo/lane'", "parameters.kind='refactor'"], true).unwrap();
+    assert_eq!(lens_ids(&document), ["lens-correctness-spec", "lens-refactor-cleanup"]);
+}
+
+#[test]
 fn triggered_lenses_follow_the_risk_tags() {
     let document = council(
         &[
