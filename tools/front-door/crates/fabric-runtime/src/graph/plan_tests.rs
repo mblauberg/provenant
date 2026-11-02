@@ -1494,6 +1494,15 @@ fn planned_big_batch_expands_to_its_static_composite_and_records_the_patterns() 
     assert!(expansion.patterns[0].nodes.iter().any(|id| id == "plan--a--evaluate"));
 }
 
+/// A preset planner with a static fallback refuses an invalid fragment by
+/// running the fallback and naming the refusal, never by trusting it.
+fn assert_refused_into_fallback(run: &GraphRun) {
+    assert_eq!(run.status, GraphStatus::Complete);
+    let plan = run.checkpoint.nodes.iter().find(|node| node.id == "plan").unwrap();
+    let reason = &plan.outputs.as_ref().unwrap().plan.as_ref().unwrap().fallback_reason;
+    assert!(reason.contains("planner fragment invalid"), "{reason}");
+}
+
 fn planned_fixture(name: &str) -> GraphDocument {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join(format!("../../assets/presets/fixtures/{name}.plan.json"));
@@ -1537,8 +1546,7 @@ fn planned_scout_swarm_expands_scouts_with_a_question_and_a_route() {
     ]);
     let mut owner = fixture_owner(&[&outside]);
     let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert_eq!(run.status, GraphStatus::Paused);
-    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+    assert_refused_into_fallback(&run);
 }
 
 #[test]
@@ -1569,14 +1577,12 @@ fn planned_review_council_expands_only_the_lens_legs_the_catalogue_lists() {
     let gated = pattern_result_all(vec![leg("security-privacy", "junior")]);
     let mut owner = fixture_owner(&["framed", &gated]);
     let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert_eq!(run.status, GraphStatus::Paused);
-    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+    assert_refused_into_fallback(&run);
     // A lens the catalogue lists cannot be run at a tier outside its closed list.
     let wild = pattern_result_all(vec![leg("tests", "web")]);
     let mut owner = fixture_owner(&["framed", &wild]);
     let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert_eq!(run.status, GraphStatus::Paused);
-    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+    assert_refused_into_fallback(&run);
 }
 
 #[test]
@@ -1617,7 +1623,7 @@ fn planned_workers_and_the_no_scout_note_expand_and_feed_their_consumers() {
     ]);
     let mut owner = fixture_owner(&[&outside]);
     let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert_eq!(run.status, GraphStatus::Paused);
+    assert_refused_into_fallback(&run);
 }
 
 #[test]
