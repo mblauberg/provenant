@@ -104,6 +104,44 @@ fn failed_planner_runs_static_fallback_and_records_reason() {
     );
 }
 
+#[test]
+fn invalid_successful_planner_fragment_runs_static_fallback_and_records_reason() {
+    let document = two_step_fallback_document();
+    let mut owner = fixture_owner(&[
+        "```fragment\n{not json}\n```",
+        "first static result",
+        "second static result",
+        "done",
+    ]);
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    assert!(run.checkpoint.successful());
+    assert_eq!(owner.calls.len(), 4);
+    assert!(owner.calls[1].0.node_id.contains("plan--fallback--first"));
+    let plan = run.checkpoint.nodes.iter().find(|node| node.id == "plan").unwrap();
+    let reason = &plan.outputs.as_ref().unwrap().plan.as_ref().unwrap().fallback_reason;
+    assert!(reason.contains("planner fragment invalid: invalid fragment"), "{reason}");
+    assert!(plan.deterministic_summary().unwrap().contains(reason));
+}
+
+#[test]
+fn planner_fragment_accepts_string_shorthand_inputs_as_result_inputs() {
+    let mut second = slice("second", &["src"]);
+    second["depends_on"] = json!(["first"]);
+    second["inputs"] = json!(["first"]);
+    let output = result(vec![slice("first", &["src"]), second]);
+    let mut owner = fixture_owner(&[&output, "first result", "second result", "done"]);
+    let run = advance(&planner(2), &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    let second = run.checkpoint.expansions[0]
+        .nodes
+        .iter()
+        .find(|node| node.id == "plan--second")
+        .unwrap();
+    assert_eq!(second.inputs[0].node, "plan--first");
+    assert_eq!(second.inputs[0].outputs, vec![OutputKind::Result]);
+}
+
 fn two_step_fallback_document() -> GraphDocument {
     serde_json::from_value(json!({
         "schema_version":1, "graph_id":"planned-fallback-restart", "nodes":[
@@ -169,6 +207,41 @@ fn restart_after_fallback_expansion_does_not_duplicate_work_or_admit_dependants_
 }
 
 #[test]
+fn restart_after_invalid_fragment_fallback_reuses_the_persisted_expansion() {
+    let document = two_step_fallback_document();
+    let mut journal = MemoryJournal::default();
+    let mut first_owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, "```fragment\n{not json}\n```"),
+            AttemptObservation::Pending { attempt_ref: None },
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let interrupted = advance(&document, &mut first_owner, &mut journal).unwrap();
+    assert_eq!(interrupted.status, GraphStatus::Pending);
+    assert_eq!(interrupted.checkpoint.expansions.len(), 1);
+    assert!(interrupted.checkpoint.nodes.iter().find(|node| node.id == "plan").unwrap()
+        .outputs.as_ref().unwrap().plan.as_ref().unwrap().fallback_reason.contains("invalid fragment"));
+
+    let mut second_owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, "first result"),
+            terminal_with_result(AttemptOutcome::Succeeded, "second result"),
+            terminal_with_result(AttemptOutcome::Succeeded, "done"),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut second_owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    assert!(run.checkpoint.successful());
+    assert_eq!(run.checkpoint.expansions.len(), 1);
+    let ids: Vec<_> = second_owner.calls.iter().map(|call| call.0.node_id.as_str()).collect();
+    assert_eq!(ids, ["plan--fallback--first", "plan--fallback--second", "after"]);
+}
+
+#[test]
 fn restart_rejects_a_fallback_expansion_that_differs_from_the_spec() {
     let document = two_step_fallback_document();
     let mut journal = MemoryJournal::default();
@@ -212,6 +285,113 @@ fn fallback_expansion_over_a_structural_limit_pauses_with_a_reason() {
     assert!(reason.contains("plan fallback expansion paused"), "{reason}");
     assert!(run.checkpoint.expansions.is_empty());
     assert_eq!(owner.calls.len(), 1);
+}
+
+#[test]
+fn missing_fragment_fallback_retries_after_raising_the_structural_limit() {
+    let document = two_step_fallback_document();
+    let limits = crate::config::GraphLimits {
+        nodes: 3,
+        ..Default::default()
+    };
+    let mut owner = FakeOwner {
+        observations: [terminal_with_result(
+            AttemptOutcome::Succeeded,
+            "planner returned no fragment block",
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let paused = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &limits,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(paused.status, GraphStatus::Paused);
+    assert!(paused
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "plan")
+        .unwrap()
+        .fragment
+        .is_none());
+    assert!(paused.checkpoint.expansions.is_empty());
+
+    let mut owner = fixture_owner(&["first result", "second result", "done"]);
+    let resumed = resume_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &Default::default(),
+        &Default::default(),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(resumed.status, GraphStatus::Complete, "{:?}", resumed.checkpoint.pause_reason);
+    assert!(resumed.checkpoint.successful());
+    assert_eq!(resumed.checkpoint.expansions.len(), 1);
+    let plan = resumed
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "plan")
+        .unwrap();
+    assert!(plan
+        .outputs
+        .as_ref()
+        .unwrap()
+        .plan
+        .as_ref()
+        .unwrap()
+        .fallback_reason
+        .contains("fragment block missing"));
+    let ids: Vec<_> = owner.calls.iter().map(|call| call.0.node_id.as_str()).collect();
+    assert_eq!(ids, ["plan--fallback--first", "plan--fallback--second", "after"]);
+}
+
+#[test]
+fn ordinary_advance_clears_pause_after_admitting_retried_fallback() {
+    let document = two_step_fallback_document();
+    let limits = crate::config::GraphLimits {
+        nodes: 3,
+        ..Default::default()
+    };
+    let mut owner = FakeOwner {
+        observations: [terminal_with_result(
+            AttemptOutcome::Succeeded,
+            "planner returned no fragment block",
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let paused = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &limits,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(paused.status, GraphStatus::Paused);
+
+    let mut owner = fixture_owner(&["first result", "second result", "done"]);
+    let advanced = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &Default::default(),
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(advanced.status, GraphStatus::Complete, "{:?}", advanced.checkpoint.pause_reason);
+    assert!(advanced.checkpoint.successful());
+    assert_eq!(advanced.checkpoint.expansions.len(), 1);
 }
 
 #[test]
@@ -410,6 +590,8 @@ fn planner_prompt_uses_wire_kinds_and_required_field_names() {
     assert!(prompt.contains("`worktree`"));
     assert!(prompt.contains("`inputs`"));
     assert!(prompt.contains("`acceptance_checks`"));
+    assert!(prompt.contains(r#"{"node":"id","outputs":["result"]}"#));
+    assert!(prompt.contains(r#""id"` (which selects `result`)"#));
     assert!(prompt.contains("Do not emit presets or review shapes"));
 }
 
@@ -1312,6 +1494,15 @@ fn planned_big_batch_expands_to_its_static_composite_and_records_the_patterns() 
     assert!(expansion.patterns[0].nodes.iter().any(|id| id == "plan--a--evaluate"));
 }
 
+/// A preset planner with a static fallback refuses an invalid fragment by
+/// running the fallback and naming the refusal, never by trusting it.
+fn assert_refused_into_fallback(run: &GraphRun) {
+    assert_eq!(run.status, GraphStatus::Complete);
+    let plan = run.checkpoint.nodes.iter().find(|node| node.id == "plan").unwrap();
+    let reason = &plan.outputs.as_ref().unwrap().plan.as_ref().unwrap().fallback_reason;
+    assert!(reason.contains("planner fragment invalid"), "{reason}");
+}
+
 fn planned_fixture(name: &str) -> GraphDocument {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join(format!("../../assets/presets/fixtures/{name}.plan.json"));
@@ -1355,8 +1546,7 @@ fn planned_scout_swarm_expands_scouts_with_a_question_and_a_route() {
     ]);
     let mut owner = fixture_owner(&[&outside]);
     let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert_eq!(run.status, GraphStatus::Paused);
-    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+    assert_refused_into_fallback(&run);
 }
 
 #[test]
@@ -1387,14 +1577,12 @@ fn planned_review_council_expands_only_the_lens_legs_the_catalogue_lists() {
     let gated = pattern_result_all(vec![leg("security-privacy", "junior")]);
     let mut owner = fixture_owner(&["framed", &gated]);
     let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert_eq!(run.status, GraphStatus::Paused);
-    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+    assert_refused_into_fallback(&run);
     // A lens the catalogue lists cannot be run at a tier outside its closed list.
     let wild = pattern_result_all(vec![leg("tests", "web")]);
     let mut owner = fixture_owner(&["framed", &wild]);
     let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert_eq!(run.status, GraphStatus::Paused);
-    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+    assert_refused_into_fallback(&run);
 }
 
 #[test]
@@ -1435,7 +1623,7 @@ fn planned_workers_and_the_no_scout_note_expand_and_feed_their_consumers() {
     ]);
     let mut owner = fixture_owner(&[&outside]);
     let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert_eq!(run.status, GraphStatus::Paused);
+    assert_refused_into_fallback(&run);
 }
 
 #[test]

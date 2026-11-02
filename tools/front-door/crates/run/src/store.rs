@@ -794,6 +794,7 @@ impl RunStore {
         if !matches!(outcome, Outcome::Rejected | Outcome::Cancelled) {
             return Err(RunError::Validation("withdrawal outcome"));
         }
+        let defer_writer_cleanup = matches!(expected, AttemptState::Starting { .. });
         let old = self.record(id, call)?;
         let dir = self.run_dir(old.run_id, false)?;
         let writer = dir.lock(
@@ -884,6 +885,25 @@ impl RunStore {
         drop(writer);
         match result {
             Ok(Some(record)) => {
+                // A failed handoff must publish its refusal promptly. Git pin
+                // cleanup can block on Git; tmp_retained makes reconciliation
+                // discover this terminal attempt and complete it there.
+                if defer_writer_cleanup
+                    && matches!(
+                        record.state,
+                        AttemptState::Terminal {
+                            outcome: Outcome::Rejected,
+                            ..
+                        }
+                    )
+                    && self
+                        .request(record.run_id, call)?
+                        .tasks
+                        .iter()
+                        .any(|task| task.task_id == record.task_id && task.writer.is_some())
+                {
+                    return self.record(id, call).map(Some);
+                }
                 self.settle_cleanup(&record, call);
                 self.record(id, call).map(Some)
             }
