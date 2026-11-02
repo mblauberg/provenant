@@ -9,6 +9,8 @@
 //!   process and every build tool, so the nested profile adds nothing.
 //! - `--build-system native`: writes only the package scratch path (`.build`
 //!   by default), `TMPDIR` and the lane cache, all writable to a writer.
+//! - `--scratch-path`: read-only lanes put SwiftPM's build output in their
+//!   private scratch instead of the read-only workspace.
 //! - SwiftPM's cache, configuration and security directories, and the Clang
 //!   module cache, move from the user's `~/Library` and `~/.cache` into the
 //!   lane cache, so no shared host store is written.
@@ -135,7 +137,12 @@ impl SwiftToolchain {
 
     /// The shim script: it selects this toolchain, redirects module and
     /// SwiftPM caches into `cache`, and runs SwiftPM inside the lane profile.
-    pub(crate) fn shim(&self, cache: &Path) -> Result<Vec<u8>, crate::ProviderError> {
+    pub(crate) fn shim(
+        &self,
+        cache: &Path,
+        scratch: &Path,
+        read_only: bool,
+    ) -> Result<Vec<u8>, crate::ProviderError> {
         let quote = |path: &Path| -> Result<String, crate::ProviderError> {
             let text = path.to_str().ok_or(crate::ProviderError::InvalidPath)?;
             if !path.is_absolute() || text.chars().any(char::is_control) {
@@ -150,6 +157,17 @@ impl SwiftToolchain {
         let configuration = quote(&cache.join("configuration"))?;
         let security = quote(&cache.join("security"))?;
         let cache_text = quote(cache)?;
+        let scratch_path = quote(&scratch.join("swift-build"))?;
+        let scratch_arg = if read_only {
+            format!("--scratch-path {scratch_path}")
+        } else {
+            String::new()
+        };
+        let cache_hint = if read_only {
+            "lane scratch"
+        } else {
+            "lane cache"
+        };
         Ok(format!(
             r#"#!/bin/sh
 # Provenant lane shim: SwiftPM inside the lane's Seatbelt profile.
@@ -170,7 +188,7 @@ case "$sub" in
         --build-system|--build-system=*) build_system= ;;
       esac
     done
-    set -- "$sub" --disable-sandbox --cache-path {packages} --config-path {configuration} --security-path {security} ${{build_system:+"$build_system"}} "$@"
+    set -- "$sub" --disable-sandbox --cache-path {packages} --config-path {configuration} --security-path {security} {scratch_arg} ${{build_system:+"$build_system"}} "$@"
     ;;
 esac
 "$real" "$@"
@@ -178,7 +196,7 @@ status=$?
 if [ "$status" -ne 0 ]; then
   case "$sub" in
     build|test|run|package)
-      printf 'provenant: swift %s exited %s inside the lane sandbox. Writes are allowed only in the worktree, TMPDIR (%s) and the lane cache (%s); an "Operation not permitted" error names a path outside them. SwiftPM runs with --disable-sandbox and the native build system; pass --build-system swiftbuild to override.\n' "$sub" "$status" "$TMPDIR" {cache_text} >&2
+      printf 'provenant: swift %s exited %s inside the lane sandbox. Writes outside paths permitted by this lane are denied; SwiftPM cache is in the %s (%s). An "Operation not permitted" error names a path outside them. SwiftPM runs with --disable-sandbox and the native build system; pass --build-system swiftbuild to override.\n' "$sub" "$status" '{cache_hint}' {cache_text} >&2
       ;;
   esac
 fi
@@ -207,9 +225,9 @@ fn xcode_select_path() -> Option<PathBuf> {
     (!text.is_empty()).then(|| PathBuf::from(text))
 }
 
-/// Grants, shim and `PATH` for a writer that may run `swift build` and
-/// `swift test`. Read-only lanes (#2542) take the same toolchain with
-/// scratch-only roots; this adds nothing for them yet.
+/// Grants, shim and `PATH` for lanes that may run `swift build` and
+/// `swift test`. Read-only lanes keep build output and generated executables
+/// under their private scratch root.
 pub(crate) fn swift_tools(
     input: &PrepareInput<'_>,
     access: Access,
@@ -218,16 +236,17 @@ pub(crate) fn swift_tools(
     env: &mut [(OsString, OsString)],
     setup: &mut Vec<SetupStep>,
 ) {
-    if access != Access::WorktreeWrite {
-        return;
-    }
     let Some(toolchain) = SwiftToolchain::selected(input.host_var) else {
         return;
     };
+    let scratch = &input.confined.permissions().scratch.path;
     install(
         &toolchain,
-        &input.confined.permissions().scratch.path,
-        &crate::launch::lane_cache(input).join("swift"),
+        SwiftInstall {
+            scratch,
+            cache: &crate::launch::lane_cache(input).join("swift"),
+            read_only: access == Access::ReadOnly,
+        },
         runtime_reads,
         tool_exec_roots,
         env,
@@ -235,30 +254,44 @@ pub(crate) fn swift_tools(
     );
 }
 
+struct SwiftInstall<'a> {
+    scratch: &'a Path,
+    cache: &'a Path,
+    read_only: bool,
+}
+
 fn install(
     toolchain: &SwiftToolchain,
-    scratch: &Path,
-    cache: &Path,
+    install: SwiftInstall<'_>,
     runtime_reads: &mut Vec<PathGrant>,
     tool_exec_roots: &mut Vec<PathGrant>,
     env: &mut [(OsString, OsString)],
     setup: &mut Vec<SetupStep>,
 ) {
-    let Ok(shim) = toolchain.shim(cache) else {
+    let Ok(shim) = toolchain.shim(install.cache, install.scratch, install.read_only) else {
         return;
     };
     runtime_reads.extend(toolchain.reads());
     tool_exec_roots.extend(toolchain.executables());
-    let bin = scratch.join("bin");
+    let bin = install.scratch.join("bin");
     let create = SetupStep::CreateDir(bin.clone());
     if !setup.contains(&create) {
         setup.push(create);
+    }
+    if install.read_only {
+        let create = SetupStep::CreateDir(install.scratch.join("swift-build"));
+        if !setup.contains(&create) {
+            setup.push(create);
+        }
     }
     setup.push(SetupStep::WriteExecutable {
         path: bin.join("swift"),
         bytes: shim,
     });
     tool_exec_roots.push(subtree(&bin));
+    if install.read_only {
+        tool_exec_roots.push(subtree(install.scratch.join("swift-build")));
+    }
     if let Some((_, path)) = env.iter_mut().find(|(key, _)| key == "PATH")
         && std::env::split_paths(path).next().as_deref() != Some(bin.as_path())
         && let Ok(joined) =
@@ -307,7 +340,9 @@ mod tests {
                 .any(|grant| grant.path.ends_with("Xcode.app/Contents")
                     && grant.scope == provenant_confinement::permissions::PathScope::Subtree)
         );
-        assert!(reads.iter().all(|grant| !grant.path.starts_with("/Users")));
+        assert!(reads.iter().all(|grant| {
+            grant.path.starts_with(&root) || grant.path.starts_with("/Library/Preferences")
+        }));
         assert_eq!(toolchain.executables().len(), 1);
     }
 
@@ -324,18 +359,38 @@ mod tests {
             &std::fs::canonicalize(root.path()).unwrap(),
             "Toolchains/XcodeDefault.xctoolchain/usr/bin/swift",
         );
-        let text =
-            String::from_utf8(toolchain.shim(Path::new("/lane/cache/swift")).unwrap()).unwrap();
+        let text = String::from_utf8(
+            toolchain
+                .shim(
+                    Path::new("/lane/cache/swift"),
+                    Path::new("/lane/scratch"),
+                    true,
+                )
+                .unwrap(),
+        )
+        .unwrap();
         for needle in [
             "unset SDKROOT",
             "DEVELOPER_DIR='",
             "CLANG_MODULE_CACHE_PATH='/lane/cache/swift/clang-modules'",
             "--disable-sandbox",
             "--cache-path '/lane/cache/swift/cache'",
+            "--scratch-path '/lane/scratch/swift-build'",
             "--build-system=native",
         ] {
             assert!(text.contains(needle), "{needle} missing from {text}");
         }
+        let writer_text = String::from_utf8(
+            toolchain
+                .shim(
+                    Path::new("/lane/cache/swift"),
+                    Path::new("/lane/scratch"),
+                    false,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(!writer_text.contains("--scratch-path"), "{writer_text}");
     }
 
     #[test]
@@ -347,8 +402,11 @@ mod tests {
         let mut env = vec![("PATH".into(), "/usr/bin:/bin".into())];
         install(
             &toolchain,
-            Path::new("/lane/scratch"),
-            Path::new("/lane/cache/swift"),
+            SwiftInstall {
+                scratch: Path::new("/lane/scratch"),
+                cache: Path::new("/lane/cache/swift"),
+                read_only: false,
+            },
             &mut reads,
             &mut execs,
             &mut env,
@@ -364,6 +422,31 @@ mod tests {
                 || grant.path.starts_with("/lane/scratch/bin")
                 || grant.path.starts_with("/Library/Preferences")
         }));
+
+        let (mut reads, mut execs, mut setup) = (Vec::new(), Vec::new(), Vec::new());
+        install(
+            &toolchain,
+            SwiftInstall {
+                scratch: Path::new("/lane/scratch"),
+                cache: Path::new("/lane/scratch/swift"),
+                read_only: true,
+            },
+            &mut reads,
+            &mut execs,
+            &mut env,
+            &mut setup,
+        );
+        assert!(execs.iter().any(|grant| {
+            grant.path == Path::new("/lane/scratch/swift-build")
+                && grant.scope == provenant_confinement::permissions::PathScope::Subtree
+        }));
+        assert!(setup.contains(&SetupStep::CreateDir(PathBuf::from(
+            "/lane/scratch/swift-build"
+        ))));
+        assert!(setup.iter().all(|step| !matches!(
+            step,
+            SetupStep::WriteExecutable { path, .. } if path.starts_with("/lane/cache")
+        )));
     }
 
     #[test]
@@ -373,8 +456,16 @@ mod tests {
             &std::fs::canonicalize(root.path()).unwrap(),
             "usr/bin/swift",
         );
-        assert!(toolchain.shim(Path::new("/lane/ca\nche")).is_err());
-        assert!(toolchain.shim(Path::new("relative")).is_err());
+        assert!(toolchain
+            .shim(
+                Path::new("/lane/ca\nche"),
+                Path::new("/lane/scratch"),
+                true
+            )
+            .is_err());
+        assert!(toolchain
+            .shim(Path::new("relative"), Path::new("/lane/scratch"), true)
+            .is_err());
     }
 
     #[test]
@@ -411,7 +502,13 @@ mod tests {
                 .unwrap();
         }
         let script = root.join("shim.sh");
-        std::fs::write(&script, toolchain.shim(cache).unwrap()).unwrap();
+        std::fs::write(
+            &script,
+            toolchain
+                .shim(cache, Path::new("/lane/scratch"), true)
+                .unwrap(),
+        )
+        .unwrap();
         use provenant_os::exec::{ExecOptions, Executor, SystemExecutor};
         let argv: Vec<OsString> = ["/bin/sh".into(), script.into_os_string()]
             .into_iter()
@@ -451,6 +548,7 @@ mod tests {
         let (_, err) = run_shim(Path::new(&cache), &["build"], "3");
         assert!(err.contains("exited 3"), "{err}");
         assert!(err.contains(&cache), "{err}");
+        assert!(err.contains("lane scratch"), "{err}");
         assert!(!marker.exists());
     }
 }

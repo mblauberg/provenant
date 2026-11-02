@@ -4438,6 +4438,7 @@ fn codex_read_only_toolchain_uses_private_build_and_cargo_home_linked_to_shared_
     let env = |key: &str| spec.env.iter().find(|(k, _)| k == key).unwrap().1.clone();
     assert_eq!(env("CODEX_HOME"), "/fixture/state");
     assert_eq!(env("CARGO_TARGET_DIR"), "/fixture/scratch/target");
+    assert_eq!(env("CARGO_BUILD_BUILD_DIR"), "/fixture/scratch/target");
     assert_eq!(env("RUSTUP_HOME"), "/fixture/home/.rustup");
     assert_eq!(env("RUSTUP_AUTO_INSTALL"), "0");
     let paths = |grants: &[provenant_confinement::permissions::PathGrant]| {
@@ -4472,6 +4473,7 @@ fn codex_read_only_toolchain_uses_private_build_and_cargo_home_linked_to_shared_
     for dir in [
         "/fixture/home/.cargo/bin",
         "/fixture/home/.rustup/toolchains",
+        "/fixture/scratch/target",
     ] {
         assert!(
             spec.profile

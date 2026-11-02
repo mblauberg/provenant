@@ -68,6 +68,12 @@ When run from a linked Git worktree with no `--mode` and no target
 and names both repairs: `--worktree <path>` for a writer, or `--mode read-only`
 for a reader.
 
+Read-only lanes can run offline Cargo tests using their private `CARGO_TARGET_DIR`
+under lane scratch. When a Swift toolchain is selected, the `swift` shim sends
+SwiftPM build output to a scratch-only path and keeps the Clang module cache in
+the lane scratch as well. Both toolchains stay read-only, and the worktree,
+Git metadata and shared caches retain the read-only profile.
+
 The receipt names the worktree. `--worktree PATH` uses an existing checkout
 without taking over its lifecycle. A missing branch name creates an owned
 checkout; for an absolute path or a path below `.worktrees/`, use

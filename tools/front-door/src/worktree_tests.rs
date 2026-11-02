@@ -185,6 +185,8 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "lane_prepare_isolates_nested_writer_state",
             "lane_prepare_isolates_nested_publishing_state",
             "lane_builds_and_tests_swift_in_a_registered_worktree",
+            "read_only_lane_builds_and_tests_swift_in_scratch",
+            "read_only_lane_builds_and_tests_cargo_in_scratch",
             "read_only_dispatch_applies_bound_git_and_project_writes",
             "writer_dispatch_uses_lane_cache_and_narrow_provider_state",
             "writer_dispatch_edits_a_linked_worktree",
@@ -249,6 +251,12 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "lane_builds_and_tests_swift_in_a_registered_worktree" => {
                     lane_builds_and_tests_swift_in_a_registered_worktree()
+                }
+                "read_only_lane_builds_and_tests_swift_in_scratch" => {
+                    read_only_lane_builds_and_tests_swift_in_scratch()
+                }
+                "read_only_lane_builds_and_tests_cargo_in_scratch" => {
+                    read_only_lane_builds_and_tests_cargo_in_scratch()
                 }
                 "lane_prepare_isolates_nested_publishing_state" => {
                     lane_prepare_isolates_nested_publishing_state()
@@ -2774,11 +2782,28 @@ fn lane_builds_and_tests_swift_in_a_registered_worktree() -> Result {
     lane_prepare_with(&[("claude", true, false, 97)], Probe::Swift)
 }
 
+fn read_only_lane_builds_and_tests_swift_in_scratch() -> Result {
+    let selected = cfg!(target_os = "macos")
+        && Path::new("/usr/bin/swift").exists()
+        && provenant_providers::swift_toolchain_available(&|name| std::env::var_os(name));
+    if !selected {
+        provenant_test_support::skip_sandbox_dependent_test("no Swift toolchain is selected")?;
+        return Ok(());
+    }
+    lane_prepare_with(&[("claude", false, false, 98)], Probe::SwiftReadOnly)
+}
+
+fn read_only_lane_builds_and_tests_cargo_in_scratch() -> Result {
+    lane_prepare_with(&[("claude", false, false, 99)], Probe::CargoReadOnly)
+}
+
 /// Which native proof a lane case runs inside its compiled profile.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Probe {
     Shell,
     Swift,
+    SwiftReadOnly,
+    CargoReadOnly,
 }
 
 fn lane_prepare_cases(cases: &[(&str, bool, bool, u8)]) -> Result {
@@ -2886,6 +2911,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
         && cases.iter().any(|&(adapter, writer, publishing, _)| {
             native_shell_probe_case(adapter, writer, publishing)
         })
+        || probe == Probe::CargoReadOnly
     {
         clone_rust_toolchain(&rig, &home)?;
     }
@@ -3308,7 +3334,10 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             frames.as_bytes(),
             &config,
             &parent_context,
-            native_shell_probe_case(adapter, writer, publishing).then_some(probe),
+            (native_shell_probe_case(adapter, writer, publishing)
+                || (!writer && adapter == "claude" && probe == Probe::CargoReadOnly)
+                || (!writer && adapter == "claude" && probe == Probe::SwiftReadOnly))
+                .then_some(probe),
         )
         .map_err(|e| format!("confined {adapter} writer={writer}: {e}"))?;
     }
@@ -3572,9 +3601,9 @@ fn verify_lane_profile(
     // Native shell proof, separate from live provider/Bash/token-scrub proof.
     // Read-only Claude has no cargo on PATH, so the narrowest probe-capable
     // profile is a non-publishing writer.
-    if cfg!(target_os = "macos") && probe == Some(Probe::Swift) {
-        // The package lives in the registered worktree, so `.build` does too;
-        // the rig's temporary directory removes both.
+    if cfg!(target_os = "macos") && matches!(probe, Some(Probe::Swift | Probe::SwiftReadOnly)) {
+        // The read-only fixture stays in the worktree so this also catches
+        // SwiftPM output that ignores its scratch-path setting.
         let package = launch.cwd.join(".swift-probe");
         fs::create_dir_all(package.join("Sources/LaneProbe"))?;
         fs::create_dir_all(package.join("Tests/LaneProbeTests"))?;
@@ -3590,15 +3619,12 @@ fn verify_lane_profile(
             package.join("Tests/LaneProbeTests/LaneProbeTests.swift"),
             "import XCTest\n@testable import LaneProbe\nfinal class LaneProbeTests: XCTestCase { func testAnswer() { XCTAssertEqual(answer(), 42) } }\n",
         )?;
-        let argv = [
-            "/bin/sh",
-            "-c",
-            concat!(
-                "set -eu; test \"$(command -v swift)\" = \"$TMPDIR/bin/swift\"; ",
-                "cd .swift-probe; swift build; swift test; printf 'lane-swift: PASS\\n'"
-            ),
-        ]
-        .map(OsString::from);
+        let command = if probe == Some(Probe::SwiftReadOnly) {
+            "set -eu; test \"$(command -v swift)\" = \"$TMPDIR/bin/swift\"; cd .swift-probe; swift build; swift test; test ! -e .build; printf 'lane-swift-read-only: PASS\\n'"
+        } else {
+            "set -eu; test \"$(command -v swift)\" = \"$TMPDIR/bin/swift\"; cd .swift-probe; swift build; swift test; printf 'lane-swift: PASS\\n'"
+        };
+        let argv = ["/bin/sh", "-c", command].map(OsString::from);
         let command = compiled.command(&argv, &provenant_core::AttemptId::from_bytes([0; 16]))?;
         let mut options = ExecOptions::new(&command, &launch.cwd, Duration::from_secs(120));
         options.process_group = true;
@@ -3611,7 +3637,53 @@ fn verify_lane_profile(
             "swift probe: {}",
             String::from_utf8_lossy(&output.stderr.bytes)
         );
-        assert!(String::from_utf8_lossy(&output.stdout.bytes).contains("lane-swift: PASS"));
+        let marker = if probe == Some(Probe::SwiftReadOnly) {
+            "lane-swift-read-only: PASS"
+        } else {
+            "lane-swift: PASS"
+        };
+        assert!(String::from_utf8_lossy(&output.stdout.bytes).contains(marker));
+    }
+    if cfg!(target_os = "macos") && probe == Some(Probe::CargoReadOnly) {
+        let scratch = &confinement.plan.permissions().scratch.path;
+        let project = launch.cwd.join(".cargo-probe");
+        fs::create_dir_all(project.join("src"))?;
+        fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname = 'lane-probe'\nversion = '0.1.0'\nedition = '2024'\n\n[workspace]\n",
+        )?;
+        let lock = project.join("Cargo.lock");
+        fs::write(
+            &lock,
+            "# This file is automatically @generated by Cargo.\n# It is not intended for manual editing.\nversion = 4\n\n[[package]]\nname = \"lane-probe\"\nversion = \"0.1.0\"\n",
+        )?;
+        fs::copy(&lock, scratch.join("cargo-probe.lock"))?;
+        fs::write(
+            project.join("src/lib.rs"),
+            "#[test] fn scratch_build_is_private() { assert_eq!(2 + 2, 4); }\n",
+        )?;
+        let argv = [
+            "/bin/sh",
+            "-c",
+            "set -eu; test \"$CARGO_TARGET_DIR\" = \"$TMPDIR/target\"; cd .cargo-probe; PATH=\"$HOME/.cargo/bin:$PATH\" cargo test -p lane-probe --offline; cmp Cargo.lock \"$TMPDIR/cargo-probe.lock\"; test ! -e target; printf 'lane-cargo-read-only: PASS\\n'",
+        ]
+        .map(OsString::from);
+        let command = compiled.command(&argv, &provenant_core::AttemptId::from_bytes([0; 16]))?;
+        let mut options = ExecOptions::new(&command, &launch.cwd, Duration::from_secs(120));
+        options.process_group = true;
+        options.cleanup_process_group = true;
+        options.env = Some(&launch.environment);
+        let output = executor.execute(options)?;
+        assert_eq!(
+            code(&output),
+            0,
+            "read-only Cargo probe: {}",
+            String::from_utf8_lossy(&output.stderr.bytes)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout.bytes).contains("lane-cargo-read-only: PASS")
+        );
+        assert!(String::from_utf8_lossy(&output.stdout.bytes).contains("1 passed"));
     }
     if cfg!(target_os = "macos") && probe == Some(Probe::Shell) {
         let scratch = &confinement.plan.permissions().scratch.path;
