@@ -106,7 +106,9 @@ pub enum WorktreeError {
     LockBusy,
     #[error("worktree writer is live")]
     LiveWriter,
-    #[error("worktree writer is live: process {0} has its working directory inside the tree")]
+    #[error(
+        "worktree writer is live: process {0} has its working directory inside the tree; run from the main checkout or another directory"
+    )]
     LiveProcess(ObservedProcess),
     #[error("incomplete worker census: {detail}")]
     IncompleteCensus { detail: String },
