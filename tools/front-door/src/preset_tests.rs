@@ -1370,8 +1370,9 @@ fn each_review_stage_selects_its_shape_from_its_own_parameters() {
     let mut high = batch.to_vec();
     high.push("council.risk_tier='crucial'".into());
     let high = expand(&layers, "big-batch", "brief", &high).unwrap();
-    assert_ne!(lens_count(&high.document, "council"), standard);
-    assert!(high.review_shape.unwrap().contains("deep (by_risk)"));
+    assert_eq!(standard, 8);
+    assert_eq!(lens_count(&high.document, "council"), standard);
+    assert!(high.review_shape.unwrap().contains("deep (by_kind)"));
     // A parent's ambient risk tier reaches a child that declares it.
     let mut layers = Layers::empty();
     layers.review = Some(shapes());

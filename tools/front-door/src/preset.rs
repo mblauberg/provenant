@@ -3070,6 +3070,11 @@ pub fn run(
         }
         let name = selection.choice.preset.as_str();
         let mut params = selection.choice.parameters.into_iter().collect::<Vec<_>>();
+        if matches!(name, "review-council" | "big-batch")
+            && let Some(risk) = &request.risk_tier
+        {
+            params.push(("risk_tier".into(), json!(risk)));
+        }
         if name == "review-council"
             && let Some(kind) = &request.task_kind
         {
