@@ -187,6 +187,29 @@ pub(crate) fn private_git_objects(
         input.confined.permissions().mode,
         AccessMode::WorktreeWrite(_)
     ) {
+        let git = input.provenant.git;
+        let bin = input
+            .confined
+            .permissions()
+            .scratch
+            .path
+            .join("read-only-git");
+        spec.setup.push(SetupStep::CreateDir(bin.clone()));
+        spec.setup.push(SetupStep::Symlink {
+            link: bin.join("git"),
+            target: git.to_owned(),
+        });
+        if let Some((_, path)) = spec.env.iter_mut().find(|(key, _)| key == "PATH") {
+            let mut value = bin.into_os_string();
+            value.push(":");
+            value.push(&*path);
+            *path = value;
+        }
+        spec.profile.spec.process_executables.push(exact(git));
+        spec.profile
+            .spec
+            .runtime_reads
+            .extend(crate::dylib::linked_libraries(git).into_iter().map(exact));
         return Ok(());
     }
     let scratch = &input.confined.permissions().scratch.path;
