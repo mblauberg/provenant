@@ -144,18 +144,12 @@ fn occupancy_snapshot(pid: i32) -> OccupancySnapshot {
                 size,
             )
         };
-        // A full buffer may be truncated; a partial record is malformed.
-        if count < 0
-            || count >= size
-            || !(count as usize).is_multiple_of(std::mem::size_of::<libc::proc_fdinfo>())
-        {
-            return None;
-        }
+        let len = fd_list_records(count, size, std::mem::size_of::<libc::proc_fdinfo>())?;
         // SAFETY: full fd records are initialized by libproc and u64 alignment suffices.
         let entries = unsafe {
             std::slice::from_raw_parts(
                 records.as_ptr().cast::<libc::proc_fdinfo>(),
-                count as usize / std::mem::size_of::<libc::proc_fdinfo>(),
+                len,
             )
         };
         let mut values: Vec<_> = entries
@@ -235,6 +229,28 @@ fn occupancy_snapshot(pid: i32) -> OccupancySnapshot {
     complete &= list().is_some_and(|after| before == after);
     snapshot.complete = complete;
     snapshot
+}
+
+/// Validate a PROC_PIDLISTFDS byte count. libproc also returns zero when the
+/// query fails (EPERM for protected daemons), so zero is never an empty table.
+/// A full buffer may be truncated, and a partial record is malformed.
+#[cfg(any(target_os = "macos", test))]
+fn fd_list_records(count: i32, size: i32, record: usize) -> Option<usize> {
+    if count <= 0 || count >= size || !(count as usize).is_multiple_of(record) {
+        return None;
+    }
+    Some(count as usize / record)
+}
+
+#[cfg(test)]
+#[test]
+fn zero_descriptor_listing_is_a_failed_query_not_an_empty_table() {
+    let record = 8;
+    assert_eq!(fd_list_records(0, 1024, record), None, "failure shows as 0");
+    assert_eq!(fd_list_records(-1, 1024, record), None);
+    assert_eq!(fd_list_records(1024, 1024, record), None, "truncated");
+    assert_eq!(fd_list_records(20, 1024, record), None, "partial record");
+    assert_eq!(fd_list_records(24, 1024, record), Some(3));
 }
 
 #[cfg(test)]
