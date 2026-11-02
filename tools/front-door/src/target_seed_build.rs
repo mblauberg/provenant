@@ -148,7 +148,9 @@ pub enum Refresh {
 /// advanced `origin/main`; it does nothing when the seed is current or a build
 /// is running, and never builds from a lane checkout (the build uses a scratch
 /// clone of the pinned `origin/main`).
-// The host tick calls this once per project; wiring it in is tracked on #2484.
+// The detached seed worker (`internal tick-seed`) calls this once per project
+// after the daily collection's fetch. The harness-free worktree driver
+// includes this module without that caller.
 #[allow(dead_code)]
 pub fn refresh(state: &Path, project: &Path) -> Result<Refresh> {
     refuse_in_lane()?;

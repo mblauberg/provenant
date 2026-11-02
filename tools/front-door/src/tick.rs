@@ -33,6 +33,17 @@ fn write_gc_result(
     state: &str,
     error: Option<String>,
 ) -> Result<(), String> {
+    write_result(directory, "gc-result.json", "tick-gc", at, state, error)
+}
+
+fn write_result(
+    directory: &Directory,
+    file: &str,
+    purpose: &str,
+    at: WallTime,
+    state: &str,
+    error: Option<String>,
+) -> Result<(), String> {
     let result = GcResult {
         extra: Default::default(),
         state: state.into(),
@@ -41,12 +52,7 @@ fn write_gc_result(
     };
     let bytes = serde_json::to_vec(&result).map_err(|error| error.to_string())?;
     directory
-        .atomic_write(
-            "gc-result.json".as_ref(),
-            "tick-gc",
-            &bytes,
-            PublishMode::Replace,
-        )
+        .atomic_write(file.as_ref(), purpose, &bytes, PublishMode::Replace)
         .map_err(|error| error.to_string())?;
     Ok(())
 }
@@ -163,6 +169,22 @@ pub(crate) fn gc_worker(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
             },
             collected.as_ref().err().cloned(),
         )?;
+        // The collection fetched every project's default branch, so any seed
+        // that is now behind can be rebuilt. This only queues a detached
+        // worker; a failure to queue is recorded for the tick and never fails
+        // the collection.
+        let _ = queue_seed(&directory, clock.wall_now()?, || {
+            let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+            let argv = [
+                executable.into_os_string(),
+                "--state-dir".into(),
+                resolved.roots.state.as_path().as_os_str().to_owned(),
+                "internal".into(),
+                "tick-seed".into(),
+            ];
+            provenant_os::exec::spawn_detached(&argv, &resolved.home)
+                .map_err(|error| error.to_string())
+        });
         collected.map_err(Into::into)
     })();
     match result {
@@ -174,6 +196,167 @@ pub(crate) fn gc_worker(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
             &error.to_string(),
             globals,
         ),
+    }
+}
+
+const SEED_RESULT: &str = "seed-result.json";
+
+/// Queue the detached seed worker. Workers are single-flight on
+/// `seed-worker.lock`, so a second queue while one runs is a no-op there.
+fn queue_seed(
+    directory: &Directory,
+    now: WallTime,
+    spawn: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    write_result(directory, SEED_RESULT, "tick-seed", now, "queued", None)?;
+    if let Err(error) = spawn() {
+        write_result(
+            directory,
+            SEED_RESULT,
+            "tick-seed",
+            now,
+            "failed",
+            Some(error.clone()),
+        )?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// What one pass over the registered projects did.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SeedPass {
+    built: usize,
+    current: usize,
+    busy: usize,
+    errors: Vec<String>,
+}
+
+/// Refresh each project in turn. A busy build is a no-op and one project's
+/// failure never stops the others.
+fn refresh_projects(
+    projects: &[std::path::PathBuf],
+    refresh: impl Fn(
+        &std::path::Path,
+    ) -> Result<crate::target_seed_build::Refresh, Box<dyn std::error::Error>>,
+) -> SeedPass {
+    use crate::target_seed_build::Refresh;
+    let mut pass = SeedPass::default();
+    for project in projects {
+        match refresh(project) {
+            Ok(Refresh::Built(_)) => pass.built += 1,
+            Ok(Refresh::Current) => pass.current += 1,
+            Ok(Refresh::Busy) => pass.busy += 1,
+            Err(error) => pass.errors.push(format!("{}: {error}", project.display())),
+        }
+    }
+    pass
+}
+
+/// Run one single-flight pass under `seed-worker.lock`. A second worker, or a
+/// disabled seed, returns without touching the result file.
+fn seed_pass(
+    directory: &Directory,
+    clock: &dyn Clock,
+    enabled: bool,
+    projects: impl FnOnce() -> Result<Vec<std::path::PathBuf>, String>,
+    refresh: impl Fn(
+        &std::path::Path,
+    ) -> Result<crate::target_seed_build::Refresh, Box<dyn std::error::Error>>,
+) -> Result<(), String> {
+    let _worker = match directory.try_lock("seed-worker.lock".as_ref(), LockMode::Exclusive) {
+        Ok(lock) => lock,
+        Err(provenant_os::fs::FsError::LockTimeout { .. }) => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let at = || clock.wall_now().map_err(|error| error.to_string());
+    if !enabled {
+        return write_result(directory, SEED_RESULT, "tick-seed", at()?, "disabled", None);
+    }
+    write_result(directory, SEED_RESULT, "tick-seed", at()?, "running", None)?;
+    let outcome = projects().map(|projects| refresh_projects(&projects, refresh));
+    let (state, error) = match outcome {
+        Ok(pass) if pass.errors.is_empty() => ("complete", None),
+        Ok(pass) => ("failed", Some(pass.errors.join("; "))),
+        Err(error) => ("failed", Some(error)),
+    };
+    write_result(directory, SEED_RESULT, "tick-seed", at()?, state, error)
+}
+
+/// Detached cargo-seed refresh queued by the daily collector. The build can
+/// run for hours, so it never runs inline in the tick; its durable result
+/// replaces discarded detached-process output.
+pub(crate) fn seed_worker(globals: &Globals) -> u8 {
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        if provenant_cli::fabric::in_lane() {
+            return Err("tick seed refresh requires host custody".into());
+        }
+        let resolved = crate::roots::resolve(
+            globals,
+            crate::roots::Workspace::Home,
+            crate::roots::Product::Required,
+        )?;
+        let directory = provenant_config::private_directory(
+            &resolved.roots.state.as_path().join("tick"),
+            true,
+        )?;
+        let config = provenant_config::read_with_domains(
+            &resolved.roots,
+            &provenant_cli::domains::SECTIONS,
+        )?;
+        let state = resolved.roots.state.as_path();
+        seed_pass(
+            &directory,
+            &SystemClock,
+            config.domains.fabric.lanes.cargo_seed.enabled,
+            || {
+                let selection = provenant_config::registered_gc_project_selection(&resolved.roots)
+                    .map_err(|error| error.to_string())?;
+                Ok(selection
+                    .projects
+                    .iter()
+                    .map(|binding| {
+                        let common = binding.common_dir();
+                        if common.file_name() == Some(std::ffi::OsStr::new(".git")) {
+                            common.parent().unwrap_or(common).to_owned()
+                        } else {
+                            common.to_owned()
+                        }
+                    })
+                    .collect())
+            },
+            |project| crate::target_seed_build::refresh(state, project),
+        )?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => 0,
+        Err(error) => crate::fail(
+            "internal tick-seed",
+            Outcome::Error,
+            "tick_seed",
+            &error.to_string(),
+            globals,
+        ),
+    }
+}
+
+/// The last seed pass, for the tick's report. A failed pass is visible here
+/// but is not a tick failure: the next daily collection retries it.
+fn seed_state(directory: &Directory) -> &'static str {
+    match directory.read_bounded(SEED_RESULT.as_ref(), 64 * 1024) {
+        Ok(bytes) => match serde_json::from_slice::<GcResult>(&bytes) {
+            Ok(result) => match result.state.as_str() {
+                "queued" => "queued",
+                "running" => "running",
+                "complete" => "complete",
+                "disabled" => "disabled",
+                _ => "last_failed",
+            },
+            Err(_) => "last_failed",
+        },
+        Err(error) if error.is_not_found() => "idle",
+        Err(_) => "last_failed",
     }
 }
 
@@ -294,8 +477,16 @@ fn tick(
     };
     // These are the integration seams for #2125 and #2225. They deliberately
     // have no cadence, network probes or policy until their owners wire them.
+    let target_seed = match provenant_config::private_directory(
+        &resolved.roots.state.as_path().join("tick"),
+        true,
+    ) {
+        Ok(directory) => Task::idle("target_seed", seed_state(&directory)),
+        Err(_) => Task::idle("target_seed", "last_failed"),
+    };
     let tasks = vec![
         gc,
+        target_seed,
         Task::idle("notice_batch_flush", "unwired"),
         Task::idle("quota_refresh", "unwired"),
     ];
@@ -308,10 +499,11 @@ pub(crate) fn run(globals: &Globals, workers: &'static dyn WorkerObserver) -> u8
             let failed = !data.graphs.errors.is_empty()
                 || data.tasks.iter().any(|task| task.error.is_some());
             let human = format!(
-                "tick: graphs={} errors={} gc={}\n",
+                "tick: graphs={} errors={} gc={} seed={}\n",
                 data.graphs.advanced,
                 data.graphs.errors.len(),
-                data.tasks[0].state
+                data.tasks[0].state,
+                data.tasks[1].state
             );
             let rows = data
                 .graphs
@@ -394,5 +586,134 @@ mod tests {
             "collection failed"
         );
         assert_eq!(queue_gc(&reopened, deadline, || Ok(())).unwrap(), "queued");
+    }
+
+    fn seed_clock() -> provenant_os::clock::SystemClock {
+        provenant_os::clock::SystemClock
+    }
+
+    fn seed_state_of(directory: &Directory) -> (&'static str, Option<String>) {
+        let bytes = directory
+            .read_bounded(SEED_RESULT.as_ref(), 64 * 1024)
+            .unwrap();
+        let result: GcResult = serde_json::from_slice(&bytes).unwrap();
+        (seed_state(directory), result.error)
+    }
+
+    #[test]
+    fn seed_refresh_is_queued_without_running_inline_and_a_spawn_failure_is_recorded() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = provenant_config::private_directory(temp.path(), true).unwrap();
+        let now = WallTime::from_micros(1_000_000).unwrap();
+        assert_eq!(seed_state(&directory), "idle");
+        let mut spawned = 0;
+        queue_seed(&directory, now, || {
+            spawned += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(spawned, 1);
+        assert_eq!(seed_state_of(&directory).0, "queued");
+        // Queueing never builds: the refresh closure is only reachable from
+        // the detached worker.
+        let error = queue_seed(&directory, now, || Err("no process budget".into())).unwrap_err();
+        assert_eq!(error, "no process budget");
+        assert_eq!(
+            seed_state_of(&directory),
+            ("last_failed", Some("no process budget".into()))
+        );
+    }
+
+    #[test]
+    fn seed_pass_treats_busy_as_a_noop_and_isolates_project_failures() {
+        use crate::target_seed_build::Refresh;
+        let temp = tempfile::tempdir().unwrap();
+        let directory = provenant_config::private_directory(temp.path(), true).unwrap();
+        let projects = vec![
+            std::path::PathBuf::from("/a"),
+            std::path::PathBuf::from("/b"),
+            std::path::PathBuf::from("/c"),
+            std::path::PathBuf::from("/d"),
+        ];
+        let listed = projects.clone();
+        seed_pass(
+            &directory,
+            &seed_clock(),
+            true,
+            || Ok(listed),
+            |project| match project.to_str().unwrap() {
+                "/a" => Ok(Refresh::Busy),
+                "/b" => Err("origin/main missing".into()),
+                "/c" => Ok(Refresh::Built("generation".into())),
+                _ => Ok(Refresh::Current),
+            },
+        )
+        .unwrap();
+        // The failure is logged in the result and visible to the tick, which
+        // is not itself failed: the later projects still ran.
+        let (state, error) = seed_state_of(&directory);
+        assert_eq!(state, "last_failed");
+        assert_eq!(error.unwrap(), "/b: origin/main missing");
+        let pass = refresh_projects(&projects, |project| match project.to_str().unwrap() {
+            "/a" => Ok(Refresh::Busy),
+            "/b" => Err("origin/main missing".into()),
+            "/c" => Ok(Refresh::Built("generation".into())),
+            _ => Ok(Refresh::Current),
+        });
+        assert_eq!(
+            (pass.built, pass.current, pass.busy, pass.errors.len()),
+            (1, 1, 1, 1)
+        );
+        let clean = vec![std::path::PathBuf::from("/a")];
+        seed_pass(
+            &directory,
+            &seed_clock(),
+            true,
+            || Ok(clean),
+            |_| Ok(Refresh::Busy),
+        )
+        .unwrap();
+        assert_eq!(seed_state_of(&directory), ("complete", None));
+    }
+
+    #[test]
+    fn seed_pass_is_single_flight_and_respects_a_disabled_seed() {
+        use crate::target_seed_build::Refresh;
+        let temp = tempfile::tempdir().unwrap();
+        let directory = provenant_config::private_directory(temp.path(), true).unwrap();
+        let held = directory
+            .try_lock("seed-worker.lock".as_ref(), LockMode::Exclusive)
+            .unwrap();
+        seed_pass(
+            &directory,
+            &seed_clock(),
+            true,
+            || panic!("a second worker must not enumerate projects"),
+            |_| -> Result<Refresh, Box<dyn std::error::Error>> { panic!("must not refresh") },
+        )
+        .unwrap();
+        assert_eq!(seed_state(&directory), "idle");
+        drop(held);
+        seed_pass(
+            &directory,
+            &seed_clock(),
+            false,
+            || panic!("a disabled seed must not enumerate projects"),
+            |_| -> Result<Refresh, Box<dyn std::error::Error>> { panic!("must not refresh") },
+        )
+        .unwrap();
+        assert_eq!(seed_state(&directory), "disabled");
+        seed_pass(
+            &directory,
+            &seed_clock(),
+            true,
+            || Err("registry unreadable".into()),
+            |_| Ok(Refresh::Current),
+        )
+        .unwrap();
+        assert_eq!(
+            seed_state_of(&directory),
+            ("last_failed", Some("registry unreadable".into()))
+        );
     }
 }
