@@ -10,7 +10,13 @@ struct QuotaReport {
         case stale
         case unknown
         case authRequired = "auth_required"
+        case keychainUnavailable = "keychain_unavailable"
         case unsupported
+
+        /// A status this app does not know, from a newer CLI, reads as unknown so one row never blanks the report.
+        init(wire: String) { self = Status(rawValue: wire) ?? .unknown }
+        /// The account needs the user to act before it can be read again.
+        var needsAction: Bool { self == .authRequired || self == .keychainUnavailable }
     }
 
     let accounts: [Account]
@@ -55,7 +61,7 @@ struct QuotaReport {
 
     struct Account: Identifiable {
         let provider, account, accountKey: String
-        let plan, error: String?
+        let plan, error, repair: String?
         let fingerprint, creditBalance, note: String?
         let active: Bool?
         let priority: Double?
@@ -75,7 +81,7 @@ struct QuotaReport {
 
         var id: String { "\(provider)/\(accountKey)" }
         var hasReading: Bool { hasSnapshot && [.available, .creditOnly, .exhausted, .stale].contains(status) }
-        var requiresAuth: Bool { status == .authRequired }
+        var needsAction: Bool { status.needsAction }
         var next: Schedule? { schedule }
         var credits: [Credit] { [] }
         var statusTitle: String {
@@ -87,12 +93,11 @@ struct QuotaReport {
             provider = adapter
             account = row.account.label
             accountKey = row.account.accountKey
-            guard let status = Status(rawValue: row.status) else {
-                throw QuotaReport.invalid("unknown account status")
-            }
+            let status = Status(wire: row.status)
             self.status = status
             freePoolRefusal = row.freePoolRefusal ?? false
             error = row.error
+            repair = row.repair?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
             entry = row.display.map {
                 Entry(id: $0.id, name: $0.name?.trimmingCharacters(in: .whitespaces).nilIfEmpty, hidden: $0.hidden ?? false,
                       order: $0.order.map(Int.init), headline: $0.headline.map { Headline(wire: $0) })
@@ -188,6 +193,7 @@ struct QuotaReport {
         case .stale: "Stale"
         case .unknown: "Unknown"
         case .authRequired: "Authentication required"
+        case .keychainUnavailable: "Keychain unavailable"
         case .unsupported: "Unsupported"
         }
     }
@@ -279,11 +285,8 @@ struct QuotaReport {
         guard !wire.reportPath.isEmpty, wire.reportPath.hasPrefix("/") else { throw invalid("report path is not absolute") }
         let generatedAt = date(wire.generatedUnixSeconds)
         let accounts = try wire.accounts.map { try Account($0, generatedAt: generatedAt) }
-        let sources = try (wire.sources ?? []).map { source -> Source in
-            guard let status = Status(rawValue: source.status) else {
-                throw invalid("unknown source status")
-            }
-            return Source(adapter: source.adapter, status: status, error: source.error,
+        let sources = (wire.sources ?? []).map { source -> Source in
+            Source(adapter: source.adapter, status: Status(wire: source.status), error: source.error,
                           nextDueAt: source.nextDueUnixSeconds.map(date))
         }
         var display = Display()
@@ -375,6 +378,7 @@ struct QuotaWireAccount: Decodable, Sendable {
     let nextDueUnixSeconds: Int64?
     let refreshing: Bool
     let error: String?
+    let repair: String?
     let display: QuotaWireRowDisplay?
 }
 struct QuotaWireRefusal: Decodable, Sendable {
@@ -478,7 +482,7 @@ extension QuotaReport.Account {
     func isDrawing(now _: Date) -> Bool { drawingCredits == true }
     func rank(_ now: Date) -> Int {
         switch status {
-        case .authRequired: 4
+        case .authRequired, .keychainUnavailable: 4
         case .exhausted: 3
         case .creditOnly: 1
         case .available: 0
@@ -629,9 +633,9 @@ enum Fmt {
     }
 
     static func row(_ account: QuotaReport.Account, now: Date, alert: Double) -> Row {
-        if account.requiresAuth {
+        if account.needsAction {
             let when = account.backAt.map { back($0, now: now) } ?? account.observedAt.map { "read \(ago($0, now: now))" }
-            return Row(lead: account.statusTitle, trailing: when, spoken: [account.statusTitle, when].compactMap { $0 })
+            return Row(lead: account.statusTitle, trailing: when, spoken: [account.statusTitle, when, account.repair].compactMap { $0 })
         }
         if !account.hasReading {
             let why = account.error ?? account.statusTitle

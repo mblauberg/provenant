@@ -120,6 +120,29 @@ pub(super) fn is_linked_gitfile(checkout: &Path) -> Result<bool, Fail> {
     Ok(gitdir.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("worktrees")))
 }
 
+/// The full target of a lane this run just reported, read from its row.
+fn lane_target(row: &Value) -> Option<Target> {
+    Some(Target {
+        selection: None,
+        run: Some(row["run_id"].as_str()?.parse().ok()?),
+        task: Some(row["task_id"].as_str()?.parse().ok()?),
+        attempt: Some(row["attempt_id"].as_str()?.parse().ok()?),
+    })
+}
+
+/// The current project's run store, opened read-only; `None` sends each lane
+/// through the general `output` path, which reports the failure itself.
+fn local_session(edge: &Edge<'_>) -> Option<Session> {
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel).ok()?;
+    let context = execution_context(edge).ok()?;
+    let store = run::RunStore::open_read_only(&context, &call)
+        .ok()??
+        .with_writer_registry(edge.roots.state.as_path());
+    Some(Session { store, context })
+}
+
 pub(super) fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
     result.result.command = "run".into();
     if result.result.error.is_some() {
@@ -153,6 +176,9 @@ pub(super) fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
     let timed_out = result.result.status == Status::Timeout;
     let mut next = None;
     let mut wait = None;
+    // Every lane's result tail reads the same project's store, so resolve the
+    // project and open it once for the whole run rather than once per lane.
+    let tails = std::cell::OnceCell::new();
     for row in rows {
         let Some(id) = row["attempt_id"].as_str() else {
             continue;
@@ -181,7 +207,18 @@ pub(super) fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
                 && !matches!(state, "queued" | "starting" | "running" | "settling")))
             && let Ok(attempt) = id.parse()
         {
-            let tail = output(
+            let target = if row["result_path"].is_string() {
+                lane_target(&row)
+            } else {
+                None
+            };
+            let local = target.and_then(|target| {
+                tails
+                    .get_or_init(|| local_session(edge))
+                    .as_ref()
+                    .map(|session| (session, target))
+            });
+            let tail = output_with(
                 Output {
                     attempt,
                     host: None,
@@ -194,6 +231,7 @@ pub(super) fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
                     path: false,
                 },
                 edge,
+                local.as_ref().map(|(session, target)| (*session, target)),
             );
             if tail.result.error.is_none() {
                 human.push_str(&tail.human);

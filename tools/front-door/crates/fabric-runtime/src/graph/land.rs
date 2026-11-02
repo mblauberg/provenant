@@ -519,6 +519,7 @@ fn outputs(record: &LandRecord) -> NodeOutputs {
         branch: Some(record.branch.clone()),
         commit: Some(record.head.clone()),
         warnings: Vec::new(),
+        plan: None,
         remaining: None,
     }
 }

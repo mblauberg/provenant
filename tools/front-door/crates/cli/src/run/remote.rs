@@ -1216,7 +1216,8 @@ pub(super) fn output(
             "attempt required",
         ));
     };
-    read_output(command, host, attempt, Peer::open_for(edge, [placement])?)
+    let peer = Peer::open_for(edge, [placement])?;
+    read_output(command, host, attempt, peer)
 }
 
 /// `output --host PEER` or `PEER/ATTEMPT`: the peer's own attempt, with no
@@ -1328,6 +1329,13 @@ fn read_output(
     else {
         return Err(corrupt());
     };
+    let fallback = match &chunk {
+        OutputResult::Chunk { extra, .. } if matches!(command.part, Part::Result) => extra
+            .get(super::output::PLANNER_FALLBACK_KEY)
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        _ => None,
+    };
     let chunk = if let Some(lines) = command.tail {
         collect_tail(chunk, lines, command.max_bytes, |offset| {
             let input = OutputInput::Read {
@@ -1359,7 +1367,11 @@ fn read_output(
     } else {
         chunk
     };
-    chunk_response(attempt, host, &command.part, chunk)
+    let (mut data, mut text) = chunk_response(attempt, host, &command.part, chunk)?;
+    if let Some(reason) = fallback {
+        super::output::add_planner_fallback(&mut data, &mut text, reason);
+    }
+    Ok((data, text))
 }
 
 /// Older peers expose paged reads. Retain only the bounded tail while paging,

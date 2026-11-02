@@ -178,6 +178,59 @@ final class ReportTests: XCTestCase {
             account.windows.filter { $0.name == "untimed-budget" }, now: now)))
     }
 
+    private func showJSON(accountStatus: String, sourceStatus: String = "unknown", repair: String? = nil) -> String {
+        let repairField = repair.map { #""repair": "\#($0)","# } ?? ""
+        return #"""
+        {
+          "schema_version": 1, "command": "quota show", "status": "ok", "error": null,
+          "data": {
+            "schema_version": 1, "generated_unix_seconds": 1793577600,
+            "accounts": [{
+              "account": {"adapter": "agy", "account_key": "agy-google-abc", "label": "legacy"},
+              "snapshot": null, "status": "\#(accountStatus)", \#(repairField)
+              "age_seconds": null, "next_due_unix_seconds": null, "refreshing": false,
+              "error": "isolated_keychain_unavailable"
+            }, {
+              "account": {"adapter": "codex", "account_key": "ok", "label": "ok"},
+              "snapshot": null, "status": "unknown",
+              "age_seconds": null, "next_due_unix_seconds": null, "refreshing": false, "error": null
+            }],
+            "sources": [{"adapter": "agy", "status": "\#(sourceStatus)", "error": null, "next_due_unix_seconds": null}],
+            "coverage": {"total": 2, "known": 0},
+            "refreshing_ids": [], "next_due_unix_seconds": null,
+            "report_path": "/tmp/provenant/quota/report.json"
+          }
+        }
+        """#
+    }
+
+    func testKeychainUnavailableDecodesAsNeedingActionWithRepairText() throws {
+        let repair = "expected /tmp/.gemini/Library/Keychains/login.keychain-db; re-register with `provenant accounts register --adapter agy --directory ~ legacy`"
+        let report = try decodeShow(showJSON(accountStatus: "keychain_unavailable", sourceStatus: "keychain_unavailable", repair: repair))
+        let account = try XCTUnwrap(report.accounts.first { $0.provider == "agy" })
+        XCTAssertEqual(account.status, .keychainUnavailable)
+        XCTAssertTrue(account.needsAction)
+        XCTAssertEqual(account.repair, repair)
+        XCTAssertEqual(account.statusTitle, "Keychain unavailable")
+        XCTAssertEqual(report.sources.first?.status, .keychainUnavailable)
+        XCTAssertEqual(account.rank(report.generatedAt), 4)
+        let row = QuotaMenu.account(account, now: report.generatedAt, alert: report.alertPercent)
+        XCTAssertEqual(row.subtitle, "Keychain unavailable")
+        let line = Fmt.row(account, now: report.generatedAt, alert: report.alertPercent)
+        XCTAssertEqual(line.lead, "Keychain unavailable")
+        XCTAssertTrue(line.spoken.contains(repair))
+    }
+
+    func testUnknownFutureStatusDegradesOneRowInsteadOfFailingTheReport() throws {
+        let report = try decodeShow(showJSON(accountStatus: "some_future_status", sourceStatus: "some_future_status"))
+        XCTAssertEqual(report.accounts.count, 2)
+        let account = try XCTUnwrap(report.accounts.first { $0.provider == "agy" })
+        XCTAssertEqual(account.status, .unknown)
+        XCTAssertNil(account.repair)
+        XCTAssertEqual(report.sources.first?.status, .unknown)
+        XCTAssertEqual(report.accounts.last?.status, .unknown)
+    }
+
     func testRefusalResetDecodesAndAppearsOnTheMenuBarRow() throws {
         let json = #"""
         {

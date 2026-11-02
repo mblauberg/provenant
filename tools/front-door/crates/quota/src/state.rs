@@ -256,6 +256,8 @@ pub enum ProbeFailure {
     Auth,
     /// The CLI is signed in as a different account than the registered key.
     AccountMismatch,
+    /// An agy isolated account has no usable private login keychain.
+    IsolatedKeychainUnavailable,
     MissingCli,
     ProbeDirectory,
     Disabled,
@@ -321,6 +323,8 @@ pub struct AccountRow {
     pub next_due_unix_seconds: Option<i64>,
     pub refreshing: bool,
     pub error: Option<ProbeFailure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair: Option<String>,
     /// Live provider capacity cooldowns for this account.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capacity_cooldowns: Vec<CapacityCooldownRow>,

@@ -490,12 +490,14 @@ pub fn apply(
         .ok_or_else(|| {
             format!("preset {name}: plan.replaces names no top-level stage: {replaces}")
         })?;
+    let fallback_stage = stages[position].clone();
     let mut planner = json!({
         "id": "plan",
         "role": "plan.shape",
         "tier": ctx.route,
         "access": "read_only",
         "plan": {"kinds": ["task", "synthesise"], "max_nodes": ctx.max_nodes, "patterns": []},
+        "fallback_stage": fallback_stage,
     });
     // A fragment cannot widen its planner's read roots, so a preset whose
     // planned scouts read the caller's extra roots gives the planner the same.
@@ -808,6 +810,28 @@ pub fn attach(nodes: &mut [Value], plan: Value) -> Result<(), String> {
         .iter_mut()
         .find(|node| node["id"] == "plan")
         .ok_or("the planner node was not built")?;
+    let mut plan = plan;
+    if let Some(fallback) = node
+        .as_object_mut()
+        .and_then(|node| node.remove("fallback_stage"))
+    {
+        plan["fallback"] = json!({
+            "nodes": fallback["nodes"],
+            "exports": fallback["exports"],
+        });
+        for (field, value) in [
+            ("fallback_depends_on", fallback["depends_on"].clone()),
+            ("fallback_inputs", fallback["inputs"].clone()),
+            ("fallback_source", fallback["source"].clone()),
+            ("fallback_read_roots", fallback["read_roots"].clone()),
+            ("fallback_title", fallback["title"].clone()),
+        ] {
+            let empty = value.is_null() || value.as_array().is_some_and(Vec::is_empty);
+            if !empty {
+                plan[field] = value;
+            }
+        }
+    }
     node["plan"] = plan;
     Ok(())
 }

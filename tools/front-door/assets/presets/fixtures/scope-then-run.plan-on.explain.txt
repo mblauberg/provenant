@@ -61,3 +61,4 @@ Roles:
   scout.external  origin=bundled digest=<digest>
   write.implement  origin=bundled digest=<digest>
 Substituted scout: web -> junior (route web is not defined in the routing configuration)
+Substituted external: web -> junior (route web is not defined in the routing configuration)

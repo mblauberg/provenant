@@ -633,6 +633,7 @@ pub(super) fn validate_expanded_rows<R: Error + 'static, J: Error + 'static>(
 }
 
 pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
+    document: &GraphDocument,
     checkpoint: &GraphCheckpoint,
     plan: &PlannedGraph,
     digest: &str,
@@ -823,10 +824,14 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 }
                 None => false,
             },
-            NodeState::Succeeded => last.is_some_and(|attempt| {
-                attempt.state == AttemptState::Terminal
-                    && attempt.outcome == Some(AttemptOutcome::Succeeded)
-            }),
+            // A planner whose failure was settled by its static fallback is
+            // succeeded though its last attempt failed (or never launched).
+            NodeState::Succeeded => {
+                last.is_some_and(|attempt| {
+                    attempt.state == AttemptState::Terminal
+                        && attempt.outcome == Some(AttemptOutcome::Succeeded)
+                }) || fallback_settled(node, progress, document, checkpoint)
+            }
             NodeState::Failed if progress.advance_error.is_some() => last.is_none_or(|attempt| {
                 attempt.state == AttemptState::Terminal
                     && attempt
@@ -850,4 +855,27 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         }
     }
     Ok(())
+}
+
+/// A planner settled by its static fallback: it recorded the reason and
+/// persisted exactly the stage its fallback spec derives from the document.
+fn fallback_settled(
+    node: &PlannedNode,
+    progress: &NodeProgress,
+    document: &GraphDocument,
+    checkpoint: &GraphCheckpoint,
+) -> bool {
+    let Some(spec) = node.plan.as_ref().filter(|spec| spec.fallback.is_some()) else {
+        return false;
+    };
+    progress
+        .outputs
+        .as_ref()
+        .is_some_and(|outputs| outputs.plan.is_some())
+        && plans::fallback_expansion(&node.id, spec, document).is_ok_and(|derived| {
+            checkpoint
+                .expansions
+                .iter()
+                .any(|expansion| expansion.source == node.id && *expansion == derived)
+        })
 }

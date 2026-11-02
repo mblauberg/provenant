@@ -40,7 +40,7 @@ fn command_error(program: &str, error: ExecError) -> ProbeFailure {
         ExecError::Io {
             operation: crate::agy::KEYCHAIN_OPERATION,
             ..
-        } => ProbeFailure::Auth,
+        } => ProbeFailure::IsolatedKeychainUnavailable,
         ExecError::Io {
             operation: "spawn",
             source,
@@ -506,10 +506,17 @@ impl LiveQuota {
         details: &mut QuotaDetails,
     ) -> Result<Value, ProbeFailure> {
         // An isolated agy account is signed in under its own directory as
-        // `HOME`. A missing isolated keychain is a login problem, never the
-        // shared login, and the probe re-checks it around the spawn.
-        let probe_home = crate::agy::ProbeHome::select(&account.identity_dir, &self.home)
-            .map_err(|_| ProbeFailure::Auth)?;
+        // `HOME`. A missing keychain has its own failure, never auth, and the
+        // probe re-checks it around the spawn.
+        let probe_home =
+            crate::agy::ProbeHome::select(&account.identity_dir, &self.home).map_err(|error| {
+                match error {
+                    crate::ProviderError::IsolatedKeychainUnavailable(_) => {
+                        ProbeFailure::IsolatedKeychainUnavailable
+                    }
+                    _ => ProbeFailure::Auth,
+                }
+            })?;
         let scratch = crate::host::HostProbeDir::create(&self.state)
             .map_err(|_| ProbeFailure::ProbeDirectory)?;
         let log = scratch.path().join("cli.log");
@@ -749,14 +756,14 @@ mod tests {
         for dir in [&legacy, &root.path().join("absent"), &linked] {
             assert_eq!(
                 probe(dir, "first@example.test").unwrap_err(),
-                ProbeFailure::Auth
+                ProbeFailure::IsolatedKeychainUnavailable
             );
         }
         // The keychain vanishing after a successful probe fails closed too.
         fs::remove_file(isolated.join("Library/Keychains/login.keychain-db")).unwrap();
         assert_eq!(
             probe(&isolated, "second@example.test").unwrap_err(),
-            ProbeFailure::Auth
+            ProbeFailure::IsolatedKeychainUnavailable
         );
         assert_eq!(*homes.lock().unwrap(), [isolated, home]);
     }
@@ -809,7 +816,7 @@ mod tests {
             quota
                 .agy(&account, quota.now() + 60, &mut QuotaDetails::default())
                 .unwrap_err(),
-            ProbeFailure::Auth
+            ProbeFailure::IsolatedKeychainUnavailable
         );
         assert_eq!(homes.lock().unwrap().len(), 1);
     }

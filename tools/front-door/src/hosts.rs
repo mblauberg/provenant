@@ -36,6 +36,13 @@ struct Managed {
     findings: u64,
 }
 #[derive(Serialize, Deserialize)]
+struct AgyAccount {
+    label: String,
+    directory: String,
+    keychain: String,
+    keychain_available: bool,
+}
+#[derive(Serialize, Deserialize)]
 pub(crate) struct Report {
     claude: Vec<Identity>,
     /// The executable lanes can resolve through their read-only Rust toolchain.
@@ -48,6 +55,8 @@ pub(crate) struct Report {
     /// Every registered account of every adapter.
     #[serde(default)]
     managed: Vec<Managed>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    agy_accounts: Vec<AgyAccount>,
     /// Why `managed` could not be read, when it could not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     managed_error: Option<String>,
@@ -165,6 +174,27 @@ fn managed(roots: &provenant_core::Roots, home: &Path) -> (Vec<Managed>, Option<
         Err(error) => (Vec::new(), Some(error.to_string())),
     }
 }
+fn agy_accounts(
+    accounts: &provenant_providers::accounts::Settings,
+    home: &Path,
+) -> Vec<AgyAccount> {
+    accounts
+        .entries
+        .values()
+        .filter(|entry| entry.adapter == "agy")
+        .map(|entry| {
+            let keychain = entry.directory.join("Library/Keychains/login.keychain-db");
+            let keychain_available =
+                provenant_providers::agy::account_keychain(&entry.directory, home).is_ok();
+            AgyAccount {
+                label: entry.label.clone(),
+                directory: entry.directory.display().to_string(),
+                keychain: keychain.display().to_string(),
+                keychain_available,
+            }
+        })
+        .collect()
+}
 pub(crate) fn local(
     home: &Path,
     roots: &provenant_core::Roots,
@@ -225,12 +255,18 @@ pub(crate) fn local(
         claude.push(Identity { label, signin });
     }
     let (managed, managed_error) = managed(roots, home);
+    let agy_accounts =
+        provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)
+            .ok()
+            .map(|config| agy_accounts(&config.domains.accounts, home))
+            .unwrap_or_default();
     Ok(Report {
         claude,
         nextest: lane_nextest(home),
         peer_agent: provenant_fabric_runtime::peer_agent::status(state, home),
         tick_agent: crate::tick_agent::diagnosis(state, home),
         managed,
+        agy_accounts,
         managed_error,
         warnings: crate::pool_effort_warnings(roots),
     })
@@ -299,6 +335,14 @@ fn valid_remote(report: &Report) -> bool {
             [&row.adapter, &row.label].iter().all(|text| {
                 !text.is_empty() && text.len() <= 128 && !text.chars().any(char::is_control)
             })
+        })
+        && report.agy_accounts.len() <= 128
+        && report.agy_accounts.iter().all(|row| {
+            [&row.label, &row.directory, &row.keychain]
+                .iter()
+                .all(|text| {
+                    !text.is_empty() && text.len() <= 4096 && !text.chars().any(char::is_control)
+                })
         })
         && report
             .managed_error
@@ -380,6 +424,21 @@ pub fn run(command: Hosts, globals: &Globals) -> u8 {
                 }
                 text.push_str("; token validity unverified\n");
             }
+            for row in &report.agy_accounts {
+                text.push_str(&format!(
+                    "agy [{}]: {}",
+                    row.label,
+                    if row.keychain_available {
+                        "keychain available"
+                    } else {
+                        "isolated keychain unavailable"
+                    }
+                ));
+                if !row.keychain_available {
+                    text.push_str(&format!("; expected {}; re-register with `provenant accounts register --adapter agy --directory ~ {}` if this is the login-keychain account, or create the isolated keychain per docs/runbooks/providers.md", row.keychain, row.label));
+                }
+                text.push('\n');
+            }
             // Without a receipt there is nothing to be out of step with.
             for row in report
                 .managed
@@ -453,6 +512,25 @@ pub(crate) fn keychain_suffix(config_dir: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn doctor_flags_an_agy_registration_without_its_isolated_keychain() {
+        let home = tempfile::tempdir().unwrap();
+        let directory = home.path().join(".gemini");
+        std::fs::create_dir_all(&directory).unwrap();
+        let accounts: provenant_providers::accounts::Settings = serde_json::from_value(
+            serde_json::json!({"entries":{"legacy":{"adapter":"agy","label":"legacy","key":"agy-google-abcdef123456","directory":directory}}}),
+        )
+        .unwrap();
+        let rows = super::agy_accounts(&accounts, home.path());
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].keychain_available);
+        assert!(
+            rows[0]
+                .keychain
+                .ends_with(".gemini/Library/Keychains/login.keychain-db")
+        );
+    }
+
     #[test]
     fn keychain_suffix_is_the_hex_digest_prefix() {
         assert_eq!(super::keychain_suffix(b"/home/u/.claude-work"), "9fa37e90");

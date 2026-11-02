@@ -199,6 +199,15 @@ temporary replacement, absence or symlink swap while agy runs that is undone,
 with the original inode restored, before the second check. Registering your own home directory keeps the shared
 login keychain.
 
+A registered isolated directory with no usable keychain is reported as
+`KEYCHAIN_UNAVAILABLE` by `provenant quota` and by `provenant hosts doctor`, with
+the expected path. If the directory was registered before isolated keychains
+were required and represents the login-keychain account, re-register it with
+`provenant accounts register --adapter agy --directory ~ <label>`. Otherwise,
+create and sign in to the isolated keychain as described below. Launch errors
+name the same path and repair options; missing or symlinked keychains continue
+to fail closed.
+
 Unregistered and registered agy behave differently at launch:
 
 - With no agy registration, agy runs on the user's login keychain as before.

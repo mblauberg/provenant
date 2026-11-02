@@ -23,6 +23,20 @@ pub struct PlanSpec {
     /// instances export. Off, a consumer keeps exactly the inputs it declared.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub wire_exports: bool,
+    /// Static preset stage to run if this planner's attempt fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<CompositeSpec>,
+    /// Existing dependencies and inputs inherited by the static stage.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_depends_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_inputs: Vec<GraphInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_source: Option<SourceBinding>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_read_roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_title: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -357,6 +371,28 @@ fn fragment_exports(document: &GraphDocument, expansion: &Expansion) -> Vec<Grap
     else {
         return Vec::new();
     };
+    if let Some(fallback) = &spec.fallback
+        && expansion
+            .nodes
+            .iter()
+            .any(|node| node.id == format!("{}--fallback", expansion.source))
+    {
+        let mut outputs = Vec::new();
+        for output in fallback
+            .exports
+            .iter()
+            .flat_map(|export| export.outputs.iter().copied())
+        {
+            if !outputs.contains(&output) {
+                outputs.push(output);
+            }
+        }
+        return vec![GraphInput {
+            extra: Default::default(),
+            node: format!("{}--fallback", expansion.source),
+            outputs,
+        }];
+    }
     expansion
         .patterns
         .iter()
@@ -957,6 +993,67 @@ pub(super) fn settle(
     if checkpoint.expansions.iter().any(|e| e.source == node.id) {
         return None;
     }
+    if node
+        .plan
+        .as_ref()
+        .is_some_and(|spec| spec.fallback.is_some())
+        && checkpoint
+            .nodes
+            .iter()
+            .any(|progress| progress.id == node.id && progress.state == NodeState::Failed)
+    {
+        let spec = node.plan.as_ref()?;
+        let index = checkpoint
+            .nodes
+            .iter()
+            .position(|progress| progress.id == node.id)?;
+        let reason = fallback_reason(&checkpoint.nodes[index]);
+        let built = (|| {
+            let addition = fallback_expansion(&node.id, spec, source)?;
+            let mut preview = document.clone();
+            append(&mut preview, &addition);
+            let (plan, positions) =
+                validate_flat_plan(&preview, &generous()).map_err(str::to_owned)?;
+            if let Some(reason) = structural_limit_reason(&preview, &plan, limits) {
+                return Err(reason);
+            }
+            let mut expansions = checkpoint.expansions.clone();
+            expansions.push(addition.clone());
+            if let Some(reason) =
+                envelope::reason(source, &expansions, &checkpoint.extensions, &plan)
+            {
+                return Err(reason);
+            }
+            Ok((addition, plan, positions, preview))
+        })();
+        let (addition, plan, positions, preview) = match built {
+            Ok(built) => built,
+            Err(reason) => {
+                // Same diagnostic as a rejected planner expansion: pause with a reason.
+                let reason = bounded(
+                    &format!("node {} fallback expansion paused: {reason}", node.id),
+                    MAX_ADVANCE_ERROR_BYTES,
+                );
+                checkpoint.nodes[index].expansion_pause = Some(reason.clone());
+                checkpoint.pause_reason = Some(reason);
+                checkpoint.pause_code = Some("invalid_plan_expansion".into());
+                return None;
+            }
+        };
+        checkpoint.nodes[index].state = NodeState::Succeeded;
+        checkpoint.nodes[index].expansion_pause = None;
+        let outputs = checkpoint.nodes[index]
+            .outputs
+            .get_or_insert_with(|| super::outputs::make_outputs(None, None, None, None, None));
+        outputs.plan = Some(PlanOutput {
+            extra: Default::default(),
+            fallback_reason: reason,
+        });
+        checkpoint.expansions.push(addition);
+        loops::reconcile(checkpoint, &plan);
+        remaining(checkpoint, &preview, limits);
+        return Some((preview, plan, positions));
+    }
     let index = checkpoint
         .nodes
         .iter()
@@ -1060,4 +1157,73 @@ pub(super) fn settle(
             None
         }
     }
+}
+
+/// The static stage a planner's `fallback` spec expands to in the original
+/// document. Deterministic, so `settle` appends it and checkpoint validation
+/// recomputes it to check what was persisted.
+pub(super) fn fallback_expansion(
+    node_id: &str,
+    spec: &PlanSpec,
+    source: &GraphDocument,
+) -> Result<Expansion, String> {
+    let fallback = spec
+        .fallback
+        .as_ref()
+        .ok_or_else(|| "planner has no fallback stage".to_owned())?;
+    let root_id = format!("{node_id}--fallback");
+    let root: GraphNode = serde_json::from_value(serde_json::json!({
+        "id": root_id,
+        "kind": "composite",
+        "access": "read_only",
+        "depends_on": spec.fallback_depends_on,
+        "inputs": spec.fallback_inputs,
+        "source": spec.fallback_source,
+        "read_roots": spec.fallback_read_roots,
+        "title": spec.fallback_title,
+        "composite": fallback,
+    }))
+    .map_err(|error| format!("invalid fallback stage: {error}"))?;
+    let mut with_root = source.clone();
+    with_root.nodes.push(root);
+    let expanded = composites::expand(&with_root, &generous())
+        .map_err(|error| format!("fallback stage does not expand: {error}"))?;
+    Ok(Expansion {
+        extra: Default::default(),
+        source: node_id.to_owned(),
+        continuation: false,
+        nodes: expanded
+            .nodes
+            .into_iter()
+            .filter(|child| child.id == root_id || child.id.starts_with(&format!("{root_id}--")))
+            .collect(),
+        patterns: Vec::new(),
+    })
+}
+
+fn fallback_reason(progress: &NodeProgress) -> String {
+    let outcome = progress
+        .attempts
+        .last()
+        .and_then(|attempt| attempt.outcome)
+        .map_or_else(
+            || "unknown failure".to_owned(),
+            |outcome| format!("{outcome:?}"),
+        );
+    let detail = progress
+        .advance_error
+        .as_deref()
+        .or_else(|| {
+            progress
+                .outputs
+                .as_ref()
+                .and_then(|outputs| outputs.result.as_ref())
+                .map(|result| result.excerpt.as_str())
+        })
+        .filter(|detail| !detail.trim().is_empty());
+    let reason = detail.map_or_else(
+        || format!("planner attempt failed: {outcome}"),
+        |detail| format!("planner attempt failed ({outcome}): {detail}"),
+    );
+    bounded(&reason, NOTE_BYTES)
 }

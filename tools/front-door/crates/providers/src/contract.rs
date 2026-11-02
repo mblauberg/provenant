@@ -30,8 +30,9 @@ pub enum ProviderError {
     #[error("confinement plan asks for a policy this adapter cannot honour")]
     UnsupportedPolicy,
     #[error(
-        "agy isolated keychain {0} is missing or not a regular file; create the isolated \
-         keychain and sign in there first (docs/runbooks/providers.md, Agy accounts)"
+        "agy isolated keychain {0} is missing or not a regular file; re-register with \
+         `provenant accounts register --adapter agy --directory ~ <label>` if this is the \
+         login-keychain account, or create the isolated keychain per docs/runbooks/providers.md"
     )]
     IsolatedKeychainUnavailable(String),
     #[error("provider login token is unavailable")]

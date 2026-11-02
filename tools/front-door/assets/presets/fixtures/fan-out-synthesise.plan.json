@@ -3,7 +3,7 @@
     "pattern": "fan-out-synthesise",
     "preset": "fan-out-synthesise"
   },
-  "graph_id": "preset-3cc7b8cacb576ec1ccccd12b4123da7f",
+  "graph_id": "preset-90f470dd22aa1dc9a04a57775af9f010",
   "nodes": [
     {
       "access": "read_only",
@@ -12,6 +12,44 @@
       "kind": "plan",
       "plan": {
         "disjoint_waves": true,
+        "fallback": {
+          "exports": [
+            {
+              "node": "branch-1",
+              "outputs": [
+                "result"
+              ]
+            },
+            {
+              "node": "branch-2",
+              "outputs": [
+                "result"
+              ]
+            }
+          ],
+          "nodes": [
+            {
+              "access": "read_only",
+              "depends_on": [],
+              "id": "branch-1",
+              "prompt": "brief",
+              "route": {
+                "alias": "senior"
+              },
+              "title": "branch-1"
+            },
+            {
+              "access": "read_only",
+              "depends_on": [],
+              "id": "branch-2",
+              "prompt": "brief",
+              "route": {
+                "alias": "senior"
+              },
+              "title": "branch-2"
+            }
+          ]
+        },
         "kinds": [
           "task",
           "synthesise"
