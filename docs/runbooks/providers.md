@@ -345,16 +345,19 @@ naming the file, if one has another; remove the other name and retry. A lane's
 Cargo and pnpm caches are private to it, so a link inside them cannot reach a
 shared store.
 
-A writer's `TMPDIR` lives in the attempt's `tmp/candidate-N`, which terminal
-commit and unreserved reconciliation collect. Account probes still use `scratch/`.
+A writer's `TMPDIR` is attempt-private and terminal commit and unreserved
+reconciliation collect it. On macOS it is a `candidate-N` directory under
+`/private/tmp/pv-<attempt-id>` so Unix-domain socket paths fit `sun_path`; other
+platforms use the attempt's `tmp/candidate-N`. Account probes still use
+`scratch/`.
 Writer profiles permit reading and executing fixtures only in that candidate's
 temp subtree, signalling their own children and reading `/dev/fd/N`. Read-only
 profiles keep their existing limits. Private check homes honour `TMPDIR`.
 
 From `tools/front-door`, verify touched crates with
 `cargo nextest run --profile lane -p <crate>`. The `lane` profile excludes
-fixtures requiring hard links or short Unix socket paths that the writer
-sandbox cannot provide.
+fixtures requiring hard links; writer lanes now provide a short socket-safe
+temporary root.
 Keep local checks targeted; full suites run in CI with the `ci` profile,
 which retains these host-only tests.
 

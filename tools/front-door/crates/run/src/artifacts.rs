@@ -2,7 +2,11 @@ use crate::*;
 use provenant_core::{RelativePath, RunId};
 use provenant_os::fs::{Directory, FileKind, Metadata, PayloadTree, PublishMode};
 use provenant_records::{CanonicalV1, PathWire};
-use std::{ffi::OsStr, io::Read, path::Component};
+use std::{
+    ffi::OsStr,
+    io::Read,
+    path::{Component, PathBuf},
+};
 
 pub(crate) fn subdir(parent: &Directory, name: &OsStr, create: bool) -> Result<Directory> {
     if create {
@@ -18,7 +22,53 @@ pub(crate) fn subdir(parent: &Directory, name: &OsStr, create: bool) -> Result<D
 }
 
 pub(crate) fn remove_temporary_best_effort(attempt: &Directory) -> provenant_os::fs::Result<()> {
-    remove_entry_tree(attempt, OsStr::new("tmp"))
+    remove_entry_tree(attempt, OsStr::new("tmp"))?;
+    remove_macos_temporary_root(attempt)
+}
+
+#[cfg(target_os = "macos")]
+fn remove_macos_temporary_root(attempt: &Directory) -> provenant_os::fs::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let attempt_path = attempt.current_path()?;
+    let Some(name) = attempt_path.file_name() else {
+        return Err(provenant_os::fs::FsError::Io {
+            operation: "derive short temporary root",
+            path: attempt_path,
+            source: std::io::Error::other("attempt path has no name"),
+        });
+    };
+    let path = PathBuf::from(format!("/private/tmp/pv-{}", name.to_string_lossy()));
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata)
+            if metadata.is_dir()
+                && !metadata.file_type().is_symlink()
+                && metadata.uid() == provenant_os::fs::effective_uid()
+                && metadata.mode() & 0o077 == 0 =>
+        {
+            std::fs::remove_dir_all(&path).map_err(|source| provenant_os::fs::FsError::Io {
+                operation: "remove short temporary root",
+                path,
+                source,
+            })
+        }
+        Ok(_) => Err(provenant_os::fs::FsError::Io {
+            operation: "remove short temporary root",
+            path,
+            source: std::io::Error::other("short temporary root is not a directory"),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(provenant_os::fs::FsError::Io {
+            operation: "inspect short temporary root",
+            path,
+            source,
+        }),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn remove_macos_temporary_root(_: &Directory) -> provenant_os::fs::Result<()> {
+    Ok(())
 }
 
 /// Reconcile and retention GC may dispose of lock-named payloads after proving the
@@ -32,17 +82,19 @@ pub(crate) fn remove_unreserved_terminal_temporary(
     let name = OsStr::new("tmp");
     let metadata = match attempt.metadata_at(name, false) {
         Ok(metadata) => metadata,
-        Err(error) if error.is_not_found() => return Ok(()),
+        Err(error) if error.is_not_found() => return remove_macos_temporary_root(attempt),
         Err(error) => return Err(error),
     };
     if metadata.kind != FileKind::Directory {
-        return attempt.unlink(name);
+        attempt.unlink(name)?;
+        return remove_macos_temporary_root(attempt);
     }
     let tree = PayloadTree::claim(attempt, name, &metadata)?;
     remove_payload_contents(&tree)?;
     drop(tree);
     // tmp itself is not lock-named, so ordinary removal suffices.
-    attempt.rmdir(name)
+    attempt.rmdir(name)?;
+    remove_macos_temporary_root(attempt)
 }
 
 fn remove_payload_contents(directory: &PayloadTree) -> provenant_os::fs::Result<()> {

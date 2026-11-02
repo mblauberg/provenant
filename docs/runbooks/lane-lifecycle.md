@@ -75,6 +75,12 @@ SwiftPM build output to a scratch-only path and keeps the Clang module cache and
 (where SwiftPM runs the compiled package manifest) in the lane scratch as well. Both toolchains stay read-only, and the worktree,
 Git metadata and shared caches retain the read-only profile.
 
+On macOS, each attempt's temporary root is created at `/private/tmp/pv-<attempt-id>`
+so tools that bind Unix sockets stay within Darwin's `sun_path` limit. Provider
+scratch directories live below that root. The root is private to the attempt
+and is removed by terminal settlement or unreserved temporary-file collection.
+Other platforms keep the attempt's state-root `tmp` directory.
+
 The receipt names the worktree. `--worktree PATH` uses an existing checkout
 without taking over its lifecycle. A missing branch name creates an owned
 checkout; for an absolute path or a path below `.worktrees/`, use

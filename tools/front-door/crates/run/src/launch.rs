@@ -303,7 +303,7 @@ impl RunStore {
             .saturating_add(task.provider_timeout_seconds.saturating_mul(1000)),
             scratch: base.join("scratch"),
             provider_state: base.join("provider-state"),
-            temporary: base.join("tmp"),
+            temporary: self.temporary_path(attempt.attempt_id, call)?,
         };
         let prompt = output_prompt(&base, &attempt.prompt);
         let plan = providers
@@ -1424,7 +1424,7 @@ impl RunStore {
                     .saturating_add(task.provider_timeout_seconds.saturating_mul(1000)),
                 scratch: base.join("scratch"),
                 provider_state: base.join("provider-state"),
-                temporary: base.join("tmp"),
+                temporary: self.temporary_path(id, call)?,
             };
             let prepared = providers
                 .priority(task)
