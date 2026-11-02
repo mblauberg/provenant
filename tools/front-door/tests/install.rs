@@ -1,4 +1,8 @@
 mod support;
+// Exercise the binary-only tick rendering seam without registering a real service.
+#[path = "../src/tick_agent.rs"]
+#[allow(dead_code)]
+mod tick_agent;
 use provenant_config::{Release, ReleaseSmoke};
 use provenant_core::CancelToken;
 use provenant_records::{CommandResult, Outcome, SourceInput, VersionInfo, source_digest};
@@ -9,6 +13,15 @@ use std::{
     path::{Path, PathBuf},
 };
 use support::{Result, TestRig, code};
+
+/// Executables of the bundled app: the console, and the menu helper nested as a login-item app.
+const APP_EXECUTABLES: [&str; 2] = ["Contents/MacOS/provenant-console", MENU_EXECUTABLE];
+const MENU_EXECUTABLE: &str =
+    "Contents/Library/LoginItems/Provenant Menu.app/Contents/MacOS/quota-menubar";
+
+// Emulate the helper protocol for installer failure injection; the native
+// RENAME_SWAP implementation is exercised by the Swift Menu tests.
+const APP_FIXTURE: &str = "#!/bin/sh\nif [ \"$1\" = --swap-path ]; then\n  mv \"$2\" \"$2.swap\" && mv \"$3\" \"$2\" && mv \"$2.swap\" \"$3\" || exit $?\n  if [ -n \"${PROVENANT_TEST_SWAP_SIGNAL:-}\" ] && [ ! -f \"$PROVENANT_TEST_SWAP_SIGNAL\" ]; then\n    touch \"$PROVENANT_TEST_SWAP_SIGNAL\"; kill -TERM \"$PPID\"\n  fi\n  exit 0\nfi\nexit 0\n";
 
 struct FixtureSmoke(VersionInfo);
 
@@ -21,6 +34,15 @@ fn staged(rig: &TestRig) -> Result<PathBuf> {
     staged_named(rig, "staged", b"synthetic release")
 }
 fn staged_named(rig: &TestRig, name: &str, identity: &[u8]) -> Result<PathBuf> {
+    staged_binary(rig, name, identity, None)
+}
+
+fn staged_binary(
+    rig: &TestRig,
+    name: &str,
+    identity: &[u8],
+    signed_binary: Option<&Path>,
+) -> Result<PathBuf> {
     let stage = rig.root.join(name);
     fs::create_dir_all(stage.join("bin"))?;
     fs::create_dir_all(stage.join("skills/example"))?;
@@ -69,6 +91,9 @@ fn staged_named(rig: &TestRig, name: &str, identity: &[u8]) -> Result<PathBuf> {
     );
     let binary = stage.join("bin/provenant");
     fs::write(&binary, script)?;
+    if let Some(signed_binary) = signed_binary {
+        fs::copy(signed_binary, &binary)?;
+    }
     fs::set_permissions(binary, fs::Permissions::from_mode(0o755))?;
     let path = stage.join("skills/example/SKILL.md");
     fs::write(&path, skill)?;
@@ -86,6 +111,91 @@ fn staged_named(rig: &TestRig, name: &str, identity: &[u8]) -> Result<PathBuf> {
         &CancelToken::new(),
     )?;
     Ok(stage)
+}
+
+#[test]
+fn tick_upgrade_keeps_stable_program_path_and_valid_signature() -> Result {
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+    use provenant_core::{Clock, WaitBudget};
+    struct Reporter;
+    impl provenant_config::InstallReporter for Reporter {
+        fn preview(&mut self, _: &[provenant_config::Action]) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let rig = TestRig::new()?;
+    let roots = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone())
+        .resolve(&provenant_os::fs::SystemPathResolver)?;
+    let mut targets =
+        provenant_config::Targets::new(roots, &rig.home, &[provenant_records::Harness::Codex]);
+    let program = targets.bin_dir.join("provenant");
+    targets.tick_agent = Some(tick_agent::render(
+        &program,
+        targets.roots.state.as_path(),
+        "/usr/bin:/bin".as_ref(),
+    )?);
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let context = provenant_config::InstallContext {
+        clock: &clock,
+        cancel: &cancel,
+        budget: WaitBudget::cli(clock.mono_now(), 30)?,
+    };
+    // Signed Mach-O stand-ins exercise actual binary publication and replacement.
+    // Config owns those writes; no launchctl operation or ambient user agent is invoked.
+    for (name, source) in [
+        ("first-signed", "/usr/bin/true"),
+        ("next-signed", "/bin/echo"),
+    ] {
+        let stage = staged_binary(&rig, name, name.as_bytes(), Some(Path::new(source)))?;
+        let release = Release::read(&stage, env!("PROVENANT_TARGET_TRIPLE"))?;
+        let manifest = release.manifest();
+        let smoke = FixtureSmoke(VersionInfo {
+            extra: Default::default(),
+            source_digest: manifest.source_digest,
+            asset_digest: manifest.asset_digest,
+            target: manifest.target.clone(),
+            toolchain: manifest.toolchain.clone(),
+            record_schema_version: 1,
+            config_schema_version: 1,
+        });
+        provenant_config::plan_and_install(
+            &release,
+            &targets,
+            &context,
+            &mut Reporter,
+            &smoke,
+            false,
+        )?;
+        assert_eq!(fs::read(&program)?, fs::read(source)?);
+        let plist = tick_agent::plist(&rig.home);
+        let extracted = rig.execute_os(
+            Path::new("/usr/bin/plutil"),
+            &[
+                "-extract".into(),
+                "ProgramArguments.0".into(),
+                "raw".into(),
+                "-o".into(),
+                "-".into(),
+                plist.into(),
+            ],
+            None,
+        )?;
+        assert_eq!(code(&extracted), 0, "{extracted:?}");
+        assert_eq!(
+            String::from_utf8(extracted.stdout.bytes)?.trim(),
+            program.to_str().ok_or("program path")?
+        );
+        let verified = rig.execute_os(
+            Path::new("/usr/bin/codesign"),
+            &["--verify".into(), program.clone().into()],
+            None,
+        )?;
+        assert_eq!(code(&verified), 0, "{verified:?}");
+    }
+    Ok(())
 }
 fn args(stage: &Path, dry: bool) -> Vec<std::ffi::OsString> {
     let mut args = vec![
@@ -874,11 +984,10 @@ fi
         format!("{digest}  package.tar.gz\n"),
     )?;
     let app_fixture = fixtures.join("apps");
-    let app_binaries = app_fixture.join("Provenant Console.app/Contents/MacOS");
-    fs::create_dir_all(&app_binaries)?;
-    for binary in ["provenant-console", "quota-menubar"] {
-        let path = app_binaries.join(binary);
-        fs::write(&path, "#!/bin/sh\nexit 0\n")?;
+    for binary in APP_EXECUTABLES {
+        let path = app_fixture.join("Provenant Console.app").join(binary);
+        fs::create_dir_all(path.parent().ok_or("app executable parent")?)?;
+        fs::write(&path, APP_FIXTURE)?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
     }
     let apps_archive = fixtures.join("provenant-apps-aarch64-apple-darwin.tar.gz");
@@ -1092,7 +1201,7 @@ esac
     fs::write(
         &mv,
         format!(
-            "#!/bin/sh\ncase \"$1\" in */.provenant-upgrade.*/*) if [ ! -f '{0}' ]; then touch '{0}'; exit 1; fi ;; esac\nexec /bin/mv \"$@\"\n",
+            "#!/bin/sh\ncase \"$1\" in */.provenant-retained.*/*) if [ ! -f '{0}' ]; then touch '{0}'; exit 1; fi ;; esac\nexec /bin/mv \"$@\"\n",
             rig.root.join("direct-install-mv-failed-once").display()
         ),
     )?;
@@ -1113,11 +1222,21 @@ esac
             !entry
                 .file_name()
                 .to_string_lossy()
-                .starts_with(".provenant-upgrade.")
+                .starts_with(".provenant-retained.")
         })
     }));
     fs::remove_file(&recorded)?;
     fs::remove_file(&mv)?;
+    let signal_marker = rig.root.join("swap-signalled");
+    rig.env.push((
+        "PROVENANT_TEST_SWAP_SIGNAL".into(),
+        signal_marker.into_os_string(),
+    ));
+    let interrupted = rig.execute_os(Path::new("/bin/sh"), &args, None)?;
+    assert_eq!(code(&interrupted), 143, "{interrupted:?}");
+    assert!(installed_app.join("old-build").exists());
+    rig.env
+        .retain(|(key, _)| key != "PROVENANT_TEST_SWAP_SIGNAL");
     let agent = rig
         .home
         .join("Library/LaunchAgents/dev.provenant.quota-menubar.plist");
@@ -1144,9 +1263,238 @@ esac
             !entry
                 .file_name()
                 .to_string_lossy()
-                .starts_with(".provenant-upgrade.")
+                .starts_with(".provenant-retained.")
         })
     }));
+    let cp = fake_bin.join("cp");
+    fs::write(
+        &cp,
+        "#!/bin/sh\ncase \"$3\" in */agent.plist.tmp) printf partial > \"$3\"; exit 1 ;; esac\nexec /bin/cp \"$@\"\n",
+    )?;
+    fs::set_permissions(&cp, fs::Permissions::from_mode(0o755))?;
+    let failed_copy = rig.execute_os(
+        Path::new("/bin/sh"),
+        &guided_args,
+        Some(b"n\ny\nn\nn\nn\nn\nappend\nskip\n"),
+    )?;
+    assert_eq!(code(&failed_copy), 4, "{failed_copy:?}");
+    assert_eq!(fs::read_to_string(&agent)?, "fake LaunchAgent");
+    assert!(installed_app.join("old-build").exists());
+    fs::write(
+        &cp,
+        "#!/bin/sh\ncase \"$2\" in */agent.plist) exit 1 ;; esac\nexec /bin/cp \"$@\"\n",
+    )?;
+    fs::set_permissions(&cp, fs::Permissions::from_mode(0o755))?;
+    let failed_restore = rig.execute_os(
+        Path::new("/bin/sh"),
+        &guided_args,
+        Some(b"n\ny\nn\nn\nn\nappend\nskip\n"),
+    )?;
+    assert_eq!(code(&failed_restore), 4, "{failed_restore:?}");
+    assert!(!installed_app.join("old-build").exists());
+    assert!(
+        String::from_utf8_lossy(&failed_restore.stderr.bytes).contains("agent remains stopped")
+    );
+    let retained = fs::read_dir(rig.home.join("Applications"))?
+        .collect::<io::Result<Vec<_>>>()?
+        .into_iter()
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".provenant-retained.")
+        })
+        .ok_or("retained staging directory")?
+        .path();
+    assert_eq!(
+        fs::read_to_string(retained.join("agent.plist"))?,
+        "fake LaunchAgent"
+    );
+    assert!(!agent.exists());
+    fs::copy(retained.join("agent.plist"), &agent)?;
+    fs::remove_file(cp)?;
+    fs::remove_dir_all(&installed_app)?;
+    fs::rename(retained.join("Provenant Console.app"), &installed_app)?;
+    fs::remove_dir_all(retained)?;
+    fs::write(
+        &plutil,
+        "#!/bin/sh\ncase \"$1\" in -replace) printf '%s' \"$4\" > \"$5\" ;; -extract) cat \"$6\" ;; esac\n",
+    )?;
+    fs::write(&launchctl, "#!/bin/sh\nexit 0\n")?;
+    // A retained legacy bundle must not look like an active wrapper stage.
+    for binary in [
+        "Contents/MacOS/provenant-console",
+        "Contents/MacOS/quota-menubar",
+    ] {
+        let path = installed_app.join(binary);
+        fs::create_dir_all(path.parent().ok_or("legacy executable parent")?)?;
+        fs::write(&path, APP_FIXTURE)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+    }
+    let rm = fake_bin.join("rm");
+    fs::write(
+        &rm,
+        "#!/bin/sh\ncase \"$2\" in */.provenant-retained.*/Provenant\\ Console.app) exit 1 ;; esac\nexec /bin/rm \"$@\"\n",
+    )?;
+    fs::set_permissions(&rm, fs::Permissions::from_mode(0o755))?;
+    let retained_backup = rig.execute_os(
+        Path::new("/bin/sh"),
+        &guided_args,
+        Some(b"n\ny\nn\nn\nn\nn\nappend\nskip\n"),
+    )?;
+    assert_eq!(code(&retained_backup), 0, "{retained_backup:?}");
+    assert!(String::from_utf8_lossy(&retained_backup.stderr.bytes).contains("staging remains"));
+    assert!(!installed_app.join("old-build").exists());
+    assert!(fs::read_to_string(&agent)?.contains("quota-menubar"));
+    let retained = fs::read_dir(rig.home.join("Applications"))?
+        .collect::<io::Result<Vec<_>>>()?
+        .into_iter()
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".provenant-retained.")
+        })
+        .ok_or("retained staging directory")?
+        .path();
+    assert_eq!(
+        fs::read_to_string(retained.join("agent.plist"))?,
+        "fake LaunchAgent"
+    );
+    assert!(retained.join("Provenant Console.app/old-build").exists());
+    fs::remove_file(rm)?;
+    fs::write(&agent, "legacy agent")?;
+    let next_upgrade = rig.execute_os(
+        Path::new("/bin/sh"),
+        &guided_args,
+        Some(b"n\ny\nn\nn\nn\nn\nappend\nskip\n"),
+    )?;
+    assert_eq!(code(&next_upgrade), 0, "{next_upgrade:?}");
+    assert!(fs::read_to_string(&agent)?.contains("Contents/Library/LoginItems/Provenant Menu.app"));
+    fs::remove_dir_all(retained)?;
+    fs::remove_file(&recorded)?;
+    // A failed install whose swap-back and plist quarantine both fail must still
+    // report the retained recovery copies and leave the agent stopped.
+    fs::write(&agent, "legacy agent")?;
+    fs::write(installed_app.join("old-build"), "preserve this app")?;
+    let restart_failed = rig.root.join("restart-failed");
+    let booted_out = rig.root.join("booted-out");
+    fs::write(
+        &launchctl,
+        format!(
+            "#!/bin/sh\ncase \"$1\" in print) touch '{}'; exit 19 ;; bootout) touch '{}' ;; esac\nexit 0\n",
+            restart_failed.display(),
+            booted_out.display()
+        ),
+    )?;
+    let mv = fake_bin.join("mv");
+    let rm = fake_bin.join("rm");
+    fs::write(
+        &mv,
+        format!(
+            "#!/bin/sh\ncase \"$1\" in */.provenant-retained.*/*) [ ! -f '{}' ] || exit 1 ;; esac\ncase \"$2\" in */LaunchAgents/*.plist) exit 1 ;; esac\nexec /bin/mv \"$@\"\n",
+            restart_failed.display()
+        ),
+    )?;
+    fs::write(
+        &rm,
+        "#!/bin/sh\ncase \"$2\" in */LaunchAgents/*.plist) exit 1 ;; esac\nexec /bin/rm \"$@\"\n",
+    )?;
+    for tool in [&mv, &rm] {
+        fs::set_permissions(tool, fs::Permissions::from_mode(0o755))?;
+    }
+    let unquarantined = rig.execute_os(
+        Path::new("/bin/sh"),
+        &guided_args,
+        Some(b"n\ny\nn\nn\nn\nn\nappend\nskip\n"),
+    )?;
+    assert_eq!(code(&unquarantined), 4, "{unquarantined:?}");
+    let message = String::from_utf8_lossy(&unquarantined.stderr.bytes);
+    let retained = fs::read_dir(rig.home.join("Applications"))?
+        .collect::<io::Result<Vec<_>>>()?
+        .into_iter()
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".provenant-retained.")
+        })
+        .ok_or("retained staging directory")?
+        .path();
+    assert!(
+        message.contains("Could not restore the previous Provenant app; agent remains stopped")
+    );
+    assert!(message.contains(&format!(
+        "previous app {}",
+        retained.join("Provenant Console.app").display()
+    )));
+    assert!(message.contains(&format!(
+        "previous LaunchAgent plist {}",
+        retained.join("agent.plist").display()
+    )));
+    assert!(message.contains(&format!("rm -f '{}'", agent.display())));
+    assert!(booted_out.exists());
+    assert_eq!(
+        fs::read_to_string(retained.join("agent.plist"))?,
+        "legacy agent"
+    );
+    assert!(retained.join("Provenant Console.app/old-build").exists());
+    assert_eq!(fs::read_to_string(&agent)?, "legacy agent");
+    // The remove hint precedes the restore instructions.
+    assert!(
+        message.find("remove it with: rm -f").ok_or("hint")?
+            < message.find("Before bootstrapping").ok_or("restore")?
+    );
+    fs::remove_file(&rm)?;
+    fs::write(&launchctl, "#!/bin/sh\nexit 0\n")?;
+    fs::remove_dir_all(retained)?;
+    fs::remove_file(&recorded)?;
+    // If the plist backup copy fails after the swap and the swap-back fails too,
+    // the live plist is the only copy and must survive even when it cannot be moved.
+    fs::write(&agent, "only copy")?;
+    fs::write(installed_app.join("old-build"), "preserve this app")?;
+    let backup_failed = rig.root.join("backup-copy-failed");
+    let cp = fake_bin.join("cp");
+    fs::write(
+        &cp,
+        format!(
+            "#!/bin/sh\ncase \"$3\" in */agent.plist.tmp) touch '{}'; exit 1 ;; esac\nexec /bin/cp \"$@\"\n",
+            backup_failed.display()
+        ),
+    )?;
+    fs::write(
+        &mv,
+        format!(
+            "#!/bin/sh\ncase \"$1\" in */.provenant-retained.*/*) [ ! -f '{}' ] || exit 1 ;; esac\ncase \"$2\" in */LaunchAgents/*.plist) exit 1 ;; esac\nexec /bin/mv \"$@\"\n",
+            backup_failed.display()
+        ),
+    )?;
+    fs::set_permissions(&cp, fs::Permissions::from_mode(0o755))?;
+    let no_backup = rig.execute_os(
+        Path::new("/bin/sh"),
+        &guided_args,
+        Some(b"n\ny\nn\nn\nn\nn\nappend\nskip\n"),
+    )?;
+    assert_eq!(code(&no_backup), 4, "{no_backup:?}");
+    let message = String::from_utf8_lossy(&no_backup.stderr.bytes);
+    let retained = fs::read_dir(rig.home.join("Applications"))?
+        .collect::<io::Result<Vec<_>>>()?
+        .into_iter()
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".provenant-retained.")
+        })
+        .ok_or("retained staging directory")?
+        .path();
+    assert!(message.contains("left in place because no backup of it exists"));
+    assert!(!message.contains("previous LaunchAgent plist"));
+    assert!(retained.join("Provenant Console.app/old-build").exists());
+    assert_eq!(fs::read_to_string(&agent)?, "only copy");
+    fs::remove_file(&mv)?;
+    fs::remove_file(&cp)?;
+    fs::remove_dir_all(retained)?;
     fs::remove_file(&recorded)?;
     fs::remove_file(agent)?;
     fs::remove_file(plutil)?;
@@ -1289,11 +1637,10 @@ fn upgrade_pins_one_release_replays_settings_and_reports_peer_failure() -> Resul
         .ok_or("digest")?
         .to_owned();
     let apps = rig.root.join("apps");
-    let app = "Provenant Console.app/Contents/MacOS";
-    fs::create_dir_all(apps.join(app))?;
-    for binary in ["provenant-console", "quota-menubar"] {
-        let path = apps.join(app).join(binary);
-        fs::write(&path, "#!/bin/sh\nexit 0\n")?;
+    for binary in APP_EXECUTABLES {
+        let path = apps.join("Provenant Console.app").join(binary);
+        fs::create_dir_all(path.parent().ok_or("app executable parent")?)?;
+        fs::write(&path, APP_FIXTURE)?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
     }
     let apps_archive = rig.root.join("apps.tar.gz");
@@ -1396,7 +1743,7 @@ fn upgrade_pins_one_release_replays_settings_and_reports_peer_failure() -> Resul
     fs::write(
         &launchctl,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{0}'\nif [ \"$1\" = bootstrap ] && [ ! -f '{0}.bootstrapped' ]; then touch '{0}.bootstrapped'; exit 5; fi\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{0}'\nif [ \"$1\" = bootstrap ] && [ -n \"${{PROVENANT_TEST_BOOTSTRAP_FAIL:-}}\" ]; then exit 5; fi\nif [ \"$1\" = bootstrap ] && [ ! -f '{0}.bootstrapped' ]; then touch '{0}.bootstrapped'; exit 5; fi\n",
             launch_log.display(),
         ),
     )?;
@@ -1568,7 +1915,7 @@ esac
     fs::write(
         &mv,
         format!(
-            "#!/bin/sh\ncase \"$1\" in */.provenant-upgrade.*/*) if [ ! -f '{0}' ]; then touch '{0}'; exit 1; fi ;; esac\nexec /bin/mv \"$@\"\n",
+            "#!/bin/sh\ncase \"$1\" in */.provenant-retained.*/*) if [ ! -f '{0}' ]; then touch '{0}'; exit 1; fi ;; esac\nexec /bin/mv \"$@\"\n",
             rig.root.join("mv-failed-once").display()
         ),
     )?;
@@ -1591,10 +1938,24 @@ esac
             !entry
                 .file_name()
                 .to_string_lossy()
-                .starts_with(".provenant-upgrade.")
+                .starts_with(".provenant-retained.")
         })
     }));
     fs::remove_file(mv)?;
+    if cfg!(target_os = "macos") {
+        // A failed agent restart rolls back both the app and the migrated agent plist.
+        let before_plist = fs::read_to_string(&agent)?;
+        rig.env
+            .push(("PROVENANT_TEST_BOOTSTRAP_FAIL".into(), "1".into()));
+        let failed = rig.command(&["upgrade", "--json"])?;
+        let failed_value: serde_json::Value = serde_json::from_slice(&failed.stdout.bytes)?;
+        assert_eq!(failed_value["data"][0]["success"], false, "{failed_value}");
+        rig.env
+            .retain(|(key, _)| key != "PROVENANT_TEST_BOOTSTRAP_FAIL");
+        assert_eq!(fs::read_to_string(&agent)?, before_plist);
+        assert!(installed_app.join("old-build").exists());
+        assert!(!installed_app.join(MENU_EXECUTABLE).exists());
+    }
     fs::write(&curl_log, "")?;
     let result = rig.command(&["upgrade", "--hosts", "all", "--json"])?;
     let value: serde_json::Value = serde_json::from_slice(&result.stdout.bytes)?;
@@ -1626,14 +1987,14 @@ esac
             .join("Contents/MacOS/provenant-console")
             .is_file()
     );
-    assert!(installed_app.join("Contents/MacOS/quota-menubar").is_file());
+    assert!(installed_app.join(MENU_EXECUTABLE).is_file());
     if cfg!(target_os = "macos") {
         let plist = fs::read_to_string(&agent)?;
         let agent_path = agent.to_str().ok_or("agent")?;
         assert!(
             plist.contains(
                 installed_app
-                    .join("Contents/MacOS/quota-menubar")
+                    .join(MENU_EXECUTABLE)
                     .to_str()
                     .ok_or("agent path")?
             )
@@ -1658,7 +2019,12 @@ esac
     let older_value: serde_json::Value = serde_json::from_slice(&older.stdout.bytes)?;
     assert_eq!(older_value["data"][0]["success"], true, "{older_value}");
     assert!(String::from_utf8_lossy(&older.stdout.bytes).contains("no bundled app archive"));
-    assert!(installed_app.join("Contents/MacOS/quota-menubar").is_file());
+    assert!(installed_app.join(MENU_EXECUTABLE).is_file());
+    if cfg!(target_os = "macos") {
+        // A repeated upgrade leaves the already-migrated agent pointing at the same helper.
+        let again = fs::read_to_string(&agent)?;
+        assert_eq!(again.matches(MENU_EXECUTABLE).count(), 1, "{again}");
+    }
     rig.env
         .retain(|(key, _)| key != "PROVENANT_TEST_MISSING_APPS");
     let receipt: provenant_records::InstallReceipt = provenant_records::decode_v1(

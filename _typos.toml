@@ -36,6 +36,7 @@ Modeling = "Modeling"
 # Foundation's localized* string APIs and AppKit's Window menu (performMiniaturize, "Minimize").
 "localized" = "localized"
 "Miniaturize" = "Miniaturize"
+"Miniaturized" = "Miniaturized"
 "Minimize" = "Minimize"
 # Foundation's URL.standardized, XCTest's fulfillment(of:) and the "canceled"
 # lane state some providers report.

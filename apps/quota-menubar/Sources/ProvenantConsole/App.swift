@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import ProvenantKit
 import SwiftUI
 
@@ -12,6 +13,16 @@ import SwiftUI
 enum Main {
     static func main() {
         let arguments = Array(CommandLine.arguments.dropFirst())
+        // Installer-only process: no NSApplication, windows or user-agent changes.
+        if arguments.first == "--swap-path" {
+            guard arguments.count == 3 else {
+                FileHandle.standardError.write(Data("Usage: --swap-path OLD NEW\n".utf8))
+                exit(2)
+            }
+            let result = swapPaths(arguments[1], arguments[2])
+            if result != 0 { perror("renamex_np") }
+            exit(result == 0 ? 0 : 1)
+        }
         guard #available(macOS 26, *) else {
             FileHandle.standardError.write(Data("Provenant Console needs macOS 26 or later.\n".utf8))
             exit(1)
@@ -23,6 +34,10 @@ enum Main {
             app.setActivationPolicy(.regular)
             withExtendedLifetime(delegate) { app.run() }
         }
+    }
+
+    static func swapPaths(_ first: String, _ second: String) -> Int32 {
+        renamex_np(first, second, UInt32(RENAME_SWAP))
     }
 }
 
@@ -76,8 +91,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let window = self.window ?? makeWindow()
         self.window = window
         let wasActive = NSApp.isActive
+        window.deminiaturize(nil)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate()
+        acknowledgeWindow(window)
         guard watchesChanges, watcher == nil else { return }
         let watcher = ChangeWatcher(client: console.client) { [console] changes, isBaseline in
             // The first answer only sets the baseline; the refresh below has just read everything.
@@ -87,6 +104,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         watcher.start()
         // Becoming active reads the screen; a reopen while already active has no such event.
         if wasActive { Task { await console.refresh() } }
+    }
+
+    /// `provenant console open` waits for a fresh PID and nonce from this process. Publish them only after AppKit has
+    /// presented a visible, unminimized window; a running process or a stale marker alone proves nothing.
+    private func acknowledgeWindow(_ window: NSWindow) {
+        guard window.isVisible, !window.isMiniaturized else { return }
+        let directory = FileManager.default.homeDirectoryForCurrentUser
+            .appending(path: "Library/Caches/dev.provenant.console", directoryHint: .isDirectory)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try Data("\(ProcessInfo.processInfo.processIdentifier)\n\(UUID().uuidString)".utf8)
+                .write(to: directory.appending(path: "window-ready"), options: .atomic)
+        } catch {
+            FileHandle.standardError.write(Data("Could not acknowledge console window: \(error)\n".utf8))
+        }
     }
 
     private func makeWindow() -> NSWindow {

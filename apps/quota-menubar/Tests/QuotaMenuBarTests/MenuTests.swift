@@ -9,9 +9,10 @@ final class MenuTests: XCTestCase {
         return try CLI.decode(Data(contentsOf: url)).get()
     }
 
-    private func entries(_ report: QuotaReport, refreshing: Bool = false) -> [MenuEntry] {
+    private func entries(_ report: QuotaReport, refreshing: Bool = false, consoleURL: URL? = nil) -> [MenuEntry] {
         QuotaMenu.entries(report: report, error: nil, updatedAt: report.generatedAt, refreshing: refreshing,
-                          stateRoot: URL(fileURLWithPath: "/tmp/provenant"), now: report.generatedAt)
+                          stateRoot: URL(fileURLWithPath: "/tmp/provenant"), now: report.generatedAt,
+                          consoleURL: consoleURL)
     }
 
     private func items(_ entries: [MenuEntry]) -> [MenuItemSpec] {
@@ -103,10 +104,15 @@ final class MenuTests: XCTestCase {
     }
 
     func testFooterOpensTheConsoleAndHasSettings() throws {
-        let rows = items(entries(try fixture()))
+        let app = URL(fileURLWithPath: "/fixture/Provenant Console.app")
+        let rows = items(entries(try fixture(), consoleURL: app))
         let console = try XCTUnwrap(rows.first { $0.title == "Open Console" })
         XCTAssertTrue(console.enabled)
         XCTAssertEqual(console.action, .openConsole)
+        XCTAssertNil(console.subtitle)
+        let absent = try XCTUnwrap(items(entries(try fixture())).first { $0.title == "Open Console" })
+        XCTAssertFalse(absent.enabled)
+        XCTAssertNil(absent.action)
         let settings = try XCTUnwrap(rows.first { $0.title == "Settings" }?.submenu)
         XCTAssertTrue(items(settings).contains { $0.title == "Open Report Folder" })
         XCTAssertTrue(items(settings).contains { $0.action == .quit })

@@ -65,7 +65,9 @@ The toolbar has at most three groups (Refresh, the Runs list/tree switch, the in
 
 The console follows light, dark and increased-contrast appearance through system materials and semantic colours, and every control has a VoiceOver label. It opens no database, credential, provider store or SSH connection (a source test checks the shared, design and console sources).
 
-`provenant console open` opens `Provenant Console.app`, or prints an install hint. `./bundle` builds that app with the console as its main executable and the menu agent beside it, and compiles the brand icon (`assets/brand/Provenant.icon`) into it with `xcrun actool`. Without Xcode it warns and builds with no icon. The menu's **Open Console** item looks for that app around the running menu agent first, then asks Launch Services for `dev.provenant.console`.
+`provenant console open` opens `Provenant Console.app`, or prints an install hint. It reports success only after the console writes a fresh PID and nonce to `~/Library/Caches/dev.provenant.console/window-ready` after presenting a visible, unminimized window. A running process or a stale marker alone is insufficient. Reopening the app shows its main window again.
+
+`./bundle` builds the console at `Contents/MacOS/provenant-console` and nests the menu agent in `Contents/Library/LoginItems/Provenant Menu.app/Contents/MacOS/quota-menubar`. The nested helper has its own bundle identity and is the menu LaunchAgent's program. The bundle script compiles the brand icon (`assets/brand/Provenant.icon`) with `xcrun actool`. Without Xcode it warns and builds with no icon. The menu's **Open Console** item looks for that app around the running menu agent first, then asks Launch Services for `dev.provenant.console`; it is disabled, with a hint, when neither finds it.
 
 Memory and launch time are not measured in CI. Measure them on a Mac with `/usr/bin/time -l .build/release/provenant-console`.
 

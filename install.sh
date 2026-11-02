@@ -60,46 +60,115 @@ umask 077
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/provenant-install.XXXXXX")
 app_stage=
 app_backup=
+old_app_inode=
+agent_temp=
 app=
 agent=
 service=
 app_agent_stopped=false
+app_upgrade_committed=false
+swap_helper=
+helper_executable='Contents/Library/LoginItems/Provenant Menu.app/Contents/MacOS/quota-menubar'
+agent_backup=
 instruction_count=0
 instructions_committed=false
+# Take the live LaunchAgent plist off its path, but only while a backup copy of it exists.
+# Never fails: sets agent_note to what happened so the recovery message can say so.
+agent_note=
+quarantine_agent() {
+    agent_note=
+    if [ ! -e "$agent" ] && [ ! -L "$agent" ]; then return 0; fi
+    if [ -z "$agent_backup" ] || [ ! -f "$agent_backup" ]; then
+        agent_note=" The live LaunchAgent plist at $agent was left in place because no backup of it exists."
+    elif [ -n "$app_stage" ] && mv -f "$agent" "$app_stage/$1" 2>/dev/null; then
+        agent_note=" The live LaunchAgent plist was moved to $app_stage/$1."
+    elif rm -f "$agent" 2>/dev/null && [ ! -e "$agent" ] && [ ! -L "$agent" ]; then
+        agent_note=' The live LaunchAgent plist was removed.'
+    else
+        agent_note=" Could not move or remove the live LaunchAgent plist at $agent; remove it with: rm -f '$agent'."
+    fi
+    return 0
+}
+# Print the manual recovery instructions, naming every retained recovery copy.
+recovery_failed() {
+    retained=
+    steps=
+    if [ -n "$app_backup" ]; then
+        retained="previous app $app_backup"
+        steps="restore $app_backup to $HOME/Applications/$app"
+    fi
+    if [ -n "$agent_backup" ]; then
+        retained="${retained:+$retained; }previous LaunchAgent plist $agent_backup"
+        steps="${steps:+$steps and }restore $agent_backup to $agent"
+    fi
+    printf '%s\n' "$1; agent remains stopped. Retained recovery copies: ${retained:-none}.$agent_note${steps:+ Before bootstrapping, $steps.}" >&2
+}
 cleanup() {
+    status=$?
+    # Once recovery starts, finish it even if another termination signal arrives.
+    trap '' INT TERM HUP
+    # Every step below is best effort: set -e must not cut recovery or its report short.
+    if "$app_upgrade_committed" && [ -n "$app_backup" ] && [ -e "$app_backup" ]; then
+        printf '%s\n' "Warning: previous Provenant app backup remains at $app_backup" >&2
+        app_stage=
+    fi
     if ! "$instructions_committed"; then
         while [ "$instruction_count" -gt 0 ]; do
             record=$scratch/instructions/$instruction_count
-            file=$(cat "$record/path")
-            rm -f "$file"
-            if [ -e "$record/original" ] || [ -L "$record/original" ]; then
-                cp -Pp "$record/original" "$file"
+            file=$(cat "$record/path") || file=
+            if [ -n "$file" ]; then
+                rm -f "$file" || :
+                if [ -e "$record/original" ] || [ -L "$record/original" ]; then
+                    cp -Pp "$record/original" "$file" || printf '%s\n' "Could not restore $file from $record/original" >&2
+                fi
             fi
             instruction_count=$((instruction_count - 1))
         done
     fi
-    if [ -n "$app_backup" ] && [ -e "$app_backup" ]; then
+    if [ -n "$agent_temp" ]; then rm -f "$agent_temp" || :; fi
+    if ! "$app_upgrade_committed"; then
         recovered=true
-        if [ -e "$HOME/Applications/$app" ]; then
-            mv "$HOME/Applications/$app" "$app_stage/failed.app" || recovered=false
+        if "$app_agent_stopped"; then launchctl bootout "$service" </dev/null >/dev/null 2>&1 || :; fi
+        if [ -n "$agent_backup" ] && [ -f "$agent_backup" ]; then
+            agent_temp=$(mktemp "${agent}.restore.XXXXXX") || { recovered=false; agent_temp=; }
+            if "$recovered" && ! { cp -p "$agent_backup" "$agent_temp" && mv -f "$agent_temp" "$agent"; }; then recovered=false; fi
+            if ! "$recovered"; then
+                [ -z "$agent_temp" ] || rm -f "$agent_temp" || :
+                quarantine_agent agent.unrecovered.plist
+                recovery_failed 'Could not restore the menu bar LaunchAgent'
+                app_stage=
+            fi
         fi
-        if "$recovered"; then
-            mv "$app_backup" "$HOME/Applications/$app" || recovered=false
+        if "$recovered" && [ -n "$app_backup" ] && [ -e "$app_backup" ]; then
+            # The marker precedes the helper; exchange only if it moved the old app.
+            if backup_inode=$(ls -di "$app_backup"); then
+                backup_inode=${backup_inode%% *}
+            else
+                recovered=false
+            fi
+            if "$recovered" && [ "$backup_inode" = "$old_app_inode" ]; then
+                if [ -e "$HOME/Applications/$app" ]; then
+                    "$swap_helper" --swap-path "$app_backup" "$HOME/Applications/$app" || recovered=false
+                else
+                    mv "$app_backup" "$HOME/Applications/$app" || recovered=false
+                fi
+            fi
+            if ! "$recovered"; then
+                # Never leave a plist for a helper the new app may lack on its live path.
+                quarantine_agent agent.recovery.plist
+                recovery_failed 'Could not restore the previous Provenant app'
+                app_stage=
+            fi
         fi
-        if "$recovered"; then
-            app_backup=
-        else
-            app_stage=
-            printf '%s\n' "Could not restore the previous Provenant app; backup remains at $app_backup" >&2
+        if "$recovered" && "$app_agent_stopped" && [ -f "$agent" ] && [ -d "$HOME/Applications/$app" ]; then
+            launchctl bootout "$service" </dev/null >/dev/null 2>&1 || :
+            launchctl bootstrap "gui/$(id -u)" "$agent" </dev/null >/dev/null 2>&1 || :
+            launchctl kickstart -k "$service" </dev/null >/dev/null 2>&1 || :
         fi
     fi
-    if "$app_agent_stopped" && [ -f "$agent" ] && [ -d "$HOME/Applications/$app" ]; then
-        launchctl bootout "$service" </dev/null >/dev/null 2>&1 || :
-        launchctl bootstrap "gui/$(id -u)" "$agent" </dev/null >/dev/null 2>&1 || :
-        launchctl kickstart -k "$service" </dev/null >/dev/null 2>&1 || :
-    fi
-    if [ -n "$app_stage" ]; then rm -rf "$app_stage"; fi
-    rm -rf "$scratch"
+    if [ -n "$app_stage" ]; then rm -rf "$app_stage" || :; fi
+    rm -rf "$scratch" || :
+    exit "$status"
 }
 trap cleanup 0
 trap 'exit 130' INT
@@ -178,11 +247,10 @@ else
                 mkdir "$scratch/apps"
                 tar -xzpf "$scratch/$apps_archive" -C "$scratch/apps" </dev/null || die 4 'Cannot unpack bundled app archive'
                 app='Provenant Console.app'
-                for binary in provenant-console quota-menubar; do
-                    [ -x "$scratch/apps/$app/Contents/MacOS/$binary" ] || die 4 "Bundled app executable is missing: $binary"
-                done
+                [ -x "$scratch/apps/$app/Contents/MacOS/provenant-console" ] || die 4 'Bundled app executable is missing: provenant-console'
+                [ -x "$scratch/apps/$app/$helper_executable" ] || die 4 'Bundled app executable is missing: quota-menubar'
                 mkdir -p "$HOME/Applications"
-                app_stage=$(mktemp -d "$HOME/Applications/.provenant-upgrade.XXXXXX")
+                app_stage=$(mktemp -d "$HOME/Applications/.provenant-retained.XXXXXX")
                 cp -R "$scratch/apps/$app" "$app_stage/$app" ;;
             404) printf '%s\n' 'This release has no bundled app archive; upgrading Provenant without refreshing the app.' ;;
             *) die 4 "Cannot download bundled app archive (HTTP $apps_status)" ;;
@@ -289,19 +357,36 @@ instructions_committed=true
 if [ -n "$app_stage" ]; then
     agent="$HOME/Library/LaunchAgents/dev.provenant.quota-menubar.plist"
     service="gui/$(id -u)/dev.provenant.quota-menubar"
-    app_backup=$app_stage/previous.app
+    # Keep the new signed executable outside both paths for swap and rollback.
+    swap_helper=$scratch/swap-path
+    cp -p "$app_stage/$app/Contents/MacOS/provenant-console" "$swap_helper" || die 4 'Could not prepare atomic app swap helper'
     if [ -f "$agent" ]; then
         app_agent_stopped=true
         launchctl bootout "$service" </dev/null >/dev/null 2>&1 || :
     fi
-    if [ -e "$HOME/Applications/$app" ] && ! mv "$HOME/Applications/$app" "$app_backup"; then
-        die 4 'Could not move the previous Provenant app into its backup stage'
-    fi
-    if ! mv "$app_stage/$app" "$HOME/Applications/$app"; then
+    if [ -e "$HOME/Applications/$app" ]; then
+        old_app_inode=$(ls -di "$HOME/Applications/$app")
+        old_app_inode=${old_app_inode%% *}
+        app_backup=$app_stage/$app
+        if ! "$swap_helper" --swap-path "$app_backup" "$HOME/Applications/$app"; then
+            die 4 'Could not atomically swap the Provenant app'
+        fi
+    elif ! mv "$app_stage/$app" "$HOME/Applications/$app"; then
         die 4 'Could not install the refreshed Provenant app'
     fi
     if [ -f "$agent" ]; then
-        plutil -replace ProgramArguments.0 -string "$HOME/Applications/$app/Contents/MacOS/quota-menubar" "$agent" || die 4 'Could not update the Provenant menu bar LaunchAgent'
+        # Migrate the agent in place: its executable becomes the nested menu helper app (#2473, #2469).
+        cp -p "$agent" "$app_stage/agent.plist.tmp" || die 4 'Could not back up the Provenant menu bar LaunchAgent'
+        mv "$app_stage/agent.plist.tmp" "$app_stage/agent.plist" || die 4 'Could not publish the Provenant menu bar LaunchAgent backup'
+        agent_backup=$app_stage/agent.plist
+        helper_path="$HOME/Applications/$app/$helper_executable"
+        agent_temp=$(mktemp "${agent}.update.XXXXXX") || die 4 'Could not prepare the menu bar LaunchAgent update'
+        cp -p "$agent" "$agent_temp" || die 4 'Could not prepare the menu bar LaunchAgent update'
+        plutil -replace ProgramArguments.0 -string "$helper_path" "$agent_temp" || die 4 'Could not update the Provenant menu bar LaunchAgent'
+        [ "$(plutil -extract ProgramArguments.0 raw -o - "$agent_temp")" = "$helper_path" ] || die 4 'Could not verify the Provenant menu bar LaunchAgent'
+        mv -f "$agent_temp" "$agent" || die 4 'Could not publish the menu bar LaunchAgent'
+        agent_temp=
+        [ -x "$helper_path" ] || die 4 'The installed Provenant app has no menu bar helper'
         attempts=0
         until launchctl bootstrap "gui/$(id -u)" "$agent" </dev/null; do
             attempts=$((attempts + 1))
@@ -311,11 +396,20 @@ if [ -n "$app_stage" ]; then
         launchctl kickstart -k "$service" </dev/null || die 4 'Could not restart the Provenant menu bar app'
         launchctl print "$service" </dev/null >/dev/null || die 4 'Could not verify the Provenant menu bar app'
     fi
-    rm -rf "$app_backup" || die 4 'Could not remove the previous Provenant app backup'
-    app_backup=
-    app_agent_stopped=false
-    rmdir "$app_stage" || die 4 'Could not remove the empty Provenant app stage'
-    app_stage=
+    # The new app and migrated agent are now committed; cleanup must not roll them back.
+    app_upgrade_committed=true
+    if [ -n "$app_backup" ] && ! rm -rf "$app_backup"; then
+        printf '%s\n' "Warning: could not remove the previous Provenant app backup; staging remains at $app_stage" >&2
+        app_backup=
+        agent_backup=
+        app_stage=
+    else
+        app_backup=
+        rm -f "$agent_backup"
+        agent_backup=
+        rmdir "$app_stage" || printf '%s\n' "Warning: could not remove the Provenant app stage at $app_stage" >&2
+        app_stage=
+    fi
 fi
 if "$guided"; then
     case " $providers " in *' claude '*)

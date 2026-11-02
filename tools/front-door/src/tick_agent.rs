@@ -1,12 +1,116 @@
 //! Platform seam for the per-user host tick scheduler, published by the install receipt.
 use provenant_fabric_runtime::peer_agent::{self, AgentError, launchctl, systemctl, utf8, xml};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
 };
 
 pub const LABEL: &str = "dev.provenant.tick";
+
+/// launchd's interval job may be idle after a successful tick; that is healthy.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Diagnosis {
+    pub state: String,
+    pub last_exit_reason: Option<String>,
+    pub warning: Option<String>,
+    pub repair: Option<String>,
+}
+
+impl Default for Diagnosis {
+    fn default() -> Self {
+        Self {
+            state: "unknown".into(),
+            last_exit_reason: None,
+            warning: None,
+            repair: None,
+        }
+    }
+}
+
+pub fn diagnosis(state: &Path, home: &Path) -> Diagnosis {
+    if !cfg!(target_os = "macos") || !eligible(state, home) {
+        return Diagnosis {
+            state: "not_applicable".into(),
+            ..Default::default()
+        };
+    }
+    diagnosis_installed(home, launchctl)
+}
+
+fn diagnosis_installed(
+    home: &Path,
+    run: impl Fn(&[&OsStr], &Path) -> Result<(bool, String), AgentError>,
+) -> Diagnosis {
+    if !plist(home).exists() {
+        return Diagnosis {
+            state: "not_installed".into(),
+            warning: Some("Tick agent is not installed".into()),
+            repair: Some("provenant upgrade".into()),
+            ..Default::default()
+        };
+    }
+    let service = format!("gui/{}/{LABEL}", provenant_os::fs::effective_uid());
+    match run(&["print".as_ref(), service.as_ref()], home) {
+        Ok((true, output)) => parse_diagnosis(&output),
+        _ => Diagnosis {
+            state: "unavailable".into(),
+            warning: Some("Tick agent is not loaded or launchctl could not inspect it".into()),
+            repair: Some("provenant upgrade".into()),
+            ..Default::default()
+        },
+    }
+}
+
+fn parse_diagnosis(output: &str) -> Diagnosis {
+    let field = |key: &str| {
+        output.lines().find_map(|line| {
+            let (name, value) = line.trim().split_once(" = ")?;
+            (name == key).then(|| {
+                value
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(256)
+                    .collect::<String>()
+            })
+        })
+    };
+    let state = field("state").unwrap_or_else(|| "unknown".into());
+    let exit = field("last exit code");
+    let signal = field("last terminating signal");
+    let reason = field("last exit reason");
+    let abnormal = exit
+        .as_deref()
+        .is_some_and(|code| code != "0" && code != "(never exited)")
+        || signal.as_deref().is_some_and(|signal| signal != "0")
+        || reason.as_deref().is_some_and(|reason| {
+            let reason = reason.to_ascii_lowercase();
+            reason.contains("constraint") || reason.contains("crash") || reason.contains("kill")
+        });
+    let last_exit_reason = match (exit, signal, reason) {
+        (None, None, None) => None,
+        (exit, signal, reason) => Some(
+            [
+                exit.map(|value| format!("exit code {value}")),
+                signal.map(|value| format!("signal {value}")),
+                reason,
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("; "),
+        ),
+    };
+    Diagnosis {
+        state,
+        last_exit_reason,
+        warning: abnormal.then(|| {
+            "Tick failed or is crash-looping; a SIGKILL may indicate a launch-constraint kill"
+                .into()
+        }),
+        repair: abnormal.then(|| "provenant upgrade".into()),
+    }
+}
 const TIMER: &str = "provenant-tick.timer";
 /// Seconds between ticks on both platforms.
 const INTERVAL: u32 = 60;
@@ -143,7 +247,7 @@ pub fn install(state: &Path, home: &Path, changed: bool, enabled: bool) -> Insta
             if cfg!(target_os = "linux") {
                 enable_with(changed, |args| systemctl(args, home))
             } else {
-                bootstrap_with(home, changed, launchctl)
+                bootstrap_with(home, launchctl)
             }
         });
     match result {
@@ -154,19 +258,19 @@ pub fn install(state: &Path, home: &Path, changed: bool, enabled: bool) -> Insta
     }
 }
 
+/// Always boots the agent out and back in. launchd evaluates the launch constraint
+/// against the code identity of the program it recorded at bootstrap; an upgrade replaces
+/// the ad-hoc signed `provenant` behind the stable `~/.local/bin` path, so a service left
+/// loaded across an upgrade is killed for a Launch Constraint Violation (#2469).
 // LaunchAgent bootstrap retries are bounded real-time OS operations.
 #[allow(clippy::disallowed_methods)]
 fn bootstrap_with(
     home: &Path,
-    changed: bool,
     mut run: impl FnMut(&[&OsStr], &Path) -> Result<(bool, String), AgentError>,
 ) -> Result<(), AgentError> {
     let domain = format!("gui/{}", provenant_os::fs::effective_uid());
     let service = format!("{domain}/{LABEL}");
     let loaded = run(&["print".as_ref(), service.as_ref()], home)?.0;
-    if loaded && !changed {
-        return Ok(());
-    }
     if loaded {
         let (ok, error) = run(&["bootout".as_ref(), service.as_ref()], home)?;
         if !ok {
@@ -262,6 +366,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tick_diagnosis_is_not_applicable_for_ineligible_state() {
+        let home = tempfile::tempdir().unwrap();
+        let diagnosis = diagnosis(&home.path().join("custom-state"), home.path());
+        assert_eq!(diagnosis.state, "not_applicable");
+        assert!(diagnosis.warning.is_none());
+        assert!(diagnosis.repair.is_none());
+    }
+
+    #[test]
+    fn tick_diagnosis_distinguishes_not_installed_from_not_loaded() {
+        let home = tempfile::tempdir().unwrap();
+        let missing = diagnosis_installed(home.path(), |_, _| panic!("must not inspect launchd"));
+        assert_eq!(missing.state, "not_installed");
+        assert_eq!(missing.repair.as_deref(), Some("provenant upgrade"));
+        std::fs::create_dir_all(plist(home.path()).parent().unwrap()).unwrap();
+        std::fs::write(plist(home.path()), "plist").unwrap();
+        let unloaded = diagnosis_installed(home.path(), |_, _| Ok((false, String::new())));
+        assert_eq!(unloaded.state, "unavailable");
+    }
+
+    #[test]
+    fn tick_diagnosis_distinguishes_idle_success_from_constraint_kills_and_crashes() {
+        let idle = parse_diagnosis("state = not running\nlast exit code = 0\n");
+        assert_eq!(idle.state, "not running");
+        assert!(idle.warning.is_none());
+        assert_eq!(idle.last_exit_reason.as_deref(), Some("exit code 0"));
+        for output in [
+            "state = spawn scheduled\nlast exit code = 1\n",
+            "state = not running\nlast terminating signal = 9\n",
+            "state = not running\nlast exit reason = Launch Constraint Violation\n",
+        ] {
+            let diagnosis = parse_diagnosis(output);
+            assert!(diagnosis.warning.is_some());
+            assert!(diagnosis.last_exit_reason.is_some());
+            assert_eq!(diagnosis.repair.as_deref(), Some("provenant upgrade"));
+        }
+    }
+
+    #[test]
     fn retiring_gc_unloads_the_old_label_and_propagates_bootout_failure() {
         let mut calls = Vec::new();
         stop_with(Path::new("/home"), "dev.provenant.gc", |args, _| {
@@ -281,16 +424,23 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_keeps_an_unchanged_service_and_retries_after_bootout() {
+    fn bootstrap_always_replaces_a_loaded_service_and_retries_after_bootout() {
         let mut calls = Vec::new();
-        bootstrap_with(Path::new("/home"), false, |args, _| {
+        bootstrap_with(Path::new("/home"), |args, _| {
             calls.push(args[0].to_owned());
             Ok((true, String::new()))
         })
         .unwrap();
-        assert_eq!(calls, [OsStr::new("print")]);
+        assert_eq!(
+            calls,
+            [
+                OsStr::new("print"),
+                OsStr::new("bootout"),
+                OsStr::new("bootstrap")
+            ]
+        );
         let mut bootstraps = 0;
-        bootstrap_with(Path::new("/home"), true, |args, _| {
+        bootstrap_with(Path::new("/home"), |args, _| {
             if args[0] == "bootstrap" {
                 bootstraps += 1;
                 Ok((bootstraps > 1, "service is exiting".into()))

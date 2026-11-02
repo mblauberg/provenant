@@ -40,6 +40,8 @@ pub(crate) struct Report {
     claude: Vec<Identity>,
     /// The macOS login-session peer agent.
     peer_agent: provenant_fabric_runtime::peer_agent::Status,
+    #[serde(default)]
+    tick_agent: crate::tick_agent::Diagnosis,
     /// Every registered account of every adapter.
     #[serde(default)]
     managed: Vec<Managed>,
@@ -219,6 +221,7 @@ pub(crate) fn local(
     Ok(Report {
         claude,
         peer_agent: provenant_fabric_runtime::peer_agent::status(state, home),
+        tick_agent: crate::tick_agent::diagnosis(state, home),
         managed,
         managed_error,
         warnings: crate::pool_effort_warnings(roots),
@@ -270,7 +273,13 @@ impl DoctorError {
 /// Peer text is untrusted: bounded labels, no controls, and an unverified
 /// token validity exactly as the local report produces it.
 fn valid_remote(report: &Report) -> bool {
-    report.claude.len() <= 128
+    [&report.tick_agent.state]
+        .into_iter()
+        .chain(report.tick_agent.last_exit_reason.iter())
+        .chain(report.tick_agent.warning.iter())
+        .chain(report.tick_agent.repair.iter())
+        .all(|text| text.len() <= 1024 && !text.chars().any(char::is_control))
+        && report.claude.len() <= 128
         && report.claude.iter().all(|row| {
             !row.label.is_empty()
                 && row.label.len() <= 128
@@ -385,6 +394,20 @@ pub fn run(command: Hosts, globals: &Globals) -> u8 {
                 "peer agent [{}]: {state}\n",
                 provenant_fabric_runtime::peer_agent::LABEL
             ));
+            text.push_str(&format!(
+                "tick agent [{}]: {}\n",
+                crate::tick_agent::LABEL,
+                report.tick_agent.state
+            ));
+            if let Some(reason) = &report.tick_agent.last_exit_reason {
+                text.push_str(&format!("  last exit: {reason}\n"));
+            }
+            if let Some(warning) = &report.tick_agent.warning {
+                text.push_str(&format!("  {warning}\n"));
+            }
+            if let Some(repair) = &report.tick_agent.repair {
+                text.push_str(&format!("  repair: {repair}\n"));
+            }
             emit(
                 &CommandResult::new("hosts doctor", Outcome::Ok, report),
                 globals,
@@ -451,6 +474,14 @@ mod tests {
             serde_json::from_str(r#"{"claude":[],"peer_agent":"stopped","warnings":["safe"]}"#)
                 .unwrap();
         report.warnings[0] = "bad\nwarning".into();
+        assert!(!super::valid_remote(&report));
+
+        let mut report: super::Report =
+            serde_json::from_str(r#"{"claude":[],"peer_agent":"stopped"}"#).unwrap();
+        assert_eq!(report.tick_agent.state, "unknown");
+        report.tick_agent.last_exit_reason = Some("x".repeat(1025));
+        assert!(!super::valid_remote(&report));
+        report.tick_agent.last_exit_reason = Some("bad\nreason".into());
         assert!(!super::valid_remote(&report));
     }
 }
