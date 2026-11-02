@@ -192,3 +192,84 @@ fn even_median_rounds_down() {
     assert_eq!(spread(vec![1, 2]).median, Some(1));
     assert_eq!(spread(vec![u64::MAX, u64::MAX]).median, Some(u64::MAX));
 }
+
+#[test]
+fn partial_attempt_or_chair_counters_are_inconclusive_and_named() {
+    let mut input = fixture(10, 100, 50, true);
+    input.attempts[0].tokens = None;
+    input.attempts[10].tokens = None;
+    let study = reduce(&input).unwrap();
+    assert_eq!(study.verdict, Verdict::Inconclusive);
+    for label in ["baseline", "enabled"] {
+        assert!(
+            study
+                .reasons
+                .iter()
+                .any(|r| r.contains(label) && r.contains("attempts without token")),
+            "{:?}",
+            study.reasons
+        );
+    }
+
+    // Identical 60% read coverage in both cohorts must still not compare.
+    let mut input = fixture(10, 100, 50, true);
+    for i in (0..20).filter(|i| i % 10 < 4) {
+        input.chair[i].tokens = None;
+    }
+    let study = reduce(&input).unwrap();
+    assert_eq!(study.verdict, Verdict::Inconclusive);
+    assert_eq!(study.median_change_basis_points, None);
+    assert!(
+        study
+            .reasons
+            .iter()
+            .any(|r| r.contains("4 chair sessions with unread")),
+        "{:?}",
+        study.reasons
+    );
+}
+
+#[test]
+fn work_is_attributed_to_the_cohort_of_the_pr_merge_time() {
+    let mut input = fixture(10, 100, 50, true);
+    // Finished before the cut-over, for a PR merged after it.
+    input
+        .attempts
+        .push(attempt("early", 99 * DAY, Some("#1010"), "worker", Some(7)));
+    input.chair.push(ChairRow {
+        session: "early-chair".into(),
+        finished: 99 * DAY,
+        pr: Some(1010),
+        tokens: Some(3),
+    });
+    let study = reduce(&input).unwrap();
+    assert_eq!(study.enabled.by_category.worker, 10 * 50 + 7);
+    assert_eq!(study.enabled.by_category.chair, 10 * 10 + 3);
+    assert_eq!(study.baseline.by_category.worker, 10 * 100);
+    assert_eq!(study.baseline.by_category.chair, 10 * 10);
+    assert_eq!(study.baseline.coverage.window_attempts, 10);
+    assert_eq!(study.enabled.coverage.window_attempts, 11);
+    assert_eq!(study.enabled.coverage.linked_attempts, 11);
+    assert_eq!(study.enabled.coverage.chair_sessions, 11);
+    assert_eq!(study.baseline.coverage.chair_sessions, 10);
+}
+
+#[test]
+fn duplicate_chair_sessions_are_refused() {
+    let mut input = fixture(10, 1, 1, true);
+    input.chair.push(input.chair[0].clone());
+    assert_eq!(reduce(&input).unwrap_err(), "duplicate chair session");
+}
+
+#[test]
+fn render_reports_intervals_and_coverage() {
+    let text = render(&reduce(&fixture(10, 100, 50, true)).unwrap());
+    for needle in [
+        "interval: from=0 until=8640000",
+        "interval: from=8640000 until=17280000",
+        "attribution: linked=10/10 bp=Some(10000)",
+        "chair: sessions=10 linked=10 unread=0 prs_with_chair_bp=Some(10000)",
+    ] {
+        assert!(text.contains(needle), "{needle}\n{text}");
+    }
+}

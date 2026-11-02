@@ -26,6 +26,14 @@ Input (`StudyInput`, JSON, all times unix seconds):
 
 Rules:
 
+- Work is attributed to the cohort of its PR's **merge time**, not its own
+  finish time. An attempt or chair session that finished before the cut-over
+  for a PR merged after it counts once, in the enabled cohort. Work joined to
+  no cohort PR (unlinked or abandoned) has no merge time and falls back to its
+  own finish time; work joined to a PR merged outside both cohorts is counted
+  in neither.
+- Duplicate PR numbers, attempt IDs and chair `session` values are rejected
+  (the reducer returns an error); none are silently deduplicated.
 - An attempt joins a PR when its `work_item` is `#N`, `pr:N` or one of the
   PR's `work_items`. A label claimed by two PRs joins nothing.
 - Tokens are the sum of the five disjoint usage categories. An attempt with no
@@ -38,6 +46,9 @@ Rules:
 - Attempts and chair sessions that join no cohort PR are shown beside the
   totals, never inside them: `abandoned` (a work item that no merged PR
   claims), `unlinked` (no or ambiguous label; chair sessions with no PR).
+- The plain-text report prints each cohort's `[from, until)` interval,
+  attribution coverage (linked/window attempts, attempts without tokens) and
+  chair coverage (sessions, linked, unread, share of PRs with a read counter).
 - Reported per cohort: merged PRs, aggregate, mean and median tokens per PR
   (median of an even count is the floor of the middle pair's mean), size
   buckets by changed lines (small ≤ 50, medium ≤ 300, large, unknown), token
@@ -48,7 +59,7 @@ Verdict:
 | Verdict | Condition |
 | --- | --- |
 | `pending` | either cohort has fewer than 10 merged PRs |
-| `inconclusive` | a cohort has no chair counters attributed, or attribution or chair coverage differs by more than 10 percentage points between cohorts |
+| `inconclusive` | in either cohort: any attempt without a token counter (linked or beside the totals), any chair session with an unread counter, or no chair counters attributed; or attribution or chair coverage differs by more than 10 percentage points between cohorts. The reasons name which counters are missing |
 | `comparable` | otherwise; the percentage changes in mean and median are then filled in |
 
 A `comparable` result is a descriptive comparison, not a causal claim: the

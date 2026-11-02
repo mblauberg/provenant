@@ -3,7 +3,12 @@
 //! A pure, deterministic reducer over recorded attempt rows, chair rows and
 //! merged-PR attribution. It performs no I/O, reads no clock and adds no
 //! counters. Two cohorts, split at a cut-over, are reduced identically and
-//! compared. Method and results template: `docs/telemetry/token-per-pr-study.md`.
+//! compared. Work is attributed to the cohort of its PR's merge time, so work
+//! that finished before the cut-over for a PR merged after it counts once, in
+//! the enabled cohort. Work joined to no cohort PR (unlinked or abandoned) has
+//! no merge time and falls back to its own finish time. Work joined to a PR
+//! merged outside both cohorts is counted in neither. Duplicate attempt IDs,
+//! PR numbers and chair sessions are rejected, not deduplicated. Method and results template: `docs/telemetry/token-per-pr-study.md`.
 use std::collections::{BTreeMap, BTreeSet};
 
 use provenant_records::{AttemptFact, AttemptOutcome};
@@ -222,6 +227,9 @@ pub struct Coverage {
     pub linked_basis_points: Option<u64>,
     /// Linked attempts with no measured usage.
     pub linked_without_tokens: usize,
+    /// Every attempt counted in this cohort (linked or beside) with no
+    /// measured usage.
+    pub attempts_without_tokens: usize,
     pub chair_sessions: usize,
     pub chair_linked: usize,
     pub chair_unread: usize,
@@ -308,8 +316,9 @@ fn label_index(prs: &[MergedPr]) -> BTreeMap<String, Option<u64>> {
     index
 }
 
-/// Reduce the input. Duplicate attempt IDs, duplicate PR numbers and inverted
-/// cohort intervals are rejected rather than guessed at.
+/// Reduce the input. Duplicate attempt IDs, duplicate PR numbers, duplicate
+/// chair sessions and inverted cohort intervals are rejected rather than
+/// guessed at.
 pub fn reduce(input: &StudyInput) -> Result<Study, String> {
     for spec in [&input.baseline, &input.enabled] {
         if spec.from >= spec.until {
@@ -326,6 +335,10 @@ pub fn reduce(input: &StudyInput) -> Result<Study, String> {
     let mut seen = BTreeSet::new();
     if !input.attempts.iter().all(|a| seen.insert(a.id.as_str())) {
         return Err("duplicate attempt ID".into());
+    }
+    let mut seen = BTreeSet::new();
+    if !input.chair.iter().all(|c| seen.insert(c.session.as_str())) {
+        return Err("duplicate chair session".into());
     }
     let index = label_index(&input.prs);
     let baseline = cohort(&input.baseline, input, &index);
@@ -365,6 +378,20 @@ pub fn reduce(input: &StudyInput) -> Result<Study, String> {
             if a.unwrap_or(0).abs_diff(b.unwrap_or(0)) > MATERIAL_COVERAGE_GAP_BP {
                 reasons.push(format!(
                     "{name} coverage differs materially between cohorts"
+                ));
+            }
+        }
+        for c in [&baseline, &enabled] {
+            if c.coverage.attempts_without_tokens > 0 {
+                reasons.push(format!(
+                    "{}: {} attempts without token counters",
+                    c.label, c.coverage.attempts_without_tokens
+                ));
+            }
+            if c.coverage.chair_unread > 0 {
+                reasons.push(format!(
+                    "{}: {} chair sessions with unread token counters",
+                    c.label, c.coverage.chair_unread
                 ));
             }
         }
@@ -408,35 +435,42 @@ fn cohort(spec: &CohortSpec, input: &StudyInput, index: &BTreeMap<String, Option
     let mut coverage = Coverage::default();
     let mut beside = Beside::default();
 
-    for a in input.attempts.iter().filter(|a| in_window(a.finished)) {
-        coverage.window_attempts += 1;
+    let all_prs: BTreeSet<u64> = input.prs.iter().map(|p| p.number).collect();
+    for a in &input.attempts {
         let joined = a.work_item.as_ref().map(|w| index.get(w));
         let tokens = a.tokens.unwrap_or(0);
         match joined {
             Some(Some(Some(pr))) if prs.contains_key(pr) => {
+                coverage.window_attempts += 1;
                 coverage.linked_attempts += 1;
                 if a.tokens.is_none() {
                     coverage.linked_without_tokens += 1;
+                    coverage.attempts_without_tokens += 1;
                 }
                 let category = a.category();
                 by_category.add(category, tokens);
                 cache_read_tokens = cache_read_tokens.saturating_add(a.cache_read.unwrap_or(0));
-                *route_tokens
+                let route = route_tokens
                     .entry(a.route.clone().unwrap_or_else(|| "unknown".into()))
-                    .or_default() += tokens;
+                    .or_default();
+                *route = route.saturating_add(tokens);
                 if let Some(slot) = per_pr.get_mut(pr) {
                     *slot = slot.saturating_add(tokens);
                 }
             }
-            // A label that names a PR outside this cohort belongs to the other
-            // cohort's accounting (or neither); it is not this cohort's work.
-            Some(Some(Some(_))) => coverage.window_attempts -= 1,
-            Some(None) | None | Some(Some(None)) => {
+            // A label that names a PR merged in the other cohort (or outside
+            // both) is that PR's work, whenever the attempt finished.
+            Some(Some(Some(_))) => {}
+            // No PR to date the work by: fall back to the finish time.
+            Some(None) | None | Some(Some(None)) if in_window(a.finished) => {
+                coverage.window_attempts += 1;
+                if a.tokens.is_none() {
+                    coverage.attempts_without_tokens += 1;
+                }
                 // `Some(None)`: label unknown to any merged PR => abandoned.
                 // `Some(Some(None))`: ambiguous => unlinked.
                 // `None`: no label => unlinked.
-                let abandoned = matches!(joined, Some(None));
-                if abandoned {
+                if matches!(joined, Some(None)) {
                     beside.abandoned_attempts += 1;
                     beside.abandoned_tokens = beside.abandoned_tokens.saturating_add(tokens);
                 } else {
@@ -444,15 +478,21 @@ fn cohort(spec: &CohortSpec, input: &StudyInput, index: &BTreeMap<String, Option
                     beside.unlinked_tokens = beside.unlinked_tokens.saturating_add(tokens);
                 }
             }
+            _ => {}
         }
     }
-    for c in input.chair.iter().filter(|c| in_window(c.finished)) {
+    for c in &input.chair {
+        let linked = c.pr.filter(|p| prs.contains_key(p));
+        let elsewhere = c.pr.is_some_and(|p| all_prs.contains(&p)) && linked.is_none();
+        if elsewhere || (linked.is_none() && !in_window(c.finished)) {
+            continue;
+        }
         coverage.chair_sessions += 1;
         if c.tokens.is_none() {
             coverage.chair_unread += 1;
         }
         let tokens = c.tokens.unwrap_or(0);
-        match c.pr.filter(|p| prs.contains_key(p)) {
+        match linked {
             Some(pr) => {
                 coverage.chair_linked += 1;
                 by_category.add(Category::Chair, tokens);
@@ -522,6 +562,23 @@ pub fn render(study: &Study) -> String {
         for (route, n) in &c.route_tokens {
             out.push_str(&format!("  route {route}: {n}\n"));
         }
+        out.push_str(&format!(
+            "  interval: from={} until={} (merge time, unix seconds, [from, until))\n",
+            c.from, c.until
+        ));
+        let v = &c.coverage;
+        out.push_str(&format!(
+            "  attribution: linked={}/{} bp={:?} linked_without_tokens={} attempts_without_tokens={}\n",
+            v.linked_attempts,
+            v.window_attempts,
+            v.linked_basis_points,
+            v.linked_without_tokens,
+            v.attempts_without_tokens
+        ));
+        out.push_str(&format!(
+            "  chair: sessions={} linked={} unread={} prs_with_chair_bp={:?}\n",
+            v.chair_sessions, v.chair_linked, v.chair_unread, v.prs_with_chair_basis_points
+        ));
         let b = &c.beside;
         out.push_str(&format!(
             "  beside: abandoned={}/{} unlinked={}/{} unlinked_chair={}/{}\n",

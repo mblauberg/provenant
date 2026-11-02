@@ -5,48 +5,6 @@
 use std::{path::PathBuf, process::Command};
 
 #[test]
-fn preset_human_inspection_has_a_table_and_complete_sections()
--> Result<(), Box<dyn std::error::Error>> {
-    let temp = tempfile::tempdir()?;
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let run = |args: &[&str]| {
-        fixture_cli()
-            .current_dir(&root)
-            .env("PROVENANT_ROOT", &root)
-            .env("XDG_CONFIG_HOME", temp.path())
-            .args(args)
-            .output()
-    };
-    let listed = run(&["preset", "list"])?;
-    assert!(
-        listed.status.success(),
-        "{}",
-        String::from_utf8_lossy(&listed.stderr)
-    );
-    let listed = String::from_utf8(listed.stdout)?;
-    for label in [
-        "NAME", "LAYER", "LEVEL", "COST", "ERRORS", "scope", "single",
-    ] {
-        assert!(listed.contains(label), "{listed}");
-    }
-    let shown = run(&["preset", "show", "scout-swarm"])?;
-    assert!(shown.status.success());
-    let shown = String::from_utf8(shown.stdout)?;
-    for label in [
-        "Preset scout-swarm",
-        "Pattern",
-        "Parameters",
-        "Stages",
-        "Origins",
-        "read_roots",
-    ] {
-        assert!(shown.contains(label), "{shown}");
-    }
-    assert!(!shown.contains("--full"), "{shown}");
-    Ok(())
-}
-
-#[test]
 fn preset_explain_warns_about_every_omitted_lens() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -723,11 +681,16 @@ fn explain_text(preset: &str, extra: &[&str]) -> Result<String, Box<dyn std::err
 }
 
 fn golden(name: &str, actual: &str) -> Result<(), Box<dyn std::error::Error>> {
+    golden_in("assets/presets/fixtures", name, actual)
+}
+
+fn golden_in(dir: &str, name: &str, actual: &str) -> Result<(), Box<dyn std::error::Error>> {
     let actual = format!("{}\n", actual.trim_end());
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("assets/presets/fixtures")
+        .join(dir)
         .join(name);
     if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        std::fs::create_dir_all(path.parent().ok_or("golden path has no parent")?)?;
         std::fs::write(&path, &actual)?;
     }
     let expected = std::fs::read_to_string(&path).unwrap_or_default();
@@ -735,6 +698,39 @@ fn golden(name: &str, actual: &str) -> Result<(), Box<dyn std::error::Error>> {
         actual, expected,
         "{name}: rerun with UPDATE_GOLDEN=1 to refresh"
     );
+    Ok(())
+}
+
+#[test]
+fn preset_list_and_show_human_output_match_goldens() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
+    let run = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
+        let out = fixture_cli()
+            .current_dir(&root)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path())
+            .args(args)
+            .output()?;
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Ok(scrub(&String::from_utf8(out.stdout)?, &root))
+    };
+    golden_in(
+        "tests/golden",
+        "preset-list.txt",
+        &run(&["preset", "list"])?,
+    )?;
+    golden_in(
+        "tests/golden",
+        "preset-show-scout-swarm.txt",
+        &run(&["preset", "show", "scout-swarm"])?,
+    )?;
     Ok(())
 }
 
