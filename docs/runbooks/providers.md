@@ -169,13 +169,15 @@ still apply.
 ## Agy accounts
 
 Agy has no account switch, so a second Google account gets its own `HOME`
-holding its own login keychain. The registered `directory` is that home. When
-it contains `Library/Keychains/login.keychain-db`, the lane's private home links
-that file instead of the user's login keychain, the grant covers exactly that
-path, and registration and the quota probe run `agy -p /usage` with
-`HOME=<directory>`. A directory without the file keeps the shared login
-keychain, so an existing registration is unchanged. A keychain that is a
-symlink does not count as the account's own.
+holding its own login keychain. The registered `directory` is that home. A
+directory other than your own home is an isolated account: the lane's private
+home links its `Library/Keychains/login.keychain-db` instead of the user's login
+keychain, the grant covers exactly that path, and registration and the quota
+probe run `agy -p /usage` with `HOME=<directory>`. If that file is missing or is
+not a regular file (a symlink does not count), registration, launch and the
+quota probe fail with an error naming the path; they never fall back to the
+login keychain. Registering your own home directory keeps the shared login
+keychain.
 
 Unregistered and registered agy behave differently at launch:
 
@@ -206,8 +208,13 @@ default keychain:
 4. `HOME=$D agy`, run `/login`, finish the browser sign-in with the second
    Google account, then exit.
 5. Check `HOME=$D agy -p /usage --output-format json` returns `SUCCESS`, and
-   `HOME=$D security find-generic-password -s gemini -a antigravity` finds the
-   item (omit `-w` so no secret prints). The real login keychain is unchanged.
+   `HOME=$D security find-generic-password -s gemini -a antigravity $D/Library/Keychains/login.keychain-db`
+   finds the item. The keychain path is the final argument, so the search does
+   not fall through to another keychain on the search list; omit `-w` so no
+   secret prints. Check the first account separately against the real login
+   keychain with
+   `security find-generic-password -s gemini -a antigravity ~/Library/Keychains/login.keychain-db`.
+   The real login keychain is unchanged.
 6. `provenant accounts register --adapter agy --directory $D <label>`, then
    `provenant quota`. Registration refuses a directory that has no regular
    `Library/Keychains/login.keychain-db` (a symlink does not count), so the

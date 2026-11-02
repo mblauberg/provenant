@@ -234,8 +234,8 @@ memory; only a redacted summary persists, and there is no raw caller argv.
 Each adapter is subordinate to the outer profile: Codex's own sandbox is
 off; Claude gets its token on a descriptor closed before spawn, never in the
 environment; Agy's private home links only one keychain, the selected account's own
-when its registered directory holds `Library/Keychains/login.keychain-db`,
-otherwise the login keychain; Cursor
+(`Library/Keychains/login.keychain-db` in its registered directory, refused when
+missing) or, for the user's own home, the login keychain; Cursor
 executes only its resolved version; OpenCode denies shell and web fetch.
 Exact argv is pinned by `tests/fixtures/providers/<adapter>/recordings.json`.
 - Why: the launch spec carries credentials and authority.
