@@ -541,6 +541,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // A real deadline bounds the fork-race retry.
     fn refresh_runs_one_build_at_a_time_and_failure_publishes_nothing() {
         let state = tempfile::tempdir().unwrap();
         {
