@@ -595,7 +595,6 @@ pub(super) fn observe_worker_holders_with_audit(
                 && (setuid_excused
                     || (cwd_outside && cwd_observer.sealed_system_image(pid).is_some()));
             if !excused {
-                unplaceable(Some(pid), Some("complete stable occupancy required"));
                 record_unknown_all(
                     &mut states,
                     &mut details,
