@@ -4291,6 +4291,55 @@ fn invalid_account_evidence_excludes_only_that_account() -> Result<(), Box<dyn s
 }
 
 #[test]
+fn free_pool_refusal_excludes_the_account_for_every_free_model()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let free = "opencode/opencode/deepseek-v4.1-flash-free";
+    let mut record = availability();
+    record.adapter = "opencode".into();
+    record.account_key = Some("zen".into());
+    let records = [record];
+    let access = [AccessContext {
+        adapter: "opencode",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    let scope = provenant_quota::AccountScope {
+        adapter: "opencode".into(),
+        account_key: "zen".into(),
+        label: "test".into(),
+    };
+    // The refusal names a different free model: the keyless pool spans models.
+    let refused = [provenant_quota::record_refusal(
+        None,
+        &scope,
+        "opencode/opencode/other-free",
+        Some("opencode-free"),
+        90,
+        Some(200),
+    )?
+    .replacement
+    .ok_or("record")?];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    assert!(matches!(
+        resolve(&request(free)?, &ctx)?.readiness,
+        RouteReadiness::Ready { .. }
+    ));
+    ctx.accounts = &refused;
+    assert!(matches!(
+        resolve(&request(free)?, &ctx)?.readiness,
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::FreeTierRefused,
+            ..
+        }
+    ));
+    Ok(())
+}
+
+#[test]
 fn live_scoped_refusal_excludes_only_the_matching_account_and_model()
 -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;

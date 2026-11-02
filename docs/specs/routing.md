@@ -355,6 +355,7 @@ older readers that reject unknown variants cannot read records carrying them.
   `crates/quota/src/admission.rs::tests::account_block_types_mismatch_free_and_scoped_refusals`;
   `crates/routing/src/tests.rs::persisted_mismatch_excludes_account_and_selects_another`;
   `::invalid_account_evidence_excludes_only_that_account`;
+  `::free_pool_refusal_excludes_the_account_for_every_free_model`;
   `::live_scoped_refusal_excludes_only_the_matching_account_and_model`;
   `crates/cli/src/route.rs::tests::refused_account_falls_through_to_another_for_the_same_model`;
   `crates/records/tests/forward_compatibility.rs::route_exclusion_reason_codes_round_trip`
