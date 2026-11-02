@@ -67,6 +67,8 @@
           ]
         },
         "status": "available",
+        "refusals": [{"model": "agy/claude-sonnet", "pool": "claude",
+          "resets_at": "2026-11-02T03:00:00Z"}],
         "age_seconds": 120,
         "refreshing": false,
         "error": null

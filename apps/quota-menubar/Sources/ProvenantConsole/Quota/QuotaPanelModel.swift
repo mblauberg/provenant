@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import ProvenantDesign
 import ProvenantKit
 
 struct TrendPoint: Equatable, Sendable, Identifiable {
@@ -14,10 +15,17 @@ struct QuotaRow: Identifiable, Equatable, Sendable {
         let percent: Double
         let resetsAt: Date?
     }
+    struct Refusal: Equatable, Sendable {
+        let model: String
+        let pool: String?
+        let resetsAt: Date?
+        var id: String { "\(pool ?? "")/\(model)" }
+    }
     let id: String
     let title: String
     let provider: String
     let status: String
+    let refusals: [Refusal]
     let windows: [Window]
     let checkedAgo: TimeInterval?
     let error: String?
@@ -64,6 +72,9 @@ final class QuotaPanelModel {
                 }
                 .sorted { $0.date < $1.date }
             return QuotaRow(id: account.id, title: account.account.label, provider: account.account.adapter, status: account.status,
+                            refusals: (account.refusals ?? []).map {
+                                QuotaRow.Refusal(model: $0.model, pool: $0.pool, resetsAt: Stamp.parse($0.resetsAt))
+                            },
                             windows: windows, checkedAgo: account.ageSeconds.map(TimeInterval.init), error: account.error, trend: trend)
         }
         return QuotaSnapshot(rows: rows, generatedAt: Date(timeIntervalSince1970: TimeInterval(show.generatedUnixSeconds)),

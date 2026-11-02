@@ -236,7 +236,7 @@ enum QuotaMenu {
             parts = [until.map { "On credits until \(Fmt.moment($0, now: now))" } ?? "On credits"]
         case 3:
             row.icon = .ring(1, .red)
-            parts = [Fmt.sentence(Fmt.back(account.back(now: now), now: now))]
+            parts = account.freePoolRefusal ? [] : [Fmt.sentence(Fmt.back(account.back(now: now), now: now))]
         case 4:
             row.icon = .mark("exclamationmark", .orange)
             parts = ["Sign-in required"]
@@ -253,6 +253,11 @@ enum QuotaMenu {
                 row.icon = .mark("questionmark", .secondary)
                 parts = [account.status == .unknown && account.error != nil ? "Couldn’t check" : account.statusTitle]
             }
+        }
+        parts += account.refusals.map { refusal in
+            let pool = refusal.pool.map { " in pool \($0)" } ?? ""
+            let expiry = refusal.resetsAt.map { " until \(Fmt.moment($0, now: now))" } ?? ""
+            return "Refusal recorded for \(refusal.model)\(pool)\(expiry)"
         }
         row.subtitle = parts.compactMap { $0 }.joined(separator: " · ")
         return row

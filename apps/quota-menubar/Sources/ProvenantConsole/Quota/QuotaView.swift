@@ -54,6 +54,11 @@ private struct QuotaRowView: View {
                     Text(row.status.replacingOccurrences(of: "_", with: " ").capitalized).foregroundStyle(.secondary)
                 }
             }
+            ForEach(row.refusals, id: \.id) { refusal in
+                let pool = refusal.pool.map { " in pool \($0)" } ?? ""
+                Text("Refusal recorded for \(refusal.model)\(pool)\(refusal.resetsAt.map { " until \($0.formatted(date: .abbreviated, time: .shortened))" } ?? "")")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             ForEach(row.windows, id: \.pool) { window in
                 VStack(alignment: .leading, spacing: 2) {
                     Gauge(value: min(window.percent, 100), in: 0...100) { Text(window.pool) }
