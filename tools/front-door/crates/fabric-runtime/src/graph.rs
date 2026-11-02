@@ -334,6 +334,8 @@ struct PlannedNode {
     id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deadline_seconds: Option<u64>,
     prompt: String,
     depends_on: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1406,6 +1408,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         title: node.title.as_deref().unwrap_or(&node.id),
                         prompt: &prompt,
                         required_verdict: node.required_verdict.as_deref(),
+                        deadline_seconds: node.deadline_seconds,
                     },
                     &route,
                     node.access,
@@ -1609,6 +1612,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     } else {
                                         true
                                     }
+                                }
+                                AttemptOutcome::DeadlineExceeded => {
+                                    progress.advance_error_code = Some("deadline_exceeded".into());
+                                    progress.advance_error =
+                                        Some("node deadline exceeded; lane was cancelled".into());
+                                    progress.state = NodeState::Failed;
+                                    false
                                 }
                                 AttemptOutcome::TaskFailed | AttemptOutcome::OtherFailure => {
                                     progress.state = NodeState::Failed;

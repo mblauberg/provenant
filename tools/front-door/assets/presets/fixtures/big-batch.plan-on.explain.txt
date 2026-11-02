@@ -26,6 +26,34 @@ scout  role=- tier=- family=any kind=composite access=read_only worktree=-
   exports: [{"node":"synthesis","outputs":["result","findings"]}]
 plan  role=plan.shape tier=principal family=any kind=plan access=read_only worktree=-
   inputs: [{"node":"scout","outputs":["result"]}]
+  pattern writer-lane:
+    implement  role=write.implement tier=${route} family=any kind=- access=worktree_write worktree=${worktree}
+      write_scope: "${scope}"
+      source: {"commit":"<commit>","type":"commit"}
+      acceptance_checks: "${acceptance}"
+      deadline_seconds: "${budget_seconds}"
+    lens-correctness-spec  role=lens.correctness-spec tier=senior family=distinct_from_writer kind=- access=read_only worktree=-
+      reference: skill:code-review/references/reviewer-context.md <digest>
+      reference: skill:code-review/references/lenses/correctness-spec.md <digest>
+      read_roots: ["${worktree}","<root>/skills"]
+      source: {"node":"implement","type":"node"}
+      inputs: [{"node":"implement","outputs":["result"]}]
+      acceptance_checks: ["Check the committed change against the spec","End with one exact VERDICT line"]
+    lens-simplicity  role=lens.simplicity tier=senior family=any kind=- access=read_only worktree=-
+      reference: skill:code-review/references/reviewer-context.md <digest>
+      reference: skill:code-review/references/lenses/simplicity.md <digest>
+      read_roots: ["${worktree}","<root>/skills"]
+      source: {"node":"implement","type":"node"}
+      inputs: [{"node":"implement","outputs":["result"]}]
+      acceptance_checks: ["Name what can be deleted or simplified","End with one exact VERDICT line"]
+    evaluate  role=review.evaluator tier=senior family=any kind=synthesise access=read_only worktree=-
+      read_roots: ["${worktree}"]
+      source: {"node":"implement","type":"node"}
+      inputs: [{"node":"lens-correctness-spec","outputs":["result"]},{"node":"lens-simplicity","outputs":["result"]}]
+      acceptance_checks: ["Give every finding one disposition","End with one exact VERDICT line"]
+  pattern wave-barrier:
+    barrier  role=plan.wave tier=senior family=any kind=synthesise access=read_only worktree=-
+      acceptance_checks: ["Every lane in the wave met its acceptance subset","Cross-lane conflicts are recorded"]
 council  role=- tier=- family=any kind=composite access=read_only worktree=-
   inputs: [{"node":"plan","outputs":["result"]}]
   subject  role=plan.review tier=senior family=any kind=- access=read_only worktree=-

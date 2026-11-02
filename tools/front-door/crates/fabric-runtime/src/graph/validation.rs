@@ -96,6 +96,9 @@ pub(super) fn validate_flat_plan(
     let mut prompt_bytes = 0usize;
     let mut nodes = Vec::with_capacity(document.nodes.len());
     for node in &document.nodes {
+        if node.deadline_seconds == Some(0) {
+            return Err("node deadline_seconds must be positive");
+        }
         plans::validate_spec(node)?;
         let is_composite = node.kind == Some(NodeKind::Composite);
         if is_composite != node.composite.is_some() {
@@ -388,6 +391,7 @@ pub(super) fn validate_flat_plan(
             inputs: node.inputs.clone(),
             routes,
             required_verdict: node.required_verdict.clone(),
+            deadline_seconds: node.deadline_seconds,
         });
     }
 

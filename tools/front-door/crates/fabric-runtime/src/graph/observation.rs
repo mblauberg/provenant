@@ -18,6 +18,7 @@ pub enum AttemptOutcome {
     AuthRequired,
     UsageLimited,
     AdapterUnavailable,
+    DeadlineExceeded,
 }
 
 impl AttemptOutcome {

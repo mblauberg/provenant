@@ -55,6 +55,7 @@ struct FakeOwner {
     read_roots: Vec<Vec<String>>,
     distinct_from: Vec<Vec<String>>,
     require_distinct: Vec<bool>,
+    deadlines: Vec<Option<u64>>,
     families: std::collections::BTreeMap<String, String>,
     answers: std::collections::BTreeMap<String, AskReply>,
     now: Option<provenant_core::WallTime>,
@@ -153,6 +154,7 @@ impl AttemptOwner for FakeOwner {
         self.distinct_from
             .push(node.distinct_from_attempts.to_vec());
         self.require_distinct.push(node.require_distinct);
+        self.deadlines.push(node.deadline_seconds);
         self.titles.push(node.title.to_owned());
         self.prompts.push(node.prompt.to_owned());
         self.delivery_modes.push(replay.delivery.cloned());
@@ -206,6 +208,7 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
         worktree: None,
         id: id.to_owned(),
         title: None,
+        deadline_seconds: None,
         prompt: format!("work for {id}"),
         depends_on: Vec::new(),
         inputs: Vec::new(),
@@ -227,6 +230,32 @@ fn graph(nodes: Vec<GraphNode>) -> GraphDocument {
         graph_id: "g-test".to_owned(),
         nodes,
     }
+}
+
+#[test]
+fn node_deadline_is_forwarded_to_the_lane_run() {
+    let mut lane = node("lane", route("first"));
+    lane.deadline_seconds = Some(7);
+    let mut owner = FakeOwner {
+        observations: [terminal(AttemptOutcome::DeadlineExceeded)].into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![lane]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(owner.deadlines, vec![Some(7)]);
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
+    assert_eq!(
+        run.checkpoint.nodes[0].advance_error_code.as_deref(),
+        Some("deadline_exceeded")
+    );
+    assert_eq!(
+        run.checkpoint.nodes[0].attempts[0].outcome,
+        Some(AttemptOutcome::DeadlineExceeded)
+    );
 }
 
 #[test]
@@ -2486,6 +2515,7 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
         worktree: None,
         id: "node".to_owned(),
         title: None,
+        deadline_seconds: None,
         prompt: "do the work".to_owned(),
         depends_on: Vec::new(),
         inputs: Vec::new(),
@@ -2721,6 +2751,7 @@ fn pending_and_unknown_keep_observing_the_same_route_without_fallback() {
             worktree: None,
             id: "node".to_owned(),
             title: None,
+            deadline_seconds: None,
             prompt: "do the work".to_owned(),
             depends_on: Vec::new(),
             inputs: Vec::new(),
@@ -3029,6 +3060,7 @@ fn terminal_task_failure_does_not_try_a_fallback_route() {
         worktree: None,
         id: "node".to_owned(),
         title: None,
+        deadline_seconds: None,
         prompt: "do the work".to_owned(),
         depends_on: Vec::new(),
         inputs: Vec::new(),

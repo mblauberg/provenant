@@ -1249,6 +1249,7 @@ fn lower_leaf(
             "outputs",
             "access",
             "worktree",
+            "deadline_seconds",
             "title",
             "prompt",
             "kind",
@@ -2760,6 +2761,7 @@ fn explain_tree(nodes: &[Value], indent: usize, text: &mut String) {
             "inputs",
             "acceptance_checks",
             "required_verdict",
+            "deadline_seconds",
         ] {
             if let Some(value) = node.get(key) {
                 text.push_str(&format!("{}  {key}: {value}\n", "  ".repeat(indent)));
@@ -2778,6 +2780,15 @@ fn explain_tree(nodes: &[Value], indent: usize, text: &mut String) {
                 node["loop"]["max_rounds"]
             ));
             explain_tree(children, indent + 1, text);
+        }
+        if let Some(patterns) = node.pointer("/plan/patterns").and_then(Value::as_array) {
+            for pattern in patterns {
+                let name = pattern["name"].as_str().unwrap_or("pattern");
+                text.push_str(&format!("{}  pattern {name}:\n", "  ".repeat(indent)));
+                if let Some(nodes) = pattern.get("nodes").and_then(Value::as_array) {
+                    explain_tree(nodes, indent + 2, text);
+                }
+            }
         }
     }
 }
