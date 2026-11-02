@@ -546,6 +546,55 @@ pub(super) struct RemovedTree {
     pub(super) info: WorktreeInfo,
     pub(super) lane_cache: Option<PathBuf>,
     pub(super) _writer: LockGuard,
+    /// Held when removal took the repository lock itself, so the caller can
+    /// settle the branch under it.
+    pub(super) repository: Option<LockGuard>,
+}
+
+/// How `remove_tree_when` meets the repository lock.
+#[derive(Clone, Copy)]
+pub(super) enum Repository<'a> {
+    /// The caller holds it throughout, as ordinary removal does.
+    Held,
+    /// Output is deleted under writer custody alone. The lock is taken for the
+    /// final registration recheck and the Git mutation, and returned with the
+    /// tree. `lanes` is the cheap fence rechecked under it.
+    Acquire { lanes: &'a dyn Fn() -> bool },
+}
+
+/// The registration still names this tree with its branch and head, unheld.
+pub(super) fn tree_unchanged(
+    fresh: &[GitWorktree],
+    entry: &GitWorktree,
+    head: GitOid,
+) -> Result<(), WorktreeError> {
+    let canonical = canonicalize(&entry.path)?;
+    let current = fresh
+        .iter()
+        .find(|tree| canonicalize(&tree.path).ok().as_deref() == Some(&canonical))
+        .ok_or(WorktreeError::IdentityChanged)?;
+    if current.branch != entry.branch || current.head != head || current.locked || current.prunable
+    {
+        return Err(WorktreeError::IdentityChanged);
+    }
+    Ok(())
+}
+
+/// The branch is checked out only at `path` and still points at `head`.
+pub(super) fn branch_unchanged(
+    context: &WorktreeContext<'_>,
+    fresh: &[GitWorktree],
+    branch: &GitRefName,
+    path: &Path,
+    head: GitOid,
+    cancel: &CancelToken,
+) -> Result<(), WorktreeError> {
+    if checked_out_elsewhere(fresh, branch, Some(path))?
+        || resolve_ref(context, branch.clone(), cancel)? != head
+    {
+        return Err(WorktreeError::IdentityChanged);
+    }
+    Ok(())
 }
 
 pub(super) fn matching_worktree<'a>(
@@ -606,6 +655,7 @@ pub(super) fn remove_tree(
         cancel,
         &|| true,
         Some(output),
+        Repository::Held,
     )
 }
 
@@ -616,6 +666,7 @@ pub(super) fn remove_tree_when(
     cancel: &CancelToken,
     eligible: &dyn Fn() -> bool,
     output: Option<&provenant_config::ProjectGcSettings>,
+    repository: Repository<'_>,
 ) -> Result<RemovedTree, WorktreeError> {
     if entry.locked || entry.prunable {
         return Err(WorktreeError::GitEntryHeld {
@@ -628,23 +679,13 @@ pub(super) fn remove_tree_when(
     }
     let mut locked = lock_worktree_for_mutation(context, entry, cancel)?;
     context.repo.revalidate()?;
-    let fresh = read_worktrees(context, cancel)?;
-    let current = fresh
-        .iter()
-        .find(|tree| canonicalize(&tree.path).ok().as_deref() == Some(&canonical))
-        .ok_or(WorktreeError::IdentityChanged)?;
-    if canonicalize(&current.path)? != canonical
-        || current.branch != entry.branch
-        || current.head != expected_head
-        || current.locked
-        || current.prunable
-    {
-        return Err(WorktreeError::IdentityChanged);
-    }
+    tree_unchanged(&read_worktrees(context, cancel)?, entry, expected_head)?;
     if !eligible() {
         return Err(WorktreeError::UnknownWriter);
     }
-    if worktree_dirty_at(context, locked.verified.repo(), cancel)? == WorktreeCondition::Ignored {
+    let prepared =
+        worktree_dirty_at(context, locked.verified.repo(), cancel)? == WorktreeCondition::Ignored;
+    if prepared {
         let settings = output.cloned().unwrap_or_default();
         gc::prepare_removal(
             context,
@@ -653,6 +694,26 @@ pub(super) fn remove_tree_when(
             &settings.keep,
             cancel,
         )?;
+    }
+    // Output preparation can take time. Recheck registration, head and lane
+    // eligibility before removing the tree while writer exclusion is held.
+    let repository_guard = match repository {
+        Repository::Held => None,
+        Repository::Acquire { .. } => {
+            // Any slow census happens before the repository lock is taken.
+            if prepared && !eligible() {
+                return Err(WorktreeError::UnknownWriter);
+            }
+            Some(repository_lock(context, LockMode::Exclusive, cancel)?)
+        }
+    };
+    tree_unchanged(&read_worktrees(context, cancel)?, entry, expected_head)?;
+    let fenced = match repository {
+        Repository::Held => eligible(),
+        Repository::Acquire { lanes } => lanes(),
+    };
+    if !fenced {
+        return Err(WorktreeError::UnknownWriter);
     }
     match worktree_dirty_at(context, locked.verified.repo(), cancel)? {
         WorktreeCondition::Clean => {}
@@ -694,6 +755,7 @@ pub(super) fn remove_tree_when(
         info,
         lane_cache: cargo_cache.map(|cache| cache.path),
         _writer: writer,
+        repository: repository_guard,
     })
 }
 

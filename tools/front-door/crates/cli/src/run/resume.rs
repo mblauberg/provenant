@@ -358,7 +358,6 @@ pub fn continue_attempt_mode(
                         keep: &[],
                         written_before_ns: i128::MAX,
                         foreign_merged_clean: false,
-                        foreign_idle_before_ns: None,
                         dry_run: false,
                     },
                     call.cancel,

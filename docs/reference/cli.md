@@ -4153,7 +4153,7 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 | `--free-floor` | `{"description": "Keep at least this much free space (20G, or plain GiB)", "name": "free_floor"}` |
 | `--dry-run` | `{"conflicts": ["apply"], "defaults": ["false"], "description": "Report what would be removed without deleting anything", "name": "dry_run", "values": ["true", "false"]}` |
 | `--apply` | `{"defaults": ["false"], "description": "Also delete merged worktrees and ignored declared output (otherwise previewed)", "name": "apply", "values": ["true", "false"]}` |
-| `--idle-days` | `{"defaults": ["7"], "description": "Minimum idle age for caches, ignored output and opt-in foreign worktrees", "name": "idle_days"}` |
+| `--idle-days` | `{"defaults": ["7"], "description": "Minimum idle age for standalone caches and ignored output; merged trees are immediate", "name": "idle_days"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 

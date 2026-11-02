@@ -299,6 +299,13 @@ fn worker_census_places_a_process_in_a_deleted_directory_by_its_nearest_ancestor
     }
     struct Cwd(PathBuf);
     impl CwdObserver for Cwd {
+        fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+            provenant_os::pid::OccupancyObservation {
+                paths: vec![],
+                complete: true,
+                gap: None,
+            }
+        }
         fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
             Ok(CwdObservation::Path(self.0.clone()))
         }
@@ -369,6 +376,13 @@ fn land_worker_census_excludes_only_ancestors_through_the_session_leader()
     }
     struct Cwds(BTreeMap<i64, PathBuf>);
     impl CwdObserver for Cwds {
+        fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+            provenant_os::pid::OccupancyObservation {
+                paths: vec![],
+                complete: true,
+                gap: None,
+            }
+        }
         fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
             Ok(self
                 .0
@@ -563,6 +577,13 @@ impl ProcessObserver for InjectedCensus {
 }
 
 impl CwdObserver for InjectedCensus {
+    fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+        provenant_os::pid::OccupancyObservation {
+            paths: vec![],
+            complete: true,
+            gap: None,
+        }
+    }
     fn sealed_platform_uids(&self, pid: i64) -> Option<ProcessUids> {
         self.platform_uids.get(&pid).copied()
     }
@@ -581,6 +602,191 @@ impl WorkerObserver for InjectedCensus {
     fn observe_roots_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
         observe_worker_roots(roots, self, self, &self.current, true)
     }
+}
+
+#[test]
+fn occupancy_is_placed_per_root_and_partial_results_remain_conservative()
+-> Result<(), Box<dyn Error>> {
+    use provenant_supervisor::census::{Census, ProcessIdentity};
+    struct Occupancy {
+        cwd: PathBuf,
+        paths: Vec<PathBuf>,
+        complete: bool,
+    }
+    impl CwdObserver for Occupancy {
+        fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            Ok(CwdObservation::Path(self.cwd.clone()))
+        }
+        fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+            provenant_os::pid::OccupancyObservation {
+                paths: self.paths.clone(),
+                complete: self.complete,
+                gap: None,
+            }
+        }
+    }
+    let fixture = Fixture::new()?;
+    let base = canonicalize(fixture._temp.path())?;
+    let a = base.join("a");
+    let b = base.join("b");
+    fs::create_dir(&a)?;
+    fs::create_dir(&b)?;
+    let file = a.join("open");
+    fs::write(&file, "open")?;
+    let fact = |pid| ProcessFact {
+        identity: ProcessIdentity {
+            boot: "boot".into(),
+            pid,
+            native_start: pid as u64,
+            group_id: pid,
+            session_id: pid,
+        },
+        parent_pid: 1,
+        zombie: false,
+        cpu_micros: None,
+        command: None,
+    };
+    let current = fact(100);
+    let processes = InjectedCensus {
+        census: Census::from_observations([current.clone(), fact(200)], [], [], true, false, 32)?,
+        cwds: BTreeMap::new(),
+        current: current.clone(),
+        platform_uids: BTreeMap::new(),
+    };
+    let roots = vec![a.clone(), b.clone()];
+    let observe = |paths, complete| {
+        observe_worker_roots(
+            &roots,
+            &processes,
+            &Occupancy {
+                cwd: base.clone(),
+                paths,
+                complete,
+            },
+            &current,
+            false,
+        )
+        .0
+    };
+    let free = observe(vec![], true);
+    assert_eq!(free[&a], WorkerState::Free);
+    assert_eq!(free[&b], WorkerState::Free);
+    let live = observe(vec![file.clone()], true);
+    assert_eq!(live[&a], WorkerState::Live);
+    assert_eq!(live[&b], WorkerState::Free);
+    let partial = observe(vec![file], false);
+    assert_eq!(partial[&a], WorkerState::Live);
+    assert_eq!(partial[&b], WorkerState::Unknown);
+    Ok(())
+}
+
+#[test]
+fn occupancy_failures_retain_every_root_and_positive_occupants_stay_live()
+-> Result<(), Box<dyn Error>> {
+    use provenant_supervisor::census::{Census, ProcessIdentity};
+    use std::cell::Cell;
+    struct Occupancy {
+        base: PathBuf,
+        paths: Vec<PathBuf>,
+        complete: bool,
+        supported: bool,
+    }
+    impl CwdObserver for Occupancy {
+        fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            Ok(CwdObservation::Path(self.base.clone()))
+        }
+        fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+            if !self.supported {
+                return provenant_os::pid::OccupancyObservation::default();
+            }
+            provenant_os::pid::OccupancyObservation {
+                paths: self.paths.clone(),
+                complete: self.complete,
+                gap: None,
+            }
+        }
+    }
+    /// The second and later queries of one pid see a different process.
+    struct Reused<'a>(&'a InjectedCensus, Cell<u32>);
+    impl ProcessObserver for Reused<'_> {
+        fn boot_identity(&self) -> Result<String, provenant_supervisor::census::CensusError> {
+            self.0.boot_identity()
+        }
+        fn observe(&self, pid: i64) -> ProcessObservation {
+            let observed = self.0.observe(pid);
+            if pid != 200 {
+                return observed;
+            }
+            self.1.set(self.1.get() + 1);
+            match observed {
+                // The census listing and first recheck agree; later checks do not.
+                ProcessObservation::Present(mut fact) if self.1.get() > 1 => {
+                    fact.identity.native_start += 1;
+                    ProcessObservation::Present(fact)
+                }
+                other => other,
+            }
+        }
+        fn census(&self, max: usize) -> Result<Census, provenant_supervisor::census::CensusError> {
+            self.0.census(max)
+        }
+    }
+    let fixture = Fixture::new()?;
+    let base = canonicalize(fixture._temp.path())?;
+    let a = base.join("a");
+    let b = base.join("b");
+    fs::create_dir(&a)?;
+    fs::create_dir(&b)?;
+    let fact = |pid: i64| ProcessFact {
+        identity: ProcessIdentity {
+            boot: "boot".into(),
+            pid,
+            native_start: pid as u64,
+            group_id: pid,
+            session_id: pid,
+        },
+        parent_pid: 1,
+        zombie: false,
+        cpu_micros: None,
+        command: None,
+    };
+    let current = fact(100);
+    let processes = InjectedCensus {
+        census: Census::from_observations([current.clone(), fact(200)], [], [], true, false, 32)?,
+        cwds: BTreeMap::new(),
+        current: current.clone(),
+        platform_uids: BTreeMap::new(),
+    };
+    let roots = vec![a.clone(), b.clone()];
+    let occupancy = |paths: Vec<PathBuf>, complete, supported| Occupancy {
+        base: base.clone(),
+        paths,
+        complete,
+        supported,
+    };
+    let states = |observer: &dyn ProcessObserver, cwd: &Occupancy| {
+        observe_worker_roots(&roots, observer, cwd, &current, false).0
+    };
+    // An executable inside one root, with the other root provably unrelated.
+    let live = states(&processes, &occupancy(vec![b.join("bin/tool")], true, true));
+    assert_eq!(live[&a], WorkerState::Free);
+    assert_eq!(live[&b], WorkerState::Live);
+    // A reused pid cannot prove a snapshot belongs to the census process.
+    let reused = states(
+        &Reused(&processes, Cell::new(0)),
+        &occupancy(vec![], true, true),
+    );
+    assert_eq!(reused[&a], WorkerState::Unknown);
+    assert_eq!(reused[&b], WorkerState::Unknown);
+    // An unsupported query (default observation) is not an empty one.
+    let unsupported = states(&processes, &occupancy(vec![], true, false));
+    assert_eq!(unsupported[&a], WorkerState::Unknown);
+    assert_eq!(unsupported[&b], WorkerState::Unknown);
+    // A positive occupant stays live beside incompleteness elsewhere.
+    let partial = states(&processes, &occupancy(vec![a.join("x")], false, true));
+    assert_eq!(partial[&a], WorkerState::Live);
+    assert_eq!(partial[&b], WorkerState::Unknown);
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -888,6 +1094,13 @@ fn unplaceable_path_failures_retain_process_image_diagnostics() -> Result<(), Bo
     use provenant_supervisor::census::{Census, ProcessIdentity};
     struct DetailedCwd(PathBuf);
     impl CwdObserver for DetailedCwd {
+        fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+            provenant_os::pid::OccupancyObservation {
+                paths: vec![],
+                complete: true,
+                gap: None,
+            }
+        }
         fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
             Ok(CwdObservation::Path(self.0.clone()))
         }
@@ -1269,6 +1482,10 @@ fn cwd_query_errors_never_consult_the_daemon_policy() -> Result<(), Box<dyn Erro
         observe_same_process(&observer, &FailedCwd, &fact),
         NativeCwd::Unknown(_)
     ));
+    assert!(matches!(
+        observe_same_process(&observer, &observer, &fact),
+        NativeCwd::Unknown(_)
+    ));
     Ok(())
 }
 
@@ -1489,4 +1706,317 @@ fn nested_worker_protects_all_containing_worktrees() -> Result<(), Box<dyn Error
     assert_eq!(states[&nested], WorkerState::Live);
     assert_eq!(states[&sibling], WorkerState::Free);
     Ok(())
+}
+
+/// What the census concludes for one process beside a candidate root.
+mod narrowing {
+    use super::*;
+    use provenant_os::pid::{OccupancyGap, OccupancyObservation, SealedSystemImage};
+    use provenant_supervisor::census::{Census, ProcessIdentity};
+
+    struct Scripted {
+        cwd: CwdObservation,
+        occupancy: OccupancyObservation,
+        sealed: Option<SealedSystemImage>,
+        kernel_thread: bool,
+    }
+    impl CwdObserver for Scripted {
+        fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            Ok(self.cwd.clone())
+        }
+        fn occupancy(&self, _: i64) -> OccupancyObservation {
+            self.occupancy.clone()
+        }
+        fn sealed_system_image(&self, _: i64) -> Option<SealedSystemImage> {
+            self.sealed
+        }
+        fn kernel_thread(&self, _: i64) -> bool {
+            self.kernel_thread
+        }
+    }
+
+    fn gap(gap: OccupancyGap) -> OccupancyObservation {
+        OccupancyObservation {
+            paths: vec![],
+            complete: false,
+            gap: Some(gap),
+        }
+    }
+
+    const SYSTEM: Option<SealedSystemImage> = Some(SealedSystemImage {
+        setuid_transition: false,
+    });
+    const SETUID: Option<SealedSystemImage> = Some(SealedSystemImage {
+        setuid_transition: true,
+    });
+
+    type Observed = (
+        WorkerState,
+        String,
+        Vec<(Option<i64>, Option<&'static str>)>,
+    );
+
+    /// Observe one process (pid 200) beside the root; returns state, detail
+    /// and the audited (pid, condition) pairs.
+    fn observe(scripted: Scripted, zombie: bool) -> Result<Observed, Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let base = canonicalize(fixture._temp.path())?;
+        let root = base.join("root");
+        fs::create_dir(&root)?;
+        std::os::unix::fs::symlink(LOOP, base.join(LOOP))?;
+        let mut scripted = scripted;
+        for path in &mut scripted.occupancy.paths {
+            if path.as_os_str() == LOOP {
+                *path = base.join(LOOP);
+            }
+        }
+        let scripted = Scripted {
+            cwd: match scripted.cwd {
+                CwdObservation::Path(_) => CwdObservation::Path(base.clone()),
+                other => other,
+            },
+            ..scripted
+        };
+        let fact = |pid: i64, zombie| ProcessFact {
+            identity: ProcessIdentity {
+                boot: "boot".into(),
+                pid,
+                native_start: pid as u64,
+                group_id: pid,
+                session_id: pid,
+            },
+            parent_pid: 1,
+            zombie,
+            cpu_micros: None,
+            command: None,
+        };
+        let current = fact(100, false);
+        let processes = InjectedCensus {
+            census: Census::from_observations(
+                [current.clone(), fact(200, zombie)],
+                [],
+                [],
+                true,
+                false,
+                32,
+            )?,
+            cwds: BTreeMap::new(),
+            current: current.clone(),
+            platform_uids: BTreeMap::new(),
+        };
+        let mut audit = Vec::new();
+        let (states, _, details) = observe_worker_holders_with_audit(
+            std::slice::from_ref(&root),
+            &processes,
+            &scripted,
+            &current,
+            false,
+            &mut |pid, condition| audit.push((pid, condition)),
+        );
+        Ok((
+            states[&root],
+            details.get(&root).cloned().unwrap_or_default(),
+            audit,
+        ))
+    }
+
+    /// Stands for a path that cannot be canonicalised; `observe` makes it a
+    /// symlink to itself.
+    const LOOP: &str = "occupancy-loop";
+
+    fn path_scripted(
+        occupancy: OccupancyObservation,
+        sealed: Option<SealedSystemImage>,
+    ) -> Scripted {
+        Scripted {
+            cwd: CwdObservation::Path(PathBuf::new()),
+            occupancy,
+            sealed,
+            kernel_thread: false,
+        }
+    }
+
+    #[test]
+    fn a_sealed_system_image_with_a_wholly_denied_descriptor_listing_is_excused_by_design()
+    -> Result<(), Box<dyn Error>> {
+        let (state, _, audit) = observe(
+            path_scripted(gap(OccupancyGap::DescriptorsDenied), SYSTEM),
+            false,
+        )?;
+        assert_eq!(state, WorkerState::Free);
+        assert!(audit.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn refused_descriptors_on_a_non_system_image_stay_unknown_with_pid_and_reason()
+    -> Result<(), Box<dyn Error>> {
+        let (state, detail, audit) = observe(
+            path_scripted(gap(OccupancyGap::DescriptorsDenied), None),
+            false,
+        )?;
+        assert_eq!(state, WorkerState::Unknown);
+        assert!(
+            detail.starts_with("process 200: occupancy incomplete: descriptors unreadable (EPERM)")
+        );
+        // An incomplete occupancy is not an image-policy rejection.
+        assert!(audit.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn other_gaps_are_never_excused_even_for_a_sealed_system_image() -> Result<(), Box<dyn Error>> {
+        for gap_kind in [
+            OccupancyGap::ExecutableUnavailable,
+            OccupancyGap::DescriptorsUnavailable,
+            OccupancyGap::LimitExceeded,
+            OccupancyGap::Unobserved,
+        ] {
+            let (state, detail, _) = observe(path_scripted(gap(gap_kind), SYSTEM), false)?;
+            assert_eq!(state, WorkerState::Unknown, "{gap_kind:?}");
+            assert!(
+                detail.contains(&format!("occupancy incomplete: {}", gap_kind.describe())),
+                "{detail}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn refused_descriptors_with_an_unreadable_cwd_are_not_excused() -> Result<(), Box<dyn Error>> {
+        // The cwd is unknown, so the outside-cwd condition is unmet.
+        let (state, _, _) = observe(
+            Scripted {
+                cwd: CwdObservation::Unsupported,
+                occupancy: gap(OccupancyGap::DescriptorsDenied),
+                sealed: SYSTEM,
+                kernel_thread: false,
+            },
+            false,
+        )?;
+        assert_eq!(state, WorkerState::Unknown);
+        Ok(())
+    }
+
+    #[test]
+    fn a_setuid_sealed_image_with_a_refused_cwd_is_non_occupying() -> Result<(), Box<dyn Error>> {
+        // /usr/bin/login: ruid=501, euid=0, cwd refused by the transition.
+        let (state, _, audit) = observe(
+            Scripted {
+                cwd: CwdObservation::PermissionDenied,
+                occupancy: gap(OccupancyGap::DescriptorsDenied),
+                sealed: SETUID,
+                kernel_thread: false,
+            },
+            false,
+        )?;
+        assert_eq!(state, WorkerState::Free);
+        assert!(audit.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_setuid_sealed_image_still_reports_positively_observed_paths_and_other_gaps()
+    -> Result<(), Box<dyn Error>> {
+        let (state, detail, _) = observe(
+            Scripted {
+                cwd: CwdObservation::PermissionDenied,
+                occupancy: gap(OccupancyGap::DescriptorsUnavailable),
+                sealed: SETUID,
+                kernel_thread: false,
+            },
+            false,
+        )?;
+        assert_eq!(state, WorkerState::Unknown);
+        assert!(detail.contains("descriptors unavailable"), "{detail}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_refused_cwd_on_a_non_setuid_or_non_system_image_stays_unknown()
+    -> Result<(), Box<dyn Error>> {
+        for sealed in [None, SYSTEM] {
+            let (state, detail, _) = observe(
+                Scripted {
+                    cwd: CwdObservation::PermissionDenied,
+                    occupancy: OccupancyObservation {
+                        paths: vec![],
+                        complete: true,
+                        gap: None,
+                    },
+                    sealed,
+                    kernel_thread: false,
+                },
+                false,
+            )?;
+            assert_eq!(state, WorkerState::Unknown, "{sealed:?}");
+            assert!(
+                detail.starts_with("process 200: cwd unreadable"),
+                "{detail}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn zombies_and_kernel_threads_are_skipped() -> Result<(), Box<dyn Error>> {
+        let (state, _, _) = observe(
+            Scripted {
+                cwd: CwdObservation::Gone,
+                occupancy: gap(OccupancyGap::ExecutableUnavailable),
+                sealed: None,
+                kernel_thread: false,
+            },
+            true,
+        )?;
+        assert_eq!(state, WorkerState::Free);
+        let (state, _, _) = observe(
+            Scripted {
+                cwd: CwdObservation::Gone,
+                occupancy: gap(OccupancyGap::ExecutableUnavailable),
+                sealed: None,
+                kernel_thread: true,
+            },
+            false,
+        )?;
+        assert_eq!(state, WorkerState::Free);
+        // The same process that is neither stays unknown.
+        let (state, _, _) = observe(
+            Scripted {
+                cwd: CwdObservation::Gone,
+                occupancy: gap(OccupancyGap::ExecutableUnavailable),
+                sealed: None,
+                kernel_thread: false,
+            },
+            false,
+        )?;
+        assert_eq!(state, WorkerState::Unknown);
+        Ok(())
+    }
+
+    #[test]
+    fn occupancy_path_placement_failures_are_audited_as_unplaceable() -> Result<(), Box<dyn Error>>
+    {
+        let (state, detail, audit) = observe(
+            path_scripted(
+                OccupancyObservation {
+                    paths: vec![PathBuf::from(LOOP)],
+                    complete: true,
+                    gap: None,
+                },
+                None,
+            ),
+            false,
+        )?;
+        assert_eq!(state, WorkerState::Unknown);
+        assert!(
+            detail.starts_with("process 200: occupancy path unavailable"),
+            "{detail}"
+        );
+        assert_eq!(
+            audit,
+            vec![(Some(200), Some("occupancy path placement required"))]
+        );
+        Ok(())
+    }
 }

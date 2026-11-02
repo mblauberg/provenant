@@ -88,9 +88,10 @@ only below `gc.free_floor` and is capped at five seconds.
 Pressure sweeps prune declared idle output, with a one-day floor below the
 configured free-space floor, while retaining worktrees and skipping fetches.
 
-Explicit removal does not require idle output. Foreign collection uses declared
-ignored output directory mtimes and scans the remaining tree within its idle
-proof budget; repository boundaries remain protected in both paths.
+Explicit removal does not require idle output. Foreign collection of a proven
+merged tree is immediate and does not wait for idle output; repository
+boundaries remain protected in both paths. When a census refuses a tree, the
+error names the process and why it could not be observed.
 
 Submitted queued writers protect their worktrees before launch. Keep a writer
 reservation for tasks that have not yet been submitted into the run store.

@@ -104,6 +104,10 @@ files such as `.env` block explicit removal, whose error names up to five
 paths. Configure `regenerable`, `keep` and the opt-in
 `foreign_worktrees = "merged-clean"` policy as described in the
 [configuration runbook](configuration.md#lane-cache-collection).
+On a full pass, fetched-default ancestry permits immediate removal of a
+clean merged tree and its unchanged local branch and own cache; recent
+declared ignored output does not delay that removal. Standalone output and
+cache collection still use their configured age thresholds.
 Applied foreign collection removes any temporary writer state it created,
 after removal or refusal. Existing worktree state stays in place.
 Temporary-state cleanup can wait up to five seconds for repository custody

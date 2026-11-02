@@ -218,6 +218,15 @@ pub(super) fn system_worker_roots(roots: &[PathBuf], ancestors: bool) -> WorkerO
 
 pub(super) struct PolicyCwdObserver<'a>(pub(super) &'a [CensusIgnoreEntry]);
 impl CwdObserver for PolicyCwdObserver<'_> {
+    fn occupancy(&self, pid: i64) -> provenant_os::pid::OccupancyObservation {
+        SystemCwdObserver.occupancy(pid)
+    }
+    fn sealed_system_image(&self, pid: i64) -> Option<provenant_os::pid::SealedSystemImage> {
+        SystemCwdObserver.sealed_system_image(pid)
+    }
+    fn kernel_thread(&self, pid: i64) -> bool {
+        SystemCwdObserver.kernel_thread(pid)
+    }
     fn unreadable_policy_uids(
         &self,
         pid: i64,
@@ -391,10 +400,92 @@ pub(super) fn observe_worker_holders_with_audit(
     }
     // An incomplete census must not hide positively observed live workers.
     for fact in census.facts() {
-        if excluded.contains(&fact.identity) {
+        // A zombie holds no cwd, executable or descriptor.
+        if excluded.contains(&fact.identity) || fact.zombie {
             continue;
         }
-        match observe_same_process(observer, cwd_observer, fact) {
+        let pid = fact.identity.pid;
+        let same_process = |process: ProcessObservation| matches!(process, ProcessObservation::Present(ref p) if p.identity == fact.identity);
+        // A kernel thread holds no file in any worktree.
+        if cwd_observer.kernel_thread(pid) && same_process(observer.observe(pid)) {
+            continue;
+        }
+        let cwd = observe_same_process(observer, cwd_observer, fact);
+        let mut occupancy_gap = None;
+        if !matches!(cwd, NativeCwd::Gone) {
+            let policy_exception = matches!(&cwd, NativeCwd::PolicyExcluded(uids)
+                if uids.all_system() && roots.iter().all(|root| std::fs::metadata(root)
+                    .is_ok_and(|metadata| uids.all_differ_from(metadata.uid()))));
+            let before = observer.observe(pid);
+            let occupancy = cwd_observer.occupancy(pid);
+            let after = observer.observe(pid);
+            let stable = same_process(before) && same_process(after);
+            if stable {
+                for path in &occupancy.paths {
+                    let Some(canonical) = canonical_cwd(path) else {
+                        unplaceable(Some(pid), Some("occupancy path placement required"));
+                        record_unknown_all(
+                            &mut states,
+                            &mut details,
+                            &process_detail(cwd_observer, pid, "occupancy path unavailable"),
+                        );
+                        continue;
+                    };
+                    let location = match std::fs::metadata(&canonical) {
+                        Ok(meta) if !meta.is_dir() => canonical.parent().unwrap_or(&canonical),
+                        _ => &canonical,
+                    };
+                    let mut placement_failed = false;
+                    let placed = record_live_path_with_audit(&mut states, location, &mut || {
+                        placement_failed = true
+                    });
+                    if placement_failed {
+                        unplaceable(
+                            Some(pid),
+                            Some(
+                                "occupancy path placement required (directory identity placement failed)",
+                            ),
+                        );
+                        for (root, state) in &states {
+                            if *state == WorkerState::Unknown {
+                                details.entry(root.clone()).or_insert_with(|| {
+                                    process_detail(
+                                        cwd_observer,
+                                        pid,
+                                        "occupancy path or root identity unreadable",
+                                    )
+                                });
+                            }
+                        }
+                    }
+                    for root in placed {
+                        holders
+                            .entry(root.clone())
+                            .or_insert_with(|| ObservedProcess {
+                                pid,
+                                command: fact.command.clone(),
+                            });
+                        details.insert(
+                            root,
+                            format!("process {pid}: executable or open file inside root"),
+                        );
+                    }
+                }
+            }
+            if !stable {
+                occupancy_gap = Some(provenant_os::pid::OccupancyGap::Churn);
+            } else if !occupancy.complete && !policy_exception {
+                occupancy_gap = Some(
+                    occupancy
+                        .gap
+                        .unwrap_or(provenant_os::pid::OccupancyGap::Unobserved),
+                );
+            }
+        }
+        // Set by the cwd arms below: what the narrowing rules may rely on.
+        let mut cwd_outside = false;
+        let mut setuid_excused = false;
+        match cwd {
             NativeCwd::Gone => {}
             NativeCwd::PolicyExcluded(uids) => {
                 // Accepted risk for sealed Apple code, applied per root owner.
@@ -407,7 +498,7 @@ pub(super) fn observe_worker_holders_with_audit(
                     });
                 if !excluded {
                     unplaceable(
-                        Some(fact.identity.pid),
+                        Some(pid),
                         Some(
                             "real/effective/saved system uids foreign to every root owner required",
                         ),
@@ -415,22 +506,30 @@ pub(super) fn observe_worker_holders_with_audit(
                     record_unknown_all(
                         &mut states,
                         &mut details,
-                        &process_detail(cwd_observer, fact.identity.pid, "cwd unreadable"),
+                        &process_detail(cwd_observer, pid, "cwd unreadable"),
                     );
                 }
             }
             NativeCwd::PolicyRejected(failure) => {
-                unplaceable(Some(fact.identity.pid), failure.builtin_condition);
-                let condition = failure.condition;
-                record_unknown_all(
-                    &mut states,
-                    &mut details,
-                    &process_detail(
-                        cwd_observer,
-                        fact.identity.pid,
-                        &format!("cwd unreadable; policy_condition={condition}"),
-                    ),
-                );
+                // A setuid image on the sealed system volume has its cwd
+                // refused by its own privilege transition (login, for one).
+                // Its user-owned descendants are separate census entries.
+                setuid_excused = cwd_observer
+                    .sealed_system_image(pid)
+                    .is_some_and(|image| image.setuid_transition);
+                if !setuid_excused {
+                    unplaceable(Some(pid), failure.builtin_condition);
+                    let condition = failure.condition;
+                    record_unknown_all(
+                        &mut states,
+                        &mut details,
+                        &process_detail(
+                            cwd_observer,
+                            pid,
+                            &format!("cwd unreadable; policy_condition={condition}"),
+                        ),
+                    );
+                }
             }
             NativeCwd::Unknown(category) => {
                 let condition = if category.starts_with("cwd ") {
@@ -438,56 +537,73 @@ pub(super) fn observe_worker_holders_with_audit(
                 } else {
                     "stable process identity unavailable"
                 };
-                unplaceable(Some(fact.identity.pid), Some(condition));
+                unplaceable(Some(pid), Some(condition));
                 record_unknown_all(
                     &mut states,
                     &mut details,
-                    &process_detail(cwd_observer, fact.identity.pid, &category),
+                    &process_detail(cwd_observer, pid, &category),
                 );
             }
             NativeCwd::Path(path) => {
-                let Some(canonical) = canonical_cwd(&path) else {
+                if let Some(canonical) = canonical_cwd(&path) {
+                    let mut placement_failed = false;
+                    let placed = record_live_path_with_audit(&mut states, &canonical, &mut || {
+                        placement_failed = true
+                    });
+                    if placement_failed {
+                        unplaceable(
+                            Some(pid),
+                            Some("actual cwd EPERM required (directory identity placement failed)"),
+                        );
+                    }
+                    cwd_outside = placed.is_empty() && !placement_failed;
+                    for (root, state) in &states {
+                        if *state == WorkerState::Unknown {
+                            details.entry(root.clone()).or_insert_with(|| {
+                                process_detail(cwd_observer, pid, "cwd or root identity unreadable")
+                            });
+                        }
+                    }
+                    for root in placed {
+                        let holder =
+                            holders
+                                .entry(root.clone())
+                                .or_insert_with(|| ObservedProcess {
+                                    pid,
+                                    command: fact.command.clone(),
+                                });
+                        details.insert(root, format!("process {}: cwd inside root", holder.pid));
+                    }
+                } else {
                     unplaceable(
-                        Some(fact.identity.pid),
+                        Some(pid),
                         Some("actual cwd EPERM required (readable cwd placement failed)"),
                     );
                     record_unknown_all(
                         &mut states,
                         &mut details,
-                        &process_detail(cwd_observer, fact.identity.pid, "cwd unreadable"),
-                    );
-                    continue;
-                };
-                let mut placement_failed = false;
-                let placed = record_live_path_with_audit(&mut states, &canonical, &mut || {
-                    placement_failed = true
-                });
-                if placement_failed {
-                    unplaceable(
-                        Some(fact.identity.pid),
-                        Some("actual cwd EPERM required (directory identity placement failed)"),
+                        &process_detail(cwd_observer, pid, "cwd unreadable"),
                     );
                 }
-                for (root, state) in &states {
-                    if *state == WorkerState::Unknown {
-                        details.entry(root.clone()).or_insert_with(|| {
-                            process_detail(
-                                cwd_observer,
-                                fact.identity.pid,
-                                "cwd or root identity unreadable",
-                            )
-                        });
-                    }
-                }
-                for root in placed {
-                    let holder = holders
-                        .entry(root.clone())
-                        .or_insert_with(|| ObservedProcess {
-                            pid: fact.identity.pid,
-                            command: fact.command.clone(),
-                        });
-                    details.insert(root, format!("process {}: cwd inside root", holder.pid));
-                }
+            }
+        }
+        if let Some(gap) = occupancy_gap {
+            // Only refused descriptor queries are excusable, and only for a
+            // sealed system image that is known not to be in a candidate root:
+            // by its known cwd, or because it is a setuid transition.
+            let excused = gap == provenant_os::pid::OccupancyGap::DescriptorsDenied
+                && (setuid_excused
+                    || (cwd_outside && cwd_observer.sealed_system_image(pid).is_some()));
+            if !excused {
+                record_unknown_all(
+                    &mut states,
+                    &mut details,
+                    &process_detail(
+                        cwd_observer,
+                        pid,
+                        &format!("occupancy incomplete: {}", gap.describe()),
+                    ),
+                );
             }
         }
     }
@@ -567,7 +683,9 @@ pub(super) fn observe_same_process(
     }
     let observed = match cwd_observer.cwd(expected.identity.pid) {
         Ok(CwdObservation::Path(path)) => NativeCwd::Path(path),
-        Ok(CwdObservation::Gone) => return NativeCwd::Gone,
+        // A missing cwd is not proof that the process vanished. The stable
+        // identity recheck below distinguishes a real exit from a query gap.
+        Ok(CwdObservation::Gone) => NativeCwd::Unknown("cwd unavailable".into()),
         Ok(CwdObservation::PermissionDenied) => cwd_observer
             .unreadable_policy_uids(expected.identity.pid, &[])
             .map(NativeCwd::PolicyExcluded)
