@@ -235,16 +235,18 @@ every node supplies `result`, `findings`, `verdict` and `remaining`, while
 `commit` needs write access or a pinned source (inherited from an enclosing composite), `branch` needs write access, and loops supply neither.
 Expansion refuses a mismatch and names both nodes.
 
-A node's prompt carries a bounded excerpt of each selected `result`. When the
-upstream result is on this host, the full text is also written, redacted as
+A node's prompt carries a bounded excerpt of each selected `result`. The full
+upstream text is also written, redacted as
 `provenant output --full` shows it, to a read-only file in the node's own
 inputs directory, and the prompt lists the path beside the excerpt. A selected
 composite stands for its exported members; a partial composite offers only
 those that succeeded. The node may read that directory and nothing else of
 another attempt's state. A node's files share a 2 MiB total; a result cut at
 the limit ends with a marker, and the prompt names every capped result. An
-upstream on another host is named unavailable and the node still runs (remote
-materialisation is tracked in #2665).
+offline or refusing upstream host is named unavailable with the reason, and
+the node still runs. An older peer that does not report the redacted length
+cannot supply a result that exceeds the remaining limit; it is also named
+unavailable.
 
 Stages run in order and receive the preceding result. An entry can select
 other preceding outputs with `outputs = ["result", "findings", "commit"]`.

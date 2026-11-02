@@ -2093,6 +2093,7 @@ impl BinaryRunOwner<'_> {
                 // The serving side reads its own graph, so `output --host` can
                 // name the planner fallback it recorded.
                 let mut extra = provenant_records::ExtraFields::new();
+                extra.insert("length".into(), serde_json::Value::from(chunk.len));
                 if matches!(part, OutputPart::Result)
                     && let Some(reason) = provenant_cli::run::planner_fallback_reason(
                         &self.factory.context.roots.state,
@@ -4047,6 +4048,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     ) -> Option<provenant_fabric_runtime::graph::MaterialisedInputs> {
         Some(graph_inputs::materialise(
             self.factory,
+            self.budget,
             self.cancel,
             key,
             requests,
