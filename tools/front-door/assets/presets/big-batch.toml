@@ -32,7 +32,7 @@ spec = { type = "string", default = "", doc = "Issue number or file the batch an
 risk_tier = { type = "string", default = "", doc = "Risk tier that selects the review shape." }
 review_shape = { type = "string", default = "", doc = "Explicit review shape override." }
 kind = { type = "string", default = "", doc = "Change kind that scales the review panel: refactor, integration, docs. Empty uses the task kind." }
-size = { type = "string", default = "", doc = "Review size override (small, medium, large). Empty measures the change against base in the worktree." }
+size = { type = "string", default = "", doc = "Review size override (small, medium, large). Empty measures the worktree's current head against base when the graph expands, before the writer runs, as a proxy; pass a size when the expected scope is known." }
 risk_tags = { type = "list", default = [], doc = "Tags that trigger conditional lenses." }
 # One entry per lane: name, worktree, scope and spec. Supply with --params-file.
 lanes = [

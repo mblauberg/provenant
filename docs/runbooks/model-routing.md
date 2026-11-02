@@ -146,9 +146,11 @@ Small is at most 150 lines, 3 files and 1 crate; medium is at most 1,000 lines,
 15 files and 3 crates; larger or binary changes are large. Configure these limits
 under `domains.routing.review.size`; each small limit must not exceed its medium
 limit. The risk tier sets a floor. Integration heads select deep and are not
-measured. An empty diff, or one that cannot be measured, leaves the size unknown
-and selection falls back to risk, kind and the default shape; the cause is
-reported as a warning.
+measured. An empty diff leaves the size unknown; a diff that cannot be measured
+also leaves it unknown and reports git's error as a warning. Either way,
+selection falls back to risk, kind and the default shape. Preset graphs such
+as `deliver` measure when they expand, before the writer runs, so they size
+from the worktree's existing diff; pass `size` when the expected scope is known.
 
 Lenses fill a shape's slots in the order given by `review.lenses.order`, without
 repeats. The standard shape has three slots: `correctness-spec`, `tests`, then one
