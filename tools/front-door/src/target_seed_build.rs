@@ -270,53 +270,51 @@ pub fn build(state: &Path, project: &Path) -> Result<String> {
 }
 
 fn build_into(stage: &Path, project: &Path, commit: &str) -> Result<Manifest> {
-    {
-        let checkout = stage.join("checkout");
-        checkout_commit(project, &checkout, commit)?;
-        let worktree = checkout.join("tools/front-door");
-        let target = stage.join("target");
-        fs::create_dir(&target)?;
-        let (rustc_vv, host_triple) = target_seed::rustc_metadata(&worktree)?;
-        let mut flags = vec![
-            "cargo build --locked --all-targets".to_owned(),
-            "cargo test --locked --no-run".to_owned(),
-        ];
-        flags.extend(
-            [
-                "RUSTFLAGS",
-                "CARGO_ENCODED_RUSTFLAGS",
-                "CARGO_BUILD_RUSTFLAGS",
-                "CARGO_BUILD_TARGET",
-            ]
-            .into_iter()
-            .filter_map(|key| std::env::var(key).ok().map(|v| format!("{key}={v}"))),
-        );
-        for args in [
-            &["build", "--locked", "--all-targets"][..],
-            &["test", "--locked", "--no-run"][..],
-        ] {
-            let argv: Vec<OsString> = std::iter::once(OsString::from("cargo"))
-                .chain(args.iter().map(OsString::from))
-                .collect();
-            run(
-                &worktree,
-                &argv,
-                &[
-                    ("CARGO_TARGET_DIR".into(), target.as_os_str().into()),
-                    ("CARGO_BUILD_BUILD_DIR".into(), target.as_os_str().into()),
-                ],
-            )?;
-        }
-        fs::remove_dir_all(checkout)?;
-        Ok(Manifest {
-            rustc_vv,
-            host_triple,
-            commit: commit.to_owned(),
-            profile: "dev".into(),
-            features: vec!["default".into()],
-            flags,
-        })
+    let checkout = stage.join("checkout");
+    checkout_commit(project, &checkout, commit)?;
+    let worktree = checkout.join("tools/front-door");
+    let target = stage.join("target");
+    fs::create_dir(&target)?;
+    let (rustc_vv, host_triple) = target_seed::rustc_metadata(&worktree)?;
+    let mut flags = vec![
+        "cargo build --locked --all-targets".to_owned(),
+        "cargo test --locked --no-run".to_owned(),
+    ];
+    flags.extend(
+        [
+            "RUSTFLAGS",
+            "CARGO_ENCODED_RUSTFLAGS",
+            "CARGO_BUILD_RUSTFLAGS",
+            "CARGO_BUILD_TARGET",
+        ]
+        .into_iter()
+        .filter_map(|key| std::env::var(key).ok().map(|v| format!("{key}={v}"))),
+    );
+    for args in [
+        &["build", "--locked", "--all-targets"][..],
+        &["test", "--locked", "--no-run"][..],
+    ] {
+        let argv: Vec<OsString> = std::iter::once(OsString::from("cargo"))
+            .chain(args.iter().map(OsString::from))
+            .collect();
+        run(
+            &worktree,
+            &argv,
+            &[
+                ("CARGO_TARGET_DIR".into(), target.as_os_str().into()),
+                ("CARGO_BUILD_BUILD_DIR".into(), target.as_os_str().into()),
+            ],
+        )?;
     }
+    fs::remove_dir_all(checkout)?;
+    Ok(Manifest {
+        rustc_vv,
+        host_triple,
+        commit: commit.to_owned(),
+        profile: "dev".into(),
+        features: vec!["default".into()],
+        flags,
+    })
 }
 
 fn publish(state: &Path, build: impl FnOnce(&Path) -> Result<Manifest>) -> Result<String> {

@@ -206,13 +206,15 @@ Refresh `origin/main` before building when a newer seed is wanted. This is a
 host operation: only build seeds from a trusted `origin/main`. The host's
 `refresh` entry point rebuilds only when `origin/main` has moved past the newest
 complete generation, and does nothing while another seed build holds the build
-lock, so at most one build runs. The host tick calls it for you: when the daily
+lock, so at most one build runs; it rechecks staleness once it holds the lock, and a
+commit whose build failed is not rebuilt until `origin/main` moves. The host
+tick calls it for you: when the daily
 collection finishes (it has just fetched each project's default branch), its
 worker queues a detached `internal tick-seed` worker that refreshes every
 registered project's seed, one project at a time. The tick itself never builds,
-so a long build cannot stall graph wakes. A busy build is a no-op, a failure is
+so a long build cannot stall graph wakes. A busy build is retried on the next tick, a failure is
 recorded and the other projects still run, and the tick stays green; the tick
-output shows `seed=` (`idle`, `queued`, `running`, `complete`, `disabled` or
+output shows `seed=` (`idle`, `queued`, `running`, `busy`, `complete`, `disabled` or
 `last_failed`) and `<state>/tick/seed-result.json` holds the error. The worker
 is single-flight on `<state>/tick/seed-worker.lock` and does nothing when
 `[domains.fabric.lanes.cargo_seed] enabled` is false. With `gc.schedule` off there is no
