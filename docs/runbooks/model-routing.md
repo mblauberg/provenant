@@ -151,7 +151,7 @@ refactor-cleanup and design fit. Risk tags add their conditional lenses.
 For example, review a commit with changed paths from a Git range:
 
 ```sh
-provenant review HEAD --brief-file review-brief.md --risk crucial --kind code --range origin/main...HEAD
+provenant review HEAD --brief-file review-brief.md --risk crucial --risk-tag security --kind code --range origin/main...HEAD --explain
 provenant --json review HEAD --brief-file review-brief.md --shape quick
 ```
 

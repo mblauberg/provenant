@@ -219,6 +219,9 @@ pub struct Review {
     /// Task kind used to select a shape
     #[arg(long)]
     pub kind: Option<String>,
+    /// Add a conditional review lens (security, concurrency, or terminal)
+    #[arg(long = "risk-tag", value_parser = ["security", "concurrency", "terminal"])]
+    pub risk_tags: Vec<String>,
     /// Git range whose changed paths select the shape
     #[arg(long)]
     pub range: Option<String>,
