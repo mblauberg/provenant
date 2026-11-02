@@ -597,7 +597,6 @@ fn conflicting_markers_fall_back_to_the_configured_client() -> Result {
 #[test]
 fn session_save_outside_checkout_requires_project() -> Result {
     let mut rig = TestRig::new()?;
-    let project = rig.project.clone();
     let source = rig.root.join("checkpoint.md");
     std::fs::write(&source, "checkpoint\n")?;
     let source = source.to_str().ok_or("source")?;
@@ -629,7 +628,7 @@ fn session_save_outside_checkout_requires_project() -> Result {
     assert_eq!(unknown["error"]["code"], "SESSION_PROJECT_MISSING");
     assert_eq!(state_snapshot(&rig.state.join("workflow"))?, before);
     let mut explicit = args.to_vec();
-    explicit.extend(["--project", project.to_str().ok_or("project")?]);
+    explicit.extend(["--project", rig.root.to_str().ok_or("root")?]);
     assert_eq!(call(&rig, &explicit, 0)?["data"]["revision"], 1);
     Ok(())
 }

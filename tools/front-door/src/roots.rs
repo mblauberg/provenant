@@ -94,27 +94,59 @@ fn discovery_error(error: io::Error) -> RootError {
 }
 
 fn session_project(selected: Option<&Path>) -> Result<PathBuf, RootError> {
-    let cwd = git_checkout(&std::env::current_dir()?).ok();
+    let cwd = fs::canonicalize(std::env::current_dir()?)?;
+    if !cwd.is_dir() {
+        return Err(RootError::SessionProjectMissing);
+    }
     let Some(selected) = selected else {
-        return cwd.ok_or(RootError::SessionProjectMissing);
+        return git_checkout(&cwd).map_err(|_| RootError::SessionProjectMissing);
     };
-    let selected =
-        selected_project(Some(selected), true).map_err(|_| RootError::SessionProjectMissing)?;
-    if let Some(cwd) = cwd
-        && repository_path(&cwd, RepositoryPath::CommonDir).map_err(discovery_error)?
-            != repository_path(&selected, RepositoryPath::CommonDir).map_err(discovery_error)?
-    {
+    let selected = fs::canonicalize(selected).map_err(|_| RootError::SessionProjectMissing)?;
+    if !selected.is_dir() {
+        return Err(RootError::SessionProjectMissing);
+    }
+    let cwd_checkout = git_checkout(&cwd).ok();
+    let selected_checkout = git_checkout(&selected).ok();
+    let cwd_identity = project_identity(&cwd, cwd_checkout.as_deref())?;
+    let selected_identity = project_identity(&selected, selected_checkout.as_deref())?;
+    if cwd_identity != selected_identity {
         return Err(RootError::SessionProjectMismatch { cwd, selected });
     }
-    Ok(selected)
+    Ok(selected_checkout.unwrap_or(selected))
+}
+
+/// Git worktrees share one project identity. A non-Git directory is its own
+/// project, matching the identity used by the session hook.
+fn project_identity(path: &Path, checkout: Option<&Path>) -> Result<PathBuf, RootError> {
+    match checkout {
+        Some(checkout) => {
+            repository_path(checkout, RepositoryPath::CommonDir).map_err(discovery_error)
+        }
+        None => Ok(path.to_owned()),
+    }
 }
 /// Validate caller-selected roots before composing any leaf. This creates no
 /// state and does not require a product installation for an unavailable owner.
-pub fn validate_globals(globals: &provenant_cli::Globals) -> Result<(), RootError> {
+pub fn validate_globals(
+    globals: &provenant_cli::Globals,
+    session_save: bool,
+) -> Result<(), RootError> {
     if globals.state_dir.is_some() {
-        resolve(globals, Workspace::Project, Product::Optional)?;
+        resolve(
+            globals,
+            if session_save {
+                Workspace::Directory
+            } else {
+                Workspace::Project
+            },
+            Product::Optional,
+        )?;
     } else if globals.project.is_some() {
-        selected_project(globals.project.as_deref(), false)?;
+        if session_save {
+            resolve(globals, Workspace::Directory, Product::Optional)?;
+        } else {
+            selected_project(globals.project.as_deref(), false)?;
+        }
     }
     Ok(())
 }

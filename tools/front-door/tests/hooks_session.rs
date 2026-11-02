@@ -277,6 +277,61 @@ fn hints_from_a_hook_on_a_custom_store_carry_its_state_dir() -> Result {
 }
 
 #[test]
+fn hook_save_round_trips_from_a_non_git_project_directory() -> Result {
+    let rig = TestRig::new()?;
+    let project = rig.root.join("personal");
+    fs::create_dir(&project)?;
+    let mut inputs = RootInputs::new(rig.home.clone(), project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(&project)?)?;
+    let input = json!({
+        "hook_event_name":"SessionStart",
+        "session_id":"non-git-session",
+        "cwd":project,
+        "source":"startup"
+    });
+    let hook = run_hook(&rig, "session-start", &input)?;
+    assert_eq!(code(&hook), 0, "{:?}", hook.stderr.bytes);
+    let hook_context = context(&hook)?;
+    assert!(hook_context.contains("--project '"), "{hook_context}");
+
+    let file = rig.root.join("checkpoint.md");
+    fs::write(&file, "Chair notes from a non-Git directory.")?;
+    let saved = std::process::Command::new(BINARY)
+        .current_dir(&project)
+        .env_clear()
+        .envs(rig.env.iter().cloned())
+        .args([
+            "--state-dir",
+            rig.state.to_str().ok_or("state path is not UTF-8")?,
+            "--project",
+            project.to_str().ok_or("project path is not UTF-8")?,
+            "workflow",
+            "session",
+            "save",
+            "non-git-session",
+            "--file",
+            file.to_str().ok_or("checkpoint path is not UTF-8")?,
+            "--client",
+            "claude",
+        ])
+        .output()?;
+    assert!(
+        saved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&saved.stderr)
+    );
+
+    let mut input = input;
+    input["source"] = json!("resume");
+    let restarted = run_hook(&rig, "session-start", &input)?;
+    assert_eq!(code(&restarted), 0, "{:?}", restarted.stderr.bytes);
+    assert!(context(&restarted)?.contains("Chair notes from a non-Git directory."));
+    Ok(())
+}
+
+#[test]
 fn a_damaged_autosave_leaves_the_chair_notes_visible_at_session_start() -> Result {
     let rig = TestRig::new()?;
     save(
