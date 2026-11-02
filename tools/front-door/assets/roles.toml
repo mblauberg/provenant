@@ -287,6 +287,7 @@ every finding verbatim with one of UPHELD, FALSIFIED or UNVERIFIABLE and your
 evidence. Add any finding the lenses missed and mark it NEW. Do not edit files.
 End with a findings block (schema_version 1) whose entries keep each finding's
 id and add "verification": "upheld", "falsified" or "unverifiable".
+Carry any listed unavailable lenses into your result.
 """
 
 [roles."review.synthesis"]
@@ -308,6 +309,8 @@ entry carries "disposition" (accepted, rejected or deferred) and "reason".
 A finding without a disposition is incomplete. Emit one exact
 VERDICT: PASS only when no accepted finding remains and acceptance evidence is
 satisfied, otherwise VERDICT: FAIL.
+If the input lists unavailable lenses, state that the review is degraded and name
+them with their reasons.
 """
 
 [roles."review.evaluator"]

@@ -341,6 +341,7 @@ struct PlannedNode {
     routes: Vec<GraphRoute>,
     #[serde(skip_serializing_if = "Option::is_none")]
     required_verdict: Option<String>,
+    #[serde(skip_serializing_if = "model::is_false")]
     require_findings: bool,
 }
 

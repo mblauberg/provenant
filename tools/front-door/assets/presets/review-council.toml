@@ -1,10 +1,10 @@
 stages = [
   { id = "subject", role = "plan.review" },
-  { id = "lenses", allow_partial = true, parallel = [
+  { id = "lenses", min_successful = "${min_reviews}", parallel = [
     { id = "lens", for_each = "${lenses}", role = "lens.${item.name}", require_findings = true },
   ], source = { type = "node", node = "subject" } },
-  { id = "verify", role = "review.verify", count = "${verifiers}", source = { type = "node", node = "subject" }, prompt = "The input includes successful lens findings and any unavailable lens names and reasons. Preserve those unavailable details in your result so synthesis can assess review coverage." },
-  { id = "synthesis", role = "review.synthesis", prompt = "The verifier input includes successful lens output and any unavailable lens names and reasons. Count successful independent reviews against the review ladder minimum for risk tier ${risk_tier}. If the council is below that minimum, mark the result degraded and ask for a same-family substitute through a different lens, or ask the chair to choose one. Do not report an ordinary complete review." },
+  { id = "verify", role = "review.verify", count = "${verifiers}", source = { type = "node", node = "subject" } },
+  { id = "synthesis", role = "review.synthesis" },
 ]
 exports = [{ node = "synthesis", outputs = ["result", "findings", "verdict", "commit"] }]
 
@@ -47,6 +47,7 @@ review_shape = { type = "string", default = "", doc = "Review depth override fro
 risk_tier = { type = "string", default = "", doc = "Risk tier that selects the review shape." }
 kind = { type = "string", default = "", doc = "Change kind, for example refactor, integration, or docs." }
 size = { type = "string", default = "", doc = "Review size override: small, medium, or large." }
+min_reviews = { type = "integer", default = 0, min = 0, max = 32, doc = "Lenses that must succeed. Fewer fails the lens group, which stops the council for the chair to substitute a lens or decide. 0 takes the review ladder minimum for risk_tier, at least 1." }
 verifiers = { type = "integer", default = 1, min = 0, max = 1, doc = "Verifier stages between the lenses and the synthesis, preferably from another model family; 0 skips verification." }
 verifier_tier = { type = "string", default = "verifier", doc = "Route for the verifier. Define a route named verifier in another model family; without one the senior route is used and the substitution is recorded." }
 risk_tags = { type = "list", default = [], doc = "Tags that trigger conditional lenses: security, concurrency, terminal." }

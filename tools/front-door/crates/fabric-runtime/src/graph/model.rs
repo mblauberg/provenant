@@ -1,6 +1,6 @@
 use super::*;
 
-fn is_false(value: &bool) -> bool {
+pub(super) fn is_false(value: &bool) -> bool {
     !value
 }
 

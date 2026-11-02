@@ -1677,6 +1677,26 @@ struct StageBuilder<'a> {
 }
 
 impl StageBuilder<'_> {
+    /// Lenses that must succeed for a partial group. Zero takes the review
+    /// ladder minimum for `risk_tier`, and never less than one review.
+    fn minimum_successful(&self, value: &Value) -> Result<u64, String> {
+        let minimum = interpolate(value, &self.parameters, self.prompt, 1)?
+            .as_u64()
+            .ok_or("min_successful must be a non-negative integer")?;
+        if minimum > 0 {
+            return Ok(minimum);
+        }
+        let ladder = provenant_records::workflow::ReviewPolicy::default();
+        let tier = self.parameters.get("risk_tier").and_then(Value::as_str);
+        Ok(match tier {
+            Some("substantial") => ladder.substantial,
+            Some("crucial") => ladder.crucial,
+            Some("terminal") => ladder.terminal,
+            _ => ladder.routine,
+        }
+        .max(1))
+    }
+
     fn sequence(
         &mut self,
         stages: &Value,
@@ -1944,7 +1964,7 @@ impl StageBuilder<'_> {
                     .or_else(|| config.get("exports").cloned())
                     .unwrap_or_else(|| selected_inputs(&ends, &json!(["result", "findings"])));
                 (
-                    composite(&id, children, exports, deps, &outputs, false),
+                    composite(&id, children, exports, deps, &outputs, None),
                     true,
                 )
             } else if let Some(parallel) = object.remove("parallel") {
@@ -1966,12 +1986,12 @@ impl StageBuilder<'_> {
                 let exports = object
                     .remove("exports")
                     .unwrap_or_else(|| selected_inputs(&ends, &json!(["result", "findings"])));
-                let allow_partial = object
-                    .remove("allow_partial")
-                    .and_then(|value| value.as_bool())
-                    .unwrap_or(false);
+                let min_successful = object
+                    .remove("min_successful")
+                    .map(|value| self.minimum_successful(&value))
+                    .transpose()?;
                 (
-                    composite(&id, children, exports, deps, &outputs, allow_partial),
+                    composite(&id, children, exports, deps, &outputs, min_successful),
                     true,
                 )
             } else if let Some(stages) = object.remove("stages") {
@@ -1981,7 +2001,7 @@ impl StageBuilder<'_> {
                     .remove("exports")
                     .unwrap_or_else(|| selected_inputs(&ends, &json!(["result", "findings"])));
                 (
-                    composite(&id, children, exports, deps, &outputs, false),
+                    composite(&id, children, exports, deps, &outputs, None),
                     true,
                 )
             } else {
@@ -2100,11 +2120,11 @@ fn composite(
     exports: Value,
     deps: &[String],
     outputs: &Value,
-    allow_partial: bool,
+    min_successful: Option<u64>,
 ) -> Value {
     let mut spec = json!({"nodes":nodes,"exports":exports});
-    if allow_partial {
-        spec["allow_partial"] = json!(true);
+    if let Some(minimum) = min_successful {
+        spec["min_successful"] = json!(minimum);
     }
     let mut node =
         json!({"id":id,"kind":"composite","access":"read_only","depends_on":deps,"composite":spec});

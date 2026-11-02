@@ -1859,8 +1859,8 @@ fn review_council_verifies_between_the_lenses_and_the_synthesis() {
         .collect();
     assert_eq!(ids, ["subject", "lenses", "verify", "synthesis"]);
     assert_eq!(
-        node(&expanded.document, "lenses")["composite"]["allow_partial"],
-        true
+        node(&expanded.document, "lenses")["composite"]["min_successful"],
+        1
     );
     assert!(
         node(&expanded.document, "lenses")["composite"]["nodes"][0]["require_findings"] == true
@@ -1884,18 +1884,6 @@ fn review_council_verifies_between_the_lenses_and_the_synthesis() {
             .as_str()
             .unwrap()
             .contains("disposition")
-    );
-    assert!(
-        synthesis["prompt"]
-            .as_str()
-            .unwrap()
-            .contains("mark the result degraded")
-    );
-    assert!(
-        verify["prompt"]
-            .as_str()
-            .unwrap()
-            .contains("unavailable lens names")
     );
     let skipped = expand(
         &Layers::empty(),

@@ -910,123 +910,94 @@ fn composite_rejects_ambiguous_exports_and_blocks_on_child_failure() {
     );
 }
 
-#[test]
-fn review_composite_keeps_successful_lenses_and_records_unavailable_members() {
-    let findings = "```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"low\",\"file\":\"a.rs\",\"line\":1,\"summary\":\"review note\",\"status\":\"open\"}]}\n```";
-    let synthesis_findings = "```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"low\",\"file\":\"a.rs\",\"line\":1,\"summary\":\"review note\",\"status\":\"open\",\"disposition\":\"accepted\",\"reason\":\"verified\"}]}\n```";
-    let mut verify = node("verify", route("fixture"));
-    verify.depends_on.push("lenses".into());
-    verify.inputs.push(GraphInput {
-        extra: Default::default(),
-        node: "lenses".into(),
-        outputs: vec![OutputKind::Result],
-    });
-    let mut synthesis = node("synthesis", route("fixture"));
-    synthesis.kind = Some(NodeKind::Synthesise);
-    synthesis.dispositions = ["accepted", "rejected", "deferred"]
-        .map(str::to_owned)
-        .to_vec();
-    synthesis.depends_on.push("verify".into());
-    synthesis.depends_on.push("lenses".into());
-    synthesis.inputs.push(GraphInput {
-        extra: Default::default(),
-        node: "lenses".into(),
-        outputs: vec![OutputKind::Result, OutputKind::Findings],
-    });
-    let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+/// Three lenses: `lens-a` succeeds, `lens-b` returns no findings block and
+/// `lens-c` is unavailable. `verify` reads the lens group.
+fn partial_review(minimum: usize) -> (GraphDocument, FakeOwner) {
+    let ok = "LENS-A-OK\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"low\",\"file\":\"a.rs\",\"line\":1,\"summary\":\"note\",\"status\":\"open\"}]}\n```";
+    let lens = |id: &str| {
+        serde_json::json!({"id":id,"access":"read_only","prompt":id,
+            "require_findings":true,"route":{"alias":"fixture"}})
+    };
+    let exports: Vec<_> = ["lens-a", "lens-b", "lens-c"]
+        .map(|id| serde_json::json!({"node":id,"outputs":["result","findings"]}))
+        .into();
+    let document = serde_json::from_value(serde_json::json!({
         "schema_version": 1, "graph_id": "partial-review", "nodes": [
-            {"id":"lenses", "kind":"composite", "access":"read_only",
-             "composite":{"allow_partial":true,"nodes":[
-                {"id":"lens-a","access":"read_only","prompt":"a","require_findings":true,"route":{"alias":"fixture"}},
-                {"id":"lens-b","access":"read_only","prompt":"b","require_findings":true,"route":{"alias":"fixture"}},
-                {"id":"lens-c","access":"read_only","prompt":"c","require_findings":true,"route":{"alias":"fixture"}}
-             ],"exports":[
-                {"node":"lens-a","outputs":["result","findings"]},
-                {"node":"lens-b","outputs":["result","findings"]},
-                {"node":"lens-c","outputs":["result","findings"]}
-             ]}}
+            {"id":"lenses","kind":"composite","access":"read_only",
+             "composite":{"min_successful":minimum,
+                "nodes":[lens("lens-a"),lens("lens-b"),lens("lens-c")],"exports":exports}},
+            {"id":"verify","access":"read_only","prompt":"verify","route":{"alias":"fixture"},
+             "depends_on":["lenses"],"inputs":[{"node":"lenses","outputs":["result","findings"]}]}
         ]
-    })).unwrap();
-    document.nodes.extend([verify, synthesis]);
-    let mut owner = FakeOwner {
+    }))
+    .unwrap();
+    let owner = FakeOwner {
         observations: VecDeque::from([
-            terminal_with_result(AttemptOutcome::Succeeded, findings),
-            terminal_with_result(AttemptOutcome::Succeeded, "result without findings"),
+            terminal_with_result(AttemptOutcome::Succeeded, ok),
+            terminal_with_result(AttemptOutcome::Succeeded, "LENS-B-NO-FINDINGS"),
             terminal(AttemptOutcome::AdapterUnavailable),
             terminal_with_result(AttemptOutcome::Succeeded, "verified"),
-            terminal_with_result(
-                AttemptOutcome::Succeeded,
-                &format!(
-                    "DEGRADED: only one of three lens reviews succeeded; ask the chair for a substitute through a different lens.\n{synthesis_findings}"
-                ),
-            ),
         ]),
         ..Default::default()
     };
+    (document, owner)
+}
+
+#[test]
+fn partial_composite_exports_only_successful_members_and_lists_the_unavailable() {
+    let (document, mut owner) = partial_review(1);
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert_eq!(
-        run.status,
-        GraphStatus::Complete,
-        "{:?}",
-        run.checkpoint.pause_reason
-    );
-    let state = |id: &str| {
-        run.checkpoint
-            .nodes
-            .iter()
-            .find(|node| node.id == id || node.id.ends_with(&format!("--{id}")))
-            .unwrap_or_else(|| {
-                panic!(
-                    "missing {id}: {:?}",
-                    run.checkpoint
-                        .nodes
-                        .iter()
-                        .map(|node| &node.id)
-                        .collect::<Vec<_>>()
-                )
-            })
+    let node = |id: &str| {
+        let scoped = format!("--{id}");
+        (run.checkpoint.nodes.iter())
+            .find(|n| n.id == id || n.id.ends_with(&scoped))
+            .unwrap()
     };
-    assert_eq!(state("lenses").state, NodeState::Succeeded);
-    assert_eq!(state("verify").state, NodeState::Succeeded);
-    assert_eq!(state("lens-b").state, NodeState::Failed);
-    let receipt = state("lenses").outputs.as_ref().unwrap();
-    assert_eq!(receipt.findings.len(), 1);
-    assert_eq!(receipt.findings[0].id, "F1");
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert_eq!(node("lens-b").state, NodeState::Failed);
+    assert_eq!(node("verify").state, NodeState::Succeeded);
+    let lenses = node("lenses").outputs.as_ref().unwrap();
+    assert_eq!(lenses.findings.len(), 1);
+    let excerpt = &lenses.result.as_ref().unwrap().excerpt;
+    assert!(excerpt.starts_with("Unavailable lenses:"), "{excerpt}");
+    assert!(excerpt.contains("lens-b: the findings block is missing or invalid"));
+    assert!(excerpt.contains("lens-c: adapter unavailable"));
+    assert!(excerpt.contains("LENS-A-OK"));
+    assert!(!excerpt.contains("LENS-B-NO-FINDINGS"));
+    let verify_input = &owner.prompts[3];
+    assert!(verify_input.contains("LENS-A-OK") && verify_input.contains("lens-c"));
+    assert!(!verify_input.contains("LENS-B-NO-FINDINGS"));
+}
+
+#[test]
+fn partial_composite_below_its_minimum_fails_with_the_recorded_reason() {
+    let (document, mut owner) = partial_review(2);
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let lenses = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id == "lenses")
+        .unwrap();
+    assert_eq!(lenses.state, NodeState::Failed);
+    assert_eq!(
+        lenses.advance_error_code.as_deref(),
+        Some("coverage_below_minimum")
+    );
+    let reason = lenses.advance_error.as_deref().unwrap();
     assert!(
-        receipt
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("lens-b") && warning.contains("findings block"))
+        reason.contains("1 of 3 lenses succeeded, minimum 2"),
+        "{reason}"
     );
     assert!(
-        receipt
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("lens-c") && warning.contains("adapter"))
+        reason.contains("lens-b") && reason.contains("lens-c"),
+        "{reason}"
     );
-    assert!(
-        receipt
-            .result
-            .as_ref()
-            .unwrap()
-            .excerpt
-            .contains("Unavailable lenses:")
-    );
-    assert!(owner.prompts[3].contains("lens-b"));
-    assert!(owner.prompts[3].contains("F1"));
-    assert!(owner.prompts[4].contains("lens-c"));
-    assert!(owner.prompts[4].contains("F1"));
-    assert!(
-        state("synthesis")
-            .outputs
-            .as_ref()
-            .unwrap()
-            .result
-            .as_ref()
-            .unwrap()
-            .excerpt
-            .contains("DEGRADED")
-    );
+    assert_eq!(owner.prompts.len(), 3, "verify must not run");
+    assert!(!run.checkpoint.successful());
+    let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
+    assert_eq!(replay.checkpoint, run.checkpoint);
 }
 
 #[test]

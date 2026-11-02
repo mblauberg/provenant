@@ -3,7 +3,7 @@
     "pattern": "review-council",
     "preset": "review-council"
   },
-  "graph_id": "preset-e532efa5fb7b3916005b8255c2d359e3",
+  "graph_id": "preset-57854ca3ef71d98d4610c2ede06bebbc",
   "nodes": [
     {
       "access": "read_only",
@@ -24,7 +24,6 @@
     {
       "access": "read_only",
       "composite": {
-        "allow_partial": true,
         "exports": [
           {
             "node": "lens-correctness-spec",
@@ -83,6 +82,7 @@
             ]
           }
         ],
+        "min_successful": 1,
         "nodes": [
           {
             "access": "read_only",
@@ -331,9 +331,9 @@
           ]
         }
       ],
-      "prompt": "You falsify review findings. A finding stands only if you cannot break it.\n\nThe input includes successful lens findings and any unavailable lens names and reasons. Preserve those unavailable details in your result so synthesis can assess review coverage.",
+      "prompt": "You falsify review findings. A finding stands only if you cannot break it.\n\nVerify the lens findings for: brief\nTry to falsify every finding against the pinned commit: reproduce it, look for\nthe code or test that contradicts it, and check it against the spec. Re-emit\nevery finding verbatim with one of UPHELD, FALSIFIED or UNVERIFIABLE and your\nevidence. Add any finding the lenses missed and mark it NEW. Do not edit files.\nEnd with a findings block (schema_version 1) whose entries keep each finding's\nid and add \"verification\": \"upheld\", \"falsified\" or \"unverifiable\".\nCarry any listed unavailable lenses into your result.\n",
       "role": "review.verify",
-      "role_digest": "sha256:1b76693d13635aa0106f7bf34f48335c9c19bd59703932ab86c6aca9a988d0d0",
+      "role_digest": "sha256:27528b0d6fe7fbda1e4834b67d3748b479bd9cbac62158961e128c32c9367f13",
       "route": {
         "alias": "verifier"
       },
@@ -364,9 +364,9 @@
         }
       ],
       "kind": "synthesise",
-      "prompt": "You reconcile review findings into one verdict with a disposition for each.\n\nThe verifier input includes successful lens output and any unavailable lens names and reasons. Count successful independent reviews against the review ladder minimum for risk tier . If the council is below that minimum, mark the result degraded and ask for a same-family substitute through a different lens, or ask the chair to choose one. Do not report an ordinary complete review.",
+      "prompt": "You reconcile review findings into one verdict with a disposition for each.\n\nReconcile independent review findings against evidence for: brief\nDo not take a majority vote. Weigh each finding by its evidence and, where a\nverifier ran, by its UPHELD or FALSIFIED mark. Give every finding exactly one\ndisposition with a one-line reason: accepted (must be fixed), rejected\n(evidence refutes it) or deferred (valid, not for this change). End with a\nfenced findings block (schema_version 1) with one entry per finding id; each\nentry carries \"disposition\" (accepted, rejected or deferred) and \"reason\".\nA finding without a disposition is incomplete. Emit one exact\nVERDICT: PASS only when no accepted finding remains and acceptance evidence is\nsatisfied, otherwise VERDICT: FAIL.\nIf the input lists unavailable lenses, state that the review is degraded and name\nthem with their reasons.\n",
       "role": "review.synthesis",
-      "role_digest": "sha256:7b8230ad9a34ce36ef5b05bbf287644e291f18dd4784f1d54c1fd4ee4c3a0f6c",
+      "role_digest": "sha256:c79f106f44d1647c769954cd53de2a7b2ea5c244ca0a65fab5bc21964271e2e2",
       "route": {
         "alias": "senior"
       },
@@ -387,6 +387,11 @@
       "parameters.kind.doc": "bundled",
       "parameters.kind.type": "bundled",
       "parameters.lenses": "bundled",
+      "parameters.min_reviews.default": "bundled",
+      "parameters.min_reviews.doc": "bundled",
+      "parameters.min_reviews.max": "bundled",
+      "parameters.min_reviews.min": "bundled",
+      "parameters.min_reviews.type": "bundled",
       "parameters.review_shape.default": "bundled",
       "parameters.review_shape.doc": "bundled",
       "parameters.review_shape.type": "bundled",
@@ -624,7 +629,7 @@
         "references": []
       },
       "review.synthesis": {
-        "digest": "sha256:7b8230ad9a34ce36ef5b05bbf287644e291f18dd4784f1d54c1fd4ee4c3a0f6c",
+        "digest": "sha256:c79f106f44d1647c769954cd53de2a7b2ea5c244ca0a65fab5bc21964271e2e2",
         "extends": [
           "review.synthesis"
         ],
@@ -632,7 +637,7 @@
         "references": []
       },
       "review.verify": {
-        "digest": "sha256:1b76693d13635aa0106f7bf34f48335c9c19bd59703932ab86c6aca9a988d0d0",
+        "digest": "sha256:27528b0d6fe7fbda1e4834b67d3748b479bd9cbac62158961e128c32c9367f13",
         "extends": [
           "review.verify"
         ],

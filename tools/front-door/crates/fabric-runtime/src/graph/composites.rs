@@ -2,15 +2,15 @@
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 
-fn is_false(value: &bool) -> bool {
-    !value
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompositeSpec {
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub allow_partial: bool,
+    /// Accept partial success: members that fail are recorded as unavailable
+    /// and only successful members are exported. The composite itself fails
+    /// when fewer than this many of its exporting members succeeded, capped at
+    /// their count. Absent, a failed member blocks the composite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_successful: Option<usize>,
     pub nodes: Vec<GraphNode>,
     pub exports: Vec<GraphInput>,
 }
@@ -298,7 +298,7 @@ fn children(
             node.source = None;
             node.read_roots.clear();
             node.composite = Some(CompositeSpec {
-                allow_partial: spec.allow_partial,
+                min_successful: spec.min_successful,
                 nodes: Vec::new(),
                 exports: spec
                     .exports
@@ -337,31 +337,20 @@ fn outputs(
         remaining: None,
     };
     let mut results = Vec::new();
-    for member in &node_members(spec, positions) {
-        let progress = &checkpoint.nodes[*member];
-        if progress.state == NodeState::Failed {
-            let reason = progress
-                .advance_error
-                .as_deref()
-                .or_else(|| {
-                    progress
-                        .attempts
-                        .last()
-                        .and_then(|attempt| attempt.outcome.as_ref())
-                        .map(|outcome| match outcome {
-                            AttemptOutcome::AdapterUnavailable => "adapter unavailable",
-                            _ => "lens failed",
-                        })
-                })
-                .unwrap_or("lens failed");
-            selected.warnings.push(bounded(
-                &format!("unavailable {}: {reason}", progress.id),
-                WARNING_BYTES,
-            ));
-        }
-    }
+    let partial = spec.min_successful.is_some();
+    let unavailable = unavailable(spec, checkpoint, positions);
+    selected.warnings = unavailable
+        .iter()
+        .map(|entry| bounded(&format!("unavailable {entry}"), WARNING_BYTES))
+        .collect();
     for export in &spec.exports {
-        let Some(source) = checkpoint.nodes[positions[&export.node]].outputs.as_ref() else {
+        let member = &checkpoint.nodes[positions[&export.node]];
+        // A partial composite exports only members that succeeded: a failed
+        // member's output, such as a result without findings, is not evidence.
+        if partial && member.state != NodeState::Succeeded {
+            continue;
+        }
+        let Some(source) = member.outputs.as_ref() else {
             continue;
         };
         for kind in &export.outputs {
@@ -404,24 +393,32 @@ fn outputs(
             })
         }
     };
-    if !selected.warnings.is_empty() {
-        let unavailable = selected.warnings.join("\n");
-        let excerpt = selected
+    if !unavailable.is_empty() {
+        // The unavailable list leads and is bounded on its own, so a long
+        // review body can never truncate it away.
+        let header = bounded(
+            &format!("Unavailable lenses:\n{}", selected.warnings.join("\n")),
+            COMPOSITE_EXCERPT_BYTES / 2,
+        );
+        let (body, source_truncated) = selected
             .result
             .as_ref()
-            .map_or_else(String::new, |result| result.excerpt.clone());
-        let combined = if excerpt.is_empty() {
-            unavailable
+            .map_or((String::new(), false), |result| {
+                (result.excerpt.clone(), result.truncated)
+            });
+        let room = COMPOSITE_EXCERPT_BYTES.saturating_sub(header.len() + 2);
+        let kept = bounded(&body, room);
+        let truncated = source_truncated || kept.len() < body.len();
+        let combined = if kept.is_empty() {
+            header
         } else {
-            format!("{excerpt}\n\nUnavailable lenses:\n{unavailable}")
+            format!("{header}\n\n{kept}")
         };
-        let digest = CanonicalV1::file_digest(combined.as_bytes()).to_string();
-        let bounded_excerpt = bounded(&combined, COMPOSITE_EXCERPT_BYTES);
         selected.result = Some(ResultOutput {
             extra: Default::default(),
-            digest,
-            truncated: bounded_excerpt.len() < combined.len(),
-            excerpt: bounded_excerpt,
+            digest: CanonicalV1::file_digest(combined.as_bytes()).to_string(),
+            truncated,
+            excerpt: combined,
             path: None,
         });
     }
@@ -438,11 +435,62 @@ fn outputs(
     selected
 }
 
-fn node_members(spec: &CompositeSpec, positions: &BTreeMap<String, usize>) -> Vec<usize> {
-    spec.exports
-        .iter()
-        .map(|export| positions[&export.node])
+/// Distinct exporting members, in export order.
+fn exporting_members(spec: &CompositeSpec, positions: &BTreeMap<String, usize>) -> Vec<usize> {
+    let mut members: Vec<usize> = Vec::new();
+    for export in &spec.exports {
+        let member = positions[&export.node];
+        if !members.contains(&member) {
+            members.push(member);
+        }
+    }
+    members
+}
+
+/// Failed exporting members as `id: reason`.
+fn unavailable(
+    spec: &CompositeSpec,
+    checkpoint: &GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+) -> Vec<String> {
+    if spec.min_successful.is_none() {
+        return Vec::new();
+    }
+    exporting_members(spec, positions)
+        .into_iter()
+        .map(|member| &checkpoint.nodes[member])
+        .filter(|progress| progress.state == NodeState::Failed)
+        .map(|progress| {
+            let reason = progress.advance_error.as_deref().unwrap_or_else(|| {
+                match progress.attempts.last().and_then(|a| a.outcome.as_ref()) {
+                    Some(AttemptOutcome::AdapterUnavailable) => "adapter unavailable",
+                    _ => "lens failed",
+                }
+            });
+            format!("{}: {reason}", progress.id)
+        })
         .collect()
+}
+
+/// The recorded reason when a partial composite has too few successful members.
+fn coverage_shortfall(
+    spec: &CompositeSpec,
+    checkpoint: &GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+) -> Option<String> {
+    let members = exporting_members(spec, positions);
+    let minimum = spec.min_successful?.min(members.len());
+    let succeeded = members
+        .iter()
+        .filter(|member| checkpoint.nodes[**member].state == NodeState::Succeeded)
+        .count();
+    (succeeded < minimum).then(|| {
+        format!(
+            "coverage_below_minimum: {succeeded} of {} lenses succeeded, minimum {minimum}; unavailable: {}",
+            members.len(),
+            unavailable(spec, checkpoint, positions).join("; ")
+        )
+    })
 }
 
 pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
@@ -457,12 +505,22 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
         .composite
         .as_ref()
         .ok_or(GraphError::Invalid("composite boundary".into()))?;
-    let state = state(node, plan, checkpoint, positions);
+    let mut state = state(node, plan, checkpoint, positions);
+    let shortfall = (state == NodeState::Succeeded)
+        .then(|| coverage_shortfall(spec, checkpoint, positions))
+        .flatten();
+    if shortfall.is_some() {
+        state = NodeState::Failed;
+    }
     let exported = (state == NodeState::Succeeded).then(|| outputs(spec, checkpoint, positions));
     let progress = &mut checkpoint.nodes[index];
     if progress.state != state || progress.outputs != exported {
         progress.state = state;
         progress.outputs = exported;
+        if let Some(reason) = shortfall {
+            progress.advance_error_code = Some("coverage_below_minimum".into());
+            progress.advance_error = Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
+        }
         journal.save(checkpoint).map_err(GraphError::Journal)?;
     }
     Ok(())
@@ -477,8 +535,24 @@ fn state(
     if node
         .composite
         .as_ref()
-        .is_some_and(|spec| spec.allow_partial)
+        .is_some_and(|spec| spec.min_successful.is_some())
     {
+        // The group's own dependencies decide first; the rules below judge
+        // its members, whose failures are the point of a partial group.
+        let upstream: Vec<_> = node
+            .depends_on
+            .iter()
+            .map(|parent| checkpoint.nodes[positions[parent]].state)
+            .collect();
+        if upstream
+            .iter()
+            .any(|state| matches!(state, NodeState::Failed | NodeState::Blocked))
+        {
+            return NodeState::Blocked;
+        }
+        if upstream.contains(&NodeState::Skipped) {
+            return NodeState::Skipped;
+        }
         let members: Vec<_> = node
             .composite_members
             .iter()
@@ -526,16 +600,27 @@ pub(super) fn validate_progress(
     positions: &BTreeMap<String, usize>,
 ) -> Result<(), ()> {
     let state = state(node, plan, checkpoint, positions);
+    let shortfall = node
+        .composite
+        .as_ref()
+        .and_then(|spec| coverage_shortfall(spec, checkpoint, positions))
+        .map(|reason| bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
+    let failed_for_coverage = progress.state == NodeState::Failed
+        && state == NodeState::Succeeded
+        && progress.advance_error_code.as_deref() == Some("coverage_below_minimum")
+        && progress.advance_error == shortfall;
     let valid = progress.attempts.is_empty()
         && progress.gate.is_none()
         && progress.ci.is_none()
-        && progress.advance_error.is_none()
+        && (progress.advance_error.is_none() || failed_for_coverage)
         && progress.source_commit.is_none()
         && match progress.state {
+            NodeState::Failed => failed_for_coverage && progress.outputs.is_none(),
             NodeState::Pending => progress.outputs.is_none(),
             NodeState::Running => state == NodeState::Running && progress.outputs.is_none(),
             NodeState::Succeeded => {
                 state == NodeState::Succeeded
+                    && shortfall.is_none()
                     && progress.outputs
                         == node
                             .composite
@@ -545,7 +630,6 @@ pub(super) fn validate_progress(
             NodeState::Blocked | NodeState::Skipped => {
                 state == progress.state && progress.outputs.is_none()
             }
-            _ => false,
         };
     if valid { Ok(()) } else { Err(()) }
 }
