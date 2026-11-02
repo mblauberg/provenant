@@ -52,6 +52,11 @@ pub fn collect(
         dry_run: policy.dry_run,
         ..Default::default()
     };
+    let settings = provenant_config::ProjectGcSettings {
+        regenerable: policy.regenerable.to_vec(),
+        keep: policy.keep.to_vec(),
+        ..Default::default()
+    };
     for lane in lanes {
         if lane.path == primary {
             continue;
@@ -108,6 +113,7 @@ pub fn collect(
                 lane,
                 &branch,
                 policy,
+                &settings,
                 cancel,
                 &mut report.worktrees,
             ) {
@@ -145,10 +151,8 @@ pub fn collect(
         }
         if !policy.regenerable.is_empty() {
             let mut prune = || -> Result<(), WorktreeError> {
-                let locked = {
-                    let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
-                    lock_worktree(context, entry, cancel, policy.dry_run)?
-                };
+                // Writer custody alone excludes other mutators of this tree.
+                let locked = lock_worktree(context, entry, cancel, policy.dry_run)?;
                 if !(policy.no_live_lanes)(&lane.path) {
                     return Err(WorktreeError::UnknownWriter);
                 }
@@ -227,32 +231,17 @@ pub fn collect(
                 continue;
             }
         }
-        let output_settings = provenant_config::ProjectGcSettings {
-            regenerable: policy.regenerable.to_vec(),
-            keep: policy.keep.to_vec(),
-            ..Default::default()
-        };
         if policy.dry_run {
             {
                 let precheck = || -> Result<(), WorktreeError> {
-                    let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
+                    // The census and the ignored-output walk run without the
+                    // repository lock; it covers only the registration reads.
                     let locked = lock_worktree(context, entry, cancel, true)?;
-                    let fresh = read_worktrees(context, cancel)?;
-                    let current = fresh
-                        .iter()
-                        .find(|tree| tree.path == entry.path)
-                        .ok_or(WorktreeError::IdentityChanged)?;
-                    if current.head != lane.head
-                        || current.branch != entry.branch
-                        || current.locked
-                        || current.prunable
                     {
-                        return Err(WorktreeError::IdentityChanged);
-                    }
-                    if checked_out_elsewhere(&fresh, &branch, Some(&lane.path))?
-                        || resolve_ref(context, branch.clone(), cancel)? != lane.head
-                    {
-                        return Err(WorktreeError::IdentityChanged);
+                        let _repository = repository_lock(context, LockMode::Shared, cancel)?;
+                        let fresh = read_worktrees(context, cancel)?;
+                        tree_unchanged(&fresh, entry, lane.head)?;
+                        branch_unchanged(context, &fresh, &branch, &lane.path, lane.head, cancel)?;
                     }
                     precheck_removal(
                         context,
@@ -285,14 +274,17 @@ pub fn collect(
         }
         if let Err(error) = remove_and_finalize(
             context,
-            entry,
-            lane,
-            &branch,
-            &output_settings,
-            &|| {
-                (policy.terminal)(&lane.path)
-                    && (policy.no_live_lanes)(&lane.path)
-                    && census_free(context, &lane.path)
+            &Removal {
+                entry,
+                lane,
+                branch: &branch,
+                settings: &settings,
+                eligible: &|| {
+                    (policy.terminal)(&lane.path)
+                        && (policy.no_live_lanes)(&lane.path)
+                        && census_free(context, &lane.path)
+                },
+                lanes: &|| (policy.terminal)(&lane.path) && (policy.no_live_lanes)(&lane.path),
             },
             cancel,
             &mut report.worktrees,
@@ -314,8 +306,10 @@ fn integration_protection(
     if lane.head == upstream {
         return Ok(Some(RetainReason::AtIntegrationTip));
     }
-    Ok(is_first_parent_commit(context, upstream, lane.head, cancel)?
-        .then_some(RetainReason::NoUniqueCommit))
+    Ok(
+        is_first_parent_commit(context, upstream, lane.head, cancel)?
+            .then_some(RetainReason::NoUniqueCommit),
+    )
 }
 
 /// Removal needs a fresh positive census. Custody accepts an unobservable
@@ -328,34 +322,50 @@ fn census_free(context: &WorktreeContext<'_>, path: &Path) -> bool {
         == Some(&WorkerState::Free)
 }
 
-#[allow(clippy::too_many_arguments)]
+/// One tree's removal: what it is, and the fences rechecked around it.
+struct Removal<'a> {
+    entry: &'a GitWorktree,
+    lane: &'a WorktreeInfo,
+    branch: &'a GitRefName,
+    settings: &'a provenant_config::ProjectGcSettings,
+    /// Lanes and a fresh free census, checked under writer custody alone.
+    eligible: &'a dyn Fn() -> bool,
+    /// The cheap lane fence rechecked under the repository lock.
+    lanes: &'a dyn Fn() -> bool,
+}
+
+/// Delete output under writer custody alone; the repository lock covers only
+/// the final registration recheck, the Git removal and branch settlement.
 fn remove_and_finalize(
     context: &WorktreeContext<'_>,
-    entry: &GitWorktree,
-    lane: &WorktreeInfo,
-    branch: &GitRefName,
-    settings: &provenant_config::ProjectGcSettings,
-    eligible: &dyn Fn() -> bool,
+    removal: &Removal<'_>,
     cancel: &CancelToken,
     outcome: &mut RemoveOutcome,
 ) -> Result<(), WorktreeError> {
-    let removed = {
-        let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
-        let removed =
-            remove_tree_when(context, entry, lane.head, cancel, eligible, Some(settings))?;
-        outcome.removed.push(removed.info.clone());
-        if let Err(error) = settle_branch(
-            context,
-            branch,
-            lane.head,
-            Disposition::Merged,
-            cancel,
-            outcome,
-        ) {
-            retain(outcome, branch, retain_reason(&error));
-        }
-        removed
-    };
+    let mut removed = remove_tree_when(
+        context,
+        removal.entry,
+        removal.lane.head,
+        cancel,
+        removal.eligible,
+        Some(removal.settings),
+        Repository::Acquire {
+            lanes: removal.lanes,
+        },
+    )?;
+    outcome.removed.push(removed.info.clone());
+    if let Err(error) = settle_branch(
+        context,
+        removal.branch,
+        removal.lane.head,
+        Disposition::Merged,
+        cancel,
+        outcome,
+    ) {
+        retain(outcome, removal.branch, retain_reason(&error));
+    }
+    // Writer exclusion stays held through cache pruning.
+    removed.repository = None;
     if let Some(cache) = removed.lane_cache.as_deref()
         && let Err(error) = crate::cache::prune_worktree_cargo_cache(context.home, cache)
     {
@@ -846,14 +856,17 @@ fn protect_nonignored(
 }
 
 /// Foreign worktrees need a complete free process census in place of a
-/// Provenant custody proof. Preserve local refs and never create ownership records.
-/// Applied removal creates writer exclusion even for trees with no state yet.
+/// Provenant custody proof. Applied removal creates writer exclusion even for
+/// trees with no state yet, deletes the local ref only when a merged
+/// disposition settles it, and never creates ownership records.
+#[allow(clippy::too_many_arguments)]
 fn collect_foreign(
     context: &WorktreeContext<'_>,
     entry: &GitWorktree,
     lane: &WorktreeInfo,
     branch: &GitRefName,
     policy: &WorktreeGcPolicy<'_>,
+    settings: &provenant_config::ProjectGcSettings,
     cancel: &CancelToken,
     outcome: &mut RemoveOutcome,
 ) -> Result<Option<WorktreeInfo>, WorktreeError> {
@@ -866,110 +879,94 @@ fn collect_foreign(
     if !is_ancestor(context, lane.head, upstream, cancel)? {
         return Ok(None);
     }
-    let verified = verify_probed_worktree(context, &lane.path, cancel)?;
-    // Serialise slot creation with worktree mutations. Slots remain stable.
-    let repository = repository_lock(context, LockMode::Exclusive, cancel)?;
-    let state = if policy.dry_run {
-        match context
-            .project_state
-            .open_verified_directory(&state_dir_name(&lane.path))
-        {
-            Ok(state) => Some(state),
-            Err(error) if error.is_not_found() => None,
-            Err(error) => return Err(error.into()),
-        }
+    if policy.dry_run {
+        preview_foreign(context, entry, lane, branch, policy, cancel)?;
     } else {
-        Some(writer_directory(context.project_state, &lane.path)?)
-    };
-    let writer = match state {
-        Some(state) => {
-            let guard = if policy.dry_run {
-                state.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive)
-            } else {
-                state.try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)
-            };
-            match guard {
-                Ok(guard) => Some(guard),
-                Err(error) if policy.dry_run && error.is_not_found() => None,
-                Err(FsError::LockTimeout { .. }) => return Err(WorktreeError::LockBusy),
-                Err(error) => return Err(error.into()),
-            }
-        }
-        None => None,
-    };
-    drop(repository);
-    {
-        let recheck = || -> Result<(), WorktreeError> {
-            verified.repo().revalidate()?;
-            let entries = read_worktrees(context, cancel)?;
-            let fresh = entries
-                .iter()
-                .find(|fresh| fresh.path == entry.path)
-                .ok_or(WorktreeError::IdentityChanged)?;
-            if fresh.head != lane.head
-                || fresh.branch != entry.branch
-                || fresh.locked
-                || fresh.prunable
-            {
-                return Err(WorktreeError::IdentityChanged);
-            }
-            if !census_free(context, &lane.path) || !(policy.no_live_lanes)(&lane.path) {
-                return Err(WorktreeError::UnknownWriter);
-            }
-            match worktree_dirty_at(context, verified.repo(), cancel)? {
-                WorktreeCondition::Clean | WorktreeCondition::Ignored => Ok(()),
-                _ => Err(WorktreeError::Dirty),
-            }
-        };
-        recheck()?;
-        let protected = output_protection(context, verified.repo(), policy.keep, cancel)?;
-        let mut output = Vec::new();
-        let preview = WorktreeGcPolicy {
-            written_before_ns: i128::MAX,
-            dry_run: true,
-            ..*policy
-        };
-        walk_output(
-            verified.repo().root_dir(),
-            &lane.path,
-            Path::new(""),
-            &preview,
-            &protected,
-            &mut output,
-            0,
-        )?;
-        if !clean_after_preview(context, verified.repo(), &lane.path, &output, cancel)? {
-            return Err(WorktreeError::Dirty);
-        }
-        recheck()?;
-        if policy.dry_run {
-            let entries = read_worktrees(context, cancel)?;
-            if checked_out_elsewhere(&entries, branch, Some(&lane.path))?
-                || resolve_ref(context, branch.clone(), cancel)? != lane.head
-            {
-                return Err(WorktreeError::IdentityChanged);
-            }
-        }
-    }
-    drop(writer);
-    if !policy.dry_run {
-        let settings = provenant_config::ProjectGcSettings {
-            regenerable: policy.regenerable.to_vec(),
-            keep: policy.keep.to_vec(),
-            ..Default::default()
-        };
+        // remove_tree_when verifies once, under writer custody.
         remove_and_finalize(
             context,
-            entry,
-            lane,
-            branch,
-            &settings,
-            &|| (policy.no_live_lanes)(&lane.path) && census_free(context, &lane.path),
+            &Removal {
+                entry,
+                lane,
+                branch,
+                settings,
+                eligible: &|| {
+                    (policy.no_live_lanes)(&lane.path) && census_free(context, &lane.path)
+                },
+                lanes: &|| (policy.no_live_lanes)(&lane.path),
+            },
             cancel,
             outcome,
         )?;
     }
     Ok(Some(lane.clone()))
+}
+
+/// The dry-run proof: the same checks removal makes, without creating state.
+fn preview_foreign(
+    context: &WorktreeContext<'_>,
+    entry: &GitWorktree,
+    lane: &WorktreeInfo,
+    branch: &GitRefName,
+    policy: &WorktreeGcPolicy<'_>,
+    cancel: &CancelToken,
+) -> Result<(), WorktreeError> {
+    let verified = verify_probed_worktree(context, &lane.path, cancel)?;
+    // A missing slot means no writer has ever held this tree.
+    let writer = {
+        let _repository = repository_lock(context, LockMode::Shared, cancel)?;
+        match context
+            .project_state
+            .open_verified_directory(&state_dir_name(&lane.path))
+        {
+            Ok(state) => {
+                match state.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive) {
+                    Ok(guard) => Some(guard),
+                    Err(error) if error.is_not_found() => None,
+                    Err(FsError::LockTimeout { .. }) => return Err(WorktreeError::LockBusy),
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            Err(error) if error.is_not_found() => None,
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let recheck = || -> Result<(), WorktreeError> {
+        verified.repo().revalidate()?;
+        tree_unchanged(&read_worktrees(context, cancel)?, entry, lane.head)?;
+        if !census_free(context, &lane.path) || !(policy.no_live_lanes)(&lane.path) {
+            return Err(WorktreeError::UnknownWriter);
+        }
+        match worktree_dirty_at(context, verified.repo(), cancel)? {
+            WorktreeCondition::Clean | WorktreeCondition::Ignored => Ok(()),
+            _ => Err(WorktreeError::Dirty),
+        }
+    };
+    recheck()?;
+    let protected = output_protection(context, verified.repo(), policy.keep, cancel)?;
+    let mut output = Vec::new();
+    let preview = WorktreeGcPolicy {
+        written_before_ns: i128::MAX,
+        dry_run: true,
+        ..*policy
+    };
+    walk_output(
+        verified.repo().root_dir(),
+        &lane.path,
+        Path::new(""),
+        &preview,
+        &protected,
+        &mut output,
+        0,
+    )?;
+    if !clean_after_preview(context, verified.repo(), &lane.path, &output, cancel)? {
+        return Err(WorktreeError::Dirty);
+    }
+    recheck()?;
+    let fresh = read_worktrees(context, cancel)?;
+    branch_unchanged(context, &fresh, branch, &lane.path, lane.head, cancel)?;
+    drop(writer);
+    Ok(())
 }
 
 #[cfg(test)]

@@ -1624,7 +1624,7 @@ pub(super) fn gc_foreign_retains_a_process_with_cwd_inside_the_worktree()
         report.worktrees.retained,
         vec![RetainedBranch {
             branch: "native-cwd".into(),
-            reason: RetainReason::UnknownWriter
+            reason: RetainReason::LiveWriter
         }]
     );
     assert!(report.worktrees.removed.is_empty());
@@ -2153,6 +2153,69 @@ fn gc_managed_fallback_keeps_fresh_trees_at_the_tip_or_first_parent() -> Result<
             assert!(report.worktrees.removed.is_empty(), "{entry} {shape}");
             assert!(created.path.is_dir() && branch_exists(&fixture, &name));
         }
+    }
+    Ok(())
+}
+
+/// Records whether the repository lock was held during each census.
+struct LockProbeWorkers<'a> {
+    project_state: &'a Directory,
+    repository_held: std::sync::Mutex<Vec<bool>>,
+}
+
+impl WorkerObserver for LockProbeWorkers<'_> {
+    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        let held = self
+            .project_state
+            .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
+            .is_err();
+        self.repository_held.lock().unwrap().push(held);
+        roots
+            .iter()
+            .cloned()
+            .map(|root| (root, WorkerState::Free))
+            .collect()
+    }
+}
+
+#[test]
+fn gc_census_never_runs_under_the_repository_lock() -> Result<(), Box<dyn Error>> {
+    for scenario in ["managed", "managed-preview", "foreign", "foreign-preview"] {
+        let fixture = Fixture::new()?;
+        let test_context = TestContext::new(&fixture)?;
+        let mut context = test_context.context();
+        let mut lane = gc_merged_worktree(&fixture, &context, "gc-census-lock")?;
+        let probe = LockProbeWorkers {
+            project_state: context.project_state,
+            repository_held: Default::default(),
+        };
+        context.workers = &probe;
+        let foreign = scenario.starts_with("foreign");
+        if foreign {
+            lane.writer = WriterState::Unknown;
+        }
+        let report = collect(
+            &context,
+            &[lane],
+            &WorktreeGcPolicy {
+                foreign_merged_clean: foreign,
+                upstream: Some(fixture.head()?),
+                terminal: &|_| !foreign,
+                no_live_lanes: &|_| true,
+                regenerable: &[],
+                keep: &[],
+                written_before_ns: i128::MAX,
+                dry_run: scenario.ends_with("preview"),
+            },
+            &cancel(),
+        )?;
+        assert_eq!(report.worktrees.removed.len(), 1, "{scenario}: {report:?}");
+        let observed = probe.repository_held.lock().unwrap().clone();
+        assert!(!observed.is_empty(), "{scenario}");
+        assert!(
+            observed.iter().all(|held| !held),
+            "{scenario}: census under the repository lock {observed:?}"
+        );
     }
     Ok(())
 }

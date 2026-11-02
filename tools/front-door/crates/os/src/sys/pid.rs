@@ -147,10 +147,7 @@ fn occupancy_snapshot(pid: i32) -> OccupancySnapshot {
         let len = fd_list_records(count, size, std::mem::size_of::<libc::proc_fdinfo>())?;
         // SAFETY: full fd records are initialized by libproc and u64 alignment suffices.
         let entries = unsafe {
-            std::slice::from_raw_parts(
-                records.as_ptr().cast::<libc::proc_fdinfo>(),
-                len,
-            )
+            std::slice::from_raw_parts(records.as_ptr().cast::<libc::proc_fdinfo>(), len)
         };
         let mut values: Vec<_> = entries
             .iter()
