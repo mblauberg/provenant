@@ -815,6 +815,9 @@ refused, and the attempt records every granted path.
 - Owner: `crates/confinement/src/plan/read_only.rs`
 
 Read-only runs use their bound repository with its Git metadata read-only.
+Their PATH selects the host-resolved Git executable; the sandbox grants that
+executable and its linked libraries read access and grants only that executable
+permission to run.
 Lane Git output is never trusted host evidence; the host uses its own pinned
 Git and environment for evidence and settlement.
 - Why: a read grant must not permit mutations of shared Git metadata.
