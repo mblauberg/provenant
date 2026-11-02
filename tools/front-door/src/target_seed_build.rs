@@ -141,9 +141,9 @@ pub enum Refresh {
     Busy,
     /// A new generation was published.
     Built(String),
-    /// The last build of this exact commit failed; it is not retried until
-    /// `origin/main` moves.
-    BackedOff,
+    /// The last build of this commit (named here) failed for this project; it
+    /// is not retried until `origin/main` moves.
+    BackedOff(String),
 }
 
 /// Rebuild the seed when `origin/main` has moved past the newest complete
@@ -158,7 +158,9 @@ pub enum Refresh {
 pub fn refresh(state: &Path, project: &Path) -> Result<Refresh> {
     refuse_in_lane()?;
     let commit = origin_main(project)?;
-    refresh_with(state, &commit, |stage| build_into(stage, project, &commit))
+    refresh_with(state, &marker_name(project), &commit, |stage| {
+        build_into(stage, project, &commit)
+    })
 }
 
 /// Raised under the build lock when another refresher published this commit
@@ -172,28 +174,39 @@ impl std::fmt::Display for AlreadyCurrent {
 }
 impl Error for AlreadyCurrent {}
 
-const FAILED_COMMIT: &str = "last-failed-commit";
+/// The back-off marker file for one project, so one project's broken build
+/// neither blocks nor clears another's.
+fn marker_name(project: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+    // A toolchain change may rename every marker, which only ends a back-off.
+    let mut hasher = std::hash::DefaultHasher::new();
+    project.hash(&mut hasher);
+    format!("last-failed-{:012x}", hasher.finish() & 0xffff_ffff_ffff)
+}
 
-/// The commit whose build last failed, so a broken `origin/main` is not
-/// rebuilt every tick. A new commit differs and so clears the back-off.
-fn failed_commit(state: &Path) -> Option<String> {
-    fs::read_to_string(target_seed::store_path(state).join(FAILED_COMMIT))
+/// The commit whose build last failed for this project, so a broken
+/// `origin/main` is not rebuilt every tick. A new commit differs and so clears
+/// the back-off.
+fn failed_commit(state: &Path, marker: &str) -> Option<String> {
+    fs::read_to_string(target_seed::store_path(state).join(marker))
         .ok()
         .map(|text| text.trim().to_owned())
 }
 
 fn refresh_with(
     state: &Path,
+    marker: &str,
     head: &str,
     build: impl FnOnce(&Path) -> Result<Manifest>,
 ) -> Result<Refresh> {
-    refresh_racing(state, head, || {}, build)
+    refresh_racing(state, marker, head, || {}, build)
 }
 
 /// `between` runs after the unlocked staleness check and before the build
 /// lock: the window another refresher can publish in.
 fn refresh_racing(
     state: &Path,
+    marker: &str,
     head: &str,
     between: impl FnOnce(),
     build: impl FnOnce(&Path) -> Result<Manifest>,
@@ -201,8 +214,8 @@ fn refresh_racing(
     if newest_generation_commit(state).as_deref() == Some(head) {
         return Ok(Refresh::Current);
     }
-    if failed_commit(state).as_deref() == Some(head) {
-        return Ok(Refresh::BackedOff);
+    if failed_commit(state, marker).as_deref() == Some(head) {
+        return Ok(Refresh::BackedOff(head.to_owned()));
     }
     // Another refresher may publish this commit between the check above and
     // our taking the build lock, so look again once we hold it.
@@ -215,7 +228,7 @@ fn refresh_racing(
     });
     match result {
         Ok(id) => {
-            let _ = fs::remove_file(target_seed::store_path(state).join(FAILED_COMMIT));
+            let _ = fs::remove_file(target_seed::store_path(state).join(marker));
             Ok(Refresh::Built(id))
         }
         Err(error) if error.is::<AlreadyCurrent>() => Ok(Refresh::Current),
@@ -229,7 +242,7 @@ fn refresh_racing(
         }
         Err(error) => {
             let _ = fs::write(
-                target_seed::store_path(state).join(FAILED_COMMIT),
+                target_seed::store_path(state).join(marker),
                 format!("{head}\n"),
             );
             Err(error)
@@ -505,7 +518,7 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         let builds = std::cell::Cell::new(0);
         let run = |head: &str| {
-            refresh_with(state.path(), head, |stage| {
+            refresh_with(state.path(), "p", head, |stage| {
                 builds.set(builds.get() + 1);
                 built(stage, head)
             })
@@ -534,30 +547,56 @@ mod tests {
             // Another host build holds the build lock: no second build starts.
             target_seed::lock_store(state.path()).map(drop).unwrap();
             let _running = target_seed::lock_build(state.path()).unwrap();
-            let outcome = refresh_with(state.path(), "aaa", |_| panic!("must not build"));
+            let outcome = refresh_with(state.path(), "p", "aaa", |_| panic!("must not build"));
             assert_eq!(outcome.unwrap(), Refresh::Busy);
         }
-        let failed = refresh_with(state.path(), "aaa", |_| {
+        let failed = refresh_with(state.path(), "p", "aaa", |_| {
             Err(io::Error::other("build failed").into())
         });
         assert!(failed.is_err(), "{failed:?}");
         assert_eq!(newest_generation_commit(state.path()), None);
         // The failed commit is backed off; a newer commit builds again.
         assert_eq!(
-            refresh_with(state.path(), "aaa", |_| panic!(
+            refresh_with(state.path(), "p", "aaa", |_| panic!(
                 "must not rebuild a failed commit"
             ))
             .unwrap(),
-            Refresh::BackedOff
+            Refresh::BackedOff("aaa".into())
         );
         assert!(matches!(
-            refresh_with(state.path(), "bbb", |stage| built(stage, "bbb")).unwrap(),
+            refresh_with(state.path(), "p", "bbb", |stage| built(stage, "bbb")).unwrap(),
             Refresh::Built(_)
         ));
         assert_eq!(
-            failed_commit(state.path()),
+            failed_commit(state.path(), "p"),
             None,
             "success clears the back-off"
+        );
+        freeze(state.path());
+    }
+
+    #[test]
+    fn one_projects_failure_never_clears_anothers_back_off() {
+        let state = tempfile::tempdir().unwrap();
+        let (a, b) = (marker_name(Path::new("/a")), marker_name(Path::new("/b")));
+        assert_ne!(a, b);
+        let fail = |marker: &str, head: &str| {
+            refresh_with(state.path(), marker, head, |_| {
+                Err(io::Error::other("build failed").into())
+            })
+            .unwrap_err()
+        };
+        fail(&a, "aaa");
+        // B is not backed off by A's failure, and B's success leaves A's marker.
+        assert!(matches!(
+            refresh_with(state.path(), &b, "bbb", |stage| built(stage, "bbb")).unwrap(),
+            Refresh::Built(_)
+        ));
+        assert_eq!(failed_commit(state.path(), &a).as_deref(), Some("aaa"));
+        assert_eq!(failed_commit(state.path(), &b), None);
+        assert_eq!(
+            refresh_with(state.path(), &a, "aaa", |_| panic!("backed off")).unwrap(),
+            Refresh::BackedOff("aaa".into())
         );
         freeze(state.path());
     }
@@ -567,6 +606,7 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         let outcome = refresh_racing(
             state.path(),
+            "p",
             "aaa",
             || {
                 publish(state.path(), |stage| built(stage, "aaa")).unwrap();
@@ -575,7 +615,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(outcome, Refresh::Current);
-        assert_eq!(failed_commit(state.path()), None);
+        assert_eq!(failed_commit(state.path(), "p"), None);
         freeze(state.path());
     }
 

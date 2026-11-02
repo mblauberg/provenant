@@ -245,8 +245,15 @@ struct SeedPass {
     built: usize,
     current: usize,
     busy: usize,
+    /// Projects with no front-door manifest, which have nothing to seed.
+    skipped: usize,
+    /// Commits whose last build failed, waiting for `origin/main` to move.
+    backed_off: Vec<String>,
     errors: Vec<String>,
 }
+
+/// What `target_seed_build::build` requires of a checkout.
+const SEED_MANIFEST: &str = "tools/front-door/Cargo.lock";
 
 /// Refresh each project in turn. A busy build is a no-op and one project's
 /// failure never stops the others.
@@ -259,14 +266,31 @@ fn refresh_projects(
     use crate::target_seed_build::Refresh;
     let mut pass = SeedPass::default();
     for project in projects {
+        if !project.join(SEED_MANIFEST).is_file() {
+            pass.skipped += 1;
+            continue;
+        }
         match refresh(project) {
             Ok(Refresh::Built(_)) => pass.built += 1,
-            Ok(Refresh::Current | Refresh::BackedOff) => pass.current += 1,
+            Ok(Refresh::Current) => pass.current += 1,
+            Ok(Refresh::BackedOff(commit)) => pass.backed_off.push(commit),
             Ok(Refresh::Busy) => pass.busy += 1,
             Err(error) => pass.errors.push(format!("{}: {error}", project.display())),
         }
     }
     pass
+}
+
+fn backed_off_note(commits: &[String]) -> Option<String> {
+    let mut commits = commits.to_vec();
+    commits.sort();
+    commits.dedup();
+    (!commits.is_empty()).then(|| {
+        format!(
+            "commit {} failed; waiting for origin/main to move",
+            commits.join(", ")
+        )
+    })
 }
 
 /// Run one single-flight pass under `seed-worker.lock`. A second worker, or a
@@ -296,10 +320,16 @@ fn seed_pass(
         Ok(pass) if pass.busy > 0 => (
             "busy",
             Some(format!(
-                "{} project(s) had a build running; retrying next tick",
-                pass.busy
+                "{} project(s) had a build running; retrying next tick{}",
+                pass.busy,
+                backed_off_note(&pass.backed_off)
+                    .map(|note| format!("; {note}"))
+                    .unwrap_or_default()
             )),
         ),
+        Ok(pass) if !pass.backed_off.is_empty() => {
+            ("backed_off", backed_off_note(&pass.backed_off))
+        }
         Ok(_) => ("complete", None),
         Err(error) => ("failed", Some(error)),
     };
@@ -374,6 +404,7 @@ fn seed_state(directory: &Directory) -> &'static str {
                 "running" => "running",
                 "complete" => "complete",
                 "busy" => "busy",
+                "backed_off" => "backed_off",
                 "disabled" => "disabled",
                 _ => "last_failed",
             },
@@ -672,22 +703,18 @@ mod tests {
         // macOS temp roots sit behind a /var symlink, which private_directory refuses.
         let root = temp.path().canonicalize().unwrap();
         let directory = provenant_config::private_directory(&root, true).unwrap();
-        let projects = vec![
-            std::path::PathBuf::from("/a"),
-            std::path::PathBuf::from("/b"),
-            std::path::PathBuf::from("/c"),
-            std::path::PathBuf::from("/d"),
-        ];
+        let project = |name: &str| seed_project(&root, name, true);
+        let projects = vec![project("a"), project("b"), project("c"), project("d")];
         let listed = projects.clone();
         seed_pass(
             &directory,
             &seed_clock(),
             true,
             || Ok(listed),
-            |project| match project.to_str().unwrap() {
-                "/a" => Ok(Refresh::Busy),
-                "/b" => Err("origin/main missing".into()),
-                "/c" => Ok(Refresh::Built("generation".into())),
+            |project| match project.file_name().unwrap().to_str().unwrap() {
+                "a" => Ok(Refresh::Busy),
+                "b" => Err("origin/main missing".into()),
+                "c" => Ok(Refresh::Built("generation".into())),
                 _ => Ok(Refresh::Current),
             },
         )
@@ -696,18 +723,23 @@ mod tests {
         // is not itself failed: the later projects still ran.
         let (state, error) = seed_state_of(&directory);
         assert_eq!(state, "last_failed");
-        assert_eq!(error.unwrap(), "/b: origin/main missing");
-        let pass = refresh_projects(&projects, |project| match project.to_str().unwrap() {
-            "/a" => Ok(Refresh::Busy),
-            "/b" => Err("origin/main missing".into()),
-            "/c" => Ok(Refresh::Built("generation".into())),
-            _ => Ok(Refresh::Current),
+        assert_eq!(
+            error.unwrap(),
+            format!("{}: origin/main missing", projects[1].display())
+        );
+        let pass = refresh_projects(&projects, |project| {
+            match project.file_name().unwrap().to_str().unwrap() {
+                "a" => Ok(Refresh::Busy),
+                "b" => Err("origin/main missing".into()),
+                "c" => Ok(Refresh::Built("generation".into())),
+                _ => Ok(Refresh::Current),
+            }
         });
         assert_eq!(
             (pass.built, pass.current, pass.busy, pass.errors.len()),
             (1, 1, 1, 1)
         );
-        let clean = vec![std::path::PathBuf::from("/a")];
+        let clean = vec![projects[0].clone()];
         seed_pass(
             &directory,
             &seed_clock(),
@@ -727,12 +759,60 @@ mod tests {
             &directory,
             &seed_clock(),
             true,
-            || Ok(vec![std::path::PathBuf::from("/a")]),
+            || Ok(vec![projects[0].clone()]),
             |_| Ok(Refresh::Current),
         )
         .unwrap();
         assert_eq!(seed_state_of(&directory), ("complete", None));
         assert!(!seed_retry_due(&directory, far), "only busy is retried");
+    }
+
+    #[test]
+    fn seed_pass_skips_projects_without_a_manifest_and_reports_a_back_off() {
+        use crate::target_seed_build::Refresh;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let directory = provenant_config::private_directory(&root, true).unwrap();
+        let bare = seed_project(&root, "bare", false);
+        let broken = seed_project(&root, "broken", true);
+        let listed = vec![bare.clone(), broken.clone()];
+        let called = std::cell::RefCell::new(Vec::new());
+        seed_pass(
+            &directory,
+            &seed_clock(),
+            true,
+            || Ok(listed),
+            |project| {
+                called.borrow_mut().push(project.to_owned());
+                Ok(Refresh::BackedOff("abc123".into()))
+            },
+        )
+        .unwrap();
+        assert_eq!(*called.borrow(), vec![broken.clone()], "bare is skipped");
+        let (state, note) = seed_state_of(&directory);
+        assert_eq!(state, "backed_off", "a back-off is not `complete`");
+        assert_eq!(
+            note.unwrap(),
+            "commit abc123 failed; waiting for origin/main to move"
+        );
+        let pass = refresh_projects(&[bare], |_| panic!("no manifest, no refresh"));
+        assert_eq!(
+            pass,
+            SeedPass {
+                skipped: 1,
+                ..Default::default()
+            }
+        );
+    }
+
+    #[allow(dead_code)] // The worktree driver includes this module without libtest.
+    fn seed_project(root: &std::path::Path, name: &str, manifest: bool) -> std::path::PathBuf {
+        let project = root.join("projects").join(name);
+        std::fs::create_dir_all(project.join("tools/front-door")).unwrap();
+        if manifest {
+            std::fs::write(project.join(SEED_MANIFEST), "").unwrap();
+        }
+        project
     }
 
     #[test]
