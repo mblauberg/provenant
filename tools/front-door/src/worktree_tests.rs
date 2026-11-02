@@ -182,6 +182,8 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "resume_refuses_low_disk_writer",
             "gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text",
             "lane_prepare_isolates_nested_state",
+            "lane_prepare_isolates_nested_writer_state",
+            "lane_prepare_isolates_nested_publishing_state",
             "read_only_dispatch_applies_bound_git_and_project_writes",
             "writer_dispatch_uses_lane_cache_and_narrow_provider_state",
             "writer_dispatch_edits_a_linked_worktree",
@@ -241,6 +243,12 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "resume_refuses_low_disk_writer" => resume_refuses_low_disk_writer(),
                 "gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text" => gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text(),
                 "lane_prepare_isolates_nested_state" => lane_prepare_isolates_nested_state(),
+                "lane_prepare_isolates_nested_writer_state" => {
+                    lane_prepare_isolates_nested_writer_state()
+                }
+                "lane_prepare_isolates_nested_publishing_state" => {
+                    lane_prepare_isolates_nested_publishing_state()
+                }
                 "read_only_dispatch_applies_bound_git_and_project_writes" => {
                     crate::compose_tests::read_only_dispatch_applies_bound_git_and_project_writes()
                 }
@@ -2734,7 +2742,21 @@ fn clone_rust_toolchain(rig: &TestRig, home: &Path) -> Result {
     Ok(())
 }
 
+// Split by lane mode so each test fits the per-test time budget (#2627);
+// every case costs about 5 s of confined preparation and execution.
 fn lane_prepare_isolates_nested_state() -> Result {
+    lane_prepare_cases(&[("codex", false, false, 91), ("claude", false, false, 93)])
+}
+
+fn lane_prepare_isolates_nested_writer_state() -> Result {
+    lane_prepare_cases(&[("codex", true, false, 92), ("claude", true, false, 94)])
+}
+
+fn lane_prepare_isolates_nested_publishing_state() -> Result {
+    lane_prepare_cases(&[("codex", true, true, 95), ("claude", true, true, 96)])
+}
+
+fn lane_prepare_cases(cases: &[(&str, bool, bool, u8)]) -> Result {
     use provenant_confinement::permissions::PathScope;
     let rig = repository()?;
     let cleanup = provenant_supervisor::fixture::ProcessCleanupGuard::new(&rig.state);
@@ -2831,7 +2853,11 @@ fn lane_prepare_isolates_nested_state() -> Result {
     // Clone immutable tools into the isolated home. No test reads host
     // provider configuration, login state or Cargo credentials.
     #[cfg(target_os = "macos")]
-    clone_rust_toolchain(&rig, &home)?;
+    if cases.iter().any(|&(adapter, writer, publishing, _)| {
+        native_shell_probe_case(adapter, writer, publishing)
+    }) {
+        clone_rust_toolchain(&rig, &home)?;
+    }
     let executable = rig.root.join("provider/bin/codex");
     fs::create_dir_all(executable.parent().ok_or("provider parent")?)?;
     rig.copy_executable(&std::env::current_exe()?, &executable)?;
@@ -2870,14 +2896,7 @@ fn lane_prepare_isolates_nested_state() -> Result {
         )
     };
     fs::write(rig.state.join("config.toml"), config(1))?;
-    for (adapter, writer, publishing, seed) in [
-        ("codex", false, false, 91),
-        ("codex", true, false, 92),
-        ("claude", false, false, 93),
-        ("claude", true, false, 94),
-        ("codex", true, true, 95),
-        ("claude", true, true, 96),
-    ] {
+    for &(adapter, writer, publishing, seed) in cases {
         if publishing {
             fs::create_dir_all(home.join(".config/gh"))?;
         }

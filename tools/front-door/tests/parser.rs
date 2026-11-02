@@ -87,42 +87,79 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     let mut rig = TestRig::new()?;
     let binary = std::path::Path::new(env!("CARGO_BIN_EXE_provenant"));
     let mut attempts = Vec::new();
-    for _ in 0..25 {
-        let out = rig.execute(
-            binary,
-            &[
-                "run",
-                "--prompt-stdin",
-                "--model",
-                "codex/gpt-6-luna",
-                "--wait",
-                "1s",
-                "--json",
-            ],
-            Some(b"fixture"),
-        )?;
-        let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
-        assert_eq!(code(&out), 1, "{value}");
-        assert_eq!(value["command"], "run");
-        assert!(
-            value["data"]["operation_id"]
-                .as_str()
-                .is_some_and(|id| id.starts_with("cli-"))
-        );
-        attempts.push(
-            value["data"]["lanes"][0]["attempt_id"]
-                .as_str()
-                .ok_or("attempt")?
-                .to_owned(),
-        );
+    // The oldest lane is its own run, so run selectors below match one
+    // lane. The other 20 share one manifest submission, because each submit
+    // blocks for the minimum one-second wait.
+    let out = rig.execute(
+        binary,
+        &[
+            "run",
+            "--prompt-stdin",
+            "--model",
+            "codex/gpt-6-luna",
+            "--wait",
+            "1s",
+            "--json",
+        ],
+        Some(b"fixture"),
+    )?;
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+    assert_eq!(code(&out), 1, "{value}");
+    assert_eq!(value["command"], "run");
+    assert!(
+        value["data"]["operation_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("cli-"))
+    );
+    attempts.push(
+        value["data"]["lanes"][0]["attempt_id"]
+            .as_str()
+            .ok_or("attempt")?
+            .to_owned(),
+    );
+    let manifest = rig.root.join("lanes.json");
+    let tasks = (0..20)
+        .map(|_| {
+            serde_json::json!({
+                "prompt": "fixture",
+                "route": {"kind": "model", "provider": "codex", "model": "gpt-6-luna"}
+            })
+        })
+        .collect::<Vec<_>>();
+    std::fs::write(
+        &manifest,
+        serde_json::to_vec(&serde_json::json!({"schema_version": 1, "tasks": tasks}))?,
+    )?;
+    let out = rig.execute(
+        binary,
+        &[
+            "run",
+            "--manifest",
+            manifest.to_str().ok_or("manifest path")?,
+            "--concurrency",
+            "1",
+            "--wait",
+            "1s",
+            "--json",
+        ],
+        None,
+    )?;
+    let submitted: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+    assert_eq!(code(&out), 1, "{submitted}");
+    for lane in submitted["data"]["lanes"]
+        .as_array()
+        .ok_or("submitted lanes")?
+    {
+        attempts.push(lane["attempt_id"].as_str().ok_or("attempt")?.to_owned());
     }
+    assert_eq!(attempts.len(), 21);
     let out = rig.command(&["status", "--json"])?;
     assert_eq!(code(&out), 0);
     let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
     let lanes = value["data"]["lanes"].as_array().ok_or("lanes")?;
     assert_eq!(lanes.len(), 20);
-    assert_eq!(lanes[0]["attempt_id"], attempts[24]);
-    assert_eq!(lanes[19]["attempt_id"], attempts[5]);
+    assert_eq!(lanes[0]["attempt_id"], attempts[20]);
+    assert_eq!(lanes[19]["attempt_id"], attempts[1]);
     assert!(lanes[0]["state"].is_object(), "full record: {value}");
     assert_eq!(
         value["data"]["review_exempt"],
@@ -137,31 +174,31 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     let text = String::from_utf8(human.stdout.bytes)?;
     assert!(text.len() <= 2048, "{text}");
     assert!(text.starts_with("20 lanes"), "{text}");
-    assert!(text.contains(&attempts[24][..8]), "{text}");
+    assert!(text.contains(&attempts[20][..8]), "{text}");
     assert!(
         text.contains("review-exempt paths: docs/release-notes/next.d/, docs/specs/, Cargo.lock, .tracker-input"),
         "{text}"
     );
     assert!(
-        text.contains(&format!("next: provenant output {}", attempts[24])),
+        text.contains(&format!("next: provenant output {}", attempts[20])),
         "{text}"
     );
     let full = rig.command(&["status", "--full"])?;
     let full = String::from_utf8(full.stdout.bytes)?;
     // --full is complete detail, not --all: the older lanes stay out.
     assert!(
-        full.contains(&attempts[24]) && !full.contains(&attempts[0]),
+        full.contains(&attempts[20]) && !full.contains(&attempts[0]),
         "{full}"
     );
     let everything = rig.command(&["status", "--all", "--full"])?;
     let everything = String::from_utf8(everything.stdout.bytes)?;
     assert!(
-        everything.contains(&attempts[0]) && everything.contains(&attempts[24]),
+        everything.contains(&attempts[0]) && everything.contains(&attempts[20]),
         "{everything}"
     );
     let all = rig.command(&["status", "--all", "--json"])?;
     let all: serde_json::Value = serde_json::from_slice(&all.stdout.bytes)?;
-    assert_eq!(all["data"]["lanes"].as_array().ok_or("all")?.len(), 25);
+    assert_eq!(all["data"]["lanes"].as_array().ok_or("all")?.len(), 21);
     let page = rig.command(&["status", "--all", "--json", "--limit", "1"])?;
     let page: serde_json::Value = serde_json::from_slice(&page.stdout.bytes)?;
     assert_eq!(page["data"]["lanes"].as_array().ok_or("page")?.len(), 1);
@@ -173,7 +210,7 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
         "status", "--all", "--json", "--limit", "1", "--cursor", &cursor,
     ])?;
     let next: serde_json::Value = serde_json::from_slice(&next.stdout.bytes)?;
-    assert_eq!(next["data"]["lanes"][0]["attempt_id"], attempts[23]);
+    assert_eq!(next["data"]["lanes"][0]["attempt_id"], attempts[19]);
     std::fs::create_dir_all(rig.project.join("config"))?;
     std::fs::copy(
         concat!(
@@ -188,7 +225,7 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     assert!(stats["data"]["totals"]["cost"]["complete"].is_null());
     assert!(stats["data"]["totals"]["cost"]["known_lower_bound"].is_null());
     assert_eq!(stats["data"]["totals"]["cost"]["priced_attempts"], 0);
-    assert_eq!(stats["data"]["totals"]["cost"]["missing_attempts"], 25);
+    assert_eq!(stats["data"]["totals"]["cost"]["missing_attempts"], 21);
     let stats = rig.command(&["telemetry", "stats", "--full"])?;
     assert_eq!(code(&stats), 0);
     let text = String::from_utf8(stats.stdout.bytes)?;
@@ -197,10 +234,10 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     assert!(scope.ends_with(", finished attempts only (0 queued or running not counted); other projects are excluded, so run stats from their checkout"), "{scope}");
     assert_eq!(
         totals,
-        "25 attempts, cost unknown (25 attempts missing cost data)\ncache-read share: unknown (incomplete input categories)\n"
+        "21 attempts, cost unknown (21 attempts missing cost data)\ncache-read share: unknown (incomplete input categories)\n"
     );
     // Named status includes old terminal lanes by run, task or attempt ID.
-    let oldest = &all["data"]["lanes"][24];
+    let oldest = &all["data"]["lanes"][20];
     for key in ["run_id", "attempt_id"] {
         let id = oldest[key].as_str().ok_or("target ID")?;
         for target in [id, &id[..8]] {
@@ -312,7 +349,7 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
         .join("runs")
         .join(lanes[1]["run_id"].as_str().ok_or("local run")?)
         .join("attempts")
-        .join(&attempts[23])
+        .join(&attempts[19])
         .join("process.json");
     std::fs::write(&local_checkpoint, b"invalid observation")?;
     let full = rig.command(&["output", &attempts[0], "--part", "prompt", "--json"])?;
@@ -324,6 +361,7 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
     );
     rig.assert_legacy_unchanged()
 }
+
 #[test]
 fn creation_commands_refuse_colliding_branch_names() -> Result {
     let rig = TestRig::new()?;
