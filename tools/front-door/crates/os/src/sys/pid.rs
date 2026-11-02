@@ -5,12 +5,31 @@ const MAX_EINTR_RETRIES: u64 = 8;
 
 /// Bounded executable and descriptor occupancy. Two snapshots must agree on
 /// every object identity before the result is complete; any failure keeps the
-/// paths already obtained as positive evidence but cannot prove non-occupancy.
+/// paths already obtained as positive evidence but cannot prove non-occupancy,
+/// and the observation names the most serious gap.
 pub(crate) fn occupancy(pid: i32) -> crate::pid::OccupancyObservation {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
+        use crate::pid::OccupancyGap;
+        #[cfg(target_os = "linux")]
+        if linux_holds_nothing(pid) {
+            return crate::pid::OccupancyObservation {
+                paths: Vec::new(),
+                complete: true,
+                gap: None,
+            };
+        }
         let first = occupancy_snapshot(pid);
         let second = occupancy_snapshot(pid);
+        let stable = first.identities == second.identities;
+        let gap = [
+            first.gap,
+            second.gap,
+            (!stable).then_some(OccupancyGap::Churn),
+        ]
+        .into_iter()
+        .flatten()
+        .reduce(OccupancyGap::worse);
         let mut paths = first.paths;
         for path in second.paths {
             if !paths.contains(&path) {
@@ -19,7 +38,8 @@ pub(crate) fn occupancy(pid: i32) -> crate::pid::OccupancyObservation {
         }
         crate::pid::OccupancyObservation {
             paths,
-            complete: first.complete && second.complete && first.identities == second.identities,
+            complete: gap.is_none(),
+            gap,
         }
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -38,17 +58,65 @@ struct OccupancySnapshot {
     paths: Vec<std::path::PathBuf>,
     /// (descriptor or image label, device, inode, path bytes)
     identities: Vec<(i64, u64, u64, Vec<u8>)>,
-    complete: bool,
+    /// The most serious failure; None means every query succeeded.
+    gap: Option<crate::pid::OccupancyGap>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl OccupancySnapshot {
+    fn note(&mut self, gap: crate::pid::OccupancyGap) {
+        self.gap = Some(self.gap.map_or(gap, |known| known.worse(gap)));
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+const PF_KTHREAD: u64 = 0x0020_0000;
+
+/// Field 9 of /proc/pid/stat, after the parenthesised command name.
+#[cfg(any(target_os = "linux", test))]
+fn linux_stat_flags(stat: &str) -> Option<u64> {
+    let (_, tail) = stat.rsplit_once(')')?;
+    tail.split_whitespace().nth(6)?.parse().ok()
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_stat_kernel_thread(stat: &str) -> bool {
+    linux_stat_flags(stat).is_some_and(|flags| flags & PF_KTHREAD != 0)
+}
+
+/// Zombies and kernel threads hold no file in any worktree.
+#[cfg(any(target_os = "linux", test))]
+fn linux_stat_holds_nothing(stat: &str) -> bool {
+    linux_stat_kernel_thread(stat) || linux_stat_state(stat).is_ok_and(|s| s == ProcessState::Gone)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_holds_nothing(pid: i32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .is_ok_and(|stat| linux_stat_holds_nothing(&stat))
+}
+
+pub(crate) fn kernel_thread(pid: i32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .is_ok_and(|stat| linux_stat_kernel_thread(&stat))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        false
+    }
 }
 
 #[cfg(target_os = "linux")]
 fn occupancy_snapshot(pid: i32) -> OccupancySnapshot {
+    use crate::pid::OccupancyGap;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::MetadataExt;
 
     const DELETED: &[u8] = b" (deleted)";
     let mut snapshot = OccupancySnapshot::default();
-    let mut complete = true;
     let proc = std::path::PathBuf::from(format!("/proc/{pid}"));
     let record = |label: i64, link: &std::path::Path, snapshot: &mut OccupancySnapshot| {
         let target = std::fs::read_link(link).ok();
@@ -83,34 +151,114 @@ fn occupancy_snapshot(pid: i32) -> OccupancySnapshot {
         }
         true
     };
-    complete &= record(-1, &proc.join("exe"), &mut snapshot);
-    let listing = || -> io::Result<Vec<std::ffi::OsString>> {
+    let exe = proc.join("exe");
+    let exe_absent =
+        matches!(std::fs::read_link(&exe), Err(error) if error.kind() == io::ErrorKind::NotFound);
+    let exe_known = record(-1, &exe, &mut snapshot);
+    let listing = || -> Result<Vec<std::ffi::OsString>, OccupancyGap> {
         let mut names = Vec::new();
-        for entry in std::fs::read_dir(proc.join("fd"))? {
+        for entry in
+            std::fs::read_dir(proc.join("fd")).map_err(|_| OccupancyGap::DescriptorsUnavailable)?
+        {
             if names.len() == OCCUPANCY_LIMIT {
-                return Err(io::Error::other("descriptor limit exceeded"));
+                return Err(OccupancyGap::LimitExceeded);
             }
-            names.push(entry?.file_name());
+            names.push(
+                entry
+                    .map_err(|_| OccupancyGap::DescriptorsUnavailable)?
+                    .file_name(),
+            );
         }
         names.sort();
         Ok(names)
     };
     match listing() {
         Ok(names) => {
+            // An absent executable with an empty, readable table is a kernel
+            // thread or an exited process: it holds nothing. Otherwise the
+            // executable is genuinely unavailable.
+            if !exe_known && !(exe_absent && names.is_empty()) {
+                snapshot.note(OccupancyGap::ExecutableUnavailable);
+            }
             for name in &names {
                 let Some(fd) = name.to_str().and_then(|text| text.parse::<i64>().ok()) else {
-                    complete = false;
+                    snapshot.note(OccupancyGap::DescriptorsUnavailable);
                     continue;
                 };
-                complete &= record(fd, &proc.join("fd").join(name), &mut snapshot);
+                if !record(fd, &proc.join("fd").join(name), &mut snapshot) {
+                    snapshot.note(OccupancyGap::DescriptorsUnavailable);
+                }
             }
             // Descriptors opened or closed during the walk make it unprovable.
-            complete &= listing().is_ok_and(|after| after == names);
+            if listing().ok().as_ref() != Some(&names) {
+                snapshot.note(OccupancyGap::Churn);
+            }
         }
-        Err(_) => complete = false,
+        Err(gap) => {
+            if !exe_known {
+                snapshot.note(OccupancyGap::ExecutableUnavailable);
+            }
+            snapshot.note(gap);
+        }
     }
-    snapshot.complete = complete;
     snapshot
+}
+
+/// The least serious macOS descriptor failure: libproc refused the query.
+#[cfg(any(target_os = "macos", test))]
+fn darwin_query_gap(errno: Option<i32>) -> crate::pid::OccupancyGap {
+    if errno == Some(libc::EPERM) {
+        crate::pid::OccupancyGap::DescriptorsDenied
+    } else {
+        crate::pid::OccupancyGap::DescriptorsUnavailable
+    }
+}
+
+/// Whether a PROC_PIDLISTFDS byte count is a usable table, else why not.
+/// libproc also returns zero when the query fails (EPERM for protected
+/// daemons), so zero is never an empty table. A full buffer may be truncated,
+/// and a partial record is malformed.
+#[cfg(any(target_os = "macos", test))]
+fn fd_list_records(
+    count: i32,
+    size: i32,
+    record: usize,
+    errno: Option<i32>,
+) -> Result<usize, crate::pid::OccupancyGap> {
+    if count <= 0 {
+        return Err(darwin_query_gap(errno));
+    }
+    if count >= size {
+        return Err(crate::pid::OccupancyGap::LimitExceeded);
+    }
+    if !(count as usize).is_multiple_of(record) {
+        return Err(crate::pid::OccupancyGap::DescriptorsUnavailable);
+    }
+    Ok(count as usize / record)
+}
+
+/// A descriptor-info query is complete only when it fills the record.
+#[cfg(any(target_os = "macos", test))]
+fn fd_info_gap(count: i32, size: i32, errno: Option<i32>) -> Option<crate::pid::OccupancyGap> {
+    (count != size).then(|| darwin_query_gap(errno))
+}
+
+/// An executable that no longer exists belongs to no existing root; it is
+/// judged by cwd and descriptors. Any other failure is an unavailable image.
+#[cfg(any(target_os = "macos", test))]
+fn darwin_image_gap(metadata: &io::Result<(u64, u64)>) -> Option<crate::pid::OccupancyGap> {
+    match metadata {
+        Ok(_) => None,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(_) => Some(crate::pid::OccupancyGap::ExecutableUnavailable),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_clear_errno() {
+    // SAFETY: __error returns this thread's live errno slot; writing zero
+    // ensures a failed call cannot be blamed on a stale error.
+    unsafe { *libc::__error() = 0 };
 }
 
 #[cfg(target_os = "macos")]
@@ -118,6 +266,22 @@ fn occupancy_snapshot(pid: i32) -> OccupancySnapshot {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::MetadataExt;
 
+    // XNU sys/proc_info.h: PROX_FDTYPE_VNODE is the only descriptor kind with
+    // a file location. These kinds carry none: ATALK, SOCKET, PSHM, PSEM,
+    // KQUEUE, PIPE, FSEVENTS, NEXUS, CHANNEL and NETPOLICY.
+    const FDTYPE_VNODE: u32 = libc::PROX_FDTYPE_VNODE as u32;
+    const LOCATIONLESS: [u32; 10] = [
+        libc::PROX_FDTYPE_ATALK as u32,
+        libc::PROX_FDTYPE_SOCKET as u32,
+        libc::PROX_FDTYPE_PSHM as u32,
+        libc::PROX_FDTYPE_PSEM as u32,
+        libc::PROX_FDTYPE_KQUEUE as u32,
+        libc::PROX_FDTYPE_PIPE as u32,
+        libc::PROX_FDTYPE_FSEVENTS as u32,
+        libc::PROX_FDTYPE_NEXUS as u32,
+        libc::PROX_FDTYPE_CHANNEL as u32,
+        libc::PROX_FDTYPE_NETPOLICY as u32,
+    ];
     #[repr(C)]
     struct FileInfo {
         open_flags: u32,
@@ -131,9 +295,11 @@ fn occupancy_snapshot(pid: i32) -> OccupancySnapshot {
         file: FileInfo,
         vnode: libc::vnode_info_path,
     }
-    let list = || -> Option<Vec<(i32, u32)>> {
+    let list = || -> Result<Vec<(i32, u32)>, crate::pid::OccupancyGap> {
         let mut records = vec![0u64; OCCUPANCY_LIMIT];
-        let size = i32::try_from(records.len() * std::mem::size_of::<u64>()).ok()?;
+        let size = i32::try_from(records.len() * std::mem::size_of::<u64>())
+            .map_err(|_| crate::pid::OccupancyGap::LimitExceeded)?;
+        darwin_clear_errno();
         // SAFETY: the aligned buffer has size writable bytes; libproc borrows it.
         let count = unsafe {
             libc::proc_pidinfo(
@@ -144,7 +310,8 @@ fn occupancy_snapshot(pid: i32) -> OccupancySnapshot {
                 size,
             )
         };
-        let len = fd_list_records(count, size, std::mem::size_of::<libc::proc_fdinfo>())?;
+        let errno = io::Error::last_os_error().raw_os_error();
+        let len = fd_list_records(count, size, std::mem::size_of::<libc::proc_fdinfo>(), errno)?;
         // SAFETY: full fd records are initialized by libproc and u64 alignment suffices.
         let entries = unsafe {
             std::slice::from_raw_parts(records.as_ptr().cast::<libc::proc_fdinfo>(), len)
@@ -154,36 +321,46 @@ fn occupancy_snapshot(pid: i32) -> OccupancySnapshot {
             .map(|entry| (entry.proc_fd, entry.proc_fdtype))
             .collect();
         values.sort_unstable();
-        Some(values)
+        Ok(values)
     };
     let mut snapshot = OccupancySnapshot::default();
-    let mut complete = true;
     match darwin_executable_path(pid) {
-        Some(path) => match std::fs::metadata(&path) {
-            Ok(meta) => {
-                snapshot.identities.push((
-                    -1,
-                    meta.dev(),
-                    meta.ino(),
-                    path.as_os_str().as_bytes().to_vec(),
-                ));
-                snapshot.paths.push(path);
+        Some(path) => {
+            let metadata = std::fs::metadata(&path).map(|meta| (meta.dev(), meta.ino()));
+            if let Some(gap) = darwin_image_gap(&metadata) {
+                snapshot.note(gap);
             }
-            Err(_) => {
-                snapshot.paths.push(path);
-                complete = false;
+            match metadata {
+                Ok((dev, ino)) => {
+                    snapshot
+                        .identities
+                        .push((-1, dev, ino, path.as_os_str().as_bytes().to_vec()));
+                    snapshot.paths.push(path);
+                }
+                // Deleted: no existing root contains it, and the next snapshot
+                // must agree that it is still gone.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    snapshot
+                        .identities
+                        .push((-1, 0, 0, path.as_os_str().as_bytes().to_vec()));
+                }
+                Err(_) => snapshot.paths.push(path),
             }
-        },
-        None => complete = false,
+        }
+        None => snapshot.note(crate::pid::OccupancyGap::ExecutableUnavailable),
     }
-    let Some(before) = list() else {
-        return snapshot;
+    let before = match list() {
+        Ok(before) => before,
+        Err(gap) => {
+            snapshot.note(gap);
+            return snapshot;
+        }
     };
     for (fd, kind) in &before {
-        if *kind != libc::PROX_FDTYPE_VNODE as u32 {
+        if *kind != FDTYPE_VNODE {
             // Sockets, pipes, kqueues and shared memory carry no file location.
-            if !matches!(*kind, 0 | 2..=7 | 9..=11) {
-                complete = false;
+            if !LOCATIONLESS.contains(kind) {
+                snapshot.note(crate::pid::OccupancyGap::DescriptorsUnavailable);
             }
             snapshot
                 .identities
@@ -192,10 +369,12 @@ fn occupancy_snapshot(pid: i32) -> OccupancySnapshot {
         }
         let mut info = std::mem::MaybeUninit::<VnodePath>::zeroed();
         let size = std::mem::size_of::<VnodePath>() as i32;
+        darwin_clear_errno();
         // SAFETY: info is ABI-sized writable storage, borrowed only for this call.
         let count = unsafe { libc::proc_pidfdinfo(pid, *fd, 2, info.as_mut_ptr().cast(), size) };
-        if count != size {
-            complete = false;
+        let errno = io::Error::last_os_error().raw_os_error();
+        if let Some(gap) = fd_info_gap(count, size, errno) {
+            snapshot.note(gap);
             continue;
         }
         // SAFETY: the full record was initialized by libproc.
@@ -219,35 +398,91 @@ fn occupancy_snapshot(pid: i32) -> OccupancySnapshot {
         }
         match decode_darwin_path(pid, &raw) {
             Ok(path) => snapshot.paths.push(path),
-            Err(_) => complete = false,
+            Err(_) => snapshot.note(crate::pid::OccupancyGap::DescriptorsUnavailable),
         }
     }
     // Descriptor numbers can be reused; the caller compares object identities.
-    complete &= list().is_some_and(|after| before == after);
-    snapshot.complete = complete;
-    snapshot
-}
-
-/// Validate a PROC_PIDLISTFDS byte count. libproc also returns zero when the
-/// query fails (EPERM for protected daemons), so zero is never an empty table.
-/// A full buffer may be truncated, and a partial record is malformed.
-#[cfg(any(target_os = "macos", test))]
-fn fd_list_records(count: i32, size: i32, record: usize) -> Option<usize> {
-    if count <= 0 || count >= size || !(count as usize).is_multiple_of(record) {
-        return None;
+    if list().ok().as_ref() != Some(&before) {
+        snapshot.note(crate::pid::OccupancyGap::Churn);
     }
-    Some(count as usize / record)
+    snapshot
 }
 
 #[cfg(test)]
 #[test]
 fn zero_descriptor_listing_is_a_failed_query_not_an_empty_table() {
+    use crate::pid::OccupancyGap::*;
     let record = 8;
-    assert_eq!(fd_list_records(0, 1024, record), None, "failure shows as 0");
-    assert_eq!(fd_list_records(-1, 1024, record), None);
-    assert_eq!(fd_list_records(1024, 1024, record), None, "truncated");
-    assert_eq!(fd_list_records(20, 1024, record), None, "partial record");
-    assert_eq!(fd_list_records(24, 1024, record), Some(3));
+    assert_eq!(
+        fd_list_records(0, 1024, record, Some(0)),
+        Err(DescriptorsUnavailable),
+        "failure shows as 0"
+    );
+    assert_eq!(
+        fd_list_records(0, 1024, record, Some(libc::EPERM)),
+        Err(DescriptorsDenied)
+    );
+    assert_eq!(
+        fd_list_records(-1, 1024, record, None),
+        Err(DescriptorsUnavailable)
+    );
+    assert_eq!(
+        fd_list_records(1024, 1024, record, None),
+        Err(LimitExceeded)
+    );
+    assert_eq!(
+        fd_list_records(20, 1024, record, None),
+        Err(DescriptorsUnavailable)
+    );
+    assert_eq!(fd_list_records(24, 1024, record, None), Ok(3));
+}
+
+#[cfg(test)]
+#[test]
+fn only_a_refused_descriptor_query_is_the_excusable_gap() {
+    use crate::pid::OccupancyGap::*;
+    assert_eq!(fd_info_gap(10, 10, None), None);
+    assert_eq!(
+        fd_info_gap(0, 10, Some(libc::EPERM)),
+        Some(DescriptorsDenied)
+    );
+    assert_eq!(
+        fd_info_gap(-1, 10, Some(libc::ESRCH)),
+        Some(DescriptorsUnavailable)
+    );
+    assert_eq!(DescriptorsDenied.worse(Churn), Churn);
+    assert_eq!(Churn.worse(DescriptorsDenied), Churn);
+    assert_eq!(
+        DescriptorsDenied.worse(DescriptorsDenied),
+        DescriptorsDenied
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn a_deleted_executable_is_not_a_gap_but_other_failures_are() {
+    let gone: io::Result<(u64, u64)> = Err(io::Error::from_raw_os_error(libc::ENOENT));
+    let denied: io::Result<(u64, u64)> = Err(io::Error::from_raw_os_error(libc::EACCES));
+    assert_eq!(darwin_image_gap(&gone), None);
+    assert_eq!(darwin_image_gap(&Ok((1, 2))), None);
+    assert_eq!(
+        darwin_image_gap(&denied),
+        Some(crate::pid::OccupancyGap::ExecutableUnavailable)
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn linux_zombies_and_kernel_threads_hold_nothing() {
+    let zombie = "123 (defunct) Z 1 123 123 0 -1 4194308 0 0 0 0 0 0 0 0 20 0 1 0 1";
+    let kthread = "2 (kthreadd) S 0 0 0 0 -1 2129984 0 0 0 0 0 0 0 0 20 0 1 0 1";
+    let user = "200 (a b) S 1 200 200 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 1";
+    assert!(linux_stat_holds_nothing(zombie));
+    assert!(linux_stat_holds_nothing(kthread));
+    assert!(linux_stat_kernel_thread(kthread));
+    assert!(!linux_stat_kernel_thread(zombie));
+    assert!(!linux_stat_holds_nothing(user));
+    assert!(!linux_stat_holds_nothing("garbage"));
 }
 
 #[cfg(test)]
@@ -550,6 +785,113 @@ pub(crate) fn unreadable_policy_uids(
         let _ = (pid, entries);
         Err("macOS signing evidence unavailable".into())
     }
+}
+
+/// Directories of the sealed system volume. An executable here is still only
+/// trusted after the root-owned chain and volume seal checks.
+#[cfg(any(target_os = "macos", test))]
+fn sealed_system_path(path: &std::path::Path) -> bool {
+    path.components().all(|part| {
+        matches!(
+            part,
+            std::path::Component::RootDir | std::path::Component::Normal(_)
+        )
+    }) && [
+        "/System",
+        "/usr/libexec",
+        "/usr/sbin",
+        "/usr/bin",
+        "/sbin",
+        "/bin",
+    ]
+    .iter()
+    .any(|directory| path.starts_with(directory) && path != std::path::Path::new(directory))
+}
+
+/// A root-owned setuid image running with an effective uid of its owner but a
+/// different real uid: the kernel refuses its cwd for the privilege change.
+#[cfg(any(target_os = "macos", test))]
+fn setuid_transition(mode: u32, owner: u32, uids: crate::pid::ProcessUids) -> bool {
+    const SETUID: u32 = 0o4000;
+    mode & SETUID != 0 && owner == 0 && uids.effective == owner && uids.real != uids.effective
+}
+
+/// The process image, when it is a root-owned executable on the sealed system
+/// volume. Any missing evidence returns None.
+pub(crate) fn sealed_system_image(pid: i32) -> Option<crate::pid::SealedSystemImage> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let path = darwin_executable_path(pid)?;
+        if !sealed_system_path(&path) {
+            return None;
+        }
+        let executable = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+            .ok()?;
+        let metadata = executable.metadata().ok()?;
+        if !root_owned_executable_chain(&path, &executable)
+            || darwin_on_sealed_system_volume(&executable) != Some(true)
+        {
+            return None;
+        }
+        let uids = darwin_uids(pid)?;
+        if darwin_executable_path(pid)? != path || darwin_uids(pid)? != uids {
+            return None;
+        }
+        Some(crate::pid::SealedSystemImage {
+            setuid_transition: setuid_transition(metadata.mode(), metadata.uid(), uids),
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn sealed_system_images_are_system_directories_and_setuid_needs_a_transition() {
+    use std::path::Path;
+    for path in [
+        "/usr/bin/login",
+        "/System/Library/CoreServices/x",
+        "/usr/libexec/routined",
+        "/usr/sbin/cfprefsd",
+        "/sbin/launchd",
+        "/bin/sh",
+    ] {
+        assert!(sealed_system_path(Path::new(path)), "{path}");
+    }
+    for path in [
+        "/usr/bin",
+        "/usr/local/bin/login",
+        "/Users/me/usr/bin/login",
+        "/usr/bin/../local/bin/x",
+        "relative/usr/bin/x",
+        "/Applications/Foo.app/x",
+    ] {
+        assert!(!sealed_system_path(Path::new(path)), "{path}");
+    }
+    let login = crate::pid::ProcessUids {
+        real: 501,
+        effective: 0,
+        saved: 0,
+    };
+    assert!(setuid_transition(0o104555, 0, login));
+    assert!(
+        !setuid_transition(0o100555, 0, login),
+        "needs the setuid bit"
+    );
+    assert!(!setuid_transition(0o104555, 501, login), "root owner only");
+    assert!(
+        !setuid_transition(0o104555, 0, test_uids(0)),
+        "no transition"
+    );
+    assert!(!setuid_transition(0o104555, 0, test_uids(501)));
 }
 
 #[cfg(any(target_os = "macos", test))]

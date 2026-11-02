@@ -303,6 +303,7 @@ fn worker_census_places_a_process_in_a_deleted_directory_by_its_nearest_ancestor
             provenant_os::pid::OccupancyObservation {
                 paths: vec![],
                 complete: true,
+                gap: None,
             }
         }
         fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
@@ -379,6 +380,7 @@ fn land_worker_census_excludes_only_ancestors_through_the_session_leader()
             provenant_os::pid::OccupancyObservation {
                 paths: vec![],
                 complete: true,
+                gap: None,
             }
         }
         fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
@@ -579,6 +581,7 @@ impl CwdObserver for InjectedCensus {
         provenant_os::pid::OccupancyObservation {
             paths: vec![],
             complete: true,
+            gap: None,
         }
     }
     fn sealed_platform_uids(&self, pid: i64) -> Option<ProcessUids> {
@@ -618,6 +621,7 @@ fn occupancy_is_placed_per_root_and_partial_results_remain_conservative()
             provenant_os::pid::OccupancyObservation {
                 paths: self.paths.clone(),
                 complete: self.complete,
+                gap: None,
             }
         }
     }
@@ -698,6 +702,7 @@ fn occupancy_failures_retain_every_root_and_positive_occupants_stay_live()
             provenant_os::pid::OccupancyObservation {
                 paths: self.paths.clone(),
                 complete: self.complete,
+                gap: None,
             }
         }
     }
@@ -1093,6 +1098,7 @@ fn unplaceable_path_failures_retain_process_image_diagnostics() -> Result<(), Bo
             provenant_os::pid::OccupancyObservation {
                 paths: vec![],
                 complete: true,
+                gap: None,
             }
         }
         fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
