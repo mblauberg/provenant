@@ -2023,6 +2023,138 @@ mod narrowing {
         }
     }
 
+    /// Wraps a scripted observer; the process exits (as `exit`) once its
+    /// occupancy has been queried, however often it is observed.
+    struct ExitsOnOccupancy<'a> {
+        processes: &'a InjectedCensus,
+        scripted: &'a Scripted,
+        exit: ProcessObservation,
+        exited: std::sync::atomic::AtomicBool,
+    }
+    impl ProcessObserver for ExitsOnOccupancy<'_> {
+        fn boot_identity(&self) -> Result<String, provenant_supervisor::census::CensusError> {
+            self.processes.boot_identity()
+        }
+        fn observe(&self, pid: i64) -> ProcessObservation {
+            if pid == 200 && self.exited.load(std::sync::atomic::Ordering::SeqCst) {
+                return self.exit.clone();
+            }
+            self.processes.observe(pid)
+        }
+        fn census(
+            &self,
+            max: usize,
+        ) -> Result<provenant_supervisor::census::Census, provenant_supervisor::census::CensusError>
+        {
+            self.processes.census(max)
+        }
+    }
+    impl CwdObserver for ExitsOnOccupancy<'_> {
+        fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            self.scripted.cwd(pid)
+        }
+        fn occupancy(&self, pid: i64) -> OccupancyObservation {
+            self.exited.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.scripted.occupancy(pid)
+        }
+        fn sealed_system_image(&self, pid: i64) -> Option<SealedSystemImage> {
+            self.scripted.sealed_system_image(pid)
+        }
+        fn kernel_thread(&self, pid: i64) -> bool {
+            self.scripted.kernel_thread(pid)
+        }
+    }
+
+    /// Root state when pid 200, with its cwd and an open file inside the root,
+    /// becomes `exit` during its occupancy query.
+    fn exits_during_occupancy(
+        exit: impl Fn(ProcessFact) -> ProcessObservation,
+    ) -> Result<WorkerState, Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let root = canonicalize(fixture._temp.path())?.join("root");
+        fs::create_dir(&root)?;
+        let fact = |pid: i64| ProcessFact {
+            identity: ProcessIdentity {
+                boot: "boot".into(),
+                pid,
+                native_start: pid as u64,
+                group_id: pid,
+                session_id: pid,
+            },
+            parent_pid: 1,
+            zombie: false,
+            cpu_micros: None,
+            command: None,
+        };
+        let current = fact(100);
+        let processes = InjectedCensus {
+            census: Census::from_observations(
+                [current.clone(), fact(200)],
+                [],
+                [],
+                true,
+                false,
+                32,
+            )?,
+            cwds: BTreeMap::new(),
+            current: current.clone(),
+            platform_uids: BTreeMap::new(),
+        };
+        let scripted = Scripted {
+            cwd: CwdObservation::Path(root.clone()),
+            occupancy: OccupancyObservation {
+                paths: vec![root.join("open-file")],
+                complete: false,
+                gap: Some(OccupancyGap::DescriptorsUnavailable),
+            },
+            sealed: None,
+            kernel_thread: false,
+        };
+        let observer = ExitsOnOccupancy {
+            processes: &processes,
+            scripted: &scripted,
+            exit: exit(fact(200)),
+            exited: std::sync::atomic::AtomicBool::new(false),
+        };
+        let (states, _, _) = observe_worker_holders_with_audit(
+            std::slice::from_ref(&root),
+            &observer,
+            &observer,
+            &current,
+            false,
+            &mut |_, _| {},
+        );
+        Ok(states[&root])
+    }
+
+    #[test]
+    fn a_process_that_exits_during_occupancy_inspection_frees_its_root()
+    -> Result<(), Box<dyn Error>> {
+        assert_eq!(
+            exits_during_occupancy(|_| ProcessObservation::Absent)?,
+            WorkerState::Free
+        );
+        assert_eq!(
+            exits_during_occupancy(|fact| ProcessObservation::Present(ProcessFact {
+                zombie: true,
+                ..fact
+            }))?,
+            WorkerState::Free
+        );
+        // A different process that reused the PID proves nothing.
+        assert_ne!(
+            exits_during_occupancy(|fact| ProcessObservation::Present(ProcessFact {
+                identity: ProcessIdentity {
+                    native_start: 999,
+                    ..fact.identity
+                },
+                ..fact
+            }))?,
+            WorkerState::Free
+        );
+        Ok(())
+    }
+
     #[test]
     fn a_sealed_system_image_with_a_wholly_denied_descriptor_listing_is_excused_by_design()
     -> Result<(), Box<dyn Error>> {

@@ -414,7 +414,7 @@ pub(super) fn observe_worker_holders_with_audit(
         if cwd_observer.kernel_thread(pid) && same_process(observer.observe(pid)) {
             continue;
         }
-        let cwd = observe_same_process(observer, cwd_observer, fact);
+        let mut cwd = observe_same_process(observer, cwd_observer, fact);
         let mut occupancy_gap = None;
         if !matches!(cwd, NativeCwd::Gone) {
             let policy_exception = matches!(&cwd, NativeCwd::PolicyExcluded(excusal)
@@ -422,7 +422,32 @@ pub(super) fn observe_worker_holders_with_audit(
             let before = observer.observe(pid);
             let occupancy = cwd_observer.occupancy(pid);
             let after = observer.observe(pid);
+            // A process that exited during the occupancy query (absent, or a
+            // zombie of the same identity) now holds no cwd or open file, even
+            // if an earlier observation named a root.
+            let exited = match &after {
+                ProcessObservation::Absent => true,
+                ProcessObservation::Present(process) => {
+                    process.identity == fact.identity && process.zombie
+                }
+                ProcessObservation::Unknown(_) => false,
+            };
+            if exited {
+                continue;
+            }
+            let pid_reused = matches!(
+                &before,
+                ProcessObservation::Present(process) if process.identity != fact.identity
+            ) || matches!(
+                &after,
+                ProcessObservation::Present(process) if process.identity != fact.identity
+            );
             let stable = same_process(before) && same_process(after);
+            if pid_reused {
+                // Do not let observations from the listed process classify a
+                // different process that reused its PID during the census.
+                cwd = NativeCwd::Unknown("identity race".into());
+            }
             if stable {
                 for path in &occupancy.paths {
                     let Some(canonical) = canonical_cwd(path) else {
