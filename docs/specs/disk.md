@@ -103,23 +103,31 @@ declared output containing it, including beneath ignored parents.
 
 `gc.projects.<id>.foreign_worktrees = "merged-clean"` applies exactly where
 GC otherwise reports unknown writer evidence. The default is `"keep"`.
-Fetched-default ancestry, idle writes, clean Git state, no live lanes, free
-writer locks and a complete free process census
-are required. Repository custody protects registration rechecks; every
-worktree is verified against the Git common directory. The primary stays
-protected and local refs survive this policy's removals.
+Removal is immediate once the tree is proven merged: there is no idle age.
+Fetched-default ancestry, clean Git state (after only declared ignored output
+is removed), no live lanes or reservations, a free writer lock and a complete
+free process census are required. Managed trees that fall through to this
+policy keep the managed upstream-tip and first-parent protections first. The
+primary stays protected, and every worktree is verified against the Git common
+directory.
 GC verifies the repository's local `core.bare` value before selecting a primary
 checkout. Bare repositories and their linked checkouts cannot supply that root,
 even when the bare directory is named `.git`. A primary using a separate Git
 directory remains eligible; a linked checkout is never the fallback primary.
-Foreign idleness scans the non-output tree within 1,000,000 entries and five
-seconds. Declared ignored output contributes only its top-level directory mtime:
-the scanner skips its contents, so neither deep writes nor the worktree root
-stand in for output age. Root and non-output mtimes independently protect recent
-work outside output. Removal still checks nested repository boundaries.
-Brief repository custody establishes writer state. Bulk output pruning holds
-writer custody only. Exclusive repository custody is reacquired after pruning
-for the final recheck and Git removal.
+Applied removal verifies once, under writer custody: registration, head, clean
+state, lanes and a fresh `Free` census. Declared ignored output is deleted
+under the writer lock only, and no census runs under the repository lock.
+Exclusive repository custody is taken after that, briefly, for the final
+registration recheck, the Git removal and branch settlement. A dry run takes
+the same proofs without creating state.
+The census places occupancy per candidate root. A process that cannot be
+observed forces `Unknown` for every root and is reported by pid and reason,
+with these exceptions: a deleted executable, a zombie or kernel thread, an
+executable on the sealed system volume whose descriptor queries are refused
+(EPERM) while its cwd is known to be outside every candidate root, and a
+setuid sealed-system executable whose cwd is refused by its privilege
+transition (for example `/usr/bin/login`). User-owned descendants of such a
+process are observed normally.
 Queued and pending submitted dispatches naming a worktree retain it with
 `unknown_writer`, including managed trees without a terminal lane record.
 Tasks not yet submitted into a run store are not visible to this census;
@@ -132,7 +140,7 @@ Exclusion slots remain after collection or refusal. Reusing a canonical path
 uses the same flock inode and never requires a retired identity record. Legacy
 identity and registry reservation files are ignored by worktree collection.
 - Why: native worktrees need an explicit alternative to terminal-lane evidence.
-- Test: `crates/confinement/src/worktrees.rs::gc_foreign_merged_clean_is_opt_in_idle_and_requires_complete_census`
+- Test: `crates/confinement/src/worktrees/lifecycle_tests.rs::gc_foreign_merged_clean_is_opt_in_immediate_and_requires_complete_census`
 - Owner: `crates/confinement/src/worktrees/gc.rs`, `crates/config/src/gc.rs`
 
 ## Registration hygiene

@@ -615,7 +615,6 @@ fn owned_cleanup_rechecks_regenerated_output_and_keep_paths() -> Result<(), Box<
             keep: &kept,
             written_before_ns: i128::MAX,
             foreign_merged_clean: false,
-
             dry_run: false,
         };
         let result = prune_owned(
@@ -678,7 +677,6 @@ fn owned_cleanup_refuses_dirty_unmerged_and_adopted_trees() -> Result<(), Box<dy
         keep: &[],
         written_before_ns: i128::MAX,
         foreign_merged_clean: false,
-
         dry_run: false,
     };
     fs::write(info.path.join("dirty"), "keep")?;

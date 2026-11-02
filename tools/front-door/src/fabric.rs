@@ -3371,7 +3371,6 @@ fn settle_owned_worktree(
                     keep: &settings.keep,
                     written_before_ns: i128::MAX,
                     foreign_merged_clean: false,
-
                     dry_run: false,
                 };
                 // A failed pre-prune step must not replace a retained lane's

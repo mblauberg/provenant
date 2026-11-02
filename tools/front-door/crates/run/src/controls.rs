@@ -1058,7 +1058,6 @@ mod lineage_tests {
                     keep: &[],
                     written_before_ns: i128::MAX,
                     foreign_merged_clean: false,
-
                     dry_run: false,
                 },
                 &cancel,

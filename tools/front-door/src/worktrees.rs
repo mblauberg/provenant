@@ -817,7 +817,6 @@ pub(crate) fn land_cleanup(
                     keep: &settings.keep,
                     written_before_ns: now_ns,
                     foreign_merged_clean: false,
-
                     dry_run: false,
                 },
                 cancel,
@@ -1087,7 +1086,6 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                         keep: &settings.keep,
                         written_before_ns: now_ns
                             - i128::from(output_idle_days) * 86_400 * 1_000_000_000,
-
                         foreign_merged_clean: !command.pressure
                             && settings.foreign_worktrees
                                 == provenant_config::ForeignWorktrees::MergedClean,
