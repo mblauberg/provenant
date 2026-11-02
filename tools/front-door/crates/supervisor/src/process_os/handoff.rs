@@ -153,6 +153,19 @@ pub(crate) fn spawn(
     if provenant_os::fs::durability_relaxed() {
         guardian_environment.push((provenant_os::fs::DURABILITY_ENV.into(), "relaxed".into()));
     }
+    // Fixture guardians belong to the test process, not the short-lived CLI.
+    // Capture its native identity before detaching so PID reuse cannot extend
+    // the guardian's lifetime beyond its owner.
+    #[cfg(feature = "fixture")]
+    if let Some(owner_pid) = std::env::var(crate::FIXTURE_OWNER_PID_ENV)
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        && let crate::census::ProcessObservation::Present(owner) =
+            crate::census::SystemProcessObserver.observe(owner_pid)
+        && let Ok(identity) = serde_json::to_string(&owner.identity)
+    {
+        guardian_environment.push((crate::FIXTURE_OWNER_ENV.into(), identity.into()));
+    }
     // The guardian also submits successor lanes, so it keeps a fixture's spacing cap.
     #[cfg(debug_assertions)]
     if let Some(spacing) = std::env::var_os(crate::STARTUP_SPACING_ENV) {

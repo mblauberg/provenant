@@ -230,6 +230,10 @@ fn fixture() -> Result {
     if args.get(1).is_some_and(|v| v == "run") {
         let mut prompt = String::new();
         io::stdin().read_to_string(&mut prompt)?;
+        if prompt.contains("fixture owner lifetime probe") {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            return Ok(());
+        }
         let frames = if prompt.contains("free limit") {
             include_str!("fixtures/providers/opencode/v2.2.0-free-limit.jsonl")
         } else if prompt.contains("model unavailable") {
@@ -3988,7 +3992,142 @@ fn owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation() -> Result 
     Ok(())
 }
 
+fn fixture_owner_repro(ready_path: &std::path::Path) -> Result {
+    let mut rig = TestRig::new()?;
+    let data = rig.home.join(".local/share/opencode");
+    fs::create_dir_all(&data)?;
+    let db = rusqlite::Connection::open(data.join("opencode.db"))?;
+    db.execute_batch(
+        r#"PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+        CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT);
+        INSERT INTO session_message VALUES ('ses_x', 'assistant',
+        '{"model":{"providerID":"opencode-go","id":"glm-5.3-flash"},"finish":"stop"}');"#,
+    )?;
+    let bin = rig.root.join("provider/bin");
+    fs::create_dir_all(&bin)?;
+    rig.copy_executable(&std::env::current_exe()?, &bin.join("opencode"))?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    let prompt = rig.root.join("prompt.md");
+    fs::write(&prompt, "fixture owner lifetime probe")?;
+    let output = rig.command(&[
+        "dispatch",
+        "--model",
+        "opencode/opencode-go/glm-5.3-flash",
+        "--operation-id",
+        "fixture-owner-lifetime",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt path")?,
+        "--wait",
+        "1s",
+        "--json",
+    ])?;
+    // The provider is still running when the one-second wait ends (exit 124).
+    assert!(matches!(code(&output), 0 | 124), "{output:?}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(identity) = find_guardian_identity(&rig.state)? {
+            fs::write(
+                ready_path,
+                serde_json::to_vec(&json!({"root": rig.root, "guardian": identity}))?,
+            )?;
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "fixture guardian identity was not published; dispatch output: {}",
+                String::from_utf8_lossy(&output.stdout.bytes)
+            )
+            .into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
+}
+
+fn find_guardian_identity(root: &std::path::Path) -> Result<Option<Value>> {
+    for entry in fs::read_dir(root)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            if let Some(identity) = find_guardian_identity(&path)? {
+                return Ok(Some(identity));
+            }
+        } else if path
+            .file_name()
+            .is_some_and(|name| name == "reservation.json")
+        {
+            let value: Value = serde_json::from_slice(&fs::read(path)?)?;
+            if let Some(identity) = value.get("guardian") {
+                return Ok(Some(identity.clone()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn fixture_guardian_exits_when_sigkilled_test_owner_dies() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    use provenant_supervisor::census::{ProcessObservation, SystemProcessObserver};
+    use std::os::unix::process::ExitStatusExt;
+    let ready = std::env::temp_dir().join(format!("pv-owner-{}.json", std::process::id()));
+    let mut child = std::process::Command::new(std::env::current_exe()?)
+        .env("PROVENANT_FIXTURE_OWNER_REPRO", &ready)
+        .spawn()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !ready.exists() && std::time::Instant::now() < deadline {
+        if let Some(status) = child.try_wait()? {
+            return Err(format!("fixture owner repro exited early: {status}").into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    if !ready.exists() {
+        child.kill()?;
+        let _ = child.wait()?;
+        return Err("fixture owner repro did not publish readiness".into());
+    }
+    let record: Value = serde_json::from_slice(&fs::read(&ready)?)?;
+    let identity: provenant_supervisor::census::ProcessIdentity =
+        serde_json::from_value(record["guardian"].clone())?;
+    child.kill()?;
+    let status = child.wait()?;
+    assert_eq!(status.signal(), Some(9));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        match SystemProcessObserver.observe(identity.pid) {
+            ProcessObservation::Present(fact) if fact.identity == identity => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            _ => {
+                fs::remove_file(&ready)?;
+                fs::remove_dir_all(record["root"].as_str().ok_or("fixture root")?)?;
+                return Ok(());
+            }
+        }
+    }
+    Err(format!(
+        "fixture guardian {} survived its killed owner",
+        identity.pid
+    )
+    .into())
+}
+
 fn main() -> ExitCode {
+    if let Some(path) = std::env::var_os("PROVENANT_FIXTURE_OWNER_REPRO") {
+        return match fixture_owner_repro(std::path::Path::new(&path)) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                let _ = writeln!(io::stderr(), "fixture owner repro: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     #[cfg(target_os = "macos")]
     if std::env::args_os().next().is_some_and(|arg| {
@@ -4028,6 +4167,7 @@ fn main() -> ExitCode {
                 "submit_prints_each_brief_read_root_warning_once",
                 "interrupted_progress_recovers_on_another_account_in_the_same_worktree",
                 "capacity_settlement_resumes_the_same_session",
+                "fixture_guardian_exits_when_sigkilled_test_owner_dies",
                 "review_fans_out_and_collects_fake_provider",
                 "opencode_dispatch_observes_v2_wal_session",
                 "opus_writer_dispatch_advises_a_cheaper_route",
@@ -4077,6 +4217,7 @@ fn main() -> ExitCode {
                     "submit_prints_each_brief_read_root_warning_once" => submit_prints_each_brief_read_root_warning_once(),
                     "interrupted_progress_recovers_on_another_account_in_the_same_worktree" => interrupted_progress_recovers_on_another_account_in_the_same_worktree(),
                     "capacity_settlement_resumes_the_same_session" => capacity_settlement_resumes_the_same_session(),
+                    "fixture_guardian_exits_when_sigkilled_test_owner_dies" => fixture_guardian_exits_when_sigkilled_test_owner_dies(),
                     "review_fans_out_and_collects_fake_provider" => review_fans_out_and_collects_fake_provider(),
                     "opencode_dispatch_observes_v2_wal_session" => {
                         opencode_dispatch_observes_v2_wal_session()
