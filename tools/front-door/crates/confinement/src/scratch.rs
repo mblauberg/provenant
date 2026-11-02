@@ -162,7 +162,9 @@ mod tests {
         let elsewhere = fixture.root.join("elsewhere");
         std::fs::create_dir(&elsewhere)?;
         std::os::unix::fs::symlink(&elsewhere, &scratch)?;
-        assert!(ensure(&fixture.repo, &SystemClock, &CancelToken::new()).is_err());
+        let error = ensure(&fixture.repo, &SystemClock, &CancelToken::new()).unwrap_err();
+        assert!(error.to_string().contains(".provenant/scratch"));
+        assert!(error.to_string().to_ascii_lowercase().contains("symlink"));
         Ok(())
     }
 

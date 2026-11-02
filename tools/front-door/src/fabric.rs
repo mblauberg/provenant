@@ -14,6 +14,8 @@ use graph_status::{graph_snapshot, graph_status_elapsed};
 pub use peer::{hosts, peer};
 #[allow(unused_imports)]
 pub(crate) use preset_graph::publish_preset_graph;
+#[cfg(test)]
+pub(crate) use preset_graph::{PreparedScratch, retry_scratch_poll};
 pub(crate) use preset_graph::{retain_preset_graph, run_preset_graph};
 
 #[cfg(test)]
@@ -44,10 +46,11 @@ use std::{
     time::Instant,
 };
 
-fn scratch_prepare_error(error: impl std::fmt::Display) -> FacadeError {
-    FacadeError::io(format!(
-        "prepare project scratch .provenant/scratch/graphs: {error}"
-    ))
+pub(crate) fn scratch_prepare_error(error: impl std::fmt::Display) -> FacadeError {
+    FacadeError::Io {
+        operation: format!("prepare project scratch: {error}"),
+        path: Some(".provenant/scratch".into()),
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -4638,6 +4641,16 @@ impl Factory {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
+        self.graph_with_scratch(input, budget, cancel, None)
+    }
+
+    fn graph_with_scratch(
+        &self,
+        input: GraphInput,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        prepared_scratch: Option<&Path>,
+    ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
         use provenant_fabric_runtime::coordination::input::ValidateInput;
         use provenant_fabric_runtime::graph::{FileJournal, GraphJournal};
         let input = match input {
@@ -4657,23 +4670,10 @@ impl Factory {
         let resume = matches!(&input, GraphInput::Resume { .. });
         let document = match &input {
             GraphInput::Run { document, .. } | GraphInput::Resume { document, .. } => {
-                let scratch = provenant_confinement::worktrees::with_context(
-                    &self.context.roots,
-                    &self.home,
-                    &self.cwd,
-                    &self.clock,
-                    cancel,
-                    |context| {
-                        let repo = context.utility.open_repo(
-                            context.executor,
-                            &self.cwd,
-                            context.utility_budget,
-                            cancel,
-                        )?;
-                        provenant_confinement::scratch::ensure(&repo, &self.clock, cancel)
-                    },
-                )
-                .map_err(scratch_prepare_error)?;
+                let scratch = match prepared_scratch {
+                    Some(scratch) => scratch.to_path_buf(),
+                    None => self.prepare_scratch(cancel)?,
+                };
                 let document = if resume {
                     self.resolve_graph(&document.to_string_lossy())?
                         .1
@@ -5017,6 +5017,26 @@ impl Factory {
             }
         }
         Ok(graph_snapshot(checkpoint))
+    }
+
+    fn prepare_scratch(&self, cancel: &CancelToken) -> Result<PathBuf, FacadeError> {
+        provenant_confinement::worktrees::with_context(
+            &self.context.roots,
+            &self.home,
+            &self.cwd,
+            &self.clock,
+            cancel,
+            |context| {
+                let repo = context.utility.open_repo(
+                    context.executor,
+                    &self.cwd,
+                    context.utility_budget,
+                    cancel,
+                )?;
+                provenant_confinement::scratch::ensure(&repo, &self.clock, cancel)
+            },
+        )
+        .map_err(scratch_prepare_error)
     }
 }
 

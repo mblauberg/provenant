@@ -1,5 +1,22 @@
 use super::*;
 
+#[derive(Default)]
+pub(crate) struct PreparedScratch(Option<std::path::PathBuf>);
+
+impl PreparedScratch {
+    pub(crate) fn get_or_prepare(
+        &mut self,
+        prepare: impl FnOnce() -> Result<std::path::PathBuf, FacadeError>,
+    ) -> Result<&std::path::Path, FacadeError> {
+        if self.0.is_none() {
+            self.0 = Some(prepare()?);
+        }
+        self.0
+            .as_deref()
+            .ok_or_else(|| FacadeError::io("prepare project scratch returned no path"))
+    }
+}
+
 /// Retain a content-addressed preset graph in the same verified scratch area
 /// consumed by the graph owner. Repeated publication must match byte for byte.
 pub(crate) fn retain_preset_graph(
@@ -125,16 +142,65 @@ pub(crate) fn run_preset_graph(
         }
         let cancel = CancelToken::new();
         let waiting = WaitBudget::cli(factory.clock.mono_now(), wait_seconds)?;
+        let mut prepared_scratch = PreparedScratch::default();
+        let mut last_run = None;
+        let mut admitted_graph_id = admitted_graph_id(&factory, &document);
+        let mut scratch_error = None;
         loop {
+            if waiting.remaining(factory.clock.mono_now()).as_micros() == 0
+                && (last_run.is_some() || scratch_error.is_some())
+            {
+                if let (Some(graph_id), Some(error)) = (&admitted_graph_id, scratch_error) {
+                    return Err(format!("graph {graph_id}: {error}").into());
+                }
+                return last_run.ok_or_else(|| "preset wait budget expired before polling".into());
+            }
             let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
-            let run = factory.graph(
+            let scratch = match prepared_scratch.get_or_prepare(|| factory.prepare_scratch(&cancel))
+            {
+                Ok(scratch) => scratch,
+                Err(error) if retry_scratch_poll(&error, admitted_graph_id.is_some()) => {
+                    scratch_error = Some(error);
+                    provenant_core::Pause::wait(
+                        &factory.backoff,
+                        provenant_core::DurationMicros::from_micros(
+                            250_000.min(waiting.remaining(factory.clock.mono_now()).as_micros()),
+                        ),
+                        &cancel,
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let result = factory.graph_with_scratch(
                 GraphInput::Run {
                     extra: Default::default(),
                     document: document.clone(),
                 },
                 budget,
                 &cancel,
-            )?;
+                Some(scratch),
+            );
+            let run = match result {
+                Ok(run) => {
+                    scratch_error = None;
+                    run
+                }
+                Err(error) if retry_scratch_poll(&error, admitted_graph_id.is_some()) => {
+                    scratch_error = Some(error);
+                    provenant_core::Pause::wait(
+                        &factory.backoff,
+                        provenant_core::DurationMicros::from_micros(
+                            250_000.min(waiting.remaining(factory.clock.mono_now()).as_micros()),
+                        ),
+                        &cancel,
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            admitted_graph_id = Some(run.checkpoint.graph_id.clone());
+            last_run = Some(run.clone());
             if run.status != GraphStatus::Pending
                 || waiting.remaining(factory.clock.mono_now()).as_micros() == 0
             {
@@ -210,6 +276,26 @@ pub(crate) fn run_preset_graph(
             globals,
         ),
     }
+}
+
+fn admitted_graph_id(factory: &Factory, document: &std::path::Path) -> Option<String> {
+    use provenant_fabric_runtime::graph::FileJournal;
+    let graph = factory.read_graph_document(document).ok()?;
+    FileJournal::read_checkpoint(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        &graph.graph_id,
+    )
+    .ok()?
+    .map(|_| graph.graph_id)
+}
+
+fn is_scratch_prepare_error(error: &FacadeError) -> bool {
+    matches!(error, FacadeError::Io { operation, .. } if operation.starts_with("prepare project scratch:"))
+}
+
+pub(crate) fn retry_scratch_poll(error: &FacadeError, graph_admitted: bool) -> bool {
+    graph_admitted && is_scratch_prepare_error(error)
 }
 
 fn shell_path(path: &std::path::Path) -> String {

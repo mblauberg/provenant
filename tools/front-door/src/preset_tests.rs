@@ -647,6 +647,54 @@ fn graph_attempt_input_carries_preset_selection_context() {
 }
 
 #[test]
+fn preset_wait_retries_an_injected_scratch_failure_after_graph_admission() {
+    let mut scratch = super::fabric::PreparedScratch::default();
+    let mut attempts = 0;
+    let result = loop {
+        attempts += 1;
+        match scratch.get_or_prepare(|| {
+            if attempts == 1 {
+                Err(super::fabric::scratch_prepare_error(
+                    "exclude lock timed out",
+                ))
+            } else {
+                Ok(".provenant/scratch".into())
+            }
+        }) {
+            Err(error) if super::fabric::retry_scratch_poll(&error, true) => {
+                continue;
+            }
+            result => break result,
+        }
+    };
+    assert_eq!(attempts, 2);
+    assert_eq!(result.unwrap(), std::path::Path::new(".provenant/scratch"));
+
+    let scratch_error = super::fabric::scratch_prepare_error("exclude lock timed out");
+    assert!(!super::fabric::retry_scratch_poll(&scratch_error, false));
+    let other_error = provenant_fabric_runtime::coordination::facade::FacadeError::Conflict;
+    assert!(!super::fabric::retry_scratch_poll(&other_error, true));
+}
+
+#[test]
+fn preset_wait_prepares_scratch_once_across_polls() {
+    let mut scratch = super::fabric::PreparedScratch::default();
+    let mut calls = 0;
+    for _ in 0..5 {
+        let path = scratch
+            .get_or_prepare(|| {
+                calls += 1;
+                Ok::<_, provenant_fabric_runtime::coordination::facade::FacadeError>(
+                    ".provenant/scratch".into(),
+                )
+            })
+            .unwrap();
+        assert_eq!(path, std::path::Path::new(".provenant/scratch"));
+    }
+    assert_eq!(calls, 1);
+}
+
+#[test]
 fn bundled_presets_complete_through_the_real_scheduler_and_replay() {
     use provenant_fabric_runtime::graph::{GraphStatus, NodeState, advance_with_budget};
     for name in [

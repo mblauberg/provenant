@@ -1468,6 +1468,12 @@ checkout's scratch root (never a symlink), so briefs there stay readable from a
 linked worktree. The graph path error and CLI help name
 `.provenant/scratch/graphs`. Scratch is disposable operator data, separate from
 authoritative run state; expiry is owned by GC rather than graph execution.
+
+Foreground preset waits prepare project scratch once before the first graph
+poll. A setup failure there fails the command with the step, path and cause. If
+a later poll reports a transient scratch setup failure after graph admission,
+the wait retries on its next poll; if its wait budget expires, the error names
+the admitted graph ID.
 - Why: graph documents and lane briefs need a discoverable project-local home
   without creating tracked configuration changes.
 - Test: `crates/confinement/src/scratch.rs::scratch_is_local_excluded_idempotent_and_refuses_links`;
