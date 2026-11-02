@@ -280,6 +280,9 @@ pub struct WriterDeliveryRequest {
     pub branch: String,
     #[serde(default)]
     pub open_pr: bool,
+    /// An integration may only advance its target to the delivered head.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fast_forward_only: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

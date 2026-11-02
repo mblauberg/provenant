@@ -412,6 +412,7 @@ impl HostDeliveryContext {
             remote,
             branch: destination,
             open_pr,
+            fast_forward_only: false,
         };
         validate(&request)?;
         Ok(Some(request))
@@ -1470,6 +1471,9 @@ impl HostDeliveryContext {
             .is_ok()
         {
             head
+        } else if request.fast_forward_only {
+            // A loop round never merges: the target moved since the round began.
+            return Err(RunError::Delivery(stage));
         } else {
             // A configured merge driver may execute arbitrary repository code.
             if !self

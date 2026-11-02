@@ -906,6 +906,7 @@ mod lineage_tests {
             remote: "origin".into(),
             branch: "old-lane".into(),
             open_pr: true,
+            fast_forward_only: false,
         });
         let prior = original.attempts[0].attempt_id;
         let (project_id, info) =

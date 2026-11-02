@@ -791,13 +791,24 @@ containing `body`, `until` and a positive `max_rounds`. Optional
 `max_extension_rounds` caps each extension decision and defaults to five
 (allowed range 1 to 1024). The body is a
 self-contained DAG of task, synthesise and gate nodes. `until` names a body
-gate that follows every other body node, directly or transitively. Nested loops,
-body `on_fail` routes and body delivery are rejected. The wrapper has no
+gate that follows every other body node, directly or transitively. Nested loops
+and body `on_fail` routes are rejected. A body writer may deliver only by
+`integrate:TARGET`, never by `push` or `pr`. The wrapper has no
 prompt, route, worktree, inputs, condition or delivery configuration. All body
 writers must name the same existing worktree; every round continues on its
 branch without creating a checkout. Body writer worktrees, including no-op
 rounds, remain available through exhaustion, acceptance and cancellation for
 explicit delivery or later collection.
+
+A body writer that integrates delivers every round that settles with a new
+commit, by compare-and-swap fast-forward of `TARGET` onto that commit. It never
+merges: before a round launches, the graph checks that `TARGET` is still at the
+head the previous writer in that worktree delivered, and otherwise fails the
+round with `integration_head_moved`, which stops the loop. The host also
+refuses a round delivery whose head does not descend from the target. A round
+with no new commit integrates nothing and is not an error. Because every round
+continues the same worktree and branch, round N+1 descends from round N's
+integrated head.
 
 The runtime expands the full allowance before admission. Node, edge, prompt,
 depth and fan-out limits therefore cover every possible round, including rounds
@@ -865,6 +876,10 @@ remain in use. Existing graph budget and limit extensions still apply.
   `::loop_admission_counts_every_round_before_any_launch`;
   `::loop_decisions_stop_or_accept_exhausted_outputs`;
   `::loop_writers_keep_one_worktree_and_never_deliver_between_rounds`;
+  `::loop_body_delivers_only_by_integrate`;
+  `::loop_rounds_integrate_from_the_head_the_previous_round_delivered`;
+  `::loop_stops_when_the_target_moved_after_the_previous_delivery`;
+  `crates/run/src/delivery_tests.rs::fast_forward_only_integration_advances_but_never_merges`;
   `::loop_body_failure_blocks_later_rounds_and_dependants`.
 - Owner: `crates/fabric-runtime/src/graph/loops.rs`, `src/fabric.rs`
 

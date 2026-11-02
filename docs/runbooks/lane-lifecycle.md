@@ -80,8 +80,8 @@ live process and names its pid and command when available.
 Choose `--deliver none`, `push`, `integrate:integration` or `pr`. Push and PR
 use origin and the lane branch. Integration targets must already exist;
 `integrate:origin/integration` selects a remote branch. Local targets must be
-checked out nowhere. Integration conflicts leave checkouts and destination
-refs intact. Inspect the failure and resolve it through the owning lane.
+checked out nowhere, including the delivering lane's own worktree. Integration
+conflicts leave checkouts and destination refs intact. Inspect the failure and resolve it through the owning lane.
 Legacy `--deliver-remote`, `--deliver-branch` and `--open-pr` remain available
 as an alternative to `--deliver`.
 

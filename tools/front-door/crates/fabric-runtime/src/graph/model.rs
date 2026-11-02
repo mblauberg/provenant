@@ -833,6 +833,9 @@ pub struct Replay<'a> {
     /// The delivery branch a continuing writer must push to. The host refuses
     /// a worktree on any other branch.
     pub branch: Option<&'a str>,
+    /// An integration may only fast-forward its target onto the round's head.
+    /// It never merges, so a target that moved refuses the delivery.
+    pub fast_forward_only: bool,
     /// Reference to the accepted attempt, once saved.
     pub stored_ref: Option<&'a str>,
     /// Actor to submit under when no reference was saved.

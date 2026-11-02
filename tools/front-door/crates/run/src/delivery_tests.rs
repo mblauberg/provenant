@@ -1769,6 +1769,45 @@ fn local_integration_fast_forwards_merges_and_replays()
 }
 
 #[test]
+fn fast_forward_only_integration_advances_but_never_merges()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    fixture.git(&["branch", "integration"])?;
+    fixture.request =
+        HostDeliveryContext::destination(DeliveryMode::Integrate("integration".into()), "lane")?
+            .ok_or("destination")?;
+    fixture.request.fast_forward_only = true;
+    let host = fixture.prepare()?;
+    let rev = |fixture: &PrepareFixture, name: &str| {
+        host.command(
+            &fixture.writer.project,
+            "git",
+            &["rev-parse", name],
+            WriterDeliveryStage::Verify,
+        )
+    };
+    // A descendant of the target fast-forwards it.
+    fixture.commit(&fixture.writer.worktree, "round one")?;
+    let first = host.head(&fixture.writer)?;
+    host.integrate(&fixture.writer, &fixture.request, first)?;
+    assert_eq!(rev(&fixture, "integration")?, first.to_string());
+    // A head the target already contains integrates nothing and is not an error.
+    host.integrate(&fixture.writer, &fixture.request, first)?;
+    // The target moved elsewhere: the round is refused instead of merged.
+    fixture.commit(&fixture.writer.project, "someone else")?;
+    fixture.git(&["branch", "-f", "integration", "HEAD"])?;
+    let moved = rev(&fixture, "integration")?;
+    fixture.commit(&fixture.writer.worktree, "round two")?;
+    let second = host.head(&fixture.writer)?;
+    assert!(matches!(
+        host.integrate(&fixture.writer, &fixture.request, second),
+        Err(RunError::Delivery(WriterDeliveryStage::Integrate))
+    ));
+    assert_eq!(rev(&fixture, "integration")?, moved);
+    Ok(())
+}
+
+#[test]
 fn local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut fixture = PrepareFixture::new()?;
@@ -2399,6 +2438,7 @@ impl PrepareFixture {
                 remote: "origin".into(),
                 branch: "published/lane".into(),
                 open_pr: false,
+                fast_forward_only: false,
             },
         };
         fixture.git(&["init", "-q"])?;
@@ -3357,6 +3397,7 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
         remote: "origin".into(),
         branch: "published/lane".into(),
         open_pr: false,
+        fast_forward_only: false,
     };
     let host = host.prepare(&writer, &request)?;
     assert!(
@@ -3988,6 +4029,7 @@ fn host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch()
         remote: "origin".into(),
         branch: "published/lane".into(),
         open_pr: false,
+        fast_forward_only: false,
     };
     let host = host.prepare(&writer, &request)?;
     std::fs::write(lane.join("change"), "a repair on a stale base")?;

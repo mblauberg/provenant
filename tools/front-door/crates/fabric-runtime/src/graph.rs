@@ -1256,6 +1256,47 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         journal.save(&checkpoint).map_err(GraphError::Journal)?;
                         break;
                     }
+                    // A loop round integrates by fast-forward from the head the
+                    // previous writer in its worktree delivered, so a target
+                    // that moved since then stops the loop before the round.
+                    if node.round.is_some()
+                        && plans::writer(node)
+                        && matches!(
+                            node.delivery,
+                            Some(provenant_records::run::DeliveryMode::Integrate(_))
+                        )
+                        && checkpoint.nodes[node_index].attempts.is_empty()
+                        && let Some(delivered) = plan.nodes[..node_index]
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .filter(|(_, earlier)| {
+                                plans::writer(earlier)
+                                    && earlier.worktree == node.worktree
+                                    && matches!(
+                                        earlier.delivery,
+                                        Some(provenant_records::run::DeliveryMode::Integrate(_))
+                                    )
+                            })
+                            .find_map(|(index, _)| {
+                                checkpoint.nodes[index]
+                                    .outputs
+                                    .as_ref()
+                                    .and_then(|outputs| outputs.commit.clone())
+                            })
+                        && let Some(head) = owner.integration_head().map_err(GraphError::Run)?
+                        && head != delivered
+                    {
+                        let progress = &mut checkpoint.nodes[node_index];
+                        progress.state = NodeState::Failed;
+                        progress.advance_error_code = Some("integration_head_moved".into());
+                        progress.advance_error = Some(format!(
+                            "node {}: the integration branch moved from the delivered {delivered} to {head}; a loop round only fast-forwards it, so rerun the graph",
+                            node.id
+                        ));
+                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        break;
+                    }
                     if node.continues.is_some()
                         && land::continued_branch(node, &checkpoint, &positions).is_none()
                     {
@@ -1372,6 +1413,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     Replay {
                         delivery: land::delivery(node),
                         branch: continued.as_deref(),
+                        fast_forward_only: node.round.is_some(),
                         stored_ref: stored_ref.as_deref(),
                         launch_actor: &launch_actor,
                     },
