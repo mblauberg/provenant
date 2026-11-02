@@ -147,8 +147,11 @@ final class ConsoleModel {
 }
 
 extension ConsoleModel {
-    /// The board, tree or overview row for an attempt, for its title and state.
-    func lane(_ id: String) -> BoardLane? {
-        runs.board.value?.lanes.first { $0.id == id } ?? overview.reader.value?.overview.lanes.first { $0.id == id }
+    /// The title and state for an attempt, from its board row or else its overview row.
+    func heading(_ id: String) -> (title: String, state: String, outcome: String?)? {
+        if let lane = runs.board.value?.lanes.first(where: { $0.id == id }) {
+            return (lane.title, lane.metadata.attempt.state.state, lane.metadata.attempt.state.outcome)
+        }
+        return overview.reader.value?.overview.lanes.first { $0.id == id }.map { ($0.title, $0.state, nil) }
     }
 }

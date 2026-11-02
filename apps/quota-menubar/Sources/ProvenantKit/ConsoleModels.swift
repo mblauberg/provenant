@@ -225,11 +225,27 @@ public struct NeedsYouEntry: Decodable, Equatable, Sendable, Identifiable {
 }
 
 /// `console overview` (data version 2). A null count means the CLI could not count it.
+/// An active or attention-needing lane in `console overview`. This is not a
+/// board row: the overview carries only identity, label and coarse state.
+public struct OverviewLane: Decodable, Equatable, Sendable, Identifiable {
+    public let projectId: String
+    public let projectLabel: String?
+    public let runId: String
+    public let taskId: String?
+    public let attemptId: String
+    public let taskLabel: String?
+    /// `queued`, `starting`, `running`, `settling` or `terminal`.
+    public let state: String
+    public let attention: Bool
+    public var id: String { attemptId }
+    public var title: String { taskLabel ?? "Attempt \(attemptId.prefix(8))" }
+}
+
 public struct Overview: Decodable, Equatable, Sendable {
     public let counts: OverviewCounts
     public let coverage: OverviewCoverage
     public let needsYou: [NeedsYouEntry]
-    public let lanes: [BoardLane]
+    public let lanes: [OverviewLane]
 }
 
 public struct ProjectEntry: Decodable, Equatable, Sendable, Identifiable {

@@ -5,13 +5,14 @@ import SwiftUI
 /// One attempt in a list: its title, state and, when known, route and what it waits for.
 struct LaneRow: View {
     let title: String
-    let state: AttemptState
+    let state: String
+    let outcome: String?
     let route: Route?
     let waiting: String?
     let attention: Bool
     var depth = 0
 
-    private var style: StatusStyle { .attempt(state: state.state, outcome: state.outcome) }
+    private var style: StatusStyle { .attempt(state: state, outcome: outcome) }
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: Space.small) {
@@ -44,12 +45,19 @@ struct LaneRow: View {
 
 extension LaneRow {
     init(_ lane: BoardLane, depth: Int = 0) {
-        self.init(title: lane.title, state: lane.metadata.attempt.state, route: lane.metadata.attempt.requestedRoute,
+        let state = lane.metadata.attempt.state
+        self.init(title: lane.title, state: state.state, outcome: state.outcome, route: lane.metadata.attempt.requestedRoute,
                   waiting: lane.wait?.waitingFor, attention: lane.attention, depth: depth)
     }
 
+    init(_ lane: OverviewLane) {
+        self.init(title: lane.title, state: lane.state, outcome: nil, route: nil,
+                  waiting: lane.projectLabel, attention: lane.attention)
+    }
+
     init(_ node: TreeNode) {
-        self.init(title: node.metadata.attempt.title ?? "Attempt \(node.id.prefix(8))", state: node.metadata.attempt.state,
+        let state = node.metadata.attempt.state
+        self.init(title: node.metadata.attempt.title ?? "Attempt \(node.id.prefix(8))", state: state.state, outcome: state.outcome,
                   route: node.metadata.attempt.requestedRoute, waiting: nil, attention: false, depth: node.depth)
     }
 }

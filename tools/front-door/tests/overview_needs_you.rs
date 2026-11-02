@@ -258,6 +258,28 @@ fn overview_needs_you() -> Result {
     let lane = &with_lane["data"]["lanes"][0];
     assert_eq!(lane["task_label"], "Review changes");
     assert_eq!(lane["project_label"], "project");
+    // The console app decodes exactly these keys (ProvenantKit `OverviewLane`);
+    // an overview lane is not a board row.
+    let mut keys: Vec<&str> = lane
+        .as_object()
+        .ok_or("overview lane is not an object")?
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "attempt_id",
+            "attention",
+            "project_id",
+            "project_label",
+            "run_id",
+            "state",
+            "task_id",
+            "task_label"
+        ]
+    );
     assert_eq!(with_lane["data"]["counts"]["running"], 1);
     assert!(!with_lane.to_string().contains("PRIVATE PROMPT MARKER"));
 

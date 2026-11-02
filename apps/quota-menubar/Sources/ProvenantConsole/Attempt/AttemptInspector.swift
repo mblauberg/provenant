@@ -30,14 +30,14 @@ struct AttemptInspector: View {
 
     private func found(_ detail: AttemptDetail) -> some View {
         let now = console.inbox.displayNow
-        let lane = console.lane(detail.laneId.attemptId)
+        let heading = console.heading(detail.laneId.attemptId)
         return ScrollView {
             VStack(alignment: .leading, spacing: Space.large) {
                 VStack(alignment: .leading, spacing: Space.tight) {
-                    Text(lane?.title ?? "Attempt \(detail.laneId.attemptId.prefix(8))")
+                    Text(heading?.title ?? "Attempt \(detail.laneId.attemptId.prefix(8))")
                         .font(.title3.weight(.semibold)).accessibilityAddTraits(.isHeader).textSelection(.enabled)
-                    if let state = lane?.metadata.attempt.state {
-                        StatusLabel(.attempt(state: state.state, outcome: state.outcome))
+                    if let heading {
+                        StatusLabel(.attempt(state: heading.state, outcome: heading.outcome))
                     }
                 }
                 routes(detail)

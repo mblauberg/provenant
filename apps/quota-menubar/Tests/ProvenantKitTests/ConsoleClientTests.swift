@@ -10,6 +10,13 @@ final class ConsoleClientTests: XCTestCase {
     }
 
     func testOverviewKeepsNullCountsUnknownAndNamesCoverage() async throws {
+        let (active, _) = client([(["console", "overview"], "console-overview-active", 0)])
+        let lanes = try await active.overview().lanes
+        XCTAssertEqual(lanes.map(\.title), ["Implement console overview", "Review the change set", "Run the whole test suite"])
+        XCTAssertEqual(lanes.last?.state, "terminal")
+        XCTAssertEqual(lanes.last?.attention, true)
+        XCTAssertEqual(lanes.first?.projectLabel, "provenant")
+
         let (console, _) = client([(["console", "overview"], "console-overview", 0)])
         let overview = try await console.overview()
         XCTAssertNil(overview.counts.running)

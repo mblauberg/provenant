@@ -56,6 +56,9 @@ struct RunsView: View {
             let nodes = RunsModel.ordered(tree.nodes)
             List(selection: $runs.selection) {
                 if tree.truncated { Notice("The tree is limited to the first \(tree.nodes.count) attempts.", tone: .neutral) }
+                if let nested = tree.coverage?.nestedRuns, nested != "complete" {
+                    Notice("Some nested runs couldn’t be read, so this tree may be incomplete.", tone: .neutral)
+                }
                 ForEach(nodes) { node in LaneRow(node).tag(node.id) }
             }
             .listStyle(.inset)
