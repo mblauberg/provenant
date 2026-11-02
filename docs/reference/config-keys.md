@@ -452,6 +452,55 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 
 ```json
 {
+  "host_plan_settings": {
+    "path": "domains.fabric.plan",
+    "settings": {
+      "auto.acceptance_items": {
+        "default": "6",
+        "effect": "`auto` turns planning on when the subject lists more acceptance items than this.",
+        "min": 1,
+        "type": "int"
+      },
+      "auto.batch_issues": {
+        "default": "2",
+        "effect": "`auto` turns planning on when one batch names at least this many issues.",
+        "min": 1,
+        "type": "int"
+      },
+      "auto.write_crates": {
+        "default": "2",
+        "effect": "`auto` turns planning on when the subject's write scope touches more crates than this.",
+        "min": 1,
+        "type": "int"
+      },
+      "lane_deadline_seconds": {
+        "default": "3600",
+        "effect": "Longest wall-clock budget a planner may give one planned lane. A larger budget refuses the plan before admission.",
+        "max": 14400,
+        "min": 60,
+        "type": "int"
+      },
+      "max_nodes": {
+        "default": "24",
+        "effect": "Most nodes and pattern instances one plan may emit, within the host graph limits.",
+        "max": 512,
+        "min": 1,
+        "type": "int"
+      },
+      "mode": {
+        "allowed": "auto, on or off",
+        "default": "auto",
+        "effect": "Default for `provenant run --preset --plan`. on puts a principal planner node in front of the preset graph so it can shape the graph from the preset's pattern catalogue; off keeps the preset's static graph; auto decides from the subject size. `--explain` prints the decision and its reason.",
+        "type": "enum"
+      },
+      "route": {
+        "allowed": "a pool alias",
+        "default": "principal",
+        "effect": "Route alias the planner node runs on. When it is unavailable the run falls back to the preset's deterministic defaults and records the reason; a weaker planner is never substituted.",
+        "type": "string"
+      }
+    }
+  },
   "presets": {
     "balanced": {
       "description": "Today's behaviour: every knob at its registry default.",
