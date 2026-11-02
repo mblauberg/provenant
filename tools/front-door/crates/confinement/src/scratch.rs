@@ -170,6 +170,8 @@ mod tests {
             SystemClock.mono_now(),
             provenant_core::DurationMicros::from_micros(100_000),
         );
+        // Wall-clock bound on the real lock wait, not the injected clock.
+        #[allow(clippy::disallowed_methods)]
         let started = std::time::Instant::now();
         assert!(
             ensure_with_budget(&fixture.repo, &SystemClock, &CancelToken::new(), budget).is_err()

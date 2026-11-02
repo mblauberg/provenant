@@ -13,11 +13,13 @@ use graph_human::graph_summary;
 use graph_status::{graph_snapshot, graph_status_elapsed};
 pub use peer::{hosts, peer};
 #[cfg(test)]
+#[allow(unused_imports)] // unused where integration tests include this file
 pub(crate) use preset_graph::ScratchPreparationError;
 #[allow(unused_imports)]
 pub(crate) use preset_graph::publish_preset_graph;
 pub(crate) use preset_graph::run_preset_graph;
 #[cfg(test)]
+#[allow(unused_imports)] // unused where integration tests include this file
 pub(crate) use preset_graph::{PreparedScratch, retry_scratch_poll, scratch_prepare_error_message};
 
 #[cfg(test)]
