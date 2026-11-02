@@ -298,7 +298,8 @@ pub struct GcSettings {
     pub alert_below: Option<String>,
     /// Executables whose unreadable cwd may be excused by the worker census.
     /// Entries are exact canonical paths or canonical directory prefixes
-    /// ending in `/`; they apply only to processes with system uids.
+    /// ending in `/` (`/private/var`, not `/var`); they apply only to
+    /// processes with system uids.
     pub census_excused_executables: Vec<String>,
     pub projects: BTreeMap<String, ProjectGcSettings>,
 }
@@ -375,20 +376,20 @@ impl GcSettings {
     }
 }
 
+/// An entry is an absolute path with no empty, `.` or `..` segments and no
+/// control characters, optionally ending in one `/` to mean a directory prefix.
+/// It must already be canonical (`/private/var`, not `/var`): the census
+/// compares it with the kernel's executable path without resolving links.
 fn valid_census_executable_entry(entry: &str) -> bool {
-    let path = entry.strip_suffix('/').unwrap_or(entry);
-    let path = Path::new(path);
-    path.is_absolute()
-        && path.file_name().is_some()
+    let Some(path) = entry.strip_prefix('/') else {
+        return false;
+    };
+    let path = path.strip_suffix('/').unwrap_or(path);
+    !path.is_empty()
+        && !entry.chars().any(char::is_control)
         && path
-            .components()
-            .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
-        && path
-            .components()
-            .collect::<std::path::PathBuf>()
-            .as_os_str()
-            == std::ffi::OsStr::new(path.as_os_str())
-        && !entry.bytes().any(|byte| byte.is_ascii_control())
+            .split('/')
+            .all(|segment| !matches!(segment, "" | "." | ".."))
 }
 
 fn default_free_floor(total_bytes: u64) -> u64 {
@@ -471,8 +472,17 @@ mod tests {
         for entry in [
             "relative/daemon",
             "/usr/bin/../libexec/daemon",
+            "/usr/./libexec/daemon",
+            "/usr/libexec/.",
+            "/usr/libexec/..",
             "/usr/libexec//daemon",
+            "/usr/libexec/daemon//",
+            "/usr/libexec/dae\u{0}mon",
+            "/usr/libexec/dae\nmon",
+            "/usr/libexec/dae\u{85}mon",
+            "",
             "/",
+            "//",
         ] {
             assert!(!super::valid_census_executable_entry(entry), "{entry}");
         }

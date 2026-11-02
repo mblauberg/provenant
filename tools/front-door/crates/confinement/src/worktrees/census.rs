@@ -356,7 +356,7 @@ pub(super) fn observe_worker_holders_with_audit(
         .collect();
     let mut holders = BTreeMap::new();
     let mut details = BTreeMap::new();
-    let mut excused_details = BTreeMap::new();
+    let mut excused_details: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
     if roots.is_empty() {
         return (states, holders, details);
     }
@@ -434,8 +434,7 @@ pub(super) fn observe_worker_holders_with_audit(
         let mut occupancy_gap = None;
         if !matches!(cwd, NativeCwd::Gone) {
             let policy_exception = matches!(&cwd, NativeCwd::PolicyExcluded(excusal)
-                if excusal.uids.all_system() && roots.iter().all(|root| std::fs::metadata(root)
-                    .is_ok_and(|metadata| excusal.uids.all_differ_from(metadata.uid()))));
+                if excusal_applies(excusal, roots));
             let before = observer.observe(pid);
             let occupancy = cwd_observer.occupancy(pid);
             let after = observer.observe(pid);
@@ -511,17 +510,14 @@ pub(super) fn observe_worker_holders_with_audit(
                 // Accepted risk for sealed Apple code, applied per root owner.
                 // All credentials must be system accounts and foreign to every
                 // candidate root, including the real uid of a setuid tool.
-                let excluded = excusal.uids.all_system()
-                    && roots.iter().all(|root| {
-                        std::fs::metadata(root)
-                            .is_ok_and(|metadata| excusal.uids.all_differ_from(metadata.uid()))
-                    });
-                if !excluded {
+                if !excusal_applies(&excusal, roots) {
                     unplaceable(
                         Some(pid),
-                        Some(
-                            "real/effective/saved system uids foreign to every root owner required",
-                        ),
+                        Some(if executable_inside_roots(&excusal, roots) {
+                            "configured excused executable outside every candidate root required"
+                        } else {
+                            "real/effective/saved system uids foreign to every root owner required"
+                        }),
                     );
                     record_unknown_all(
                         &mut states,
@@ -529,14 +525,18 @@ pub(super) fn observe_worker_holders_with_audit(
                         &process_detail(cwd_observer, pid, "cwd unreadable"),
                     );
                 } else if let Some(entry) = excusal.configured_entry {
+                    let detail = process_detail(
+                        cwd_observer,
+                        pid,
+                        &format!(
+                            "cwd unreadable; excused by gc.census_excused_executables entry={entry:?}"
+                        ),
+                    );
                     for root in roots {
-                        excused_details.entry(root.clone()).or_insert_with(|| {
-                            process_detail(
-                                cwd_observer,
-                                pid,
-                                &format!("cwd unreadable; excused by gc.census_excused_executables entry={entry:?}"),
-                            )
-                        });
+                        excused_details
+                            .entry(root.clone())
+                            .or_default()
+                            .push(detail.clone());
                     }
                 }
             }
@@ -556,9 +556,13 @@ pub(super) fn observe_worker_holders_with_audit(
                         &process_detail(
                             cwd_observer,
                             pid,
-                            &format!(
-                                "cwd unreadable; policy_condition={condition}; config_key=gc.census_excused_executables (requires all real/effective/saved uids below 500)"
-                            ),
+                            &if failure.configurable {
+                                format!(
+                                    "cwd unreadable; policy_condition={condition}; config_key=gc.census_excused_executables"
+                                )
+                            } else {
+                                format!("cwd unreadable; policy_condition={condition}")
+                            },
                         ),
                     );
                 }
@@ -647,9 +651,9 @@ pub(super) fn observe_worker_holders_with_audit(
             "process listing truncated or incomplete",
         );
     }
-    for (root, detail) in excused_details {
+    for (root, excused) in excused_details {
         if states.get(&root) == Some(&WorkerState::Free) {
-            details.entry(root).or_insert(detail);
+            details.entry(root).or_insert(excused.join("; "));
         }
     }
     (states, holders, details)
@@ -661,6 +665,35 @@ pub(super) fn observe_worker_holders_with_audit(
 /// ancestor and re-append the rest. A process inside a deleted subdirectory of
 /// a root therefore still counts as inside that root. Any other failure is
 /// unobservable.
+/// An excusal holds when every credential is a system account foreign to each
+/// candidate root's owner and a configured executable lies outside every root.
+fn excusal_applies(
+    excusal: &provenant_os::pid::UnreadablePolicyExcusal,
+    roots: &[PathBuf],
+) -> bool {
+    excusal.uids.all_system()
+        && !executable_inside_roots(excusal, roots)
+        && roots.iter().all(|root| {
+            std::fs::metadata(root)
+                .is_ok_and(|metadata| excusal.uids.all_differ_from(metadata.uid()))
+        })
+}
+
+fn executable_inside_roots(
+    excusal: &provenant_os::pid::UnreadablePolicyExcusal,
+    roots: &[PathBuf],
+) -> bool {
+    excusal.executable.as_ref().is_some_and(|executable| {
+        let canonical = std::fs::canonicalize(executable).ok();
+        roots.iter().any(|root| {
+            executable.starts_with(root)
+                || canonical
+                    .as_ref()
+                    .is_some_and(|canonical| canonical.starts_with(root))
+        })
+    })
+}
+
 pub(super) fn canonical_cwd(path: &Path) -> Option<PathBuf> {
     let mut existing = path;
     let mut rest = Vec::new();

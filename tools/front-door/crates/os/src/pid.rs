@@ -181,6 +181,9 @@ pub struct UnreadablePolicyFailure {
     /// None means the built-in checks passed, even if a listing-specific check
     /// failed. Native acceptance must reject an unplaceable image in that case.
     pub builtin_condition: Option<&'static str>,
+    /// True only when a system-uid process failed on its executable path or
+    /// volume alone, which `gc.census_excused_executables` could excuse.
+    pub configurable: bool,
 }
 
 /// Evidence accepted for a process whose cwd query was refused.
@@ -189,6 +192,8 @@ pub struct UnreadablePolicyExcusal {
     pub uids: ProcessUids,
     /// The exact configured entry that matched, when host GC policy excused it.
     pub configured_entry: Option<String>,
+    /// The kernel-reported executable path, when it decided a configured match.
+    pub executable: Option<std::path::PathBuf>,
 }
 
 impl From<&'static str> for UnreadablePolicyFailure {
@@ -196,6 +201,7 @@ impl From<&'static str> for UnreadablePolicyFailure {
         Self {
             condition,
             builtin_condition: Some(condition),
+            configurable: false,
         }
     }
 }
@@ -272,6 +278,7 @@ pub trait CwdObserver: Send + Sync {
             .map(|uids| UnreadablePolicyExcusal {
                 uids,
                 configured_entry: None,
+                executable: None,
             })
             .ok_or_else(|| "image policy evidence unavailable".into())
     }

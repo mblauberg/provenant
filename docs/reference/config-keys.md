@@ -43,7 +43,7 @@ Set these in `[gc]` in the host configuration. Omit a key for its default.
 
 | Key | Default | Effect |
 |---|---|---|
-| `census_excused_executables` | [] | Excuse an unreadable process cwd only when all real, effective and saved uids are system uids below 500 and the executable matches one entry. Census detail records the matching entry. User-uid processes remain Unknown. An example CoreSimulator prefix is documented in docs/specs/disk.md; it is not a bundled default without verified Apple signing evidence. (exact canonical absolute executable paths or canonical directory prefixes ending in /). |
+| `census_excused_executables` | [] | Excuse an unreadable process cwd only when all real, effective and saved uids are system uids below 500 and the executable matches one entry, lies outside every candidate worktree root and has a root-owned, non-writable ancestor chain. Census detail records each excused process and its matching entry. User-uid processes remain Unknown. An example CoreSimulator prefix is documented in docs/specs/disk.md; it is not a bundled default without verified Apple signing evidence. (exact canonical absolute executable paths or canonical directory prefixes ending in /, with no . or .. segments or control characters (/private/var, not /var)). |
 
 ## Host store settings
 
