@@ -590,6 +590,124 @@ cat "$HOME/agy-usage"
     rig.assert_legacy_unchanged()
 }
 
+/// A second agy account signed in under its own `HOME` registers and probes as
+/// a separate account: its own key, its own quota record and its own row.
+#[test]
+fn a_second_agy_account_is_a_separate_quota_row() -> Result {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let mut rig = quota_rig()?;
+    support::clear_accounts(&rig)?;
+    let bin = rig.root.join("bin");
+    fs::create_dir(&bin)?;
+    let homes = rig.root.join("agy-homes");
+    let agy = bin.join("agy");
+    fs::write(
+        &agy,
+        format!(
+            r#"#!/bin/sh
+echo "$HOME" >> "{}"
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--log-file" ]; then shift; log=$1; fi
+    shift
+done
+printf 'OAuth: authenticated successfully as %s\n' "$(cat "$HOME/agy-email")" > "$log"
+cat "$HOME/agy-usage"
+"#,
+            homes.display()
+        ),
+    )?;
+    fs::set_permissions(&agy, fs::Permissions::from_mode(0o700))?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../crates/providers/src/quota/fixtures/agy.json"
+    ))?;
+    let second = rig.home.join(".agy-second");
+    fs::create_dir_all(second.join("Library/Keychains"))?;
+    fs::write(second.join("Library/Keychains/login.keychain-db"), "")?;
+    for (directory, email) in [
+        (&rig.home, "one@example.test"),
+        (&second, "two@example.test"),
+    ] {
+        fs::write(directory.join("agy-email"), email)?;
+        fs::write(
+            directory.join("agy-usage"),
+            serde_json::to_vec(&fixture["payload"])?,
+        )?;
+    }
+    let mut keys = Vec::new();
+    for (label, directory) in [("first", &rig.home), ("second", &second)] {
+        let out = rig.command(&[
+            "accounts",
+            "register",
+            label,
+            "--adapter",
+            "agy",
+            "--directory",
+            directory.to_str().ok_or("directory")?,
+            "--json",
+        ])?;
+        assert_eq!(
+            code(&out),
+            0,
+            "{}",
+            String::from_utf8_lossy(&out.stdout.bytes)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+        keys.push(
+            value["data"]["entries"][format!("agy-{label}")]["key"]
+                .as_str()
+                .ok_or("account key")?
+                .to_owned(),
+        );
+    }
+    assert_ne!(keys[0], keys[1]);
+    // Registration probed each account under its own HOME.
+    let probed = |path: &std::path::Path| -> Result<usize> {
+        let path = fs::canonicalize(path)?;
+        Ok(fs::read_to_string(&homes)?
+            .lines()
+            .filter(|line| fs::canonicalize(line).is_ok_and(|home| home == path))
+            .count())
+    };
+    assert_eq!(probed(&rig.home)?, 1);
+    assert_eq!(probed(&second)?, 1);
+    assert_eq!(
+        code(&rig.command(&["quota", "tick", "--adapter", "agy", "--json"])?),
+        0
+    );
+    // The quota probe ran once more under each account's own HOME.
+    assert_eq!(probed(&rig.home)?, 2);
+    assert_eq!(probed(&second)?, 2);
+    let out = rig.command(&["quota", "show", "--json"])?;
+    assert_eq!(
+        code(&out),
+        0,
+        "{}",
+        String::from_utf8_lossy(&out.stdout.bytes)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+    let rows: Vec<_> = report["data"]["accounts"]
+        .as_array()
+        .ok_or("rows")?
+        .iter()
+        .filter(|row| row["account"]["adapter"] == "agy")
+        .collect();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    let shown: std::collections::BTreeSet<_> = rows
+        .iter()
+        .map(|row| row["account"]["account_key"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(shown, keys.iter().map(String::as_str).collect());
+    for key in &keys {
+        assert!(rig.state.join("quota").join(key).join("agy.json").is_file());
+    }
+    Ok(())
+}
+
 #[test]
 fn registered_accounts_have_distinct_quota_keys() -> Result {
     use std::fs;

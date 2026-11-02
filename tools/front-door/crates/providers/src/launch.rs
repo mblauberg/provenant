@@ -112,10 +112,14 @@ pub(crate) fn admit(
     }
     if let Some(account) = input.account {
         account.validate_route(input.route)?;
-    } else if provenant_records::AdapterSpec::get(adapter)
-        .is_some_and(|spec| spec.registered_account)
-        && input.route.account_key.is_some()
-    {
+    } else if provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
+        spec.registered_account
+            && input
+                .route
+                .account_key
+                .as_deref()
+                .is_some_and(|key| !spec.is_unregistered_local(key))
+    }) {
         return Err(ProviderError::UnknownIdentity);
     }
     if let Some(continuation) = input.continuation {

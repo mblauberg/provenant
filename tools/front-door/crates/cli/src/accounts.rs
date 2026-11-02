@@ -118,9 +118,10 @@ pub fn resolve(settings: &Settings, account: &str) -> Result<String, String> {
     }
 }
 /// Account configuration directories, in entry order. Only adapters whose
-/// accounts are separate configuration directories (`registered_account`:
+/// accounts are separate configuration directories (`account_config_dir`:
 /// Claude and Codex) qualify. For the others the registered directory is an
-/// identity or ledger location, not where the client reads skills and settings.
+/// identity, ledger or keychain location, not where the client reads skills and
+/// settings.
 /// Directories are canonical (symlinks and `..` resolved), and two
 /// registrations of one directory count once.
 pub fn homes(settings: &Settings) -> Vec<provenant_config::AccountHome> {
@@ -130,7 +131,7 @@ pub fn homes(settings: &Settings) -> Vec<provenant_config::AccountHome> {
         .values()
         .filter_map(|entry| {
             let spec = provenant_records::AdapterSpec::get(&entry.adapter)?;
-            if !spec.registered_account {
+            if !spec.account_config_dir {
                 return None;
             }
             let home = provenant_config::shared_settings::canonical(&entry.directory);
@@ -199,6 +200,9 @@ pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Setting
             return Err(
                 "Claude registration requires its fixed ~/.claude-<label> directory".into(),
             );
+        }
+        if adapter == "agy" {
+            check_agy_directory(&directory, home)?;
         }
         let executable = crate::run::provider_executable(adapter)?;
         // The probe root must exist first. The config lock is taken later and
@@ -281,6 +285,23 @@ pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Setting
         });
     }
     Ok(settings)
+}
+
+/// An agy registration is either the user's own login (`home` itself, on the
+/// shared login keychain) or an isolated account whose directory is its own
+/// `HOME` and holds its own keychain as a regular file. Any other directory is
+/// refused up front, and detection derives the same mode from the directory, so
+/// a keychain that vanishes between this check and the probe is refused too
+/// rather than probed under the shared login and recorded under this label.
+fn check_agy_directory(directory: &Path, home: &Path) -> Result<(), String> {
+    provenant_providers::agy::account_keychain(directory, home)
+        .map(|_| ())
+        .map_err(|error| {
+            format!(
+                "{error}; or register the default login with --directory {}",
+                home.display()
+            )
+        })
 }
 
 fn headline_name(value: provenant_quota::Headline) -> &'static str {
@@ -577,6 +598,35 @@ mod tests {
                 ("codex", home.join(".codex-alt")),
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn agy_registration_requires_an_isolated_keychain_file_or_the_home_login()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().canonicalize()?.join("u");
+        std::fs::create_dir(&home)?;
+        let second = home.join(".agy-second");
+        let keychains = second.join("Library/Keychains");
+        std::fs::create_dir_all(&keychains)?;
+        // The user's own login registers without an isolated keychain.
+        assert!(check_agy_directory(&home, &home).is_ok());
+        // An isolated directory with no keychain is refused with the requirement.
+        let refused = check_agy_directory(&second, &home).unwrap_err();
+        assert!(refused.contains("login.keychain-db"), "{refused}");
+        assert!(
+            refused.contains("create the isolated keychain"),
+            "{refused}"
+        );
+        // A symlinked keychain is another file's, not the account's own.
+        let elsewhere = home.join("elsewhere.keychain-db");
+        std::fs::write(&elsewhere, b"")?;
+        std::os::unix::fs::symlink(&elsewhere, keychains.join("login.keychain-db"))?;
+        assert!(check_agy_directory(&second, &home).is_err());
+        std::fs::remove_file(keychains.join("login.keychain-db"))?;
+        std::fs::write(keychains.join("login.keychain-db"), b"")?;
+        assert!(check_agy_directory(&second, &home).is_ok());
         Ok(())
     }
 

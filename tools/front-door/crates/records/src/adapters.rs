@@ -40,6 +40,10 @@ pub struct AdapterSpec {
     pub name: &'static str,
     pub binary: &'static str,
     pub registered_account: bool,
+    /// A registered account's directory is the client's configuration
+    /// directory, which account settings sync keeps in step. False where it is
+    /// something else: agy's is the account's keychain home.
+    pub account_config_dir: bool,
     pub local_login: bool,
     pub argv_prompt: bool,
     pub authentication: Option<&'static str>,
@@ -141,6 +145,13 @@ impl std::fmt::Display for UnsupportedLaunch {
 impl std::error::Error for UnsupportedLaunch {}
 
 impl AdapterSpec {
+    /// Whether `key` names the synthetic entry of an unregistered local login.
+    /// Only an adapter that has both registered accounts and a local login (agy)
+    /// has one: it runs on the user's own login, so nothing is registered, probed
+    /// or pinned, and registered keys (`agy-<fingerprint>`) never collide with it.
+    pub fn is_unregistered_local(&self, key: &str) -> bool {
+        self.registered_account && self.local_login && key == "local"
+    }
     /// Check a request against the declared table before any side effect.
     pub fn check_launch(&self, request: &LaunchRequest<'_>) -> Result<(), UnsupportedLaunch> {
         let caps = &self.launch;
@@ -194,6 +205,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         name: "claude",
         binary: "claude",
         registered_account: true,
+        account_config_dir: true,
         local_login: false,
         argv_prompt: false,
         authentication: None,
@@ -227,6 +239,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         name: "codex",
         binary: "codex",
         registered_account: true,
+        account_config_dir: true,
         local_login: false,
         argv_prompt: false,
         authentication: Some("login"),
@@ -260,6 +273,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         name: "cursor",
         binary: "cursor-agent",
         registered_account: false,
+        account_config_dir: false,
         local_login: true,
         argv_prompt: true,
         authentication: Some("login"),
@@ -292,7 +306,8 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         id: Harness::Agy,
         name: "agy",
         binary: "agy",
-        registered_account: false,
+        registered_account: true,
+        account_config_dir: false,
         local_login: true,
         argv_prompt: true,
         authentication: Some("keychain"),
@@ -326,6 +341,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         name: "opencode",
         binary: "opencode",
         registered_account: false,
+        account_config_dir: false,
         local_login: true,
         argv_prompt: false,
         authentication: None,
@@ -359,6 +375,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         name: "command",
         binary: "",
         registered_account: false,
+        account_config_dir: false,
         local_login: false,
         argv_prompt: false,
         authentication: None,
@@ -394,6 +411,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         name: "host-native",
         binary: "",
         registered_account: false,
+        account_config_dir: false,
         local_login: false,
         argv_prompt: false,
         authentication: None,
@@ -487,6 +505,37 @@ mod tests {
             );
         }
         assert!(AdapterSpec::get("unknown").is_none());
+    }
+}
+
+#[cfg(test)]
+mod account_tests {
+    use super::*;
+
+    #[test]
+    fn only_registered_adapters_declare_config_directory_accounts() {
+        for spec in ADAPTER_SPECS {
+            assert!(
+                !spec.account_config_dir || spec.registered_account,
+                "{}",
+                spec.name
+            );
+        }
+        assert!(AdapterSpec::get("codex").unwrap().account_config_dir);
+        assert!(!AdapterSpec::get("agy").unwrap().account_config_dir);
+    }
+
+    #[test]
+    fn only_agy_has_an_unregistered_local_account() {
+        for spec in ADAPTER_SPECS {
+            assert_eq!(
+                spec.is_unregistered_local("local"),
+                spec.name == "agy",
+                "{}",
+                spec.name
+            );
+            assert!(!spec.is_unregistered_local("agy-google-fixture"));
+        }
     }
 }
 
