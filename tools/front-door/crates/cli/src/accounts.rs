@@ -621,7 +621,10 @@ mod tests {
         // An isolated directory with no keychain is refused with the requirement.
         let refused = check_agy_directory(&second, &home).unwrap_err();
         assert!(refused.contains("login.keychain-db"), "{refused}");
-        assert!(refused.contains("create the isolated keychain"), "{refused}");
+        assert!(
+            refused.contains("create the isolated keychain"),
+            "{refused}"
+        );
         // A symlinked keychain is another file's, not the account's own.
         let elsewhere = home.join("elsewhere.keychain-db");
         std::fs::write(&elsewhere, b"")?;

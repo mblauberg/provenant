@@ -380,8 +380,8 @@ fn unregistered_agy_observes_on_its_local_login_without_an_identity_probe()
 /// the probe may not fall back to the shared login and accept its sign-in under
 /// the second account's key.
 #[test]
-fn agy_account_whose_isolated_keychain_vanished_is_refused() -> Result<(), Box<dyn std::error::Error>>
-{
+fn agy_account_whose_isolated_keychain_vanished_is_refused()
+-> Result<(), Box<dyn std::error::Error>> {
     use provenant_os::exec::{
         CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
     };

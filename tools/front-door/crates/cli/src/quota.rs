@@ -1965,8 +1965,8 @@ mod tests {
     }
 
     #[test]
-    fn agy_credential_metadata_watches_the_isolated_keychain() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn agy_credential_metadata_watches_the_isolated_keychain()
+    -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let directory = temp.path().join("agy-second");
         let registration = serde_json::from_value(serde_json::json!({
@@ -1974,7 +1974,11 @@ mod tests {
         }))?;
         let keychain = directory.join("Library/Keychains/login.keychain-db");
         let watched = credential_metadata(&registration, None).unwrap();
-        assert!(watched.iter().any(|m| m.path == keychain && m.stat.is_none()));
+        assert!(
+            watched
+                .iter()
+                .any(|m| m.path == keychain && m.stat.is_none())
+        );
         std::fs::create_dir_all(keychain.parent().unwrap())?;
         std::fs::write(&keychain, b"first")?;
         let created = credential_metadata(&registration, None).unwrap();
