@@ -165,7 +165,7 @@ impl TestRig {
         let git = fs::canonicalize(
             provenant_os::git::git_executable().ok_or("Git executable unavailable")?,
         )?;
-        let env = [
+        let mut env: Vec<(OsString, OsString)> = [
             ("HOME", home.clone()),
             ("XDG_CONFIG_HOME", root.join("config")),
             ("XDG_CACHE_HOME", root.join("cache")),
@@ -196,6 +196,10 @@ impl TestRig {
             .map(|(k, v)| (k.into(), v.into())),
         )
         .collect();
+        env.push((
+            provenant_supervisor::FIXTURE_OWNER_PID_ENV.into(),
+            std::process::id().to_string().into(),
+        ));
         let rig = Self {
             _temp: temp,
             root,

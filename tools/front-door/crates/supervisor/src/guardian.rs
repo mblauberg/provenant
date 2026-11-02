@@ -482,6 +482,10 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         lane_ports: message.lane_ports,
         secret_input: message.secret_input,
         priority: message.priority,
+        #[cfg(feature = "fixture")]
+        fixture_owner: std::env::var(crate::FIXTURE_OWNER_ENV)
+            .ok()
+            .and_then(|value| serde_json::from_str(&value).ok()),
     };
     driver.run(&argv, &env, &cwd, &message.stdin, message.capture, hooks)
 }
@@ -506,6 +510,8 @@ struct Driver<'a> {
     lane_ports: Option<provenant_os::lane_ports::Plan>,
     secret_input: Option<provenant_os::exec::SecretInput>,
     priority: u8,
+    #[cfg(feature = "fixture")]
+    fixture_owner: Option<ProcessIdentity>,
     spared: crate::census::SparingTracker,
     tracked: std::collections::BTreeSet<ProcessIdentity>,
     history: std::collections::BTreeSet<ProcessIdentity>,
@@ -857,6 +863,24 @@ impl Driver<'_> {
                 }
             }
             let cancel_due = last_cancel_ms.is_none_or(|last| now.saturating_sub(last) >= 100);
+            #[cfg(feature = "fixture")]
+            let fixture_owner_gone = self.fixture_owner.as_ref().is_some_and(|owner| {
+                match self.observer.observe(owner.pid) {
+                    ProcessObservation::Present(fact) => fact.identity != *owner,
+                    ProcessObservation::Absent => true,
+                    ProcessObservation::Unknown(_) => false,
+                }
+            });
+            #[cfg(feature = "fixture")]
+            let request = if fixture_owner_gone {
+                Some(machine::StopReason::ExplicitCancellation)
+            } else if cancel_due {
+                last_cancel_ms = Some(now);
+                self.read_cancel(&mut warnings, &mut omitted_warnings)
+            } else {
+                None
+            };
+            #[cfg(not(feature = "fixture"))]
             let request = if cancel_due {
                 last_cancel_ms = Some(now);
                 self.read_cancel(&mut warnings, &mut omitted_warnings)

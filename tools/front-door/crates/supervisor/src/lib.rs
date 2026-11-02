@@ -22,6 +22,11 @@ pub use guardian::ExitPublisher;
 /// submits successor lanes, so the handoff forwards it into the cleared guardian
 /// environment; the admission policy reads it.
 pub const STARTUP_SPACING_ENV: &str = "PROVENANT_TEST_STARTUP_SPACING_MS";
+/// Test process whose lifetime owns fixture-only guardians.
+#[cfg(feature = "fixture")]
+pub const FIXTURE_OWNER_PID_ENV: &str = "PROVENANT_TEST_FIXTURE_OWNER_PID";
+#[cfg(feature = "fixture")]
+pub(crate) const FIXTURE_OWNER_ENV: &str = "PROVENANT_TEST_FIXTURE_OWNER";
 pub use guardian::{
     ChildRegistry, DiskPressure, GuardianHooks, Holder, NestedChildStore, RegisteredChild,
     supervise,
