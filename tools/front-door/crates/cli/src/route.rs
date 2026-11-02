@@ -2233,6 +2233,11 @@ pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<S
                     Err(_) => return Ok::<_, EdgeError>(Some(refusals.join("; "))),
                 };
                 let model = ModelId::parse(&format!("{}/{}", route.adapter, route.model))?;
+                // The resolver ignores exclusions for a route that names one
+                // model, and returns it again: every candidate has been seen.
+                if excluded.contains(&model) {
+                    return Ok(Some(refusals.join("; ")));
+                }
                 let pools = context.catalogue.admission_pools(&model);
                 let admission = provenant_quota::Admission {
                     policies,
@@ -2271,6 +2276,10 @@ pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<S
                     route.model,
                     member.join("; ")
                 ));
+                // Dispatch narrows only a pool; a single model has no next one.
+                if route.pool_selection.is_none() {
+                    return Ok(Some(refusals.join("; ")));
+                }
                 excluded.push(model);
             }
         },
@@ -4186,6 +4195,37 @@ mod route_tests {
             .ok_or("a pool with every member spent must block")?;
         assert!(reason.contains("claude/claude-haiku-5-5"), "{reason}");
         assert!(reason.contains("codex/gpt-6-luna"), "{reason}");
+        Ok(())
+    }
+
+    #[test]
+    fn route_blocked_ends_for_a_single_model_route_with_every_account_spent()
+    -> Result<(), Box<dyn Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = blocked_fixture(exhaust)?;
+        let path = fixture.roots.state.as_path().join("config.toml");
+        std::fs::write(
+            &path,
+            "schema_version=1\n[domains.routing.routes.solo]\nmodel='claude/claude-haiku-5-5'\n",
+        )?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        // A resolver that returns the same model for ever would hang this
+        // call, so bound it.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let roots = fixture.roots.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(super::route_blocked("solo", &[], &roots));
+        });
+        let blocked = receiver
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .map_err(|_| "route_blocked did not end")?;
+        let reason = blocked.ok_or("a spent single-model route must block")?;
+        assert!(reason.contains("allowance exhausted"), "{reason}");
+        assert_eq!(
+            reason.matches("claude/claude-haiku-5-5").count(),
+            1,
+            "{reason}"
+        );
         Ok(())
     }
 

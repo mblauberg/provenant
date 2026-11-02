@@ -524,7 +524,9 @@ registered worktrees a lane's reviewers read); every other sensitive field
 is exactly that one placeholder, never joined to other text, and every value of
 its `enum` is a clean absolute path with no `..`. The front-end also confines
 each value to the project's registered worktrees and `allowed_read_roots`
-before the graph is admitted, as it does a literal root. A budget is a bounded
+before the graph is admitted, as it does a literal root, and replaces it with
+the canonical path it resolved to, so retargeting a link afterwards moves no
+grant. A budget is a bounded
 integer parameter whose `max` is the graph timeout
 (`limits.graph_timeout_seconds`). Graph nodes have no per-node timer, so a
 budget is advisory: it is told to the writer, and only the graph timeout is

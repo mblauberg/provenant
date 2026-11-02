@@ -2345,15 +2345,27 @@ fn bare_placeholder(text: &str) -> bool {
 /// A planner pattern names a read root by a closed-list parameter. The planner
 /// can pick any listed value, so every one is confined to the project's
 /// registered worktrees and allow-list now, exactly like a literal root, and a
-/// root that is not exactly one parameter is refused.
-pub(crate) fn confine_pattern_roots(node: &Value, policy: &ReadRoots) -> Result<(), String> {
-    let Some(patterns) = node.pointer("/plan/patterns").and_then(Value::as_array) else {
+/// root that is not exactly one parameter is refused. Each value is replaced by
+/// the canonical path it confined to, so a link retargeted after admission
+/// cannot move the grant, and the planner's catalogue lists the same paths.
+pub(crate) fn confine_pattern_roots(node: &mut Value, policy: &ReadRoots) -> Result<(), String> {
+    let Some(patterns) = node
+        .pointer_mut("/plan/patterns")
+        .and_then(Value::as_array_mut)
+    else {
         return Ok(());
     };
+    let mut renamed: Vec<(String, String)> = Vec::new();
     for pattern in patterns {
-        let name = pattern.get("name").and_then(Value::as_str).unwrap_or("?");
-        let nodes = pattern.get("nodes").and_then(Value::as_array);
-        for root in nodes
+        let name = pattern
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_owned();
+        let mut parameters = Vec::new();
+        for root in pattern
+            .get("nodes")
+            .and_then(Value::as_array)
             .into_iter()
             .flatten()
             .filter_map(|child| child.get("read_roots").and_then(Value::as_array))
@@ -2368,27 +2380,76 @@ pub(crate) fn confine_pattern_roots(node: &Value, policy: &ReadRoots) -> Result<
                     "plan pattern {name}: read root {text} must be exactly one parameter"
                 ));
             }
-            let parameter = &text[2..text.len() - 1];
+            parameters.push(text[2..text.len() - 1].to_owned());
+        }
+        for parameter in parameters {
             let values = pattern
-                .pointer(&format!("/parameters/{parameter}/enum"))
-                .and_then(Value::as_array)
+                .pointer_mut(&format!("/parameters/{parameter}/enum"))
+                .and_then(Value::as_array_mut)
                 .filter(|values| !values.is_empty())
                 .ok_or_else(|| {
-                    format!("plan pattern {name}: read root {text} needs a closed list")
+                    format!("plan pattern {name}: read root ${{{parameter}}} needs a closed list")
                 })?;
             for value in values {
-                let path = Path::new(value.as_str().ok_or("read root values must be strings")?);
-                if !path.is_absolute() {
+                let given = value
+                    .as_str()
+                    .ok_or("read root values must be strings")?
+                    .to_owned();
+                if !Path::new(&given).is_absolute() {
                     return Err(format!(
-                        "plan pattern {name}: read root {} must be absolute",
-                        path.display()
+                        "plan pattern {name}: read root {given} must be absolute"
                     ));
                 }
-                policy.confine(path)?;
+                let canonical = policy
+                    .confine(Path::new(&given))?
+                    .to_str()
+                    .ok_or("read root is not UTF-8")?
+                    .to_owned();
+                if canonical != given {
+                    renamed.push((given, canonical.clone()));
+                    *value = json!(canonical);
+                }
+            }
+            // A default that named a link follows its value.
+            if let Some(default) = pattern.pointer_mut(&format!("/parameters/{parameter}/default"))
+                && let Some((_, canonical)) = default
+                    .as_str()
+                    .and_then(|text| renamed.iter().find(|(given, _)| given == text))
+            {
+                *default = json!(canonical);
             }
         }
     }
+    // The planner reads the same canonical paths the catalogue will accept.
+    if let Some(prompt) = node.get("prompt").and_then(Value::as_str) {
+        let mut text = prompt.to_owned();
+        for (given, canonical) in &renamed {
+            text = replace_path(&text, given, canonical);
+        }
+        node["prompt"] = json!(text);
+    }
     Ok(())
+}
+
+/// Replace `from` with `to` where `from` is a whole path, not the tail of a
+/// longer one such as `/var/x` inside `/private/var/x`.
+fn replace_path(text: &str, from: &str, to: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(from) {
+        let before = rest[..at].chars().next_back().or(out.chars().next_back());
+        let after = rest[at + from.len()..].chars().next();
+        let inside = |c: char| c.is_alphanumeric() || matches!(c, '/' | '_' | '-');
+        out.push_str(&rest[..at]);
+        if before.is_some_and(|c| inside(c) || c == '.') || after.is_some_and(inside) {
+            out.push_str(from);
+        } else {
+            out.push_str(to);
+        }
+        rest = &rest[at + from.len()..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Bind CLI context before hashing, explaining or retaining the executed graph.

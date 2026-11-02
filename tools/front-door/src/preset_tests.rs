@@ -3111,7 +3111,7 @@ mod planner_front_end {
         let policy = ReadRoots::new(vec![inside.clone()], &[]);
         let text = |path: &std::path::Path| path.display().to_string();
         let confine = |root: &str, values: &[String]| {
-            super::super::preset::confine_pattern_roots(&reading(root, values), &policy)
+            super::super::preset::confine_pattern_roots(&mut reading(root, values), &policy)
         };
         assert!(confine("${tree}", &[text(&inside)]).is_ok());
         // A suffix, a prefix or a second placeholder is not a closed-list root.
@@ -3125,6 +3125,41 @@ mod planner_front_end {
         assert!(confine("${tree}", &[text(&inside), text(&climbing)]).is_err());
         assert!(confine("${tree}", &["inside".into()]).is_err(), "relative");
         assert!(confine("${tree}", &[]).is_err(), "an open list");
+    }
+
+    #[test]
+    fn a_pattern_read_root_that_is_a_link_is_pinned_to_its_canonical_target() {
+        use provenant_fabric_runtime::read_roots::ReadRoots;
+        let temp = tempfile::tempdir().unwrap();
+        let inside = temp.path().join("inside");
+        let target = inside.join("lane");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let policy = ReadRoots::new(vec![inside.clone()], &[]);
+        let given = link.display().to_string();
+        let mut node = reading("${tree}", std::slice::from_ref(&given));
+        node["prompt"] = json!(format!("Pick from {given}, then {given}."));
+        super::super::preset::confine_pattern_roots(&mut node, &policy).unwrap();
+        let canonical = std::fs::canonicalize(&target)
+            .unwrap()
+            .display()
+            .to_string();
+        let values = &node["plan"]["patterns"][0]["parameters"]["tree"]["enum"];
+        assert_eq!(values, &json!([canonical]));
+        assert_eq!(
+            node["prompt"],
+            json!(format!("Pick from {canonical}, then {canonical}."))
+        );
+        // Retargeting the link after admission moves nothing the graph holds.
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        assert_eq!(
+            &node["plan"]["patterns"][0]["parameters"]["tree"]["enum"],
+            values
+        );
     }
 
     #[test]
