@@ -2839,20 +2839,20 @@ pub fn run(
                     .ok_or_else(|| format!("--plan must be auto, on or off: {text}"))?,
                 None => settings.mode,
             };
-            // A route alias is a configured route or pool, or a bundled pool such as
-            // `principal`; anything else cannot be resolved at run time.
-            let known = config.domains.routing.routes.contains_key(&settings.route)
-                || config.domains.routing.pools.contains_key(&settings.route)
-                || provenant_routing::Catalogue::bundled()
-                    .is_ok_and(|catalogue| catalogue.has_pool(&settings.route));
-            let unavailable = (!known).then(|| {
-                format!(
-                    "route {} is not defined in the routing configuration",
-                    settings.route
-                )
-            });
+            // Resolve the planner route the way dispatch does: configured pool,
+            // `--exclude` and configured exclusions, account evidence and quota.
+            let unavailable = (mode != provenant_fabric_runtime::config::PlanMode::Off)
+                .then(|| {
+                    provenant_cli::route::route_blocked(
+                        &settings.route,
+                        &request.route.exclude,
+                        &roots.roots,
+                    )
+                })
+                .flatten();
             layers.plan = Some(planner::PlanContext {
                 mode,
+                from_cli: request.preset_plan.is_some(),
                 route: settings.route.clone(),
                 lane_deadline_seconds: settings.lane_deadline_seconds,
                 max_nodes: settings.max_nodes,

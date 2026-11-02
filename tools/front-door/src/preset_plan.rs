@@ -21,6 +21,8 @@ pub struct PlanContext {
     pub auto: PlanAuto,
     /// Why the planner route cannot run now, when the host knows.
     pub unavailable: Option<String>,
+    /// True when the mode came from an explicit `--plan` flag, not config.
+    pub from_cli: bool,
     /// Paths the caller declared for the work, counted with the brief's.
     pub paths: Vec<String>,
 }
@@ -70,10 +72,23 @@ fn list_item(line: &str) -> bool {
             .is_some_and(|rest| rest.starts_with(' '))
 }
 
+/// A list item is top level when it is no more indented than the first one
+/// under the heading; deeper items are sub-bullets of the one above.
+fn top_level(line: &str, margin: &mut Option<usize>) -> bool {
+    let indent = line
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .map(|c| if c == '\t' { 4 } else { 1 })
+        .sum::<usize>();
+    let first = *margin.get_or_insert(indent);
+    indent <= first
+}
+
 /// List items under an "Acceptance" heading or label, up to the next heading.
 pub fn acceptance_items(text: &str) -> usize {
     let mut inside = false;
     let mut count = 0;
+    let mut margin = None;
     for line in text.lines() {
         let label = line
             .trim()
@@ -82,16 +97,19 @@ pub fn acceptance_items(text: &str) -> usize {
         let heading = line.trim_start().starts_with('#');
         if label.to_ascii_lowercase().starts_with("acceptance") && !list_item(line) {
             inside = true;
+            margin = None;
         } else if heading {
             inside = false;
-        } else if inside && list_item(line) {
+        } else if inside && list_item(line) && top_level(line, &mut margin) {
             count += 1;
         }
     }
     count
 }
 
-/// Distinct issue numbers (`#123`) the text names.
+/// Distinct issue numbers (`#123`) the text names. A number is decimal, at
+/// most six digits and stands alone: a hex colour such as `#1a2b3c`, an
+/// identifier such as `#12ab` or a run of more than six digits is not one.
 pub fn issues(text: &str) -> usize {
     let mut found = BTreeSet::new();
     let bytes = text.as_bytes();
@@ -101,13 +119,16 @@ pub fn issues(text: &str) -> usize {
         {
             continue;
         }
-        let digits: String = text[at + 1..]
+        let run = text[at + 1..]
             .chars()
-            .take_while(char::is_ascii_digit)
-            .collect();
-        if !digits.is_empty() {
-            found.insert(digits);
+            .take_while(char::is_ascii_alphanumeric)
+            .collect::<String>();
+        let digits = run.chars().take_while(char::is_ascii_digit).count();
+        // Digits followed by letters are a hex colour or an identifier.
+        if digits == 0 || digits != run.len() || digits > 6 {
+            continue;
         }
+        found.insert(run);
     }
     found.len()
 }
@@ -165,7 +186,7 @@ fn explicit(origins: &BTreeMap<String, String>, parameter: &str) -> bool {
                 .find(|(origin, _)| origin.starts_with(&format!("{path}.")))
                 .map(|(_, origin)| origin)
         })
-        .is_some_and(|origin| matches!(origin.as_str(), "--set" | "--params-file"))
+        .is_some_and(|origin| origin != "bundled")
 }
 
 /// The `auto` rule. Explicit shape wins; then any large or underspecified
@@ -230,12 +251,18 @@ pub fn decide(
     brief: &str,
 ) -> Result<Option<Decision>, String> {
     let Some(catalogue) = config.get("plan") else {
-        return if ctx.mode == PlanMode::On {
-            Err(format!(
-                "preset {name} declares no planner patterns; run it with --plan auto or --plan off"
-            ))
-        } else {
-            Ok(None)
+        return match ctx.mode {
+            PlanMode::On if ctx.from_cli => Err(format!(
+                "preset {name} declares no planner patterns: catalogues for it are pending (#2531 follow-up); run it with --plan auto or --plan off"
+            )),
+            PlanMode::On => Ok(Some(Decision {
+                requested: ctx.mode,
+                applied: false,
+                reason: "preset declares no planner patterns".into(),
+                route: ctx.route.clone(),
+                degraded: None,
+            })),
+            _ => Ok(None),
         };
     };
     let parameters = flatten_parameters(
@@ -256,6 +283,29 @@ pub fn decide(
         route: ctx.route.clone(),
         degraded: None,
     };
+    // An extending preset can inherit `[plan]` without the stage it shapes.
+    let replaces = catalogue.get("replaces").and_then(Value::as_str);
+    let missing = replaces.filter(|replaces| {
+        !config
+            .get("stages")
+            .and_then(Value::as_array)
+            .is_some_and(|stages| {
+                stages
+                    .iter()
+                    .enumerate()
+                    .any(|(at, stage)| stage_id(stage, at) == *replaces)
+            })
+    });
+    if wanted && let Some(replaces) = missing {
+        decision.applied = false;
+        let why = format!("plan.replaces names no top-level stage: {replaces}");
+        decision.reason = format!(
+            "{why}; running the preset's deterministic defaults. Wanted: {}",
+            decision.reason
+        );
+        decision.degraded = Some(why);
+        return Ok(Some(decision));
+    }
     // Never substitute a weaker planner: without the configured route the
     // preset runs on its deterministic defaults and says why.
     if wanted && let Some(why) = &ctx.unavailable {

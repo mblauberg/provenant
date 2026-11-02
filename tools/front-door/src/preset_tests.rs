@@ -2547,6 +2547,7 @@ mod planner_front_end {
             max_nodes: 24,
             auto: PlanAuto::default(),
             unavailable: unavailable.map(str::to_owned),
+            from_cli: true,
             paths: Vec::new(),
         });
         layers
@@ -2654,6 +2655,66 @@ mod planner_front_end {
         let error =
             expand_with(&layers(PlanMode::On, None), "single", "brief", &[], &[]).unwrap_err();
         assert!(error.contains("declares no planner patterns"), "{error}");
+        assert!(error.contains("single"), "{error}");
+        assert!(error.contains("#2531 follow-up"), "{error}");
+        // A config default of `on` is not an explicit request: the run goes
+        // ahead on the static graph with the reason recorded.
+        let mut configured = layers(PlanMode::On, None);
+        configured.plan.as_mut().unwrap().from_cli = false;
+        let quiet = run(&configured, "single", "brief", Vec::new());
+        let decision = quiet.plan.as_ref().unwrap();
+        assert!(!decision.applied);
+        assert_eq!(decision.reason, "preset declares no planner patterns");
+        assert_eq!(
+            decision.line(),
+            "plan: on -> off (preset declares no planner patterns)"
+        );
+        assert!(!ids(&quiet).contains(&"plan".to_owned()));
+    }
+
+    #[test]
+    fn any_override_beyond_the_bundled_default_counts_as_explicit() {
+        let lane = "[{name='one', worktree='/w', scope=['src'], spec=''}]";
+        let mut layers = layers(PlanMode::Auto, None);
+        layers
+            .insert(
+                "repo",
+                "mine",
+                &format!("extends='big-batch'\n[parameters]\nlanes={lane}\n"),
+            )
+            .unwrap();
+        let expansion = run(&layers, "mine", &acceptance(7), Vec::new());
+        let decision = expansion.plan.as_ref().unwrap();
+        assert!(!decision.applied, "{}", decision.line());
+        assert_eq!(decision.reason, "lanes given explicitly");
+        // The bundled default alone is not an override.
+        let bundled = run(&layers, "big-batch", &acceptance(2), Vec::new());
+        assert!(bundled.plan.as_ref().unwrap().applied);
+    }
+
+    #[test]
+    fn an_extending_preset_missing_the_shaped_stage_degrades_never_errors() {
+        let mut layers = layers(PlanMode::On, None);
+        layers
+            .insert(
+                "user",
+                "narrow",
+                "extends='big-batch'\nstages=[{ id = 'only', preset = 'single' }]\n",
+            )
+            .unwrap();
+        let expansion = run(&layers, "narrow", "brief", Vec::new());
+        let decision = expansion.plan.as_ref().unwrap();
+        assert!(!decision.applied);
+        let why = decision.degraded.as_deref().unwrap();
+        assert!(why.contains("names no top-level stage: lanes"), "{why}");
+        assert!(decision.reason.contains("deterministic defaults"));
+        assert!(!ids(&expansion).contains(&"plan".to_owned()));
+        assert!(
+            expansion
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("deterministic defaults"))
+        );
     }
 
     fn acceptance(count: usize) -> String {
@@ -2763,6 +2824,17 @@ mod planner_front_end {
         assert_eq!(planner::acceptance_items("- a\n- b"), 0);
         assert_eq!(planner::issues("Closes #12, refs #12 and #13; C#"), 2);
         assert_eq!(planner::issues("no issues &#39;"), 0);
+        // Hex colours, identifiers and over-long numbers are not issues.
+        assert_eq!(planner::issues("colour #1a2b3c and #fff and #1234567"), 0);
+        assert_eq!(planner::issues("#abc123 #12ab #99 #123456"), 2);
+        assert_eq!(planner::issues("see (#7) and #8."), 2);
+        // Nested sub-bullets belong to their parent item.
+        assert_eq!(
+            planner::acceptance_items(
+                "## Acceptance\n- a\n  - detail\n    - more\n- b\n\t- tab detail\n1. c\n   1. nested"
+            ),
+            3
+        );
     }
 
     #[test]

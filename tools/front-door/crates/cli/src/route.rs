@@ -2166,6 +2166,102 @@ pub(crate) fn explain_dispatch(
         text,
     ))
 }
+/// Whether the account's reading says a window is spent and has not reset.
+/// Admission gates only models with a quota pool; native providers surface a
+/// spent allowance as an exhausted snapshot, which a preview reads directly.
+fn spent(record: &provenant_quota::AccountRecord, now: i64) -> bool {
+    record.snapshot.as_ref().is_some_and(|snapshot| {
+        snapshot.status == provenant_quota::QuotaStatus::Exhausted
+            && snapshot.observed_unix_seconds <= now
+            && snapshot.windows.iter().any(|window| {
+                window.used_basis_points >= 10_000
+                    && window.resets_unix_seconds.is_none_or(|reset| reset > now)
+            })
+    })
+}
+
+/// Why a route alias cannot serve work now, resolved the way dispatch resolves
+/// it: the configured pool, the exclusions (flags and configuration), and the
+/// cached account evidence and quota routing already holds. `None` means a
+/// member can run, or readiness is only known once a provider is probed at
+/// dispatch. A planner never falls through to a weaker route, so the preset
+/// front-end degrades on a `Some`.
+pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<String> {
+    let query = RouteResolve {
+        writes: false,
+        account: None,
+        name: None,
+        request: RouteRequest {
+            read_heavy: false,
+            model: None,
+            route: Some(alias.into()),
+            effort: None,
+            confidential: false,
+            fallback: Vec::new(),
+            exclude: exclude.to_vec(),
+        },
+    };
+    let blocked = with_context(
+        roots,
+        &[],
+        &[],
+        "local-preview",
+        &[],
+        |context, records, policies| {
+            let request = resolve_request(&query, context)?;
+            let rules = effective_exclusion_rules(exclude, roots)?;
+            let route = provenant_routing::resolve_for_account_with_seed_excluding(
+                &request,
+                context,
+                None,
+                "route-preview",
+                0,
+                &[],
+                &rules,
+            )?;
+            let model = ModelId::parse(&format!("{}/{}", route.adapter, route.model))?;
+            let pools = context.catalogue.admission_pools(&model);
+            let now = context.now.as_timestamp().as_second();
+            let admission = provenant_quota::Admission {
+                policies,
+                now_unix_seconds: now,
+                records,
+                pools: &pools,
+            };
+            // Judge each cached account of the member's provider as if its
+            // provider were ready: a spent, refused or unauthenticated
+            // account cannot serve. With no cached account, nothing is known.
+            let mut refusals = Vec::new();
+            let mut judged = 0;
+            for record in records
+                .iter()
+                .filter(|record| record.account.adapter == route.adapter)
+            {
+                judged += 1;
+                let mut probe = route.clone();
+                probe.account_key = Some(record.account.account_key.clone());
+                probe.readiness = RouteReadiness::Ready {
+                    extra: Default::default(),
+                    availability_ref: "preview".into(),
+                    expires_unix_seconds: now + 60,
+                };
+                match admission.check(&probe) {
+                    Ok(()) if !spent(record, now) => return Ok(None),
+                    Ok(()) => refusals.push("allowance exhausted".to_owned()),
+                    Err(error) => refusals.push(error.to_string()),
+                }
+            }
+            Ok::<_, EdgeError>(
+                (judged > 0)
+                    .then(|| format!("{}/{}: {}", route.adapter, route.model, refusals.join("; "))),
+            )
+        },
+    );
+    match blocked {
+        Ok(reason) => reason,
+        Err(error) => Some(error.to_string()),
+    }
+}
 /// The human report for a resolved route preview, naming each exclusion that
 /// removed a pool candidate and where it came from.
 pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
@@ -3947,6 +4043,73 @@ mod route_tests {
                 ..
             }
         ));
+        Ok(())
+    }
+
+    /// A one-member `principal` pool, with the member's account record seeded.
+    fn blocked_fixture(
+        edit: impl FnOnce(&mut provenant_quota::AccountRecord),
+    ) -> Result<ReviewFixture, Box<dyn Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = ReviewFixture::new()?;
+        let path = fixture.roots.state.as_path().join("config.toml");
+        std::fs::write(
+            &path,
+            "schema_version=1\n[domains.routing.pools]\nprincipal=[{model='claude/claude-haiku-5-5',weight=1,effort='high',efforts=['high']}]\n",
+        )?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        fixture.seed_claude(edit)?;
+        Ok(fixture)
+    }
+
+    #[test]
+    fn route_blocked_is_quiet_for_a_usable_route() -> Result<(), Box<dyn Error>> {
+        let fixture = blocked_fixture(|_| {})?;
+        assert_eq!(super::route_blocked("principal", &[], &fixture.roots), None);
+        Ok(())
+    }
+
+    #[test]
+    fn route_blocked_names_an_excluded_principal() -> Result<(), Box<dyn Error>> {
+        let fixture = blocked_fixture(|_| {})?;
+        let flag = super::route_blocked("principal", &["claude".to_owned()], &fixture.roots);
+        assert!(flag.is_some(), "{flag:?}");
+        // A configured exclusion blocks the same way.
+        std::fs::write(
+            fixture.roots.state.as_path().join("config.toml"),
+            "schema_version=1\n[knobs]\n'routing.exclude'=['claude']\n[domains.routing.pools]\nprincipal=[{model='claude/claude-haiku-5-5',weight=1,effort='high',efforts=['high']}]\n",
+        )?;
+        let configured = super::route_blocked("principal", &[], &fixture.roots);
+        assert!(configured.is_some(), "{configured:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn route_blocked_names_an_exhausted_principal() -> Result<(), Box<dyn Error>> {
+        let fixture = blocked_fixture(|record| {
+            let account = record.account.clone();
+            let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
+            record.snapshot = Some(provenant_quota::QuotaSnapshot {
+                schema_version: 1,
+                account,
+                revision: 0,
+                status: provenant_quota::QuotaStatus::Exhausted,
+                observed_unix_seconds: now,
+                source_ref: "fixture".into(),
+                authority_ref: None,
+                windows: vec![provenant_quota::QuotaWindow {
+                    pool: "seven_day".into(),
+                    window_seconds: Some(604_800),
+                    used_basis_points: 10_000,
+                    resets_unix_seconds: Some(now + 3_600),
+                }],
+                details: None,
+            });
+        })?;
+        let blocked = super::route_blocked("principal", &[], &fixture.roots);
+        let reason = blocked.ok_or("an exhausted principal must block")?;
+        assert!(reason.contains("claude"), "{reason}");
+        assert!(reason.contains("allowance exhausted"), "{reason}");
         Ok(())
     }
 }
