@@ -1120,8 +1120,8 @@ Copy any required out-of-workspace includes into the workspace before running.
 Skip tests that fail on the unmutated baseline and list them as skipped. If
 `cargo-mutants` is unavailable or the diff matches no mutants, say so and
 continue. Report mutant, caught, missed and timed-out counts plus wall time, and
-classify every survivor as a gap or noise. This evidence is optional and never
-gates delivery.
+classify every survivor as a gap or noise. This evidence is optional and
+never gates delivery.
 "#;
 
 fn interpolate_inner(

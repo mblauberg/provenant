@@ -1264,6 +1264,7 @@ fn council(overrides: &[&str], shaped: bool) -> Result<serde_json::Value, String
 #[test]
 fn tests_lens_includes_mutation_testing_only_for_crucial_or_terminal_risk() {
     for (risk, expected) in [
+        ("", false),
         ("routine", false),
         ("substantial", false),
         ("crucial", true),
@@ -1299,7 +1300,7 @@ fn tests_lens_includes_mutation_testing_only_for_crucial_or_terminal_risk() {
             "mutation command at risk tier {risk}"
         );
         if expected {
-            assert!(prompt.contains("gates delivery"), "risk tier {risk}");
+            assert!(prompt.contains("never gates delivery"), "risk tier {risk}");
         }
         let correctness_prompt = document["nodes"][1]["composite"]["nodes"]
             .as_array()
