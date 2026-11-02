@@ -551,6 +551,52 @@ mod tests {
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 
+    // Acceptance 2 of #2484: on APFS, an enabled writer with a matching host
+    // generation and a verified fixed-release pin reports `seeded`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn enabled_writer_with_a_verified_pin_is_seeded_on_apfs() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let worktree = tmp.path().join("writer");
+        let cache = tmp.path().join("cache");
+        let state = tmp.path().join("state");
+        let bin = home.join(".rustup/toolchains/1.99.1-test-host/bin");
+        std::fs::create_dir_all(worktree.join("tools/front-door")).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(home.join(".rustup/settings.toml"), "[overrides]\n").unwrap();
+        std::fs::write(
+            worktree.join("tools/front-door/rust-toolchain.toml"),
+            "[toolchain]\nchannel = '1.99.1'\n",
+        )
+        .unwrap();
+        let report = "rustc 1.99.1\nhost: test-host\nrelease: 1.99.1\n";
+        let rustc = bin.join("rustc");
+        std::fs::write(
+            &rustc,
+            format!("#!/bin/sh\nprintf '{}'\n", report.replace('\n', "\\n")),
+        )
+        .unwrap();
+        std::fs::set_permissions(&rustc, std::fs::Permissions::from_mode(0o755)).unwrap();
+        generation(&state, "001", report, "test-host");
+        let env = [
+            ("RUSTUP_HOME".into(), home.join(".rustup").into_os_string()),
+            ("RUSTUP_AUTO_INSTALL".into(), "0".into()),
+        ];
+        let outcome = seed_target(true, &state, &cache, &worktree, &home, &env);
+        assert_eq!((outcome.status, outcome.reason), ("seeded", "cloned"));
+        assert!(cache.join("target").is_dir());
+        // A refusal records its code and nothing from the environment.
+        let refused = [("RUSTC".into(), "/secret/rustc".into())];
+        let outcome = seed_target(true, &state, &cache, &worktree, &home, &refused);
+        assert_eq!(
+            outcome,
+            Outcome::fallback_detail("toolchain_unverified", "toolchain_env_override")
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn target_clone_is_writable_and_cannot_change_seed() {

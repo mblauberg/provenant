@@ -326,7 +326,8 @@ impl Lanes {
     }
 }
 
-/// Optional host Cargo seeds for writer lanes.
+/// Host Cargo seeds for writer lanes: on by default, and a no-op off macOS.
+/// Cloning that the filesystem cannot do falls back to an empty target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CargoSeed {
@@ -340,7 +341,7 @@ pub struct CargoSeed {
 impl Default for CargoSeed {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             max_generations: 3,
             max_bytes: 20 * 1024 * 1024 * 1024,
         }
@@ -900,7 +901,7 @@ mod tests {
     #[test]
     fn lane_priority_defaults_and_bounds() {
         let mut config = config();
-        assert!(!config.lanes.cargo_seed.enabled);
+        assert!(config.lanes.cargo_seed.enabled);
         assert_eq!(config.lanes.cargo_seed.max_generations, 3);
         assert_eq!(config.lanes.cargo_seed.max_bytes, 20 * 1024 * 1024 * 1024);
         assert_eq!(config.lanes.priority.for_lane(true, false), 10);
@@ -925,7 +926,7 @@ mod tests {
         );
         value.as_object_mut().unwrap().remove("lanes");
         assert!(
-            !serde_json::from_value::<FabricConfig>(value.clone())
+            serde_json::from_value::<FabricConfig>(value.clone())
                 .unwrap()
                 .lanes
                 .cargo_seed

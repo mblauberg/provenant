@@ -130,13 +130,14 @@ frontmatter and agent sidecars are checked by `scripts/check-harness`.
 
 ## Configuration
 
-### Cargo home seed opt-in
+### Cargo seed switch
 
-The per-host Cargo home seed switch must default off and must have no
+The per-host Cargo seed switch must default on and must have no
 effect outside macOS. Its scope and manual configuration are described in
 the [worktree guide](../worktrees.md).
-- Why: cloning is an optional host-specific optimisation, not a prerequisite
-  for running a lane.
+- Why: cloning is a host-specific optimisation that falls back to an empty
+  store when unavailable, and a host may turn it off; it is never a
+  prerequisite for running a lane.
 - Test: `crates/fabric-runtime/src/config.rs::tests::lane_priority_defaults_and_bounds`;
   `crates/run/src/cargo_seed.rs::tests::disabled_does_not_touch_cache`;
   `::enabled_is_a_no_op_on_other_platforms`

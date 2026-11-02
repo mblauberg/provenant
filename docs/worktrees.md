@@ -169,18 +169,19 @@ directory, so setting only the target directory still queues behind test and
 build runs. Worktree removal and `provenant gc` remove this directory with the
 cache. Read-only lanes have no lane cache and get no variable.
 
-On macOS, a host may opt writer lanes into cloning the host Cargo registry
-and Git store into a fresh private Cargo home by hand-editing its state `config.toml` (this
-setting is not supported by `provenant config set`):
+On macOS, writer lanes clone the host Cargo registry, Git store and target seed
+into a fresh private Cargo home and target by default. Other platforms skip it.
+A host turns it off, or tunes retention, by hand-editing its state `config.toml`
+(this setting is not supported by `provenant config set`):
 
 ```toml
 [domains.fabric.lanes.cargo_seed]
-enabled = true
+enabled = false
 max_generations = 3
 max_bytes = 21474836480
 ```
 
-The default is false. `~/.cargo/registry` and `~/.cargo/git` are seeded independently;
+The default is true on macOS. `~/.cargo/registry` and `~/.cargo/git` are seeded independently;
 existing lane stores are retained. Cloning
 requires filesystem support for copy-on-write clones and falls back to an
 empty registry when unavailable or a source entry cannot be cloned. A symlink
@@ -266,8 +267,22 @@ using `du`, plus the volume free-space change during cloning. `du` counts shared
 blocks for each clone, so it cannot determine shared bytes; the free-space
 change is only an estimate and can include concurrent volume activity. Record
 the manifest, checkout and toolchain printed with the timings. The output targets
-are retained for inspection. These measurements are still pending on both hosts;
-there is no evidence yet to enable seeding by default.
+are retained for inspection.
+
+Measured on the maintainer's Apple-silicon APFS host (2 Nov 2026), seeding is
+on by default:
+
+| Step | Time |
+| --- | --- |
+| Clone of the main checkout's `target/debug` (about 10.5 GiB) | 3.8 s idle; 23.6 s at load average 52 with other lanes building |
+| `cargo check --locked` of the workspace from the clone | 23 s idle; 124 s at load average 52, rebuilding the workspace crates this branch changed |
+| Cold lane build of the same workspace | 10 minutes or more |
+
+`scripts/measure-cargo-target-seed` itself was not run here: it needs a
+published generation, whose `cargo build --all-targets` and `cargo test --no-run`
+exceed ten minutes on this host. The idle figures are from the measurement in #2484;
+the loaded figures were taken with a direct `cp -cR` clone and `cargo check` in
+this checkout. The volume free-space delta was lost in concurrent lane activity. Re-run the script on a host with spare capacity to refresh them.
 
 `provenant worktree remove` deletes only the removed worktree's own lane cache,
 derived from its verified identity before Git removes it. Cache cleanup holds
