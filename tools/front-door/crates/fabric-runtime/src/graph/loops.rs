@@ -296,6 +296,13 @@ fn expand_loops(
                     "loop body cannot nest loops or route on_fail, and may only deliver by integrate:",
                 );
             }
+            if let Some(provenant_records::run::DeliveryMode::Integrate(target)) = &child.delivery
+                && document.integration_branch.as_deref() != Some(target.as_str())
+            {
+                return Err(
+                    "loop body integrate: requires graph integration_branch equal to the node target",
+                );
+            }
             if child.land.is_some() {
                 return Err("loop body cannot land");
             }

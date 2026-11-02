@@ -1267,6 +1267,25 @@ fn commit_terminal(commit: &str) -> AttemptObservation {
 }
 
 #[test]
+fn loop_body_integrate_requires_the_graph_integration_branch() {
+    const REASON: &str =
+        "loop body integrate: requires graph integration_branch equal to the node target";
+    let mut missing = integrating_repair(Some("integrate:batch/graph"));
+    missing.integration_branch = None;
+    // The principal's own integrate: also needs the branch, so drop it.
+    missing.nodes[0].delivery = None;
+    assert_eq!(validate_plan(&missing).unwrap_err(), REASON);
+    let mut other = integrating_repair(Some("integrate:batch/other"));
+    assert_eq!(validate_plan(&other).unwrap_err(), REASON);
+    other.integration_branch = Some("batch/other".into());
+    // The principal still targets the graph branch, so the flat check refuses.
+    assert_eq!(
+        validate_plan(&other).unwrap_err(),
+        "node integration target differs from graph integration branch"
+    );
+}
+
+#[test]
 fn loop_body_delivers_only_by_integrate() {
     use provenant_records::run::DeliveryMode;
     validate_plan(&integrating_repair(Some("integrate:batch/graph"))).unwrap();
