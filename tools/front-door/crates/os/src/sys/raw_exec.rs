@@ -30,6 +30,20 @@ fn zombie_is_only_group_member(pid: u32) -> bool {
     bytes == std::mem::size_of::<i32>() as i32 && members[0] == pid as i32
 }
 
+/// Whether a failed group kill only found the zombie leader, so nothing is
+/// left to signal. Only macOS reports this as EPERM rather than ESRCH.
+fn group_kill_found_only_zombie(error: &io::Error, pid: u32) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        error.raw_os_error() == Some(libc::EPERM) && zombie_is_only_group_member(pid)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (error, pid);
+        false
+    }
+}
+
 /// The process edge must keep this policy fixed and never independently reap
 /// owned children. A blocked SIGCHLD is safe: polling still consumes status.
 pub fn verify_child_wait_policy() -> io::Result<()> {
@@ -280,11 +294,7 @@ impl OwnedPid {
             // Killing before reaping cannot target a recycled process group.
             if unsafe { libc::kill(-(pid as i32), libc::SIGKILL) } != 0 {
                 let error = io::Error::last_os_error();
-                #[cfg(target_os = "macos")]
-                let empty =
-                    error.raw_os_error() == Some(libc::EPERM) && zombie_is_only_group_member(pid);
-                #[cfg(not(target_os = "macos"))]
-                let empty = false;
+                let empty = group_kill_found_only_zombie(&error, pid);
                 if error.raw_os_error() != Some(libc::ESRCH) && !empty {
                     return Err(error);
                 }
@@ -331,7 +341,9 @@ impl OwnedPid {
             return Ok(true);
         }
         let error = io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::ESRCH) {
+        // A leader that exited since observe() is a zombie: nothing to signal.
+        let zombie_only = self.process_group && group_kill_found_only_zombie(&error, child.id());
+        if error.raw_os_error() == Some(libc::ESRCH) || zombie_only {
             Ok(false)
         } else {
             Err(error)
@@ -411,5 +423,37 @@ pub fn pid_is_absent_for_test(pid: u32) -> io::Result<bool> {
         Ok(true)
     } else {
         Err(error)
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use std::os::unix::process::CommandExt;
+
+    #[test]
+    fn group_kill_of_an_unreaped_zombie_leader_is_not_an_error() {
+        let mut child = Command::new("true").process_group(0).spawn().unwrap();
+        let pid = child.id();
+        let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+        // SAFETY: the output is writable siginfo storage. WNOWAIT leaves the
+        // child unreaped, so its PID and private PGID stay reserved.
+        let waited = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                info.as_mut_ptr(),
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        assert_eq!(waited, 0);
+        // SAFETY: the unreaped zombie reserves this PGID; kill borrows nothing.
+        assert_eq!(unsafe { libc::kill(-(pid as i32), libc::SIGKILL) }, -1);
+        let error = io::Error::last_os_error();
+        assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+        assert!(group_kill_found_only_zombie(&error, pid));
+        let other = io::Error::from_raw_os_error(libc::EACCES);
+        assert!(!group_kill_found_only_zombie(&other, pid));
+        child.wait().unwrap();
     }
 }
