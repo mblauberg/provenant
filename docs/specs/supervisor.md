@@ -702,6 +702,26 @@ optional branch by canonical path under writer custody.
 
 ### Unreadable processes need positive non-occupancy evidence
 
+Per-root occupancy requires stable process identity and complete observations
+of cwd, executable and open filesystem descriptors. A placed occupant makes
+the corresponding root live; a complete unrelated observation leaves other
+roots unchanged. Failed or partial listings, unreadable required paths, PID
+reuse and unsupported queries leave every root that could contain the process
+unknown. A failed query is never an empty observation. Host-authorised
+exceptions below remain accepted risks rather than non-occupancy proofs.
+
+The native observer reads the executable and every open filesystem descriptor
+without privileged helpers: `/proc/<pid>/{exe,fd}` on Linux and libproc
+(`proc_pidpath`, `PROC_PIDLISTFDS`, `PROC_PIDFDVNODEPATHINFO`) on macOS. It
+takes two snapshots and reports completeness only when the listing was not
+truncated, every required path and object identity (device and inode) was
+read, the descriptor sets match, and the census re-observed the same process
+identity around the query. Unlinked objects keep their former location as
+positive evidence on Linux; an unlinked vnode with no path on macOS is skipped
+because it cannot lie inside a tree being removed. Mapped libraries and other
+platforms are not observed, so the executable image and descriptors are the
+only added occupancy sources.
+
 A live process whose cwd cannot be read remains unplaceable unless it meets
 one of the explicit policies below. Both policies require all real, effective
 and saved uids to be system accounts (0–499), and each uid must differ from
@@ -740,8 +760,9 @@ The cwd seam clears errno before the syscall and preserves the actual failure.
   `/usr/bin`, `/Library/Apple` and every other prefix stay outside the built-in
   policy, even for platform binaries.
 - That executable is opened with `O_NOFOLLOW` and must be a regular file.
-  No `PROC_PIDREGIONPATHINFO` match is attempted: foreign-process region
-  queries require privileges unavailable to the ordinary caller.
+  The daemon exception does not rely on `PROC_PIDREGIONPATHINFO`; access to
+  another process's regions can be restricted, and incomplete region records
+  cannot establish non-occupancy.
 - `fstatfs` on the retained executable fd identifies a read-only root
   filesystem. The volume capability query reports `VOL_CAP_FMT_SEALED` in
   both the valid and capabilities masks.

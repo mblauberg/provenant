@@ -114,6 +114,9 @@ pub struct RouteList {
     pub configured_accounts: BTreeMap<String, PacingProfile>,
     pub configured_free: BTreeMap<String, PacingProfile>,
     pub active_overrides: Vec<PacingOverride>,
+    pub model_exclusions: Vec<ModelExclusion>,
+    /// Rows that were repaired or ignored while reading the configuration.
+    pub exclusion_notes: Vec<String>,
 }
 #[derive(Debug, Serialize)]
 pub struct ValidRoutePair {
@@ -239,6 +242,8 @@ pub fn list(
         pacing,
         configured_accounts: context.config.pacing.accounts.clone(),
         configured_free: context.config.pacing.free.clone(),
+        model_exclusions: context.config.model_exclusions.to_vec(),
+        exclusion_notes: context.config.model_exclusions.notes().to_vec(),
         active_overrides: context
             .config
             .pacing_overrides
@@ -1393,7 +1398,10 @@ pub fn resolve_with_seed(
         request,
         &ValidatedContext::new(context)?,
         Some((operation_id, task_index)),
-        &[],
+        Excluded {
+            rejected: &[],
+            rules: &[],
+        },
     )
 }
 
@@ -1421,11 +1429,14 @@ pub fn resolve_for_account_with_seed(
         operation_id,
         task_index,
         &[],
+        &[],
     )
 }
 
 /// Resolve a seeded pool while excluding members rejected by a later dispatch
-/// gate. The operation and task seed stay fixed across each redraw.
+/// gate, and those a caller, graph or the configuration excluded by `rules`.
+/// The operation and task seed stay fixed across each redraw. A pinned model
+/// is never affected by `rules`.
 pub fn resolve_for_account_with_seed_excluding(
     request: &RouteRequest,
     context: &RoutingContext<'_>,
@@ -1433,9 +1444,37 @@ pub fn resolve_for_account_with_seed_excluding(
     operation_id: &str,
     task_index: u64,
     excluded_members: &[ModelId],
+    rules: &[ExclusionRule],
 ) -> Result<ResolvedRoute, RoutingError> {
     let account = AccountSelection::parse(account)?;
-    let context = &ValidatedContext::new(context)?;
+    let context = ValidatedContext::new(context)?;
+    // Exclusions shape named-route pools only: a pinned model keeps its own
+    // account and fallback whatever is excluded.
+    let named = matches!(request.choice, RouteChoice::NamedRoute(_));
+    let rules = if named { rules } else { &[] };
+    // Withhold excluded accounts, so an adapter's other accounts still serve.
+    let availability: Vec<_> = context
+        .availability
+        .iter()
+        .filter(|record| {
+            !rules
+                .iter()
+                .filter_map(ExclusionRule::account)
+                .any(|(adapter, key)| {
+                    record.adapter == adapter && record.account_key.as_deref() == Some(key)
+                })
+        })
+        .cloned()
+        .collect();
+    let kept = ValidatedContext(RoutingContext {
+        availability: &availability,
+        ..context.0
+    });
+    let context = &kept;
+    let excluded_members = Excluded {
+        rejected: if named { excluded_members } else { &[] },
+        rules,
+    };
     if let AccountSelection::Known(account) = account {
         let adapters: BTreeSet<&str> = match &request.choice {
             RouteChoice::Model(model) => [model.adapter()].into_iter().collect(),
@@ -1490,7 +1529,57 @@ pub fn resolve(
     request: &RouteRequest,
     context: &RoutingContext<'_>,
 ) -> Result<ResolvedRoute, RoutingError> {
-    resolve_inner(request, &ValidatedContext::new(context)?, None, &[])
+    resolve_inner(
+        request,
+        &ValidatedContext::new(context)?,
+        None,
+        Excluded {
+            rejected: &[],
+            rules: &[],
+        },
+    )
+}
+
+/// Members withheld from one resolution: models a later dispatch gate
+/// rejected, and caller or graph exclusions.
+#[derive(Clone, Copy)]
+struct Excluded<'a> {
+    rejected: &'a [ModelId],
+    rules: &'a [ExclusionRule],
+}
+impl Excluded<'_> {
+    /// The reason a named-route member is excluded, if any. Rules come first,
+    /// then persistent model exclusions, then admission rejections. An account
+    /// rule removes a model once no remaining account serves it.
+    fn reason(&self, model: &ModelId, context: &ValidatedContext<'_>) -> Option<String> {
+        let serving_accounts_remain = context.availability.iter().any(|record| {
+            record.adapter == model.adapter()
+                && provenant_records::AdapterSpec::get(model.adapter()).is_none_or(|spec| {
+                    record
+                        .account_key
+                        .as_deref()
+                        .is_none_or(|key| spec.account_serves_model(key, model.model()))
+                })
+        });
+        if let Some(rule) = self
+            .rules
+            .iter()
+            .find(|rule| rule.removes(model, serving_accounts_remain))
+        {
+            return Some(rule.to_string());
+        }
+        if context
+            .config
+            .model_exclusions
+            .iter()
+            .any(|exclusion| exclusion.model == *model && exclusion.schedule.active(context.now))
+        {
+            return Some(format!("excluded by config: model {}", model.as_str()));
+        }
+        self.rejected
+            .contains(model)
+            .then(|| "admission rejected".to_owned())
+    }
 }
 
 struct PoolPick {
@@ -1502,7 +1591,7 @@ fn resolve_inner(
     request: &RouteRequest,
     context: &ValidatedContext<'_>,
     seed: Option<(&str, u64)>,
-    excluded_members: &[ModelId],
+    excluded_members: Excluded<'_>,
 ) -> Result<ResolvedRoute, RoutingError> {
     let (primary, pool_selection) = match &request.choice {
         RouteChoice::Model(model) => {
@@ -1537,6 +1626,17 @@ fn resolve_inner(
                 }
                 if !privacy_allowed(&named.model, request.confidential, context.catalogue) {
                     return Err(RoutingError::ConfidentialModel);
+                }
+                // A single-model route is a route, not a pin: provider, account
+                // and model exclusions apply and the refusal names them.
+                let single = Excluded {
+                    rejected: &[],
+                    rules: excluded_members.rules,
+                };
+                if let Some(detail) = single.reason(&named.model, context) {
+                    return Err(RoutingError::NoEligiblePoolMember {
+                        exclusions: vec![format!("{}: {detail}", named.model.as_str())],
+                    });
                 }
                 (
                     candidate(
@@ -1574,9 +1674,13 @@ fn resolve_inner(
     if models.contains(&primary_model) {
         return Err(RoutingError::Alternatives);
     }
+    let named_route = matches!(request.choice, RouteChoice::NamedRoute(_));
     let alternatives = models
         .iter()
         .filter(|model| privacy_allowed(model, request.confidential, context.catalogue))
+        // A named route's fallback keeps to the same exclusions as its pool; a
+        // pinned model's own fallback is never filtered.
+        .filter(|model| !named_route || excluded_members.reason(model, context).is_none())
         .map(|model| {
             refuse_unlisted_opencode(model, context.catalogue)?;
             candidate(
@@ -1664,7 +1768,7 @@ fn classify_pool(
     members: &[RoutePoolMember],
     request: &RouteRequest,
     context: &ValidatedContext<'_>,
-    excluded_members: &[ModelId],
+    excluded_members: Excluded<'_>,
     avoid_cooling: bool,
 ) -> Result<ClassifiedPool, RoutingError> {
     let mut classified = ClassifiedPool {
@@ -1680,10 +1784,10 @@ fn classify_pool(
     for member in members {
         let effort = request.effort.clone().or(member.effort.clone());
         let mut factor_basis_points = NEUTRAL_FACTOR_BASIS_POINTS;
-        if excluded_members.contains(&member.model) {
+        if let Some(detail) = excluded_members.reason(&member.model, context) {
             classified
                 .exclusions
-                .push(format!("{}: admission rejected", member.model.as_str()));
+                .push(format!("{}: {detail}", member.model.as_str()));
             classified.candidates.push(RouteSelectionCandidate {
                 extra: Default::default(),
                 model: member.model.as_str().into(),
@@ -1692,7 +1796,7 @@ fn classify_pool(
                 pacing_detail: None,
                 effort,
                 readiness: None,
-                exclusion: Some("admission rejected".into()),
+                exclusion: Some(detail),
             });
             classified.routes.push(None);
             continue;
@@ -1930,7 +2034,7 @@ fn select_pool(
     request: &RouteRequest,
     context: &ValidatedContext<'_>,
     seed: Option<(&str, u64)>,
-    excluded_members: &[ModelId],
+    excluded_members: Excluded<'_>,
 ) -> Result<PoolPick, RoutingError> {
     let mut classified = classify_pool(members, request, context, excluded_members, true)?;
     let (draw, reason) = match draw_pool(name, &classified, seed) {

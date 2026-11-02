@@ -614,6 +614,30 @@ Existing raw `loop.body` configuration also remains available. All body
 writers share one worktree; `previous.NODE` selects prior-round evidence or
 commit bindings. Planner output cannot refer to named presets.
 
+
+### Planner front-end for presets
+
+`provenant run --preset big-batch --plan on` replaces the static `lanes` stage
+with a principal planner that chooses from the preset's `[plan]` catalogue:
+`writer-lane` (write scope, acceptance subset, route, budget) and
+`wave-barrier`. Supply the registered writer worktrees with
+`--set 'parameters.worktrees=["/path/a","/path/b"]'`; the planner may assign
+only those. A lane budget above `[domains.fabric.plan] lane_deadline_seconds`,
+overlapping write scopes inside one wave and a worktree outside the list refuse
+the plan before anything is admitted.
+
+`--plan` defaults to `[domains.fabric.plan] mode` (`auto`). `auto` plans when the
+brief lists more than `auto.acceptance_items` acceptance items, names at least
+`auto.batch_issues` issues or writes to more than `auto.write_crates` crates, or
+when no lanes are supplied; `--explain` prints the decision and its reason. If
+the planner route is not defined, the preset runs its deterministic defaults and
+the reason is recorded in the graph provenance and printed as a warning.
+
+A preset opts in with a `[plan]` table: `replaces` (the stage to swap),
+`explicit` (parameters that, when set, keep the static graph), `guidance` and
+one `[[plan.patterns]]` entry per pattern, written like a stage with
+`parameters`, `nodes` and `exports`.
+
 ## Observe and resume
 
 Preset runs use the normal bounded `run` wait, 240 seconds by default.

@@ -541,6 +541,8 @@ pub(super) fn prepare_candidates(
     let host = provenant_config::bind_host(roots)
         .map_err(|e| e.to_string())?
         .to_string();
+    let rules = crate::route::task_exclusion_rules(&task.profile, roots)
+        .map_err(|error| error.to_string())?;
     let resolved = crate::route::resolve_dispatch(
         &request,
         roots,
@@ -558,6 +560,7 @@ pub(super) fn prepare_candidates(
             } => Some((excluded_families.as_slice(), *require_distinct)),
             _ => None,
         },
+        &rules,
     )
     .map_err(|error| error.to_string())?;
     if let Some(selection) = &resolved.pool_selection {

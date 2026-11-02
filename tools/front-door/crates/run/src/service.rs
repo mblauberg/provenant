@@ -418,39 +418,35 @@ impl<'a> Service<'a> {
         })
     }
     pub fn status(&self, id: AttemptId, call: &Request<'_>) -> Result<AttemptRecord> {
-        self.store.record(id, call)
+        self.custody_state(self.store.record(id, call)?, call)
     }
-    /// Reader waits include custody release after the terminal transaction.
+    /// Return the terminal decision and separately indicate custody retention.
     pub fn status_for_wait(&self, id: AttemptId, call: &Request<'_>) -> Result<AttemptRecord> {
-        self.custody_state(self.status(id, call)?, call)
+        self.status(id, call)
     }
     fn custody_state(
         &self,
         mut record: AttemptRecord,
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
-        if matches!(record.state, AttemptState::Terminal { .. })
-            && !self.store.custody_released(&record, call)?
-        {
-            record.state = AttemptState::Settling {
-                publication_pending: false,
-                extra: Default::default(),
-            };
+        if matches!(record.state, AttemptState::Terminal { .. }) {
+            record.custody_pending =
+                Some(!self.store.custody_released(&record, call).unwrap_or(false));
         }
         Ok(record)
     }
     pub fn lanes(&self, query: &LaneQuery, call: &Request<'_>) -> Result<LanePage> {
-        self.store.lanes(query, call)
-    }
-    /// Peer waits consume the same custody-aware view as local waits.
-    pub fn lanes_for_wait(&self, query: &LaneQuery, call: &Request<'_>) -> Result<LanePage> {
-        let mut page = self.lanes(query, call)?;
+        let mut page = self.store.lanes(query, call)?;
         page.lanes = page
             .lanes
             .into_iter()
             .map(|record| self.custody_state(record, call))
             .collect::<Result<_>>()?;
         Ok(page)
+    }
+    /// Peer waits consume the same custody-aware view as local waits.
+    pub fn lanes_for_wait(&self, query: &LaneQuery, call: &Request<'_>) -> Result<LanePage> {
+        self.lanes(query, call)
     }
     pub fn output(
         &self,

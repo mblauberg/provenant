@@ -1,6 +1,6 @@
 Graph <id>
 Preset selection: deliver (override)
-Review shape: standard (default)
+Review shape: quick (by_size; size=small; kind=unknown; risk=unknown)
 write  role=write.implement tier=senior family=any kind=- access=worktree_write worktree=.
   write_scope: ["."]
   source: {"commit":"<commit>","type":"commit"}
@@ -29,11 +29,7 @@ review  role=- tier=- family=any kind=composite access=read_only worktree=-
       reference: skill:code-review/references/reviewer-context.md <digest>
       reference: skill:code-review/references/lenses/correctness-spec.md <digest>
       read_roots: ["<project>","<root>/skills"]
-    lens-design-fit-reuse  role=lens.design-fit-reuse tier=junior family=any kind=- access=read_only worktree=-
-      reference: skill:code-review/references/reviewer-context.md <digest>
-      reference: skill:code-review/references/lenses/design-fit-reuse.md <digest>
-      read_roots: ["<project>","<root>/skills"]
-    exports: [{"node":"lens-correctness-spec","outputs":["result","findings"]},{"node":"lens-design-fit-reuse","outputs":["result","findings"]}]
+    exports: [{"node":"lens-correctness-spec","outputs":["result","findings"]}]
   verify  role=review.verify tier=senior family=cross_preferred kind=- access=read_only worktree=-
     read_roots: ["<project>"]
     source: {"node":"subject","type":"node"}
@@ -48,16 +44,19 @@ accept  role=- tier=- family=any kind=gate access=read_only worktree=-
 land  role=- tier=- family=any kind=land access=read_only worktree=-
 Roles:
   lens.correctness-spec  origin=bundled digest=<digest>
-  lens.design-fit-reuse  origin=bundled digest=<digest>
   plan.review  origin=bundled digest=<digest>
   repairer  origin=preset digest=<digest>
   review.synthesis  origin=bundled digest=<digest>
   review.verify  origin=bundled digest=<digest>
   write.implement  origin=bundled digest=<digest>
 Substituted verify: verifier -> senior (route verifier is not defined in the routing configuration)
-Warning: preset review-council: omitted lens simplicity: review shape has 2 slots
-Warning: preset review-council: omitted lens conventions-readability: review shape has 2 slots
-Warning: preset review-council: omitted lens tests: review shape has 2 slots
+Warning: preset review-council: omitted lens tests: review shape has 1 slots
+Warning: preset review-council: omitted lens design-fit-reuse: review shape has 1 slots
+Warning: preset review-council: omitted lens simplicity: review shape has 1 slots
+Warning: preset review-council: omitted lens conventions-readability: review shape has 1 slots
+Warning: preset review-council: omitted lens refactor-cleanup: review shape has 1 slots
+Warning: preset review-council: omitted lens reliability: review shape has 1 slots
+Warning: preset review-council: omitted lens flexibility: review shape has 1 slots
 Warning: preset review-council: omitted lens "security-privacy": requires risk tag security
 Warning: preset review-council: omitted lens "concurrency-data-errors": requires risk tag concurrency
 Warning: preset review-council: omitted lens "adversarial": requires risk tag terminal

@@ -23,16 +23,23 @@ base = { type = "string", default = "", doc = "Diff reference the change is meas
 spec = { type = "string", default = "", doc = "Issue number or file the change answers." }
 review_shape = { type = "string", default = "", doc = "Review depth override from routing review shapes (quick, standard, deep)." }
 risk_tier = { type = "string", default = "", doc = "Risk tier that selects the review shape." }
+kind = { type = "string", default = "", doc = "Change kind, for example refactor, integration, or docs." }
+size = { type = "string", default = "", doc = "Review size override: small, medium, or large." }
 verifiers = { type = "integer", default = 1, min = 0, max = 1, doc = "Verifier stages between the lenses and the synthesis, preferably from another model family; 0 skips verification." }
 verifier_tier = { type = "string", default = "verifier", doc = "Route for the verifier. Define a route named verifier in another model family; without one the senior route is used and the substitution is recorded." }
 risk_tags = { type = "list", default = [], doc = "Tags that trigger conditional lenses: security, concurrency, terminal." }
 # Lens tiers left empty come from the routing review shape. Set a tier to override.
+# Slots fill in this order; routing's review.lenses.order and kind rules reorder or
+# extend it unless a caller supplies its own list, which keeps its order.
 lenses = [
   { name = "correctness-spec", tier = "", when = "" },
+  { name = "tests", tier = "", when = "" },
   { name = "design-fit-reuse", tier = "", when = "" },
   { name = "simplicity", tier = "", when = "" },
   { name = "conventions-readability", tier = "", when = "" },
-  { name = "tests", tier = "", when = "" },
+  { name = "refactor-cleanup", tier = "", when = "" },
+  { name = "reliability", tier = "", when = "" },
+  { name = "flexibility", tier = "", when = "" },
   { name = "security-privacy", tier = "", when = "security" },
   { name = "concurrency-data-errors", tier = "", when = "concurrency" },
   { name = "adversarial", tier = "", when = "terminal" },

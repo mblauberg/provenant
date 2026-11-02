@@ -127,17 +127,19 @@ distinct model families. Configure them in the selected state's `config.toml`:
 reviewers = [{ pool = "junior", count = 1 }]
 
 [domains.routing.review.shapes.standard]
-reviewers = [{ pool = "junior", count = 2, distinct_families = true }]
+reviewers = [{ pool = "junior", count = 3, distinct_families = true }]
 
 [domains.routing.review.shapes.deep]
 reviewers = [
-  { pool = "junior", count = 4, lenses = ["correctness-spec", "security-privacy", "concurrency-data-errors", "tests"], distinct_families = true },
-  { pool = "senior", count = 2, distinct_families = true },
+  { pool = "junior", count = 4, distinct_families = true },
+  { pool = "senior", count = 4, distinct_families = true },
 ]
 
 [domains.routing.review.select]
 default = "standard"
 by_risk = { routine = "quick", substantial = "standard", crucial = "deep", terminal = "deep" }
+by_kind = { integration = "deep", docs = "quick", refactor = "standard" }
+by_size = { small = "quick", medium = "standard", large = "deep" }
 by_paths = { ".github/workflows/**" = "deep" }
 ```
 
@@ -147,23 +149,65 @@ count must be between 1 and 32, and a non-empty `lenses` array must have one
 identifier per reviewer. Pools and selected shape names must exist. A shape may
 dispatch at most 64 reviewers.
 
+The default size bands measure added plus removed lines, changed files and
+crate roots in the diff from the merge base of the base ref to the subject.
+Small is at most 150 lines, 3 files and 1 crate; medium is at most 1,000 lines,
+15 files and 3 crates; larger or binary changes are large. Configure these limits
+under `domains.routing.review.size`; each small limit must not exceed its medium
+limit. The risk tier sets a floor. Integration heads select deep and are not
+measured. An empty diff leaves the size unknown; a diff that cannot be measured
+also leaves it unknown and reports git's error as a warning. Either way,
+selection falls back to risk, kind and the default shape. Preset graphs such
+as `deliver` measure when they expand, before the writer runs, so they size
+from the worktree's existing diff; pass `size` when the expected scope is known.
+
+Lenses fill a shape's slots in the order given by `review.lenses.order`, without
+repeats. The standard shape has three slots: `correctness-spec`, `tests`, then one
+more lens in that order (`design-fit-reuse`). A kind can replace the order or add
+lenses outside the slot cap, and risk tags add their conditional lenses:
+
+```toml
+[domains.routing.review.lenses]
+order = ["correctness-spec", "tests", "design-fit-reuse", "simplicity",
+  "conventions-readability", "refactor-cleanup", "reliability", "flexibility"]
+[domains.routing.review.lenses.by_kind.docs]
+order = ["conventions-readability"]    # one base lens, however many slots
+[domains.routing.review.lenses.by_kind.refactor]
+add = ["refactor-cleanup", "design-fit-reuse"]    # additive, deduplicated
+```
+
+Docs therefore run one readability reviewer at any depth, plus any risk-tag lenses.
+A refactor runs its shape's base lenses plus `refactor-cleanup` and
+`design-fit-reuse`. Risk tags (`security`, `concurrency`, `terminal`; a terminal
+risk tier implies `terminal`) add `security-privacy`, `concurrency-data-errors`
+and `adversarial`. A risk tier alone does not add `security-privacy` or
+`concurrency-data-errors`; pass `--risk-tag` (or the `risk_tags` parameter) for
+those. A caller-supplied `lenses` list in `review-council` keeps the caller's
+order.
+
 For example, review a commit with changed paths from a Git range:
 
 ```sh
-provenant review HEAD --brief-file review-brief.md --risk crucial --kind code --range origin/main...HEAD
+provenant review HEAD --brief-file review-brief.md --risk crucial --risk-tag security --kind code --range origin/main...HEAD --explain
 provenant --json review HEAD --brief-file review-brief.md --shape quick
 ```
 
-The target must resolve to a commit. `--range` supplies changed paths for
-selection; without it no path rules match. Renames are treated as a deletion
+The target must resolve to a commit. `--range` supplies changed paths and size for
+selection; without it the range defaults to `<default branch>...TARGET` (the
+branch `origin/HEAD` names, else `origin/main`, `main`, `origin/master` or
+`master`), so size and path rules apply by default. Renames are treated as a deletion
 and an addition, so rules can match either path. `--shape` overrides selection
-and skips the range lookup. A changed path that is not UTF-8 is rejected; use
+and skips the range lookup; the risk floor and integration override still apply. A changed path that is not UTF-8 is rejected; use
 an explicit shape when path selection cannot represent it.
 `--wait` sets the overall wait limit, defaulting to one hour, and accepts
 seconds or durations such as `30m`, from one second to four hours.
 
-Selection uses an explicit shape first, then the most specific matching `by_paths`
-pattern, then `by_risk`, `by_kind` and finally `default`. Specificity is the
+An explicit shape is applied first, then raised to the risk floor: the risk tier
+sets a minimum that an explicit `--shape` or `review_shape` can raise but not
+lower. Without an explicit shape, selection uses the most specific matching
+`by_paths` pattern, then `by_risk`, `by_kind`, `by_size` and finally `default`.
+Size and kind can raise the selected count above the risk floor, except where a
+`by_paths` rule matched. Specificity is the
 number of literal bytes, followed by fewer wildcards; lexical order breaks ties.
 In path patterns, `*` and `?` do not cross directory separators; `**` does.
 The selected shape and its source appear in the review summary. Family
@@ -202,6 +246,78 @@ summary lists all planned reviewers, including `not_submitted` entries, and
 prints commands to collect or cancel active runs. Active runs are not cancelled
 automatically. Use `provenant lanes --id RUN --wait 4m` to collect one, or
 `provenant cancel RUN` to cancel it.
+
+## Excluding members
+
+An exclusion keeps a provider, an account or an exact model out of named-route
+pools. It never widens a pool: if the exclusions leave a pool with no eligible
+member, the dispatch is refused and the error names each exclusion and its
+source (`flag`, `graph` or `config`).
+
+A selector takes one of three forms:
+
+| Selector | Example | Removes |
+|---|---|---|
+| Provider | `claude` | Every member served by that adapter. |
+| Account | a label, an entry, or `claude/work` | That account's availability. A member of its adapter goes only when no other serving account remains. |
+| Exact model | `codex/gpt-6-luna` | That model in every pool, including fallback members. |
+
+An unknown selector is refused with the valid forms, before anything is
+submitted.
+
+For one dispatch, pass `--exclude` to `run`, `review` or `route resolve`. Repeat
+the flag once per selector; it takes no comma-separated list:
+
+```sh
+provenant run --route junior --exclude claude --explain
+provenant review --exclude codex/gpt-6-luna
+provenant route resolve junior --exclude claude
+```
+
+`--explain` and `route resolve` list each exclusion that removed a candidate
+and where it came from. `review` keeps its family separation: it substitutes
+an unused family around the exclusions, and refuses once they exhaust the
+families left, naming the exclusions in the refusal.
+
+Three sources combine as a union, never as a replacement, and each rule keeps
+its source in refusals and `--explain`:
+
+| Source | Set by | Knob |
+|---|---|---|
+| `config` | The standing list in `[knobs]` | `routing.exclude` |
+| `flag` | `--exclude` on this dispatch | `routing.flag_exclude` |
+| `graph` | `--exclude` on a preset or automatically selected graph, inherited by every node | `routing.graph_exclude` |
+
+A list that is not a list of strings, or holds an unknown selector, is
+refused, the same as on the flag. `--explain` and `route resolve` read the
+standing and flag lists the dispatch would use; a graph's list is applied only
+when its nodes launch.
+
+An exclusion applies to named-route pools, to the fallback models of a named
+route, and to a named route that holds a single model. A pinned `--model`, and
+the fallback listed alongside it, are never filtered.
+
+To exclude an exact model from every pool until you remove it, use:
+
+```sh
+provenant route exclude add codex/gpt-6-luna --until 2h
+provenant route exclude list
+provenant route exclude remove codex/gpt-6-luna
+```
+
+`--until` accepts a future RFC 3339 timestamp or a duration; omit it to keep
+the exclusion until it is removed. `route list` and `route override list`
+also show these rules. Adding an exclusion also drops rows that have expired.
+
+A stored row that cannot be read in full does not refuse the configuration.
+If its model parses, the model stays excluded with no schedule; if not, the row
+is ignored. Either way the repair shows as a `note:` on `route exclude list`,
+`route list`, `route override list` and `--explain`, until you fix or remove
+the row.
+
+An explicit `--model` pin always selects the named model, whatever the
+exclusions. Pacing overrides keep their precedence; an exclusion removes
+members before pacing weighs the rest.
 
 ## Per-account pacing
 

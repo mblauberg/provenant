@@ -1,6 +1,6 @@
 Graph <id>
 Preset selection: big-batch (override)
-Review shape: standard (default)
+Review shape: deep (by_kind; size=unknown; kind=integration; risk=unknown), standard (default; size=unknown; kind=unknown; risk=unknown)
 plan: on -> on (planning requested)
 Planner route: principal
 scout  role=- tier=- family=any kind=composite access=read_only worktree=-
@@ -38,11 +38,35 @@ council  role=- tier=- family=any kind=composite access=read_only worktree=-
       reference: skill:code-review/references/reviewer-context.md <digest>
       reference: skill:code-review/references/lenses/correctness-spec.md <digest>
       read_roots: ["<project>","<root>/skills"]
+    lens-tests  role=lens.tests tier=junior family=any kind=- access=read_only worktree=-
+      reference: skill:code-review/references/reviewer-context.md <digest>
+      reference: skill:code-review/references/lenses/tests.md <digest>
+      read_roots: ["<project>","<root>/skills"]
     lens-design-fit-reuse  role=lens.design-fit-reuse tier=junior family=any kind=- access=read_only worktree=-
       reference: skill:code-review/references/reviewer-context.md <digest>
       reference: skill:code-review/references/lenses/design-fit-reuse.md <digest>
       read_roots: ["<project>","<root>/skills"]
-    exports: [{"node":"lens-correctness-spec","outputs":["result","findings"]},{"node":"lens-design-fit-reuse","outputs":["result","findings"]}]
+    lens-simplicity  role=lens.simplicity tier=junior family=any kind=- access=read_only worktree=-
+      reference: skill:code-review/references/reviewer-context.md <digest>
+      reference: skill:code-review/references/lenses/simplicity.md <digest>
+      read_roots: ["<project>","<root>/skills"]
+    lens-conventions-readability  role=lens.conventions-readability tier=senior family=any kind=- access=read_only worktree=-
+      reference: skill:code-review/references/reviewer-context.md <digest>
+      reference: skill:code-review/references/lenses/conventions-readability.md <digest>
+      read_roots: ["<project>","<root>/skills"]
+    lens-refactor-cleanup  role=lens.refactor-cleanup tier=senior family=any kind=- access=read_only worktree=-
+      reference: skill:code-review/references/reviewer-context.md <digest>
+      reference: skill:code-review/references/lenses/refactor-cleanup.md <digest>
+      read_roots: ["<project>","<root>/skills"]
+    lens-reliability  role=lens.reliability tier=senior family=any kind=- access=read_only worktree=-
+      reference: skill:code-review/references/reviewer-context.md <digest>
+      reference: skill:code-review/references/lenses/reliability.md <digest>
+      read_roots: ["<project>","<root>/skills"]
+    lens-flexibility  role=lens.flexibility tier=senior family=any kind=- access=read_only worktree=-
+      reference: skill:code-review/references/reviewer-context.md <digest>
+      reference: skill:code-review/references/lenses/flexibility.md <digest>
+      read_roots: ["<project>","<root>/skills"]
+    exports: [{"node":"lens-correctness-spec","outputs":["result","findings"]},{"node":"lens-tests","outputs":["result","findings"]},{"node":"lens-design-fit-reuse","outputs":["result","findings"]},{"node":"lens-simplicity","outputs":["result","findings"]},{"node":"lens-conventions-readability","outputs":["result","findings"]},{"node":"lens-refactor-cleanup","outputs":["result","findings"]},{"node":"lens-reliability","outputs":["result","findings"]},{"node":"lens-flexibility","outputs":["result","findings"]}]
   verify  role=review.verify tier=senior family=cross_preferred kind=- access=read_only worktree=-
     read_roots: ["<project>"]
     source: {"node":"subject","type":"node"}
@@ -76,11 +100,15 @@ repair  role=- tier=- family=any kind=loop access=read_only worktree=-
         reference: skill:code-review/references/reviewer-context.md <digest>
         reference: skill:code-review/references/lenses/correctness-spec.md <digest>
         read_roots: ["<project>","<root>/skills"]
+      lens-tests  role=lens.tests tier=junior family=any kind=- access=read_only worktree=-
+        reference: skill:code-review/references/reviewer-context.md <digest>
+        reference: skill:code-review/references/lenses/tests.md <digest>
+        read_roots: ["<project>","<root>/skills"]
       lens-design-fit-reuse  role=lens.design-fit-reuse tier=junior family=any kind=- access=read_only worktree=-
         reference: skill:code-review/references/reviewer-context.md <digest>
         reference: skill:code-review/references/lenses/design-fit-reuse.md <digest>
         read_roots: ["<project>","<root>/skills"]
-      exports: [{"node":"lens-correctness-spec","outputs":["result","findings"]},{"node":"lens-design-fit-reuse","outputs":["result","findings"]}]
+      exports: [{"node":"lens-correctness-spec","outputs":["result","findings"]},{"node":"lens-tests","outputs":["result","findings"]},{"node":"lens-design-fit-reuse","outputs":["result","findings"]}]
     verify  role=review.verify tier=senior family=cross_preferred kind=- access=read_only worktree=-
       read_roots: ["<project>"]
       source: {"node":"subject","type":"node"}
@@ -93,8 +121,14 @@ repair  role=- tier=- family=any kind=loop access=read_only worktree=-
   accept  role=- tier=- family=any kind=gate access=read_only worktree=-
     inputs: [{"node":"review","outputs":["verdict"]}]
 Roles:
+  lens.conventions-readability  origin=bundled digest=<digest>
   lens.correctness-spec  origin=bundled digest=<digest>
   lens.design-fit-reuse  origin=bundled digest=<digest>
+  lens.flexibility  origin=bundled digest=<digest>
+  lens.refactor-cleanup  origin=bundled digest=<digest>
+  lens.reliability  origin=bundled digest=<digest>
+  lens.simplicity  origin=bundled digest=<digest>
+  lens.tests  origin=bundled digest=<digest>
   plan.research  origin=bundled digest=<digest>
   plan.review  origin=bundled digest=<digest>
   plan.shape  origin=bundled digest=<digest>
@@ -109,15 +143,14 @@ Roles:
 Substituted external: web -> junior (route web is not defined in the routing configuration)
 Substituted verify: verifier -> senior (route verifier is not defined in the routing configuration)
 Substituted verify: verifier -> senior (route verifier is not defined in the routing configuration)
-Warning: preset review-council: omitted lens simplicity: review shape has 2 slots
-Warning: preset review-council: omitted lens conventions-readability: review shape has 2 slots
-Warning: preset review-council: omitted lens tests: review shape has 2 slots
 Warning: preset review-council: omitted lens "security-privacy": requires risk tag security
 Warning: preset review-council: omitted lens "concurrency-data-errors": requires risk tag concurrency
 Warning: preset review-council: omitted lens "adversarial": requires risk tag terminal
-Warning: preset review-council: omitted lens simplicity: review shape has 2 slots
-Warning: preset review-council: omitted lens conventions-readability: review shape has 2 slots
-Warning: preset review-council: omitted lens tests: review shape has 2 slots
+Warning: preset review-council: omitted lens simplicity: review shape has 3 slots
+Warning: preset review-council: omitted lens conventions-readability: review shape has 3 slots
+Warning: preset review-council: omitted lens refactor-cleanup: review shape has 3 slots
+Warning: preset review-council: omitted lens reliability: review shape has 3 slots
+Warning: preset review-council: omitted lens flexibility: review shape has 3 slots
 Warning: preset review-council: omitted lens "security-privacy": requires risk tag security
 Warning: preset review-council: omitted lens "concurrency-data-errors": requires risk tag concurrency
 Warning: preset review-council: omitted lens "adversarial": requires risk tag terminal

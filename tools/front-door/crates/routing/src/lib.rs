@@ -1,12 +1,14 @@
 //! Pure explicit routing over immutable snapshots. No process or state effects.
 #![forbid(unsafe_code)]
 mod catalog;
+mod exclusion;
 mod facts;
 mod policy;
 mod request;
 mod resolve;
 mod review;
 pub use catalog::*;
+pub use exclusion::*;
 pub use facts::*;
 pub use policy::*;
 pub use provenant_records::ResolvedRoute;
@@ -40,6 +42,8 @@ pub enum RoutingError {
     },
     #[error("{model} is not an admitted OpenCode route; choose one of: {admitted}")]
     UnlistedOpenCodeModel { model: String, admitted: String },
+    #[error("unknown exclusion `{selector}`: {detail}")]
+    UnknownExclusion { selector: String, detail: String },
     #[error("invalid catalogue")]
     Catalogue,
     #[error("invalid availability record")]
@@ -62,6 +66,7 @@ impl RoutingError {
             Self::NoEligiblePoolMember { .. } => "no_eligible_pool_member",
             Self::UnsupportedEffort { .. } => "unsupported_effort",
             Self::UnlistedOpenCodeModel { .. } => "unlisted_opencode_model",
+            Self::UnknownExclusion { .. } => "unknown_exclusion",
             Self::Catalogue => "catalogue",
             Self::Availability => "availability",
             Self::ReviewDemand => "review_demand",

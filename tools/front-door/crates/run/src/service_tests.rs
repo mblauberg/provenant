@@ -5,7 +5,7 @@ use provenant_core::{CancelToken, OperationId, TaskId};
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
 #[test]
-fn peer_wait_views_remain_settling_until_terminal_custody_is_released() -> TestResult {
+fn peer_wait_views_keep_terminal_and_show_custody_until_released() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -42,23 +42,17 @@ fn peer_wait_views_remain_settling_until_terminal_custody_is_released() -> TestR
         service.status(id, &call)?.state,
         AttemptState::Terminal { .. }
     ));
+    let waiting = service.status_for_wait(id, &call)?;
+    assert!(matches!(waiting.state, AttemptState::Terminal { .. }));
+    assert_eq!(waiting.custody_pending, Some(true));
     assert_eq!(
-        service.status_for_wait(id, &call)?.state,
-        AttemptState::Settling {
-            publication_pending: false,
-            extra: Default::default()
-        }
-    );
-    assert_eq!(
-        service.lanes_for_wait(&query, &call)?.lanes[0].state,
-        AttemptState::Settling {
-            publication_pending: false,
-            extra: Default::default()
-        }
+        service.lanes_for_wait(&query, &call)?.lanes[0].custody_pending,
+        Some(true)
     );
     drop(custody);
     let observed = service.status_for_wait(id, &call)?;
     assert!(matches!(observed.state, AttemptState::Terminal { .. }));
+    assert_eq!(observed.custody_pending, Some(false));
     assert!(store.custody_released(&observed, &call)?);
     assert!(matches!(
         service.lanes_for_wait(&query, &call)?.lanes[0].state,

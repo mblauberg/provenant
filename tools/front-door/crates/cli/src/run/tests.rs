@@ -3277,9 +3277,6 @@ fn local_wait_observes_settlement_and_renders_pending_details()
                     &call,
                 )?;
             }
-            if reads == 3 {
-                drop(custody.take());
-            }
             fetch(remaining)
         },
         picks.scope().map_err(|fail| fail.message)?,
@@ -3297,7 +3294,12 @@ fn local_wait_observes_settlement_and_renders_pending_details()
             ..
         }
     ));
-    assert_eq!(reads, 3, "terminal state must wait for custody release");
+    // The wait returns the sealed decision and reports retained custody
+    // separately, instead of holding the terminal state back.
+    assert_eq!(reads, 2, "a terminal decision ends the wait");
+    assert_eq!(waited.lanes[0].custody_pending, Some(true));
+    assert!(!session.store.custody_released(&waited.lanes[0], &call)?);
+    drop(custody.take());
     assert!(session.store.custody_released(&waited.lanes[0], &call)?);
     Ok(())
 }
@@ -3905,6 +3907,7 @@ fn quota_reason_uses_provider_message_without_exposing_known_secret_shapes() {
         reaped: vec![],
         omitted_reaped: 0,
         spared: vec![],
+        cancel_delivered_before_exit: None,
         omitted_spared: 0,
         warnings: vec![],
         omitted_warnings: 0,
@@ -3985,6 +3988,7 @@ fn clean_exit() -> ExitObservation {
         reaped: vec![],
         omitted_reaped: 0,
         spared: vec![],
+        cancel_delivered_before_exit: None,
         omitted_spared: 0,
         warnings: vec![],
         omitted_warnings: 0,

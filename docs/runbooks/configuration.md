@@ -660,6 +660,12 @@ declared output cleanup. Pass `--apply` to delete those entries too, or
 it does not need a fresh local `main`. Failed fetches keep worktrees and
 report the failure. Worktrees need known-terminal lanes and merged commits
 of their own: tips equal to upstream or on its first-parent history stay.
+Containment in the fetched default proves a merge, including a lane merged
+through a batch branch. A locally merged batch, or squash-only equivalence,
+does not prove containment. Eligible merged trees, their unchanged local
+branches and their own Cargo caches are collected on the next pass without an
+idle-age threshold. This does not change the age rules for standalone output
+and cache collection.
 
 `gc.projects` is keyed by the registered Fabric project ID. Each project's
 `regenerable` list contains directory names, matched at any depth in its
@@ -678,10 +684,11 @@ Failures skip individual entries. Lane caches still use their existing GC path.
 worktrees that otherwise report `unknown_writer`. GC requires fetched-default
 ancestry, a clean tree after only declared ignored output is removed, no live
 lanes or reservations, a free existing writer lock where present, a complete
-free-process census and the full `--idle-days` age, including below the floor. Missing process observations
+free-process census. Missing process observations
 refuse removal. It verifies Git registration and filesystem identity again
 under repository custody. This policy also covers Git-registered worktrees
-outside `.worktrees/`; it preserves their local branch refs. The default
+outside `.worktrees/`; an unchanged branch not checked out elsewhere is deleted.
+Recent declared ignored output does not delay a proven merged tree. The default
 `"keep"` retains the existing terminal-lane requirement.
 
 Scheduled GC excludes missing Git roots, non-Git workspaces and known staging,

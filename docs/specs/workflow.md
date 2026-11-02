@@ -509,3 +509,33 @@ plan's node limit.
   `::pattern_children_obey_plan_node_and_kind_limits`.
 - Owner: `crates/fabric-runtime/src/graph/plans.rs`,
   `crates/fabric-runtime/src/graph/pattern_plan.rs`
+
+### Waves, patterns-only plans and closed route lists
+
+Three opt-in `plan` fields tighten a plan node without changing hand-written
+graphs. `patterns_only` refuses raw fragment nodes, so a fragment can only
+instantiate listed patterns. `disjoint_waves` refuses, before admission, two
+writer instances with overlapping write scopes unless a dependency orders them;
+a later wave depends on the earlier wave's barrier. A pattern's `route` or
+`routes` field may be a `${parameter}` placeholder only when that parameter is a
+string with an `enum` of route names; every other sensitive field (kind,
+access, role, source, read roots) still refuses placeholders. A budget is a
+bounded integer parameter whose `max` is the host lane deadline.
+
+### Preset planner front-end
+
+`provenant run --preset P --plan auto|on|off` puts a principal planner in front
+of a preset that declares a `[plan]` table (`big-batch` today). The default is
+`[domains.fabric.plan] mode`, `auto`. `on` replaces the preset's named stage
+with a read-only `plan` node (role `plan.shape`, route `principal`, no
+fallback) that carries the preset's catalogue; the expansion equals the static
+composite for the same instances, and the pattern names and parameters are
+recorded. `auto` decides in order: a shape parameter set explicitly stays off;
+more than `auto.acceptance_items` acceptance items in the brief, a write scope
+over `auto.write_crates` crates, or at least `auto.batch_issues` issue
+references turn it on; so does no explicit lanes. Otherwise it stays off.
+`--explain` prints `plan: MODE -> on|off (reason)` and the planner route. When
+the planner route cannot be resolved, the run keeps the preset's static graph,
+records `provenance.plan.degraded` and warns; it never substitutes a weaker
+planner. `--plan off` and hand-written graphs are unchanged.
+

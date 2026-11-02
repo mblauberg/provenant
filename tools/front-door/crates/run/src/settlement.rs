@@ -110,11 +110,7 @@ pub(crate) fn blocked(
     let _lock = journal_lock(attempt)?;
     let mut journal = read(attempt, scope)?;
     let now = now_ms(clock)?;
-    if journal
-        .owner
-        .as_ref()
-        .is_some_and(|owner| alive(owner, journal.owner_since_ms, now))
-    {
+    if owner_active(attempt, &journal, now)? {
         return Ok(());
     }
     journal.recovery_failures = journal.recovery_failures.saturating_add(1).min(LIMIT);
@@ -275,7 +271,63 @@ fn journal_lock(attempt: &Directory) -> Result<provenant_os::fs::LockGuard> {
     )?)
 }
 
+// A zero-budget flock interrupted by a signal is surfaced as LockTimeout by
+// Directory. A few immediate probes distinguish that transient refusal without
+// waiting on another owner or spending an import attempt.
+fn try_progress_lock(
+    attempt: &Directory,
+    name: &str,
+) -> provenant_os::fs::Result<provenant_os::fs::LockGuard> {
+    let mut result = attempt.try_lock(OsStr::new(name), LockMode::Exclusive);
+    for _ in 0..2 {
+        if !matches!(result, Err(FsError::LockTimeout { .. })) {
+            break;
+        }
+        result = attempt.try_lock(OsStr::new(name), LockMode::Exclusive);
+    }
+    result
+}
+
 pub(crate) struct Guard;
+
+/// Refusal observations use the same locks and deadline as a claim, without
+/// changing its retry budget. A free lifetime lease proves a same-process owner
+/// has abandoned its driver, even if Drop could not clear the journal.
+fn owner_active(attempt: &Directory, journal: &Journal, now: u64) -> Result<bool> {
+    match try_progress_lock(attempt, "settlement-driver.lock") {
+        Err(FsError::LockTimeout { .. }) => Ok(true),
+        Err(error) => Err(error.into()),
+        Ok(_lease) => Ok(journal.owner.as_ref().is_some_and(|owner| {
+            owner.pid != i64::from(std::process::id()) && alive(owner, journal.owner_since_ms, now)
+        })),
+    }
+}
+
+pub(crate) fn refusal(
+    attempt: &Directory,
+    scope: Scope,
+    clock: &dyn Clock,
+) -> Result<Option<String>> {
+    let _lock = match try_progress_lock(attempt, "settlement.lock") {
+        Ok(lock) => lock,
+        Err(FsError::LockTimeout { .. }) => {
+            return Ok(Some("settlement journal contention".into()));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let journal = read(attempt, scope)?;
+    let now = now_ms(clock)?;
+    if owner_active(attempt, &journal, now)? {
+        return Ok(Some("settlement driver ownership is live".into()));
+    }
+    if now < journal.retry_after_ms {
+        return Ok(Some(format!(
+            "settlement retry deadline: {}ms",
+            journal.retry_after_ms
+        )));
+    }
+    Ok(None)
+}
 
 impl Guard {
     /// A live native owner, including this process, excludes another driver.
@@ -286,17 +338,22 @@ impl Guard {
         clock: &'a dyn Clock,
     ) -> Result<Option<Driver<'a>>> {
         let now_ms = now_ms(clock)?;
-        let _lock = match attempt.try_lock(OsStr::new("settlement.lock"), LockMode::Exclusive) {
+        let lease = match try_progress_lock(attempt, "settlement-driver.lock") {
+            Ok(lease) => lease,
+            Err(FsError::LockTimeout { .. }) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let _lock = match try_progress_lock(attempt, "settlement.lock") {
             Ok(lock) => lock,
             Err(FsError::LockTimeout { .. }) => return Ok(None),
             Err(error) => return Err(error.into()),
         };
         let mut journal = read(attempt, scope)?;
         if journal.phase == Phase::Complete
-            || journal
-                .owner
-                .as_ref()
-                .is_some_and(|owner| alive(owner, journal.owner_since_ms, now_ms))
+            || journal.owner.as_ref().is_some_and(|owner| {
+                owner.pid != i64::from(std::process::id())
+                    && alive(owner, journal.owner_since_ms, now_ms)
+            })
         {
             return Ok(None);
         }
@@ -317,6 +374,7 @@ impl Guard {
         journal.retry_after_ms = now_ms.saturating_add(backoff_ms(journal.attempts));
         write(attempt, &journal)?;
         Ok(Some(Driver {
+            _lease: lease,
             attempt: attempt.try_clone()?,
             journal,
             owner,
@@ -327,8 +385,10 @@ impl Guard {
     }
 }
 
-/// A native process owns progress; this value holds no kernel lock.
+/// A kernel lease excludes drivers for their whole lifetime; the separate
+/// journal lock covers only short updates.
 pub(crate) struct Driver<'a> {
+    _lease: provenant_os::fs::LockGuard,
     clock: &'a dyn Clock,
     attempt: Directory,
     journal: Journal,
@@ -1532,8 +1592,13 @@ mod tests {
         write(&attempt, &crashed)?;
         drop(first);
         advance_to(&mut clock, crashed.retry_after_ms)?;
-        let resumed =
-            Guard::claim(&attempt, scope(), &clock)?.expect("stale native identity recovered");
+        let resumed = Guard::claim(&attempt, scope(), &clock)?.unwrap_or_else(|| {
+            panic!(
+                "stale native identity not recovered: {:?}; journal={:?}",
+                refusal(&attempt, scope(), &clock),
+                read(&attempt, scope())
+            )
+        });
         assert_eq!(resumed.attempts(), 0);
         Ok(())
     }
@@ -1595,6 +1660,47 @@ mod tests {
     }
 
     #[test]
+    fn settlement_reclaims_dropped_owner_after_failed_journal_clear() -> TestResult {
+        let clock = clock();
+        let temp = tempfile::tempdir()?;
+        let attempt = Directory::open_anchor(temp.path())?;
+        let driver = Guard::claim(&attempt, scope(), &clock)?.ok_or("initial claim")?;
+        assert!(
+            refusal(&attempt, scope(), &clock)?
+                .unwrap()
+                .contains("ownership")
+        );
+        clock.wait_until(MonoTime::from_micros(5_000_000))?;
+        assert!(
+            Guard::claim(&attempt, scope(), &clock)?.is_none(),
+            "live lease excludes after deadline"
+        );
+        let lock = try_progress_lock(&attempt, "settlement.lock")?;
+        assert!(
+            refusal(&attempt, scope(), &clock)?
+                .unwrap()
+                .contains("contention")
+        );
+        drop(driver);
+        drop(lock);
+        assert!(
+            read(&attempt, scope())?.owner.is_some(),
+            "failed Drop preserved journal owner"
+        );
+        let reclaimed =
+            Guard::claim(&attempt, scope(), &clock)?.ok_or("abandoned same-process owner")?;
+        drop(reclaimed);
+        assert!(
+            refusal(&attempt, scope(), &clock)?
+                .unwrap()
+                .contains("deadline")
+        );
+        clock.wait_until(MonoTime::from_micros(10_000_000))?;
+        assert!(Guard::claim(&attempt, scope(), &clock)?.is_some());
+        Ok(())
+    }
+
+    #[test]
     fn dropped_driver_uses_injected_clock_for_retry() -> TestResult {
         let clock = clock();
         let temp = tempfile::tempdir()?;
@@ -1638,7 +1744,7 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let attempt = Directory::open_anchor(temp.path())?;
         let mut driver = Guard::claim(&attempt, scope(), &clock)?.expect("claim");
-        let held = attempt.try_lock(OsStr::new("settlement.lock"), LockMode::Exclusive)?;
+        let held = try_progress_lock(&attempt, "settlement.lock")?;
         std::thread::scope(|threads| {
             threads.spawn(move || {
                 let (_wake, waiting) = mpsc::channel::<()>();
@@ -1648,7 +1754,7 @@ mod tests {
             driver.begin_import()
         })?;
         assert_eq!(driver.attempts(), 1);
-        let held = attempt.try_lock(OsStr::new("settlement.lock"), LockMode::Exclusive)?;
+        let held = try_progress_lock(&attempt, "settlement.lock")?;
         std::thread::scope(|threads| {
             threads.spawn(move || {
                 let (_wake, waiting) = mpsc::channel::<()>();
@@ -1667,6 +1773,10 @@ mod tests {
 
 pub(crate) fn pinned_head(attempt: &Directory, scope: Scope) -> Result<Option<GitOid>> {
     read(attempt, scope).map(|journal| journal.head)
+}
+
+pub(crate) fn pinned_base(attempt: &Directory, scope: Scope) -> Result<Option<GitOid>> {
+    read(attempt, scope).map(|journal| journal.base)
 }
 
 pub(crate) fn complete(attempt: &Directory, scope: Scope) -> Result<()> {
@@ -1823,6 +1933,11 @@ impl crate::RunStore {
                 Some(error)
             }
         };
+        for id in self.pending_effect_attempts(run, call)? {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
         // Reactions need the same retry gates, but are internal work rather
         // than custody recovery rows. Report them only if recovery is uncertain.
         let mut reaction_only = Vec::new();
@@ -1876,10 +1991,7 @@ impl crate::RunStore {
                         || (journal.recovery_failures < LIMIT
                             && !(journal.blocking_reason.is_some()
                                 && now < journal.retry_after_ms)))
-                    && !journal
-                        .owner
-                        .as_ref()
-                        .is_some_and(|owner| alive(owner, journal.owner_since_ms, now));
+                    && !owner_active(&directory, &journal, now)?;
                 if eligible
                     && let Ok(handle) =
                         provenant_supervisor::custody::reattach(directory.try_clone()?, scope)
@@ -1903,7 +2015,8 @@ impl crate::RunStore {
                     failed(format!("writer fence listing failed: {error}"))
                 } else {
                     crate::Reconciled::Settling {
-                        phase: format!("{:?}", journal.phase).to_ascii_lowercase(),
+                        phase: refusal(&directory, scope, call.clock)?
+                            .unwrap_or_else(|| format!("{:?}", journal.phase).to_ascii_lowercase()),
                     }
                 };
                 Ok((directory, scope, state, eligible))
@@ -2127,7 +2240,7 @@ pub fn resume(raw: &str, providers: &dyn crate::Providers) -> Result<()> {
             store.reconcile_with_observer(request.run, providers, &call, &SystemProcessObserver)?;
         if !found
             .iter()
-            .any(|(_, state)| matches!(state, crate::Reconciled::Uncertain { reason } if !matches!(reason, crate::UncertainReason::HostStalled)))
+            .any(|(_, state)| matches!(state, crate::Reconciled::Settling {..}) || matches!(state, crate::Reconciled::Uncertain { reason } if !matches!(reason, crate::UncertainReason::HostStalled)))
         {
             break;
         }

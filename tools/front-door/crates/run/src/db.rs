@@ -271,7 +271,7 @@ impl RunStore {
             launched_tasks: Default::default(),
             _owner: PhantomData,
         };
-        if schema_version < 6 {
+        if schema_version < 7 {
             // Read legacy paths once, outside the migration transaction. The
             // initialisation lock serialises migrations. Unreadable paths and
             // in-flight attempts keep the conservative retained default.
@@ -282,6 +282,41 @@ impl RunStore {
             };
             store.write(request, |tx| {
                 let current = version(tx)?;
+                if current > 0 && current < 7 {
+                    // The write reservation excludes other commits until both the
+                    // WAL-aware snapshot and the migration are complete.
+                    let stamp = request
+                        .clock
+                        .wall_now()
+                        .map_err(|_| RunError::Validation("wall clock"))?
+                        .as_micros();
+                    let source = provenant_sqlite::open_connection(
+                        &context.state_root.as_path().join("run.sqlite3"),
+                        true,
+                    )?;
+                    let mut suffix = 0_u32;
+                    let name = loop {
+                        let candidate = if suffix == 0 {
+                            format!("run.sqlite3.bak-{stamp}")
+                        } else {
+                            format!("run.sqlite3.bak-{stamp}-{suffix}")
+                        };
+                        match store.root.metadata_at(OsStr::new(&candidate), false) {
+                            Err(error) if error.is_not_found() => break candidate,
+                            Ok(_) => suffix = suffix.checked_add(1).ok_or(RunError::Conflict)?,
+                            Err(error) => return Err(error.into()),
+                        }
+                    };
+                    let path = context.state_root.as_path().join(&name);
+                    source.execute(
+                        "VACUUM INTO ?1",
+                        [path
+                            .to_str()
+                            .ok_or(RunError::Validation("backup path is not UTF-8"))?],
+                    )?;
+                    store.root.open_read(OsStr::new(&name))?.sync()?;
+                    store.root.sync()?;
+                }
                 let start = usize::try_from(current).map_err(|_| RunError::Version(current))?;
                 let steps = [
                     include_str!("schema.sql"),
@@ -290,6 +325,7 @@ impl RunStore {
                     include_str!("schema_v4.sql"),
                     include_str!("schema_v5.sql"),
                     include_str!("schema_v6.sql"),
+                    include_str!("schema_v7.sql"),
                 ];
                 provenant_sqlite::apply_migrations(tx, &steps, start, |index, db| {
                     if index == 3 {
@@ -415,7 +451,7 @@ pub(crate) fn open_database(
     Ok((root, db, initialisation))
 }
 fn version(db: &Connection) -> Result<i64> {
-    match provenant_sqlite::read_version(db, 6) {
+    match provenant_sqlite::read_version(db, 7) {
         Ok(version) => Ok(version as i64),
         Err(provenant_sqlite::VersionError::Unsupported(version)) => {
             Err(RunError::Version(version))
@@ -462,6 +498,24 @@ pub(crate) fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> 
             ..Default::default()
         },
     )?)
+}
+
+pub(crate) fn decode_unversioned<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+    Ok(provenant_records::decode(
+        bytes,
+        provenant_records::Limits {
+            max_bytes: RECORD_LIMIT,
+            ..Default::default()
+        },
+    )?)
+}
+
+pub(crate) fn decode_attempt(bytes: &[u8]) -> Result<AttemptRecord> {
+    let record: AttemptRecord = decode_unversioned(bytes)?;
+    if !matches!(record.schema_version, 1 | 2) {
+        return Err(RunError::Version(record.schema_version as i64));
+    }
+    Ok(record)
 }
 
 pub(crate) fn sql_int(value: u64) -> Result<i64> {

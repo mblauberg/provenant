@@ -1032,7 +1032,6 @@ mod lineage_tests {
                     keep: &[],
                     written_before_ns: i128::MAX,
                     foreign_merged_clean: false,
-                    foreign_idle_before_ns: None,
                     dry_run: false,
                 },
                 &cancel,
@@ -1658,10 +1657,32 @@ impl RunStore {
             let Some(handle) = &held.handle else {
                 // The latest handle is dropped only after observing guardian
                 // exit. Earlier superseded generations cannot be selected.
+                let record = self.record(id, call)?;
+                if matches!(record.state, AttemptState::Terminal { .. }) {
+                    self.record_cancellation(
+                        id,
+                        record.generation,
+                        CancellationDisposition::AcknowledgedIneffective,
+                        call,
+                    )?;
+                }
                 return Ok(CancelReceipt::AlreadyTerminal);
             };
             let stopped = custody::stop(handle, StopReason::ExplicitCancellation)
                 .map_err(|error| error.to_string());
+            if stopped.is_ok()
+                && let Ok(record) = self.record(id, call)
+                && matches!(record.state, AttemptState::Terminal { .. })
+            {
+                self.record_cancellation(
+                    id,
+                    record.generation,
+                    CancellationDisposition::AcknowledgedIneffective,
+                    call,
+                )?;
+                // The stop receipt still reports what the held handle accepted:
+                // a lane-rewritable record does not decide whether it stopped.
+            }
             return Ok(match stopped {
                 Ok(StopReceipt::Requested) => CancelReceipt::Requested,
                 Ok(StopReceipt::AlreadyRequested) => CancelReceipt::AlreadyRequested,
@@ -1671,7 +1692,15 @@ impl RunStore {
         loop {
             let record = self.record(id, call)?;
             match record.state {
-                AttemptState::Terminal { .. } => return Ok(CancelReceipt::AlreadyTerminal),
+                AttemptState::Terminal { .. } => {
+                    self.record_cancellation(
+                        id,
+                        record.generation,
+                        CancellationDisposition::AcknowledgedIneffective,
+                        call,
+                    )?;
+                    return Ok(CancelReceipt::AlreadyTerminal);
+                }
                 AttemptState::Queued { .. } => {
                     let now = call
                         .clock
@@ -1688,7 +1717,16 @@ impl RunStore {
                         call,
                     ) {
                         Ok(Some(_)) => return Ok(CancelReceipt::Cancelled),
-                        Ok(None) => return Ok(CancelReceipt::AlreadyTerminal),
+                        Ok(None) => {
+                            let terminal = self.record(id, call)?;
+                            self.record_cancellation(
+                                id,
+                                terminal.generation,
+                                CancellationDisposition::AcknowledgedIneffective,
+                                call,
+                            )?;
+                            return Ok(CancelReceipt::AlreadyTerminal);
+                        }
                         // A concurrent start took it; it is no longer queued.
                         Err(RunError::Conflict) => continue,
                         Err(error) => return Err(error),
@@ -2228,6 +2266,11 @@ impl RunStore {
                 (Vec::new(), Some(error.to_string()))
             }
         };
+        for id in self.pending_effect_attempts(run, call)? {
+            if !ids.contains(&id.to_string()) {
+                ids.push(id.to_string());
+            }
+        }
         for fence in fences {
             if fence.scope.run == run && !ids.contains(&fence.scope.attempt.to_string()) {
                 ids.push(fence.scope.attempt.to_string());
@@ -2655,6 +2698,45 @@ impl RunStore {
             return Ok(Some(Reconciled::uncertain(UncertainReason::HostStalled)));
         }
         if matches!(record.state, AttemptState::Terminal { .. }) {
+            let directory = self.attempt_dir(record.run_id, id, false)?;
+            let scope = Self::scope(&record);
+            let effects_retained = read_sealed(&directory, "terminal-effects.json", RECORD_LIMIT)?
+                .is_some()
+                && record.exit_evidence.is_some()
+                && (custody::reservation_present(&directory, scope)?
+                    || self
+                        .writer_fences()?
+                        .iter()
+                        .any(|fence| fence.scope == scope));
+            // Retained custody can only be reattached through the launch
+            // summary; an attempt that never sealed one has nothing to recover.
+            let reattachable = effects_retained
+                && directory
+                    .metadata_at(std::ffi::OsStr::new("launch.json"), false)
+                    .is_ok();
+            if !self.import_release_permitted(&record, call)?
+                || self.retained_import_fence(Self::scope(&record))?
+                || reattachable
+            {
+                let handle = custody::reattach(directory.try_clone()?, Self::scope(&record))
+                    .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
+                if let Observation::Exited(exit) =
+                    custody::observe(&handle, call.lock_budget(), call.cancel, call.clock)
+                        .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?
+                {
+                    let recovery = self.orphan_recovery(&record, directory.try_clone()?, call)?;
+                    self.finish_recovered_terminal(
+                        id, &directory, &exit, recovery, providers, call,
+                    )?;
+                }
+                let current = self.record(id, call)?;
+                if !self.import_release_permitted(&current, call)? {
+                    return Ok(Some(Reconciled::Settling {
+                        phase: "import".into(),
+                    }));
+                }
+            }
+            self.reconcile_terminal_effects(&record, call)?;
             return self.reconcile_terminal_temporary(&record, call, observer);
         }
         self.reconcile_live_attempt(&record, providers, call, observer)
@@ -2717,7 +2799,12 @@ impl RunStore {
                     }
                     Ok(Observation::Exited(exit)) => {
                         let attempt = dir()?;
-                        self.finish(id, &attempt, &exit, providers, call)?;
+                        let finished = self.finish(id, &attempt, &exit, providers, call)?;
+                        if !self.import_release_permitted(&finished, call)? {
+                            return Ok(Reconciled::Settling {
+                                phase: "import".into(),
+                            });
+                        }
                         custody::publish_release(&attempt, scope)
                             .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
                         Ok(Reconciled::Finished)
