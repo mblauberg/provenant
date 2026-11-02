@@ -1,4 +1,5 @@
 use super::*;
+use provenant_records::{result_capture::CapturedResult, workflow::ReviewVerdict};
 
 /// Admit reviewers through the ordinary run scheduler and collate their results.
 pub fn review(command: crate::Review, edge: &Edge<'_>) -> Reply {
@@ -492,7 +493,7 @@ fn review_identity(
 
 fn review_task(slot: &ReviewSlot, head: &str, brief: &str, families: Vec<String>) -> Submitted {
     let prompt = format!(
-        "Review commit {head}. Work read-only.\nLens: {}\nStart with exactly one line: Verdict: approve, Verdict: request_changes, or Verdict: inconclusive. Then give findings.\n\n{brief}",
+        "Review commit {head}. Work read-only.\nLens: {}\nGive findings, then end with exactly one final non-empty line: VERDICT: APPROVE, VERDICT: REQUEST_CHANGES, or VERDICT: INCONCLUSIVE. A closed trailing handoff fence may follow.\n\n{brief}",
         slot.lens.as_deref().unwrap_or("general")
     );
     Submitted {
@@ -594,74 +595,60 @@ fn review_collect(edge: &Edge<'_>, data: &mut Value) -> Result<(), Fail> {
         if let Some(f) = &family {
             used.push(f.clone());
         }
-        let verdict = row["result_path"]
+        let verdict = row["attempt_id"]
             .as_str()
-            .and_then(|p| review_verdict_file(Path::new(p)))
-            .unwrap_or("unknown");
+            .and_then(|id| id.parse::<AttemptId>().ok())
+            .and_then(|id| session.store.stream_result(id, &call, None).ok())
+            .and_then(|captured| captured_review_verdict(&captured));
         if let (Some(target), Some(source)) = (reviewer.as_object_mut(), row.as_object()) {
             target.extend(source.clone());
         }
         reviewer["family"] = json!(family);
         reviewer["substitution"] = json!(substitution);
-        reviewer["verdict"] = json!(verdict);
+        reviewer["verdict"] = verdict.map_or_else(|| json!("unknown"), |verdict| json!(verdict));
     }
     Ok(())
 }
-// Verdicts are at the beginning; the rest of a large result need not be read.
-fn review_verdict_file(path: &Path) -> Option<&'static str> {
-    const LIMIT: u64 = 8192;
-    if !std::fs::metadata(path).ok()?.is_file() {
+// One-release reader for retained first-line review outputs. The shared lexer
+// still controls declaration uniqueness across the complete artifact.
+fn captured_review_verdict(captured: &CapturedResult) -> Option<ReviewVerdict> {
+    if let Some(token) = captured.verdict.as_deref() {
+        return ReviewVerdict::from_token(token);
+    }
+    if captured.declarations != 1 {
         return None;
     }
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .ok()?
-        .take(LIMIT + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    let truncated = bytes.len() as u64 > LIMIT;
-    bytes.truncate(LIMIT as usize);
-    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
-        if truncated && !line.ends_with(b"\n") {
-            return None;
-        }
-        let line = std::str::from_utf8(line).ok()?;
-        if !line.trim().is_empty() {
-            return Some(review_verdict(line));
-        }
+    let line = captured
+        .excerpt
+        .split_inclusive('\n')
+        .find(|line| !line.trim().is_empty())?;
+    // A clipped first line is not legacy evidence.
+    if captured.truncated && !line.ends_with('\n') {
+        return None;
     }
-    None
-}
-fn review_verdict(output: &str) -> &'static str {
-    let Some(line) = output.lines().map(str::trim).find(|line| !line.is_empty()) else {
-        return "unknown";
-    };
     let stripped = line.replace('*', "");
-    let line = stripped.trim_matches('_').trim();
-    let Some((label, verdict)) = line.split_once(':') else {
-        return "unknown";
-    };
+    let (label, token) = stripped.trim().trim_matches('_').trim().split_once(':')?;
     if !label
         .trim_matches(|c| c == '*' || c == '_')
         .trim()
         .eq_ignore_ascii_case("verdict")
     {
-        return "unknown";
+        return None;
     }
-    match verdict
+    match token
         .trim()
         .trim_matches(|c| c == '*' || c == '_')
         .to_ascii_lowercase()
         .as_str()
     {
-        "approve" => "approve",
-        "request_changes" => "request_changes",
-        "inconclusive" => "inconclusive",
-        _ => "unknown",
+        "approve" => Some(ReviewVerdict::Approve),
+        "request_changes" => Some(ReviewVerdict::RequestChanges),
+        "inconclusive" => Some(ReviewVerdict::Inconclusive),
+        _ => None,
     }
 }
 fn aggregate_verdicts(data: &Value) -> Value {
-    let mut counts = json!({"approve": 0, "request_changes": 0, "inconclusive": 0, "unknown": 0, "not_submitted": 0});
+    let mut counts = json!({"approve": 0, "approve_with_nits": 0, "request_changes": 0, "inconclusive": 0, "unknown": 0, "not_submitted": 0});
     if let Some(rows) = data["reviewers"].as_array() {
         for row in rows {
             let verdict = row["verdict"].as_str().unwrap_or("unknown");
@@ -669,7 +656,7 @@ fn aggregate_verdicts(data: &Value) -> Value {
                 "not_submitted"
             } else {
                 match verdict {
-                    "approve" | "request_changes" | "inconclusive" => verdict,
+                    "approve" | "approve_with_nits" | "request_changes" | "inconclusive" => verdict,
                     _ => "unknown",
                 }
             };
@@ -753,19 +740,82 @@ fn review_text(data: &Value) -> String {
 #[cfg(test)]
 mod review_shape_tests {
     use super::*;
+    fn captured(text: &str) -> CapturedResult {
+        let mut capture = provenant_records::result_capture::ResultCapture::new(None);
+        for chunk in text.as_bytes().chunks(7) {
+            capture.push(chunk);
+        }
+        capture.finish()
+    }
     #[test]
-    fn verdict_requires_an_exact_first_line() {
-        assert_eq!(review_verdict("Verdict: approve\nNothing found"), "approve");
-        assert_eq!(
-            review_verdict("Verdict: request_changes\nFinding"),
-            "request_changes"
+    fn review_rejects_duplicate_declarations_as_unknown() {
+        for text in [
+            "VERDICT: APPROVE\nVERDICT: REQUEST_CHANGES",
+            "Verdict: approve\nVerdict: request_changes",
+            "Verdict: approve\nVERDICT: APPROVE",
+        ] {
+            assert_eq!(captured_review_verdict(&captured(text)), None);
+        }
+        let duplicate = format!(
+            "Verdict: approve\n{}\nVERDICT: REQUEST_CHANGES",
+            "x".repeat(20_000)
         );
-        assert_eq!(review_verdict("I approve\nVerdict: approve"), "unknown");
-        assert_eq!(review_verdict("Verdict: approved"), "unknown");
-        assert_eq!(review_verdict("\n **Verdict: APPROVE**\n"), "approve");
+        assert_eq!(captured_review_verdict(&captured(&duplicate)), None);
+    }
+    #[test]
+    fn review_reads_legacy_first_line_only_when_single_declaration() {
+        for (text, expected) in [
+            (
+                "Verdict: approve\nNothing found",
+                Some(ReviewVerdict::Approve),
+            ),
+            (
+                "\n **Verdict: APPROVE**\nNothing found",
+                Some(ReviewVerdict::Approve),
+            ),
+            (
+                "**Verdict:** *Request_Changes*\nFinding",
+                Some(ReviewVerdict::RequestChanges),
+            ),
+            (
+                "Verdict: inconclusive\nIncomplete",
+                Some(ReviewVerdict::Inconclusive),
+            ),
+            ("Verdict: approve\nVerdict: request_changes", None),
+            ("I approve\nVerdict: approve", None),
+            ("Verdict: approved", None),
+            ("Verdict: approve_with_nits\nFinding", None),
+        ] {
+            assert_eq!(captured_review_verdict(&captured(text)), expected, "{text}");
+        }
         assert_eq!(
-            review_verdict("**Verdict:** *Request_Changes*"),
-            "request_changes"
+            captured_review_verdict(&captured(&format!(
+                "Verdict: approve\n{}",
+                "x".repeat(20_000)
+            ))),
+            Some(ReviewVerdict::Approve)
+        );
+        assert_eq!(
+            captured_review_verdict(&captured(&format!("Verdict: approve{}", " ".repeat(9000)))),
+            None
+        );
+    }
+    #[test]
+    fn review_consumes_shared_final_line_capture() {
+        for (token, expected) in [
+            ("APPROVE", ReviewVerdict::Approve),
+            ("PASS", ReviewVerdict::Approve),
+            ("FAIL", ReviewVerdict::RequestChanges),
+            ("REQUEST_CHANGES", ReviewVerdict::RequestChanges),
+            ("APPROVE_WITH_NITS", ReviewVerdict::ApproveWithNits),
+            ("INCONCLUSIVE", ReviewVerdict::Inconclusive),
+        ] {
+            let text = format!("Findings\nVERDICT: {token}\n```handoff\n{{}}\n```\n");
+            assert_eq!(captured_review_verdict(&captured(&text)), Some(expected));
+        }
+        assert_eq!(
+            captured_review_verdict(&captured("Findings\nVERDICT: UNKNOWN")),
+            None
         );
     }
     #[test]
@@ -953,23 +1003,8 @@ mod review_shape_tests {
         let data = json!({"reviewers":[{"verdict":"approve"},{"verdict":"request_changes"},{"verdict":"unknown"},{"state":"not_submitted"}]});
         assert_eq!(
             aggregate_verdicts(&data),
-            json!({"approve":1,"request_changes":1,"inconclusive":0,"unknown":1,"not_submitted":1})
+            json!({"approve":1,"approve_with_nits":0,"request_changes":1,"inconclusive":0,"unknown":1,"not_submitted":1})
         );
-    }
-    #[test]
-    fn verdict_reads_only_a_complete_bounded_prefix() -> Result<(), Box<dyn std::error::Error>> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join("result");
-        std::fs::write(
-            &path,
-            format!("\nVerdict: approve\n{}", "x".repeat(1_100_000)),
-        )?;
-        assert_eq!(review_verdict_file(&path), Some("approve"));
-        std::fs::write(&path, format!("Verdict: approve{}", " ".repeat(9000)))?;
-        assert_eq!(review_verdict_file(&path), None);
-        std::fs::write(&path, b"Verdict: approve")?;
-        assert_eq!(review_verdict_file(&path), Some("approve"));
-        Ok(())
     }
     #[test]
     fn explicit_shape_skips_range_validation() {

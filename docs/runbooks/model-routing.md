@@ -165,13 +165,19 @@ member's route before submitting its next member. Each reviewer goes through
 normal dispatch, so pacing and quota apply per reviewer.
 
 The summary collates each reviewer's run, route, state, verdict and full output
-path without merging findings. A reviewer is asked to begin with
-`Verdict: approve`, `Verdict: request_changes` or `Verdict: inconclusive`.
-Leading blank lines, case and Markdown emphasis are accepted; an unrecognised
-or unreadable result is `unknown`. JSON includes verdict counts, with planned
+path without merging findings. Reviewers give findings followed by one final-line
+declaration using the [review wire grammar](../specs/fabric.md#typed-node-outputs).
+The prompt offers approval, change request or inconclusive; it does not offer
+approval with nits. The collector uses the complete verified result stream;
+duplicate declarations, an unrecognised token or an unreadable result is `unknown`.
+For one release, retained first-line legacy outputs remain readable when there
+is no captured final verdict, exactly one declaration in the complete stream,
+and the first non-empty excerpt line is a legacy approval, change request or
+inconclusive verdict. Legacy case and Markdown emphasis remain accepted.
+JSON includes verdict counts, with planned
 but `not_submitted` reviewers counted separately. The command
 exits successfully only when every reviewer succeeds and approves; a failed,
-inconclusive, change-requesting or unknown verdict is non-zero. This result
+inconclusive, change-requesting, approval-with-nits or unknown verdict is non-zero. This result
 does not itself decide delivery acceptance.
 
 Retries use deterministic reviewer operation IDs derived from the resolved

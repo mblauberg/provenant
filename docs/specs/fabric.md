@@ -663,7 +663,9 @@ as a task. Omitting `kind`, or setting it to `task`, preserves task behaviour.
 ### Deterministic gates
 
 A `gate` must evaluate its condition without a model or attempt. Verdict gates
-must compare selected direct dependencies' verdicts exactly, with missing
+must compare selected direct dependencies' review verdicts by canonical token
+(as defined under [typed node outputs](#typed-node-outputs)), falling back to exact strings
+when either value is outside the review vocabulary, with missing
 verdicts counting as non-matches. Malformed, repeated or non-final verdicts
 must fail the gate regardless of its threshold. Majority requires strictly more than half;
 count requires at least the configured positive count. Budget gates must check
@@ -1137,6 +1139,26 @@ is a non-match; a matched `required_verdict` contract must not override invalid
 typed evidence.
 Run-store integrity verification rejects incomplete artifacts before their
 verdicts can be consumed; excerpt truncation alone does not invalidate a verdict.
+
+`records::workflow::ReviewVerdict` supplies the review vocabulary:
+
+| Wire token | Canonical token | Workflow JSON value |
+|---|---|---|
+| `APPROVE`, `PASS` | `APPROVE` | `approve` |
+| `APPROVE_WITH_NITS` | `APPROVE_WITH_NITS` | `approve_with_nits` |
+| `REQUEST_CHANGES`, `FAIL` | `REQUEST_CHANGES` | `request_changes` |
+| `INCONCLUSIVE` | `INCONCLUSIVE` | `inconclusive` |
+
+`from_token` accepts a bare token or its stored `VERDICT: ` prefix; `as_token`
+returns the canonical token. The aliases apply only to the pairs above;
+approval with nits matches only itself. Verdict gates compare canonical tokens
+when both sides belong to this vocabulary, otherwise they compare strings
+exactly (including for decision IDs and land outcomes). Stored
+`NodeOutputs.verdict` strings and checkpoints keep their original values.
+Graph run summaries use canonical review tokens as verdict count keys;
+other verdict keys retain their existing lowercase representation.
+Review coverage semantics belong to [workflow](workflow.md#review-coverage).
+Handoff status remains a separate completion state.
 
 Findings use a fenced `findings` JSON block with `schema_version: 1`
 and a `findings` array; each item has string fields `id`, `severity`, `file`, `summary` and

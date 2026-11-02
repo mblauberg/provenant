@@ -147,6 +147,13 @@ pub fn check(ctx: &ReviewContext<'_>, facts: &[ReviewFact]) -> ValidationReport 
                 ),
                 "repair the findings, then obtain a fresh review",
             );
+        } else if fact.verdict == ReviewVerdict::Inconclusive {
+            note(
+                "inconclusive_review",
+                field,
+                "review is inconclusive and supplies no coverage".into(),
+                "obtain a fresh review with a passing verdict",
+            );
         } else if excluded.contains(&fact.reviewer_id) {
             note(
                 "reviewer_not_independent",
@@ -285,7 +292,12 @@ pub fn check(ctx: &ReviewContext<'_>, facts: &[ReviewFact]) -> ValidationReport 
     diagnostics.sort_by(|a, b| (a.code, &a.field).cmp(&(b.code, &b.field)));
     // Routine work needs no review; only a blocking review still fails it.
     if need == 0 {
-        diagnostics.retain(|d| matches!(d.code, "blocking_review" | "stale_subject"));
+        diagnostics.retain(|d| {
+            matches!(
+                d.code,
+                "blocking_review" | "stale_subject" | "inconclusive_review"
+            )
+        });
     }
     let incomplete = diagnostics.iter().any(|d| {
         matches!(
@@ -401,6 +413,45 @@ mod tests {
             reference: evidence(),
             expires_at: UtcMicros::from_micros(expires).unwrap(),
         }
+    }
+
+    #[test]
+    fn inconclusive_review_is_not_counted_and_never_blocks() {
+        let authors = [author(attested(ModelTier::Senior))];
+        let mut inconclusive = review(
+            2,
+            observed(ModelTier::Senior, "openai"),
+            Some("openai"),
+            "correctness",
+        );
+        inconclusive.verdict = ReviewVerdict::Inconclusive;
+        inconclusive.blocking_findings = vec!["unresolved concern".into()];
+        let inconclusive = crate::review::fact(
+            inconclusive.clone(),
+            &inconclusive.subject,
+            &ReviewPolicy::default(),
+        )
+        .unwrap();
+        for (risk, expected) in [
+            (RiskTier::Routine, Status::Passed),
+            (RiskTier::Substantial, Status::Incomplete),
+        ] {
+            let report = run(risk, &authors, std::slice::from_ref(&inconclusive), &[]);
+            assert_eq!(report.status, expected);
+            assert!(report.counted.is_empty());
+            assert!(codes(&report).contains(&"inconclusive_review"));
+            assert!(!codes(&report).contains(&"blocking_review"));
+        }
+        let good = review(
+            3,
+            observed(ModelTier::Senior, "openai"),
+            Some("openai"),
+            "correctness",
+        );
+        let report = run(RiskTier::Substantial, &authors, &[inconclusive, good], &[]);
+        assert_eq!(report.status, Status::Passed);
+        assert_eq!(report.counted.len(), 1);
+        assert!(codes(&report).contains(&"inconclusive_review"));
     }
 
     #[test]

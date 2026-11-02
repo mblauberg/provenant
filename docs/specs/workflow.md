@@ -18,7 +18,13 @@ install or release authority. Paths are relative to `tools/front-door/`.
 A review passes only for a retained matching verdict and output on the exact
 subject, with adequate tier and an independent reviewer. Authors and decision
 makers, including the chair, never count, and repeats add nothing.
-`approve_with_nits` passes only when every remaining finding is advisory.
+`ReviewVerdict` uses the [review wire vocabulary](fabric.md#typed-node-outputs).
+Both `approve` and `approve_with_nits` require empty `blocking_findings` to pass;
+there is no advisory-findings list. `request_changes` requires at least one
+blocking finding and blocks acceptance on the exact subject. `inconclusive`
+never counts towards coverage and never blocks acceptance, regardless of its
+findings; it emits an `inconclusive_review` diagnostic asking for a fresh review.
+Insufficient passing coverage still leaves acceptance incomplete.
 Counted reviewers must be at least the highest author tier, and family separation is
 measured against all authors.
 - Why: self-review or a stale subject proves nothing.

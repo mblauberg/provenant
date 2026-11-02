@@ -71,6 +71,7 @@ pub fn fact(
                 !fact.blocking_findings.is_empty()
             }
             ReviewVerdict::RequestChanges => fact.blocking_findings.is_empty(),
+            ReviewVerdict::Inconclusive => false,
         }
     {
         return Err(ReviewError::Output);
