@@ -298,10 +298,49 @@ final class ExecTimeoutTests: XCTestCase {
     }
 
     func testDescendantsIgnoringTermAreKilledAfterTheGrace() throws {
-        // The shell ignores SIGTERM and so does its child; only the group SIGKILL ends them.
-        let run = try CLI.exec(URL(fileURLWithPath: "/bin/sh"), ["-c", "trap '' TERM; sleep 30 & wait"], path: nil, limit: 0.3, grace: 0.3)
-        XCTAssertTrue(run.timedOut)
-        XCTAssertTrue(run.signalled)
+        // Publish readiness after the shell installs its trap and forks sleep.
+        let marker = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: marker) }
+        let out = Pipe(), err = Pipe()
+        let command = "trap '' TERM; sleep 30 & echo $! > \"$1\"; wait"
+        let pid = try CLI.spawn(URL(fileURLWithPath: "/bin/sh"), ["-c", command, "descendant-test", marker.path],
+                                path: nil, qos: QOS_CLASS_UTILITY, out: out, err: err)
+        let leader = CLI.Leader(pid: pid)
+        var childPID: pid_t?
+        let ready = waitUntil(timeout: 5) {
+            guard let child = try? String(contentsOf: marker, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines) else { return false }
+            childPID = pid_t(child)
+            return childPID != nil
+        }
+        guard ready, let childPID else {
+            leader.signalGroup(SIGKILL)
+            if leader.waitForExit(seconds: 3) { _ = leader.reap() } else { leader.abandon() }
+            out.fileHandleForReading.closeFile()
+            err.fileHandleForReading.closeFile()
+            return XCTFail("shell did not publish its descendant PID")
+        }
+
+        let leaderStillRunning = CLI.terminate(leader, grace: 0.3)
+        if leaderStillRunning { leader.abandon() } else { _ = leader.reap() }
+        out.fileHandleForReading.closeFile()
+        err.fileHandleForReading.closeFile()
+        XCTAssertFalse(leaderStillRunning)
+        XCTAssertTrue(waitUntil(timeout: 5, condition: { !processExists(childPID) }),
+                      "SIGKILL should end the descendant after the grace period")
+    }
+
+    private func waitUntil(timeout: TimeInterval, condition: () -> Bool) -> Bool {
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        while !condition() && ProcessInfo.processInfo.systemUptime < deadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        return condition()
+    }
+
+    private func processExists(_ pid: pid_t) -> Bool {
+        if kill(pid, 0) == 0 { return true }
+        return errno != ESRCH
     }
 
     func testCleanExitReportsStatusAndOutput() throws {

@@ -2132,20 +2132,27 @@ fn retry_is_busy_while_a_descendant_of_a_killed_guardian_is_alive(root: &Path) -
         attempt: AttemptId::from_bytes([9; 16]),
         ..scope()
     };
-    let admit = || {
+    let admit = |budget| {
         fixture::acquire_writer(
             Directory::open_anchor(&writer_path)?,
             retry,
-            WaitBudget::nonblocking(provenant_core::Clock::mono_now(&clock)),
+            budget,
             &CancelToken::new(),
             &clock,
         )
     };
-    assert!(matches!(admit(), Err(CustodyError::Busy)));
+    assert!(matches!(
+        admit(WaitBudget::nonblocking(provenant_core::Clock::mono_now(
+            &clock
+        ))),
+        Err(CustodyError::Busy)
+    ));
     assert!(!root.join("inherited-attempt/process-exit.json").exists());
     drop(descendant_gate);
     wait_for_identity_absence(&descendant)?;
-    admit()?.withdraw_unlaunched()?;
+    // Darwin can report the process absent just before the last inherited flock
+    // descriptor closes. Wait on the lock itself before reacquiring custody.
+    admit(budget(&clock)?)?.withdraw_unlaunched()?;
     assert!(
         writer_path
             .join(scope().attempt.to_string())
