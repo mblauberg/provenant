@@ -4780,3 +4780,43 @@ fn configured_model_exclusion_removes_the_member_from_every_pool()
     assert!(seen > 0);
     Ok(())
 }
+
+#[test]
+fn a_malformed_persisted_exclusion_fails_closed_for_its_row_only()
+-> Result<(), Box<dyn std::error::Error>> {
+    let config: RoutingConfig = serde_json::from_value(serde_json::json!({
+        "model_exclusions": [
+            {"model": "codex/gpt-6-luna", "schedule": {"expires": "not-a-time"}},
+            {"model": "claude/unreadable", "extra": true},
+            {"model": "not a model"},
+            {"model": "codex/gpt-6-terra", "schedule": {"expires": "2030-01-01T00:00:00Z"}},
+        ],
+    }))?;
+    let models: Vec<&str> = config
+        .model_exclusions
+        .iter()
+        .map(|row| row.model.as_str())
+        .collect();
+    // The two rows whose model parses stay excluded; the unparseable one is
+    // reported, and the valid row is untouched.
+    assert_eq!(
+        models,
+        ["codex/gpt-6-luna", "claude/unreadable", "codex/gpt-6-terra"]
+    );
+    assert!(config.model_exclusions[0].schedule.expires.is_none());
+    assert!(config.model_exclusions[2].schedule.expires.is_some());
+    let notes = config.model_exclusions.notes();
+    assert_eq!(notes.len(), 3, "{notes:?}");
+    assert!(notes[0].contains("model_exclusions[0]") && notes[0].contains("stays excluded"));
+    assert!(notes[2].contains("model_exclusions[2]") && notes[2].contains("is ignored"));
+    // A repaired row excludes its model in the pools.
+    let catalogue = Catalogue::bundled()?;
+    let ctx = context(&catalogue, &config, now()?);
+    let mut query = request("codex/test")?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("junior")?);
+    let route = resolve(&query, &ctx)?;
+    let receipt = route.pool_selection.ok_or("pool selection")?;
+    assert!(receipt.candidates.iter().any(|candidate| candidate.model == "codex/gpt-6-luna"
+        && candidate.exclusion.is_some()));
+    Ok(())
+}
