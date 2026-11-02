@@ -81,6 +81,123 @@ fn isolated_keychain(
     }
 }
 
+/// The `ExecError::Io` operation of a probe refused because its isolated
+/// keychain was no longer the one selected.
+pub const KEYCHAIN_OPERATION: &str = "isolated keychain";
+
+/// The `HOME` an agy identity probe runs under, with the isolated keychain that
+/// selected it.
+///
+/// The probe itself is unconfined, and `HOME` is all that makes the agent use
+/// the account's keychain: if that file vanished, macOS could fall through to
+/// the shared login keychain and the probe would record the wrong account.
+/// [`ProbeHome::guard`] therefore re-checks the keychain (same device and
+/// inode, still a regular file inside the account directory) immediately
+/// before spawning and again once the probe returns, and refuses the result if
+/// either check fails.
+///
+/// Residual race: the agent opens the keychain after the first check and
+/// before it exits, so a keychain swapped for another regular file and back
+/// within that window is not observable. Closing it needs a seatbelt profile
+/// denying the real home's `Library/Keychains` to the probe, which cannot be
+/// verified against a real agy without touching a real keychain.
+#[derive(Debug)]
+pub struct ProbeHome {
+    home: std::path::PathBuf,
+    held: Option<Held>,
+}
+
+#[derive(Debug)]
+struct Held {
+    directory: std::path::PathBuf,
+    id: (u64, u64),
+}
+
+fn identity(metadata: &std::fs::Metadata) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    (metadata.dev(), metadata.ino())
+}
+
+impl ProbeHome {
+    /// The `HOME` for `directory`, refusing an isolated account whose keychain
+    /// is not available. The user's own home needs no guard.
+    pub fn select(
+        directory: &std::path::Path,
+        home: &std::path::Path,
+    ) -> Result<Self, crate::ProviderError> {
+        if account_keychain(directory, home)?.is_none() {
+            return Ok(Self {
+                home: home.to_owned(),
+                held: None,
+            });
+        }
+        let (_, metadata) = isolated_keychain(directory)?;
+        Ok(Self {
+            home: directory.to_owned(),
+            held: Some(Held {
+                directory: directory.to_owned(),
+                id: identity(&metadata),
+            }),
+        })
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.home
+    }
+
+    /// Fails unless the isolated keychain is still the selected file.
+    pub fn verify(&self) -> Result<(), crate::ProviderError> {
+        let Some(held) = &self.held else {
+            return Ok(());
+        };
+        let (keychain, metadata) = isolated_keychain(&held.directory)?;
+        if identity(&metadata) == held.id {
+            Ok(())
+        } else {
+            Err(crate::ProviderError::IsolatedKeychainUnavailable(
+                keychain.display().to_string(),
+            ))
+        }
+    }
+
+    /// Runs probes through `executor` under this home's keychain check.
+    pub fn guard<'a>(
+        &'a self,
+        executor: &'a dyn provenant_os::exec::Executor,
+    ) -> GuardedExecutor<'a> {
+        GuardedExecutor {
+            executor,
+            home: self,
+        }
+    }
+}
+
+/// An executor that checks the keychain before spawning and after the probe
+/// returns, failing with [`KEYCHAIN_OPERATION`] when it changed.
+pub struct GuardedExecutor<'a> {
+    executor: &'a dyn provenant_os::exec::Executor,
+    home: &'a ProbeHome,
+}
+
+impl provenant_os::exec::Executor for GuardedExecutor<'_> {
+    fn execute(
+        &self,
+        options: provenant_os::exec::ExecOptions<'_>,
+    ) -> Result<provenant_os::exec::ExecOutcome, provenant_os::exec::ExecError> {
+        let refused = |error: crate::ProviderError| provenant_os::exec::ExecError::Io {
+            operation: KEYCHAIN_OPERATION,
+            source: std::io::Error::other(match error {
+                crate::ProviderError::IsolatedKeychainUnavailable(path) => path,
+                other => other.to_string(),
+            }),
+        };
+        self.home.verify().map_err(refused)?;
+        let outcome = self.executor.execute(options)?;
+        self.home.verify().map_err(refused)?;
+        Ok(outcome)
+    }
+}
+
 /// Agy runs with the attempt's private state as `HOME`, so it sees none of the
 /// user's Gemini or Antigravity configuration, MCP servers, plugins, hooks,
 /// sidecars or knowledge: its state lives and dies in the private home. Its

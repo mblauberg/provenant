@@ -5235,6 +5235,126 @@ fn agy_registration_identity_comes_from_the_directory_it_is_signed_in_under()
     Ok(())
 }
 
+/// Runs `inner`, then applies `change` to the keychain, as a competing process
+/// would while the probe is running.
+struct ChangesKeychain<'a> {
+    inner: &'a AgySignIns,
+    change: Box<dyn Fn() + Send + Sync>,
+}
+impl provenant_os::exec::Executor for ChangesKeychain<'_> {
+    fn execute(
+        &self,
+        options: provenant_os::exec::ExecOptions<'_>,
+    ) -> Result<provenant_os::exec::ExecOutcome, provenant_os::exec::ExecError> {
+        let outcome = self.inner.execute(options);
+        (self.change)();
+        outcome
+    }
+}
+
+#[test]
+fn agy_probe_refuses_a_keychain_that_changes_between_selection_and_execution()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_os::exec::{ExecOptions, Executor};
+    let root = tempfile::tempdir()?;
+    let real_home = root.path().join("home");
+    let isolated = real_home.join(".agy-second");
+    let keychain = isolated.join(KEYCHAIN_FILE);
+    std::fs::create_dir_all(keychain.parent().ok_or("parent")?)?;
+    let reset = || -> std::io::Result<()> {
+        let _ = std::fs::remove_file(&keychain);
+        std::fs::write(&keychain, "")
+    };
+    let probes = AgySignIns {
+        accounts: vec![(isolated.clone(), "second@example.test")],
+        homes: Default::default(),
+    };
+    let argv: Vec<std::ffi::OsString> = vec!["agy".into(), "--log-file".into(), "/dev/null".into()];
+    let env = [("HOME".into(), isolated.clone().into_os_string())];
+    let run = |executor: &dyn Executor| {
+        let mut options =
+            ExecOptions::new(&argv, Path::new("/"), std::time::Duration::from_secs(5));
+        options.env = Some(&env);
+        executor.execute(options).map(|_| ())
+    };
+    let refused = |result: Result<(), provenant_os::exec::ExecError>| {
+        matches!(
+            result,
+            Err(provenant_os::exec::ExecError::Io { operation, .. })
+                if operation == agy::KEYCHAIN_OPERATION
+        )
+    };
+
+    // Gone after selection and before the spawn: nothing is spawned.
+    reset()?;
+    let selected = agy::ProbeHome::select(&isolated, &real_home)?;
+    std::fs::remove_file(&keychain)?;
+    assert!(refused(run(&selected.guard(&probes))));
+    assert!(probes.homes.lock().unwrap().is_empty());
+
+    // Replaced by another file before the spawn: same path, new identity.
+    reset()?;
+    let selected = agy::ProbeHome::select(&isolated, &real_home)?;
+    // Renamed over the old file, so both inodes exist at once and cannot be
+    // the same one.
+    let sibling = keychain.with_extension("new");
+    std::fs::write(&sibling, "other")?;
+    std::fs::rename(&sibling, &keychain)?;
+    assert!(refused(run(&selected.guard(&probes))));
+    assert!(probes.homes.lock().unwrap().is_empty());
+
+    // Gone, or swapped for a symlink, while the probe runs: the result is refused.
+    for swap_in_link in [false, true] {
+        reset()?;
+        let selected = agy::ProbeHome::select(&isolated, &real_home)?;
+        let (path, elsewhere) = (keychain.clone(), root.path().join("elsewhere"));
+        let racing = ChangesKeychain {
+            inner: &probes,
+            change: Box::new(move || {
+                std::fs::remove_file(&path).unwrap();
+                if swap_in_link {
+                    std::fs::write(&elsewhere, "").unwrap();
+                    std::os::unix::fs::symlink(&elsewhere, &path).unwrap();
+                }
+            }),
+        };
+        assert!(refused(run(&selected.guard(&racing))));
+    }
+    // The probe did run in those two cases; only its result was refused.
+    assert_eq!(probes.homes.lock().unwrap().len(), 2);
+
+    // An unchanged keychain passes, and the user's own home is never guarded.
+    reset()?;
+    let selected = agy::ProbeHome::select(&isolated, &real_home)?;
+    assert!(run(&selected.guard(&probes)).is_ok());
+    let own = agy::ProbeHome::select(&real_home, &real_home)?;
+    assert_eq!(own.path(), real_home);
+    assert!(own.verify().is_ok());
+
+    // Through registration: a keychain removed during the probe is not recorded.
+    reset()?;
+    let probe_root = root.path().join("probes");
+    std::fs::create_dir_all(&probe_root)?;
+    let path = keychain.clone();
+    let racing = ChangesKeychain {
+        inner: &probes,
+        change: Box::new(move || std::fs::remove_file(&path).unwrap()),
+    };
+    assert!(matches!(
+        crate::accounts::detect(
+            &racing,
+            "agy",
+            Path::new("/opt/homebrew/bin/agy"),
+            &real_home,
+            OsStr::new("u"),
+            &isolated,
+            &probe_root,
+        ),
+        Err(ProviderError::IsolatedKeychainUnavailable(_))
+    ));
+    Ok(())
+}
+
 #[test]
 fn opencode_free_limit_preserves_provider_message() -> Result<(), Box<dyn std::error::Error>> {
     // Synthetic protocol regression from #1216, not an activation recording.

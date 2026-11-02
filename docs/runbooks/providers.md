@@ -174,9 +174,13 @@ directory other than your own home is an isolated account: the lane's private
 home links its `Library/Keychains/login.keychain-db` instead of the user's login
 keychain, the grant covers exactly that path, and registration and the quota
 probe run `agy -p /usage` with `HOME=<directory>`. If that file is missing or is
-not a regular file (a symlink does not count), registration, launch and the
-quota probe fail with an error naming the path; they never fall back to the
-login keychain. Registering your own home directory keeps the shared login
+not a regular file (a symlink does not count, nor does a symlinked `Library`
+or `Library/Keychains` along the way), registration, launch and the quota probe
+fail with an error naming the path; they never fall back to the login keychain.
+Both probes re-check the keychain (same device and inode) immediately before
+spawning agy and again when it returns, and discard the result if it changed.
+The probe is not sandboxed, so a keychain swapped for another regular file and
+back while agy runs is the one residual window. Registering your own home directory keeps the shared login
 keychain.
 
 Unregistered and registered agy behave differently at launch:
