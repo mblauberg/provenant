@@ -25,6 +25,85 @@ final class InboxClientTests: XCTestCase {
         XCTAssertEqual(replay.recorded.count, 1)
     }
 
+    func testFirstPageAsksForPeersAndLaterPagesDoNot() async throws {
+        let replay = Replay([(["inbox", "--all-projects", "--state", "open", "--limit", "50", "--cursor", "CUR1"], "inbox-page2", 0),
+                             (["inbox"], "inbox-page1", 0)])
+        _ = try await InboxClient(cli: replay.client).list()
+        XCTAssertEqual(replay.recorded[0], ["inbox", "--all-projects", "--state", "open", "--limit", "50", "--hosts", "all", "--json"])
+        XCTAssertEqual(replay.recorded[1], ["inbox", "--all-projects", "--state", "open", "--limit", "50", "--cursor", "CUR1", "--json"])
+        XCTAssertFalse(replay.recorded[1].contains("--hosts"))
+    }
+
+    func testPeerRowsCarryTheirHostLabelProjectAndCoverage() async throws {
+        let replay = Replay([(["inbox"], "inbox-peers-complete", 0)])
+        let page = try await InboxClient(cli: replay.client).list()
+        XCTAssertEqual(page.items.map(\.id.first), ["1", "5", "6"])
+        let local = page.items[0], peer = page.items[1]
+        XCTAssertEqual(local.ownerHost, "cccccccccccccccccccccccccccccccc")
+        XCTAssertNil(local.peerHost)
+        XCTAssertNil(local.peerRoute)
+        XCTAssertEqual(peer.ownerHost, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+        XCTAssertEqual(peer.peerHost, peer.ownerHost)
+        XCTAssertEqual(peer.peerLabel, "studio")
+        XCTAssertEqual(peer.peerRoute, PeerRoute(host: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", projectKey: "peer/key"))
+        XCTAssertEqual(peer.projectName, "alpha")
+        XCTAssertEqual(page.peers?.map(\.state), ["complete", "unsupported"])
+        XCTAssertEqual(page.peers?.first?.included, 2)
+        XCTAssertEqual(page.peers?.first?.kind, .complete)
+    }
+
+    func testCoverageStaysAStringAndUnknownPeerStatesDecode() async throws {
+        let listed = try CLIClient.decode(
+            CLI.Output(status: 0, signalled: false, timedOut: false, truncated: false,
+                       out: try Replay.fixture("inbox-peers-future"), err: ""),
+            command: "inbox", as: InboxClient.Listed.self)
+        XCTAssertTrue(listed.coverage.hasPrefix("local_only"))
+        let peer = try XCTUnwrap(listed.peers?.first)
+        XCTAssertEqual(peer.state, "degraded")
+        XCTAssertEqual(peer.kind, .other("degraded"))
+        XCTAssertFalse(peer.contributedNoPage)
+        let gaps = try JSONDecoder.snake.decode(PeerCoverage.self, from: Data(
+            #"{"host":"h","label":"l","state":"partial","included":0,"invalid_rows":1,"duplicate_rows":2,"truncated":true,"reason":"invalid_page"}"#.utf8))
+        XCTAssertEqual([gaps.invalidRows, gaps.duplicateRows], [1, 2])
+        XCTAssertTrue(gaps.truncated && gaps.contributedNoPage)
+        let noReason = PeerCoverage(host: "h", label: "l", state: "partial", included: 3, truncated: true)
+        XCTAssertFalse(noReason.contributedNoPage)
+        XCTAssertTrue(PeerCoverage(host: "h", label: "l", state: "unreachable", reason: "timeout").contributedNoPage)
+    }
+
+    func testAnOldCLIWithoutPeersOrOwnerHostStillDecodes() async throws {
+        let replay = Replay([(["inbox"], "inbox-host", 0)])
+        let page = try await InboxClient(cli: replay.client).list()
+        XCTAssertNil(page.peers)
+        XCTAssertTrue(page.items.allSatisfy { $0.peerHost == nil && $0.peerRoute == nil })
+        // Older still: no owner_host on the rows at all.
+        var envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: Replay.fixture("inbox-host")) as? [String: Any])
+        var data = try XCTUnwrap(envelope["data"] as? [String: Any])
+        data["items"] = try XCTUnwrap(data["items"] as? [[String: Any]]).map { $0.filter { $0.key != "owner_host" } }
+        envelope["data"] = data
+        let bytes = try JSONSerialization.data(withJSONObject: envelope)
+        let old = CLIClient { _, _ in CLI.Output(status: 0, signalled: false, timedOut: false, truncated: false, out: bytes, err: "") }
+        let legacy = try await InboxClient(cli: old).list()
+        XCTAssertEqual(legacy.items.count, 2)
+        XCTAssertTrue(legacy.items.allSatisfy { $0.ownerHost == nil && $0.peerHost == nil })
+        XCTAssertEqual(legacy.items.map(\.projectName), ["provenant", "provenant"])
+    }
+
+    func testPeerAnswerAndViewNameTheOwnerHostAndProjectKey() async throws {
+        let route = PeerRoute(host: "eeee", projectKey: "peer/key")
+        let replay = Replay([(["answer"], "answer-saved", 0), (["inbox", "--all-projects", "9"], "inbox-item-answered", 0)])
+        let client = InboxClient(cli: replay.client)
+        _ = try await client.answer("9", action: .choose, option: "sqlite", expectRevision: 3, route: route)
+        XCTAssertEqual(replay.recorded[0], ["answer", "--all-projects", "9", "--host", "eeee", "--project-key", "peer/key",
+                                            "--action", "choose", "--expect-revision", "3", "--channel", "console", "--option", "sqlite", "--json"])
+        _ = try await client.item("9", route: route)
+        XCTAssertEqual(replay.recorded[1], ["inbox", "--all-projects", "9", "--host", "eeee", "--project-key", "peer/key", "--json"])
+        replay.set([(["answer"], "answer-conflict", 1), (["inbox", "--all-projects", "9"], "inbox-item-stale", 0)])
+        let outcome = try await client.answer("9", action: .confirm, expectRevision: 3, route: route)
+        guard case .stale = outcome else { return XCTFail("expected stale") }
+        XCTAssertEqual(replay.recorded.last, ["inbox", "--all-projects", "9", "--host", "eeee", "--project-key", "peer/key", "--json"])
+    }
+
     func testPageLimitReportsRemainingPages() async throws {
         let replay = Replay([(["inbox"], "inbox-page1", 0)])
         let page = try await InboxClient(cli: replay.client).list(maxPages: 1)
