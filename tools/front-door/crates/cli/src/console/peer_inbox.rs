@@ -9,8 +9,25 @@ use std::collections::BTreeSet;
 #[derive(Debug)]
 pub enum InboxObservation {
     Page(Value),
-    Unreachable,
+    /// The peer answered, but contributed no usable page; the reason says why.
+    Refused(&'static str),
+    /// No answer in time or at all; the reason says which.
+    Unreachable(&'static str),
     Unsupported,
+}
+
+/// A peer-supplied project label is display text only: a string, with control
+/// characters removed and at most 128 characters. Anything else is null.
+fn peer_label(value: &Value) -> Value {
+    let label: String = value
+        .as_str()
+        .map(|text| text.chars().filter(|c| !c.is_control()).take(128).collect())
+        .unwrap_or_default();
+    if label.is_empty() {
+        Value::Null
+    } else {
+        Value::String(label)
+    }
 }
 
 /// The configured host is authoritative for the identities in its reply.
@@ -66,8 +83,12 @@ pub fn compose_inbox(
             continue;
         }
         let page = match peer.observation {
-            InboxObservation::Unreachable => {
-                report.push(entry("unreachable", [0; 3], false, None));
+            InboxObservation::Refused(reason) => {
+                report.push(entry("partial", [0; 3], false, Some(reason)));
+                continue;
+            }
+            InboxObservation::Unreachable(reason) => {
+                report.push(entry("unreachable", [0; 3], false, Some(reason)));
                 continue;
             }
             InboxObservation::Unsupported => {
@@ -93,7 +114,7 @@ pub fn compose_inbox(
             } else {
                 projects.insert(
                     format!("{host}:{}", request.project_id),
-                    json!({"label":page["projects"][request.project_id.to_string()]["label"],
+                    json!({"label":peer_label(&page["projects"][request.project_id.to_string()]["label"]),
                         "host":host}),
                 );
                 items.push(request);
@@ -186,7 +207,7 @@ mod tests {
                         false,
                     ),
                 ),
-                peer(offline, InboxObservation::Unreachable),
+                peer(offline, InboxObservation::Unreachable("error")),
                 peer(old, InboxObservation::Unsupported),
             ],
         )
@@ -234,26 +255,71 @@ mod tests {
     }
 
     #[test]
-    fn peer_inbox_rejects_non_listings_and_bad_pages() {
-        let me = HostId::from_bytes([1; 16]);
+    fn peer_inbox_rejects_a_non_listing() {
+        let saved: InboxResult = serde_json::from_value(json!({
+            "result":"saved","operation_id":"op","request_id":HumanRequestId::from_bytes([1;16]),
+            "revision":1,"state":"open","answer_id":null,"delivery":null
+        }))
+        .unwrap();
+        assert!(compose_inbox(saved, vec![]).is_err());
+    }
+
+    #[test]
+    fn peer_inbox_reports_bad_pages_reasons_and_duplicate_hosts() {
         let remote = HostId::from_bytes([2; 16]);
+        let other = HostId::from_bytes([3; 16]);
+        let listed = || InboxResult::Listed {
+            extra: Default::default(),
+            items: vec![],
+            next_cursor: None,
+            truncated: false,
+            coverage: String::new(),
+        };
         let item = compose_inbox(
-            InboxResult::Listed {
-                extra: Default::default(),
-                items: vec![],
-                next_cursor: None,
-                truncated: false,
-                coverage: String::new(),
-            },
+            listed(),
             vec![
                 peer(remote, InboxObservation::Page(Value::Null)),
-                peer(remote, InboxObservation::Unreachable),
+                peer(remote, InboxObservation::Unreachable("timeout")),
+                peer(other, InboxObservation::Refused("project_unknown")),
             ],
         )
         .unwrap();
         let value = serde_json::to_value(item).unwrap();
+        assert_eq!(value["peers"][0]["state"], "partial");
         assert_eq!(value["peers"][0]["reason"], "invalid_page");
         assert_eq!(value["peers"][1]["reason"], "duplicate_host");
-        let _ = me;
+        assert_eq!(value["peers"][2]["state"], "partial");
+        assert_eq!(value["peers"][2]["reason"], "project_unknown");
+        let item = compose_inbox(
+            listed(),
+            vec![peer(remote, InboxObservation::Unreachable("timeout"))],
+        )
+        .unwrap();
+        let value = serde_json::to_value(item).unwrap();
+        assert_eq!(value["peers"][0]["state"], "unreachable");
+        assert_eq!(value["peers"][0]["reason"], "timeout");
+    }
+
+    #[test]
+    fn peer_project_labels_are_bounded_display_text() {
+        let remote = HostId::from_bytes([2; 16]);
+        let project = ProjectId::from_bytes([9; 16]).to_string();
+        let label = |label: Value| {
+            let page = InboxObservation::Page(json!({"items":[request(remote, 2, Some("k"))],
+                "truncated":false,"projects":{project.clone():{"label":label}}}));
+            let result =
+                compose_inbox(local(HostId::from_bytes([1; 16])), vec![peer(remote, page)])
+                    .unwrap();
+            serde_json::to_value(result).unwrap()["projects"][format!("{remote}:{project}")]
+                ["label"]
+                .clone()
+        };
+        assert!(label(json!({"nested":"object"})).is_null());
+        assert!(label(json!(7)).is_null());
+        assert!(label(json!("\u{1b}\n\t\u{0}")).is_null());
+        assert_eq!(label(json!("re\u{1b}[31mpo\n")), "re[31mpo");
+        // 130 two-byte characters are cut on a character boundary.
+        let long = "é".repeat(130);
+        assert_eq!(label(json!(long)), json!("é".repeat(128)));
     }
 }
