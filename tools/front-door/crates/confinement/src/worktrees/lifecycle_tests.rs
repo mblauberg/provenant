@@ -2298,6 +2298,48 @@ fn gc_managed_removal_needs_a_fresh_free_census_under_custody() -> Result<(), Bo
 }
 
 #[test]
+fn gc_preview_and_apply_both_retain_a_managed_tree_with_an_unknown_census()
+-> Result<(), Box<dyn Error>> {
+    for dry_run in [true, false] {
+        let fixture = Fixture::new()?;
+        let test_context = TestContext::new(&fixture)?;
+        let mut context = test_context.context();
+        let lane = gc_merged_worktree(&fixture, &context, "gc-census-unknown")?;
+        let unknown = FlippingWorkers {
+            calls: Default::default(),
+            unknown_from: 0,
+        };
+        context.workers = &unknown;
+        let report = collect(
+            &context,
+            std::slice::from_ref(&lane),
+            &WorktreeGcPolicy {
+                foreign_merged_clean: false,
+                upstream: Some(fixture.head()?),
+                terminal: &|_| true,
+                no_live_lanes: &|_| true,
+                regenerable: &[],
+                keep: &[],
+                written_before_ns: i128::MAX,
+                dry_run,
+            },
+            &cancel(),
+        )?;
+        assert!(report.worktrees.removed.is_empty(), "{dry_run}: {report:?}");
+        assert_eq!(
+            report.worktrees.retained,
+            vec![RetainedBranch {
+                branch: "gc-census-unknown".into(),
+                reason: RetainReason::UnknownWriter,
+            }],
+            "dry_run={dry_run}"
+        );
+        assert!(lane.path.is_dir());
+    }
+    Ok(())
+}
+
+#[test]
 fn gc_dry_run_retains_merged_worktree_with_unknown_writer() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let test_context = TestContext::new(&fixture)?;

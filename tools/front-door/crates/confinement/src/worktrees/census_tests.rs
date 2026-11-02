@@ -1837,7 +1837,7 @@ mod narrowing {
     }
 
     #[test]
-    fn refused_descriptors_on_a_sealed_system_image_with_an_outside_cwd_are_excused()
+    fn a_sealed_system_image_with_a_wholly_denied_descriptor_listing_is_excused_by_design()
     -> Result<(), Box<dyn Error>> {
         let (state, _, audit) = observe(
             path_scripted(gap(OccupancyGap::DescriptorsDenied), SYSTEM),

@@ -243,6 +243,11 @@ pub fn collect(
                         tree_unchanged(&fresh, entry, lane.head)?;
                         branch_unchanged(context, &fresh, &branch, &lane.path, lane.head, cancel)?;
                     }
+                    // Applying needs a fresh Free census; a preview must not
+                    // report a removal that applying would refuse.
+                    if !census_free(context, &lane.path) {
+                        return Err(WorktreeError::UnknownWriter);
+                    }
                     precheck_removal(
                         context,
                         locked.verified.repo(),

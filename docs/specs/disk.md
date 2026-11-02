@@ -128,6 +128,10 @@ executable on the sealed system volume whose descriptor queries are refused
 setuid sealed-system executable whose cwd is refused by its privilege
 transition (for example `/usr/bin/login`). User-owned descendants of such a
 process are observed normally.
+The sealed-system exemption covers a descriptor listing that is denied outright
+(a whole-listing EPERM), without enumerating descriptors: Apple sealed-system
+daemons are not workers, and treating them strictly left collection unusable
+on a normal host.
 Queued and pending submitted dispatches naming a worktree retain it with
 `unknown_writer`, including managed trees without a terminal lane record.
 Tasks not yet submitted into a run store are not visible to this census;
