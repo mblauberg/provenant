@@ -122,28 +122,49 @@ pub(crate) struct NativeProcess {
 /// One bounded worker per live provider. Sampling and fsync never block the
 /// guardian's output, cancellation or deadline loop. Dropping it requests stop;
 /// the worker invalidates the file after any already-running observation.
-pub(crate) struct Sampler(std::sync::mpsc::Sender<()>);
+/// `wait_ready` acknowledges the first publication attempt.
+pub(crate) struct Sampler {
+    stop: std::sync::mpsc::Sender<()>,
+    ready: std::sync::mpsc::Receiver<bool>,
+}
 impl Sampler {
     pub(crate) fn start(
         directory: &Directory,
         root: &ProcessIdentity,
         attempt: AttemptId,
     ) -> Option<Self> {
-        let directory = directory.try_clone().ok()?;
         let root = root.clone();
+        // Reconcile transient fork/exit churn without overlapping walks.
+        // Retain the last good observation until it expires.
+        Self::start_with(directory, move || {
+            observe_refresh(|| observe(&root, attempt))
+        })
+    }
+
+    fn start_with(
+        directory: &Directory,
+        mut observer: impl FnMut() -> Option<Snapshot> + Send + 'static,
+    ) -> Option<Self> {
+        let directory = directory.try_clone().ok()?;
         let (stop, receiver) = std::sync::mpsc::channel();
+        let (acknowledge, ready) = std::sync::mpsc::channel();
         std::thread::Builder::new()
             .name("lane-memory".into())
             .spawn(move || {
+                let mut first = true;
                 loop {
-                    // Reconcile transient fork/exit churn without overlapping
-                    // walks. Retain the last good observation until it expires.
-                    let snapshot = observe_refresh(|| observe(&root, attempt));
+                    let snapshot = observer();
                     if receiver.try_recv() != Err(std::sync::mpsc::TryRecvError::Empty) {
                         break;
                     }
-                    if let Some(snapshot) = &snapshot {
-                        let _ = publish(&directory, Some(snapshot));
+                    let published = snapshot
+                        .as_ref()
+                        .is_some_and(|snapshot| publish(&directory, Some(snapshot)).is_ok());
+                    if first {
+                        // Also released when sampling is unavailable, so the
+                        // guardian never waits for a publication that cannot come.
+                        first = false;
+                        let _ = acknowledge.send(published);
                     }
                     if receiver.recv_timeout(std::time::Duration::from_secs(1))
                         != Err(std::sync::mpsc::RecvTimeoutError::Timeout)
@@ -154,12 +175,19 @@ impl Sampler {
                 let _ = publish(&directory, None);
             })
             .ok()?;
-        Some(Self(stop))
+        Some(Self { stop, ready })
+    }
+
+    /// Wait up to `timeout` for the first publication attempt. True only when a
+    /// snapshot was published; false on unavailable sampling, worker exit or
+    /// timeout, all of which release the caller.
+    pub(crate) fn wait_ready(&self, timeout: std::time::Duration) -> bool {
+        self.ready.recv_timeout(timeout).unwrap_or(false)
     }
 }
 impl Drop for Sampler {
     fn drop(&mut self) {
-        let _ = self.0.send(());
+        let _ = self.stop.send(());
     }
 }
 
@@ -473,6 +501,34 @@ mod tests {
             group_id: 10,
             session_id: 10,
         }
+    }
+
+    #[test]
+    fn sampler_readiness_waits_for_a_delayed_first_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = Directory::open_anchor(temp.path()).unwrap();
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let sampler = Sampler::start_with(&directory, move || {
+            gate.recv().ok()?;
+            Some(snapshot())
+        })
+        .unwrap();
+        assert!(!sampler.wait_ready(std::time::Duration::from_millis(50)));
+        assert!(!temp.path().join(FILE).exists());
+        release.send(()).unwrap();
+        assert!(sampler.wait_ready(std::time::Duration::from_secs(10)));
+        let published: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(temp.path().join(FILE)).unwrap()).unwrap();
+        assert_eq!(published["sample"]["root_pid"], 10);
+    }
+
+    #[test]
+    fn sampler_readiness_releases_when_sampling_is_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = Directory::open_anchor(temp.path()).unwrap();
+        let sampler = Sampler::start_with(&directory, || None).unwrap();
+        assert!(!sampler.wait_ready(std::time::Duration::from_secs(10)));
+        drop(sampler);
     }
 
     #[test]

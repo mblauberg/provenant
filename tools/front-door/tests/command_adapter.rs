@@ -294,18 +294,11 @@ set -eu
 test -n "$PROVENANT_PROCESS_TREE"
 /bin/sh -c '/bin/sleep 15 & wait' &
 child=$!
-for attempt in 1 2 3 4 5 6 7 8 9 10; do
-    if "$1" process-tree --root "$$" --json > "$TMPDIR/sample.json"; then
-        printf '%s\n' "$PROVENANT_PROCESS_TREE"
-        /bin/cat "$TMPDIR/sample.json"
-        exit 0
-    else
-        status=$?
-        test "$status" = 4
-    fi
-    /bin/sleep 0.2
-done
-exit 90
+# The supervisor holds stdin open until the first sample is published.
+IFS= read -r _ || true
+"$1" process-tree --root "$$" --json > "$TMPDIR/sample.json"
+printf '%s\n' "$PROVENANT_PROCESS_TREE"
+/bin/cat "$TMPDIR/sample.json"
 "#;
     let command = json!({"argv":["/bin/sh","-c",script,"memory",binary], "runtimes":[binary]});
     let mut rig = rig(json!({"memory":command.clone(), "memory-foreign":command}))?;

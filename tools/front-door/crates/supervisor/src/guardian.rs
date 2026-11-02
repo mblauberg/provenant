@@ -656,7 +656,8 @@ impl Driver<'_> {
             argv,
             env,
             cwd,
-            input,
+            // Held open until the first sample is published; see below.
+            !input.is_empty() || memory_path.is_some(),
             plan,
             ports.as_ref().map(provenant_os::lane_ports::Lease::guard),
         );
@@ -695,6 +696,12 @@ impl Driver<'_> {
                     self.reservation.scope.attempt,
                 )
             });
+        // The provider's stdin stays open until the first sample is published
+        // (or sampling is shown unavailable), so a stdin-gated provider cannot
+        // read the tree before it exists. Bounded; never blocks cleanup.
+        if let Some(sampler) = &memory {
+            let _ = sampler.wait_ready(std::time::Duration::from_secs(2));
+        }
         if write_record(
             &self.writer_dir,
             "reservation.json",
@@ -1363,7 +1370,7 @@ impl Driver<'_> {
         argv: &[OsString],
         env: &[(OsString, OsString)],
         cwd: &Path,
-        input: &[u8],
+        pipe_stdin: bool,
         plan: CapturePlan,
         ports: Option<&provenant_os::fs::LockGuard>,
     ) -> io::Result<crate::process_os::provider::ProviderGroup> {
@@ -1375,7 +1382,7 @@ impl Driver<'_> {
                             argv,
                             env: Some(env),
                             cwd,
-                            input: !input.is_empty(),
+                            input: pipe_stdin,
                             secret_input: self.secret_input.as_ref(),
                             inherited_lease: None,
                             inherited_ports: ports,
