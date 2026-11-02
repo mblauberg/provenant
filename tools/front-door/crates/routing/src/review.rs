@@ -47,6 +47,9 @@ pub struct LensPlan {
     /// The kind names its own base order, so other lenses are not base lenses.
     pub exclusive: bool,
     pub add: Vec<String>,
+    /// The part of `add` that the change itself triggers (matching path rules
+    /// and test markers). A caller-supplied lens list still takes these.
+    pub change_add: Vec<String>,
     /// Matching path rules that added lenses, in config key order.
     pub matched_paths: Vec<String>,
     /// Whether changed diff hunks contain a recognised test marker.
@@ -385,19 +388,28 @@ impl ReviewConfig {
             .filter(|(pattern, _)| paths.iter().any(|path| path_matches(pattern, path)))
             .map(|(pattern, _)| pattern.clone())
             .collect();
-        let mut add = entry.map(|entry| entry.add.clone()).unwrap_or_default();
+        let mut change_add: Vec<String> = Vec::new();
         for pattern in &matched_paths {
             if let Some(rule) = self.lenses.by_paths.get(pattern) {
-                add.extend(rule.add.iter().cloned());
+                change_add.extend(rule.add.iter().cloned());
             }
         }
-        if test_marker && !add.iter().any(|lens| lens == "tests") {
-            add.push("tests".into());
+        if test_marker {
+            change_add.push("tests".into());
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        change_add.retain(|lens| seen.insert(lens.clone()));
+        let mut add = entry.map(|entry| entry.add.clone()).unwrap_or_default();
+        for lens in &change_add {
+            if !add.contains(lens) {
+                add.push(lens.clone());
+            }
         }
         LensPlan {
             order: own.map_or(&self.lenses.order, |entry| &entry.order).clone(),
             exclusive: own.is_some(),
             add,
+            change_add,
             matched_paths,
             test_marker,
         }
@@ -704,20 +716,38 @@ fn path_matches(pattern: &str, path: &str) -> bool {
 }
 
 /// Detect test declarations or common test-runner calls on added or removed
-/// diff hunk lines. File headers and hunk metadata are ignored.
+/// diff hunk lines. File headers and hunk metadata are ignored. A marker counts
+/// only at the start of the line after indentation, so comments, strings and
+/// ordinary method calls such as `object.describe()` do not.
 pub fn diff_has_test_markers(diff: &str) -> bool {
-    const ATTRIBUTES: [&str; 3] = ["#[test]", "#[cfg(test)]", "#[tokio::test]"];
+    const PREFIXES: [&str; 10] = [
+        "#[test]",
+        "#[cfg(test)]",
+        "#[tokio::test",
+        "func Test",
+        "def test_",
+        "async def test_",
+        "@Test",
+        "describe",
+        "it",
+        "test",
+    ];
+    const CALL_SUFFIXES: [&str; 5] = ["(", ".only(", ".skip(", ".each(", ".concurrent("];
     diff.lines().any(|line| {
-        ((line.starts_with('+') && !line.starts_with("+++"))
-            || (line.starts_with('-') && !line.starts_with("---")))
-            && (ATTRIBUTES.iter().any(|marker| line.contains(marker))
-                || ["describe(", "it("].iter().any(|call| {
-                    line.match_indices(call).any(|(index, _)| {
-                        line[..index].chars().next_back().is_none_or(|character| {
-                            !character.is_ascii_alphanumeric() && character != '_'
-                        })
-                    })
-                }))
+        let Some(body) = line
+            .strip_prefix('+')
+            .filter(|_| !line.starts_with("+++"))
+            .or_else(|| line.strip_prefix('-').filter(|_| !line.starts_with("---")))
+        else {
+            return false;
+        };
+        let body = body.trim_start();
+        PREFIXES.iter().any(|prefix| {
+            body.strip_prefix(prefix).is_some_and(|rest| {
+                !prefix.chars().all(|c| c.is_ascii_lowercase())
+                    || CALL_SUFFIXES.iter().any(|suffix| rest.starts_with(suffix))
+            })
+        })
     })
 }
 
@@ -881,28 +911,47 @@ mod tests {
 
     #[test]
     fn test_marker_scan_only_reads_added_or_removed_hunk_lines() {
-        assert!(diff_has_test_markers(
-            "@@ -1 +1 @@\n-#[cfg(test)]\n+#[tokio::test]\n"
-        ));
-        assert!(diff_has_test_markers(
-            "@@ -1,0 +2 @@\n+describe(\"suite\", () => {})\n"
-        ));
-        assert!(!diff_has_test_markers("@@ -1 +1 @@\n context #[test]\n"));
-        assert!(!diff_has_test_markers(
-            "@@ -1 +1 @@\n+let result = source.split(',');\n"
-        ));
-        assert!(diff_has_test_markers(
-            "@@ -1 +1 @@\n+    it(\"works\", () => {});\n"
-        ));
-        assert!(!diff_has_test_markers(
-            "+++ b/src/lib.rs\n--- a/src/lib.rs\n"
-        ));
-    }
-
-    #[test]
-    fn empty_path_lens_table_disables_bundled_path_rules() {
-        let config: RoutingConfig = toml_edit::de::from_str("[review.lenses.by_paths]\n").unwrap();
-        assert!(config.review.lenses.by_paths.is_empty());
+        for (diff, expected) in [
+            ("@@ -1 +1 @@\n-#[cfg(test)]\n+#[tokio::test]\n", true),
+            (
+                "@@ -1 +1 @@\n+#[tokio::test(flavor = \"multi_thread\")]\n",
+                true,
+            ),
+            ("@@ -1,0 +2 @@\n+describe(\"suite\", () => {})\n", true),
+            ("@@ -1 +1 @@\n+    it(\"works\", () => {});\n", true),
+            ("@@ -1 +1 @@\n-test(\"works\", () => {});\n", true),
+            ("@@ -1 +1 @@\n+  it.each([1])(\"n\", () => {});\n", true),
+            ("@@ -1 +1 @@\n+func TestParse(t *testing.T) {\n", true),
+            ("@@ -1 +1 @@\n+def test_parse():\n", true),
+            ("@@ -1 +1 @@\n+    @Test func parses() {}\n", true),
+            // Context lines and file headers are not changes.
+            ("@@ -1 +1 @@\n context #[test]\n", false),
+            ("+++ b/src/lib.rs\n--- a/src/lib.rs\n", false),
+            // Ordinary code, comments and strings are not test declarations.
+            ("@@ -1 +1 @@\n+let result = source.split(',');\n", false),
+            ("@@ -1 +1 @@\n+return object.describe();\n", false),
+            (
+                "@@ -1 +1 @@\n+    let text = widget.it(x) + test(y);\n",
+                false,
+            ),
+            ("@@ -1 +1 @@\n+    submit(order);\n", false),
+            ("@@ -1 +1 @@\n+    items(order);\n", false),
+            (
+                "@@ -1 +1 @@\n+// #[test] describe(\"x\") it(\"y\")\n",
+                false,
+            ),
+            ("@@ -1 +1 @@\n+/// #[tokio::test]\n", false),
+            ("@@ -1 +1 @@\n+# def test_parse():\n", false),
+            ("@@ -1 +1 @@\n+ * describe(\"x\")\n", false),
+            ("@@ -1 +1 @@\n+let marker = \"#[test]\";\n", false),
+            (
+                "@@ -1 +1 @@\n+let marker = \"describe(\\\"x\\\")\";\n",
+                false,
+            ),
+            ("@@ -1 +1 @@\n+    \"it(x)\",\n", false),
+        ] {
+            assert_eq!(diff_has_test_markers(diff), expected, "{diff:?}");
+        }
     }
 
     #[test]

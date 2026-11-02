@@ -1359,6 +1359,40 @@ fn a_caller_supplied_lens_list_keeps_its_order() {
 }
 
 #[test]
+fn a_path_added_lens_survives_its_risk_tag_condition_without_duplicating() {
+    let lenses = "parameters.lenses=[{name='correctness-spec',tier='',when=''},{name='tests',tier='',when='security'}]";
+    for tags in ["[]", "['security']", "['other']"] {
+        let mut layers = Layers::empty();
+        layers.review = Some(Box::new(|_| {
+            Ok(super::preset::ShapeHint {
+                name: "quick".into(),
+                source: "test".into(),
+                slots: vec!["junior".into()],
+                plan: provenant_routing::LensPlan {
+                    add: vec!["tests".into()],
+                    change_add: vec!["tests".into()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        }));
+        let overrides = [
+            "parameters.worktree='/repo/lane'".to_owned(),
+            lenses.to_owned(),
+            format!("parameters.risk_tags={tags}"),
+        ];
+        let document = expand(&layers, "review-council", "the change", &overrides)
+            .unwrap()
+            .document;
+        assert_eq!(
+            lens_ids(&document),
+            ["lens-correctness-spec", "lens-tests"],
+            "risk_tags={tags}"
+        );
+    }
+}
+
+#[test]
 fn the_council_lens_triggers_match_the_shared_risk_tag_table() {
     let text = include_str!("../assets/presets/review-council.toml");
     for (tag, lens) in provenant_routing::RISK_TAG_LENSES {

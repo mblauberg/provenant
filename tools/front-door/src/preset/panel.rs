@@ -276,13 +276,22 @@ impl StageBuilder<'_> {
         let hint = self.shape_hint()?;
         let shape = hint.as_ref();
         let plan = shape.map(|shape| &shape.plan);
-        if let Some(plan) = plan {
-            append_plan_additions(&mut list, &plan.add);
-        }
         let caller_supplied = self
             .origins
             .get("parameters.lenses")
             .is_some_and(|origin| origin != "bundled");
+        if let Some(plan) = plan {
+            // A caller's own list keeps its lenses and order; only what the
+            // change itself triggers (test paths and markers) is added to it.
+            append_plan_additions(
+                &mut list,
+                if caller_supplied {
+                    &plan.change_add
+                } else {
+                    &plan.add
+                },
+            );
+        }
         let in_list =
             |names: &[String], item: &Value| names.iter().any(|name| item["name"] == *name);
         if let Some(plan) = plan.filter(|plan| !caller_supplied && !plan.order.is_empty()) {
@@ -307,7 +316,10 @@ impl StageBuilder<'_> {
         let mut selected = Vec::new();
         for mut item in list {
             let when = item.get("when").and_then(Value::as_str).unwrap_or_default();
-            if !when.is_empty() && !tags.contains(&when) {
+            // A lens the change itself adds (a test path, say) is present whatever
+            // its risk-tag condition says; the condition only gates unrequested lenses.
+            let triggered = plan.is_some_and(|plan| in_list(&plan.change_add, &item));
+            if !when.is_empty() && !tags.contains(&when) && !triggered {
                 self.layers.warnings.borrow_mut().push(format!(
                     "preset {}: omitted lens {}: requires risk tag {when}",
                     self.name, item["name"]
