@@ -132,6 +132,20 @@ The sealed-system exemption covers a descriptor listing that is denied outright
 (a whole-listing EPERM), without enumerating descriptors: Apple sealed-system
 daemons are not workers, and treating them strictly left collection unusable
 on a normal host.
+Host GC configuration may list exact canonical executable paths or canonical
+directory prefixes ending in `/` in `gc.census_excused_executables`. A match
+excuses an unreadable cwd only when the process's real, effective and saved
+uids are all system uids (below 500), and the process remains outside every
+candidate root owner. The census detail records the matching entry. This does
+not excuse user-uid processes or change sealed-system policy. The CoreSimulator
+`Resources/bin/` prefix under `/Library/Developer/PrivateFrameworks/CoreSimulator.framework/`
+is an example configuration; it is not a bundled default unless its binaries'
+Apple signature is verified.
+
+```toml
+[gc]
+census_excused_executables = ["/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Resources/bin/"]
+```
 Queued and pending submitted dispatches naming a worktree retain it with
 `unknown_writer`, including managed trees without a terminal lane record.
 Tasks not yet submitted into a run store are not visible to this census;

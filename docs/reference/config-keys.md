@@ -37,6 +37,14 @@ Set these in `[domains.fabric.graph]` in the host configuration. Omit a key for 
 | `allowed_read_roots` | empty (read roots stay inside the project and its registered worktrees) | Absolute host directories that graph and preset `read_roots` may name besides the project's own registered worktrees. (absolute directory paths). |
 | `limits.expansion_depth` | 64 | Longest dependency chain in edges, root nodes at depth 0, and deepest composite nesting a graph may expand to. The bundled `big-batch` preset needs 33. Graph documents cannot raise it. (1 or more). |
 
+## Host GC settings
+
+Set these in `[gc]` in the host configuration. Omit a key for its default.
+
+| Key | Default | Effect |
+|---|---|---|
+| `census_excused_executables` | [] | Excuse an unreadable process cwd only when all real, effective and saved uids are system uids below 500 and the executable matches one entry. Census detail records the matching entry. User-uid processes remain Unknown. An example CoreSimulator prefix is documented in docs/specs/disk.md; it is not a bundled default without verified Apple signing evidence. (exact canonical absolute executable paths or canonical directory prefixes ending in /). |
+
 ## Host store settings
 
 Set these in `[domains.fabric.limits]` in the host configuration. Omit a key for its default.

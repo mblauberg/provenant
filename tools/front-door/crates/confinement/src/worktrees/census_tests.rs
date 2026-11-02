@@ -48,7 +48,7 @@ fn native_full_census_places_clean_merged_worktree_and_same_user_sleep()
     let (clean, _, clean_details) = observe_worker_holders_with_audit(
         std::slice::from_ref(&root),
         &SystemProcessObserver,
-        &PolicyCwdObserver(&workers.entries),
+        &PolicyCwdObserver(&workers.entries, &workers.excused_executables),
         &current,
         true,
         &mut |pid, condition| {
@@ -240,7 +240,7 @@ fn native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree()
     assert!(
         matches!(
             observe_same_process(&SystemProcessObserver, &SystemCwdObserver, windowserver),
-            NativeCwd::PolicyExcluded(uids) if uids.all_system() && uids.all_differ_from(provenant_os::fs::effective_uid())
+            NativeCwd::PolicyExcluded(excusal) if excusal.uids.all_system() && excusal.uids.all_differ_from(provenant_os::fs::effective_uid())
         ),
         "WindowServer must still be unreadable, running sealed platform code and foreign"
     );
@@ -602,6 +602,124 @@ impl WorkerObserver for InjectedCensus {
     fn observe_roots_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
         observe_worker_roots(roots, self, self, &self.current, true)
     }
+}
+
+#[test]
+fn configured_census_excusal_only_accepts_system_uid_processes_with_matching_path()
+-> Result<(), Box<dyn Error>> {
+    use provenant_os::pid::UnreadablePolicyExcusal;
+    use provenant_supervisor::census::{Census, ProcessIdentity};
+
+    struct RefusedCwd {
+        uids: ProcessUids,
+        path: String,
+        entries: Vec<String>,
+    }
+    impl CwdObserver for RefusedCwd {
+        fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+            provenant_os::pid::OccupancyObservation {
+                paths: vec![],
+                complete: true,
+                gap: None,
+            }
+        }
+        fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            Ok(CwdObservation::PermissionDenied)
+        }
+        fn unreadable_policy_uids(
+            &self,
+            _: i64,
+            _: &[CensusIgnoreEntry],
+            _: &[String],
+        ) -> Result<UnreadablePolicyExcusal, provenant_os::pid::UnreadablePolicyFailure> {
+            let matched = self.entries.iter().find(|entry| {
+                if entry.ends_with('/') {
+                    self.path.starts_with(entry.as_str())
+                } else {
+                    self.path == **entry
+                }
+            });
+            if self.uids.all_system() {
+                if let Some(entry) = matched {
+                    return Ok(UnreadablePolicyExcusal {
+                        uids: self.uids,
+                        configured_entry: Some(entry.clone()),
+                    });
+                }
+            }
+            Err("gc.census_excused_executables entry required".into())
+        }
+    }
+
+    let fixture = Fixture::new()?;
+    let root = canonicalize(&fixture.root)?;
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
+    let fact = |pid| ProcessFact {
+        identity: ProcessIdentity {
+            boot: "boot".into(),
+            pid,
+            native_start: pid as u64,
+            group_id: pid,
+            session_id: pid,
+        },
+        parent_pid: 1,
+        zombie: false,
+        cpu_micros: None,
+        command: None,
+    };
+    let current = fact(100);
+    let processes = InjectedCensus {
+        census: Census::from_observations([current.clone(), fact(200)], [], [], true, false, 32)?,
+        cwds: BTreeMap::new(),
+        current: current.clone(),
+        platform_uids: BTreeMap::new(),
+    };
+    let entries = vec!["/Library/Developer/Simulator/bin/".to_owned()];
+    let observe = |uids, path: &str| {
+        observe_worker_roots(
+            std::slice::from_ref(&root),
+            &processes,
+            &RefusedCwd {
+                uids,
+                path: path.into(),
+                entries: entries.clone(),
+            },
+            &current,
+            false,
+        )
+    };
+    let (excused, details) = observe(
+        ProcessUids {
+            real: 0,
+            effective: 0,
+            saved: 0,
+        },
+        "/Library/Developer/Simulator/bin/simdiskimaged",
+    );
+    assert_eq!(excused[&root], WorkerState::Free);
+    assert!(details[&root].contains("gc.census_excused_executables"));
+    assert!(details[&root].contains(&entries[0]));
+
+    let (user_owned, _) = observe(
+        ProcessUids {
+            real: 0,
+            effective: 501,
+            saved: 0,
+        },
+        "/Library/Developer/Simulator/bin/simdiskimaged",
+    );
+    assert_eq!(user_owned[&root], WorkerState::Unknown);
+    let (unconfigured, refusal_details) = observe(
+        ProcessUids {
+            real: 0,
+            effective: 0,
+            saved: 0,
+        },
+        "/Library/Developer/Other/daemon",
+    );
+    assert_eq!(unconfigured[&root], WorkerState::Unknown);
+    assert!(refusal_details[&root].contains("gc.census_excused_executables"));
+    Ok(())
 }
 
 #[test]
@@ -1005,7 +1123,7 @@ fn worker_census_audit_keeps_all_unplaceable_processes_and_first_detail()
     assert_eq!(states[&root], WorkerState::Unknown);
     assert_eq!(
         details[&root],
-        "process 1: cwd unreadable; policy_condition=image policy evidence unavailable"
+        "process 1: cwd unreadable; policy_condition=image policy evidence unavailable; config_key=gc.census_excused_executables (requires all real/effective/saved uids below 500)"
     );
     assert_eq!(
         audit.keys().copied().collect::<Vec<_>>(),
@@ -1023,7 +1141,11 @@ fn worker_census_audit_keeps_all_unplaceable_processes_and_first_detail()
             &self,
             _: i64,
             _: &[CensusIgnoreEntry],
-        ) -> Result<ProcessUids, provenant_os::pid::UnreadablePolicyFailure> {
+            _: &[String],
+        ) -> Result<
+            provenant_os::pid::UnreadablePolicyExcusal,
+            provenant_os::pid::UnreadablePolicyFailure,
+        > {
             Err(provenant_os::pid::UnreadablePolicyFailure {
                 condition: "stable signing team required",
                 builtin_condition: None,
@@ -1158,7 +1280,7 @@ fn unplaceable_path_failures_retain_process_image_diagnostics() -> Result<(), Bo
 #[test]
 fn host_policy_is_scoped_to_config_roots_and_preserves_injected_refusal()
 -> Result<(), Box<dyn Error>> {
-    struct Probe(std::sync::Mutex<Vec<Vec<CensusIgnoreEntry>>>);
+    struct Probe(std::sync::Mutex<Vec<(Vec<CensusIgnoreEntry>, Vec<String>)>>);
     impl WorkerObserver for Probe {
         fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
             roots
@@ -1171,10 +1293,14 @@ fn host_policy_is_scoped_to_config_roots_and_preserves_injected_refusal()
             &self,
             roots: &[PathBuf],
             entries: &[CensusIgnoreEntry],
+            excused_executables: &[String],
             for_land: bool,
         ) -> WorkerObservations {
             assert!(for_land);
-            self.0.lock().unwrap().push(entries.to_vec());
+            self.0
+                .lock()
+                .unwrap()
+                .push((entries.to_vec(), excused_executables.to_vec()));
             (self.observe_roots(roots), BTreeMap::new())
         }
     }
@@ -1184,7 +1310,7 @@ fn host_policy_is_scoped_to_config_roots_and_preserves_injected_refusal()
     fs::create_dir(&state)?;
     fs::write(
         state.join("config.toml"),
-        "schema_version=1\n[knobs]\n'confinement.census_ignore_unreadable'=[{path='/Library/Daemon',team_id='TEAM123'}]\n",
+        "schema_version=1\n[knobs]\n'confinement.census_ignore_unreadable'=[{path='/Library/Daemon',team_id='TEAM123'}]\n[gc]\ncensus_excused_executables=['/Library/Developer/Simulator/bin/']\n",
     )?;
     let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
     inputs.state_dir = Some(state);
@@ -1204,14 +1330,15 @@ fn host_policy_is_scoped_to_config_roots_and_preserves_injected_refusal()
     );
     let seen = probe.0.lock().unwrap();
     assert_eq!(
-        seen[0],
+        seen[0].0,
         vec![CensusIgnoreEntry {
             path: "/Library/Daemon".into(),
             team_id: "TEAM123".into()
         }]
     );
+    assert_eq!(seen[0].1, ["/Library/Developer/Simulator/bin/"]);
     assert!(
-        seen[1].is_empty(),
+        seen[1].0.is_empty() && seen[1].1.is_empty(),
         "policy must not leak across roots or wrappers"
     );
     Ok(())
@@ -1541,7 +1668,7 @@ fn unreadable_occupant_cwd_keeps_the_tree_for_removal() -> Result<(), Box<dyn Er
         &cancellation,
     );
     assert!(
-        matches!(&refused, Err(WorktreeError::IncompleteCensus { detail }) if detail == "process 200: cwd unreadable; policy_condition=image policy evidence unavailable"),
+        matches!(&refused, Err(WorktreeError::IncompleteCensus { detail }) if detail == "process 200: cwd unreadable; policy_condition=image policy evidence unavailable; config_key=gc.census_excused_executables (requires all real/effective/saved uids below 500)"),
         "{refused:?}"
     );
     assert!(created.path.exists());

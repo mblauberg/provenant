@@ -811,25 +811,45 @@ pub(crate) fn ignored_unreadable_uids(
     pid: i32,
     entries: &[crate::pid::CensusIgnoreEntry],
 ) -> Option<crate::pid::ProcessUids> {
-    unreadable_policy_uids(pid, entries).ok()
+    unreadable_policy_uids(pid, entries, &[])
+        .ok()
+        .map(|result| result.uids)
 }
 
 pub(crate) fn unreadable_policy_uids(
     pid: i32,
     entries: &[crate::pid::CensusIgnoreEntry],
-) -> Result<crate::pid::ProcessUids, crate::pid::UnreadablePolicyFailure> {
+    excused_executables: &[String],
+) -> Result<crate::pid::UnreadablePolicyExcusal, crate::pid::UnreadablePolicyFailure> {
     #[cfg(target_os = "macos")]
     {
         use std::os::unix::fs::OpenOptionsExt;
         let before = darwin_uids(pid).ok_or("real/effective/saved uids unavailable")?;
         if !before.all_system() {
-            return Err("real/effective/saved system uids below 500 required".into());
+            return Err(
+                "gc.census_excused_executables requires all real/effective/saved uids below 500"
+                    .into(),
+            );
+        }
+        let path = darwin_executable_path(pid).ok_or("kernel executable path unavailable")?;
+        if let Some(entry) = darwin_configured_excusal(before, &path, excused_executables) {
+            if darwin_executable_path(pid)
+                .ok_or("executable path recheck unavailable")?
+                .as_os_str()
+                != path.as_os_str()
+                || darwin_uids(pid) != Some(before)
+            {
+                return Err("stable executable path and system uids required".into());
+            }
+            return Ok(crate::pid::UnreadablePolicyExcusal {
+                uids: before,
+                configured_entry: Some(entry),
+            });
         }
         let flags = darwin_signing_status(pid).ok_or("live signing state unavailable")?;
         if !darwin_valid_signature(flags) {
             return Err("valid signed image without untrusted flags required".into());
         }
-        let path = darwin_executable_path(pid).ok_or("kernel executable path unavailable")?;
         let executable = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW)
@@ -856,7 +876,10 @@ pub(crate) fn unreadable_policy_uids(
         let platform_chain = || root_owned_executable_chain(&path, &executable);
         let listed = listed_image_matches(entries, &path, flags, team.as_deref(), platform_chain);
         if !listed {
-            builtin?;
+            builtin.map_err(|builtin_condition| crate::pid::UnreadablePolicyFailure {
+                condition: builtin_condition,
+                builtin_condition: Some(builtin_condition),
+            })?;
         }
         if darwin_executable_path(pid)
             .ok_or("executable path recheck unavailable")?
@@ -877,13 +900,38 @@ pub(crate) fn unreadable_policy_uids(
                 builtin_condition: builtin.err(),
             });
         }
-        Ok(before)
+        Ok(crate::pid::UnreadablePolicyExcusal {
+            uids: before,
+            configured_entry: None,
+        })
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (pid, entries);
+        let _ = (pid, entries, excused_executables);
         Err("macOS signing evidence unavailable".into())
     }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn darwin_configured_excusal(
+    uids: crate::pid::ProcessUids,
+    path: &std::path::Path,
+    entries: &[String],
+) -> Option<String> {
+    if !uids.all_system() {
+        return None;
+    }
+    let path = path.to_str()?;
+    entries
+        .iter()
+        .find(|entry| {
+            if entry.ends_with('/') {
+                path.starts_with(entry.as_str())
+            } else {
+                path == entry.as_str()
+            }
+        })
+        .cloned()
 }
 
 /// Directories of the sealed system volume. An executable here is still only
@@ -1051,6 +1099,60 @@ fn builtin_condition_names_each_failed_gate_and_accepts_complete_evidence() {
     assert_eq!(
         darwin_builtin_condition(test_uids(0), flags, daemon, || None),
         Err("sealed read-only root volume evidence unavailable")
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn configured_census_executable_requires_system_uids_and_exact_or_directory_match() {
+    use std::path::Path;
+    let entries = [
+        "/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Resources/bin/".into(),
+        "/usr/libexec/exact-daemon".into(),
+    ];
+    let prefix_match = Path::new(
+        "/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Resources/bin/simdiskimaged",
+    );
+    assert_eq!(
+        darwin_configured_excusal(test_uids(0), prefix_match, &entries),
+        Some(entries[0].clone())
+    );
+    assert_eq!(
+        darwin_configured_excusal(
+            test_uids(0),
+            Path::new("/usr/libexec/exact-daemon"),
+            &entries
+        ),
+        Some(entries[1].clone())
+    );
+    assert_eq!(
+        darwin_configured_excusal(
+            test_uids(0),
+            Path::new("/usr/libexec/exact-daemon-child"),
+            &entries
+        ),
+        None
+    );
+    assert_eq!(
+        darwin_configured_excusal(test_uids(501), prefix_match, &entries),
+        None,
+        "user-owned processes cannot be excused by a matching path"
+    );
+    assert_eq!(
+        darwin_configured_excusal(test_uids(0), Path::new("/Library/Daemon"), &entries),
+        None,
+        "an unconfigured path remains unknown"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn unreadable_policy_failure_preserves_its_specific_condition() {
+    let failure: crate::pid::UnreadablePolicyFailure = "unconfigured executable path".into();
+    assert_eq!(failure.condition, "unconfigured executable path");
+    assert_eq!(
+        failure.builtin_condition,
+        Some("unconfigured executable path")
     );
 }
 

@@ -88,6 +88,17 @@
       "effect": "Prices over time for the account. The entry with the latest effective_from on or before a reading applies to it, and quota history --json shows it as plan_price, with price and notional_usd. Dates must differ within an account; unknown keys, negative or non-finite prices and bad dates refuse the config. This is not the detected plan label, which comes from the provider or the account's plan option."
     }
   },
+  "host_gc_settings": {
+    "path": "gc",
+    "settings": {
+      "census_excused_executables": {
+        "type": "string_list",
+        "allowed": "exact canonical absolute executable paths or canonical directory prefixes ending in /",
+        "default": [],
+        "effect": "Excuse an unreadable process cwd only when all real, effective and saved uids are system uids below 500 and the executable matches one entry. Census detail records the matching entry. User-uid processes remain Unknown. An example CoreSimulator prefix is documented in docs/specs/disk.md; it is not a bundled default without verified Apple signing evidence."
+      }
+    }
+  },
   "host_lane_build_settings": {
     "path": "domains.fabric.lanes",
     "settings": {

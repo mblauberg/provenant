@@ -296,6 +296,10 @@ pub struct GcSettings {
     pub idle_days: u64,
     pub free_floor: Option<String>,
     pub alert_below: Option<String>,
+    /// Executables whose unreadable cwd may be excused by the worker census.
+    /// Entries are exact canonical paths or canonical directory prefixes
+    /// ending in `/`; they apply only to processes with system uids.
+    pub census_excused_executables: Vec<String>,
     pub projects: BTreeMap<String, ProjectGcSettings>,
 }
 
@@ -306,6 +310,7 @@ impl Default for GcSettings {
             idle_days: 7,
             free_floor: None,
             alert_below: None,
+            census_excused_executables: Vec::new(),
             projects: BTreeMap::new(),
         }
     }
@@ -356,11 +361,34 @@ impl GcSettings {
         if let Some(size) = &self.alert_below {
             parse_cache_size(size)?;
         }
+        if self
+            .census_excused_executables
+            .iter()
+            .any(|entry| !valid_census_executable_entry(entry))
+        {
+            return Err("census_excused_executable_path");
+        }
         for project in self.projects.values() {
             project.validate()?;
         }
         Ok(())
     }
+}
+
+fn valid_census_executable_entry(entry: &str) -> bool {
+    let path = entry.strip_suffix('/').unwrap_or(entry);
+    let path = Path::new(path);
+    path.is_absolute()
+        && path.file_name().is_some()
+        && path
+            .components()
+            .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
+        && path
+            .components()
+            .collect::<std::path::PathBuf>()
+            .as_os_str()
+            == std::ffi::OsStr::new(path.as_os_str())
+        && !entry.bytes().any(|byte| byte.is_ascii_control())
 }
 
 fn default_free_floor(total_bytes: u64) -> u64 {
@@ -432,6 +460,24 @@ pub fn parse_cache_size(text: &str) -> Result<u64, &'static str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn census_excused_executables_accept_only_canonical_absolute_entries() {
+        for entry in [
+            "/usr/libexec/daemon",
+            "/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Resources/bin/",
+        ] {
+            assert!(super::valid_census_executable_entry(entry), "{entry}");
+        }
+        for entry in [
+            "relative/daemon",
+            "/usr/bin/../libexec/daemon",
+            "/usr/libexec//daemon",
+            "/",
+        ] {
+            assert!(!super::valid_census_executable_entry(entry), "{entry}");
+        }
+    }
+
     #[test]
     fn direct_settings_reads_recover_invalid_optional_values()
     -> Result<(), Box<dyn std::error::Error>> {
