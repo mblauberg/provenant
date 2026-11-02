@@ -357,6 +357,7 @@ jobs:
         run: >-
           cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --test-threads 1
           -E 'binary(=worktrees) & (test(=lane_prepare_isolates_nested_state) | test(=lane_prepare_isolates_nested_writer_state) | test(=lane_prepare_isolates_nested_publishing_state)
+          | test(=lane_builds_and_tests_swift_in_a_registered_worktree)
           | test(=read_only_dispatch_applies_bound_git_and_project_writes)
           | test(=writer_dispatch_uses_lane_cache_and_narrow_provider_state)
           | test(=writer_dispatch_edits_a_linked_worktree)

@@ -1,5 +1,9 @@
 use super::*;
 
+pub(super) fn is_false(value: &bool) -> bool {
+    !value
+}
+
 /// Persisted retry wait on a node whose launch failed with a transient kind.
 /// The wait belongs to the node's current attempt: it is recorded under the
 /// attempt key, so a later retry observes or relaunches exactly that attempt,
@@ -185,6 +189,9 @@ pub struct GraphNode {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Wall-clock limit for this node's lane, in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_seconds: Option<u64>,
     #[serde(default, alias = "goal", alias = "brief")]
     pub prompt: String,
     #[serde(default)]
@@ -199,6 +206,8 @@ pub struct GraphNode {
     /// Require this exact, case-sensitive line (ignoring surrounding whitespace)
     /// in a successful result. A missing line fails the node without fallback.
     pub required_verdict: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub require_findings: bool,
 }
 
 impl GraphNode {
@@ -875,6 +884,7 @@ pub struct NodeInput<'a> {
     pub title: &'a str,
     pub prompt: &'a str,
     pub required_verdict: Option<&'a str>,
+    pub deadline_seconds: Option<u64>,
 }
 
 /// Host polling policy. Defaults observe pending gates once per tick; hosts

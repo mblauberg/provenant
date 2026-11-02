@@ -1249,6 +1249,7 @@ fn lower_leaf(
             "outputs",
             "access",
             "worktree",
+            "deadline_seconds",
             "title",
             "prompt",
             "kind",
@@ -1274,6 +1275,7 @@ fn lower_leaf(
             "fallback_tier",
             "purpose",
             "dispositions",
+            "require_findings",
             "continues",
             "land",
         ]
@@ -1676,6 +1678,26 @@ struct StageBuilder<'a> {
 }
 
 impl StageBuilder<'_> {
+    /// Lenses that must succeed for a partial group. Zero takes the review
+    /// ladder minimum for `risk_tier`, and never less than one review.
+    fn minimum_successful(&self, value: &Value) -> Result<u64, String> {
+        let minimum = interpolate(value, &self.parameters, self.prompt, 1)?
+            .as_u64()
+            .ok_or("min_successful must be a non-negative integer")?;
+        if minimum > 0 {
+            return Ok(minimum);
+        }
+        let ladder = provenant_records::workflow::ReviewPolicy::default();
+        let tier = self.parameters.get("risk_tier").and_then(Value::as_str);
+        Ok(match tier {
+            Some("substantial") => ladder.substantial,
+            Some("crucial") => ladder.crucial,
+            Some("terminal") => ladder.terminal,
+            _ => ladder.routine,
+        }
+        .max(1))
+    }
+
     fn sequence(
         &mut self,
         stages: &Value,
@@ -1943,7 +1965,10 @@ impl StageBuilder<'_> {
                     .remove("exports")
                     .or_else(|| config.get("exports").cloned())
                     .unwrap_or_else(|| selected_inputs(&ends, &json!(["result", "findings"])));
-                (composite(&id, children, exports, deps, &outputs), true)
+                (
+                    composite(&id, children, exports, deps, &outputs, None),
+                    true,
+                )
             } else if let Some(parallel) = object.remove("parallel") {
                 let entries = parallel
                     .as_array()
@@ -1963,14 +1988,24 @@ impl StageBuilder<'_> {
                 let exports = object
                     .remove("exports")
                     .unwrap_or_else(|| selected_inputs(&ends, &json!(["result", "findings"])));
-                (composite(&id, children, exports, deps, &outputs), true)
+                let min_successful = object
+                    .remove("min_successful")
+                    .map(|value| self.minimum_successful(&value))
+                    .transpose()?;
+                (
+                    composite(&id, children, exports, deps, &outputs, min_successful),
+                    true,
+                )
             } else if let Some(stages) = object.remove("stages") {
                 let mut children = Vec::new();
                 let ends = self.sequence(&stages, "", &[], &mut children, depth + 1)?;
                 let exports = object
                     .remove("exports")
                     .unwrap_or_else(|| selected_inputs(&ends, &json!(["result", "findings"])));
-                (composite(&id, children, exports, deps, &outputs), true)
+                (
+                    composite(&id, children, exports, deps, &outputs, None),
+                    true,
+                )
             } else {
                 (
                     lower_leaf(
@@ -2134,8 +2169,14 @@ fn composite(
     exports: Value,
     deps: &[String],
     outputs: &Value,
+    min_successful: Option<u64>,
 ) -> Value {
-    let mut node = json!({"id":id,"kind":"composite","access":"read_only","depends_on":deps,"composite":{"nodes":nodes,"exports":exports}});
+    let mut spec = json!({"nodes":nodes,"exports":exports});
+    if let Some(minimum) = min_successful {
+        spec["min_successful"] = json!(minimum);
+    }
+    let mut node =
+        json!({"id":id,"kind":"composite","access":"read_only","depends_on":deps,"composite":spec});
     if !deps.is_empty() {
         node["inputs"] = selected_inputs(deps, outputs);
     }
@@ -2808,6 +2849,7 @@ fn explain_tree(nodes: &[Value], indent: usize, text: &mut String) {
             "inputs",
             "acceptance_checks",
             "required_verdict",
+            "deadline_seconds",
         ] {
             if let Some(value) = node.get(key) {
                 text.push_str(&format!("{}  {key}: {value}\n", "  ".repeat(indent)));
@@ -2826,6 +2868,15 @@ fn explain_tree(nodes: &[Value], indent: usize, text: &mut String) {
                 node["loop"]["max_rounds"]
             ));
             explain_tree(children, indent + 1, text);
+        }
+        if let Some(patterns) = node.pointer("/plan/patterns").and_then(Value::as_array) {
+            for pattern in patterns {
+                let name = pattern["name"].as_str().unwrap_or("pattern");
+                text.push_str(&format!("{}  pattern {name}:\n", "  ".repeat(indent)));
+                if let Some(nodes) = pattern.get("nodes").and_then(Value::as_array) {
+                    explain_tree(nodes, indent + 2, text);
+                }
+            }
         }
     }
 }

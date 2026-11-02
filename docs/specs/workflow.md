@@ -542,9 +542,9 @@ before the graph is admitted, as it does a literal root, and replaces it with
 the canonical path it resolved to, so retargeting a link afterwards moves no
 grant. A budget is a bounded
 integer parameter whose `max` is the graph timeout
-(`limits.graph_timeout_seconds`). Graph nodes have no per-node timer, so a
-budget is advisory: it is told to the writer, and only the graph timeout is
-enforced.
+(`limits.graph_timeout_seconds`). The planned lane node carries this value as
+`deadline_seconds`; the runtime applies the smaller of it and the graph timeout
+to the lane's run deadline. When omitted, a node uses the graph timeout.
 
 ### Preset planner front-end
 

@@ -4233,7 +4233,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                             effort: route.effort.clone(),
                         },
                     },
-                    timeout_seconds: self.factory.context.config.limits.graph_timeout_seconds,
+                    timeout_seconds: node
+                        .deadline_seconds
+                        .unwrap_or(self.factory.context.config.limits.graph_timeout_seconds)
+                        .min(self.factory.context.config.limits.graph_timeout_seconds),
                     delivery_id: None,
                     deliver: delivery,
                     new_worktree: None,
@@ -4390,6 +4393,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                             Outcome::RateLimited | Outcome::QuotaLimited => {
                                 AttemptOutcome::UsageLimited
                             }
+                            Outcome::TimedOut if node.deadline_seconds.is_some() => {
+                                AttemptOutcome::DeadlineExceeded
+                            }
+                            Outcome::TimedOut => AttemptOutcome::OtherFailure,
                             // A route refused before launch leaves the next route free to try.
                             Outcome::ModelUnavailable => AttemptOutcome::AdapterUnavailable,
                             Outcome::Rejected if !launched => AttemptOutcome::AdapterUnavailable,

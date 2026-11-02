@@ -3,5 +3,8 @@ Preset selection: fan-out (override)
 plan: on -> on (planning requested)
 Planner route: principal
 plan  role=plan.shape tier=principal family=any kind=plan access=read_only worktree=-
+  pattern worker:
+    worker  role=- tier=${route} family=any kind=- access=read_only worktree=-
+      acceptance_checks: ["Answer the question from the repository and cite the evidence"]
 Roles:
   plan.shape  origin=bundled digest=<digest>
