@@ -2651,8 +2651,19 @@ impl PrepareFixture {
             clock.wait_until(provenant_core::MonoTime::from_micros(
                 clock.mono_now().as_micros() + 120_000_000,
             ))?;
-            settlement =
-                crate::settlement::Guard::claim(&attempt, scope, &clock)?.ok_or("resumed owner")?;
+            // The claim is a zero-wait try_lock, and a sibling test's forked
+            // child can briefly share the dropped lock's open file description
+            // until it execs. Retry for about five seconds.
+            let mut resumed = None;
+            for _ in 0..500 {
+                resumed = crate::settlement::Guard::claim(&attempt, scope, &clock)?;
+                if resumed.is_some() {
+                    break;
+                }
+                #[allow(clippy::disallowed_methods)]
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            settlement = resumed.ok_or("resumed owner")?;
         }
         let review = launch.terminal(
             &state,
