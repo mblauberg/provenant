@@ -194,9 +194,13 @@ fn occupancy_snapshot(pid: i32) -> OccupancySnapshot {
     let exe_known = record(-1, &exe, &mut snapshot);
     let listing = || -> Result<Vec<std::ffi::OsString>, OccupancyGap> {
         let mut names = Vec::new();
-        for entry in
-            std::fs::read_dir(proc.join("fd")).map_err(|_| OccupancyGap::DescriptorsUnavailable)?
-        {
+        for entry in std::fs::read_dir(proc.join("fd")).map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                OccupancyGap::Gone
+            } else {
+                OccupancyGap::DescriptorsUnavailable
+            }
+        })? {
             if names.len() == OCCUPANCY_LIMIT {
                 return Err(OccupancyGap::LimitExceeded);
             }
@@ -244,10 +248,10 @@ fn occupancy_snapshot(pid: i32) -> OccupancySnapshot {
 /// The least serious macOS descriptor failure: libproc refused the query.
 #[cfg(any(target_os = "macos", test))]
 fn darwin_query_gap(errno: Option<i32>) -> crate::pid::OccupancyGap {
-    if errno == Some(libc::EPERM) {
-        crate::pid::OccupancyGap::DescriptorsDenied
-    } else {
-        crate::pid::OccupancyGap::DescriptorsUnavailable
+    match errno {
+        Some(libc::EPERM) => crate::pid::OccupancyGap::DescriptorsDenied,
+        Some(libc::ESRCH) => crate::pid::OccupancyGap::Gone,
+        _ => crate::pid::OccupancyGap::DescriptorsUnavailable,
     }
 }
 
@@ -491,10 +495,7 @@ fn only_a_refused_descriptor_query_is_the_excusable_gap() {
         fd_info_gap(0, 10, Some(libc::EPERM)),
         Some(DescriptorsDenied)
     );
-    assert_eq!(
-        fd_info_gap(-1, 10, Some(libc::ESRCH)),
-        Some(DescriptorsUnavailable)
-    );
+    assert_eq!(fd_info_gap(-1, 10, Some(libc::ESRCH)), Some(Gone));
     assert_eq!(DescriptorsDenied.worse(Churn), Churn);
     assert_eq!(Churn.worse(DescriptorsDenied), Churn);
     assert_eq!(
@@ -549,7 +550,11 @@ fn startup_churn_is_retried_but_a_table_that_never_settles_stays_incomplete() {
 #[test]
 fn a_pidpath_enoent_is_a_deleted_executable_but_other_failures_are_gaps() {
     assert_eq!(darwin_pidpath_gap(Some(libc::ENOENT)), None);
-    for errno in [Some(libc::EPERM), Some(libc::ESRCH), None] {
+    assert_eq!(
+        darwin_pidpath_gap(Some(libc::ESRCH)),
+        Some(crate::pid::OccupancyGap::Gone)
+    );
+    for errno in [Some(libc::EPERM), None] {
         assert_eq!(
             darwin_pidpath_gap(errno),
             Some(crate::pid::OccupancyGap::ExecutableUnavailable)
@@ -1288,7 +1293,11 @@ fn darwin_executable_path(pid: i32) -> Option<std::path::PathBuf> {
 /// belongs to no existing root and is judged by cwd and descriptors.
 #[cfg(any(target_os = "macos", test))]
 fn darwin_pidpath_gap(errno: Option<i32>) -> Option<crate::pid::OccupancyGap> {
-    (errno != Some(libc::ENOENT)).then_some(crate::pid::OccupancyGap::ExecutableUnavailable)
+    match errno {
+        Some(libc::ENOENT) => None,
+        Some(libc::ESRCH) => Some(crate::pid::OccupancyGap::Gone),
+        _ => Some(crate::pid::OccupancyGap::ExecutableUnavailable),
+    }
 }
 
 #[cfg(any(target_os = "macos", test))]

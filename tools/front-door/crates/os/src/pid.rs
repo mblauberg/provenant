@@ -93,6 +93,8 @@ pub enum OccupancyGap {
     DescriptorsUnavailable,
     /// The table changed between the two snapshots.
     Churn,
+    /// The process exited while its occupancy was being inspected.
+    Gone,
     /// The table was larger than the bounded buffer.
     LimitExceeded,
     /// The process could not be observed at all.
@@ -106,6 +108,7 @@ impl OccupancyGap {
             Self::ExecutableUnavailable => "executable unavailable",
             Self::DescriptorsUnavailable => "descriptors unavailable",
             Self::Churn => "descriptors or executable changed during the census",
+            Self::Gone => "process exited during occupancy inspection",
             Self::LimitExceeded => "descriptor limit exceeded",
             Self::Unobserved => "process not observed",
         }
@@ -114,10 +117,10 @@ impl OccupancyGap {
     /// The more serious of two gaps. A refused query is the least serious: it
     /// is the only gap a caller may excuse, and only if nothing else failed.
     pub fn worse(self, other: Self) -> Self {
-        if self == Self::DescriptorsDenied {
-            other
-        } else {
-            self
+        match (self, other) {
+            (Self::Gone, _) | (_, Self::Gone) => Self::Gone,
+            (Self::DescriptorsDenied, other) => other,
+            (known, _) => known,
         }
     }
 }

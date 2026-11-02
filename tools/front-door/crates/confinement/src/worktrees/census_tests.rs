@@ -2023,6 +2023,91 @@ mod narrowing {
         }
     }
 
+    struct ExitsDuringOccupancy<'a> {
+        inner: &'a InjectedCensus,
+        observations: std::cell::Cell<usize>,
+    }
+    impl ProcessObserver for ExitsDuringOccupancy<'_> {
+        fn boot_identity(&self) -> Result<String, provenant_supervisor::census::CensusError> {
+            self.inner.boot_identity()
+        }
+        fn observe(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
+            if pid == 200 {
+                let count = self.observations.get() + 1;
+                self.observations.set(count);
+                // The fourth check follows occupancy inspection; the listed
+                // process has exited by then.
+                if count == 4 {
+                    return provenant_supervisor::census::ProcessObservation::Absent;
+                }
+            }
+            self.inner.observe(pid)
+        }
+        fn census(
+            &self,
+            max: usize,
+        ) -> Result<provenant_supervisor::census::Census, provenant_supervisor::census::CensusError>
+        {
+            self.inner.census(max)
+        }
+    }
+
+    #[test]
+    fn an_esrch_occupancy_gap_for_a_process_that_exits_leaves_roots_free()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        let root = canonicalize(fixture._temp.path())?.join("root");
+        fs::create_dir(&root)?;
+        let fact = |pid: i64| ProcessFact {
+            identity: ProcessIdentity {
+                boot: "boot".into(),
+                pid,
+                native_start: pid as u64,
+                group_id: pid,
+                session_id: pid,
+            },
+            parent_pid: 1,
+            zombie: false,
+            cpu_micros: None,
+            command: None,
+        };
+        let current = fact(100);
+        let processes = InjectedCensus {
+            census: Census::from_observations(
+                [current.clone(), fact(200)],
+                [],
+                [],
+                true,
+                false,
+                32,
+            )?,
+            cwds: BTreeMap::new(),
+            current: current.clone(),
+            platform_uids: BTreeMap::new(),
+        };
+        let observer = ExitsDuringOccupancy {
+            inner: &processes,
+            observations: std::cell::Cell::new(0),
+        };
+        let cwd = Scripted {
+            // The old process was inside the candidate root before it exited.
+            cwd: CwdObservation::Path(root.clone()),
+            occupancy: gap(OccupancyGap::Gone),
+            sealed: None,
+            kernel_thread: false,
+        };
+        let (states, _, _) = observe_worker_holders_with_audit(
+            std::slice::from_ref(&root),
+            &observer,
+            &cwd,
+            &current,
+            false,
+            &mut |_, _| {},
+        );
+        assert_eq!(states[&root], WorkerState::Free);
+        Ok(())
+    }
+
     #[test]
     fn a_sealed_system_image_with_a_wholly_denied_descriptor_listing_is_excused_by_design()
     -> Result<(), Box<dyn Error>> {
@@ -2056,6 +2141,7 @@ mod narrowing {
         for gap_kind in [
             OccupancyGap::ExecutableUnavailable,
             OccupancyGap::DescriptorsUnavailable,
+            OccupancyGap::Gone,
             OccupancyGap::LimitExceeded,
             OccupancyGap::Unobserved,
         ] {
