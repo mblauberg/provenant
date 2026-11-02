@@ -271,7 +271,7 @@ fn loop_decisions_stop_or_accept_exhausted_outputs() {
 }
 
 #[test]
-fn loop_writers_keep_one_worktree_and_never_deliver_between_rounds() {
+fn loop_writers_keep_one_worktree_when_the_body_does_not_deliver() {
     let mut document = fixture("pass");
     let spec = document.nodes[0].loop_body.as_mut().unwrap();
     spec.body[0].access = AccessMode::WorktreeWrite;
