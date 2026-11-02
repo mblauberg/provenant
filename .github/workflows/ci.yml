@@ -159,12 +159,21 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Set Rust temporary directory
         env:
           TMPDIR: ${{ runner.temp }}
         run: printf 'TMPDIR=%s\n' "$TMPDIR" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Select affected Rust tests
+        id: affected
+        working-directory: tools/front-door
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          IS_MAIN: ${{ github.ref == 'refs/heads/main' }}
+        run: ../../scripts/select-affected-crate-tests
       - name: Cache Rust build artefacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
@@ -180,10 +189,17 @@ jobs:
       # serial-process group, so the serial worktree suites split across both.
       - name: Run workspace tests
         working-directory: tools/front-door
-        run: cargo nextest run --profile ci --workspace --locked --features provenant-providers/recording --partition hash:${{ matrix.partition }}/2
+        env:
+          NEXTTEST_FILTER: ${{ steps.affected.outputs.nextest_filter }}
+        run: |
+          if [ -n "$NEXTTEST_FILTER" ]; then
+            cargo nextest run --profile ci --workspace --locked --features provenant-providers/recording --partition hash:${{ matrix.partition }}/2 -E "$NEXTTEST_FILTER"
+          else
+            cargo nextest run --profile ci --workspace --locked --features provenant-providers/recording --partition hash:${{ matrix.partition }}/2
+          fi
       # Cargo does not include example tests in the default nextest selection.
       - name: Run provider recording example test
-        if: matrix.partition == 1
+        if: matrix.partition == 1 && steps.affected.outputs.run_provider_example == 'true'
         working-directory: tools/front-door
         run: |
           cargo test --locked -p provenant-providers --features recording --example record bash_proof_needs_a_matching_successful_tool_result
