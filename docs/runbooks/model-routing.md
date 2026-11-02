@@ -203,6 +203,27 @@ add = ["tests"]
 The explanation and review report include the matched `by_paths:<pattern>`
 reason. Marker-triggered additions report `test-marker`.
 
+For crucial or terminal risk, the `tests` lens may attach optional mutation
+evidence. From the PR head, write the workspace-relative diff to a temporary
+patch and pass it to `cargo-mutants`:
+
+```sh
+base=origin/main
+workspace=tools/front-door
+git diff --relative="$workspace" "$base"...HEAD > "$TMPDIR/pr-head.diff"
+(cd "$workspace" && cargo mutants --in-diff "$TMPDIR/pr-head.diff" --workspace)
+```
+
+Set the relative path to the Rust workspace under review, and keep the patch
+relative to that workspace. Copy any required includes from outside the
+workspace into it before the run. Skip tests that fail on the unmutated
+baseline and list them as skipped. If `cargo-mutants` is unavailable or the
+diff matches no mutants, report that and continue. Report mutant, caught,
+missed and timed-out counts, wall time, and classify each survivor as a gap or
+noise. Cap the run (`cargo mutants --timeout` per mutant and stop after about
+15 minutes); report partial counts as timed-out or skipped, and still end with
+the verdict. This evidence is optional and never gates delivery.
+
 For example, review a commit with changed paths from a Git range:
 
 ```sh
