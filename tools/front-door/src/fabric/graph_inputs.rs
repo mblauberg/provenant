@@ -3,18 +3,16 @@
 //! Each result is read through the run store's verified, redacted output path,
 //! the one `provenant output --full` uses, never from another attempt's files.
 //! The lane is granted this directory alone.
-use super::{BinaryRunOwner, Factory};
-use provenant_core::CancelToken;
+use super::{
+    AttemptTarget, BinaryRunOwner, FacadeError, Factory, OutputBytes, OutputInput, OutputPart,
+    OutputResult,
+};
+use provenant_core::{CancelToken, WaitBudget};
 use provenant_fabric_runtime::graph::{
     AttemptKey, InputRequest, MaterialisedInput, MaterialisedInputs,
 };
 use provenant_os::fs::{Directory, PublishMode};
 use std::{ffi::OsStr, path::PathBuf};
-
-/// Why a result on another host is not offered.
-fn remote_reason(host: &str) -> String {
-    format!("on host {host}; remote materialisation tracked in #2665")
-}
 
 fn open_or_create(parent: &Directory, name: &str) -> Result<Directory, provenant_os::fs::FsError> {
     let name = OsStr::new(name);
@@ -95,8 +93,84 @@ fn read_result(
     }
 }
 
+/// Page through the same verified and redacted peer output used by the CLI.
+fn read_remote(
+    owner: &mut BinaryRunOwner<'_>,
+    target: AttemptTarget,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+    max: usize,
+) -> Result<(Vec<u8>, u64), FacadeError> {
+    let mut bytes = Vec::new();
+    let mut offset = 0;
+    let mut expected_digest = None;
+    loop {
+        let result = owner.output(
+            OutputInput::Read {
+                extra: Default::default(),
+                target: target.clone(),
+                part: OutputPart::Result,
+                offset,
+                max_bytes: (max - bytes.len()).min(provenant_records::run::OUTPUT_LIMIT as usize)
+                    as u64,
+            },
+            budget,
+            cancel,
+        )?;
+        let OutputResult::Chunk {
+            extra,
+            target: returned_target,
+            part,
+            offset: returned,
+            next_offset,
+            eof,
+            digest,
+            bytes: page,
+            ..
+        } = result
+        else {
+            return Err(FacadeError::StateCorrupt);
+        };
+        if returned_target != target
+            || !matches!(part, OutputPart::Result)
+            || returned != offset
+            || expected_digest.is_some_and(|previous| previous != digest)
+        {
+            return Err(FacadeError::StateCorrupt);
+        }
+        expected_digest = Some(digest);
+        let page = match page {
+            OutputBytes::Utf8(text) => text.into_bytes(),
+            OutputBytes::Base64(text) => provenant_fabric_runtime::handoff::decode_base64(&text)
+                .ok_or(FacadeError::StateCorrupt)?,
+        };
+        if next_offset != offset + page.len() as u64 || page.len() > max - bytes.len() {
+            return Err(FacadeError::StateCorrupt);
+        }
+        bytes.extend_from_slice(&page);
+        if eof {
+            return Ok((bytes, next_offset));
+        }
+        if next_offset <= offset {
+            return Err(FacadeError::StateCorrupt);
+        }
+        if bytes.len() == max {
+            let length = extra
+                .get("length")
+                .and_then(serde_json::Value::as_u64)
+                .filter(|length| *length > next_offset)
+                .ok_or_else(|| {
+                    FacadeError::io("peer did not report the full redacted result length")
+                })?;
+            return Ok((bytes, length));
+        }
+        offset = next_offset;
+    }
+}
+
 pub(super) fn materialise(
     factory: &Factory,
+    budget: WaitBudget,
     cancel: &CancelToken,
     key: &AttemptKey,
     requests: &[InputRequest],
@@ -107,29 +181,6 @@ pub(super) fn materialise(
         label: request.label.clone(),
         reason,
     };
-    // Only results on this host are read; the rest are named with the reason.
-    let local = |request: &InputRequest| {
-        request
-            .attempt_ref
-            .as_deref()
-            .and_then(|reference| reference.split_once('/'))
-            .is_some_and(|(owner, _)| owner == host.to_string())
-    };
-    if !requests.iter().any(local) {
-        return MaterialisedInputs {
-            directory: None,
-            entries: requests
-                .iter()
-                .map(|request| match request.attempt_ref.as_deref() {
-                    Some(reference) => unavailable(
-                        request,
-                        remote_reason(reference.split_once('/').map_or(reference, |(h, _)| h)),
-                    ),
-                    None => unavailable(request, "no attempt was recorded for it".into()),
-                })
-                .collect(),
-        };
-    }
     let failed = |reason: &str| MaterialisedInputs {
         directory: None,
         entries: requests
@@ -137,9 +188,9 @@ pub(super) fn materialise(
             .map(|request| unavailable(request, reason.into()))
             .collect(),
     };
-    let owner = BinaryRunOwner {
+    let mut owner = BinaryRunOwner {
         factory,
-        allow_remote: false,
+        allow_remote: true,
         actor: None,
         chair: None,
     };
@@ -149,7 +200,10 @@ pub(super) fn materialise(
     let Some((path, directory)) = attempt_directory(factory, key) else {
         return failed("the inputs directory could not be created");
     };
-    let call = owner.call(cancel);
+    let call = provenant_run::Request {
+        clock: &factory.clock,
+        cancel,
+    };
     let mut remaining = cap;
     let mut entries = Vec::with_capacity(requests.len());
     for request in requests {
@@ -164,10 +218,6 @@ pub(super) fn materialise(
             ));
             continue;
         };
-        if owner_host != host.to_string() {
-            entries.push(unavailable(request, remote_reason(owner_host)));
-            continue;
-        }
         if remaining == 0 {
             entries.push(MaterialisedInput::Capped {
                 label: request.label.clone(),
@@ -181,7 +231,25 @@ pub(super) fn materialise(
             ));
             continue;
         };
-        let (bytes, length) = match read_result(&session, &call, attempt, remaining) {
+        let read = if owner_host == host.to_string() {
+            read_result(&session, &call, attempt, remaining).map_err(super::run_error)
+        } else {
+            match owner_host.parse() {
+                Ok(remote_host) => read_remote(
+                    &mut owner,
+                    AttemptTarget {
+                        extra: Default::default(),
+                        host: Some(remote_host),
+                        attempt,
+                    },
+                    budget,
+                    cancel,
+                    remaining,
+                ),
+                Err(_) => Err(FacadeError::InvalidInput),
+            }
+        };
+        let (bytes, length) = match read {
             Ok(read) => read,
             Err(error) => {
                 entries.push(unavailable(

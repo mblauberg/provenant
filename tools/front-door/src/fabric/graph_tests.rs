@@ -759,12 +759,11 @@ mod result_tests {
     }
 
     #[test]
-    fn upstream_results_on_other_hosts_are_named_unavailable_without_a_fetch()
+    fn remote_upstream_is_materialised_and_unreachable_peer_is_named()
     -> Result<(), Box<dyn std::error::Error>> {
         use super::*;
-        use provenant_fabric_runtime::graph::{
-            AttemptKey, InputRequest, MaterialisedInput, MaterialisedInputs,
-        };
+        use provenant_fabric_runtime::graph::{AttemptKey, InputRequest, MaterialisedInput};
+        use std::os::unix::fs::PermissionsExt;
         struct FreeWorkers;
         impl WorkerObserver for FreeWorkers {
             fn observe_roots(
@@ -775,7 +774,26 @@ mod result_tests {
                 Default::default()
             }
         }
-        let rig = crate::worktree_tests::support::TestRig::new()?;
+        let mut rig = crate::worktree_tests::support::TestRig::new()?;
+        let project = rig.home.join("project");
+        std::fs::rename(&rig.project, &project)?;
+        rig.project = project;
+        let remote_host = provenant_core::HostId::from_bytes([9; 16]);
+        let attempt = provenant_core::AttemptId::from_bytes([8; 16]);
+        let ssh = rig.root.join("ssh");
+        let response = rig.root.join("response");
+        std::fs::write(
+            &ssh,
+            format!("#!/bin/sh\ncat >/dev/null\ncat '{}'\n", response.display()),
+        )?;
+        std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::write(
+            rig.state.join("config.toml"),
+            format!(
+                "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric]\nssh_executable={:?}\n[domains.fabric.peers.workshop]\nhost='{remote_host}'\ndestination='workshop'\n",
+                ssh.to_string_lossy()
+            ),
+        )?;
         let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
         let factory = Factory {
             context: Context::open(roots, &rig.home, &rig.project)
@@ -791,6 +809,39 @@ mod result_tests {
             mcp_project: None,
             workers: &FreeWorkers,
         };
+        let text = format!("full {} end-of-remote-result", "remote ".repeat(1400));
+        let target = AttemptTarget {
+            extra: Default::default(),
+            host: Some(remote_host),
+            attempt,
+        };
+        let digest = provenant_core::Digest::from_bytes(
+            *provenant_records::CanonicalV1::file_digest(text.as_bytes()).bytes(),
+        );
+        let locator = ProjectLocator::new(&factory.context.identity, &rig.home)?;
+        let mut reply = PeerResponse {
+            extra: Default::default(),
+            version: 1,
+            protocol: PROTOCOL,
+            host: remote_host,
+            project: locator.key,
+            result: PeerResult::Output {
+                extra: Default::default(),
+                data: OutputResult::Chunk {
+                    extra: Default::default(),
+                    target,
+                    part: OutputPart::Result,
+                    state: "succeeded".into(),
+                    reason: None,
+                    offset: 0,
+                    next_offset: text.len() as u64,
+                    eof: true,
+                    digest,
+                    bytes: OutputBytes::Utf8(text.clone()),
+                },
+            },
+        };
+        std::fs::write(&response, serde_json::to_vec(&reply)?)?;
         let request = |label: &str, attempt_ref: Option<&str>| InputRequest {
             label: label.into(),
             attempt_ref: attempt_ref.map(str::to_owned),
@@ -803,33 +854,179 @@ mod result_tests {
         };
         let inputs = graph_inputs::materialise(
             &factory,
+            WaitBudget::cli(factory.clock.mono_now(), 30)?,
             &CancelToken::new(),
             &key,
             &[
-                request("review", Some("workshop/abc123")),
+                request("review", Some(&format!("{remote_host}/{attempt}"))),
+                request(
+                    "offline",
+                    Some(&format!(
+                        "{}/{attempt}",
+                        provenant_core::HostId::from_bytes([7; 16])
+                    )),
+                ),
                 request("never-ran", None),
             ],
-            1024,
+            16_384,
         );
-        assert_eq!(
-            inputs,
-            MaterialisedInputs {
-                directory: None,
-                entries: vec![
-                    MaterialisedInput::Unavailable {
-                        label: "review".into(),
-                        reason: "on host workshop; remote materialisation tracked in #2665".into(),
-                    },
-                    MaterialisedInput::Unavailable {
-                        label: "never-ran".into(),
-                        reason: "no attempt was recorded for it".into(),
-                    },
-                ],
+        let MaterialisedInput::File { path, omitted, .. } = &inputs.entries[0] else {
+            return Err(format!("{inputs:?}").into());
+        };
+        assert_eq!(std::fs::read_to_string(path)?, text);
+        assert_eq!(*omitted, 0);
+        // Exercise the graph scheduler with the real staging adapter and a
+        // fixture peer, including a consumer that reads its materialised file.
+        use provenant_fabric_runtime::graph;
+        struct Journal(Option<graph::GraphCheckpoint>);
+        impl graph::GraphJournal for Journal {
+            type Error = std::convert::Infallible;
+            fn load(&mut self, _: &str) -> Result<Option<graph::GraphCheckpoint>, Self::Error> {
+                Ok(self.0.clone())
             }
+            fn save(&mut self, checkpoint: &graph::GraphCheckpoint) -> Result<(), Self::Error> {
+                self.0 = Some(checkpoint.clone());
+                Ok(())
+            }
+        }
+        struct FixtureOwner<'a> {
+            factory: &'a Factory,
+            reference: String,
+            expected: &'a str,
+            offline: bool,
+            consumed: bool,
+        }
+        impl graph::AttemptOwner for FixtureOwner<'_> {
+            type Error = std::convert::Infallible;
+            fn actor(&self) -> String {
+                "fixture".into()
+            }
+            fn materialise_inputs(
+                &mut self,
+                key: &graph::AttemptKey,
+                requests: &[graph::InputRequest],
+                cap: usize,
+            ) -> Option<graph::MaterialisedInputs> {
+                Some(graph_inputs::materialise(
+                    self.factory,
+                    WaitBudget::cli(self.factory.clock.mono_now(), 30).unwrap(),
+                    &CancelToken::new(),
+                    key,
+                    requests,
+                    cap,
+                ))
+            }
+            fn observe_or_start(
+                &mut self,
+                key: &graph::AttemptKey,
+                node: graph::NodeInput<'_>,
+                _: &graph::GraphRoute,
+                _: graph::AccessMode,
+                _: Option<&str>,
+                _: graph::Replay<'_>,
+            ) -> Result<graph::AttemptObservation, Self::Error> {
+                let producer = key.node_id == "producer";
+                if !producer {
+                    self.consumed = true;
+                    if self.offline {
+                        assert!(node.prompt.contains("unavailable:"), "{}", node.prompt);
+                    } else {
+                        let file = node
+                            .inputs_dir
+                            .unwrap()
+                            .join(graph_inputs::file_name("producer"));
+                        assert_eq!(std::fs::read_to_string(file).unwrap(), self.expected);
+                    }
+                }
+                let mut capture =
+                    provenant_fabric_runtime::result_capture::ResultCapture::new(None);
+                capture.push(b"bounded producer excerpt");
+                Ok(graph::AttemptObservation::Terminal {
+                    attempt_ref: producer.then(|| self.reference.clone()),
+                    outcome: graph::AttemptOutcome::Succeeded,
+                    launched: true,
+                    result: Some(Box::new(capture.finish())),
+                    result_warning: None,
+                    result_path: None,
+                    branch: None,
+                    commit: None,
+                })
+            }
+        }
+        for offline in [false, true] {
+            let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+                "schema_version": 1, "graph_id": if offline { "offline-graph" } else { "remote-graph" },
+                "nodes": [
+                    {"id":"producer", "prompt":"produce", "access":"read_only", "route":{"adapter":"fixture", "model":"fixture/model"}},
+                    {"id":"consumer", "prompt":"consume", "access":"read_only", "depends_on":["producer"], "inputs":[{"node":"producer", "outputs":["result"]}], "route":{"adapter":"fixture", "model":"fixture/model"}}
+                ]
+            }))?;
+            let host = if offline {
+                provenant_core::HostId::from_bytes([7; 16])
+            } else {
+                remote_host
+            };
+            let mut owner = FixtureOwner {
+                factory: &factory,
+                reference: format!("{host}/{attempt}"),
+                expected: &text,
+                offline,
+                consumed: false,
+            };
+            let run = graph::advance_with_budget(
+                &document,
+                &mut owner,
+                &mut Journal(None),
+                &Default::default(),
+                &Default::default(),
+            )?;
+            assert!(run.checkpoint.successful());
+            assert!(owner.consumed);
+        }
+        if let PeerResult::Output {
+            data:
+                OutputResult::Chunk {
+                    extra,
+                    next_offset,
+                    eof,
+                    bytes,
+                    ..
+                },
+            ..
+        } = &mut reply.result
+        {
+            extra.insert("length".into(), serde_json::json!(text.len()));
+            *next_offset = 5;
+            *eof = false;
+            *bytes = OutputBytes::Utf8(text[..5].into());
+        }
+        std::fs::write(&response, serde_json::to_vec(&reply)?)?;
+        let capped = graph_inputs::materialise(
+            &factory,
+            WaitBudget::cli(factory.clock.mono_now(), 30)?,
+            &CancelToken::new(),
+            &key,
+            &[request("review", Some(&format!("{remote_host}/{attempt}")))],
+            5,
+        );
+        let MaterialisedInput::File {
+            path,
+            bytes,
+            omitted,
+            ..
+        } = &capped.entries[0]
+        else {
+            return Err(format!("{capped:?}").into());
+        };
+        assert_eq!(*bytes, 5);
+        assert_eq!(*omitted, (text.len() - 5) as u64);
+        assert!(std::fs::read_to_string(path)?.starts_with("full "));
+        assert!(
+            matches!(&inputs.entries[1], MaterialisedInput::Unavailable { label, reason } if label == "offline" && reason.contains("result could not be read")),
+            "{inputs:?}"
         );
         assert!(
-            !rig.state.join("fabric").join("graph-inputs").exists(),
-            "no directory is made when nothing is local"
+            matches!(&inputs.entries[2], MaterialisedInput::Unavailable { label, reason } if label == "never-ran" && reason == "no attempt was recorded for it")
         );
         Ok(())
     }

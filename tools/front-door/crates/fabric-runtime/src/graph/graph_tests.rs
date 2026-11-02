@@ -2573,16 +2573,17 @@ fn a_remote_upstream_is_named_unavailable_and_the_node_still_runs() {
             .iter()
             .map(|request| MaterialisedInput::Unavailable {
                 label: request.label.clone(),
-                reason: "on host workshop; remote materialisation tracked in #2665".into(),
+                reason: "its result could not be read: peer unavailable".into(),
             })
             .collect(),
     }));
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
     assert!(run.checkpoint.successful());
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
-    assert!(owner.prompts[1].contains(
-        "- parent: unavailable: on host workshop; remote materialisation tracked in #2665"
-    ));
+    assert!(
+        owner.prompts[1]
+            .contains("- parent: unavailable: its result could not be read: peer unavailable")
+    );
 }
 
 #[test]
