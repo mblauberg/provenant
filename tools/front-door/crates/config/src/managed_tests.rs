@@ -276,58 +276,69 @@ fn install_keeps_the_settings_indent_and_leaves_unchanged_settings_alone() {
 }
 
 #[test]
-fn missing_peer_agent_is_stopped_only_when_the_last_harness_is_removed() {
-    let mut f = Fixture::new();
-    f.targets.roots = RootInputs::new(f.home.clone(), f.base.join("checkout"))
-        .resolve(&Resolver)
-        .unwrap();
-    f.targets.harnesses = Targets::new(
-        f.targets.roots.clone(),
-        &f.home,
-        &[Harness::Claude, Harness::Codex],
-    )
-    .harnesses;
-    f.targets.peer_agent = Some(b"rendered plist\n".to_vec());
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let ctx = context(&clock, &cancel);
-    install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
-    fs::remove_file(peer_agent_plist(f.targets.roots.state.as_path()).unwrap()).unwrap();
-    struct StopReporter(usize);
-    impl InstallReporter for StopReporter {
-        fn preview(&mut self, _: &[Action]) -> io::Result<()> {
-            Ok(())
+fn missing_peer_and_tick_agents_wait_for_the_last_harness() {
+    for (case, agent, selector) in [
+        ("peer agent", AgentFixture::Peer, "peer-agent"),
+        ("tick agent", AgentFixture::Tick, "tick-agent"),
+    ] {
+        let mut f = Fixture::new();
+        configured_agent(&mut f, agent);
+        f.targets.harnesses = Targets::new(
+            f.targets.roots.clone(),
+            &f.home,
+            &[Harness::Claude, Harness::Codex],
+        )
+        .harnesses;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let ctx = context(&clock, &cancel);
+        install(&f.plan(), &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+        let plist = match agent {
+            AgentFixture::Peer => peer_agent_plist(f.targets.roots.state.as_path()).unwrap(),
+            AgentFixture::Tick => tick_agent_plist(f.targets.roots.state.as_path()).unwrap(),
+        };
+        fs::remove_file(plist).unwrap();
+        struct StopReporter {
+            count: usize,
+            selector: &'static str,
         }
-        fn before_remove(&mut self, action: &Action) -> io::Result<()> {
-            if action.selector == "peer-agent" {
-                self.0 += 1;
+        impl InstallReporter for StopReporter {
+            fn preview(&mut self, _: &[Action]) -> io::Result<()> {
+                Ok(())
             }
-            Ok(())
+            fn before_remove(&mut self, action: &Action) -> io::Result<()> {
+                if action.selector == self.selector {
+                    self.count += 1;
+                }
+                Ok(())
+            }
         }
+        let mut reporter = StopReporter { count: 0, selector };
+        let codex = f.targets.harnesses.pop().unwrap();
+        uninstall(&f.targets, &ctx, &mut reporter).unwrap();
+        assert_eq!(reporter.count, 0, "{case}");
+        assert!(
+            read_receipt(&f.targets)
+                .unwrap()
+                .unwrap()
+                .entries
+                .iter()
+                .any(|entry| entry.selector == selector),
+            "{case}"
+        );
+        f.targets.harnesses = vec![codex];
+        uninstall(&f.targets, &ctx, &mut reporter).unwrap();
+        assert_eq!(reporter.count, 1, "{case}");
+        assert!(
+            !read_receipt(&f.targets)
+                .unwrap()
+                .unwrap()
+                .entries
+                .iter()
+                .any(|entry| entry.selector == selector),
+            "{case}"
+        );
     }
-    let mut reporter = StopReporter(0);
-    let codex = f.targets.harnesses.pop().unwrap();
-    uninstall(&f.targets, &ctx, &mut reporter).unwrap();
-    assert_eq!(reporter.0, 0);
-    assert!(
-        read_receipt(&f.targets)
-            .unwrap()
-            .unwrap()
-            .entries
-            .iter()
-            .any(|entry| entry.selector == "peer-agent")
-    );
-    f.targets.harnesses = vec![codex];
-    uninstall(&f.targets, &ctx, &mut reporter).unwrap();
-    assert_eq!(reporter.0, 1);
-    assert!(
-        !read_receipt(&f.targets)
-            .unwrap()
-            .unwrap()
-            .entries
-            .iter()
-            .any(|entry| entry.selector == "peer-agent")
-    );
 }
 
 #[test]
@@ -820,84 +831,102 @@ fn moved_receipt_rejects_entries_outside_both_state_roots() {
 }
 
 #[test]
-fn peer_agent_is_previewed_receipted_and_removed_only_on_an_exact_match() {
-    for state in ["unchanged", "modified", "missing"] {
-        let modified = state == "modified";
-        let mut f = Fixture::new();
-        let plist = configured_agent(&mut f, AgentFixture::Peer);
-        let plan = f.plan();
-        assert!(
-            plan.actions()
-                .iter()
-                .any(|action| action.selector == "peer-agent"
-                    && action.path.to_path_buf().unwrap() == plist)
-        );
-        assert!(!plist.exists());
-        let clock = SystemClock::new();
-        let cancel = CancelToken::new();
-        let context = InstallContext {
-            clock: &clock,
-            cancel: &cancel,
-            budget: WaitBudget::cli(clock.mono_now(), 30).unwrap(),
-        };
-        install(&plan, &context, &mut Reporter::default(), &Smoke, false).unwrap();
-        assert!(f.plan().actions().is_empty());
-        let receipt = read_receipt(&f.targets).unwrap().unwrap();
-        assert!(
-            receipt
-                .entries
-                .iter()
-                .any(|entry| entry.selector == "peer-agent")
-        );
-        if modified {
-            fs::write(&plist, b"user edited plist\n").unwrap();
-            let release = f.release();
-            let error = Snapshots::capture(&release, &f.targets)
-                .and_then(|snapshots| plan_install(release, f.targets.clone(), snapshots))
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains(plist.to_str().unwrap()), "{error}");
-            assert!(error.contains("move it aside"), "{error}");
+fn peer_and_tick_agents_are_removed_only_on_an_exact_match() {
+    for (agent_case, agent, selector) in [
+        ("peer agent", AgentFixture::Peer, "peer-agent"),
+        ("tick agent", AgentFixture::Tick, "tick-agent"),
+    ] {
+        for state in ["unchanged", "modified", "missing"] {
+            let modified = state == "modified";
+            let mut f = Fixture::new();
+            let plist = configured_agent(&mut f, agent);
+            let plan = f.plan();
             assert!(
-                error.contains("launchctl bootout gui/$UID/dev.provenant.peer"),
-                "{error}"
+                plan.actions()
+                    .iter()
+                    .any(|action| action.selector == selector
+                        && action.path.to_path_buf().unwrap() == plist),
+                "{agent_case}: {state}"
+            );
+            assert!(!plist.exists());
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let context = InstallContext {
+                clock: &clock,
+                cancel: &cancel,
+                budget: WaitBudget::cli(clock.mono_now(), 30).unwrap(),
+            };
+            install(&plan, &context, &mut Reporter::default(), &Smoke, false).unwrap();
+            assert!(f.plan().actions().is_empty());
+            let receipt = read_receipt(&f.targets).unwrap().unwrap();
+            assert!(
+                receipt
+                    .entries
+                    .iter()
+                    .any(|entry| entry.selector == selector),
+                "{agent_case}: {state}"
+            );
+            if modified {
+                fs::write(&plist, b"user edited plist\n").unwrap();
+                let release = f.release();
+                let error = Snapshots::capture(&release, &f.targets)
+                    .and_then(|snapshots| plan_install(release, f.targets.clone(), snapshots))
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains(plist.to_str().unwrap()), "{error}");
+                if matches!(agent, AgentFixture::Peer) {
+                    assert!(error.contains("move it aside"), "{error}");
+                    assert!(
+                        error.contains("launchctl bootout gui/$UID/dev.provenant.peer"),
+                        "{error}"
+                    );
+                }
+            }
+            if state == "missing" {
+                fs::remove_file(&plist).unwrap();
+            }
+            struct StopReporter {
+                count: usize,
+                selector: &'static str,
+            }
+            impl InstallReporter for StopReporter {
+                fn preview(&mut self, _: &[Action]) -> io::Result<()> {
+                    Ok(())
+                }
+                fn before_remove(&mut self, action: &Action) -> io::Result<()> {
+                    if action.selector == self.selector {
+                        self.count += 1;
+                    }
+                    Ok(())
+                }
+            }
+            let mut reporter = StopReporter { count: 0, selector };
+            let result = uninstall(&f.targets, &context, &mut reporter).unwrap();
+            assert_eq!(
+                reporter.count,
+                usize::from(!modified),
+                "{agent_case}: {state}"
+            );
+            assert_eq!(
+                result
+                    .actions
+                    .iter()
+                    .filter(|action| action.selector == selector)
+                    .count(),
+                usize::from(!modified),
+                "{agent_case}: {state}"
+            );
+            assert_eq!(plist.exists(), modified, "{agent_case}: {state}");
+            assert_eq!(
+                result
+                    .findings
+                    .iter()
+                    .any(|finding| finding.rule == "relinquished_modified_entry"
+                        && finding.path.to_path_buf().unwrap() == plist),
+                modified,
+                "{agent_case}: {state}"
             );
         }
-        if state == "missing" {
-            fs::remove_file(&plist).unwrap();
-        }
-        struct StopReporter(usize);
-        impl InstallReporter for StopReporter {
-            fn preview(&mut self, _: &[Action]) -> io::Result<()> {
-                Ok(())
-            }
-            fn before_remove(&mut self, action: &Action) -> io::Result<()> {
-                if action.selector == "peer-agent" {
-                    self.0 += 1;
-                }
-                Ok(())
-            }
-        }
-        let mut reporter = StopReporter(0);
-        let result = uninstall(&f.targets, &context, &mut reporter).unwrap();
-        assert_eq!(reporter.0, usize::from(!modified));
-        assert_eq!(
-            result
-                .actions
-                .iter()
-                .filter(|action| action.selector == "peer-agent")
-                .count(),
-            usize::from(!modified)
-        );
-        assert_eq!(plist.exists(), modified);
-        assert_eq!(
-            result
-                .findings
-                .iter()
-                .any(|finding| finding.rule == "relinquished_modified_entry"
-                    && finding.path.to_path_buf().unwrap() == plist),
-            modified
-        );
     }
 }
 
@@ -4092,83 +4121,6 @@ fn missing_tick_agent_is_stopped_only_when_the_last_harness_is_removed() {
             .iter()
             .any(|entry| entry.selector == "tick-agent")
     );
-}
-
-#[test]
-fn tick_agent_is_previewed_receipted_and_removed_only_on_an_exact_match() {
-    for state in ["unchanged", "modified", "missing"] {
-        let modified = state == "modified";
-        let mut f = Fixture::new();
-        let plist = configured_agent(&mut f, AgentFixture::Tick);
-        let plan = f.plan();
-        assert!(
-            plan.actions()
-                .iter()
-                .any(|action| action.selector == "tick-agent"
-                    && action.path.to_path_buf().unwrap() == plist)
-        );
-        assert!(!plist.exists());
-        let clock = SystemClock::new();
-        let cancel = CancelToken::new();
-        let context = InstallContext {
-            clock: &clock,
-            cancel: &cancel,
-            budget: WaitBudget::cli(clock.mono_now(), 30).unwrap(),
-        };
-        install(&plan, &context, &mut Reporter::default(), &Smoke, false).unwrap();
-        assert!(f.plan().actions().is_empty());
-        let receipt = read_receipt(&f.targets).unwrap().unwrap();
-        assert!(
-            receipt
-                .entries
-                .iter()
-                .any(|entry| entry.selector == "tick-agent")
-        );
-        if modified {
-            fs::write(&plist, b"user edited plist\n").unwrap();
-            let release = f.release();
-            let error = Snapshots::capture(&release, &f.targets)
-                .and_then(|snapshots| plan_install(release, f.targets.clone(), snapshots))
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains(plist.to_str().unwrap()), "{error}");
-        }
-        if state == "missing" {
-            fs::remove_file(&plist).unwrap();
-        }
-        struct StopReporter(usize);
-        impl InstallReporter for StopReporter {
-            fn preview(&mut self, _: &[Action]) -> io::Result<()> {
-                Ok(())
-            }
-            fn before_remove(&mut self, action: &Action) -> io::Result<()> {
-                if action.selector == "tick-agent" {
-                    self.0 += 1;
-                }
-                Ok(())
-            }
-        }
-        let mut reporter = StopReporter(0);
-        let result = uninstall(&f.targets, &context, &mut reporter).unwrap();
-        assert_eq!(reporter.0, usize::from(!modified));
-        assert_eq!(
-            result
-                .actions
-                .iter()
-                .filter(|action| action.selector == "tick-agent")
-                .count(),
-            usize::from(!modified)
-        );
-        assert_eq!(plist.exists(), modified);
-        assert_eq!(
-            result
-                .findings
-                .iter()
-                .any(|finding| finding.rule == "relinquished_modified_entry"
-                    && finding.path.to_path_buf().unwrap() == plist),
-            modified
-        );
-    }
 }
 
 #[test]

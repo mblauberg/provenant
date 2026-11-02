@@ -1083,6 +1083,28 @@ fn published_output_schemas_accept_real_runtime_records() {
 }
 
 #[test]
+fn submit_optional_fields_are_named_cases() {
+    for (case, check) in [
+        (
+            "bounded work context",
+            submit_accepts_optional_bounded_work_context as fn(),
+        ),
+        ("bounded git base", submit_accepts_optional_bounded_git_base),
+        ("head length bound", submit_head_matches_schema_length_bound),
+        ("task title", submit_accepts_optional_task_title),
+    ] {
+        if let Err(panic) = std::panic::catch_unwind(check) {
+            if let Some(message) = panic.downcast_ref::<String>() {
+                panic!("submit {case}: {message}");
+            }
+            if let Some(message) = panic.downcast_ref::<&str>() {
+                panic!("submit {case}: {message}");
+            }
+            panic!("submit {case} failed");
+        }
+    }
+}
+
 fn submit_accepts_optional_bounded_work_context() {
     use provenant_fabric_runtime::coordination::facade::SubmitInput;
     let schema = &all_catalogue()
@@ -1112,7 +1134,6 @@ fn submit_accepts_optional_bounded_work_context() {
     assert!(tasks[0].context.is_none());
 }
 
-#[test]
 fn submit_accepts_optional_bounded_git_base() {
     use provenant_fabric_runtime::coordination::facade::SubmitInput;
 
@@ -1135,7 +1156,6 @@ fn submit_accepts_optional_bounded_git_base() {
     assert!(ToolCall::parse("fabric_run", input).is_err());
 }
 
-#[test]
 fn submit_head_matches_schema_length_bound() {
     let schema = &all_catalogue()
         .iter()
@@ -1154,7 +1174,6 @@ fn submit_head_matches_schema_length_bound() {
     assert!(ToolCall::parse("fabric_run", input).is_err());
 }
 
-#[test]
 fn submit_accepts_optional_task_title() {
     use provenant_fabric_runtime::coordination::facade::SubmitInput;
 
