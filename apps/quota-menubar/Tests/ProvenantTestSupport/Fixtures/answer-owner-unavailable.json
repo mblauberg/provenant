@@ -1,0 +1,12 @@
+{
+ "schema_version": 1,
+ "command": "answer",
+ "status": "error",
+ "data": null,
+ "error": {
+  "code": "owner_unavailable",
+  "message": "inbox owner studio is not reachable",
+  "cause": null,
+  "repair": "Retry with the same operation ID when the owner host is reachable."
+ }
+}

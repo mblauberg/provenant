@@ -40,7 +40,7 @@ struct RequestList: View {
 
     var body: some View {
         List(model.visibleRequests, selection: $model.selection) { request in
-            RequestRow(request: request, now: model.displayNow)
+            RequestRow(request: request, now: model.displayNow, staleSince: model.staleSince(for: request))
                 .tag(request.id)
                 .listRowSeparator(.hidden)
                 .listRowInsets(EdgeInsets(top: 7, leading: Space.medium, bottom: 7, trailing: Space.medium))
@@ -50,9 +50,11 @@ struct RequestList: View {
         .focused($listFocused)
         .onAppear { listFocused = true }
         .safeAreaInset(edge: .top, spacing: 0) {
-            if let error = model.refreshError, !model.requests.isEmpty {
+            let notes = model.peerNotes
+            if (model.refreshError != nil && !model.requests.isEmpty) || !notes.isEmpty {
                 VStack(spacing: 0) {
-                    Notice("Refresh failed. \(error)")
+                    if let error = model.refreshError, !model.requests.isEmpty { Notice("Refresh failed. \(error)") }
+                    ForEach(notes) { Notice($0.text) }
                     Divider()
                 }
                 .background(.bar)

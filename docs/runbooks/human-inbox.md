@@ -101,10 +101,15 @@ key returns `no_project`. A key that matches more than one registered project is
 refused, and `--host` must name the same host as a qualified ID. Close stays
 `owner_local_only`.
 
-The Console shows peer requests labelled by host. While a peer is `unreachable`
-it keeps that peer's last rows, marked stale, and answering stays allowed; an
-`owner_unavailable` failure is shown if the owner cannot be reached. It drops a
-peer's rows when the peer is `complete` or `unsupported`.
+The Console shows peer requests labelled by host and groups projects by host
+and project ID. It asks for peers on the first page only. A peer that gave no
+page (`unreachable`, or `partial` with a `reason` and no rows) keeps its last
+rows, marked "stale since" the last good read, and answering stays allowed; an
+`owner_unavailable` failure is shown if the owner cannot be reached. A `partial`
+peer without a `reason` shows the rows it gave, with a note that some are
+missing. The Console drops a peer's kept rows when the peer is `complete` or
+`unsupported` (a line says to update it), or no longer listed. Each non-complete
+peer gets one coverage line.
 The MCP `fabric_inbox` tool accepts `host` for list, answer, close and
 acknowledge; list with an ID shows one request. The same owner-local restriction
 applies to close and acknowledgement.
