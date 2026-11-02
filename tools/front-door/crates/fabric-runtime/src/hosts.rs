@@ -1632,148 +1632,89 @@ mod tests {
         ));
     }
     #[test]
-    fn console_inbox_uses_its_own_protocol() {
-        let host = HostId::from_bytes([2; 16]);
-        let project = ProjectLocator {
-            extra: Default::default(),
-            key: project_key(Path::new("/home/a")),
-            common_dir: "repo/.git".into(),
-        };
-        let request = PeerRequest::new(
-            host,
-            HostId::from_bytes([1; 16]),
-            "chair".into(),
-            project,
-            PeerAction::ConsoleInbox {
-                extra: Default::default(),
-                state: crate::inbox::InboxFilter::Open,
-                limit: 50,
-            },
-        );
-        assert_eq!(request.protocol, CONSOLE_INBOX_PROTOCOL);
-        assert!(request.operation().is_none());
-        assert!(
-            protocol_refusal(&serde_json::to_vec(&request).unwrap())
-                .unwrap()
-                .is_none()
-        );
-        let mut old = serde_json::to_value(request).unwrap();
-        old["protocol"] = CONSOLE_DETAIL_PROTOCOL.into();
-        assert_eq!(
-            protocol_refusal(&serde_json::to_vec(&old).unwrap())
-                .unwrap()
-                .unwrap()
-                .protocol,
-            CONSOLE_INBOX_PROTOCOL
-        );
-    }
-    #[test]
-    fn console_protocol_refused_before_action_decode() {
-        let host = HostId::from_bytes([2; 16]);
-        let project = ProjectLocator {
-            extra: Default::default(),
-            key: project_key(Path::new("/home/a")),
-            common_dir: "repo/.git".into(),
-        };
-        let request = PeerRequest::new(
-            host,
-            HostId::from_bytes([1; 16]),
-            "chair".into(),
-            project,
-            PeerAction::ConsoleBoard {
-                extra: Default::default(),
-                all: false,
-                limit: 50,
-                selected: false,
-            },
-        );
-        assert_eq!(request.protocol, CONSOLE_PROTOCOL);
-        assert!(
-            protocol_refusal(&serde_json::to_vec(&request).unwrap())
-                .unwrap()
-                .is_none()
-        );
-        let mut old = serde_json::to_value(&request).unwrap();
-        old["protocol"] = PROTOCOL.into();
-        let refusal = protocol_refusal(&serde_json::to_vec(&old).unwrap())
-            .unwrap()
-            .unwrap();
-        assert_eq!(refusal.protocol, CONSOLE_PROTOCOL);
-    }
-    #[test]
-    fn doctor_action_uses_its_protocol_and_is_refused_before_action_decode() {
-        let host = HostId::from_bytes([2; 16]);
-        let project = ProjectLocator {
-            extra: Default::default(),
-            key: project_key(Path::new("/home/a")),
-            common_dir: "repo/.git".into(),
-        };
-        let request = PeerRequest::new(
-            host,
-            HostId::from_bytes([1; 16]),
-            "chair".into(),
-            project,
-            PeerAction::Doctor {
-                extra: Default::default(),
-            },
-        );
-        assert_eq!(request.protocol, DOCTOR_PROTOCOL);
-        assert!(
-            protocol_refusal(&serde_json::to_vec(&request).unwrap())
-                .unwrap()
-                .is_none()
-        );
-        let mut old = serde_json::to_value(&request).unwrap();
-        old["protocol"] = PROTOCOL.into();
-        let refusal = protocol_refusal(&serde_json::to_vec(&old).unwrap())
-            .unwrap()
-            .unwrap();
-        assert_eq!(refusal.protocol, DOCTOR_PROTOCOL);
-        assert!(matches!(
-            refusal.result,
-            PeerResult::Error {
-                data: crate::hosts::PeerResultError {
-                    error: facade::FacadeError::PeerVersion,
-                    ..
+    fn feature_actions_use_their_protocol_fences() {
+        let cases = [
+            (
+                "console inbox",
+                PeerAction::ConsoleInbox {
+                    extra: Default::default(),
+                    state: crate::inbox::InboxFilter::Open,
+                    limit: 50,
                 },
-                ..
-            }
-        ));
-    }
-    #[test]
-    fn console_detail_uses_its_own_protocol() {
-        let host = HostId::from_bytes([2; 16]);
-        let project = ProjectLocator {
-            extra: Default::default(),
-            key: project_key(Path::new("/home/a")),
-            common_dir: "repo/.git".into(),
-        };
-        let request = PeerRequest::new(
-            host,
-            HostId::from_bytes([1; 16]),
-            "chair".into(),
-            project,
-            PeerAction::ConsoleDetail {
-                extra: Default::default(),
-                id: "attempt".into(),
-            },
-        );
-        assert_eq!(request.protocol, CONSOLE_DETAIL_PROTOCOL);
-        assert!(request.operation().is_none());
-        assert!(
-            protocol_refusal(&serde_json::to_vec(&request).unwrap())
+                CONSOLE_INBOX_PROTOCOL,
+                CONSOLE_DETAIL_PROTOCOL,
+            ),
+            (
+                "console board",
+                PeerAction::ConsoleBoard {
+                    extra: Default::default(),
+                    all: false,
+                    limit: 50,
+                    selected: false,
+                },
+                CONSOLE_PROTOCOL,
+                PROTOCOL,
+            ),
+            (
+                "doctor",
+                PeerAction::Doctor {
+                    extra: Default::default(),
+                },
+                DOCTOR_PROTOCOL,
+                PROTOCOL,
+            ),
+            (
+                "console detail",
+                PeerAction::ConsoleDetail {
+                    extra: Default::default(),
+                    id: "attempt".into(),
+                },
+                CONSOLE_DETAIL_PROTOCOL,
+                CONSOLE_PROTOCOL,
+            ),
+        ];
+
+        for (case, action, expected_protocol, old_protocol) in cases {
+            let request = PeerRequest::new(
+                HostId::from_bytes([2; 16]),
+                HostId::from_bytes([1; 16]),
+                "chair".into(),
+                ProjectLocator {
+                    extra: Default::default(),
+                    key: project_key(Path::new("/home/a")),
+                    common_dir: "repo/.git".into(),
+                },
+                action,
+            );
+            assert_eq!(request.protocol, expected_protocol, "{case}");
+            assert!(request.operation().is_none(), "{case}");
+            assert!(
+                protocol_refusal(&serde_json::to_vec(&request).unwrap())
+                    .unwrap()
+                    .is_none(),
+                "{case} at its own protocol"
+            );
+
+            let mut old = serde_json::to_value(request).unwrap();
+            old["protocol"] = old_protocol.into();
+            let refusal = protocol_refusal(&serde_json::to_vec(&old).unwrap())
                 .unwrap()
-                .is_none()
-        );
-        let mut old = serde_json::to_value(request).unwrap();
-        old["protocol"] = CONSOLE_PROTOCOL.into();
-        assert_eq!(
-            protocol_refusal(&serde_json::to_vec(&old).unwrap())
-                .unwrap()
-                .unwrap()
-                .protocol,
-            CONSOLE_DETAIL_PROTOCOL
-        );
+                .unwrap();
+            assert_eq!(refusal.protocol, expected_protocol, "{case}");
+            assert!(
+                matches!(
+                    refusal.result,
+                    PeerResult::Error {
+                        data: crate::hosts::PeerResultError {
+                            error: facade::FacadeError::PeerVersion,
+                            ..
+                        },
+                        ..
+                    }
+                ),
+                "{case}"
+            );
+        }
     }
     #[test]
     fn read_only_failures_name_their_cause_on_the_same_wire_code() {

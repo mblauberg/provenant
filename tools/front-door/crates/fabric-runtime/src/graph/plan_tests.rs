@@ -433,37 +433,35 @@ fn pattern_expansion_counts_against_the_graph_node_limit() {
     assert!(run.checkpoint.expansions.is_empty());
 }
 
-fn assert_pattern_parameter_error(doc: &GraphDocument, parameters: Value, reason: &str) {
+fn assert_pattern_parameter_error(
+    case: &str,
+    doc: &GraphDocument,
+    parameters: Value,
+    reason: &str,
+) {
     let mut owner = fixture_owner(&[&pattern_result(json!({"id":"impl", "pattern":"generator", "parameters":parameters}))]);
     let run = advance(doc, &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert_eq!(run.status, GraphStatus::Paused);
-    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
-    assert!(run.checkpoint.pause_reason.as_deref().unwrap_or_default().contains(reason), "{:?}", run.checkpoint.pause_reason);
-    assert!(run.checkpoint.expansions.is_empty());
+    assert_eq!(run.status, GraphStatus::Paused, "{case}");
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"), "{case}");
+    assert!(run.checkpoint.pause_reason.as_deref().unwrap_or_default().contains(reason), "{case}: {:?}", run.checkpoint.pause_reason);
+    assert!(run.checkpoint.expansions.is_empty(), "{case}");
 }
 
 #[test]
-fn pattern_missing_required_parameter_is_refused() {
-    let mut doc = pattern_planner(4);
-    doc.nodes[0].plan.as_mut().unwrap().patterns[0].parameters.get_mut("label").unwrap().default = None;
-    assert_pattern_parameter_error(&doc, json!({}), "requires parameter label");
-}
+fn pattern_parameter_errors_are_refused() {
+    let mut missing_required = pattern_planner(4);
+    missing_required.nodes[0].plan.as_mut().unwrap().patterns[0].parameters.get_mut("label").unwrap().default = None;
+    let mut enum_violation = pattern_planner(4);
+    enum_violation.nodes[0].plan.as_mut().unwrap().patterns[0].parameters.get_mut("retries").unwrap().allowed = vec![json!(1)];
 
-#[test]
-fn pattern_unknown_parameter_is_refused() {
-    assert_pattern_parameter_error(&pattern_planner(4), json!({"unknown":1}), "no parameter unknown");
-}
-
-#[test]
-fn pattern_non_table_parameters_are_refused() {
-    assert_pattern_parameter_error(&pattern_planner(4), json!([]), "parameters must be a table");
-}
-
-#[test]
-fn pattern_enum_violation_is_refused() {
-    let mut doc = pattern_planner(4);
-    doc.nodes[0].plan.as_mut().unwrap().patterns[0].parameters.get_mut("retries").unwrap().allowed = vec![json!(1)];
-    assert_pattern_parameter_error(&doc, json!({"retries":2}), "must be one of");
+    for (case, doc, parameters, reason) in [
+        ("missing required parameter", missing_required, json!({}), "requires parameter label"),
+        ("unknown parameter", pattern_planner(4), json!({"unknown":1}), "no parameter unknown"),
+        ("non-table parameters", pattern_planner(4), json!([]), "parameters must be a table"),
+        ("enum violation", enum_violation, json!({"retries":2}), "must be one of"),
+    ] {
+        assert_pattern_parameter_error(case, &doc, parameters, reason);
+    }
 }
 
 #[test]

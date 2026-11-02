@@ -2796,7 +2796,13 @@ fn usage_limit_failure_reports_cause_instead_of_missing_findings() {
     );
 }
 
-fn check_fallback(access: AccessMode, launched: bool, outcome: AttemptOutcome, expected: bool) {
+fn check_fallback(
+    case: &str,
+    access: AccessMode,
+    launched: bool,
+    outcome: AttemptOutcome,
+    expected: bool,
+) {
     let mut task = node("node", route("first"));
     task.access = access;
     task.worktree = (access == AccessMode::WorktreeWrite).then(|| "/private/tmp/writer".into());
@@ -2821,14 +2827,15 @@ fn check_fallback(access: AccessMode, launched: bool, outcome: AttemptOutcome, e
     };
     let mut journal = MemoryJournal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(owner.calls.len(), if expected { 2 } else { 1 });
+    assert_eq!(owner.calls.len(), if expected { 2 } else { 1 }, "{case}");
     assert!(
         owner
             .permissions
             .iter()
             .all(|(mode, worktree)| *mode == access
                 && worktree.as_deref()
-                    == (access == AccessMode::WorktreeWrite).then_some("/private/tmp/writer"))
+                    == (access == AccessMode::WorktreeWrite).then_some("/private/tmp/writer")),
+        "{case}"
     );
 
     assert_eq!(
@@ -2837,73 +2844,83 @@ fn check_fallback(access: AccessMode, launched: bool, outcome: AttemptOutcome, e
             NodeState::Succeeded
         } else {
             NodeState::Failed
-        }
+        },
+        "{case}"
     );
     assert_eq!(
         run.checkpoint.nodes[0].worktree.as_deref(),
-        (access == AccessMode::WorktreeWrite).then_some("/private/tmp/writer")
+        (access == AccessMode::WorktreeWrite).then_some("/private/tmp/writer"),
+        "{case}"
     );
     // Reopening the checkpoint must make the same safety decision.
-    assert_eq!(advance(&document, &mut owner, &mut journal).unwrap(), run);
-}
-
-#[test]
-fn writer_preflight_admission_refusal_can_fall_back() {
-    check_fallback(
-        AccessMode::WorktreeWrite,
-        false,
-        AttemptOutcome::UsageLimited,
-        true,
+    assert_eq!(
+        advance(&document, &mut owner, &mut journal).unwrap(),
+        run,
+        "{case}"
     );
 }
 
 #[test]
-fn writer_auth_refusal_before_launch_can_fall_back() {
-    check_fallback(
-        AccessMode::WorktreeWrite,
-        false,
-        AttemptOutcome::AuthRequired,
-        true,
-    );
-}
-
-#[test]
-fn writer_unavailable_adapter_before_launch_can_fall_back() {
-    check_fallback(
-        AccessMode::WorktreeWrite,
-        false,
-        AttemptOutcome::AdapterUnavailable,
-        true,
-    );
-}
-
-#[test]
-fn reader_limits_after_launch_can_fall_back() {
-    check_fallback(
-        AccessMode::ReadOnly,
-        true,
-        AttemptOutcome::UsageLimited,
-        true,
-    );
-}
-
-#[test]
-fn reader_auth_and_adapter_failures_after_launch_can_fall_back() {
-    for outcome in [
-        AttemptOutcome::AuthRequired,
-        AttemptOutcome::AdapterUnavailable,
+fn fallback_outcomes_are_named_by_access_and_launch_state() {
+    for (case, access, launched, outcome, expected) in [
+        (
+            "writer usage limit before launch",
+            AccessMode::WorktreeWrite,
+            false,
+            AttemptOutcome::UsageLimited,
+            true,
+        ),
+        (
+            "writer auth refusal before launch",
+            AccessMode::WorktreeWrite,
+            false,
+            AttemptOutcome::AuthRequired,
+            true,
+        ),
+        (
+            "writer unavailable adapter before launch",
+            AccessMode::WorktreeWrite,
+            false,
+            AttemptOutcome::AdapterUnavailable,
+            true,
+        ),
+        (
+            "reader usage limit after launch",
+            AccessMode::ReadOnly,
+            true,
+            AttemptOutcome::UsageLimited,
+            true,
+        ),
+        (
+            "reader auth refusal after launch",
+            AccessMode::ReadOnly,
+            true,
+            AttemptOutcome::AuthRequired,
+            true,
+        ),
+        (
+            "reader unavailable adapter after launch",
+            AccessMode::ReadOnly,
+            true,
+            AttemptOutcome::AdapterUnavailable,
+            true,
+        ),
+        (
+            "writer auth refusal after launch",
+            AccessMode::WorktreeWrite,
+            true,
+            AttemptOutcome::AuthRequired,
+            false,
+        ),
+        (
+            "writer unavailable adapter after launch",
+            AccessMode::WorktreeWrite,
+            true,
+            AttemptOutcome::AdapterUnavailable,
+            false,
+        ),
     ] {
-        check_fallback(AccessMode::ReadOnly, true, outcome, true);
-    }
-}
-
-#[test]
-fn writer_auth_and_adapter_failures_after_launch_do_not_fall_back() {
-    for outcome in [
-        AttemptOutcome::AuthRequired,
-        AttemptOutcome::AdapterUnavailable,
-    ] {
-        check_fallback(AccessMode::WorktreeWrite, true, outcome, false);
+        check_fallback(case, access, launched, outcome, expected);
     }
 }
 
