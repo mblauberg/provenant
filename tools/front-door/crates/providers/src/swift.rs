@@ -23,11 +23,7 @@ use provenant_confinement::permissions::PathGrant;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-/// Where macOS records the selected developer directory (`xcode-select -p`).
-#[cfg(target_os = "macos")]
-const SELECT_LINK: &str = "/var/db/xcode_select_link";
-#[cfg(target_os = "macos")]
-const XCODE_DEVELOPER: &str = "/Applications/Xcode.app/Contents/Developer";
+const APPLICATIONS: &str = "/Applications";
 const XCODE_LICENCE: &str = "/Library/Preferences/com.apple.dt.Xcode.plist";
 const COMMAND_LINE_TOOLS: &str = "/Library/Developer/CommandLineTools";
 
@@ -39,9 +35,28 @@ pub(crate) struct SwiftToolchain {
 }
 
 impl SwiftToolchain {
-    /// Resolve a developer directory to its toolchain, when it has a driver.
+    /// Resolve a developer directory to its toolchain, when it is a known
+    /// location and has a driver.
     pub(crate) fn at(developer: &Path) -> Option<Self> {
+        Self::at_in(developer, Path::new(APPLICATIONS))
+    }
+
+    /// As `at`, with the directory that holds Xcode app bundles. The whole
+    /// developer subtree becomes executable, so only the Command Line Tools
+    /// and `<applications>/<name>.app/Contents/Developer` qualify, by their
+    /// canonical path; any other `DEVELOPER_DIR` adds no grant and no shim.
+    fn at_in(developer: &Path, applications: &Path) -> Option<Self> {
         let developer = std::fs::canonicalize(developer).ok()?;
+        let contents = developer.parent()?;
+        let bundle = contents.parent()?;
+        let known = developer == Path::new(COMMAND_LINE_TOOLS)
+            || (developer.file_name()? == "Developer"
+                && contents.file_name()? == "Contents"
+                && bundle.extension()? == "app"
+                && bundle.parent()? == std::fs::canonicalize(applications).ok()?);
+        if !known {
+            return None;
+        }
         let swift = [
             "Toolchains/XcodeDefault.xctoolchain/usr/bin/swift",
             "usr/bin/swift",
@@ -52,22 +67,22 @@ impl SwiftToolchain {
         Some(Self { developer, swift })
     }
 
-    /// The host's selected toolchain, if any: `DEVELOPER_DIR`, else the
-    /// `xcode-select` link, else the standard Xcode location. Resolution
-    /// reads the filesystem only; no process runs.
+    /// The host's selected toolchain, if any: `DEVELOPER_DIR`, which takes
+    /// precedence even when it names no toolchain, else `xcode-select -p`
+    /// (run once, bounded). There is no fallback to a default Xcode, so a
+    /// host that selected the Command Line Tools keeps them.
     #[cfg(target_os = "macos")]
     pub(crate) fn selected(host_var: &dyn Fn(&str) -> Option<OsString>) -> Option<Self> {
-        let explicit = host_var("DEVELOPER_DIR").map(PathBuf::from);
-        // This crate's unit tests pin the profile to their fixed lookup, so
-        // the Xcode a runner has selected never changes an expectation.
-        if cfg!(test) {
-            return explicit.and_then(|developer| Self::at(&developer));
+        if let Some(explicit) = host_var("DEVELOPER_DIR").filter(|value| !value.is_empty()) {
+            return Self::at(Path::new(&explicit));
         }
-        explicit
-            .into_iter()
-            .chain(std::fs::read_link(SELECT_LINK).ok())
-            .chain(std::iter::once(PathBuf::from(XCODE_DEVELOPER)))
-            .find_map(|developer| Self::at(&developer))
+        // This crate's unit tests pin the profile to their fixed lookup, so
+        // the developer directory a runner has selected never changes an
+        // expectation.
+        if cfg!(test) {
+            return None;
+        }
+        Self::at(&xcode_select_path()?)
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -80,19 +95,23 @@ impl SwiftToolchain {
     }
 
     /// Read grants for the developer directory and, for an Xcode app, the
-    /// app's `Contents` (`SharedFrameworks` holds `SwiftBuild` and
-    /// `BuildServerProtocol`, `Frameworks` holds the `xcrun` loader library).
-    /// Nothing here is writable. The Command Line Tools already have their
-    /// own grants.
+    /// parts of `Contents` a build touches: `SharedFrameworks` holds
+    /// `SwiftBuild` and `BuildServerProtocol`, `Frameworks` holds the `xcrun`
+    /// loader library, and the bundle records give its version. Nothing here
+    /// is writable. The Command Line Tools already have their own grants.
     pub(crate) fn reads(&self) -> Vec<PathGrant> {
         if self.is_command_line_tools() {
             return Vec::new();
         }
-        let app = self
-            .developer
-            .parent()
-            .filter(|contents| contents.file_name().is_some_and(|name| name == "Contents"));
-        let mut grants = vec![subtree(app.unwrap_or(&self.developer))];
+        let mut grants = vec![subtree(&self.developer)];
+        if let Some(contents) = self.developer.parent() {
+            grants.extend([
+                subtree(contents.join("Frameworks")),
+                subtree(contents.join("SharedFrameworks")),
+                exact(contents.join("Info.plist")),
+                exact(contents.join("version.plist")),
+            ]);
+        }
         // `xcrun` refuses to run until it reads the accepted-licence record.
         // The file is root-owned and public.
         let licence = Path::new(XCODE_LICENCE);
@@ -143,7 +162,10 @@ case "$sub" in
     build_system=--build-system=native
     [ "$sub" = package ] && build_system=
     for arg in "$@"; do
-      case "$arg" in --build-system|--build-system=*) build_system= ;; esac
+      case "$arg" in
+        --) break ;;
+        --build-system|--build-system=*) build_system= ;;
+      esac
     done
     set -- "$sub" --disable-sandbox --cache-path {packages} --config-path {configuration} --security-path {security} ${{build_system:+"$build_system"}} "$@"
     ;;
@@ -153,7 +175,7 @@ status=$?
 if [ "$status" -ne 0 ]; then
   case "$sub" in
     build|test|run|package)
-      printf '%s\n' "provenant: swift $sub exited $status inside the lane sandbox. Writes are allowed only in the worktree, \$TMPDIR ($TMPDIR) and the lane cache ({cache_text}); an 'Operation not permitted' or 'authorization denied' error names a path outside them. SwiftPM runs with --disable-sandbox and the native build system; pass --build-system swiftbuild to override." >&2
+      printf 'provenant: swift %s exited %s inside the lane sandbox. Writes are allowed only in the worktree, TMPDIR (%s) and the lane cache (%s); an Operation not permitted or authorization denied error names a path outside them. SwiftPM runs with --disable-sandbox and the native build system; pass --build-system swiftbuild to override.\n' "$sub" "$status" "$TMPDIR" {cache_text} >&2
       ;;
   esac
 fi
@@ -162,6 +184,24 @@ exit "$status"
         )
         .into_bytes())
     }
+}
+
+/// `xcode-select -p`, killed after a few seconds. Its environment is empty,
+/// so only the host's own selection answers.
+#[cfg(target_os = "macos")]
+fn xcode_select_path() -> Option<PathBuf> {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    let argv: Vec<OsString> = vec!["/usr/bin/xcode-select".into(), "-p".into()];
+    let mut options = ExecOptions::new(&argv, Path::new("/"), std::time::Duration::from_secs(5));
+    options.env = Some(&[]);
+    options.stdout = StreamPolicy::Capture { limit: 4096 };
+    options.stderr = StreamPolicy::Discard;
+    let output = SystemExecutor::new(1).ok()?.execute(options).ok()?;
+    if output.termination != Termination::Exit(0) || output.stdout.truncated {
+        return None;
+    }
+    let text = std::str::from_utf8(&output.stdout.bytes).ok()?.trim();
+    (!text.is_empty()).then(|| PathBuf::from(text))
 }
 
 /// Grants, shim and `PATH` for a writer that may run `swift build` and
@@ -241,7 +281,7 @@ mod tests {
         std::fs::create_dir_all(swift.parent().unwrap()).unwrap();
         std::fs::write(&swift, b"").unwrap();
         std::fs::create_dir_all(developer.parent().unwrap().join("SharedFrameworks")).unwrap();
-        SwiftToolchain::at(&developer).unwrap()
+        SwiftToolchain::at_in(&developer, root).unwrap()
     }
 
     #[test]
@@ -252,7 +292,18 @@ mod tests {
             "Toolchains/XcodeDefault.xctoolchain/usr/bin/swift",
         );
         let reads = toolchain.reads();
-        assert!(reads[0].path.ends_with("Xcode.app/Contents"), "{reads:?}");
+        assert!(
+            reads
+                .iter()
+                .any(|grant| grant.path.ends_with("Contents/SharedFrameworks")),
+            "{reads:?}"
+        );
+        assert!(
+            !reads
+                .iter()
+                .any(|grant| grant.path.ends_with("Xcode.app/Contents")
+                    && grant.scope == provenant_confinement::permissions::PathScope::Subtree)
+        );
         assert!(reads.iter().all(|grant| !grant.path.starts_with("/Users")));
         assert_eq!(toolchain.executables().len(), 1);
     }
@@ -321,5 +372,82 @@ mod tests {
         );
         assert!(toolchain.shim(Path::new("/lane/ca\nche")).is_err());
         assert!(toolchain.shim(Path::new("relative")).is_err());
+    }
+
+    #[test]
+    fn only_the_command_line_tools_and_an_app_bundle_are_toolchains() {
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        let toolchain = fake(&root, "usr/bin/swift");
+        let developer = toolchain.developer.clone();
+        assert!(SwiftToolchain::at_in(&developer, &root).is_some());
+        // The same app, when Xcode apps are expected somewhere else.
+        assert!(SwiftToolchain::at_in(&developer, &root.join("Xcode.app")).is_none());
+        // A directory with a driver that is not an app bundle's developer directory.
+        let loose = root.join("loose");
+        std::fs::create_dir_all(loose.join("usr/bin")).unwrap();
+        std::fs::write(loose.join("usr/bin/swift"), b"").unwrap();
+        assert!(SwiftToolchain::at_in(&loose, &root).is_none());
+        assert!(SwiftToolchain::at_in(&loose, &loose).is_none());
+    }
+
+    /// Run the shim against a stand-in driver that echoes its arguments.
+    #[cfg(unix)]
+    fn run_shim(cache: &Path, args: &[&str], status: &str) -> (String, String) {
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        let toolchain = fake(&root, "usr/bin/swift");
+        std::fs::write(
+            &toolchain.swift,
+            "#!/bin/sh\necho \"$@\"\nexit $FAKE_STATUS\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&toolchain.swift, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        let script = root.join("shim.sh");
+        std::fs::write(&script, toolchain.shim(cache).unwrap()).unwrap();
+        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor};
+        let argv: Vec<OsString> = ["/bin/sh".into(), script.into_os_string()]
+            .into_iter()
+            .chain(args.iter().map(OsString::from))
+            .collect();
+        let env: Vec<(OsString, OsString)> = vec![
+            ("FAKE_STATUS".into(), status.into()),
+            ("TMPDIR".into(), "/lane/tmp".into()),
+        ];
+        let mut options = ExecOptions::new(&argv, &root, std::time::Duration::from_secs(10));
+        options.env = Some(&env);
+        let output = SystemExecutor::new(1).unwrap().execute(options).unwrap();
+        (
+            String::from_utf8_lossy(&output.stdout.bytes).into_owned(),
+            String::from_utf8_lossy(&output.stderr.bytes).into_owned(),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_system_scan_stops_at_the_argument_separator() {
+        let cache = Path::new("/lane/cache/swift");
+        let (out, _) = run_shim(cache, &["run", "tool", "--", "--build-system"], "0");
+        assert!(out.contains("--build-system=native"), "{out}");
+        let (out, _) = run_shim(cache, &["build", "--build-system", "swiftbuild"], "0");
+        assert!(!out.contains("--build-system=native"), "{out}");
+        let (out, _) = run_shim(cache, &["package", "describe"], "0");
+        assert!(!out.contains("--build-system=native"), "{out}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failure_hint_prints_the_cache_path_without_running_it() {
+        let marker = tempfile::tempdir().unwrap();
+        let marker = std::fs::canonicalize(marker.path()).unwrap().join("ran");
+        let cache = format!("/lane/$(touch {})/`id`\"x", marker.display());
+        let (_, err) = run_shim(Path::new(&cache), &["build"], "3");
+        assert!(err.contains("exited 3"), "{err}");
+        assert!(err.contains(&cache), "{err}");
+        assert!(!marker.exists());
     }
 }

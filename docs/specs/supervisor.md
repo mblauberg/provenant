@@ -596,18 +596,24 @@ parsing property list"), and SwiftPM and Clang write caches under
 Line Tools for Cargo's linker, whose SDK and compiler can disagree.
 
 Preparation therefore resolves the host's Swift toolchain (`DEVELOPER_DIR`,
-the `xcode-select` link, then the standard Xcode location) and, for a writer
-only:
+else `xcode-select -p`, run once with a 5 s bound; there is no fallback to a
+default Xcode) and, for a writer only. A developer directory counts only when
+its canonical path is `/Library/Developer/CommandLineTools` or
+`/Applications/<name>.app/Contents/Developer`; any other `DEVELOPER_DIR` gets
+no grant and no shim. Then:
 
-- grants read on the Xcode app's `Contents` and the accepted-licence record,
-  and execute on its `Developer` directory; it grants no write;
+- grants read on the Xcode app's `Developer`, `Frameworks` and
+  `SharedFrameworks` directories, its `Info.plist` and `version.plist`, and
+  the accepted-licence record, and execute on `Developer`; it grants no write
+  (the Command Line Tools need no extra grant);
 - installs a `swift` shim first on `PATH` that selects that toolchain, moves
   the Clang module cache and SwiftPM cache, configuration and security
   directories into the lane cache (`.../swift`), and runs
   `build`, `test`, `run` and `package` with `--disable-sandbox` (the lane
   profile already confines every child) and, except for `package`,
   `--build-system native`, which writes only the scratch path (`.build` in the
-  worktree), `TMPDIR` and the lane cache. Explicit `--build-system` wins.
+  worktree), `TMPDIR` and the lane cache. Explicit `--build-system` wins, as
+  long as it comes before `--`.
 
 Writer confinement is unchanged: writes stay in the worktree, attempt scratch
 and the lane cache. A Seatbelt denial is not reported to the sandboxed
@@ -618,10 +624,13 @@ naming the writable roots and the overrides in force. Read-only lanes (#2542)
 reuse the same toolchain resolution and shim with scratch-only roots; they
 do not receive it yet.
 - Why: a writer that cannot build or test commits untested Swift.
-- Test: `src/worktree_tests.rs::lane_prepare_isolates_nested_state` (builds
-  and tests a SwiftPM package in the worktree through the production profile
-  when a Swift toolchain is selected);
-  `crates/providers/src/swift.rs::install_puts_the_shim_first_on_path_and_grants_no_write`
+- Test: `src/worktree_tests.rs::lane_builds_and_tests_swift_in_a_registered_worktree`
+  (one writer case: builds and tests a SwiftPM package in the worktree
+  through the production profile when a Swift toolchain is selected; it has
+  its own nextest timeout in `.config/nextest.toml`);
+  `crates/providers/src/swift.rs::install_puts_the_shim_first_on_path_and_grants_no_write`,
+  `only_the_command_line_tools_and_an_app_bundle_are_toolchains`,
+  `build_system_scan_stops_at_the_argument_separator`
 - Owner: `crates/providers/src/swift.rs`, `crates/providers/src/launch.rs`
 
 ### Host-side delivery
