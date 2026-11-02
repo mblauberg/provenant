@@ -79,7 +79,9 @@ pub struct TerminalPublication<'a> {
 }
 impl RunStore {
     /// A sealed decision is not a certificate that an unfinished import can
-    /// relinquish its reservation or private object inputs.
+    /// relinquish its reservation or private object inputs: the import must
+    /// finish first, unless it was refused for good. The terminal receipts are
+    /// the single source.
     pub(crate) fn import_release_permitted(
         &self,
         record: &AttemptRecord,
@@ -89,25 +91,15 @@ impl RunStore {
         if crate::holder::object_import_refused(&attempt, Self::scope(record))?.is_some() {
             return Ok(true);
         }
-        let Some(raw) = read_sealed(&attempt, "terminal-effects.json", RECORD_LIMIT)? else {
-            return Ok(true);
-        };
-        let initial: TerminalEffects = decode(&raw)?;
-        if initial.schema_version != 1 || initial.scope != Self::scope(record) {
-            return Err(RunError::Conflict);
-        }
-        if initial.effects.iter().any(|(effect, disposition)| {
-            *effect == SettlementEffect::GitImport
-                && !matches!(disposition, EffectDisposition::Done)
-        }) {
-            return Ok(self
-                .record(record.attempt_id, call)?
-                .settlement_receipts
-                .is_some_and(|receipts| matches!(receipts.git_import, EffectDisposition::Done)));
-        }
-        Ok(true)
+        Ok(self
+            .record(record.attempt_id, call)?
+            .settlement_receipts
+            .is_none_or(|receipts| matches!(receipts.git_import, EffectDisposition::Done)))
     }
 
+    /// Terminal attempts with effects still to drive. A row that cannot be
+    /// judged is listed too, so its own reconcile reports the error instead of
+    /// the failure hiding every other attempt of the run.
     pub(crate) fn pending_effect_attempts(
         &self,
         run: RunId,
@@ -120,6 +112,29 @@ impl RunStore {
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
         )?;
         let mut pending = Vec::new();
+        for row in rows {
+            call.check()?;
+            let (id, raw) = row?;
+            let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
+            if self
+                .effects_pending(&request, run, id, &raw, call)
+                .unwrap_or(true)
+            {
+                pending.push(id);
+            }
+        }
+        Ok(pending)
+    }
+
+    fn effects_pending(
+        &self,
+        request: &CanonicalRequest,
+        run: RunId,
+        id: AttemptId,
+        raw: &[u8],
+        call: &Request<'_>,
+    ) -> Result<bool> {
+        // A cancelled delivery waits for an explicit `lane deliver`.
         let retryable = |effect: &EffectDisposition| {
             matches!(
                 effect,
@@ -128,53 +143,41 @@ impl RunStore {
                         retryable: true,
                         ..
                     }
-                    | EffectDisposition::Cancelled {
-                        retryable: true,
-                        ..
-                    }
             )
         };
-        for row in rows {
-            call.check()?;
-            let (id, raw) = row?;
-            let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
-            let receipts: SettlementReceipts = crate::db::decode_unversioned(&raw)?;
-            let record = self.record(id, call)?;
-            let task = request
-                .tasks
-                .iter()
-                .find(|task| task.task_id == record.task_id)
-                .ok_or(RunError::NotFound)?;
-            let delivery = task.writer.is_some()
-                && task.deliver.is_some()
-                && matches!(
-                    record.state,
-                    AttemptState::Terminal {
-                        outcome: Outcome::Succeeded | Outcome::ReviewRequired,
-                        ..
-                    }
-                )
-                && retryable(&receipts.delivery);
-            let manifest = retryable(&receipts.manifest_conflict)
-                && (matches!(receipts.manifest_conflict, EffectDisposition::Failed { .. })
-                    || self
-                        .attempt_dir(run, id, false)
-                        .and_then(|attempt| {
-                            crate::artifacts::subdir(&attempt, OsStr::new("quarantine"), false)
-                        })
-                        .is_ok_and(|archive| {
-                            read_sealed(&archive, "manifest-intended.json", RECORD_LIMIT)
-                                .ok()
-                                .flatten()
-                                .is_some()
-                        }));
-            let import = retryable(&receipts.git_import)
-                && !self.import_release_permitted(&record, call).unwrap_or(true);
-            if delivery || manifest || import {
-                pending.push(id);
-            }
-        }
-        Ok(pending)
+        let receipts: SettlementReceipts = crate::db::decode_unversioned(raw)?;
+        let record = self.record(id, call)?;
+        let task = request
+            .tasks
+            .iter()
+            .find(|task| task.task_id == record.task_id)
+            .ok_or(RunError::NotFound)?;
+        let delivery = task.writer.is_some()
+            && task.deliver.is_some()
+            && matches!(
+                record.state,
+                AttemptState::Terminal {
+                    outcome: Outcome::Succeeded | Outcome::ReviewRequired,
+                    ..
+                }
+            )
+            && retryable(&receipts.delivery);
+        let manifest = retryable(&receipts.manifest_conflict)
+            && (matches!(receipts.manifest_conflict, EffectDisposition::Failed { .. })
+                || self
+                    .attempt_dir(run, id, false)
+                    .and_then(|attempt| {
+                        crate::artifacts::subdir(&attempt, OsStr::new("quarantine"), false)
+                    })
+                    .is_ok_and(|archive| {
+                        read_sealed(&archive, "manifest-intended.json", RECORD_LIMIT)
+                            .ok()
+                            .flatten()
+                            .is_some()
+                    }));
+        let import =
+            retryable(&receipts.git_import) && !self.import_release_permitted(&record, call)?;
+        Ok(delivery || manifest || import)
     }
     /// A result-only orphan predates durable terminal intent. The trusted
     /// provider/confinement edge must revalidate its terminal facts; the file's
