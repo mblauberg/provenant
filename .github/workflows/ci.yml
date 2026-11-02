@@ -44,22 +44,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           IS_MAIN: ${{ github.ref == 'refs/heads/main' }}
-        run: |
-          if [ "$IS_MAIN" = "true" ]; then
-            echo "run_macos=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [ -z "$BASE_SHA" ] || ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
-            echo "Base commit unavailable; running macOS checks conservatively."
-            echo "run_macos=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
-          if printf '%s\n' "$changed" | grep -Eq '^(tools/front-door/|apps/|\.github/workflows/ci\.yml$)'; then
-            echo "run_macos=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run_macos=false" >> "$GITHUB_OUTPUT"
-          fi
+        run: scripts/select-macos-checks
 
   generated-reference:
     name: Harness assets and generated reference
@@ -450,6 +435,8 @@ jobs:
       - name: Check shell scripts
         run: |
           { git ls-files '*.sh'; grep -lE '^#!.*\b(ba)?sh\b' scripts/* 2>/dev/null; } | sort -u | xargs -r shellcheck
+      - name: Test macOS path selector
+        run: scripts/test-select-macos-checks
       - name: Check local Markdown links and fragments
         run: git ls-files '*.md' | lychee --offline --include-fragments --files-from -
       - name: Check retired names

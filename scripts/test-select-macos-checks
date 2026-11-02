@@ -1,0 +1,88 @@
+#!/bin/sh
+set -eu
+# shellcheck source=scripts/test-git-env.sh disable=SC1091
+. "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)/test-git-env.sh"
+
+script=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)/select-macos-checks
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/provenant-macos-scope.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+repo=$tmp/repo
+mkdir "$repo"
+git -C "$repo" init -q
+git -C "$repo" config user.name 'Provenant test'
+git -C "$repo" config user.email 'test@example.invalid'
+mkdir -p "$repo/skills"
+printf '%s\n' base > "$repo/skills/base.md"
+git -C "$repo" add .
+git -C "$repo" commit -qm 'common ancestor'
+common=$(git -C "$repo" rev-parse HEAD)
+
+# Advance the base branch with Rust changes after the topic branch was cut.
+mkdir -p "$repo/tools/front-door"
+printf '%s\n' main > "$repo/tools/front-door/main.rs"
+git -C "$repo" add .
+git -C "$repo" commit -qm 'advance base with Rust changes'
+base=$(git -C "$repo" rev-parse HEAD)
+
+# The topic branch remains behind the base and changes only skills/.
+git -C "$repo" checkout -q --detach "$common"
+printf '%s\n' topic > "$repo/skills/topic.md"
+git -C "$repo" add .
+git -C "$repo" commit -qm 'topic changes skills'
+head=$(git -C "$repo" rev-parse HEAD)
+
+run_selector() {
+  output=$tmp/github-output
+  : > "$output"
+  (cd "$repo" && BASE_SHA="$base" HEAD_SHA="$head" IS_MAIN=false GITHUB_OUTPUT="$output" "$script") > "$tmp/log"
+  cat "$output"
+}
+
+result=$(run_selector)
+test "$result" = 'run_macos=false'
+grep -F 'skills/topic.md' "$tmp/log" >/dev/null
+grep -F 'Selected run_macos=false' "$tmp/log" >/dev/null
+if grep -F 'tools/front-door/main.rs' "$tmp/log" >/dev/null; then
+  echo 'base-only Rust changes must not select macOS checks' >&2
+  exit 1
+fi
+
+# A topic change under tools/front-door/ selects macOS checks.
+mkdir -p "$repo/tools/front-door"
+printf '%s\n' topic > "$repo/tools/front-door/topic.rs"
+git -C "$repo" add .
+git -C "$repo" commit -qm 'topic changes Rust'
+head=$(git -C "$repo" rev-parse HEAD)
+result=$(run_selector)
+test "$result" = 'run_macos=true'
+grep -F 'tools/front-door/topic.rs' "$tmp/log" >/dev/null
+
+# Main pushes always select macOS checks.
+output=$tmp/github-output
+: > "$output"
+(cd "$repo" && BASE_SHA="$base" HEAD_SHA="$head" IS_MAIN=true GITHUB_OUTPUT="$output" "$script") > "$tmp/log"
+test "$(cat "$output")" = 'run_macos=true'
+
+# Missing base and unrelated histories conservatively select macOS checks.
+output=$tmp/github-output
+: > "$output"
+(cd "$repo" && BASE_SHA=missing HEAD_SHA="$head" IS_MAIN=false GITHUB_OUTPUT="$output" "$script") > "$tmp/log"
+test "$(cat "$output")" = 'run_macos=true'
+
+unrelated_repo=$tmp/unrelated
+mkdir "$unrelated_repo"
+git -C "$unrelated_repo" init -q
+git -C "$unrelated_repo" config user.name 'Provenant test'
+git -C "$unrelated_repo" config user.email 'test@example.invalid'
+printf '%s\n' unrelated > "$unrelated_repo/unrelated.txt"
+git -C "$unrelated_repo" add .
+git -C "$unrelated_repo" commit -qm 'unrelated history'
+unrelated=$(git -C "$unrelated_repo" rev-parse HEAD)
+git -C "$unrelated_repo" fetch -q "$repo" "$base"
+output=$tmp/github-output
+: > "$output"
+(cd "$unrelated_repo" && BASE_SHA="$base" HEAD_SHA="$unrelated" IS_MAIN=false GITHUB_OUTPUT="$output" "$script") > "$tmp/log"
+test "$(cat "$output")" = 'run_macos=true'
+grep -F 'No merge base found' "$tmp/log" >/dev/null
+
+echo 'macOS scope selector checks passed'
