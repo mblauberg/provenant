@@ -141,6 +141,13 @@ impl std::fmt::Display for UnsupportedLaunch {
 impl std::error::Error for UnsupportedLaunch {}
 
 impl AdapterSpec {
+    /// Whether `key` names the synthetic entry of an unregistered local login.
+    /// Only an adapter that has both registered accounts and a local login (agy)
+    /// has one: it runs on the user's own login, so nothing is registered, probed
+    /// or pinned, and registered keys (`agy-<fingerprint>`) never collide with it.
+    pub fn is_unregistered_local(&self, key: &str) -> bool {
+        self.registered_account && self.local_login && key == "local"
+    }
     /// Check a request against the declared table before any side effect.
     pub fn check_launch(&self, request: &LaunchRequest<'_>) -> Result<(), UnsupportedLaunch> {
         let caps = &self.launch;

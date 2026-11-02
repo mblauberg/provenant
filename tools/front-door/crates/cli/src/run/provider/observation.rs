@@ -93,21 +93,24 @@ pub(super) fn observe_account(
         )
         .into());
     }
-    let (detected, org) =
-        if !AdapterSpec::get(&entry.adapter).is_some_and(|spec| spec.registered_account) {
-            (entry.key.clone(), None)
-        } else {
-            provenant_providers::accounts::detect_with_org(
-                executor,
-                &entry.adapter,
-                executable,
-                home,
-                user,
-                &directory,
-                executor.root(),
-            )
-            .map_err(|error| detect_failure(entry, &error))?
-        };
+    // Adapters without registered accounts, and an unregistered local login
+    // (agy's synthetic `local` entry), have no registered identity to probe.
+    let (detected, org) = if AdapterSpec::get(&entry.adapter)
+        .is_none_or(|spec| !spec.registered_account || spec.is_unregistered_local(&entry.key))
+    {
+        (entry.key.clone(), None)
+    } else {
+        provenant_providers::accounts::detect_with_org(
+            executor,
+            &entry.adapter,
+            executable,
+            home,
+            user,
+            &directory,
+            executor.root(),
+        )
+        .map_err(|error| detect_failure(entry, &error))?
+    };
     if detected != entry.key {
         return Err(format!(
             "{} account {} changed identity; re-register it",
