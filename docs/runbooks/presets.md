@@ -631,8 +631,11 @@ graph nodes have no per-node timer, so only `limits.graph_timeout_seconds`
 is enforced.
 
 `--plan` defaults to `[domains.fabric.plan] mode` (`auto`). `auto` stays off when
-`lanes` has any origin other than the bundled default, including a project or
-user preset. Otherwise, for `big-batch` unset lanes force it on; the thresholds
+`lanes` (or the catalogue's other `explicit` parameter, such as `width` or
+`lenses`) has any origin other than the bundled default, including a project or
+user preset. A `by_size` catalogue plans only a large subject. Otherwise, for
+`big-batch` unset lanes force it on, and an unset `width` does the same for the
+research presets; the thresholds
 (`auto.acceptance_items`, `auto.batch_issues`, `auto.write_crates`) then only
 change the reason that `--explain` prints. `--plan on` with explicit lanes
 discards them and warns. `--plan on` on a preset with no catalogue is an error
@@ -653,7 +656,31 @@ resume after fixing the route with `provenant fabric graph resume`.
 A preset opts in with a `[plan]` table: `replaces` (the stage to swap),
 `explicit` (parameters that, when set, keep the static graph), `guidance` and
 one `[[plan.patterns]]` entry per pattern, written like a stage with
-`parameters`, `nodes` and `exports`.
+`parameters`, `nodes` and `exports`. Two optional keys scale the decision:
+`by_size = true` makes `auto` plan only a large review subject, and
+`subject_types` lists the `subject` types a planned fragment can pin (others
+keep the static graph and say why). An entry with `for_each = "lenses"` stands
+for one pattern per lens the review panel selects; `${item.name}` and
+`${item.tier}` are bound in it.
+
+Catalogues shipped today:
+
+| Preset | Patterns | The planner chooses |
+| --- | --- | --- |
+| `big-batch` | `writer-lane`, `wave-barrier` | Lanes, scopes, waves, routes, budgets. |
+| `review-council` | `lens-<name>` per panel-selected lens | Which of the panel's lenses run, and each tier. |
+| `scout-swarm` | `scout`, `external-scout` | Scout count, each question, each route. |
+| `fan-out`, `fan-out-synthesise` | `worker` | Worker count, each question, each route. |
+| `scope-then-run` | `scout`, `external-scout`, `no-scout` | Whether to scout, the width, each question. |
+
+`review-council --plan on` cannot add a lens: the panel (risk-gated lenses,
+slot limit, order and tiers) builds the catalogue first, so the planner only
+narrows it and raises or lowers tiers. A planned research stage does not run
+the static synthesis; the next stage reads the planner result. `deliver` has
+no catalogue because one `write` stage is named by the CI gate, the review and
+land; use `big-batch` for planned lanes. The chair plans when the brief
+already fixes the shape (pass the parameter); leave `--plan auto` when the
+brief leaves it open.
 
 ## Observe and resume
 

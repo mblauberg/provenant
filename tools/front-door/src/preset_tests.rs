@@ -2657,7 +2657,7 @@ mod planner_front_end {
             expand_with(&layers(PlanMode::On, None), "single", "brief", &[], &[]).unwrap_err();
         assert!(error.contains("declares no planner patterns"), "{error}");
         assert!(error.contains("single"), "{error}");
-        assert!(error.contains("#2531 follow-up"), "{error}");
+        assert!(error.contains("--plan auto or --plan off"), "{error}");
         // A config default of `on` is not an explicit request: the run goes
         // ahead on the static graph with the reason recorded.
         let mut configured = layers(PlanMode::On, None);
@@ -2671,6 +2671,221 @@ mod planner_front_end {
             "plan: on -> off (preset declares no planner patterns)"
         );
         assert!(!ids(&quiet).contains(&"plan".to_owned()));
+    }
+
+    fn pattern_names(expansion: &super::super::preset::Expansion) -> Vec<String> {
+        let plan = expansion.document["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["id"] == "plan")
+            .unwrap();
+        plan["plan"]["patterns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|pattern| pattern["name"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    fn pattern<'a>(expansion: &'a super::super::preset::Expansion, name: &str) -> &'a Value {
+        expansion.document["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["id"] == "plan")
+            .and_then(|plan| plan["plan"]["patterns"].as_array())
+            .and_then(|patterns| patterns.iter().find(|pattern| pattern["name"] == name))
+            .unwrap()
+    }
+
+    #[test]
+    fn research_presets_offer_the_planner_scouts_and_workers_with_a_question_and_a_route() {
+        let on = layers(PlanMode::On, None);
+        let swarm = run(&on, "scout-swarm", "brief", Vec::new());
+        assert_eq!(ids(&swarm), ["plan", "synthesis"]);
+        assert_eq!(pattern_names(&swarm), ["scout", "external-scout"]);
+        let scout = pattern(&swarm, "scout");
+        assert_eq!(scout["nodes"][0]["role"], "scout.codebase");
+        assert_eq!(scout["parameters"]["route"]["default"], "junior");
+        assert_eq!(
+            scout["parameters"]["route"]["enum"],
+            json!(["junior", "senior", "principal"])
+        );
+        assert_eq!(scout["parameters"]["question"]["type"], "string");
+        assert!(
+            scout["nodes"][0]["prompt"]
+                .as_str()
+                .unwrap()
+                .contains("${question}")
+        );
+        assert_eq!(
+            pattern(&swarm, "external-scout")["nodes"][0]["role"],
+            "scout.external"
+        );
+        for name in ["fan-out", "fan-out-synthesise"] {
+            let fan = run(&on, name, "brief", Vec::new());
+            assert_eq!(pattern_names(&fan), ["worker"], "{name}");
+            let worker = pattern(&fan, "worker");
+            assert_eq!(worker["parameters"]["route"]["default"], "senior");
+            assert_eq!(worker["nodes"][0]["route"]["alias"], "${route}");
+        }
+        let synth = run(&on, "fan-out-synthesise", "brief", Vec::new());
+        assert_eq!(ids(&synth), ["plan", "synthesis"]);
+        // An explicit width is the caller's choice, so auto leaves the graph alone.
+        let given = run(
+            &layers(PlanMode::Auto, None),
+            "scout-swarm",
+            "brief",
+            vec![("width".into(), json!(3))],
+        );
+        assert_eq!(
+            given.plan.as_ref().unwrap().reason,
+            "width given explicitly"
+        );
+        assert!(!given.plan.as_ref().unwrap().applied);
+    }
+
+    #[test]
+    fn scope_then_run_lets_the_planner_decide_whether_to_scout() {
+        let expansion = run(
+            &layers(PlanMode::On, None),
+            "scope-then-run",
+            "brief",
+            Vec::new(),
+        );
+        assert_eq!(ids(&expansion), ["plan", "scope", "ready", "run"]);
+        assert_eq!(
+            pattern_names(&expansion),
+            ["scout", "external-scout", "no-scout"]
+        );
+        let none = pattern(&expansion, "no-scout");
+        assert_eq!(none["parameters"]["reason"]["type"], "string");
+        assert_eq!(none["exports"][0]["node"], "note");
+        // The scoping stage reads the planner's result in place of the scouts.
+        let scope = &expansion.document["nodes"][1];
+        assert_eq!(scope["depends_on"], json!(["plan"]));
+    }
+
+    fn lens_names(expansion: &super::super::preset::Expansion) -> Vec<String> {
+        pattern_names(expansion)
+            .iter()
+            .map(|name| name.strip_prefix("lens-").unwrap().to_owned())
+            .collect()
+    }
+
+    fn static_lenses(params: Vec<(String, Value)>) -> Vec<String> {
+        let plain = plain("review-council", params);
+        plain.document["nodes"][1]["composite"]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| {
+                node["id"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("lens-")
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn review_council_plans_only_lenses_the_panel_allows() {
+        let on = layers(PlanMode::On, None);
+        let base = vec![("worktree".to_owned(), json!("/repo/lane"))];
+        for tags in [json!([]), json!(["security"])] {
+            let mut params = base.clone();
+            params.push(("risk_tags".into(), tags.clone()));
+            let planned = run(&on, "review-council", "brief", params.clone());
+            // The catalogue is exactly the lens set the static stage would run.
+            assert_eq!(lens_names(&planned), static_lenses(params), "{tags}");
+            assert_eq!(ids(&planned), ["subject", "plan", "verify", "synthesis"]);
+        }
+        // A gated lens is offered only when its risk tag is present.
+        let mut quiet = base.clone();
+        quiet.push(("risk_tags".into(), json!([])));
+        assert!(
+            !lens_names(&run(&on, "review-council", "brief", quiet))
+                .contains(&"security-privacy".to_owned())
+        );
+        let mut tagged = base.clone();
+        tagged.push(("risk_tags".into(), json!(["security"])));
+        let planned = run(&on, "review-council", "brief", tagged);
+        assert!(lens_names(&planned).contains(&"security-privacy".to_owned()));
+        // Each lens leg pins the commit itself and offers its panel tier.
+        let leg = pattern(&planned, "lens-correctness-spec");
+        assert_eq!(leg["nodes"][0]["role"], "lens.correctness-spec");
+        assert_eq!(leg["nodes"][0]["source"]["type"], "commit");
+        assert_eq!(leg["nodes"][0]["route"]["alias"], "${tier}");
+        assert_eq!(leg["parameters"]["tier"]["default"], "junior");
+        assert!(
+            leg["parameters"]["tier"]["enum"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("principal"))
+        );
+        // Lens choice is bounded by the panel, not by the preset's full list.
+        assert!(lens_names(&planned).len() <= 11);
+    }
+
+    #[test]
+    fn review_council_with_a_non_commit_subject_keeps_its_static_lenses() {
+        let params = vec![
+            ("worktree".to_owned(), json!("/repo/lane")),
+            (
+                "subject".to_owned(),
+                json!({"type": "node", "node": "write"}),
+            ),
+        ];
+        let expansion = run(
+            &layers(PlanMode::On, None),
+            "review-council",
+            "brief",
+            params,
+        );
+        let decision = expansion.plan.as_ref().unwrap();
+        assert!(!decision.applied);
+        assert!(
+            decision.reason.contains("node subject cannot be pinned"),
+            "{}",
+            decision.reason
+        );
+        assert!(!ids(&expansion).contains(&"plan".to_owned()));
+    }
+
+    #[test]
+    fn review_council_auto_plans_only_a_large_subject() {
+        let sized = |size: Option<&'static str>| -> Layers {
+            let mut layers = layers(PlanMode::Auto, None);
+            layers.review = Some(Box::new(move |query| {
+                let mut hint = shapes()(query)?;
+                hint.size = size.map(str::to_owned);
+                Ok(hint)
+            }));
+            layers
+        };
+        let params = || vec![("worktree".to_owned(), json!("/repo/lane"))];
+        let large = run(&sized(Some("large")), "review-council", "brief", params());
+        let decision = large.plan.as_ref().unwrap();
+        assert!(decision.applied, "{}", decision.reason);
+        assert_eq!(decision.reason, "review subject is large");
+        assert!(ids(&large).contains(&"plan".to_owned()));
+        let small = run(&sized(Some("small")), "review-council", "brief", params());
+        let decision = small.plan.as_ref().unwrap();
+        assert!(!decision.applied);
+        assert_eq!(decision.reason, "review subject is not large (size=small)");
+        assert!(!ids(&small).contains(&"plan".to_owned()));
+        let unknown = run(&sized(None), "review-council", "brief", params());
+        assert!(
+            unknown
+                .plan
+                .as_ref()
+                .unwrap()
+                .reason
+                .contains("size=unknown")
+        );
     }
 
     #[test]
@@ -3160,6 +3375,23 @@ mod planner_front_end {
             &node["plan"]["patterns"][0]["parameters"]["tree"]["enum"],
             values
         );
+    }
+
+    #[test]
+    fn planned_research_and_review_match_their_golden_graphs() {
+        let council = vec![("worktree".to_owned(), json!("/repo/lane"))];
+        for (name, params) in [("scout-swarm", Vec::new()), ("review-council", council)] {
+            let expansion = run(&layers(PlanMode::On, None), name, "brief", params);
+            let mut actual = serde_json::to_string_pretty(&expansion.document).unwrap();
+            actual.push('\n');
+            let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("assets/presets/fixtures/{name}.plan.json"));
+            if std::env::var_os("UPDATE_GOLDEN").is_some() {
+                std::fs::write(&path, &actual).unwrap();
+            }
+            let expected = std::fs::read_to_string(&path).unwrap_or_default();
+            assert_eq!(actual, expected, "{name}: rerun with UPDATE_GOLDEN=1");
+        }
     }
 
     #[test]

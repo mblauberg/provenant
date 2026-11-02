@@ -1104,6 +1104,84 @@ fn planned_big_batch_expands_to_its_static_composite_and_records_the_patterns() 
     assert!(expansion.patterns[0].nodes.iter().any(|id| id == "plan--a--evaluate"));
 }
 
+fn planned_fixture(name: &str) -> GraphDocument {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(format!("../../assets/presets/fixtures/{name}.plan.json"));
+    let text = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("\"commit\": \"HEAD\"", "\"commit\": \"0123456789abcdef0123456789abcdef01234567\"");
+    serde_json::from_str(&text).unwrap()
+}
+
+#[test]
+fn planned_scout_swarm_expands_scouts_with_a_question_and_a_route() {
+    let doc = planned_fixture("scout-swarm");
+    let instances = vec![
+        json!({"id":"a", "pattern":"scout", "parameters":{"question":"Where is X decided?"}}),
+        json!({"id":"b", "pattern":"scout", "parameters":{"question":"Who calls Y?", "route":"senior"}}),
+        json!({"id":"web", "pattern":"external-scout", "parameters":{"question":"How do others do Z?"}}),
+    ];
+    let fragment = pattern_result_all(instances);
+    let mut results = vec![fragment.as_str()];
+    results.extend(std::iter::repeat_n("done", 12));
+    let mut owner = fixture_owner(&results);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    let expansion = &run.checkpoint.expansions[0];
+    let recorded: Vec<_> = expansion.patterns.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(recorded, ["scout", "scout", "external-scout"]);
+    assert_eq!(expansion.patterns[1].parameters["route"], "senior");
+    assert_eq!(expansion.patterns[0].parameters["route"], "junior");
+    // A route outside the closed list is refused, not trusted.
+    let outside = pattern_result_all(vec![
+        json!({"id":"a", "pattern":"scout", "parameters":{"question":"q", "route":"web"}}),
+    ]);
+    let mut owner = fixture_owner(&[&outside]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+}
+
+#[test]
+fn planned_review_council_expands_only_the_lens_legs_the_catalogue_lists() {
+    let doc = planned_fixture("review-council");
+    let leg = |lens: &str, tier: &str| {
+        json!({"id":lens, "pattern":format!("lens-{lens}"), "parameters":{"tier":tier}})
+    };
+    let fragment = pattern_result_all(vec![
+        leg("correctness-spec", "senior"),
+        leg("tests", "junior"),
+    ]);
+    let mut results = vec!["framed", fragment.as_str()];
+    results.extend(std::iter::repeat_n("done\nVERDICT: PASS", 12));
+    let mut owner = fixture_owner(&results);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    let expansion = &run.checkpoint.expansions[0];
+    let recorded: Vec<_> = expansion.patterns.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(recorded, ["lens-correctness-spec", "lens-tests"]);
+    assert_eq!(expansion.patterns[0].parameters["tier"], "senior");
+    // The security lens is gated off for this subject, so it cannot be named.
+    let gated = pattern_result_all(vec![leg("security-privacy", "junior")]);
+    let mut owner = fixture_owner(&["framed", &gated]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+    // A lens the catalogue lists cannot be run at a tier outside its closed list.
+    let wild = pattern_result_all(vec![leg("tests", "web")]);
+    let mut owner = fixture_owner(&["framed", &wild]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+}
+
+fn pattern_result_all(instances: Vec<Value>) -> String {
+    format!(
+        "```fragment\n{}\n```",
+        json!({"schema_version":1,"nodes":[],"patterns":instances})
+    )
+}
+
 #[test]
 fn planned_big_batch_refuses_overlapping_waves_and_budgets_over_the_lane_deadline() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

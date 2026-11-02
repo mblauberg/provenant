@@ -535,7 +535,8 @@ enforced.
 ### Preset planner front-end
 
 `provenant run --preset P --plan auto|on|off` puts a principal planner in front
-of a preset that declares a `[plan]` table (`big-batch` today). The default is
+of a preset that declares a `[plan]` table: `big-batch`, `review-council`,
+`scout-swarm`, `fan-out`, `fan-out-synthesise` and `scope-then-run`. The default is
 `[domains.fabric.plan] mode`, `auto`. `on` replaces the preset's named stage
 with a read-only `plan` node (role `plan.shape`, route `principal`, no
 fallback) that carries the preset's catalogue. A planned writer lane keeps the
@@ -543,12 +544,31 @@ static `generator-evaluator` lane's review: the writer, the default lens legs
 and the evaluator, as flat nodes because a pattern cannot nest composites; a
 test compares them with the independently expanded static preset. The pattern
 names and parameters are recorded. The planner's position is per preset:
-`big-batch` plans after `scout`, so the plan uses the research; research
-presets will plan first and set the swarm's width.
+`big-batch` plans after `scout`, so the plan uses the research; the research
+presets plan first and set the swarm's width.
+
+The other catalogues are narrow. `scout-swarm` and `scope-then-run` offer a
+codebase `scout` and an `external-scout`, each with a `question` and a
+closed-list `route`; `fan-out` and `fan-out-synthesise` offer a `worker`, with
+a `question` and a `route`. `scope-then-run` also offers `no-scout`, a junior
+note with a `reason`, so the planner decides whether to scout at all (an empty
+fragment is refused). The planner's fragment replaces the preset's static
+scout stage, so the swarm's synthesis is not run there and the scope stage
+reads the planner result. `review-council` offers one pattern per lens, and the
+catalogue is built by the routing review panel (#2527), not by the preset:
+the panel drops risk-gated lenses whose tag is absent, applies the review
+shape's slot limit and lens order, and sets each lens's default tier. The
+planner can only pick among those lenses and choose a tier from the closed
+list; it cannot name a lens the panel did not select. A lens leg pins the
+review commit itself, so a `review-council` whose `subject` is not a commit
+keeps its static lenses and records the reason. The council's verifier and
+synthesis still run after the planned lenses.
 
 `auto` decides in order: a shape parameter with any origin other than the
 bundled default (`--set`, `--params-file` or a project or user preset) stays
-off; more than `auto.acceptance_items` acceptance items in the brief (nested
+off; a catalogue with `by_size` (`review-council`) plans only when the review
+panel sizes the subject `large`, so a small change keeps its fixed lenses;
+more than `auto.acceptance_items` acceptance items in the brief (nested
 sub-bullets are not counted), a write scope over `auto.write_crates` crates, or
 at least `auto.batch_issues` distinct issue references (`#N`, decimal, at most
 six digits, not a hex colour) turn it on; so does no explicit lanes. For
@@ -564,8 +584,14 @@ can serve it, or an extending preset inherits `[plan]` without the stage it
 replaces, the run keeps the preset's static graph, records
 `provenance.plan.degraded` and warns; it never substitutes a weaker planner. A
 plan node that fails at run time has no fallback edge: its dependents block and
-the run fails, so rerun with `--plan off` (a follow-up). The registered writer
+the run fails, so rerun with `--plan off`. The registered writer
 worktrees default to the project's linked worktrees unless `parameters.worktrees`
-is set. `--explain` prints `plan: MODE -> on|off (reason)` and the planner
-route. `--plan off` and hand-written graphs are unchanged.
+is set. The chair plans only what it states in the brief; the planner plans
+what the brief leaves open (lane shapes, scout questions and width, lens
+tiers). A chair that already knows the shape passes the parameter and `auto`
+stays off. `--explain` prints `plan: MODE -> on|off (reason)` and the planner
+route. `--plan off` and hand-written graphs are unchanged. `deliver` has no catalogue:
+its single `write` stage is referenced by name by the CI gate, the review
+subject and the land step, and planned lanes would need an integration branch
+and no pull requests, so a planned delivery is `big-batch`'s job.
 

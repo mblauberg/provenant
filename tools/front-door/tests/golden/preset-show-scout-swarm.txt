@@ -41,6 +41,10 @@ Origins
   pattern.select_when: bundled
   pattern.summary: bundled
   pattern.tags: bundled
+  plan.explicit: bundled
+  plan.guidance: bundled
+  plan.patterns: bundled
+  plan.replaces: bundled
   roles.plan.research: bundled
   roles.scout.codebase: bundled
   roles.scout.external: bundled

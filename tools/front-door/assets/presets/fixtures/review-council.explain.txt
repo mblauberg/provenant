@@ -1,6 +1,8 @@
 Graph <id>
 Preset selection: review-council (override)
 Review shape: deep (by_risk; size=unknown; kind=unknown; risk=crucial)
+plan: auto -> off (review subject is not large (size=unknown))
+Planner route: principal
 subject  role=plan.review tier=senior family=any kind=- access=read_only worktree=-
   read_roots: ["<project>"]
   source: {"commit":"<commit>","type":"commit"}

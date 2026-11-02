@@ -1,4 +1,7 @@
 Graph <id>
 Preset selection: fan-out (override)
-branch-1  role=- tier=senior family=any kind=- access=read_only worktree=-
-branch-2  role=- tier=senior family=any kind=- access=read_only worktree=-
+plan: auto -> on (width not set)
+Planner route: principal
+plan  role=plan.shape tier=principal family=any kind=plan access=read_only worktree=-
+Roles:
+  plan.shape  origin=bundled digest=<digest>
