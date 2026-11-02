@@ -330,15 +330,9 @@
       "cache": {
         "read_share_target": 0.9
       },
-      "lane": {
-        "read_only": true
-      },
+      "lane": {},
       "result": {
         "check": true,
-        "sections": [
-          "## Findings",
-          "## Evidence"
-        ],
         "fallback": "codex/gpt-6-luna",
         "fallback_effort": "high"
       }
@@ -351,15 +345,9 @@
       "cache": {
         "read_share_target": 0.9
       },
-      "lane": {
-        "read_only": true
-      },
+      "lane": {},
       "result": {
         "check": true,
-        "sections": [
-          "## Findings",
-          "## Evidence"
-        ],
         "fallback": "codex/gpt-6-luna",
         "fallback_effort": "high"
       }
@@ -426,15 +414,9 @@
       "cache": {
         "read_share_target": 0.9
       },
-      "lane": {
-        "read_only": true
-      },
+      "lane": {},
       "result": {
         "check": true,
-        "sections": [
-          "## Findings",
-          "## Evidence"
-        ],
         "fallback": "codex/gpt-6-luna",
         "fallback_effort": "high"
       }
@@ -447,15 +429,9 @@
       "cache": {
         "read_share_target": 0.9
       },
-      "lane": {
-        "read_only": true
-      },
+      "lane": {},
       "result": {
         "check": true,
-        "sections": [
-          "## Findings",
-          "## Evidence"
-        ],
         "fallback": "codex/gpt-6-luna",
         "fallback_effort": "high"
       }
@@ -468,15 +444,9 @@
       "cache": {
         "read_share_target": 0.9
       },
-      "lane": {
-        "read_only": true
-      },
+      "lane": {},
       "result": {
         "check": true,
-        "sections": [
-          "## Findings",
-          "## Evidence"
-        ],
         "fallback": "codex/gpt-6-luna",
         "fallback_effort": "high"
       }
@@ -489,15 +459,9 @@
       "cache": {
         "read_share_target": 0.9
       },
-      "lane": {
-        "read_only": true
-      },
+      "lane": {},
       "result": {
         "check": true,
-        "sections": [
-          "## Findings",
-          "## Evidence"
-        ],
         "fallback": "codex/gpt-6-luna",
         "fallback_effort": "high"
       }

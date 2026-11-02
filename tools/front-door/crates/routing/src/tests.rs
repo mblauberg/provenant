@@ -20,12 +20,26 @@ fn model_policy_config_accepts_layered_rules() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
-fn restricted_routes_refuse_writes() -> Result<(), Box<dyn std::error::Error>> {
+fn configured_read_only_route_refuses_writes() -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
-    let config = RoutingConfig::default();
-    let context = context(&catalogue, &config, now()?);
+    let default_config = RoutingConfig::default();
+    let default_context = context(&catalogue, &default_config, now()?);
+    for model in [
+        "agy/gemini-3.8-flash",
+        "opencode/opencode/glm-5.3-flash-free",
+    ] {
+        let mut writer = request(model)?;
+        writer.intent.writes = true;
+        let resolved = resolve(&writer, &default_context);
+        assert!(resolved.is_ok(), "{model}: {resolved:?}");
+    }
     let mut query = request("agy/gemini-3.8-flash")?;
     query.intent.writes = true;
+
+    let config: RoutingConfig = toml_edit::de::from_str(
+        "[[model_policy.rules]]\nmodel='agy/gemini-3.8-flash'\n[model_policy.rules.policy.lane]\nread_only=true\n",
+    )?;
+    let context = context(&catalogue, &config, now()?);
     assert!(matches!(
         resolve(&query, &context),
         Err(RoutingError::ReadOnlyPolicy)
@@ -4152,7 +4166,9 @@ fn invalid_override_schedules_drop_their_override_at_load() -> Result<(), Box<dy
 fn read_only_policy_model_stays_in_junior_and_senior_pools_for_read_only_work()
 -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
-    let config = RoutingConfig::default();
+    let config: RoutingConfig = toml_edit::de::from_str(
+        "[[model_policy.rules]]\nmodel='agy/gemini-3.8-flash'\n[model_policy.rules.policy.lane]\nread_only=true\n",
+    )?;
     let records = [AvailabilityRecord {
         adapter: "agy".into(),
         observed_models: vec!["gemini-3.8-flash".into()],
