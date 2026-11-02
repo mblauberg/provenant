@@ -676,6 +676,114 @@ fn occupancy_is_placed_per_root_and_partial_results_remain_conservative()
     Ok(())
 }
 
+#[test]
+fn occupancy_failures_retain_every_root_and_positive_occupants_stay_live()
+-> Result<(), Box<dyn Error>> {
+    use provenant_supervisor::census::{Census, ProcessIdentity};
+    use std::cell::Cell;
+    struct Occupancy {
+        base: PathBuf,
+        paths: Vec<PathBuf>,
+        complete: bool,
+        supported: bool,
+    }
+    impl CwdObserver for Occupancy {
+        fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            Ok(CwdObservation::Path(self.base.clone()))
+        }
+        fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+            if !self.supported {
+                return provenant_os::pid::OccupancyObservation::default();
+            }
+            provenant_os::pid::OccupancyObservation {
+                paths: self.paths.clone(),
+                complete: self.complete,
+            }
+        }
+    }
+    /// The second and later queries of one pid see a different process.
+    struct Reused<'a>(&'a InjectedCensus, Cell<u32>);
+    impl ProcessObserver for Reused<'_> {
+        fn boot_identity(&self) -> Result<String, provenant_supervisor::census::CensusError> {
+            self.0.boot_identity()
+        }
+        fn observe(&self, pid: i64) -> ProcessObservation {
+            let observed = self.0.observe(pid);
+            if pid != 200 {
+                return observed;
+            }
+            self.1.set(self.1.get() + 1);
+            match observed {
+                // The census listing and first recheck agree; later checks do not.
+                ProcessObservation::Present(mut fact) if self.1.get() > 1 => {
+                    fact.identity.native_start += 1;
+                    ProcessObservation::Present(fact)
+                }
+                other => other,
+            }
+        }
+        fn census(&self, max: usize) -> Result<Census, provenant_supervisor::census::CensusError> {
+            self.0.census(max)
+        }
+    }
+    let fixture = Fixture::new()?;
+    let base = canonicalize(fixture._temp.path())?;
+    let a = base.join("a");
+    let b = base.join("b");
+    fs::create_dir(&a)?;
+    fs::create_dir(&b)?;
+    let fact = |pid: i64| ProcessFact {
+        identity: ProcessIdentity {
+            boot: "boot".into(),
+            pid,
+            native_start: pid as u64,
+            group_id: pid,
+            session_id: pid,
+        },
+        parent_pid: 1,
+        zombie: false,
+        cpu_micros: None,
+        command: None,
+    };
+    let current = fact(100);
+    let processes = InjectedCensus {
+        census: Census::from_observations([current.clone(), fact(200)], [], [], true, false, 32)?,
+        cwds: BTreeMap::new(),
+        current: current.clone(),
+        platform_uids: BTreeMap::new(),
+    };
+    let roots = vec![a.clone(), b.clone()];
+    let occupancy = |paths: Vec<PathBuf>, complete, supported| Occupancy {
+        base: base.clone(),
+        paths,
+        complete,
+        supported,
+    };
+    let states = |observer: &dyn ProcessObserver, cwd: &Occupancy| {
+        observe_worker_roots(&roots, observer, cwd, &current, false).0
+    };
+    // An executable inside one root, with the other root provably unrelated.
+    let live = states(&processes, &occupancy(vec![b.join("bin/tool")], true, true));
+    assert_eq!(live[&a], WorkerState::Free);
+    assert_eq!(live[&b], WorkerState::Live);
+    // A reused pid cannot prove a snapshot belongs to the census process.
+    let reused = states(
+        &Reused(&processes, Cell::new(0)),
+        &occupancy(vec![], true, true),
+    );
+    assert_eq!(reused[&a], WorkerState::Unknown);
+    assert_eq!(reused[&b], WorkerState::Unknown);
+    // An unsupported query (default observation) is not an empty one.
+    let unsupported = states(&processes, &occupancy(vec![], true, false));
+    assert_eq!(unsupported[&a], WorkerState::Unknown);
+    assert_eq!(unsupported[&b], WorkerState::Unknown);
+    // A positive occupant stays live beside incompleteness elsewhere.
+    let partial = states(&processes, &occupancy(vec![a.join("x")], false, true));
+    assert_eq!(partial[&a], WorkerState::Live);
+    assert_eq!(partial[&b], WorkerState::Unknown);
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn native_worker_census_places_both_data_firmlink_spellings() -> Result<(), Box<dyn Error>> {
