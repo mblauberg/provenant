@@ -78,17 +78,17 @@ pub enum Graph {
     },
     /// Show a task graph's status
     Status {
-        /// Graph ID
+        /// Graph ID, project-local document path or document SHA-256 hash
         id: String,
     },
     /// Cancel a task graph
     Cancel {
-        /// Graph ID
+        /// Graph ID, project-local document path or document SHA-256 hash
         id: String,
     },
     /// Resume a task graph from its document
     Resume {
-        /// Project-local graph document
+        /// Graph ID, project-local graph document or document SHA-256 hash
         #[arg(long)]
         document: PathBuf,
         /// Raise a limit, budget or loop allowance, or decide a paused loop (KEY=VALUE); may be repeated
