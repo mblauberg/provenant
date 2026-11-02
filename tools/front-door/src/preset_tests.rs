@@ -1261,6 +1261,61 @@ fn council(overrides: &[&str], shaped: bool) -> Result<serde_json::Value, String
     expand(&layers, "review-council", "the change", &overrides).map(|e| e.document)
 }
 
+#[test]
+fn tests_lens_includes_mutation_testing_only_for_crucial_or_terminal_risk() {
+    for (risk, expected) in [
+        ("routine", false),
+        ("substantial", false),
+        ("crucial", true),
+        ("terminal", true),
+    ] {
+        let risk_override = format!("parameters.risk_tier='{risk}'");
+        let document = council(
+            &[
+                "parameters.worktree='/repo/lane'",
+                "parameters.kind='integration'",
+                "parameters.lenses=[{name='tests',tier='',when=''},{name='correctness-spec',tier='',when=''}]",
+                risk_override.as_str(),
+            ],
+            true,
+        )
+        .unwrap();
+        let prompt = document["nodes"][1]["composite"]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["id"] == "lens-tests")
+            .unwrap()["prompt"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            prompt.contains("Diff-scoped mutation evidence"),
+            expected,
+            "risk tier {risk}"
+        );
+        assert_eq!(
+            prompt.contains("cargo mutants --in-diff"),
+            expected,
+            "mutation command at risk tier {risk}"
+        );
+        if expected {
+            assert!(prompt.contains("gates delivery"), "risk tier {risk}");
+        }
+        let correctness_prompt = document["nodes"][1]["composite"]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["id"] == "lens-correctness-spec")
+            .unwrap()["prompt"]
+            .as_str()
+            .unwrap();
+        assert!(
+            !correctness_prompt.contains("Diff-scoped mutation evidence"),
+            "correctness lens at risk tier {risk}"
+        );
+    }
+}
+
 fn lens_ids(document: &serde_json::Value) -> Vec<String> {
     document["nodes"][1]["composite"]["nodes"]
         .as_array()

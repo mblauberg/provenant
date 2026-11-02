@@ -1111,6 +1111,19 @@ fn interpolate(
     interpolate_inner(value, parameters, prompt, index, false)
 }
 
+const MUTATION_TESTING_PROMPT: &str = r#"
+
+Diff-scoped mutation evidence (optional; crucial or terminal risk only):
+generate a patch from the PR head with `git diff --relative=<workspace>` and run
+`cargo mutants --in-diff <workspace-relative diff of the PR head> --workspace`.
+Copy any required out-of-workspace includes into the workspace before running.
+Skip tests that fail on the unmutated baseline and list them as skipped. If
+`cargo-mutants` is unavailable or the diff matches no mutants, say so and
+continue. Report mutant, caught, missed and timed-out counts plus wall time, and
+classify every survivor as a gap or noise. This evidence is optional and never
+gates delivery.
+"#;
+
 fn interpolate_inner(
     value: &Value,
     parameters: &Value,
@@ -1124,6 +1137,14 @@ fn interpolate_inner(
                 "prompt" => Ok(json!(prompt)),
                 "index" if defer_index => Ok(json!("${index}")),
                 "index" => Ok(json!(index)),
+                "mutation_testing" if parameters.get(name).is_none() => Ok(json!(if matches!(
+                    parameters.get("risk_tier").and_then(Value::as_str),
+                    Some("crucial" | "terminal")
+                ) {
+                    MUTATION_TESTING_PROMPT
+                } else {
+                    ""
+                })),
                 _ => {
                     let mut parts = name.split('.');
                     let first = parts.next().unwrap_or_default();

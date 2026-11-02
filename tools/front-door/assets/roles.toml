@@ -216,6 +216,15 @@ references = [
   { ref = "skill:test-design/references/judgement.md", when = "always", inline = true },
   { ref = "skill:test-design/references/boundaries.md", when = "always", inline = true },
 ]
+prompt = """
+Lens: ${item.name}. Subject: ${prompt}
+Base (diff reference): ${base}
+Spec (acceptance criteria): ${spec}
+Check correctness against the spec as well as this lens.
+${mutation_testing}
+End with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not
+include another verdict line elsewhere in the result.
+"""
 
 [roles."lens.reliability"]
 extends = "lens"
