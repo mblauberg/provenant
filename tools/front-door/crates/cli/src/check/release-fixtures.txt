@@ -155,7 +155,6 @@ tools/front-door/crates/providers/src/tests.rs release.home-path d770ca0d1e68b50
 tools/front-door/crates/providers/src/tests.rs release.home-path dc40616fcd80f602
 tools/front-door/crates/providers/src/tests.rs release.home-path f45f437fe9f7434b
 tools/front-door/crates/providers/src/tests.rs release.home-path f8cc774b4d0590f2
-tools/front-door/crates/providers/src/tests.rs release.home-path fe76a0cb075e4ac4
 tools/front-door/crates/providers/tests/snapshots/seatbelt/agy-read-only.sb release.home-path 10a9173ac2af1f02
 tools/front-door/crates/providers/tests/snapshots/seatbelt/agy-read-only.sb release.home-path 14fbdca49e43e9c2
 tools/front-door/crates/providers/tests/snapshots/seatbelt/agy-read-only.sb release.home-path 6159c74d4a1cbb4f
