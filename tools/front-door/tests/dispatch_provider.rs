@@ -2694,6 +2694,10 @@ fn persisted_attempt_with(
             finished_at: clock.wall_now()?,
             reason: Some("lost before recording a route".into()),
         };
+        // Version 2 records carry the evidence that justifies the decision.
+        running.terminal_evidence = Some(provenant_run::TerminalEvidence::Lost {
+            reason: "lost before recording a route".into(),
+        });
         let bytes = CanonicalV1::bytes(&running)?.as_bytes().to_vec();
         database.execute(
             "UPDATE attempts SET terminal=1,record=?1 WHERE id=?2",
