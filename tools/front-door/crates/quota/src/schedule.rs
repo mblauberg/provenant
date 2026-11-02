@@ -108,6 +108,7 @@ pub fn backoff(failure: ProbeFailure, failures: u64, retry_after_seconds: Option
             .as_secs()
         }
         ProbeFailure::Auth | ProbeFailure::AccountMismatch => 900,
+        ProbeFailure::IsolatedKeychainUnavailable => 3600,
         ProbeFailure::MissingCli | ProbeFailure::Disabled => 86400,
         ProbeFailure::Malformed | ProbeFailure::ProbeDirectory => 120,
     };
@@ -471,6 +472,9 @@ pub fn report(
             .unwrap_or_default();
         let free_refused = !active_free_refusals.is_empty();
         let status = match &record.snapshot {
+            _ if record.last_error == Some(ProbeFailure::IsolatedKeychainUnavailable) => {
+                QuotaStatus::KeychainUnavailable
+            }
             _ if free_refused => QuotaStatus::Exhausted,
             _ if auth_required => QuotaStatus::AuthRequired,
             Some(snapshot) if fresh => snapshot.status,
@@ -508,6 +512,7 @@ pub fn report(
                 .as_ref()
                 .is_some_and(|c| c.deadline_unix_seconds > now),
             error: record.last_error,
+            repair: None,
             capacity_cooldowns: record
                 .capacity_cooldowns
                 .iter()
@@ -600,6 +605,23 @@ mod tests {
             .unwrap(),
             Some(115)
         );
+    }
+    #[test]
+    fn missing_isolated_keychain_has_its_own_quota_status() {
+        let mut account = account();
+        account.adapter = "agy".into();
+        let mut record = AccountRecord::empty(account);
+        record.last_error = Some(ProbeFailure::IsolatedKeychainUnavailable);
+        let report = report(
+            crate::source::TEST_POLICIES,
+            &[record],
+            &[],
+            &QuotaQuery { adapter: None },
+            100,
+            "fixture".into(),
+        )
+        .unwrap();
+        assert_eq!(report.accounts[0].status, QuotaStatus::KeychainUnavailable);
     }
     #[test]
     fn manual_respects_floor_backoff_and_expired_claims() {

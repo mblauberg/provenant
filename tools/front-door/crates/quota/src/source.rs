@@ -130,6 +130,7 @@ pub enum QuotaStatus {
     Stale,
     Unknown,
     AuthRequired,
+    KeychainUnavailable,
     Unsupported,
 }
 

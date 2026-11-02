@@ -239,7 +239,7 @@ enum QuotaMenu {
             parts = account.freePoolRefusal ? [] : [Fmt.sentence(Fmt.back(account.back(now: now), now: now))]
         case 4:
             row.icon = .mark("exclamationmark", .orange)
-            parts = ["Sign-in required"]
+            parts = [account.status == .keychainUnavailable ? "Keychain unavailable" : "Sign-in required"]
         default:
             // Stale, unknown or unsupported: the last reading keeps its figure, dimmed, beside when it was taken.
             if let shown {
@@ -347,6 +347,8 @@ enum QuotaMenu {
         let notes: [MenuEntry] = [
             account.note.map { .note(clip($0), nil) },
             account.error.map { .note(clip(Fmt.sentence($0)), .orange) },
+            // Notes are one line; the full repair text is in the CLI output these commands print.
+            account.repair == nil ? nil : .note("Repair steps: run provenant hosts doctor", .orange),
             account.status == .stale && account.error == nil ? .note("Window reset since reading", nil) : nil,
         ].compactMap { $0 }
         return [windows, info, notes].filter { !$0.isEmpty }.reduce([]) { $0.isEmpty ? $1 : $0 + [.separator] + $1 }
