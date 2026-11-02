@@ -637,50 +637,6 @@ fn warning_level_stderr_line(line: &str) -> bool {
     timestamp && tokens.next() == Some("WARN")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::provider_error_from_stderr;
-
-    #[test]
-    fn provider_error_uses_failure_before_trailing_tracing_warning() {
-        let stderr = b"provider process failed: exit code 1\n\
-2026-11-02T00:00:00.123456Z  WARN codex_core: skill scan failed\n";
-        assert_eq!(
-            provider_error_from_stderr(stderr).as_deref(),
-            Some("provider process failed: exit code 1")
-        );
-    }
-
-    #[test]
-    fn provider_error_keeps_non_warning_lines_that_mention_warn() {
-        assert_eq!(
-            provider_error_from_stderr(b"test-failed WARN: assertion failed\n").as_deref(),
-            Some("test-failed WARN: assertion failed")
-        );
-    }
-
-    #[test]
-    fn provider_error_skips_warning_level_lines() {
-        assert_eq!(
-            provider_error_from_stderr(
-                b"warning: retrying request\nreal failure\n2026-11-02T00:00:00Z WARN cleanup failed\n"
-            )
-            .as_deref(),
-            Some("real failure")
-        );
-    }
-
-    #[test]
-    fn provider_error_does_not_headline_a_warning_without_a_failure_line() {
-        assert_eq!(
-            provider_error_from_stderr(
-                b"WARN: skill scan failed\n2026-11-02T00:00:00Z WARN cleanup failed\n"
-            ),
-            None
-        );
-    }
-}
-
 /// The exact bytes of a read, from the lossless encoding `output` reports.
 pub(super) fn chunk_bytes(data: &Value) -> Option<Vec<u8>> {
     let bytes = &data["bytes"];
@@ -905,4 +861,48 @@ pub fn attempt_provider(
         .into_iter()
         .flatten()
         .find_map(|route| route.provider.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_error_from_stderr;
+
+    #[test]
+    fn provider_error_uses_failure_before_trailing_tracing_warning() {
+        let stderr = b"provider process failed: exit code 1\n\
+2026-11-02T00:00:00.123456Z  WARN codex_core: skill scan failed\n";
+        assert_eq!(
+            provider_error_from_stderr(stderr).as_deref(),
+            Some("provider process failed: exit code 1")
+        );
+    }
+
+    #[test]
+    fn provider_error_keeps_non_warning_lines_that_mention_warn() {
+        assert_eq!(
+            provider_error_from_stderr(b"test-failed WARN: assertion failed\n").as_deref(),
+            Some("test-failed WARN: assertion failed")
+        );
+    }
+
+    #[test]
+    fn provider_error_skips_warning_level_lines() {
+        assert_eq!(
+            provider_error_from_stderr(
+                b"warning: retrying request\nreal failure\n2026-11-02T00:00:00Z WARN cleanup failed\n"
+            )
+            .as_deref(),
+            Some("real failure")
+        );
+    }
+
+    #[test]
+    fn provider_error_does_not_headline_a_warning_without_a_failure_line() {
+        assert_eq!(
+            provider_error_from_stderr(
+                b"WARN: skill scan failed\n2026-11-02T00:00:00Z WARN cleanup failed\n"
+            ),
+            None
+        );
+    }
 }
