@@ -1,6 +1,6 @@
 Graph <id>
 Preset selection: generator-evaluator (override)
-Review shape: standard (default)
+Review shape: standard (default; size=unknown; kind=unknown; risk=unknown)
 implement  role=write.implement tier=senior family=any kind=- access=worktree_write worktree=.
   write_scope: ["."]
   source: {"commit":"<commit>","type":"commit"}
