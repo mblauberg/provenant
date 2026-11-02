@@ -77,6 +77,10 @@ need no registration or adoption. Another project's checkout is refused.
 A held writer lock reports busy; lifecycle removal also refuses an observed
 live process and names its pid and command when available.
 
+A refusal that says repository authority could not be revalidated includes the
+underlying repository error and its reason. Inspect that reason and the
+worktree's Git registration and configuration before submitting again.
+
 Choose `--deliver none`, `push`, `integrate:integration` or `pr`. Push and PR
 use origin and the lane branch. Integration targets must already exist;
 `integrate:origin/integration` selects a remote branch. Local targets must be
