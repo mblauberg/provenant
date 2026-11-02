@@ -322,14 +322,19 @@ previews merged worktree and declared output cleanup. `--apply` deletes those
 entries; `--dry-run` previews every class. The installed agent passes `--apply`.
 GC fetches `origin`'s default branch and selects clean managed `.worktrees/`
 entries with known-terminal lanes and merged commits of their own. Unmanaged
-worktrees are skipped, including for output pruning. Tips
+worktrees are skipped unless foreign merged-clean collection is enabled. Tips
 equal to the fetched upstream tip or on its first-parent history are kept,
 protecting fresh worktrees. Eligible removal deletes local branches and own
-lane caches, keeping dirty, unmerged and live or unobservable worktrees.
+lane caches without an idle delay, keeping dirty, unmerged and live or
+unobservable worktrees. An opted-in foreign worktree also requires a complete
+free census and can have its unchanged local branch and own cache removed.
 Broken registrations are skipped individually. Configured regenerable
 output requires a clean or ignored-only managed worktree whose associated
 lanes are all known terminal. Ignored output may be pruned; tracked paths,
-configured keep paths, symlinks and output written within 24 hours are kept.
+configured keep paths, symlinks and output newer than the applicable idle
+threshold are kept.
+The age rule applies to standalone output collection; declared ignored output
+needed to remove a tree proven merged can be removed immediately.
 See the [configuration runbook](runbooks/configuration.md#lane-cache-collection).
 Settlement collects the lane's declared ignored output and Cargo cache without
 an idle delay, even when the worktree stays for delivery pickup. Successful

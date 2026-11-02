@@ -80,8 +80,8 @@ live process and names its pid and command when available.
 Choose `--deliver none`, `push`, `integrate:integration` or `pr`. Push and PR
 use origin and the lane branch. Integration targets must already exist;
 `integrate:origin/integration` selects a remote branch. Local targets must be
-checked out nowhere. Integration conflicts leave checkouts and destination
-refs intact. Inspect the failure and resolve it through the owning lane.
+checked out nowhere, including the delivering lane's own worktree. Integration
+conflicts leave checkouts and destination refs intact. Inspect the failure and resolve it through the owning lane.
 Legacy `--deliver-remote`, `--deliver-branch` and `--open-pr` remain available
 as an alternative to `--deliver`.
 
@@ -189,7 +189,10 @@ resolves there when no current-directory file exists. Explicit project-local
 paths also work. A graph can use node `delivery: "integrate:integration"`
 with top-level `integration_branch: "integration"` and `delivery: "pr"` for one
 final PR. Delivery failures block dependants or retain the graph advance error;
-`fabric graph resume --document PATH` retries final delivery.
+`fabric graph resume --document PATH` retries final delivery. Loop rounds
+integrate fast-forward only. If a loop round's delivery fails at the Integrate
+stage, the integration branch moved after the round launched; rerun the graph
+from the new head rather than resuming it.
 
 Drain writer lanes before upgrading, as described in the
 [upgrade procedure](install.md#bootstrap-and-upgrade). Upgrading does not

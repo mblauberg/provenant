@@ -60,6 +60,47 @@ fn fixture_cli() -> Command {
 }
 
 #[test]
+fn review_explain_snapshots_integration_panel() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let brief = temp.path().join("brief");
+    std::fs::write(&brief, "Review this integration head")?;
+    let output = fixture_cli()
+        .current_dir(&root)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .arg("--state-dir")
+        .arg(temp.path().join("state"))
+        .args(["review", "HEAD", "--brief-file"])
+        .arg(&brief)
+        .args([
+            "--kind",
+            "integration",
+            "--risk",
+            "routine",
+            "--risk-tag",
+            "security",
+            "--explain",
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout)?;
+    // CI's shallow checkout may add a "no default branch" warning after the
+    // header, so the header and the lens block are matched separately.
+    assert!(
+        text.starts_with("review deep (by_kind; size=unknown; kind=integration; risk=routine)\n"),
+        "{text}"
+    );
+    let snapshot = "  risk tags: security\n  lens=correctness-spec pool=junior\n  lens=tests pool=junior\n  lens=design-fit-reuse pool=junior\n  lens=simplicity pool=junior\n  lens=conventions-readability pool=senior\n  lens=refactor-cleanup pool=senior\n  lens=reliability pool=senior\n  lens=flexibility pool=senior\n  lens=security-privacy pool=senior\n";
+    assert!(text.contains(snapshot), "{text}");
+    Ok(())
+}
+
+#[test]
 fn preset_wait_completes_a_retained_gate_graph_and_replays_it()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -654,6 +695,29 @@ fn explain_text(preset: &str, extra: &[&str]) -> Result<String, Box<dyn std::err
                 .success()
         );
     }
+    // A small change on top of the base, so a review stage can measure it.
+    std::fs::write(project.join("change.txt"), "one line\n")?;
+    for args in [
+        &["add", "change.txt"][..],
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "commit",
+            "-q",
+            "-m",
+            "change",
+        ],
+    ] {
+        assert!(
+            provenant_os::fixture::git_command()
+                .current_dir(&project)
+                .args(args)
+                .status()?
+                .success()
+        );
+    }
     let prompt = temp.path().join("brief");
     std::fs::write(&prompt, "the change")?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -780,6 +844,13 @@ fn scout_swarm_and_generator_evaluator_explain_goldens() -> Result<(), Box<dyn s
 fn remaining_bundled_patterns_have_explain_goldens() -> Result<(), Box<dyn std::error::Error>> {
     let worktree = ["--set", "parameters.worktree=\".\""];
     let batch = ["--set", "parameters.batch_worktree=\".\""];
+    // The review stage measures the last commit against its parent.
+    let deliver = [
+        "--set",
+        "parameters.worktree=\".\"",
+        "--set",
+        "parameters.base=\"HEAD~1\"",
+    ];
     for (name, extra) in [
         ("single", &[][..]),
         ("chain", &[]),
@@ -787,7 +858,7 @@ fn remaining_bundled_patterns_have_explain_goldens() -> Result<(), Box<dyn std::
         ("fan-out-synthesise", &[]),
         ("big-batch", &batch[..]),
         ("scope-then-run", &worktree[..]),
-        ("deliver", &worktree[..]),
+        ("deliver", &deliver[..]),
     ] {
         golden(&format!("{name}.explain.txt"), &explain_text(name, extra)?)?;
     }
@@ -938,6 +1009,95 @@ fn automatic_preset_selection_submits_network_off_and_refuses_lane_only_flags()
     }
     // `--network off` keeps only the provider's own endpoints.
     assert_eq!(submitted, [serde_json::json!("provider")], "{result}");
+    Ok(())
+}
+
+/// `run --exclude` on an automatically selected graph is refused when a
+/// selector is unknown, and otherwise binds the list to the graph so every
+/// node's task carries it as the graph's exclusion knob.
+#[test]
+fn graph_exclusions_are_validated_and_inherited_by_every_node()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "seed",
+        ],
+    ] {
+        let output = provenant_os::fixture::git_command()
+            .current_dir(&project)
+            .args(args)
+            .output()?;
+        assert!(output.status.success());
+    }
+    let presets = project.join(".provenant/presets");
+    std::fs::create_dir_all(&presets)?;
+    std::fs::write(
+        project.join(".provenant/preset-rules.toml"),
+        "[select]\ndefault = { preset = 'probe' }\n",
+    )?;
+    std::fs::write(
+        presets.join("probe.toml"),
+        "stages = [{ id = 'task', tier = { adapter = 'fixture', model = 'fixture/model' } }]\n",
+    )?;
+    let prompt = project.join("ready.md");
+    std::fs::write(
+        &prompt,
+        "Acceptance criteria are explicit. Surface: the run command. Risk tier: low. \
+         Verification uses cargo test. Design decision is settled.\n",
+    )?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let state = temp.path().join("state");
+    let run = |extra: &[&str]| {
+        fixture_cli()
+            .current_dir(&project)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["--json", "--state-dir"])
+            .arg(&state)
+            .args(["run", "--prompt-file"])
+            .arg(&prompt)
+            .args(extra)
+            .output()
+    };
+    let refused = run(&["--exclude", "nosuchprovider"])?;
+    assert!(!refused.status.success());
+    let refused: serde_json::Value = serde_json::from_slice(&refused.stdout)?;
+    assert_eq!(refused["status"], "invalid", "{refused}");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("adapter/id")),
+        "{refused}"
+    );
+    assert!(!state.join("runs").exists());
+
+    let output = run(&["--exclude", "claude", "--wait", "5s"])?;
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let document = result["data"]["document"]
+        .as_str()
+        .ok_or_else(|| format!("retained document: {result}"))?;
+    let document: serde_json::Value = serde_json::from_slice(&std::fs::read(document)?)?;
+    assert_eq!(document["exclude"], serde_json::json!(["claude"]));
+    let mut carried = Vec::new();
+    for run in std::fs::read_dir(state.join("runs"))? {
+        let request: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(run?.path().join("request.json"))?)?;
+        for task in request["tasks"].as_array().ok_or("tasks")? {
+            carried.push(task["profile"]["knobs"]["routing.graph_exclude"].clone());
+        }
+    }
+    assert_eq!(carried, [serde_json::json!(["claude"])], "{result}");
     Ok(())
 }
 

@@ -425,6 +425,42 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `type` | `"enum"` |
 | `values` | `["delta", "full"]` |
 
+## `routing.exclude`
+
+| Field | Value |
+|---|---|
+| `default` | `[]` |
+| `effect` | `"Keep each listed provider (claude), account (label, entry or adapter/key) or exact model (adapter/id) out of named-route pools for every task. A standing list; &#96;--exclude&#96; and a graph's list are added to it, not substituted for it. A pinned &#96;--model&#96; is never affected."` |
+| `reader` | `"tools/front-door/crates/cli/src/route.rs"` |
+| `status` | `"wired"` |
+| `strict` | `true` |
+| `trade_off` | `"Selection still weighs pacing and readiness over the remaining members, but an exclusion that empties a pool refuses the dispatch rather than widening it."` |
+| `type` | `"string_list"` |
+
+## `routing.flag_exclude`
+
+| Field | Value |
+|---|---|
+| `default` | `[]` |
+| `effect` | `"The exclusion list one dispatch carries, set by &#96;--exclude&#96; on &#96;run&#96; and &#96;review&#96;. Same selectors as &#96;routing.exclude&#96;; refusals and &#96;--explain&#96; name the flag as the source."` |
+| `reader` | `"tools/front-door/crates/cli/src/route.rs"` |
+| `status` | `"wired"` |
+| `strict` | `true` |
+| `trade_off` | `"Applies to this dispatch only; the standing &#96;routing.exclude&#96; list and a graph's list still apply."` |
+| `type` | `"string_list"` |
+
+## `routing.graph_exclude`
+
+| Field | Value |
+|---|---|
+| `default` | `[]` |
+| `effect` | `"The exclusion list a graph passes to each node it launches, set from &#96;run --exclude&#96; on a preset or graph. Same selectors as &#96;routing.exclude&#96;; refusals and &#96;--explain&#96; name the graph as the source."` |
+| `reader` | `"tools/front-door/crates/cli/src/route.rs"` |
+| `status` | `"wired"` |
+| `strict` | `true` |
+| `trade_off` | `"Applies to every node's named-route pool; a node's pinned model is never affected."` |
+| `type` | `"string_list"` |
+
 ## `routing.workload`
 
 | Field | Value |

@@ -271,7 +271,7 @@ fn loop_decisions_stop_or_accept_exhausted_outputs() {
 }
 
 #[test]
-fn loop_writers_keep_one_worktree_and_never_deliver_between_rounds() {
+fn loop_writers_keep_one_worktree_when_the_body_does_not_deliver() {
     let mut document = fixture("pass");
     let spec = document.nodes[0].loop_body.as_mut().unwrap();
     spec.body[0].access = AccessMode::WorktreeWrite;
@@ -1212,7 +1212,7 @@ fn loop_rejects_nested_routing_worktree_prefix_and_identifier_ambiguities() {
             _ => document.nodes[0].id = "x".repeat(60),
         }
         let expected = match case {
-            0 | 1 => "loop body cannot nest loops or deliver or route on_fail",
+            0 | 1 => "loop body cannot nest loops or route on_fail, and may only deliver by integrate:",
             2 => "loop writers must share one worktree",
             3 => "previous. is reserved for prior round inputs",
             _ => "expanded loop node id exceeds 64 bytes",
@@ -1223,6 +1223,167 @@ fn loop_rejects_nested_routing_worktree_prefix_and_identifier_ambiguities() {
             "case {case}"
         );
     }
+}
+
+fn integrating_repair(delivery: Option<&str>) -> GraphDocument {
+    let mut writer = serde_json::json!({
+        "id":"fix","access":"worktree_write","worktree":"/fixture/batch",
+        "prompt":"repair","route":{"alias":"senior"}
+    });
+    if let Some(delivery) = delivery {
+        writer["delivery"] = delivery.into();
+    }
+    serde_json::from_value(serde_json::json!({
+        "schema_version":1,"graph_id":"integrating-repair","integration_branch":"batch/graph",
+        "nodes":[
+            {"id":"principal","access":"worktree_write","worktree":"/fixture/batch",
+                "prompt":"refactor","route":{"alias":"senior"},"delivery":"integrate:batch/graph"},
+            {"id":"repair","kind":"loop","access":"read_only","depends_on":["principal"],
+                "loop":{"max_rounds":2,"until":"accepted","body":[
+                    writer,
+                    {"id":"review","access":"read_only","depends_on":["fix"],
+                        "prompt":"review","route":{"alias":"senior"},
+                        "source":{"type":"node","node":"fix"}},
+                    {"id":"accepted","kind":"gate","access":"read_only","depends_on":["review"],
+                        "inputs":[{"node":"review","outputs":["verdict"]}],
+                        "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
+                ]}}
+        ]
+    }))
+    .unwrap()
+}
+
+fn commit_terminal(commit: &str) -> AttemptObservation {
+    AttemptObservation::Terminal {
+        attempt_ref: None,
+        outcome: AttemptOutcome::Succeeded,
+        launched: true,
+        result: None,
+        result_warning: None,
+        result_path: None,
+        branch: None,
+        commit: Some(commit.to_owned()),
+    }
+}
+
+#[test]
+fn loop_body_integrate_requires_the_graph_integration_branch() {
+    const REASON: &str =
+        "loop body integrate: requires graph integration_branch equal to the node target";
+    let mut missing = integrating_repair(Some("integrate:batch/graph"));
+    missing.integration_branch = None;
+    // The principal's own integrate: also needs the branch, so drop it.
+    missing.nodes[0].delivery = None;
+    assert_eq!(validate_plan(&missing).unwrap_err(), REASON);
+    let mut other = integrating_repair(Some("integrate:batch/other"));
+    assert_eq!(validate_plan(&other).unwrap_err(), REASON);
+    other.integration_branch = Some("batch/other".into());
+    // The principal still targets the graph branch, so the flat check refuses.
+    assert_eq!(
+        validate_plan(&other).unwrap_err(),
+        "node integration target differs from graph integration branch"
+    );
+}
+
+#[test]
+fn loop_body_delivers_only_by_integrate() {
+    use provenant_records::run::DeliveryMode;
+    validate_plan(&integrating_repair(Some("integrate:batch/graph"))).unwrap();
+    validate_plan(&integrating_repair(None)).unwrap();
+    for refused in ["push", "pr"] {
+        assert_eq!(
+            validate_plan(&integrating_repair(Some(refused))).unwrap_err(),
+            "loop body cannot nest loops or route on_fail, and may only deliver by integrate:",
+            "{refused}"
+        );
+    }
+    // The accepted mode reaches every expanded round.
+    let document = integrating_repair(Some("integrate:batch/graph"));
+    let expanded = document.expanded(&Default::default()).unwrap();
+    let delivering: Vec<_> = expanded
+        .nodes
+        .iter()
+        .filter(|node| node.delivery.is_some())
+        .map(|node| (node.id.as_str(), node.delivery.clone()))
+        .collect();
+    let integrate = Some(DeliveryMode::Integrate("batch/graph".into()));
+    assert_eq!(
+        delivering,
+        [
+            ("principal", integrate.clone()),
+            ("repair--r1--fix", integrate.clone()),
+            ("repair--r2--fix", integrate)
+        ]
+    );
+}
+
+#[test]
+fn loop_rounds_integrate_from_the_head_the_previous_round_delivered() {
+    let document = integrating_repair(Some("integrate:batch/graph"));
+    let (c0, c1, c2) = ("a".repeat(40), "b".repeat(40), "c".repeat(40));
+    let mut owner = FakeOwner {
+        observations: [
+            commit_terminal(&c0),
+            commit_terminal(&c1),
+            terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: FAIL"),
+            commit_terminal(&c2),
+            terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: PASS"),
+        ]
+        .into(),
+        // Each round starts when the target is at the previous delivery.
+        integration_heads: [c0.clone(), c1.clone()].into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert!(run.checkpoint.successful(), "{:?}", run.checkpoint);
+    let fix: Vec<_> = owner
+        .calls
+        .iter()
+        .zip(&owner.fast_forward_only)
+        .filter(|((key, _), _)| key.node_id.ends_with("--fix") || key.node_id == "principal")
+        .map(|((key, _), flag)| (key.node_id.as_str(), *flag))
+        .collect();
+    // Only loop rounds are restricted to fast-forward; the principal may merge.
+    assert_eq!(
+        fix,
+        [
+            ("principal", false),
+            ("repair--r1--fix", true),
+            ("repair--r2--fix", true)
+        ]
+    );
+    assert!(owner.integration_heads.is_empty());
+}
+
+#[test]
+fn loop_stops_when_the_target_moved_after_the_previous_delivery() {
+    let document = integrating_repair(Some("integrate:batch/graph"));
+    let (c0, c1) = ("a".repeat(40), "b".repeat(40));
+    let mut owner = FakeOwner {
+        observations: [
+            commit_terminal(&c0),
+            commit_terminal(&c1),
+            terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: FAIL"),
+        ]
+        .into(),
+        // Someone else advanced the target after round one delivered.
+        integration_heads: [c0, "d".repeat(40)].into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert!(!run.checkpoint.successful());
+    let second = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "repair--r2--fix")
+        .unwrap();
+    assert_eq!(second.state, NodeState::Failed);
+    assert_eq!(
+        second.advance_error_code.as_deref(),
+        Some("integration_head_moved")
+    );
+    assert!(second.attempts.is_empty());
 }
 
 #[test]

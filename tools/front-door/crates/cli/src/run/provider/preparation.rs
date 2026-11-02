@@ -541,6 +541,8 @@ pub(super) fn prepare_candidates(
     let host = provenant_config::bind_host(roots)
         .map_err(|e| e.to_string())?
         .to_string();
+    let rules = crate::route::task_exclusion_rules(&task.profile, roots)
+        .map_err(|error| error.to_string())?;
     let resolved = crate::route::resolve_dispatch(
         &request,
         roots,
@@ -558,6 +560,7 @@ pub(super) fn prepare_candidates(
             } => Some((excluded_families.as_slice(), *require_distinct)),
             _ => None,
         },
+        &rules,
     )
     .map_err(|error| error.to_string())?;
     if let Some(selection) = &resolved.pool_selection {
@@ -656,7 +659,9 @@ pub(super) fn prepare_candidates(
             .find(|e| e.adapter == route.adapter && Some(&e.key) == route.account_key.as_ref());
         let account = match entry
             .filter(|entry| {
-                AdapterSpec::get(&entry.adapter).is_some_and(|spec| spec.registered_account)
+                AdapterSpec::get(&entry.adapter).is_some_and(|spec| {
+                    spec.registered_account && !spec.is_unregistered_local(&entry.key)
+                })
             })
             .map(|entry| entry.registered())
             .transpose()
@@ -667,8 +672,14 @@ pub(super) fn prepare_candidates(
                 continue;
             }
         };
-        if AdapterSpec::get(adapter.id()).is_some_and(|spec| spec.registered_account)
-            && account.is_none()
+        // An unregistered local login runs without a pinned account.
+        if AdapterSpec::get(adapter.id()).is_some_and(|spec| {
+            spec.registered_account
+                && !route
+                    .account_key
+                    .as_deref()
+                    .is_some_and(|key| spec.is_unregistered_local(key))
+        }) && account.is_none()
         {
             reasons.push(skip(
                 &label,

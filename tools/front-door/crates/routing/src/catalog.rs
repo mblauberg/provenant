@@ -223,6 +223,8 @@ impl From<FixedDeadline> for String {
 /// registry-free callers and can match accounts across adapters, including
 /// profile, reset reference and override selectors.
 pub struct RoutingConfig {
+    /// Exact models excluded from every pool while their schedule is active.
+    pub model_exclusions: ModelExclusions,
     pub model_policy: crate::ModelPolicies,
     /// Override the bundled writer advice; omitted fields keep the bundled values.
     pub writer_advisory: Option<WriterAdvisoryOverride>,
@@ -257,6 +259,7 @@ pub const MAX_RETRY_WAIT_SECONDS: u64 = 7 * 24 * 3_600;
 impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
+            model_exclusions: ModelExclusions::default(),
             model_policy: crate::ModelPolicies::default(),
             writer_advisory: None,
             suppress_opus_writer_warning: false,
@@ -274,6 +277,80 @@ impl Default for RoutingConfig {
             opencode_go: OpenCodeGoSettings::default(),
         }
     }
+}
+
+/// The persisted model exclusions. A row is read on its own: one that cannot
+/// be read in full still excludes its model when the model parses (without a
+/// schedule, failing closed), and a row whose model does not parse is dropped
+/// and reported in `notes`. Neither refuses the configuration.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(transparent)]
+pub struct ModelExclusions {
+    rows: Vec<ModelExclusion>,
+    #[serde(skip)]
+    notes: Vec<String>,
+}
+impl ModelExclusions {
+    /// What was repaired or ignored while reading the rows.
+    pub fn notes(&self) -> &[String] {
+        &self.notes
+    }
+}
+impl std::ops::Deref for ModelExclusions {
+    type Target = Vec<ModelExclusion>;
+    fn deref(&self) -> &Self::Target {
+        &self.rows
+    }
+}
+impl std::ops::DerefMut for ModelExclusions {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.rows
+    }
+}
+impl<'de> Deserialize<'de> for ModelExclusions {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let values = Vec::<serde_json::Value>::deserialize(deserializer)?;
+        let mut read = Self::default();
+        for (index, value) in values.into_iter().enumerate() {
+            match serde_json::from_value::<ModelExclusion>(value.clone()) {
+                Ok(row) if row.schedule.valid() => read.rows.push(row),
+                outcome => {
+                    let model = value
+                        .get("model")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|text| ModelId::parse(text).ok());
+                    let reason = match outcome {
+                        Ok(_) => "its schedule is invalid".to_owned(),
+                        Err(error) => error.to_string(),
+                    };
+                    match model {
+                        Some(model) => {
+                            read.notes.push(format!(
+                                "model_exclusions[{index}]: {reason}; {} stays excluded with no schedule",
+                                model.as_str()
+                            ));
+                            read.rows.push(ModelExclusion {
+                                model,
+                                schedule: crate::Schedule::default(),
+                            });
+                        }
+                        None => read.notes.push(format!(
+                            "model_exclusions[{index}]: {reason}; the row is ignored"
+                        )),
+                    }
+                }
+            }
+        }
+        Ok(read)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelExclusion {
+    pub model: ModelId,
+    #[serde(default)]
+    pub schedule: crate::Schedule,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -433,6 +510,20 @@ impl DomainConfig for RoutingConfig {
     fn validate(&self) -> Vec<SectionError> {
         let mut errors = Vec::new();
         self.model_policy.validate(&mut errors);
+        if self.model_exclusions.len() > 256 {
+            errors.push(SectionError {
+                field: "model_exclusions".into(),
+                code: "limit",
+            });
+        }
+        for (index, exclusion) in self.model_exclusions.iter().enumerate() {
+            if !exclusion.schedule.valid() {
+                errors.push(SectionError {
+                    field: format!("model_exclusions.{index}"),
+                    code: "schedule",
+                });
+            }
+        }
         if let Some(advice) = &self.writer_advisory {
             advice.validate("writer_advisory", &mut errors);
         }

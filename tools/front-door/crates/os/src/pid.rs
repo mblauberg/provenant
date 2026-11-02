@@ -80,6 +80,68 @@ pub enum CwdObservation {
     Unsupported,
 }
 
+/// Why an occupancy observation could not prove non-occupancy. The caller
+/// reports it, and may excuse only `DescriptorsDenied` under its own policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OccupancyGap {
+    /// Every failed query was a descriptor query refused with EPERM; the
+    /// executable and each readable descriptor are in `paths`.
+    DescriptorsDenied,
+    /// The executable could not be identified or inspected.
+    ExecutableUnavailable,
+    /// The descriptor table or a descriptor could not be read (not EPERM).
+    DescriptorsUnavailable,
+    /// The table changed between the two snapshots.
+    Churn,
+    /// The table was larger than the bounded buffer.
+    LimitExceeded,
+    /// The process could not be observed at all.
+    Unobserved,
+}
+
+impl OccupancyGap {
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::DescriptorsDenied => "descriptors unreadable (EPERM)",
+            Self::ExecutableUnavailable => "executable unavailable",
+            Self::DescriptorsUnavailable => "descriptors unavailable",
+            Self::Churn => "descriptors or executable changed during the census",
+            Self::LimitExceeded => "descriptor limit exceeded",
+            Self::Unobserved => "process not observed",
+        }
+    }
+
+    /// The more serious of two gaps. A refused query is the least serious: it
+    /// is the only gap a caller may excuse, and only if nothing else failed.
+    pub fn worse(self, other: Self) -> Self {
+        if self == Self::DescriptorsDenied {
+            other
+        } else {
+            self
+        }
+    }
+}
+
+/// Paths positively observed for an executable and filesystem descriptors.
+/// A partial observation retains its paths but cannot establish non-occupancy.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OccupancyObservation {
+    pub paths: Vec<PathBuf>,
+    pub complete: bool,
+    /// Why the observation is incomplete; None when complete or not attempted.
+    pub gap: Option<OccupancyGap>,
+}
+
+/// An executable on the sealed system volume, found through the root-owned,
+/// non-writable path check. This supports a caller's risk policy; it is not
+/// proof of non-occupancy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SealedSystemImage {
+    /// A root-owned setuid file whose process runs with a different real uid:
+    /// the kernel refuses its cwd because of the privilege transition.
+    pub setuid_transition: bool,
+}
+
 /// Host-owner acceptance of the risk that this signed executable occupies a
 /// worktree despite an unreadable cwd. Paths and signers are exact matches.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -158,6 +220,22 @@ impl CensusIgnoreEntry {
 pub trait CwdObserver: Send + Sync {
     fn cwd(&self, pid: i64) -> Result<CwdObservation, PidError>;
 
+    /// Unimplemented observers must not accidentally prove non-occupancy.
+    fn occupancy(&self, _pid: i64) -> OccupancyObservation {
+        OccupancyObservation::default()
+    }
+
+    /// The process's executable on the sealed system volume, or None when any
+    /// evidence is missing. Missing evidence never grants an exception.
+    fn sealed_system_image(&self, _pid: i64) -> Option<SealedSystemImage> {
+        None
+    }
+
+    /// A Linux kernel thread, which holds no files or cwd in any worktree.
+    fn kernel_thread(&self, _pid: i64) -> bool {
+        false
+    }
+
     /// System real/effective/saved uids only after kernel signing status, daemon
     /// image and sealed system-volume checks. Missing evidence returns None.
     /// This supports a caller's explicit risk policy, not non-occupancy proof.
@@ -193,6 +271,25 @@ pub trait CwdObserver: Send + Sync {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemCwdObserver;
 impl CwdObserver for SystemCwdObserver {
+    fn occupancy(&self, pid: i64) -> OccupancyObservation {
+        let Some(pid) = i32::try_from(pid).ok().filter(|pid| *pid > 0) else {
+            return OccupancyObservation::default();
+        };
+        crate::sys::pid::occupancy(pid)
+    }
+
+    fn sealed_system_image(&self, pid: i64) -> Option<SealedSystemImage> {
+        let pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
+        crate::sys::pid::sealed_system_image(pid)
+    }
+
+    fn kernel_thread(&self, pid: i64) -> bool {
+        i32::try_from(pid)
+            .ok()
+            .filter(|pid| *pid > 0)
+            .is_some_and(crate::sys::pid::kernel_thread)
+    }
+
     fn unreadable_policy_uids(
         &self,
         pid: i64,

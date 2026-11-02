@@ -433,14 +433,18 @@ impl run::Providers for Registry<'_> {
             .adapter
             .failure_diagnostic(stderr)
     }
-    fn decode_with_context(
+    fn decode_captures(
         &self,
         route: &run::RouteRecord,
         stdout: &[u8],
+        stderr: &[u8],
         exit: &ExitObservation,
         provider_state: &Path,
-        context: &run::HolderContext,
+        context: Option<&run::HolderContext>,
     ) -> Result<run::Decoded, String> {
+        let Some(context) = context else {
+            return self.decode_inner(route, stdout, stderr, exit, provider_state, false);
+        };
         let (configuration_root, _) = context.disk_roots();
         // Every branch carries the holder home: without it the OpenCode
         // identity lookup has no `.local/share` fallback and decodes capture
@@ -452,7 +456,7 @@ impl run::Providers for Registry<'_> {
                 home: holder_home,
                 ..Default::default()
             }
-            .decode(route, stdout, exit, provider_state);
+            .decode_inner(route, stdout, stderr, exit, provider_state, false);
         }
         let mut inputs = provenant_core::RootInputs::new(
             context.roots.home.clone(),
@@ -468,7 +472,14 @@ impl run::Providers for Registry<'_> {
                     home: holder_home,
                     ..Default::default()
                 }
-                .decode(route, stdout, exit, provider_state)?;
+                .decode_inner(
+                    route,
+                    stdout,
+                    stderr,
+                    exit,
+                    provider_state,
+                    false,
+                )?;
                 if decoded.reason.as_deref().is_some_and(capacity_reason) {
                     let reason = decoded.reason.get_or_insert_with(String::new);
                     let mut end = reason
@@ -489,7 +500,7 @@ impl run::Providers for Registry<'_> {
             state_root: Some(configuration_root),
             ..Default::default()
         };
-        registry.decode_inner(route, stdout, exit, provider_state, true)
+        registry.decode_inner(route, stdout, stderr, exit, provider_state, true)
     }
     fn prepare(
         &self,
@@ -508,7 +519,7 @@ impl run::Providers for Registry<'_> {
         exit: &ExitObservation,
         provider_state: &Path,
     ) -> Result<run::Decoded, String> {
-        self.decode_inner(route, stdout, exit, provider_state, false)
+        self.decode_inner(route, stdout, &[], exit, provider_state, false)
     }
 }
 impl Registry<'_> {
@@ -516,6 +527,7 @@ impl Registry<'_> {
         &self,
         route: &run::RouteRecord,
         stdout: &[u8],
+        stderr: &[u8],
         exit: &ExitObservation,
         provider_state: &Path,
         host_settlement: bool,
@@ -559,6 +571,14 @@ impl Registry<'_> {
             return Ok(failed("provider outcome is malformed"));
         };
         events.extend(outcome.final_events().iter().cloned());
+        // Stderr quota text is evidence only for a run the adapter did not
+        // accept; a successful run may print incidental quota wording.
+        if adapter.id() == "opencode"
+            && !matches!(outcome.status(), OutcomeStatus::Success)
+            && let Some(event) = provenant_providers::opencode::stderr_quota(stderr)
+        {
+            events.push(event);
+        }
         let rollout = (adapter.id() == "codex").then(|| {
             outcome
                 .session()

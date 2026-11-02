@@ -11,21 +11,10 @@ const DEPTH: usize = 8;
 #[path = "preset_cli.rs"]
 mod presentation;
 
-/// The review shape selected for one review stage. Review shapes are canonical
-/// for who reviews; presets compose them, so lens counts and tiers default from here.
-/// Picks a review shape from a stage's `review_shape` and `risk_tier`. The host
-/// owns routing, so it supplies this from its review configuration.
-pub type ShapeSelector = Box<dyn Fn(Option<&str>, Option<&str>) -> Result<ShapeHint, String>>;
-
-#[derive(Clone, Debug, Default)]
-pub struct ShapeHint {
-    pub name: String,
-    pub source: String,
-    /// Reviewer pools in shape order, one entry per reviewer.
-    pub slots: Vec<String>,
-    /// Lens names a shape reviewer group names explicitly, with its pool.
-    pub named: Vec<(String, String)>,
-}
+mod panel;
+#[cfg(test)]
+pub use panel::ShapeHint;
+pub use panel::{ShapeSelector, review_selector};
 
 #[derive(Default)]
 pub struct Layers {
@@ -1668,89 +1657,6 @@ impl StageBuilder<'_> {
         Ok(incoming)
     }
 
-    /// The shape this stage's final parameters select, if shapes are configured.
-    fn shape_hint(&self) -> Result<Option<ShapeHint>, String> {
-        let Some(select) = &self.layers.review else {
-            return Ok(None);
-        };
-        let text = |key: &str| {
-            self.parameters
-                .get(key)
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-        };
-        let hint = select(text("review_shape"), text("risk_tier"))?;
-        self.layers
-            .used_shapes
-            .borrow_mut()
-            .insert(format!("{} ({})", hint.name, hint.source));
-        Ok(Some(hint))
-    }
-
-    /// Apply `when` triggers and the selected review shape to a lens list.
-    /// An item without a tier takes it from the shape, and only such items count
-    /// against the shape's reviewer total; a tier set in the preset is an override.
-    fn select_items(&self, list: Vec<Value>) -> Result<Vec<Value>, String> {
-        let mut tags: Vec<&str> = self
-            .parameters
-            .get("risk_tags")
-            .and_then(Value::as_array)
-            .map(|tags| tags.iter().filter_map(Value::as_str).collect())
-            .unwrap_or_default();
-        if self.parameters.get("risk_tier").and_then(Value::as_str) == Some("terminal") {
-            tags.push("terminal");
-        }
-        let hint = self.shape_hint()?;
-        let shape = hint.as_ref();
-        let limit = shape.map_or(usize::MAX, |shape| shape.slots.len().max(1));
-        let mut governed = 0usize;
-        let mut selected = Vec::new();
-        for mut item in list {
-            let when = item.get("when").and_then(Value::as_str).unwrap_or_default();
-            if !when.is_empty() && !tags.contains(&when) {
-                self.layers.warnings.borrow_mut().push(format!(
-                    "preset {}: omitted lens {}: requires risk tag {when}",
-                    self.name, item["name"]
-                ));
-                continue;
-            }
-            let tier = item.get("tier").and_then(Value::as_str).unwrap_or_default();
-            if tier.is_empty() {
-                let name = item["name"].as_str().unwrap_or_default().to_owned();
-                if when.is_empty() {
-                    if governed >= limit {
-                        self.layers.warnings.borrow_mut().push(format!(
-                            "preset {}: omitted lens {name}: review shape has {limit} slots",
-                            self.name
-                        ));
-                        continue;
-                    }
-                    governed += 1;
-                }
-                let pool = shape.and_then(|shape| {
-                    shape
-                        .named
-                        .iter()
-                        .find(|(lens, _)| name == *lens || name.starts_with(&format!("{lens}-")))
-                        .map(|(_, pool)| pool.clone())
-                        .or_else(|| {
-                            shape
-                                .slots
-                                .get(governed.saturating_sub(1))
-                                .or(shape.slots.last())
-                                .cloned()
-                        })
-                });
-                item["tier"] = json!(pool.unwrap_or_else(|| "senior".into()));
-            }
-            selected.push(item);
-        }
-        if selected.is_empty() {
-            return Err("for_each selected no items".into());
-        }
-        Ok(selected)
-    }
-
     fn entry(
         &mut self,
         entry: &Value,
@@ -2385,6 +2291,11 @@ pub(crate) fn bind_run_context(
             provenant_cli::Switch::Off => "off",
         });
     }
+    // `--exclude` binds every node the graph launches; an unknown selector
+    // was refused before this point.
+    if !request.route.exclude.is_empty() {
+        expansion.document["exclude"] = json!(request.route.exclude);
+    }
     let nodes = expansion.document["nodes"]
         .as_array_mut()
         .ok_or("missing graph nodes")?;
@@ -2865,23 +2776,11 @@ pub fn run(
         };
         let mut layers = configured(globals)?;
         layers.known_routes = Some(config.domains.routing.routes.keys().cloned().collect());
-        let review = config.domains.routing.review.clone();
-        layers.review = Some(Box::new(move |named, risk| {
-            let selected = review.select_shape(named, risk, None, &[])?;
-            let mut hint = ShapeHint {
-                name: selected.name.to_owned(),
-                source: selected.source.to_owned(),
-                ..Default::default()
-            };
-            for group in &selected.shape.reviewers {
-                hint.slots
-                    .extend(std::iter::repeat_n(group.pool.clone(), group.count));
-                for lens in &group.lenses {
-                    hint.named.push((lens.clone(), group.pool.clone()));
-                }
-            }
-            Ok(hint)
-        }));
+        layers.review = Some(review_selector(
+            config.domains.routing.review.clone(),
+            directory.clone(),
+            request.task_kind.clone(),
+        ));
         // Experiments apply only to work items and never beside an explicit
         // preset. A malformed entry warns and is skipped; the others still apply.
         let placement = match (request.preset.is_none(), request.task_id.as_ref()) {
@@ -2965,6 +2864,16 @@ pub fn run(
         }
         let name = selection.choice.preset.as_str();
         let mut params = selection.choice.parameters.into_iter().collect::<Vec<_>>();
+        if matches!(name, "review-council" | "big-batch")
+            && let Some(risk) = &request.risk_tier
+        {
+            params.push(("risk_tier".into(), json!(risk)));
+        }
+        if name == "review-council"
+            && let Some(kind) = &request.task_kind
+        {
+            params.push(("kind".into(), json!(kind)));
+        }
         file_params.into_iter().for_each(|(key, value)| {
             if let Some(existing) = params.iter_mut().find(|(name, _)| name == &key) {
                 existing.1 = value;
@@ -3010,6 +2919,7 @@ pub fn run(
             &config.domains.fabric.graph.allowed_read_roots,
             &policy_roots,
         );
+        provenant_cli::route::validate_exclusions(&request.route.exclude, &roots.roots)?;
         bind_run_context(
             &mut expansion,
             &request,

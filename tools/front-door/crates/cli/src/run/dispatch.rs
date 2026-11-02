@@ -654,6 +654,50 @@ pub(super) fn dispatch_inner(
     if command.route.read_heavy {
         command.knobs.push("routing.workload=read_heavy".into());
     }
+    if command.explain {
+        if command.input.manifest.is_some() {
+            return Err(Fail::new(
+                Status::Invalid,
+                ErrorKind::Invalid,
+                "--explain applies to one --route or --model, or to --preset",
+            ));
+        }
+        return crate::route::explain_dispatch(&command.route, edge.roots)
+            .map(|(data, text)| (data, text, false))
+            .map_err(|error| {
+                let refused = matches!(
+                    &error,
+                    crate::route::EdgeError::Routing(routing)
+                        if routing.code() == "no_eligible_pool_member"
+                );
+                Fail::new(
+                    if refused {
+                        Status::Refused
+                    } else {
+                        Status::Invalid
+                    },
+                    if refused {
+                        ErrorKind::Refused
+                    } else {
+                        ErrorKind::Invalid
+                    },
+                    error.to_string(),
+                )
+            });
+    }
+    if !command.route.exclude.is_empty() {
+        // Refuse an unknown selector before anything is submitted.
+        crate::route::exclusion_rules(
+            &command.route.exclude,
+            provenant_routing::ExclusionSource::Flag,
+            edge.roots,
+        )
+        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
+        command.knobs.push(format!(
+            "routing.flag_exclude={}",
+            serde_json::Value::from(command.route.exclude.clone())
+        ));
+    }
     let flag_route = (
         command.route.model.as_ref().map(|m| m.0.clone()),
         command.route.route.clone(),
@@ -676,6 +720,7 @@ pub(super) fn dispatch_inner(
                 remote,
                 branch,
                 open_pr: command.open_pr,
+                fast_forward_only: false,
             });
     if let Some(mode) = &command.deliver {
         let branch = if let Some(path) = &command.access.worktree {
@@ -1103,6 +1148,7 @@ pub(super) fn replay_owned_dispatch(
                 remote,
                 branch,
                 open_pr: command.open_pr,
+                fast_forward_only: false,
             }),
     };
     let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
@@ -1374,6 +1420,18 @@ impl run::Providers for PreparedProvider<'_> {
     }
     fn failure_diagnostic(&self, route: &run::RouteRecord, stderr: &[u8]) -> Option<String> {
         self.fallback.failure_diagnostic(route, stderr)
+    }
+    fn decode_captures(
+        &self,
+        route: &run::RouteRecord,
+        stdout: &[u8],
+        stderr: &[u8],
+        exit: &ExitObservation,
+        provider_state: &Path,
+        context: Option<&run::HolderContext>,
+    ) -> Result<run::Decoded, String> {
+        self.fallback
+            .decode_captures(route, stdout, stderr, exit, provider_state, context)
     }
 }
 

@@ -47,6 +47,41 @@ struct BoundDelivery {
     /// Destination sealed at launch; a later request edit cannot redirect it.
     destination: WriterDeliveryRequest,
 }
+const BINDING_FILE: &str = "delivery-binding.json";
+pub(crate) const HEAD_MISMATCH: &str = "worktree head differs from sealed delivery head";
+const BINDING_MISMATCH: &str = "delivery destination differs from the launch binding";
+const BINDING_MISSING: &str = "delivery launch binding was not sealed";
+
+/// Recovery cannot repair these; retrying them cannot change the answer.
+pub(crate) fn recovery_refused(error: &RunError) -> bool {
+    matches!(
+        error,
+        RunError::Validation(HEAD_MISMATCH | BINDING_MISMATCH | BINDING_MISSING)
+    )
+}
+
+/// The destination the host bound before the lane ran.
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
+struct LaunchBinding {
+    schema_version: u64,
+    scope: provenant_supervisor::custody::Scope,
+    push_url: String,
+    lane_branch: String,
+    pull_request_repo: Option<String>,
+    destination: WriterDeliveryRequest,
+}
+impl LaunchBinding {
+    fn new(scope: provenant_supervisor::custody::Scope, bound: &BoundDelivery) -> Self {
+        Self {
+            schema_version: 1,
+            scope,
+            push_url: bound.push_url.clone(),
+            lane_branch: bound.lane_branch.clone(),
+            pull_request_repo: bound.pull_request_repo.clone(),
+            destination: bound.destination.clone(),
+        }
+    }
+}
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct HostTools {
     git: PathBuf,
@@ -106,6 +141,65 @@ impl std::fmt::Debug for HostDeliveryContext {
 }
 
 impl HostDeliveryContext {
+    /// Rebuild the delivery binding after a restart. The destination sealed at
+    /// launch and the sealed head must both still hold; a mismatch is final.
+    pub(crate) fn prepare_recovery(
+        self,
+        writer: &WriterRequest,
+        request: &WriterDeliveryRequest,
+        attempt: &Directory,
+        scope: provenant_supervisor::custody::Scope,
+        head: GitOid,
+        base: GitOid,
+    ) -> Result<Self> {
+        let mut host = self.prepare(writer, request)?;
+        host.verify_launch_binding(attempt, scope)?;
+        if host.head(writer)? != head {
+            return Err(RunError::Validation(HEAD_MISMATCH));
+        }
+        host.bound
+            .as_mut()
+            .ok_or(RunError::Validation("delivery binding missing"))?
+            .base_head = base;
+        Ok(host)
+    }
+    /// Seal the destination bound at launch, replacing an earlier launch's.
+    pub(crate) fn seal_launch_binding(
+        &self,
+        attempt: &Directory,
+        scope: provenant_supervisor::custody::Scope,
+    ) -> Result<()> {
+        let bound = self
+            .bound
+            .as_ref()
+            .ok_or(RunError::Validation("delivery binding missing"))?;
+        attempt
+            .atomic_write(
+                OsStr::new(BINDING_FILE),
+                ".binding-",
+                &crate::db::bytes(&LaunchBinding::new(scope, bound))?,
+                provenant_os::fs::PublishMode::Replace,
+            )?
+            .require_durable()
+            .map_err(RunError::from)
+    }
+    fn verify_launch_binding(
+        &self,
+        attempt: &Directory,
+        scope: provenant_supervisor::custody::Scope,
+    ) -> Result<()> {
+        let sealed = crate::artifacts::read_sealed(attempt, BINDING_FILE, crate::RECORD_LIMIT)?
+            .ok_or(RunError::Validation(BINDING_MISSING))?;
+        let sealed: LaunchBinding = crate::db::decode(&sealed)?;
+        let bound = self
+            .bound
+            .as_ref()
+            .ok_or(RunError::Validation("delivery binding missing"))?;
+        if sealed != LaunchBinding::new(scope, bound) {
+            return Err(RunError::Validation(BINDING_MISMATCH));
+        }
+        Ok(())
+    }
     pub(crate) fn cancellable(&self, cancel: &provenant_core::CancelToken) -> Self {
         let mut context = self.clone();
         context.cancellation = Some(cancel.clone());
@@ -412,6 +506,7 @@ impl HostDeliveryContext {
             remote,
             branch: destination,
             open_pr,
+            fast_forward_only: false,
         };
         validate(&request)?;
         Ok(Some(request))
@@ -1470,6 +1565,9 @@ impl HostDeliveryContext {
             .is_ok()
         {
             head
+        } else if request.fast_forward_only {
+            // A loop round never merges: the target moved since the round began.
+            return Err(RunError::IntegrationHeadMoved);
         } else {
             // A configured merge driver may execute arbitrary repository code.
             if !self
@@ -1827,6 +1925,7 @@ pub(super) fn stdout_limit(commit_log: bool, args: &[&str]) -> usize {
 pub(crate) fn failed_state(error: &RunError) -> WriterDeliveryState {
     let (stage, reason) = match error {
         RunError::Delivery(stage) => (*stage, None),
+        RunError::IntegrationHeadMoved => (Stage::Integrate, None),
         RunError::DeliveryLimit { stage, .. } => (*stage, Some(prepare_reason(error))),
         RunError::DeliveryPrepare { .. } => (Stage::Prepare, Some(prepare_reason(error))),
         _ => (Stage::Push, None),
@@ -2229,6 +2328,13 @@ impl crate::RunStore {
                 crate::RECORD_LIMIT,
             )?;
             publish_pickup(&attempt, &request, &receipt)?;
+            let _ = self.record_effect(
+                id,
+                record.generation,
+                crate::SettlementEffect::Delivery,
+                crate::EffectDisposition::Done,
+                call,
+            );
         }
         Ok(receipt)
     }
@@ -2243,21 +2349,27 @@ pub(crate) fn deliver_once(
     attempt: &Directory,
     identity: &str,
 ) -> Result<WriterDeliveryReceipt> {
+    if let Some(raw) =
+        crate::artifacts::read_sealed(attempt, "delivery-cancelled.json", crate::RECORD_LIMIT)?
+    {
+        return crate::db::decode(&raw);
+    }
     if let Some(raw) = crate::artifacts::read_sealed(attempt, "delivery.json", crate::RECORD_LIMIT)?
     {
         return crate::db::decode(&raw);
     }
-    if host
-        .bound
-        .as_ref()
-        .is_none_or(|bound| bound.destination != *request)
+    let started =
+        crate::artifacts::read_sealed(attempt, "delivery-started.json", crate::RECORD_LIMIT)?;
+    if started.is_none()
+        && host
+            .bound
+            .as_ref()
+            .is_none_or(|bound| bound.destination != *request)
     {
         return Err(RunError::Validation(
             "delivery destination changed after launch",
         ));
     }
-    let started =
-        crate::artifacts::read_sealed(attempt, "delivery-started.json", crate::RECORD_LIMIT)?;
     let mut receipt = match &started {
         Some(raw) => crate::db::decode(raw)?,
         None => WriterDeliveryReceipt {
@@ -2310,9 +2422,21 @@ pub(crate) fn deliver_once(
             }
         };
     }
+    // Keep the start marker: an aborted remote command can have an unknown
+    // outcome. Automatic recovery must not repeat it, but explicit pickup may.
+    let name = if matches!(receipt.state, WriterDeliveryState::Failed { .. })
+        && host
+            .cancellation
+            .as_ref()
+            .is_some_and(|cancel| cancel.is_cancelled())
+    {
+        "delivery-cancelled.json"
+    } else {
+        "delivery.json"
+    };
     crate::artifacts::seal(
         attempt,
-        "delivery.json",
+        name,
         &crate::db::bytes(&receipt)?,
         crate::RECORD_LIMIT,
     )?;

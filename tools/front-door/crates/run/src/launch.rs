@@ -374,14 +374,17 @@ pub trait Providers {
         exit: &ExitObservation,
         provider_state: &std::path::Path,
     ) -> std::result::Result<Decoded, String>;
-    /// Decode with the host-sealed roots used by the guardian.
-    fn decode_with_context(
+    /// Decode the sealed captures: the single production entry point. `stderr`
+    /// is extra evidence for providers that report limits there, and `context`
+    /// carries the host-sealed roots used by the guardian.
+    fn decode_captures(
         &self,
         route: &RouteRecord,
         stdout: &[u8],
+        _stderr: &[u8],
         exit: &ExitObservation,
         provider_state: &std::path::Path,
-        _context: &crate::HolderContext,
+        _context: Option<&crate::HolderContext>,
     ) -> std::result::Result<Decoded, String> {
         self.decode(route, stdout, exit, provider_state)
     }
@@ -849,7 +852,7 @@ impl RunStore {
             let id: String = row.get(0)?;
             let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
             let raw: Vec<u8> = row.get(1)?;
-            let record: AttemptRecord = decode(&raw)?;
+            let record: AttemptRecord = crate::db::decode_attempt(&raw)?;
             if let Some(reason) = self.child_attempt_reason(run, request, &record)? {
                 attempts.refusals.insert(id, reason);
                 continue;
@@ -957,7 +960,7 @@ impl RunStore {
         };
         let mut runs = std::collections::BTreeSet::new();
         for raw in records {
-            let record: AttemptRecord = crate::db::decode(&raw)?;
+            let record: AttemptRecord = crate::db::decode_attempt(&raw)?;
             if matches!(record.state, AttemptState::Queued { .. }) {
                 runs.insert(record.run_id);
             }

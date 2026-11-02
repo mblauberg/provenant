@@ -1008,6 +1008,7 @@ pub(crate) fn tick_graphs(
                     integration_base: execution.integration_base,
                     integration_branch: execution.document.integration_branch.clone(),
                     network: graph_network(&execution.document)?,
+                    exclude: graph_exclude(&execution.document)?,
                     budget,
                     cancel: &cancel,
                     prices: None,
@@ -2526,6 +2527,9 @@ struct BoundGraphOwner<'a> {
     /// The graph's explicit network reach for every node lane, such as
     /// `run --network off` bound before automatic preset selection.
     network: Option<provenant_cli::Switch>,
+    /// The graph's route-exclusion selectors, passed to each node as the
+    /// `routing.graph_exclude` knob.
+    exclude: Vec<String>,
     budget: WaitBudget,
     cancel: &'a CancelToken,
     prices: Option<Result<provenant_telemetry::PriceTable, String>>,
@@ -3073,6 +3077,7 @@ fn advance_graphs_after_settlement(
                 integration_base: execution.integration_base,
                 integration_branch: execution.document.integration_branch.clone(),
                 network: graph_network(&execution.document)?,
+                exclude: graph_exclude(&execution.document)?,
                 budget,
                 cancel: &cancel,
                 prices: None,
@@ -3371,7 +3376,6 @@ fn settle_owned_worktree(
                     keep: &settings.keep,
                     written_before_ns: i128::MAX,
                     foreign_merged_clean: false,
-                    foreign_idle_before_ns: None,
                     dry_run: false,
                 };
                 // A failed pre-prune step must not replace a retained lane's
@@ -4150,6 +4154,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 }
                 provenant_run::HostDeliveryContext::destination(mode.clone(), &branch)
                     .map_err(run_error)?
+                    .map(|mut request| {
+                        request.fast_forward_only = replay.fast_forward_only;
+                        request
+                    })
             } else {
                 None
             };
@@ -4210,7 +4218,14 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     new_worktree: None,
                 }],
                 concurrency: Some(1),
-                knobs: vec![],
+                knobs: if self.exclude.is_empty() {
+                    vec![]
+                } else {
+                    vec![format!(
+                        "routing.graph_exclude={}",
+                        serde_json::Value::from(self.exclude.clone())
+                    )]
+                },
                 host: None,
             };
             // Operation replay is actor-scoped: submit under the recorded launch actor.
@@ -4397,6 +4412,25 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         }
     }
 }
+/// A graph document's optional top-level `exclude` list of route-exclusion
+/// selectors, inherited by every node it launches.
+fn graph_exclude(
+    document: &provenant_fabric_runtime::graph::GraphDocument,
+) -> Result<Vec<String>, FacadeError> {
+    match document.extra.get("exclude") {
+        None => Ok(Vec::new()),
+        Some(value) => value
+            .as_array()
+            .ok_or(FacadeError::InvalidInput)?
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .map(str::to_owned)
+                    .ok_or(FacadeError::InvalidInput)
+            })
+            .collect(),
+    }
+}
 /// A graph document's optional top-level `network` (`"on"` or `"off"`),
 /// applied to every node lane it launches.
 fn graph_network(
@@ -4526,6 +4560,35 @@ impl Factory {
                             writer.branch.as_str().trim_start_matches("refs/heads/"),
                         )
                         .map_err(|_| FacadeError::ConfinementRefused)?;
+                    }
+                    // A local target checked out in the writer's own worktree
+                    // cannot be advanced by compare-and-swap, so refuse the
+                    // graph before any attempt rather than at delivery.
+                    if !admitted
+                        && let Some(provenant_records::run::DeliveryMode::Integrate(target)) =
+                            &node.delivery
+                        && !target.starts_with("origin/")
+                        && let Some(path) = node.worktree.as_deref()
+                    {
+                        let writer = provenant_run::resolve_writer(
+                            self.context.roots.state.as_path(),
+                            &self.cwd,
+                            Path::new(path),
+                        )
+                        .map_err(run_error)?;
+                        let writer = provenant_run::prepare_writer(
+                            &writer,
+                            self.context.roots.state.as_path(),
+                            self.context.identity.project,
+                        )
+                        .map_err(run_error)?;
+                        if writer.branch.as_str().trim_start_matches("refs/heads/") == target {
+                            return Err(FacadeError::DispatchRefused {
+                                reason: format!(
+                                    "worktree {path} is on the integration branch {target}; create it with `git worktree add -b batch/work PATH BASE`"
+                                ),
+                            });
+                        }
                     }
                 }
                 Some(document)
@@ -4666,6 +4729,7 @@ impl Factory {
                 integration_base,
                 integration_branch: document.integration_branch.clone(),
                 network: graph_network(document)?,
+                exclude: graph_exclude(document)?,
                 budget,
                 cancel,
                 prices: None,
@@ -4752,6 +4816,7 @@ impl Factory {
                 integration_base: None,
                 integration_branch: None,
                 network: None,
+                exclude: Vec::new(),
                 budget,
                 cancel,
                 prices: None,

@@ -1,17 +1,27 @@
 use super::*;
 use provenant_records::{result_capture::CapturedResult, workflow::ReviewVerdict};
 
+mod report;
+mod shape;
+use report::{aggregate_verdicts, review_text};
+
 /// Admit reviewers through the ordinary run scheduler and collate their results.
 pub fn review(command: crate::Review, edge: &Edge<'_>) -> Reply {
     let mut data = json!({"reviewers": []});
+    let explain = command.explain;
     let outcome = review_inner(command, edge, &mut data);
-    let collected = review_collect(edge, &mut data);
+    let collected = if explain {
+        Ok(())
+    } else {
+        review_collect(edge, &mut data)
+    };
     let verdicts = aggregate_verdicts(&data);
     data["verdicts"] = verdicts;
     let human = review_text(&data);
     let (status, error) = match (outcome, collected) {
         (Err(error), _) | (Ok(_), Err(error)) => (error.status, Some(error)),
         (Ok(true), Ok(())) => (Status::Timeout, None),
+        (Ok(false), Ok(())) if explain => (Status::Ok, None),
         (Ok(false), Ok(()))
             if data["reviewers"].as_array().is_some_and(|rows| {
                 rows.iter()
@@ -35,7 +45,7 @@ pub fn review(command: crate::Review, edge: &Edge<'_>) -> Reply {
         result,
         human,
         summary: None,
-        read_only: false,
+        read_only: explain,
     }
 }
 
@@ -71,32 +81,45 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
     ])?
     .trim()
     .to_owned();
-    let paths: Vec<String> =
-        if let Some(range) = selection_range(command.shape.as_deref(), command.range.as_deref())? {
-            git(&["diff", "--no-renames", "--name-only", "-z", range, "--"])?
-                .split('\0')
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-                .collect()
-        } else {
-            vec![]
-        };
     let brief = read_bounded(&command.brief_file)?;
+    // Different exclusions are a different request, so a slot's identity covers them.
+    let identity_brief = if command.exclude.is_empty() {
+        brief.clone()
+    } else {
+        format!(
+            "{brief}\nexclude:{}",
+            serde_json::Value::from(command.exclude.clone())
+        )
+    };
     let domains = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
         .map_err(|e| invalid(e.to_string()))?
         .domains;
-    let selected = domains
-        .routing
-        .review
+    let routing = &domains.routing.review;
+    let inputs = shape::inputs(
+        &git,
+        routing,
+        command.shape.as_deref(),
+        command.range.as_deref(),
+        &head,
+        command.kind.as_deref(),
+    )?;
+    let (paths, size) = (inputs.paths, inputs.size);
+    data["warnings"] = json!(inputs.warnings);
+    let selected = routing
         .select_shape(
             command.shape.as_deref(),
             command.risk.as_deref(),
             command.kind.as_deref(),
             &paths,
+            size,
         )
         .map_err(invalid)?;
-    if selected
-        .shape
+    let panel_shape = routing.panel(
+        selected.shape,
+        command.kind.as_deref(),
+        &provenant_routing::risk_lenses(&command.risk_tags, command.risk.as_deref()),
+    );
+    if panel_shape
         .reviewers
         .iter()
         .map(|group| group.count)
@@ -105,9 +128,40 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
     {
         return Err(invalid("review shape exceeds 64 reviewers".into()));
     }
+    // Refuse an unknown selector before any reviewer is submitted.
+    crate::route::exclusion_rules(
+        &command.exclude,
+        provenant_routing::ExclusionSource::Flag,
+        edge.roots,
+    )
+    .map_err(|e| invalid(e.to_string()))?;
+    let knobs: Vec<String> = if command.exclude.is_empty() {
+        vec![]
+    } else {
+        vec![format!(
+            "routing.flag_exclude={}",
+            serde_json::Value::from(command.exclude.clone())
+        )]
+    };
     data["shape"] = json!(selected.name);
     data["selection_source"] = json!(selected.source);
+    data["size"] = json!(size);
+    data["kind"] = json!(command.kind);
+    data["risk"] = json!(command.risk);
+    data["risk_tags"] = json!(command.risk_tags);
     data["target"] = json!(head);
+
+    if command.explain {
+        for group in &panel_shape.reviewers {
+            for lens in &group.lenses {
+                data["reviewers"]
+                    .as_array_mut()
+                    .ok_or_else(|| invalid("invalid review result".into()))?
+                    .push(json!({"lens": lens, "pool": group.pool, "state": "planned"}));
+            }
+        }
+        return Ok(false);
+    }
 
     let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| invalid(e.to_string()))?;
     let clock = SystemClock::new();
@@ -128,14 +182,14 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
         })
     };
     let mut slots = Vec::new();
-    for (group_index, group) in selected.shape.reviewers.iter().enumerate() {
+    for (group_index, group) in panel_shape.reviewers.iter().enumerate() {
         for index in 0..group.count {
             let lens = group.lenses.get(index).cloned();
             let (operation_id, task_id) = review_identity(
                 &head,
                 selected.name,
-                selected.shape,
-                &brief,
+                &panel_shape,
+                &identity_brief,
                 group_index,
                 index,
                 0,
@@ -169,8 +223,8 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
         let choice = recover_slot(
             &head,
             selected.name,
-            selected.shape,
-            &brief,
+            &panel_shape,
+            &identity_brief,
             slot.group,
             slot.index,
             |id| inspect_slot(&session, id, &call),
@@ -252,7 +306,7 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
                         chair: chair.clone(),
                         operation_id: slot.operation_id.clone(),
                         concurrency: Some(1),
-                        knobs: vec![],
+                        knobs: knobs.clone(),
                         tasks: vec![review_task(slot, &head, &brief, families)],
                     },
                     &call,
@@ -526,23 +580,6 @@ fn review_task(slot: &ReviewSlot, head: &str, brief: &str, families: Vec<String>
     }
 }
 
-fn selection_range<'a>(
-    shape: Option<&str>,
-    range: Option<&'a str>,
-) -> Result<Option<&'a str>, Fail> {
-    if shape.is_some() {
-        return Ok(None);
-    }
-    if range.is_some_and(|range| range.starts_with('-')) {
-        return Err(Fail::new(
-            Status::Invalid,
-            ErrorKind::Invalid,
-            "git range must not begin with -",
-        ));
-    }
-    Ok(range)
-}
-
 fn review_collect(edge: &Edge<'_>, data: &mut Value) -> Result<(), Fail> {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -647,96 +684,6 @@ fn captured_review_verdict(captured: &CapturedResult) -> Option<ReviewVerdict> {
         _ => None,
     }
 }
-fn aggregate_verdicts(data: &Value) -> Value {
-    let mut counts = json!({"approve": 0, "approve_with_nits": 0, "request_changes": 0, "inconclusive": 0, "unknown": 0, "not_submitted": 0});
-    if let Some(rows) = data["reviewers"].as_array() {
-        for row in rows {
-            let verdict = row["verdict"].as_str().unwrap_or("unknown");
-            let key = if row["state"] == "not_submitted" {
-                "not_submitted"
-            } else {
-                match verdict {
-                    "approve" | "approve_with_nits" | "request_changes" | "inconclusive" => verdict,
-                    _ => "unknown",
-                }
-            };
-            counts[key] = json!(counts[key].as_u64().unwrap_or(0) + 1);
-        }
-    }
-    counts
-}
-fn review_text(data: &Value) -> String {
-    let mut text = format!(
-        "review {} ({})\n",
-        data["shape"].as_str().unwrap_or("unknown"),
-        data["selection_source"].as_str().unwrap_or("unknown")
-    );
-    if let Some(rows) = data["reviewers"].as_array() {
-        for row in rows {
-            let model = row["applied_route"]["model"]
-                .as_str()
-                .unwrap_or("unresolved");
-            let effort = row["applied_route"]["effort"]
-                .as_str()
-                .map(|e| format!("@{e}"))
-                .unwrap_or_default();
-            text.push_str(&format!(
-                "  run={} operation={} {}{} state={} verdict={} output={}{}\n",
-                row["run_id"].as_str().unwrap_or("unknown"),
-                row["operation_id"].as_str().unwrap_or("unknown"),
-                model,
-                effort,
-                row["state"].as_str().unwrap_or("pending"),
-                row["verdict"].as_str().unwrap_or("unknown"),
-                row["result_path"].as_str().unwrap_or("none"),
-                if row["substitution"].as_bool() == Some(true) {
-                    " (family substitution)"
-                } else {
-                    ""
-                }
-            ));
-            if let Some(id) = row["run_id"].as_str()
-                && matches!(
-                    row["state"].as_str(),
-                    Some("queued" | "starting" | "running" | "settling" | "submitted")
-                )
-            {
-                text.push_str(&format!("    collect: provenant lanes --id {id} --wait 4m; cancel: provenant cancel {id}\n"));
-            }
-        }
-    }
-    if data["reviewers"]
-        .as_array()
-        .is_some_and(|rows| rows.iter().any(|row| row["state"] == "not_submitted"))
-    {
-        text.push_str("  Retry the same review command to submit remaining reviewers and reattach to existing runs.\n");
-    }
-    if data["reviewers"].as_array().is_some_and(|rows| {
-        rows.iter().any(|row| {
-            matches!(
-                row["state"].as_str(),
-                Some(
-                    "failed"
-                        | "rejected"
-                        | "cancelled"
-                        | "timed_out"
-                        | "rate_limited"
-                        | "quota_limited"
-                        | "auth_required"
-                        | "model_unavailable"
-                        | "permission_denied"
-                        | "quarantined"
-                        | "lost"
-                        | "uncommitted"
-                )
-            )
-        })
-    }) {
-        text.push_str("  Retry the same review command to resubmit failed or cancelled reviewers and reattach to the others.\n");
-    }
-    text
-}
-
 #[cfg(test)]
 mod review_shape_tests {
     use super::*;
@@ -1007,23 +954,11 @@ mod review_shape_tests {
         );
     }
     #[test]
-    fn explicit_shape_skips_range_validation() {
-        assert_eq!(
-            selection_range(Some("quick"), Some("-invalid")).unwrap(),
-            None
-        );
-        assert!(selection_range(None, Some("-invalid")).is_err());
-        assert_eq!(
-            selection_range(None, Some("main..HEAD")).unwrap(),
-            Some("main..HEAD")
-        );
-    }
-    #[test]
     fn text_reports_partial_run_and_actual_receipt() {
         let data = json!({"shape":"deep","selection_source":"by_risk","reviewers":[{"run_id":"abc","operation_id":"op","applied_route":{"model":"codex/test","effort":"high"},"state":"failed","verdict":"unknown","result_path":"/output","substitution":true}]});
         let text = review_text(&data);
         for expected in [
-            "deep (by_risk)",
+            "deep (by_risk; size=unknown; kind=unknown; risk=unknown)",
             "run=abc",
             "codex/test@high",
             "state=failed",
@@ -1034,5 +969,13 @@ mod review_shape_tests {
         ] {
             assert!(text.contains(expected), "{text}");
         }
+    }
+    #[test]
+    fn text_snapshots_panel_and_reason() {
+        let data = json!({"shape":"quick","selection_source":"by_size","size":"small","kind":"code","risk":"routine","reviewers":[{"lens":"correctness-spec","pool":"junior","state":"planned"}]});
+        assert_eq!(
+            review_text(&data),
+            "review quick (by_size; size=small; kind=code; risk=routine)\n  lens=correctness-spec pool=junior\n"
+        );
     }
 }

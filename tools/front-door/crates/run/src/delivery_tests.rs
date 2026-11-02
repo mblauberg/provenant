@@ -7,6 +7,317 @@ use provenant_os::fs::Directory;
 use std::{ffi::OsString, path::Path, time::Duration};
 
 #[test]
+fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    for mode in [
+        "pending",
+        "retryable",
+        "uncertain",
+        "cancelled",
+        "late_cancel",
+        "failed_legacy",
+        "cancelled_legacy",
+        "definite_failed",
+        "binding_mismatch",
+        "head_mismatch",
+        "writer_busy",
+        "effects_busy",
+    ] {
+        let fixture = PrepareFixture::new()?;
+        let execution = registered_landed_writer_fixture(&fixture)?;
+        let host = fixture.prepare()?;
+        let base = host.head(&fixture.writer)?;
+        fixture.commit(&fixture.writer.worktree, "writer change")?;
+        let head = host.head(&fixture.writer)?;
+        let (clock, cancel) = (tests::clock(), provenant_core::CancelToken::new());
+        let call = tests::call(&clock, &cancel);
+        let store = RunStore::open(&execution, &call)?;
+        let mut input = tests::input();
+        input.request.tasks[0].writer = Some(fixture.writer.clone());
+        input.request.tasks[0].deliver = Some(fixture.request.clone());
+        store.create(&input, &call)?;
+        let id = input.attempts[0].attempt_id;
+        let attempt = store.attempt_dir(input.run_id, id, false)?;
+        let scope = RunStore::scope(&store.record(id, &call)?);
+        let mut driver =
+            crate::settlement::Guard::claim(&attempt, scope, &clock)?.ok_or("driver")?;
+        driver.set_base(base)?;
+        driver.set_head(head)?;
+        driver.advance(crate::settlement::Phase::Record)?;
+        drop(driver);
+        host.seal_launch_binding(&attempt, scope)?;
+        if mode == "binding_mismatch" {
+            let other = fixture.root.join("other.git");
+            fixture.git(&["init", "--bare", "-q", other.to_str().ok_or("other")?])?;
+            fixture.git(&[
+                "remote",
+                "set-url",
+                "--push",
+                "origin",
+                other.to_str().ok_or("other")?,
+            ])?;
+        }
+        if mode == "head_mismatch" {
+            fixture.commit(&fixture.writer.worktree, "after the sealed head")?;
+        }
+        artifacts::seal(
+            &attempt,
+            "writer-terminal.json",
+            &db::bytes(&writer::WriterTerminal {
+                schema_version: 1,
+                head,
+                protected_paths: vec![],
+            })?,
+            RECORD_LIMIT,
+        )?;
+        let initial = if mode == "retryable" {
+            EffectDisposition::Failed {
+                reason: "prepare failed before start".into(),
+                retryable: true,
+            }
+        } else {
+            EffectDisposition::Pending
+        };
+        if !mode.ends_with("_legacy") {
+            artifacts::seal(
+                &attempt,
+                "terminal-effects.json",
+                &db::bytes(&store::TerminalEffects {
+                    schema_version: 1,
+                    scope,
+                    effects: vec![
+                        (SettlementEffect::GitImport, EffectDisposition::Done),
+                        (SettlementEffect::ManifestConflict, EffectDisposition::Done),
+                        (SettlementEffect::Delivery, initial),
+                    ],
+                })?,
+                RECORD_LIMIT,
+            )?;
+        }
+        let lock = attempt.try_lock(
+            std::ffi::OsStr::new("custody.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
+        drop(lock);
+        let mut observed = tests::exit();
+        let mut publication = tests::publication();
+        if mode == "failed_legacy" {
+            publication.outcome = Outcome::Failed;
+        }
+        if mode == "cancelled_legacy" {
+            publication.outcome = Outcome::Cancelled;
+            observed.cancel_delivered_before_exit = Some(true);
+        }
+        dispatch_tests::seal_exit(&store, &observed)?;
+        let record = store.publish_terminal(id, 1, &publication, &observed, &call)?;
+        let decision =
+            artifacts::read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?.unwrap();
+        if mode == "uncertain" {
+            artifacts::seal(
+                &attempt,
+                "delivery-started.json",
+                &db::bytes(&WriterDeliveryReceipt {
+                    extra: Default::default(),
+                    schema_version: 1,
+                    remote: fixture.request.remote.clone(),
+                    branch: fixture.request.branch.clone(),
+                    head: Some(head),
+                    review_acceptance: None,
+                    state: WriterDeliveryState::Failed {
+                        extra: Default::default(),
+                        stage: WriterDeliveryStage::Interrupted,
+                    },
+                })?,
+                RECORD_LIMIT,
+            )?;
+        } else if mode == "definite_failed" {
+            artifacts::seal(
+                &attempt,
+                "delivery.json",
+                &db::bytes(&WriterDeliveryReceipt {
+                    extra: Default::default(),
+                    schema_version: 1,
+                    remote: fixture.request.remote.clone(),
+                    branch: fixture.request.branch.clone(),
+                    head: Some(head),
+                    review_acceptance: None,
+                    state: WriterDeliveryState::Failed {
+                        extra: Default::default(),
+                        stage: WriterDeliveryStage::Push,
+                    },
+                })?,
+                RECORD_LIMIT,
+            )?;
+        } else if mode == "cancelled" {
+            let token = provenant_core::CancelToken::new();
+            token.cancel();
+            deliver_once(
+                &host.cancellable(&token),
+                &fixture.writer,
+                &fixture.request,
+                &attempt,
+                "cancelled",
+            )?;
+        } else if mode == "late_cancel" {
+            let completed = deliver_once(
+                &host,
+                &fixture.writer,
+                &fixture.request,
+                &attempt,
+                "completed",
+            )?;
+            let token = provenant_core::CancelToken::new();
+            token.cancel();
+            assert_eq!(
+                deliver_once(
+                    &host.cancellable(&token),
+                    &fixture.writer,
+                    &fixture.request,
+                    &attempt,
+                    "late cancel"
+                )?,
+                completed
+            );
+        }
+        drop(store);
+        let store = RunStore::open(&execution, &call)?;
+        assert_eq!(
+            store
+                .pending_effect_attempts(input.run_id, &call)?
+                .contains(&id),
+            !mode.ends_with("_legacy")
+        );
+        if matches!(mode, "writer_busy" | "effects_busy") {
+            // A busy lock leaves the effect pending without an error.
+            let slot = store.writer_custody_directory(&record, &fixture.writer)?;
+            let (directory, name) = if mode == "writer_busy" {
+                (&slot, "writer.lock")
+            } else {
+                (&attempt, "terminal-effects.lock")
+            };
+            let held = directory.try_lock(
+                std::ffi::OsStr::new(name),
+                provenant_os::fs::LockMode::Exclusive,
+            )?;
+            store.reconcile_terminal_effects(&record, &call)?;
+            assert!(matches!(
+                store
+                    .record(id, &call)?
+                    .settlement_receipts
+                    .unwrap()
+                    .delivery,
+                EffectDisposition::Pending
+            ));
+            assert!(
+                !fixture
+                    .root
+                    .join("remote.git/refs/heads/published/lane")
+                    .exists(),
+                "{mode}: nothing is delivered while the lock is busy"
+            );
+            drop(held);
+        }
+        store.reconcile_terminal_effects(&record, &call)?;
+        let recovered = store.record(id, &call)?;
+        assert_eq!(recovered.head, Some(head));
+        assert_eq!(recovered.state, record.state);
+        assert_eq!(
+            artifacts::read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?.unwrap(),
+            decision
+        );
+        let receipts = recovered.settlement_receipts.unwrap();
+        if matches!(
+            mode,
+            "pending" | "retryable" | "late_cancel" | "writer_busy" | "effects_busy"
+        ) {
+            assert!(
+                matches!(receipts.delivery, EffectDisposition::Done),
+                "{mode}: {receipts:?}"
+            );
+            assert_ne!(
+                receipts.cancellation,
+                Some(CancellationDisposition::DeliveryEffective)
+            );
+            fixture.git(&[
+                "--git-dir",
+                fixture.root.join("remote.git").to_str().ok_or("remote")?,
+                "show-ref",
+                "--verify",
+                &format!("refs/heads/{}", fixture.request.branch),
+            ])?;
+        } else if mode.ends_with("_legacy") {
+            assert!(matches!(receipts.delivery, EffectDisposition::Done));
+            assert!(
+                !fixture
+                    .root
+                    .join("remote.git/refs/heads/published/lane")
+                    .exists(),
+                "ineligible legacy receipt must not deliver"
+            );
+        } else {
+            assert!(
+                !fixture
+                    .root
+                    .join("remote.git/refs/heads/published/lane")
+                    .exists(),
+                "uncertain delivery must not repeat"
+            );
+            if mode == "cancelled" {
+                assert!(matches!(
+                    receipts.delivery,
+                    EffectDisposition::Cancelled {
+                        retryable: true,
+                        ..
+                    }
+                ));
+                assert_eq!(
+                    receipts.cancellation,
+                    Some(CancellationDisposition::DeliveryEffective)
+                );
+                let pickup = store.deliver(
+                    id,
+                    None,
+                    HostDeliveryContext::new(fixture.environment.clone()),
+                    false,
+                    &call,
+                )?;
+                assert!(matches!(
+                    pickup.state,
+                    WriterDeliveryState::Delivered { .. }
+                ));
+                store.reconcile_terminal_effects(&store.record(id, &call)?, &call)?;
+                assert!(matches!(
+                    store
+                        .record(id, &call)?
+                        .settlement_receipts
+                        .unwrap()
+                        .delivery,
+                    EffectDisposition::Done
+                ));
+            } else {
+                let EffectDisposition::Failed { reason, retryable } = &receipts.delivery else {
+                    panic!("{mode}: {receipts:?}");
+                };
+                assert!(!retryable, "{mode}: {reason}");
+                // Only a start marker without a result is uncertain.
+                assert_eq!(
+                    reason.contains("uncertain"),
+                    mode == "uncertain",
+                    "{reason}"
+                );
+                match mode {
+                    "binding_mismatch" => assert!(reason.contains("launch binding"), "{reason}"),
+                    "head_mismatch" => assert!(reason.contains("sealed delivery head"), "{reason}"),
+                    "definite_failed" => assert!(reason.contains("Push"), "{reason}"),
+                    _ => {}
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn prepare_reports_missing_git_with_git_code() -> std::result::Result<(), Box<dyn std::error::Error>>
 {
     let fixture = PrepareFixture::new()?;
@@ -200,7 +511,10 @@ fn terminal_outcomes_remove_the_launch_base_pin_and_interrupted_import_ref()
         input.request.tasks[0].writer = Some(fixture.writer.clone());
         store.create(&input, &call)?;
         let id = input.attempts[0].attempt_id;
-        let exit = tests::exit();
+        let mut exit = tests::exit();
+        if outcome == Outcome::Cancelled {
+            exit.cancel_delivered_before_exit = Some(true);
+        }
         let attempt = store.attempt_dir(input.run_id, id, false)?;
         let launch = crate::prepare_writer(
             &fixture.writer,
@@ -1769,6 +2083,47 @@ fn local_integration_fast_forwards_merges_and_replays()
 }
 
 #[test]
+fn fast_forward_only_integration_advances_but_never_merges()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    fixture.git(&["branch", "integration"])?;
+    fixture.request =
+        HostDeliveryContext::destination(DeliveryMode::Integrate("integration".into()), "lane")?
+            .ok_or("destination")?;
+    fixture.request.fast_forward_only = true;
+    let host = fixture.prepare()?;
+    let rev = |fixture: &PrepareFixture, name: &str| {
+        host.command(
+            &fixture.writer.project,
+            "git",
+            &["rev-parse", name],
+            WriterDeliveryStage::Verify,
+        )
+    };
+    // A descendant of the target fast-forwards it.
+    fixture.commit(&fixture.writer.worktree, "round one")?;
+    let first = host.head(&fixture.writer)?;
+    host.integrate(&fixture.writer, &fixture.request, first)?;
+    assert_eq!(rev(&fixture, "integration")?, first.to_string());
+    // A head the target already contains integrates nothing and is not an error.
+    host.integrate(&fixture.writer, &fixture.request, first)?;
+    // The target moved elsewhere: the round is refused instead of merged.
+    fixture.commit(&fixture.writer.project, "someone else")?;
+    fixture.git(&["branch", "-f", "integration", "HEAD"])?;
+    let moved = rev(&fixture, "integration")?;
+    fixture.commit(&fixture.writer.worktree, "round two")?;
+    let second = host.head(&fixture.writer)?;
+    let refused = host
+        .integrate(&fixture.writer, &fixture.request, second)
+        .unwrap_err();
+    assert!(matches!(refused, RunError::IntegrationHeadMoved));
+    assert!(refused.to_string().contains("integration_head_moved"));
+    assert!(refused.to_string().contains("rerun"));
+    assert_eq!(rev(&fixture, "integration")?, moved);
+    Ok(())
+}
+
+#[test]
 fn local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut fixture = PrepareFixture::new()?;
@@ -2399,6 +2754,7 @@ impl PrepareFixture {
                 remote: "origin".into(),
                 branch: "published/lane".into(),
                 open_pr: false,
+                fast_forward_only: false,
             },
         };
         fixture.git(&["init", "-q"])?;
@@ -2609,8 +2965,19 @@ impl PrepareFixture {
             clock.wait_until(provenant_core::MonoTime::from_micros(
                 clock.mono_now().as_micros() + 120_000_000,
             ))?;
-            settlement =
-                crate::settlement::Guard::claim(&attempt, scope, &clock)?.ok_or("resumed owner")?;
+            // The claim is a zero-wait try_lock, and a sibling test's forked
+            // child can briefly share the dropped lock's open file description
+            // until it execs. Retry for about five seconds.
+            let mut resumed = None;
+            for _ in 0..500 {
+                resumed = crate::settlement::Guard::claim(&attempt, scope, &clock)?;
+                if resumed.is_some() {
+                    break;
+                }
+                #[allow(clippy::disallowed_methods)]
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            settlement = resumed.ok_or("resumed owner")?;
         }
         let review = launch.terminal(
             &state,
@@ -3357,6 +3724,7 @@ fn host_delivery_fetches_commits_pushes_and_records_upstream()
         remote: "origin".into(),
         branch: "published/lane".into(),
         open_pr: false,
+        fast_forward_only: false,
     };
     let host = host.prepare(&writer, &request)?;
     assert!(
@@ -3912,6 +4280,88 @@ fn delivery_cancellation_stops_its_running_git_child()
 }
 
 #[test]
+fn delivery_cancelled_receipt_preserves_start_without_permanent_failure()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let host = fixture.prepare()?;
+    let attempt_path = fixture.root.join("cancelled-attempt");
+    std::fs::create_dir(&attempt_path)?;
+    let attempt = Directory::open_anchor(&attempt_path)?;
+    let cancel = provenant_core::CancelToken::new();
+    cancel.cancel();
+    let receipt = crate::delivery::deliver_once(
+        &host.cancellable(&cancel),
+        &fixture.writer,
+        &fixture.request,
+        &attempt,
+        "cancelled test",
+    )?;
+    assert!(matches!(receipt.state, WriterDeliveryState::Failed { .. }));
+    assert!(attempt_path.join("delivery-started.json").exists());
+    assert!(attempt_path.join("delivery-cancelled.json").exists());
+    assert!(!attempt_path.join("delivery.json").exists());
+    assert_eq!(
+        crate::delivery::deliver_once(
+            &host,
+            &fixture.writer,
+            &fixture.request,
+            &attempt,
+            "recovery"
+        )?,
+        receipt
+    );
+    Ok(())
+}
+
+#[test]
+fn publication_cleanup_never_removes_another_import_pin()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let execution = registered_landed_writer_fixture(&fixture)?;
+    let (clock, cancel) = (tests::clock(), provenant_core::CancelToken::new());
+    let call = tests::call(&clock, &cancel);
+    let store = RunStore::open(&execution, &call)?;
+    let mut input = tests::input();
+    input.request.tasks[0].writer = Some(fixture.writer.clone());
+    store.create(&input, &call)?;
+    let id = input.attempts[0].attempt_id;
+    dispatch_tests::seal_exit(&store, &tests::exit())?;
+    let record = store.publish_terminal(id, 1, &tests::publication(), &tests::exit(), &call)?;
+    let head = fixture.prepare()?.head(&fixture.writer)?;
+    let mut launch = crate::prepare_writer(
+        &fixture.writer,
+        execution.state_root.as_path(),
+        execution.project_id,
+    )?;
+    let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
+    let scope = provenant_supervisor::custody::Scope {
+        attempt: provenant_core::AttemptId::from_bytes([99; 16]),
+        // A live lease never has generation 0; the record's own scope does.
+        generation: 1,
+        ..RunStore::scope(&record)
+    };
+    let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+        directory,
+        scope,
+        binding,
+        call.lock_budget(),
+        &cancel,
+        &clock,
+    )?;
+    let reference = format!("refs/provenant/import/{head}");
+    fixture.git(&["update-ref", &reference, &head.to_string()])?;
+    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let mut driver = crate::settlement::Guard::claim(&attempt, RunStore::scope(&record), &clock)?
+        .ok_or("old driver")?;
+    driver.set_head(head)?;
+    drop(driver);
+    store.retry_git_cleanup(&record, &call)?;
+    fixture.git(&["show-ref", "--verify", &reference])?;
+    lease.withdraw_unlaunched()?;
+    Ok(())
+}
+
+#[test]
 fn host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -3988,6 +4438,7 @@ fn host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch()
         remote: "origin".into(),
         branch: "published/lane".into(),
         open_pr: false,
+        fast_forward_only: false,
     };
     let host = host.prepare(&writer, &request)?;
     std::fs::write(lane.join("change"), "a repair on a stale base")?;

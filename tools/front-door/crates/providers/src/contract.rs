@@ -29,6 +29,11 @@ pub enum ProviderError {
     InvalidPath,
     #[error("confinement plan asks for a policy this adapter cannot honour")]
     UnsupportedPolicy,
+    #[error(
+        "agy isolated keychain {0} is missing or not a regular file; create the isolated \
+         keychain and sign in there first (docs/runbooks/providers.md, Agy accounts)"
+    )]
+    IsolatedKeychainUnavailable(String),
     #[error("provider login token is unavailable")]
     CredentialUnavailable,
     #[error("provider login token was not found")]

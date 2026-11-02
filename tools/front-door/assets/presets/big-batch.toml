@@ -4,11 +4,11 @@ stages = [
   { id = "lanes", parallel = [
     { id = "lane", for_each = "${lanes}", preset = "generator-evaluator", parameters = { worktree = "${item.worktree}", scope = "${item.scope}", spec = "${item.spec}", base = "${base}", delivery = "integrate:${integration_branch}" } },
   ] },
-  { id = "council", preset = "review-council", parameters = { subject = { type = "integration" }, worktree = "${batch_worktree}", base = "${base}", spec = "${spec}", risk_tier = "${risk_tier}", review_shape = "${review_shape}", risk_tags = "${risk_tags}" } },
+  { id = "council", preset = "review-council", parameters = { subject = { type = "integration" }, worktree = "${batch_worktree}", base = "${base}", spec = "${spec}", risk_tier = "${risk_tier}", review_shape = "${review_shape}", kind = "${kind}", size = "${size}", risk_tags = "${risk_tags}" } },
   { id = "refactor", role = "refactor-principal" },
   { id = "repair", loop = { max_rounds = 2, until = "accept", stages = [
     { id = "fix", role = "repairer" },
-    { id = "review", preset = "review-council", parameters = { subject = { type = "node", node = "fix" }, worktree = "${batch_worktree}", base = "${base}", spec = "${spec}", risk_tier = "${risk_tier}", review_shape = "${review_shape}", risk_tags = "${risk_tags}" } },
+    { id = "review", preset = "review-council", parameters = { subject = { type = "node", node = "fix" }, worktree = "${batch_worktree}", base = "${base}", spec = "${spec}", risk_tier = "${risk_tier}", review_shape = "${review_shape}", kind = "${kind}", size = "${size}", risk_tags = "${risk_tags}" } },
     { id = "accept", kind = "gate", condition = { type = "verdict", expected = "VERDICT: PASS", threshold = "all" }, inputs = [{ node = "review", outputs = ["verdict"] }] },
   ] } },
 ]
@@ -26,11 +26,13 @@ width = { type = "integer", default = 4, min = 1, max = 32, doc = "Scouts in the
 external = { type = "integer", default = 1, min = 0, max = 8, doc = "External scouts that research outward; 0 opts out." }
 read_roots = { type = "list", default = [], doc = "Extra read roots for the scouts." }
 integration_branch = { type = "string", default = "batch/graph", doc = "Branch that lane heads integrate into." }
-batch_worktree = { type = "string", default = "", doc = "Registered worktree for the serial refactor and repair." }
+batch_worktree = { type = "string", default = "", doc = "Registered worktree on its own branch, not the integration branch." }
 base = { type = "string", default = "", doc = "Diff reference the batch is measured from." }
 spec = { type = "string", default = "", doc = "Issue number or file the batch answers." }
 risk_tier = { type = "string", default = "", doc = "Risk tier that selects the review shape." }
 review_shape = { type = "string", default = "", doc = "Explicit review shape override." }
+kind = { type = "string", default = "", doc = "Change kind that scales the review panel: refactor, integration, docs. Empty uses the task kind." }
+size = { type = "string", default = "", doc = "Review size override (small, medium, large). Empty measures the worktree's current head against base when the graph expands, before the writer runs, as a proxy; pass a size when the expected scope is known." }
 risk_tags = { type = "list", default = [], doc = "Tags that trigger conditional lenses." }
 # One entry per lane: name, worktree, scope and spec. Supply with --params-file.
 lanes = [
@@ -60,6 +62,7 @@ tier = "senior"
 access = "worktree_write"
 worktree = "${batch_worktree}"
 write_scope = ["."]
+delivery = "integrate:${integration_branch}"
 inputs = [{ node = "previous.review", outputs = ["result", "findings"] }]
 acceptance_checks = ["Resolve accepted findings", "Run targeted checks and commit"]
 prompt = """

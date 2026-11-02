@@ -103,11 +103,15 @@ impl RegisteredAccount {
         {
             return Err(crate::ProviderError::UnknownIdentity);
         }
+        // Agy's registered directory is a `HOME` holding a keychain, never a
+        // config tree that overlaps another account's, so any directory below
+        // the root qualifies, including a shallow home such as `/Users/me`.
+        let shallowest = if adapter == "agy" { 2 } else { 4 };
         if !directory.is_absolute()
             || directory
                 .components()
                 .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
-            || directory.components().count() < 4
+            || directory.components().count() < shallowest
         {
             return Err(crate::ProviderError::InvalidPath);
         }

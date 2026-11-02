@@ -14,6 +14,58 @@ use std::{
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
 #[test]
+fn publication_legacy_result_orphan_retains_manifest_failure() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let input = input();
+    store.create(&input, &call)?;
+    let id = input.attempts[0].attempt_id;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let record = store.claim(id, &clock, &call)?.ok_or("claim")?;
+    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    artifacts::seal(&attempt, "stdout.log", b"answer", CAPTURE_LIMIT)?;
+    artifacts::seal(&attempt, "result.md", b"legacy result", RESULT_LIMIT)?;
+    let archive = artifacts::subdir(&attempt, std::ffi::OsStr::new("quarantine"), true)?;
+    artifacts::seal(
+        &archive,
+        "manifest.json",
+        b"conflicting evidence",
+        RECORD_LIMIT,
+    )?;
+    let observed = ExitObservation {
+        scope: RunStore::scope(&record),
+        ..exit()
+    };
+    seal_exit(&store, &observed)?;
+    let providers = Fake {
+        observed: Some(route()),
+        ..Fake::default()
+    };
+    let record = store.finish(id, &attempt, &observed, &providers, &call)?;
+    assert!(matches!(
+        record.settlement_receipts.unwrap().manifest_conflict,
+        EffectDisposition::Failed {
+            retryable: true,
+            ..
+        }
+    ));
+    assert_eq!(
+        artifacts::read_sealed(&attempt, "result.md", RESULT_LIMIT)?.unwrap(),
+        b"legacy result"
+    );
+    Ok(())
+}
+
+#[test]
 fn terminal_dependency_waits_for_custody_release() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
@@ -251,6 +303,7 @@ fn host_refuses_child_authority_beyond_its_parent_task() -> TestResult {
         remote: "origin".into(),
         branch: branch.into(),
         open_pr,
+        fast_forward_only: false,
     };
     let read_only = input().request.tasks[0].clone();
     let mut writing = read_only.clone();
@@ -1730,6 +1783,8 @@ fn host_stops_a_launched_child_from_held_scope_not_its_records() -> TestResult {
                 finished_at: record.queued_at,
                 reason: Some("rejected, says the lane".into()),
             };
+            record.terminal_evidence = Some(TerminalEvidence::PreLaunchRefusal);
+            record.provider_launched = Some(false);
             let mut result = record.prompt.clone();
             result.path =
                 artifacts::artifact_path(record.attempt_id, "result.md").expect("result path");
@@ -2870,7 +2925,7 @@ pub(super) struct Fake {
     refuse: bool,
     policy_task: Option<TaskId>,
     observed: Option<RouteRecord>,
-    decoded: Cell<usize>,
+    pub(super) decoded: Cell<usize>,
     prepared: Cell<usize>,
     resumed: Cell<Option<AttemptId>>,
     prompt: RefCell<String>,
@@ -2880,6 +2935,8 @@ pub(super) struct Fake {
     answer: Option<String>,
     /// Partial-finish signals a decode reports.
     partial: Vec<PartialSignal>,
+    /// Report `QuotaLimited` only when this exact sealed stderr arrives.
+    quota_stderr: Option<&'static [u8]>,
 }
 
 #[test]
@@ -2961,6 +3018,22 @@ impl Providers for Fake {
             reason: None,
             partial_signals: self.partial.clone(),
         })
+    }
+    fn decode_captures(
+        &self,
+        route: &RouteRecord,
+        stdout: &[u8],
+        stderr: &[u8],
+        exit: &ExitObservation,
+        provider_state: &std::path::Path,
+        _: Option<&crate::HolderContext>,
+    ) -> std::result::Result<Decoded, String> {
+        let mut decoded = self.decode(route, stdout, exit, provider_state)?;
+        if self.quota_stderr == Some(stderr) {
+            decoded.outcome = Outcome::QuotaLimited;
+            decoded.complete = false;
+        }
+        Ok(decoded)
     }
 }
 #[test]
@@ -3051,6 +3124,8 @@ fn settle_with_role(
     artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
     let mut observed = exit();
     observed.scope = RunStore::scope(&store.record(id, &call)?);
+    // A cancelled outcome requires proof that the stop preceded the exit.
+    observed.cancel_delivered_before_exit = (outcome == Some(Outcome::Cancelled)).then_some(true);
     seal_exit(&store, &observed)?;
     let fake = Fake {
         observed: Some(route()),
@@ -3185,6 +3260,48 @@ fn settlement_scrubs_provider_session_history() -> TestResult {
 }
 
 #[test]
+fn quota_limited_empty_result_stays_quota_limited() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(&dir, "stdout.log", b"", CAPTURE_LIMIT)?;
+    // The quota evidence is only in the sealed stderr: the settlement must
+    // read it and hand it to the decoder for the outcome to be QuotaLimited.
+    artifacts::seal(&dir, "stderr.log", b"quota exhausted", CAPTURE_LIMIT)?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        quota_stderr: Some(b"quota exhausted"),
+        answer: Some(String::new()),
+        ..Fake::default()
+    };
+    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    assert!(matches!(
+        record.state,
+        AttemptState::Terminal {
+            outcome: Outcome::QuotaLimited,
+            ..
+        }
+    ));
+    Ok(())
+}
+
+#[test]
 fn unredactable_result_settles_failed_with_a_placeholder() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
@@ -3231,6 +3348,59 @@ fn unredactable_result_settles_failed_with_a_placeholder() -> TestResult {
     // A repeat settlement returns the same terminal record instead of looping.
     let repeat = store.finish(id, &dir, &observed, &fake, &call)?;
     assert_eq!(repeat.revision, record.revision);
+    Ok(())
+}
+
+#[test]
+fn a_busy_publication_lock_leaves_the_sealed_decision_to_replay() -> TestResult {
+    use provenant_os::fs::{FsError, LockMode};
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    store.create(&run, &call)?;
+    let id = run.attempts[0].attempt_id;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        observed: Some(route()),
+        ..Fake::default()
+    };
+    let held = store.run_dir(run.run_id, false)?.try_lock(
+        std::ffi::OsStr::new("publication.lock"),
+        LockMode::Exclusive,
+    )?;
+    let error = store
+        .finish(id, &dir, &observed, &fake, &call)
+        .expect_err("a held publication lock cannot commit");
+    assert!(
+        matches!(error, RunError::Filesystem(FsError::LockTimeout { .. })),
+        "{error:?}"
+    );
+    let decision =
+        artifacts::read_sealed(&dir, "terminal-pending.json", RECORD_LIMIT)?.ok_or("decision")?;
+    drop(held);
+    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    assert!(matches!(record.state, AttemptState::Terminal { .. }));
+    assert_eq!(
+        artifacts::read_sealed(&dir, "terminal-pending.json", RECORD_LIMIT)?.ok_or("decision")?,
+        decision,
+        "replay commits the sealed bytes"
+    );
+    assert_eq!(fake.decoded.get(), 1, "replay never decodes again");
     Ok(())
 }
 
@@ -3537,6 +3707,7 @@ fn runtime_deadline_reason_survives_a_cancellation_record() -> TestResult {
     observed.scope = RunStore::scope(&store.record(id, &call)?);
     observed.termination = Some(Termination::Signal(9));
     observed.stop_reason = Some(provenant_supervisor::machine::StopReason::WallDeadline);
+    observed.cancel_delivered_before_exit = Some(true);
     seal_exit(&store, &observed)?;
     let fake = Fake {
         observed: Some(route()),
@@ -5000,7 +5171,8 @@ fn holder_release_temporary_fixture(valid_binding: bool) -> TestResult {
 }
 
 #[test]
-fn holder_commits_decoded_success_only_with_exit_zero_and_observed_identity() -> TestResult {
+fn publication_holder_commits_decoded_success_only_with_exit_zero_and_observed_identity()
+-> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -5036,8 +5208,27 @@ fn holder_commits_decoded_success_only_with_exit_zero_and_observed_identity() ->
         observed.scope.generation = 1;
         observed.terminal_observed = false;
         observed.termination = Some(Termination::Exit(code));
+        if code == 0 {
+            observed.cancel_delivered_before_exit = None;
+            artifacts::seal(
+                &dir,
+                "cancel.json",
+                &crate::db::bytes(&serde_json::json!({
+                    "schema_version": 1, "scope": observed.scope,
+                    "requester": store.context.actor_id, "request_id": "legacy-late-cancel",
+                "reason": provenant_supervisor::machine::StopReason::ExplicitCancellation
+                }))?,
+                RECORD_LIMIT,
+            )?;
+        }
         seal_exit(&store, &observed)?;
         let record = store.finish(id, &dir, &observed, &fake, &call)?;
+        if code == 0 {
+            assert_eq!(
+                record.cancellation_disposition,
+                Some(CancellationDisposition::Unknown)
+            );
+        }
         let AttemptState::Terminal { outcome, .. } = record.state else {
             return Err("not terminal".into());
         };
@@ -5333,6 +5524,7 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
     observed.termination = None;
     observed.terminal_observed = false;
     observed.settlement_evidence = provenant_supervisor::custody::SettlementEvidence::NeverSpawned;
+    observed.stop_reason = Some(provenant_supervisor::machine::StopReason::ExplicitCancellation);
     seal_exit(&store, &observed)?;
     store.finish(starting, &dir, &observed, &Fake::default(), &call)?;
     assert_eq!(terminal(&store, starting, &call)?, Outcome::Cancelled);
@@ -6030,7 +6222,7 @@ fn reconcile_backfills_legacy_temporary_without_changing_terminal_records() -> T
             std::fs::rename(attempt, attempt.with_extension("moved"))?;
             std::os::unix::fs::symlink(attempt.with_extension("moved"), attempt)?;
         }
-        store.db.execute_batch("DROP INDEX reaction_pending; DROP TABLE reactions; DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; PRAGMA user_version=3;")?;
+        store.db.execute_batch("DROP TABLE settlement_receipts; DROP INDEX reaction_pending; DROP TABLE reactions; DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; PRAGMA user_version=3;")?;
         drop(store);
 
         let store = RunStore::open(&context, &call)?;
@@ -6039,7 +6231,10 @@ fn reconcile_backfills_legacy_temporary_without_changing_terminal_records() -> T
             std::fs::remove_file(attempt)?;
             std::fs::rename(attempt.with_extension("moved"), attempt)?;
         }
-        assert_eq!(store.record(id, &call)?, before);
+        // Records from before the receipt table carry no receipts.
+        let mut legacy = before.clone();
+        legacy.settlement_receipts = None;
+        assert_eq!(store.record(id, &call)?, legacy);
         assert!(
             store
                 .db
@@ -6100,7 +6295,9 @@ fn reconcile_backfills_legacy_temporary_without_changing_terminal_records() -> T
         }
         drop(store);
         let store = RunStore::open(&context, &call)?;
-        assert_eq!(store.record(id, &call)?, before);
+        let mut legacy = before.clone();
+        legacy.settlement_receipts = None;
+        assert_eq!(store.record(id, &call)?, legacy);
         assert!(store.open_runs(10, &call)?.is_empty());
     }
     Ok(())

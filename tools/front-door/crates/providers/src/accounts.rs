@@ -338,6 +338,10 @@ fn exec_error(error: ExecError) -> ProviderError {
             operation: PROBE_DIR_OPERATION,
             source,
         } => ProviderError::ProbeDirectory(source.to_string()),
+        ExecError::Io {
+            operation: crate::agy::KEYCHAIN_OPERATION,
+            source,
+        } => ProviderError::IsolatedKeychainUnavailable(source.to_string()),
         _ => ProviderError::UnknownIdentity,
     }
 }
@@ -370,8 +374,20 @@ pub fn detect_with_org(
 ) -> Result<(String, Option<String>), ProviderError> {
     let cwd = Path::new(crate::claude::PROBE_CWD);
     if adapter == "agy" {
-        return detect_agy(executor, executable, home, user, cwd, probe_root)
-            .map(|key| (key, None));
+        // An isolated account is signed in under its own directory as `HOME`.
+        // The mode comes from the directory, so a missing keychain is refused
+        // here rather than probed under the shared login.
+        let probe_home = crate::agy::ProbeHome::select(directory, home)?;
+        let guarded = probe_home.guard(executor);
+        return detect_agy(
+            &guarded,
+            executable,
+            probe_home.path(),
+            user,
+            cwd,
+            probe_root,
+        )
+        .map(|key| (key, None));
     }
     if adapter == "codex" {
         let bytes = read_following(

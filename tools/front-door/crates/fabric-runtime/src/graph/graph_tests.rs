@@ -37,6 +37,7 @@ impl GraphJournal for MemoryJournal {
 struct FakeOwner {
     deliveries: usize,
     delivery_modes: Vec<Option<provenant_records::run::DeliveryMode>>,
+    fast_forward_only: Vec<bool>,
     observations: VecDeque<AttemptObservation>,
     calls: Vec<(AttemptKey, GraphRoute)>,
     titles: Vec<String>,
@@ -155,6 +156,7 @@ impl AttemptOwner for FakeOwner {
         self.titles.push(node.title.to_owned());
         self.prompts.push(node.prompt.to_owned());
         self.delivery_modes.push(replay.delivery.cloned());
+        self.fast_forward_only.push(replay.fast_forward_only);
         self.stored_refs.push(replay.stored_ref.map(str::to_owned));
         self.launch_actors.push(replay.launch_actor.to_owned());
         self.calls.push((key.clone(), route.clone()));
@@ -2764,6 +2766,34 @@ fn writer_limit_after_launch_never_tries_a_second_route() {
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(owner.calls.len(), 1, "a launched writer cannot be retried");
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
+}
+
+#[test]
+fn usage_limit_failure_reports_cause_instead_of_missing_findings() {
+    let document = graph(vec![node("task", route("senior"))]);
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([terminal_with_result(AttemptOutcome::UsageLimited, "")]),
+        ..FakeOwner::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let node = &run.checkpoint.nodes[0];
+    assert_eq!(node.state, NodeState::Failed);
+    assert_eq!(node.advance_error_code.as_deref(), Some("usage_limited"));
+    assert!(
+        node.advance_error
+            .as_deref()
+            .unwrap()
+            .contains("quota or rate limit")
+    );
+    assert!(
+        !node
+            .outputs
+            .as_ref()
+            .unwrap()
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("findings block missing"))
+    );
 }
 
 fn check_fallback(access: AccessMode, launched: bool, outcome: AttemptOutcome, expected: bool) {

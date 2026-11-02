@@ -539,17 +539,25 @@ never share a worktree.
 3. Supervisor observes provider exit and releases host build capacity. Once
    cleanup proves quiescence, it retains the worktree writer lock through settlement.
    Read-only attempts may release their attempt-local lock.
-4. Settlement imports objects, publishes the branch, records the outcome and
-   releases the reservation through the durable phases below.
+4. Settlement validates exit and decision facts, then seals the result and scoped
+   decision before acquiring `publication.lock`. The transaction commits or
+   replays those exact bytes. Applicable effects are driven from durable
+   receipts, and custody is released only after verified import completion or
+   the existing explicit refusal/recovery path.
 5. A run closes only when every task and registered child is terminal.
 
 `settlement-progress.json` binds the attempt scope, pinned branch base and head,
-current phase, native process owner, retry deadline and one import attempt counter. A live owner
-excludes a second driver. A dead owner can be replaced after checking its boot,
-PID and start identity. An unknown process observation protects its owner for
-at most ten minutes from the claim. The replacement continues the recorded phase; it does
-not restart the provider. Journal locks cover only short reads and durable
-updates. No settlement journal lock spans an external command. The worktree
+current phase, native process owner, retry deadline and one import attempt counter.
+Each driver holds a kernel lease for its lifetime. A concurrently live driver
+excludes a second claimant even in the same process. A claimant holding the
+lease can disregard an abandoned same-process journal owner after the existing
+retry deadline, including when Drop could not lock, read or write the journal.
+Legacy foreign owners retain boot/PID/start checks and the ten-minute bound on
+unknown process observations. Refusal observations distinguish journal contention,
+live ownership and the retry deadline. The replacement continues the recorded
+phase without restarting the provider or decoding its output again. Journal
+locks cover only short reads and durable updates; they never span an external
+command. Terminal effects have a separate kernel exclusion. The worktree
 writer flock spans import and publication, so lifecycle mutations cannot race
 terminal settlement.
 
@@ -557,23 +565,99 @@ terminal settlement.
 | --- | --- |
 | `import` | Import the pinned head through Git's quarantined receive path. Repeating the same staging ref is harmless. |
 | `publish` | Compare-and-swap the real branch from its pinned base; the same head already published counts as success. |
-| `record` | Seal result and exit evidence, remove the attempt's base and import refs, then commit the terminal attempt, summary, operation state and event. Recover an interrupted terminal commit from its pending evidence. |
+| `record` | Seal the result and terminal decision before acquiring the publication lock and committing the attempt, summary, operation state and event. A lock timeout leaves the exact scoped decision replayable. Retention-ref cleanup follows the transaction outside the publication lock. |
 | `release` | Verify the committed outcome and release evidence, then remove the settling reservation. Repeated release accepts the same committed attempt. |
 | `complete` | Settlement is finished; ordinary terminal cleanup may reclaim disposable scratch. Import refusals retain private Git for host recovery. |
 
 Settlement permits three attempts that reach object import. Contention and
 pre-import checks do not consume this counter; resuming a later phase does not
 consume another import attempt. Import claims back off for 5 seconds, 30 seconds
-and 2 minutes instead of retrying immediately. Exhaustion records a terminal
-failure naming the limit and retained private Git. Rejected objects and failed
-publication never certify success. A pending terminal commit remains `settling`
+and 2 minutes instead of retrying immediately. Exhaustion records explicit
+import-refusal evidence naming the limit and
+retained private Git. If an import fails before writer facts can be verified,
+the validated terminal decision is `unsettled`, with a retryable `GitImport`
+failure. Its private inputs, reservation and custody fence remain retained.
+A retry can complete the import receipt or reach explicit refusal, but cannot
+upgrade or replace that sealed outcome. Rejected objects and failed publication
+never certify successful writer publication. A pending terminal commit remains
+`settling`
 with `publication_pending: true` and keeps the worktree reservation, while its
 provider has already stopped consuming host build capacity and live custody.
+
+An import failure preserves an already established failed, timed-out or lost
+provider outcome and its reason. A potential success with unverified writer
+facts becomes `unsettled`; even after import recovery it requires a fresh attempt
+or manual host recovery to obtain success or delivery eligibility. Effect
+completion alone does not approve protected changes.
+
+Unresolved imports also seal a scoped `import-retained.json` marker beside the
+custody reservation. Run checks predecessor markers after acquiring the normal
+writer lease, while holding `writer.lock`, and withdraws a new unlaunched lease
+on refusal. This protects shared registries across different run-state roots
+after the original recovery process exits. Predecessors without an import marker
+keep their existing admission semantics. Reservation release retires the marker's
+active fence; its evidence may remain beside the retired reservation.
+
+An attempt record version 2 carries the terminal evidence and distinguishes
+`unsettled` from `lost`. Effect receipts are stored independently of the
+immutable decision. A terminal wait view includes `custody_pending`; a pending
+fence still prevents unsafe writer admission. A cancellation determines the
+execution outcome only when delivery to the provider was recorded before its
+exit was observed. A later request is acknowledged as ineffective. Older exit
+records without delivery ordering retain uncertainty.
+
+A verified clean provider success is preserved for legacy guardians with unknown
+cancellation ordering; the cancellation receipt remains `unknown`. A host-observed
+cancellation during Git import has separate `import_cancellation` evidence and
+an `import_effective` receipt: it does not invent delivery to the provider before
+exit. Cancellation during delivery leaves the terminal decision unchanged and
+records `delivery_effective` plus a retryable cancelled delivery effect. Its start
+marker remains durable; automatic recovery cannot duplicate an uncertain remote
+effect, while explicit host pickup may retry it. A cancelled delivery does not
+seal a permanent `delivery.json` failure.
+
+Deferred effect dispositions are sealed in scoped `terminal-effects.json`
+before publication and inserted with the terminal transaction, including on
+replay. Post-commit receipt-write failures cannot withhold the committed decision
+or skip temporary cleanup. Admission is freed when settlement starts, including
+for upgraded guardians without the exit hook. Delayed Git cleanup always removes only its own attempt-scoped base pin.
+It removes a head-keyed import pin only while holding an idle writer slot with
+no competing predecessor reservation; a late retry cannot delete an active
+lane's staging evidence.
+
+The decision is sealed (`terminal-pending.json`) before the revision-checked
+transaction and replayed unchanged after a crash or `SQLITE_BUSY`; one decision
+exists per attempt generation and a conflicting sealed decision is kept beside
+it as `terminal-pending.conflict-*.json`, never replacing it. Lost recovery
+converges on any scoped sealed decision instead of overwriting it with `lost`.
+Git import, manifest sealing, remote delivery and cleanup/custody release are
+independent dispositions (`pending`, `done`, `failed{reason,retryable}`).
+Initial failures are sealed with the intent and created transactionally as
+receipts; subsequent failures update only receipts. Reconciliation discovers
+applicable pending and retryable effects even after temporary-data cleanup and
+restart. Intended manifest bytes are sealed separately as
+`quarantine/manifest-intended.json`; a conflict stays visible and its evidence
+is never overwritten. Recovery seals or confirms the manifest only when it
+matches that intended disposition. Delivery reuses the completed receipt or
+start marker. A start without a known result remains uncertain and is never
+automatically repeated. An unstarted delivery uses the sealed writer head and
+pinned base and verifies the current worktree before starting. A failed Git pin
+cleanup is retried with `retry_git_cleanup`. The internal finish result
+distinguishes retained custody from permission to release; live, recovered and
+landed-writer paths all enforce that distinction. A stop accepted between the last cancellation read and
+the commit is acknowledged ineffective from the host-sealed request after the
+commit; a lane-rewritable record never decides whether a held handle stops.
+
+Run-store schema 7 is a forward-only migration. Before migrating an existing
+store, the owner takes a timestamped SQLite snapshot including committed WAL
+contents while excluding concurrent writes. Downgrade is unsupported; recovery
+requires the pre-migration copy or a forward repair.
+Peers sharing a state root must upgrade together: schema 7 and the version 2 attempt record are not readable by earlier builds.
 
 `cancel` durably records the request and signals the supervisor without waiting
 for a writer lock. The settlement driver checks it between phases and polls it
 every 50 ms during import, instruction checks and optional automatic delivery,
-stopping the owned Git child before recording `cancelled`.
+stopping the owned Git child when required.
 Public `reconcile` starts the same binary's detached `internal settle` worker
 only when a non-terminal attempt needs settlement. A run-scoped queued claim
 and worker exclusion deduplicate concurrent requests; a queued claim expires
@@ -1155,12 +1239,18 @@ checked out in any worktree is refused. Publication uses expected-old ref
 comparison locally or an explicit remote lease after an ancestry proof.
 A concurrent publisher can win; the losing delivery records an integration
 failure for explicit host pickup rather than adding another retry counter.
+A graph worktree whose node integrates into a local branch must sit on a
+different branch; graph admission refuses a worktree on its own integration
+target. The batch worktree sits on a separate branch and is synced by the
+graph's launch fast-forward, so integration never checks out a branch for it.
 Before resolving an origin integration target, the host refreshes the exact
 remote branch and refuses delivery if the refresh fails. Final graph PR
 delivery follows the same refresh rule.
 
 `lane deliver ATTEMPT [--deliver MODE]` uses the recorded destination, or
-origin push when the settled lane recorded none. It requires a succeeded
+origin push when the settled lane recorded none. An explicit `integrate:`
+override naming the recorded target keeps a recorded fast-forward-only guard,
+so pickup cannot merge a refused loop round. It requires a succeeded
 writer, released custody, no new reservation, a clean tree and the exact
 receipt head. After reviewing a `review_required` writer, the chair can use
 `lane deliver --accept-review ATTEMPT` to accept its protected changes and

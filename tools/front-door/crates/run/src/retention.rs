@@ -1,7 +1,6 @@
 //! Temporary and provider-private state retention after terminal settlement.
 use crate::{
     artifacts::{seal, subdir},
-    db::decode,
     *,
 };
 use provenant_core::{AttemptId, WallTime};
@@ -193,7 +192,7 @@ impl RunStore {
             let first_removal = report.removed.len();
             let first_tightened = report.tightened.len();
             let result = (|| -> Result<()> {
-                let record: AttemptRecord = decode(&raw)?;
+                let record: AttemptRecord = crate::db::decode_attempt(&raw)?;
                 crate::reader::validate_attempt(&record)?;
                 if record.attempt_id.to_string() != id
                     || record.run_id.to_string() != run
@@ -1726,7 +1725,10 @@ mod tests {
             [id.to_string()],
             |row| row.get(0),
         )?;
-        assert_eq!(decode::<AttemptRecord>(&raw)?, terminal);
+        // The table row stores the decision; receipts are projected on read.
+        let mut stored = terminal;
+        stored.settlement_receipts = None;
+        assert_eq!(crate::db::decode_attempt(&raw)?, stored);
         Ok(())
     }
 

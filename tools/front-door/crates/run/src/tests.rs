@@ -283,6 +283,7 @@ pub(super) fn publication() -> TerminalPublication<'static> {
 }
 pub(super) fn exit() -> ExitObservation {
     ExitObservation {
+        cancel_delivered_before_exit: None,
         publication: PublicationState::Durable,
         scope: Scope {
             run: input().run_id,
@@ -431,6 +432,7 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
         remote: "origin".into(),
         branch: "published/lane".into(),
         open_pr: false,
+        fast_forward_only: false,
     });
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
@@ -502,6 +504,7 @@ fn requested_delivery_that_never_ran_is_recorded_not_attempted() -> TestResult {
         remote: "origin".into(),
         branch: "published/lane".into(),
         open_pr: false,
+        fast_forward_only: false,
     });
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
@@ -1560,6 +1563,23 @@ fn publication_crash_worker() -> TestResult {
         return Err("crash phase was not reached".into());
     }
     seal_exit_fixture(&store, &input)?;
+    let attempt = store.attempt_dir(input.run_id, input.attempts[0].attempt_id, false)?;
+    crate::artifacts::seal(
+        &attempt,
+        "terminal-effects.json",
+        &crate::db::bytes(&crate::store::TerminalEffects {
+            schema_version: 1,
+            scope: RunStore::scope(&store.record(input.attempts[0].attempt_id, &call)?),
+            effects: vec![(
+                SettlementEffect::ManifestConflict,
+                EffectDisposition::Failed {
+                    reason: "crash-retained conflict".into(),
+                    retryable: true,
+                },
+            )],
+        })?,
+        RECORD_LIMIT,
+    )?;
     store.publish_terminal(
         input.attempts[0].attempt_id,
         1,
@@ -1693,6 +1713,13 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
             store.publish_terminal(id, 1, &publication(), &exit(), &call)?;
         }
         assert_eq!(store.events(0, 64, None, &call)?.len(), 2);
+        if !matches!(phase, "reserved" | "withdraw-sealed") {
+            assert!(
+                matches!(store.record(id, &call)?.settlement_receipts.unwrap().manifest_conflict,
+                EffectDisposition::Failed { reason, retryable: true } if reason == "crash-retained conflict")
+            );
+        }
+        assert!(store.record(id, &call)?.terminal_evidence.is_some());
         assert!(
             store
                 .read_output(
@@ -1844,6 +1871,305 @@ fn full_database_retains_admission_and_recovers_original_terminal_intent() -> Te
 fn seal_exit_fixture(store: &RunStore, input: &PreparedRun) -> TestResult {
     seal_observation(store, input, &exit())
 }
+
+#[test]
+fn receipt_cancellation_requires_ordered_delivery() -> TestResult {
+    for delivered in [None, Some(false), Some(true)] {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let input = input();
+        let id = input.attempts[0].attempt_id;
+        store.create(&input, &call)?;
+        let mut observation = exit();
+        observation.cancel_delivered_before_exit = delivered;
+        seal_observation(&store, &input, &observation)?;
+        let mut publication = publication();
+        publication.outcome = Outcome::Cancelled;
+        let result = store.publish_terminal(id, 1, &publication, &observation, &call);
+        if delivered == Some(true) {
+            let record = result?;
+            assert_eq!(
+                record.terminal_evidence,
+                Some(TerminalEvidence::EffectiveCancellation)
+            );
+        } else {
+            assert!(result.is_err());
+            assert!(matches!(
+                store.record(id, &call)?.state,
+                AttemptState::Queued { .. }
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn publication_deferred_effects_survive_commit_and_replay() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let id = input.attempts[0].attempt_id;
+    store.create(&input, &call)?;
+    seal_exit_fixture(&store, &input)?;
+    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let effects = serde_json::json!({
+        "schema_version": 1,
+        "scope": RunStore::scope(&store.record(id, &call)?),
+        "effects": [["manifest_conflict", {"state":"failed", "reason":"conflicting evidence", "retryable":true}]]
+    });
+    crate::artifacts::seal(
+        &attempt,
+        "terminal-effects.json",
+        &serde_json::to_vec(&effects)?,
+        RECORD_LIMIT,
+    )?;
+    store.publish_terminal(id, 1, &publication(), &exit(), &call)?;
+    drop(store);
+    let store = RunStore::open(&context, &call)?;
+    let record = store.replay_terminal(id, &call)?;
+    assert!(
+        matches!(record.settlement_receipts.unwrap().manifest_conflict,
+        EffectDisposition::Failed { reason, retryable: true } if reason == "conflicting evidence")
+    );
+    Ok(())
+}
+
+#[test]
+fn publication_lock_timeout_retains_exact_sealed_decision() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let id = input.attempts[0].attempt_id;
+    store.create(&input, &call)?;
+    seal_exit_fixture(&store, &input)?;
+    let run = store.run_dir(input.run_id, false)?;
+    let lock = run.try_lock(
+        std::ffi::OsStr::new("publication.lock"),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
+    assert!(
+        store
+            .publish_terminal(id, 1, &publication(), &exit(), &call)
+            .is_err()
+    );
+    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let sealed = crate::artifacts::read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?
+        .ok_or("decision not sealed")?;
+    assert!(matches!(
+        store.record(id, &call)?.state,
+        AttemptState::Queued { .. }
+    ));
+    drop(lock);
+    drop(store);
+    let store = RunStore::open(&context, &call)?;
+    let recovered = store.recover_terminal(id, &exit(), &call)?;
+    assert_eq!(
+        crate::artifacts::read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?.unwrap(),
+        sealed
+    );
+    let pending: AttemptRecord = crate::db::decode_attempt(&sealed)?;
+    assert_eq!(recovered.state, pending.state);
+    assert_eq!(recovered.result, pending.result);
+    assert_eq!(store.events(0, 64, None, &call)?.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn publication_postcommit_effect_failure_still_cleans_temporary() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let mut input = input();
+    input.request.tasks[0].writer = Some(WriterRequest {
+        extra: Default::default(),
+        project: temp.path().into(),
+        worktree: temp.path().into(),
+    });
+    let id = input.attempts[0].attempt_id;
+    store.create(&input, &call)?;
+    seal_exit_fixture(&store, &input)?;
+    let temporary = store.temporary_path(id, &call)?;
+    std::fs::write(temporary.join("payload"), b"temporary")?;
+    crate::store::FAIL_EFFECT_WRITE.with(|fault| fault.set(true));
+    let published = store.publish_terminal(id, 1, &publication(), &exit(), &call);
+    crate::store::FAIL_EFFECT_WRITE.with(|fault| fault.set(false));
+    assert!(matches!(published?.state, AttemptState::Terminal { .. }));
+    assert!(!temporary.exists());
+    assert_eq!(admission_count(&store)?, 0);
+    Ok(())
+}
+
+#[test]
+fn publication_manifest_recovery_preserves_conflict_until_intent_is_established() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let id = input.attempts[0].attempt_id;
+    store.create(&input, &call)?;
+    seal_exit_fixture(&store, &input)?;
+    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let archive = crate::artifacts::subdir(&attempt, std::ffi::OsStr::new("quarantine"), true)?;
+    let scope = RunStore::scope(&store.record(id, &call)?);
+    let intended = crate::db::bytes(
+        &serde_json::json!({"schema_version":1,"scope":scope,"kind":"quarantine_manifest","disposition":"read_only"}),
+    )?;
+    crate::artifacts::seal(
+        &archive,
+        "manifest.json",
+        b"conflicting evidence",
+        RECORD_LIMIT,
+    )?;
+    assert!(
+        crate::holder::seal_manifest(&archive, "manifest.json", &intended, RECORD_LIMIT).is_err()
+    );
+    crate::artifacts::seal(
+        &attempt,
+        "terminal-effects.json",
+        &crate::db::bytes(&crate::store::TerminalEffects {
+            schema_version: 1,
+            scope,
+            effects: vec![(
+                SettlementEffect::ManifestConflict,
+                EffectDisposition::Failed {
+                    reason: "conflict".into(),
+                    retryable: true,
+                },
+            )],
+        })?,
+        RECORD_LIMIT,
+    )?;
+    store.publish_terminal(id, 1, &publication(), &exit(), &call)?;
+    drop(store);
+    let store = RunStore::open(&context, &call)?;
+    assert!(
+        store
+            .pending_effect_attempts(input.run_id, &call)?
+            .contains(&id)
+    );
+    store.reconcile_terminal_effects(&store.record(id, &call)?, &call)?;
+    assert_eq!(
+        crate::artifacts::read_sealed(&archive, "manifest.json", RECORD_LIMIT)?.unwrap(),
+        b"conflicting evidence"
+    );
+    assert!(matches!(
+        store
+            .record(id, &call)?
+            .settlement_receipts
+            .unwrap()
+            .manifest_conflict,
+        EffectDisposition::Failed {
+            retryable: true,
+            ..
+        }
+    ));
+    // Model explicit host resolution while preserving the conflicting evidence.
+    let path = context
+        .state_root
+        .as_path()
+        .join(format!("runs/{}/attempts/{id}/quarantine", input.run_id));
+    std::fs::rename(
+        path.join("manifest.json"),
+        path.join("manifest.conflict.json"),
+    )?;
+    store.reconcile_terminal_effects(&store.record(id, &call)?, &call)?;
+    assert_eq!(
+        crate::artifacts::read_sealed(&archive, "manifest.json", RECORD_LIMIT)?.unwrap(),
+        intended
+    );
+    assert!(matches!(
+        store
+            .record(id, &call)?
+            .settlement_receipts
+            .unwrap()
+            .manifest_conflict,
+        EffectDisposition::Done
+    ));
+    assert!(
+        !store
+            .pending_effect_attempts(input.run_id, &call)?
+            .contains(&id)
+    );
+    Ok(())
+}
+
+#[test]
+fn receipt_prelaunch_cancel_and_deadline_have_distinct_evidence() -> TestResult {
+    use provenant_supervisor::machine::StopReason;
+    for prelaunch in [true, false] {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let input = input();
+        let id = input.attempts[0].attempt_id;
+        store.create(&input, &call)?;
+        let mut observation = exit();
+        observation.never_spawned = prelaunch;
+        observation.termination = if prelaunch {
+            None
+        } else {
+            Some(Termination::Exit(1))
+        };
+        observation.stop_reason = Some(if prelaunch {
+            StopReason::ExplicitCancellation
+        } else {
+            StopReason::WallDeadline
+        });
+        observation.cancel_delivered_before_exit = Some(false);
+        seal_observation(&store, &input, &observation)?;
+        let dir = store.attempt_dir(input.run_id, id, false)?;
+        crate::artifacts::seal(
+            &dir,
+            "cancel.json",
+            &serde_json::to_vec(
+                &serde_json::json!({"schema_version":1,"scope":observation.scope,"requester":context.actor_id,"request_id":"stop-test","reason":observation.stop_reason}),
+            )?,
+            RECORD_LIMIT,
+        )?;
+        let mut publication = publication();
+        publication.outcome = if prelaunch {
+            Outcome::Cancelled
+        } else {
+            Outcome::TimedOut
+        };
+        publication.started_at = if prelaunch {
+            None
+        } else {
+            publication.started_at
+        };
+        let record = store.publish_terminal(id, 1, &publication, &observation, &call)?;
+        assert_eq!(
+            record.cancellation_disposition,
+            if prelaunch {
+                Some(CancellationDisposition::Effective)
+            } else {
+                None
+            }
+        );
+    }
+    Ok(())
+}
 pub(super) fn seal_observation(
     store: &RunStore,
     input: &PreparedRun,
@@ -1913,7 +2239,7 @@ fn the_store_initialises_at_version_six_without_spacing() -> TestResult {
             .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
                 r.get(0)
             })?;
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     let spacing: i64 = store.db.query_row(
         "SELECT COUNT(*) FROM sqlite_schema WHERE name='spacing'",
         [],
@@ -1934,7 +2260,7 @@ fn temporary_tracking_upgrade_preserves_version_one_cancel_binding() -> TestResu
     RunStore::open(&context, &call)?
         .db
         .execute_batch(
-            "DROP INDEX reaction_pending; DROP TABLE reactions; DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; DROP TABLE cancellations; CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT; PRAGMA user_version=1;",
+            "DROP TABLE settlement_receipts; DROP INDEX reaction_pending; DROP TABLE reactions; DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; DROP TABLE cancellations; CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT; PRAGMA user_version=1;",
         )?;
     let store = RunStore::open(&context, &call)?;
     let op = OperationId::parse("stop")?;
@@ -1955,7 +2281,7 @@ fn temporary_tracking_upgrade_drops_version_two_spacing() -> TestResult {
     let call = call(&clock, &cancel);
     // Shape the store exactly as version 2 left it, with the unused table back.
     RunStore::open(&context, &call)?.db.execute_batch(
-        "DROP INDEX reaction_pending; DROP TABLE reactions; DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT; PRAGMA user_version=2;",
+        "DROP TABLE settlement_receipts; DROP INDEX reaction_pending; DROP TABLE reactions; DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; CREATE TABLE spacing (id INTEGER PRIMARY KEY CHECK(id=1), last_start INTEGER NOT NULL) STRICT; PRAGMA user_version=2;",
     )?;
     let store = RunStore::open(&context, &call)?;
     let remaining: i64 = store.db.query_row(
@@ -1970,12 +2296,12 @@ fn temporary_tracking_upgrade_drops_version_two_spacing() -> TestResult {
             .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
                 r.get(0)
             })?;
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     Ok(())
 }
 
 #[test]
-fn the_store_refuses_a_version_newer_than_six() -> TestResult {
+fn the_store_refuses_a_version_newer_than_seven() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
     let clock = clock();
@@ -1983,10 +2309,10 @@ fn the_store_refuses_a_version_newer_than_six() -> TestResult {
     let call = call(&clock, &cancel);
     RunStore::open(&context, &call)?
         .db
-        .execute_batch("PRAGMA user_version=7;")?;
+        .execute_batch("PRAGMA user_version=8;")?;
     assert!(matches!(
         RunStore::open(&context, &call),
-        Err(RunError::Version(7))
+        Err(RunError::Version(8))
     ));
     Ok(())
 }
@@ -2005,7 +2331,7 @@ fn version_five_lets_one_run_continue_several_targets() -> TestResult {
     let run = input.run_id.to_string();
     // Shape the table as version 4 left it, with one row to carry over.
     store.db.execute_batch(&format!(
-        "DROP INDEX reaction_pending; DROP TABLE reactions; DROP INDEX continuation_runs; DROP TABLE continuations; CREATE TABLE continuations (target TEXT PRIMARY KEY REFERENCES attempts(id), run TEXT NOT NULL UNIQUE REFERENCES runs(id)) STRICT; INSERT INTO continuations VALUES ('{first}','{run}'); PRAGMA user_version=4;"
+        "DROP TABLE settlement_receipts; DROP INDEX reaction_pending; DROP TABLE reactions; DROP INDEX continuation_runs; DROP TABLE continuations; CREATE TABLE continuations (target TEXT PRIMARY KEY REFERENCES attempts(id), run TEXT NOT NULL UNIQUE REFERENCES runs(id)) STRICT; INSERT INTO continuations VALUES ('{first}','{run}'); PRAGMA user_version=4;"
     ))?;
     drop(store);
     let store = RunStore::open(&context, &call)?;
@@ -2171,7 +2497,7 @@ fn version_six_upgrades_from_five_and_keeps_existing_attempts() -> TestResult {
     store.create(&input, &call)?;
     // Shape the store exactly as version 5 left it.
     store.db.execute_batch(
-        "DROP INDEX reaction_pending; DROP TABLE reactions; PRAGMA user_version=5;",
+        "DROP TABLE settlement_receipts; DROP INDEX reaction_pending; DROP TABLE reactions; PRAGMA user_version=5;",
     )?;
     drop(store);
     let store = RunStore::open(&context, &call)?;
@@ -2181,7 +2507,7 @@ fn version_six_upgrades_from_five_and_keeps_existing_attempts() -> TestResult {
             .query_row("SELECT user_version FROM pragma_user_version", [], |r| {
                 r.get(0)
             })?;
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     // History is not backfilled: nothing is owed for attempts that predate it.
     assert!(store.pending_reactions(input.run_id, &call)?.is_empty());
     store.record(input.attempts[0].attempt_id, &call)?;
@@ -2448,4 +2774,42 @@ fn a_forged_row_cannot_carry_launch_authority() -> TestResult {
     });
     assert!(result.is_err() && !ran);
     Ok(())
+}
+
+#[test]
+fn receipt_lost_recovery_converges_on_a_sealed_non_lost_decision() -> TestResult {
+    provenant_sqlite::with_busy_timeout(std::time::Duration::from_millis(30), || -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let input = input();
+        let id = input.attempts[0].attempt_id;
+        store.create(&input, &call)?;
+        let blocker = rusqlite::Connection::open(context.state_root.as_path().join("run.sqlite3"))?;
+        blocker.execute_batch("BEGIN IMMEDIATE")?;
+        let finished = clock.wall_now()?;
+        assert!(
+            store
+                .settle_unsettled(id, 1, "validated decision", finished, &call)
+                .is_err()
+        );
+        blocker.execute_batch("ROLLBACK")?;
+        let scope = RunStore::scope(&store.record(id, &call)?);
+        store.commit_lost(scope, "holder lost", &call)?;
+        assert!(matches!(
+            store.record(id, &call)?.state,
+            AttemptState::Terminal { outcome: Outcome::Unsettled, reason: Some(ref reason), .. }
+                if reason == "validated decision"
+        ));
+        let rows: i64 = blocker.query_row(
+            "SELECT count(*) FROM events WHERE attempt=?1 AND revision=2",
+            [id.to_string()],
+            |row| row.get(0),
+        )?;
+        assert_eq!(rows, 1);
+        Ok(())
+    })
 }

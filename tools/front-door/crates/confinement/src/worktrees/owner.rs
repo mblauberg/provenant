@@ -202,6 +202,7 @@ pub fn prune_owned(
             keep: policy.keep.to_vec(),
             ..Default::default()
         }),
+        Repository::Held,
     )?;
     let mut result = RemoveOutcome::default();
     result.removed.push(removed.info.clone());
