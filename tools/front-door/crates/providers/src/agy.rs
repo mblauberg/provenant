@@ -32,29 +32,46 @@ const SECURITY: &str = "/usr/bin/security";
 const SHELL: &str = "/bin/zsh";
 const KEYCHAIN: &str = "Library/Keychains/login.keychain-db";
 
-/// The keychain file an isolated account keeps in its registered directory,
-/// which is that account's own `HOME`. A directory without it is a legacy
-/// registration that shares the user's login keychain.
+/// The keychain an account signs in with, from its registered directory.
 ///
-/// This only selects which keychain a lane links. It is not the guard against
-/// a wrong sign-in: registration pins the identity `agy -p /usage` reports under
-/// that `HOME`, and every launch re-verifies it, so a swapped keychain file
-/// changes the identity and is refused. A symlink is not treated as an isolated
-/// keychain, so the account falls back to the shared login keychain rather than
-/// following a link to a file elsewhere.
-pub fn account_keychain(directory: &std::path::Path) -> Option<std::path::PathBuf> {
+/// A directory that is the user's real `home` is the shared login keychain
+/// (`Ok(None)`). Any other directory is an isolated account whose own `HOME`
+/// holds its keychain, and that mode never depends on whether the file exists:
+/// a missing keychain, or one that is not a regular file (a symlink would
+/// point at a file elsewhere), is an error naming the path, so a keychain that
+/// vanishes after registration or verification fails closed instead of
+/// falling back to the shared login keychain.
+///
+/// This only selects which keychain a lane links. The guard against a wrong
+/// sign-in is the identity pinned at registration and re-verified on launch.
+pub fn account_keychain(
+    directory: &std::path::Path,
+    home: &std::path::Path,
+) -> Result<Option<std::path::PathBuf>, crate::ProviderError> {
+    let canonical = |path: &std::path::Path| std::fs::canonicalize(path).ok();
+    if directory == home
+        || canonical(directory)
+            .zip(canonical(home))
+            .is_some_and(|(directory, home)| directory == home)
+    {
+        return Ok(None);
+    }
     let keychain = directory.join(KEYCHAIN);
-    std::fs::symlink_metadata(&keychain)
-        .is_ok_and(|metadata| metadata.file_type().is_file())
-        .then_some(keychain)
+    if std::fs::symlink_metadata(&keychain).is_ok_and(|metadata| metadata.file_type().is_file()) {
+        Ok(Some(keychain))
+    } else {
+        Err(crate::ProviderError::IsolatedKeychainUnavailable(
+            keychain.display().to_string(),
+        ))
+    }
 }
 
 /// Agy runs with the attempt's private state as `HOME`, so it sees none of the
 /// user's Gemini or Antigravity configuration, MCP servers, plugins, hooks,
 /// sidecars or knowledge: its state lives and dies in the private home. Its
 /// sign-in is in a keychain, so the private home links only that one file,
-/// read-only: the selected account's own keychain when its directory holds
-/// one, otherwise the user's login keychain. Headless mode auto-denies every
+/// read-only: an isolated account's own keychain, otherwise the user's login
+/// keychain. Headless mode auto-denies every
 /// tool permission it cannot prompt for, so lanes auto-approve tools: our
 /// confinement profile, not agy's prompts, bounds what a lane can do. Its own
 /// sandbox cannot nest inside ours.
@@ -74,10 +91,11 @@ fn prepare(
         .as_ref()
         .ok_or(ProviderError::UnsupportedPolicy)?
         .path;
-    let keychain = input
-        .account
-        .and_then(|account| account_keychain(account.directory()))
-        .unwrap_or_else(|| input.home.join(KEYCHAIN));
+    let keychain = match input.account {
+        Some(account) => account_keychain(account.directory(), input.home)?,
+        None => None,
+    }
+    .unwrap_or_else(|| input.home.join(KEYCHAIN));
     let mut argv: Vec<OsString> = [
         input.executable.as_os_str(),
         "--output-format".as_ref(),

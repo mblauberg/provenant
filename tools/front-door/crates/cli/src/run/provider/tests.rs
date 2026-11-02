@@ -376,9 +376,9 @@ fn unregistered_agy_observes_on_its_local_login_without_an_identity_probe()
     Ok(())
 }
 
-/// A registered isolated agy account whose keychain vanished must be refused:
-/// the probe may not fall back to the shared login and accept its sign-in under
-/// the second account's key.
+/// A registered isolated agy account whose keychain vanished must be refused
+/// without probing: the shared login may not be signed in under the second
+/// account's key.
 #[test]
 fn agy_account_whose_isolated_keychain_vanished_is_refused()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -390,6 +390,7 @@ fn agy_account_whose_isolated_keychain_vanished_is_refused()
     struct Agy {
         home: std::path::PathBuf,
         isolated: std::path::PathBuf,
+        probed_homes: std::sync::Mutex<Vec<std::path::PathBuf>>,
     }
     impl Executor for Agy {
         fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
@@ -408,6 +409,7 @@ fn agy_account_whose_isolated_keychain_vanished_is_refused()
                     .find(|(key, _)| key == "HOME")
                     .map(|(_, value)| std::path::PathBuf::from(value))
                     .expect("probe sets HOME");
+                self.probed_homes.lock().unwrap().push(home.clone());
                 let email = if home == self.isolated {
                     "second@example.test"
                 } else {
@@ -461,6 +463,7 @@ fn agy_account_whose_isolated_keychain_vanished_is_refused()
     let agy = Agy {
         home: home.clone(),
         isolated: isolated.clone(),
+        probed_homes: Default::default(),
     };
     let executor = provenant_providers::host::HostProbeExecutor::new(&agy, &root.join("state"))?;
     let probe = Probe {
@@ -490,7 +493,14 @@ fn agy_account_whose_isolated_keychain_vanished_is_refused()
         .err()
         .ok_or("account observed after its keychain vanished")?
         .to_string();
-    assert!(error.contains("changed identity"), "{error}");
+    assert!(
+        error.contains(&keychain.display().to_string()) && error.contains("isolated keychain"),
+        "{error}"
+    );
+    assert!(
+        !agy.probed_homes.lock().unwrap().contains(&home),
+        "the shared login must not be probed for the isolated account"
+    );
     Ok(())
 }
 

@@ -371,7 +371,9 @@ pub fn detect_with_org(
     let cwd = Path::new(crate::claude::PROBE_CWD);
     if adapter == "agy" {
         // An isolated account is signed in under its own directory as `HOME`.
-        let home = crate::agy::account_keychain(directory).map_or(home, |_| directory);
+        // The mode comes from the directory, so a missing keychain is refused
+        // here rather than probed under the shared login.
+        let home = crate::agy::account_keychain(directory, home)?.map_or(home, |_| directory);
         return detect_agy(executor, executable, home, user, cwd, probe_root)
             .map(|key| (key, None));
     }

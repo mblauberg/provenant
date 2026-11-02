@@ -2887,10 +2887,14 @@ fn cursor_launches_fresh_and_resume_with_edits_only_for_writers() -> Result<(), 
     Ok(())
 }
 
-/// A registration made before agy accounts had their own keychain: its
-/// directory holds none, so lanes share the login keychain.
+/// An agy registration of the user's own login: its directory is the fixture
+/// home, so lanes share the login keychain.
 pub(super) fn legacy_agy_account() -> identity::RegisteredAccount {
-    identity::RegisteredAccount::new("agy", "opaque-account", "/fixture/identities/legacy".into())
+    agy_account_at(Path::new("/fixture/home"))
+}
+
+pub(super) fn agy_account_at(directory: &Path) -> identity::RegisteredAccount {
+    identity::RegisteredAccount::new("agy", "opaque-account", directory.into())
         .expect("fixture account")
 }
 
@@ -3779,7 +3783,7 @@ fn agy_account_probe_logs_under_the_host_probe_root() {
         Path::new("/bin/agy"),
         Path::new("/home/test"),
         OsStr::new("test"),
-        Path::new("/home/test/.agy"),
+        Path::new("/home/test"),
         &host_root,
     )
     .unwrap();
@@ -3805,7 +3809,7 @@ fn agy_account_probe_removes_its_log_directory_when_the_command_fails() {
         Path::new("/bin/agy"),
         Path::new("/home/test"),
         OsStr::new("test"),
-        Path::new("/home/test/.agy"),
+        Path::new("/home/test"),
         &host_root,
     );
     assert!(matches!(result, Err(ProviderError::UnknownIdentity)));
@@ -3834,7 +3838,7 @@ fn agy_account_probe_reports_a_missing_probe_root_as_a_probe_failure() {
         Path::new("/bin/agy"),
         Path::new("/home/test"),
         OsStr::new("test"),
-        Path::new("/home/test/.agy"),
+        Path::new("/home/test"),
         &missing,
     )
     .unwrap_err();
@@ -4871,12 +4875,8 @@ fn agy_runs_in_a_private_home_that_links_only_the_login_keychain() -> Result<(),
     let cwd = std::path::Path::new("/fixture/repo");
     for (access, edits) in [(Access::ReadOnly, false), (Access::WorktreeWrite, true)] {
         let plan = fixture_access_plan(access, Some("keychain"), false);
-        // A legacy registration's directory holds no keychain of its own.
-        let account = identity::RegisteredAccount::new(
-            "agy",
-            "opaque-account",
-            "/fixture/identities/legacy".into(),
-        )?;
+        // The user's own login is registered at the home directory itself.
+        let account = legacy_agy_account();
         let mut input = fixture_input(&route, &plan, &prompt, cwd, None);
         input.account = Some(&account);
         let spec = agy::Agy.prepare(input)?;
@@ -4960,20 +4960,35 @@ fn agy_isolated_account_links_its_own_keychain_and_grants_only_that_path()
             Err(ProviderError::IdentityMismatch)
         ));
     }
+    // The keychain vanishes after registration and observation: the launch
+    // fails closed, naming the path, and never links or grants the shared one.
+    std::fs::remove_file(&keychain)?;
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        let plan = fixture_access_plan(access, Some("keychain"), false);
+        let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+        input.account = Some(&account);
+        match agy::Agy.prepare(input) {
+            Err(ProviderError::IsolatedKeychainUnavailable(path)) => {
+                assert_eq!(path, keychain.display().to_string());
+            }
+            Err(other) => panic!("unexpected error {other}"),
+            Ok(spec) => panic!(
+                "launched without the isolated keychain: {:?} {:?}",
+                spec.setup, spec.profile.spec.authentication
+            ),
+        }
+    }
     Ok(())
 }
 
 #[test]
-fn agy_directory_without_a_keychain_file_keeps_the_shared_login_keychain()
+fn agy_own_login_keeps_the_shared_keychain_and_an_isolated_directory_never_does()
 -> Result<(), Box<dyn std::error::Error>> {
     let root = tempfile::tempdir()?;
-    let directory = root.path().join("home/.gemini");
-    // A keychain directory without the file is still a legacy registration.
-    std::fs::create_dir_all(directory.join("Library/Keychains/login.keychain-db"))?;
-    let account = identity::RegisteredAccount::new("agy", "opaque-account", directory)?;
     let prompt = Prompt::new("fixture prompt".into());
     let route = route("agy", "gemini-3.8-flash");
     let plan = fixture_access_plan(Access::ReadOnly, Some("keychain"), false);
+    let account = legacy_agy_account();
     let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
     input.account = Some(&account);
     let spec = agy::Agy.prepare(input)?;
@@ -4986,6 +5001,22 @@ fn agy_directory_without_a_keychain_file_keeps_the_shared_login_keychain()
         spec.profile.spec.authentication[0].roots,
         [crate::launch::exact(login)]
     );
+    // A directory other than the home is isolated even with no keychain file,
+    // or with a directory where the file belongs.
+    let directory = root.path().join("home/.gemini");
+    for prepare_dir in [false, true] {
+        std::fs::create_dir_all(&directory)?;
+        if prepare_dir {
+            std::fs::create_dir_all(directory.join("Library/Keychains/login.keychain-db"))?;
+        }
+        let isolated = agy_account_at(&directory);
+        let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+        input.account = Some(&isolated);
+        assert!(matches!(
+            agy::Agy.prepare(input),
+            Err(ProviderError::IsolatedKeychainUnavailable(_))
+        ));
+    }
     // An unregistered route cannot launch an adapter that pins its account.
     let input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
     assert!(matches!(
@@ -4999,16 +5030,27 @@ fn agy_directory_without_a_keychain_file_keeps_the_shared_login_keychain()
 fn agy_keychain_symlink_is_not_an_isolated_account_keychain()
 -> Result<(), Box<dyn std::error::Error>> {
     let root = tempfile::tempdir()?;
-    let directory = root.path().join("home/.agy-second");
+    let home = root.path().join("home");
+    let directory = home.join(".agy-second");
     std::fs::create_dir_all(directory.join("Library/Keychains"))?;
     let elsewhere = root.path().join("elsewhere.keychain-db");
     std::fs::write(&elsewhere, "")?;
     let keychain = directory.join("Library/Keychains/login.keychain-db");
     std::os::unix::fs::symlink(&elsewhere, &keychain)?;
-    assert_eq!(agy::account_keychain(&directory), None);
+    assert!(matches!(
+        agy::account_keychain(&directory, &home),
+        Err(ProviderError::IsolatedKeychainUnavailable(path)) if path == keychain.display().to_string()
+    ));
     std::fs::remove_file(&keychain)?;
     std::fs::write(&keychain, "")?;
-    assert_eq!(agy::account_keychain(&directory), Some(keychain));
+    assert_eq!(agy::account_keychain(&directory, &home)?, Some(keychain));
+    // The user's own home is the shared login keychain, however it is spelled.
+    assert_eq!(agy::account_keychain(&home, &home)?, None);
+    std::os::unix::fs::symlink(&home, root.path().join("alias"))?;
+    assert_eq!(
+        agy::account_keychain(&root.path().join("alias"), &home)?,
+        None
+    );
     Ok(())
 }
 
@@ -5102,10 +5144,10 @@ fn agy_registration_identity_comes_from_the_directory_it_is_signed_in_under()
     let root = tempfile::tempdir()?;
     let real_home = root.path().join("home");
     let isolated = real_home.join(".agy-second");
-    let legacy = real_home.join(".gemini");
+    let without_keychain = real_home.join(".gemini");
     std::fs::create_dir_all(isolated.join("Library/Keychains"))?;
     std::fs::write(isolated.join("Library/Keychains/login.keychain-db"), "")?;
-    std::fs::create_dir_all(&legacy)?;
+    std::fs::create_dir_all(&without_keychain)?;
     let probes = AgySignIns {
         accounts: vec![
             (real_home.clone(), "first@example.test"),
@@ -5126,7 +5168,7 @@ fn agy_registration_identity_comes_from_the_directory_it_is_signed_in_under()
             &probe_root,
         )
     };
-    let legacy_key = detect(&legacy)?;
+    let legacy_key = detect(&real_home)?;
     let isolated_key = detect(&isolated)?;
     assert!(legacy_key.starts_with("agy-google-"));
     assert!(isolated_key.starts_with("agy-google-"));
@@ -5135,6 +5177,18 @@ fn agy_registration_identity_comes_from_the_directory_it_is_signed_in_under()
         *probes.homes.lock().unwrap(),
         [real_home.clone(), isolated.clone()]
     );
+    // An isolated directory whose keychain is missing or vanishes is refused
+    // without a probe, so it can never record the shared login's key.
+    assert!(matches!(
+        detect(&without_keychain),
+        Err(ProviderError::IsolatedKeychainUnavailable(_))
+    ));
+    std::fs::remove_file(isolated.join("Library/Keychains/login.keychain-db"))?;
+    assert!(matches!(
+        detect(&isolated),
+        Err(ProviderError::IsolatedKeychainUnavailable(_))
+    ));
+    assert_eq!(probes.homes.lock().unwrap().len(), 2);
     Ok(())
 }
 

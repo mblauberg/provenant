@@ -289,25 +289,19 @@ pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Setting
 
 /// An agy registration is either the user's own login (`home` itself, on the
 /// shared login keychain) or an isolated account whose directory is its own
-/// `HOME` and holds its own keychain as a regular file. Without that file the
-/// probe would sign in as the first account and record its key under the new
-/// label, so any other directory is refused.
+/// `HOME` and holds its own keychain as a regular file. Any other directory is
+/// refused up front, and detection derives the same mode from the directory, so
+/// a keychain that vanishes between this check and the probe is refused too
+/// rather than probed under the shared login and recorded under this label.
 fn check_agy_directory(directory: &Path, home: &Path) -> Result<(), String> {
-    let own_login = provenant_os::fs::canonicalize(home).unwrap_or_else(|_| home.to_owned());
-    if directory == home || directory == own_login {
-        return Ok(());
-    }
-    if provenant_providers::agy::account_keychain(directory).is_some() {
-        return Ok(());
-    }
-    Err(format!(
-        "agy account directory {} has no Library/Keychains/login.keychain-db \
-         (a regular file, not a symlink); create the isolated keychain and sign in \
-         there first (docs/runbooks/providers.md, Agy accounts), or register the \
-         default login with --directory {}",
-        directory.display(),
-        home.display()
-    ))
+    provenant_providers::agy::account_keychain(directory, home)
+        .map(|_| ())
+        .map_err(|error| {
+            format!(
+                "{error}; or register the default login with --directory {}",
+                home.display()
+            )
+        })
 }
 
 fn headline_name(value: provenant_quota::Headline) -> &'static str {

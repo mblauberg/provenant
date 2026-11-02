@@ -479,10 +479,12 @@ impl LiveQuota {
         )
     }
     /// An isolated agy account is signed in under its own directory as `HOME`.
-    fn agy_home<'a>(&'a self, account: &'a Account) -> &'a Path {
-        match crate::agy::account_keychain(&account.identity_dir) {
-            Some(_) => &account.identity_dir,
-            None => &self.home,
+    /// A missing isolated keychain is a login problem, never the shared login.
+    fn agy_home<'a>(&'a self, account: &'a Account) -> Result<&'a Path, ProbeFailure> {
+        match crate::agy::account_keychain(&account.identity_dir, &self.home) {
+            Ok(Some(_)) => Ok(&account.identity_dir),
+            Ok(None) => Ok(&self.home),
+            Err(_) => Err(ProbeFailure::Auth),
         }
     }
     fn agy(
@@ -496,7 +498,7 @@ impl LiveQuota {
         let log = scratch.path().join("cli.log");
         let log_arg = log.to_str().ok_or(ProbeFailure::Malformed)?;
         let payload = self.json_command(
-            self.agy_home(account),
+            self.agy_home(account)?,
             "agy",
             &[
                 "-p",
@@ -670,7 +672,7 @@ mod tests {
     }
 
     #[test]
-    fn agy_quota_probe_runs_under_the_accounts_own_home_only_when_it_holds_a_keychain() {
+    fn agy_quota_probe_runs_under_the_accounts_own_home_and_never_falls_back_to_the_login() {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("home");
         let state = root.path().join("state");
@@ -722,15 +724,24 @@ mod tests {
         // The isolated account is probed under its own directory, and its
         // identity check matches the second sign-in, not the login keychain's.
         probe(&isolated, "second@example.test").unwrap();
-        // Legacy, absent and symlinked-keychain directories share the user's
-        // login keychain, so they probe under the real HOME.
-        probe(&legacy, "first@example.test").unwrap();
-        probe(&root.path().join("absent"), "first@example.test").unwrap();
-        probe(&linked, "first@example.test").unwrap();
+        // The user's own login is registered at the home directory itself.
+        probe(&home, "first@example.test").unwrap();
+        assert_eq!(*homes.lock().unwrap(), [isolated.clone(), home.clone()]);
+        // Any other directory without a regular keychain file (absent, no file,
+        // or a symlink) is refused without a probe, never run under the login.
+        for dir in [&legacy, &root.path().join("absent"), &linked] {
+            assert_eq!(
+                probe(dir, "first@example.test").unwrap_err(),
+                ProbeFailure::Auth
+            );
+        }
+        // The keychain vanishing after a successful probe fails closed too.
+        fs::remove_file(isolated.join("Library/Keychains/login.keychain-db")).unwrap();
         assert_eq!(
-            *homes.lock().unwrap(),
-            [isolated, home.clone(), home.clone(), home]
+            probe(&isolated, "second@example.test").unwrap_err(),
+            ProbeFailure::Auth
         );
+        assert_eq!(*homes.lock().unwrap(), [isolated, home]);
     }
 
     #[test]
