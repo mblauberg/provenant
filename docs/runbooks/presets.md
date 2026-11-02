@@ -352,6 +352,18 @@ falsify every finding (`verifiers = 0` skips it), and the synthesis gives each
 finding one disposition: accepted, rejected or deferred, with a reason. The
 `generator-evaluator` evaluator does the same over its lens findings.
 
+The `review-council` lens group accepts partial success. A lens that fails or
+returns no valid findings block is recorded as unavailable with its cause, and
+only successful lenses flow to verification and synthesis, after an
+"Unavailable lenses" list that is never truncated. The group still fails with
+`coverage_below_minimum: N of M lenses succeeded, minimum K; unavailable: ...`
+when fewer than `min_reviews` lenses succeed, which stops the council for the
+chair to substitute a lens through a different lens or decide. `min_reviews`
+defaults to the review ladder minimum for `risk_tier` (`substantial` 1,
+`crucial` and `terminal` 2) and is at least 1; it is capped at the lens count.
+A lens that ran and found blocking issues still blocks through its verdict.
+Councils where every lens succeeds are unchanged.
+
 The routing review shapes are canonical for who reviews. A lens whose `tier`
 is empty takes its pool from the review selection for `risk_tier` or the
 `review_shape` override. See [review shapes](model-routing.md#review-shapes)

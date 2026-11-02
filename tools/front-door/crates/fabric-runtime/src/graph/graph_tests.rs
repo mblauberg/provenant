@@ -215,6 +215,7 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
         route: Some(route),
         routes: None,
         required_verdict: None,
+        require_findings: false,
     }
 }
 
@@ -936,6 +937,96 @@ fn composite_rejects_ambiguous_exports_and_blocks_on_child_failure() {
             .checkpoint,
         run.checkpoint
     );
+}
+
+/// Three lenses: `lens-a` succeeds, `lens-b` returns no findings block and
+/// `lens-c` is unavailable. `verify` reads the lens group.
+fn partial_review(minimum: usize) -> (GraphDocument, FakeOwner) {
+    let ok = "LENS-A-OK\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"low\",\"file\":\"a.rs\",\"line\":1,\"summary\":\"note\",\"status\":\"open\"}]}\n```";
+    let lens = |id: &str| {
+        serde_json::json!({"id":id,"access":"read_only","prompt":id,
+            "require_findings":true,"route":{"alias":"fixture"}})
+    };
+    let exports: Vec<_> = ["lens-a", "lens-b", "lens-c"]
+        .map(|id| serde_json::json!({"node":id,"outputs":["result","findings"]}))
+        .into();
+    let document = serde_json::from_value(serde_json::json!({
+        "schema_version": 1, "graph_id": "partial-review", "nodes": [
+            {"id":"lenses","kind":"composite","access":"read_only",
+             "composite":{"min_successful":minimum,
+                "nodes":[lens("lens-a"),lens("lens-b"),lens("lens-c")],"exports":exports}},
+            {"id":"verify","access":"read_only","prompt":"verify","route":{"alias":"fixture"},
+             "depends_on":["lenses"],"inputs":[{"node":"lenses","outputs":["result","findings"]}]}
+        ]
+    }))
+    .unwrap();
+    let owner = FakeOwner {
+        observations: VecDeque::from([
+            terminal_with_result(AttemptOutcome::Succeeded, ok),
+            terminal_with_result(AttemptOutcome::Succeeded, "LENS-B-NO-FINDINGS"),
+            terminal(AttemptOutcome::AdapterUnavailable),
+            terminal_with_result(AttemptOutcome::Succeeded, "verified"),
+        ]),
+        ..Default::default()
+    };
+    (document, owner)
+}
+
+#[test]
+fn partial_composite_exports_only_successful_members_and_lists_the_unavailable() {
+    let (document, mut owner) = partial_review(1);
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let node = |id: &str| {
+        let scoped = format!("--{id}");
+        (run.checkpoint.nodes.iter())
+            .find(|n| n.id == id || n.id.ends_with(&scoped))
+            .unwrap()
+    };
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert_eq!(node("lens-b").state, NodeState::Failed);
+    assert_eq!(node("verify").state, NodeState::Succeeded);
+    let lenses = node("lenses").outputs.as_ref().unwrap();
+    assert_eq!(lenses.findings.len(), 1);
+    let excerpt = &lenses.result.as_ref().unwrap().excerpt;
+    assert!(excerpt.starts_with("Unavailable lenses:"), "{excerpt}");
+    assert!(excerpt.contains("lens-b: the findings block is missing or invalid"));
+    assert!(excerpt.contains("lens-c: adapter unavailable"));
+    assert!(excerpt.contains("LENS-A-OK"));
+    assert!(!excerpt.contains("LENS-B-NO-FINDINGS"));
+    let verify_input = &owner.prompts[3];
+    assert!(verify_input.contains("LENS-A-OK") && verify_input.contains("lens-c"));
+    assert!(!verify_input.contains("LENS-B-NO-FINDINGS"));
+}
+
+#[test]
+fn partial_composite_below_its_minimum_fails_with_the_recorded_reason() {
+    let (document, mut owner) = partial_review(2);
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let lenses = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id == "lenses")
+        .unwrap();
+    assert_eq!(lenses.state, NodeState::Failed);
+    assert_eq!(
+        lenses.advance_error_code.as_deref(),
+        Some("coverage_below_minimum")
+    );
+    let reason = lenses.advance_error.as_deref().unwrap();
+    assert!(
+        reason.contains("1 of 3 lenses succeeded, minimum 2"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("lens-b") && reason.contains("lens-c"),
+        "{reason}"
+    );
+    assert_eq!(owner.prompts.len(), 3, "verify must not run");
+    assert!(!run.checkpoint.successful());
+    let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
+    assert_eq!(replay.checkpoint, run.checkpoint);
 }
 
 #[test]
@@ -2522,6 +2613,7 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
         route: None,
         routes: Some(routes.clone()),
         required_verdict: None,
+        require_findings: false,
     }]);
     let mut owner = FakeOwner {
         observations: VecDeque::from([
@@ -2758,6 +2850,7 @@ fn pending_and_unknown_keep_observing_the_same_route_without_fallback() {
             route: None,
             routes: Some(routes.clone()),
             required_verdict: None,
+            require_findings: false,
         }]);
         let mut owner = FakeOwner {
             observations: VecDeque::from([first, terminal(AttemptOutcome::Succeeded)]),
@@ -3067,6 +3160,7 @@ fn terminal_task_failure_does_not_try_a_fallback_route() {
         route: None,
         routes: Some(vec![route("first"), route("second")]),
         required_verdict: None,
+        require_findings: false,
     }]);
     let mut owner = FakeOwner {
         observations: VecDeque::from([terminal(AttemptOutcome::TaskFailed)]),
