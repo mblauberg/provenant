@@ -1160,6 +1160,7 @@ existing PR reuse requires an open PR at the exact delivered head.
 - Test: `crates/run/src/delivery_tests.rs::local_integration_fast_forwards_merges_and_replays`;
   `::local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state`;
   `::integration_fast_forwards_a_clean_worktree_that_holds_the_branch`;
+  `::integration_refuses_a_worktree_checkout_that_would_clobber_or_run_filters`;
   `::remote_integration_refreshes_the_leased_destination`;
   `::settled_delivery_refuses_dirty_or_changed_head_and_replays_success`;
   `crates/cli/src/lib.rs::lifecycle_flags_parse_and_refuse_ambiguous_authority`.

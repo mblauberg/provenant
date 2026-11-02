@@ -1461,5 +1461,6 @@ launches are auto-resolved.
   `src/fabric.rs::graph_submission_pins_the_integration_base_across_replay`;
   `crates/run/src/delivery_tests.rs::graph_pr_body_uses_its_recorded_base_despite_primary_checkout_changes`;
   `crates/run/src/delivery_tests.rs::local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state`;
-  `crates/run/src/delivery_tests.rs::integration_fast_forwards_a_clean_worktree_that_holds_the_branch`.
+  `crates/run/src/delivery_tests.rs::integration_fast_forwards_a_clean_worktree_that_holds_the_branch`;
+  `crates/run/src/delivery_tests.rs::integration_refuses_a_worktree_checkout_that_would_clobber_or_run_filters`.
 - Owner: `crates/fabric-runtime/src/graph.rs`, `src/fabric.rs`

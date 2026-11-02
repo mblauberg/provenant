@@ -1557,9 +1557,19 @@ impl HostDeliveryContext {
                 return Err(RunError::Delivery(Stage::Verify));
             }
         } else if let Some(tree) = checked_out {
+            self.refuse_unsafe_checkout(writer, &tree, &expected, candidate, stage)?;
             let tree = tree.to_str().ok_or(RunError::Delivery(stage))?;
             let git_dir = format!("--git-dir={tree}/.git");
             let work_tree = format!("--work-tree={tree}");
+            let held = self.command(
+                &writer.worktree,
+                "git",
+                &[&git_dir, &work_tree, "symbolic-ref", "-q", "HEAD"],
+                stage,
+            )?;
+            if held != destination {
+                return Err(RunError::Delivery(stage));
+            }
             self.command(
                 &writer.worktree,
                 "git",
@@ -1598,6 +1608,73 @@ impl HostDeliveryContext {
         }
         if self.head(writer)? != head {
             return Err(RunError::Delivery(Stage::Head));
+        }
+        Ok(())
+    }
+
+    /// Refuses a fast-forward checkout that would run code or lose files on
+    /// the host: a changed path with a filter attribute (smudge and process
+    /// filters run during checkout), or a path the candidate adds that already
+    /// exists in the tree as an ignored or untracked file.
+    fn refuse_unsafe_checkout(
+        &self,
+        writer: &WriterRequest,
+        tree: &Path,
+        expected: &str,
+        candidate: GitOid,
+        stage: Stage,
+    ) -> Result<()> {
+        let candidate = candidate.to_string();
+        let diff = |filter: &str| {
+            self.command(
+                &writer.worktree,
+                "git",
+                &[
+                    "diff",
+                    "--name-only",
+                    "-z",
+                    "--no-renames",
+                    filter,
+                    expected,
+                    &candidate,
+                ],
+                stage,
+            )
+        };
+        let changed = diff("--diff-filter=ACDMRTUXB")?;
+        let paths: Vec<&str> = changed.split('\0').filter(|p| !p.is_empty()).collect();
+        if !paths.is_empty() {
+            let mut input = paths.join("\0");
+            input.push('\0');
+            let attributes = self.command_with_input(
+                &writer.worktree,
+                "git",
+                &[
+                    "check-attr",
+                    "-z",
+                    "--stdin",
+                    "--source",
+                    &candidate,
+                    "filter",
+                ],
+                stage,
+                input.as_bytes(),
+            )?;
+            let fields: Vec<&str> = attributes.split('\0').collect();
+            if fields
+                .chunks(3)
+                .any(|row| row.len() == 3 && !matches!(row[2], "unspecified" | "unset"))
+            {
+                return Err(RunError::Delivery(stage));
+            }
+        }
+        let added = diff("--diff-filter=A")?;
+        if added
+            .split('\0')
+            .filter(|p| !p.is_empty())
+            .any(|path| tree.join(path).symlink_metadata().is_ok())
+        {
+            return Err(RunError::Delivery(stage));
         }
         Ok(())
     }

@@ -81,7 +81,10 @@ Choose `--deliver none`, `push`, `integrate:integration` or `pr`. Push and PR
 use origin and the lane branch. Integration targets must already exist;
 `integrate:origin/integration` selects a remote branch. A local target checked
 out in a linked worktree, such as a batch worktree, advances by fast-forwarding
-that worktree; it must be clean and still at the target's tip. Integration
+that worktree. That worktree must be clean, still on the target branch at its
+tip, free of files at paths the lane adds (including ignored files), and the
+changed paths must carry no `filter` attribute, so checkout runs no filter on
+the host. The chair owns that worktree; no lane writer lock covers it. Integration
 conflicts leave checkouts and destination refs intact. Inspect the failure and resolve it through the owning lane.
 Legacy `--deliver-remote`, `--deliver-branch` and `--open-pr` remain available
 as an alternative to `--deliver`.

@@ -1483,6 +1483,74 @@ fn integration_fast_forwards_a_clean_worktree_that_holds_the_branch()
 }
 
 #[test]
+fn integration_refuses_a_worktree_checkout_that_would_clobber_or_run_filters()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    for case in ["ignored", "filter"] {
+        let mut fixture = PrepareFixture::new()?;
+        fixture.git(&["branch", "integration"])?;
+        let batch = fixture.root.join("batch");
+        fixture.git(&[
+            "worktree",
+            "add",
+            batch.to_str().ok_or("batch")?,
+            "integration",
+        ])?;
+        fixture.request = HostDeliveryContext::destination(
+            DeliveryMode::Integrate("integration".into()),
+            "lane",
+        )?
+        .ok_or("destination")?;
+        let host = fixture.prepare()?;
+        let before = host.command(
+            &fixture.writer.project,
+            "git",
+            &["rev-parse", "integration"],
+            WriterDeliveryStage::Verify,
+        )?;
+        if case == "ignored" {
+            let common = host.command(
+                &fixture.writer.project,
+                "git",
+                &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+                WriterDeliveryStage::Verify,
+            )?;
+            let info = std::path::Path::new(&common).join("info");
+            std::fs::create_dir_all(&info)?;
+            std::fs::write(info.join("exclude"), "landed\n")?;
+            std::fs::write(batch.join("landed"), "local")?;
+        } else {
+            std::fs::write(
+                fixture.writer.worktree.join(".gitattributes"),
+                "landed filter=lane\n",
+            )?;
+            fixture.lane_git(&["add", ".gitattributes"])?;
+        }
+        std::fs::write(fixture.writer.worktree.join("landed"), "lane")?;
+        fixture.lane_git(&["add", "-f", "landed"])?;
+        fixture.commit(&fixture.writer.worktree, "lane change")?;
+        let head = host.head(&fixture.writer)?;
+        assert!(
+            host.integrate(&fixture.writer, &fixture.request, head)
+                .is_err(),
+            "{case}"
+        );
+        let after = host.command(
+            &fixture.writer.project,
+            "git",
+            &["rev-parse", "integration"],
+            WriterDeliveryStage::Verify,
+        )?;
+        assert_eq!(after, before, "{case}");
+        if case == "ignored" {
+            assert_eq!(std::fs::read_to_string(batch.join("landed"))?, "local");
+        } else {
+            assert!(!batch.join("landed").exists());
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn two_lanes_contend_for_integration_without_losing_either_head()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut fixture = PrepareFixture::new()?;
