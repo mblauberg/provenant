@@ -1111,7 +1111,6 @@ fn dispatch_existing_worktree_checks_custody_and_replays() -> Result<(), Box<dyn
     use provenant_confinement::worktrees::{self, WorktreeOrigin, WorktreeOwner};
     use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
     use provenant_supervisor::custody::{self, Scope};
-    use std::ffi::OsString;
     use std::os::unix::fs::DirBuilderExt;
     const MARKER: &str = "PROVENANT_TEST_WORKTREE_ADMISSION";
     let executor = SystemExecutor::new(1)?;
