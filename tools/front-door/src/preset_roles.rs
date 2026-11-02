@@ -226,8 +226,16 @@ impl RoleLibrary {
                 .collect();
             if !layers.is_empty() {
                 let mut merged = json!({});
-                for (_, layer) in &layers {
-                    merged = overlay(&merged, layer);
+                for (origin, layer) in &layers {
+                    let mut layer = layer.clone();
+                    // Bundled display labels name a role, not a concrete job.
+                    // User and preset overrides may still choose node titles.
+                    if origin == "bundled"
+                        && let Some(map) = layer.as_object_mut()
+                    {
+                        map.remove("title");
+                    }
+                    merged = overlay(&merged, &layer);
                     // `extends` is per definition: the last layer to name one wins.
                     if let Some(parent) = layer.get("extends") {
                         merged["extends"] = parent.clone();

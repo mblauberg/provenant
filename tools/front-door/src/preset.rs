@@ -8,6 +8,9 @@ use std::{
 
 const DEPTH: usize = 8;
 
+#[path = "preset_cli.rs"]
+mod presentation;
+
 /// The review shape selected for one review stage. Review shapes are canonical
 /// for who reviews; presets compose them, so lens counts and tiers default from here.
 /// Picks a review shape from a stage's `review_shape` and `risk_tier`. The host
@@ -37,6 +40,7 @@ pub struct Layers {
     pub known_routes: Option<BTreeSet<String>>,
     used_roles: std::cell::RefCell<BTreeMap<String, Value>>,
     pub substitutions: std::cell::RefCell<Vec<Value>>,
+    warnings: std::cell::RefCell<Vec<String>>,
     entries: BTreeMap<String, Vec<(String, Value)>>,
     errors: BTreeMap<String, Vec<String>>,
     repo_files: BTreeSet<String>,
@@ -55,6 +59,7 @@ pub struct Expansion {
     pub roles: BTreeMap<String, Value>,
     /// Requested routes replaced by a fallback, for example a missing web route.
     pub substitutions: Vec<Value>,
+    pub warnings: Vec<String>,
 }
 
 impl Layers {
@@ -66,6 +71,7 @@ impl Layers {
         let mut layers = Self::default();
         for (name, text) in [
             ("single", include_str!("../assets/presets/single.toml")),
+            ("scope", include_str!("../assets/presets/scope.toml")),
             ("chain", include_str!("../assets/presets/chain.toml")),
             ("fan-out", include_str!("../assets/presets/fan-out.toml")),
             (
@@ -319,7 +325,9 @@ impl Layers {
     }
 
     pub fn resolve(&self, name: &str) -> Result<(Value, BTreeMap<String, String>), String> {
-        self.resolve_inner(name, &mut Vec::new(), &mut Vec::new())
+        let (config, mut origins) = self.resolve_inner(name, &mut Vec::new(), &mut Vec::new())?;
+        origins.retain(|path, _| !path.ends_with("$scope_read_only"));
+        Ok((config, origins))
     }
 
     fn resolve_inner(
@@ -379,6 +387,11 @@ impl Layers {
             merge(&mut value, &layer, "", origin, &mut origins)
                 .map_err(|error| format!("preset {name}: {error} ({origin})"))?;
         }
+        // Keep the scope floor in internal provenance, outside caller-settable
+        // configuration, so an extending preset cannot discard it.
+        if name == "scope" {
+            origins.insert("$scope_read_only".into(), "bundled scope floor".into());
+        }
         stack.pop();
         Ok((value, origins))
     }
@@ -413,7 +426,11 @@ fn is_fragment(value: &Value) -> bool {
 
 /// A typed parameter: `{ type, default, min, max, enum, doc }`.
 fn is_spec(value: &Value) -> bool {
-    is_fragment(value) && value.get("default").is_some()
+    is_fragment(value)
+}
+
+fn list_is_lenses(value: Option<&Value>) -> bool {
+    value.and_then(Value::as_str) == Some("${lenses}")
 }
 
 fn merge(
@@ -665,7 +682,7 @@ fn flatten_parameters(
         };
         let default = value
             .get("default")
-            .ok_or_else(|| fail("typed parameter needs a default".into()))?;
+            .ok_or_else(|| fail("required parameter is missing".into()))?;
         if let Some(kind) = value.get("type")
             && !kind.as_str().is_some_and(|kind| TYPE_NAMES.contains(&kind))
         {
@@ -818,6 +835,7 @@ pub fn expand_with(
     layers.used_shapes.borrow_mut().clear();
     layers.used_roles.borrow_mut().clear();
     layers.substitutions.borrow_mut().clear();
+    layers.warnings.borrow_mut().clear();
     let mut repo_files = Vec::new();
     let (mut config, mut origins) = layers.resolve_inner(name, &mut Vec::new(), &mut repo_files)?;
     for (key, value) in params {
@@ -864,6 +882,7 @@ pub fn expand_with(
         &mut origins,
         &mut repo_files,
     )?;
+    origins.retain(|path, _| !path.ends_with("$scope_read_only"));
     if let Some(trusted) = trusted
         && (!repo_files.is_empty() || repo_roles)
     {
@@ -899,6 +918,7 @@ pub fn expand_with(
     }
     let roles: BTreeMap<String, Value> = layers.used_roles.take().into_iter().collect();
     let substitutions = layers.substitutions.take();
+    let warnings = layers.warnings.take();
     for (role, used) in &roles {
         origins.insert(
             format!("roles.{role}"),
@@ -913,6 +933,7 @@ pub fn expand_with(
         "origins": origins,
         "roles": roles,
         "substitutions": substitutions,
+        "warnings": warnings,
     });
     if serde_json::to_vec(&document)
         .map_err(|e| e.to_string())?
@@ -936,6 +957,7 @@ pub fn expand_with(
         repo_files,
         roles,
         substitutions,
+        warnings,
     })
 }
 
@@ -1025,6 +1047,25 @@ fn build(
             origins,
         ))
     };
+    if result.is_ok() && origins.contains_key("$scope_read_only") {
+        if config.get("delivery").is_some() {
+            return Err("scope preset refuses write-broadening graph delivery".into());
+        }
+        visit_nodes(nodes, &mut |node| {
+            if node["access"] != "read_only"
+                || node.get("write_scope").is_some()
+                || node.get("delivery").is_some()
+                || node.get("land").is_some()
+                || node.get("kind").is_some_and(|kind| kind != "task")
+            {
+                return Err(format!(
+                    "scope preset refuses write-broadening override on node {}",
+                    node["id"]
+                ));
+            }
+            Ok(())
+        })?;
+    }
     stack.pop();
     result
 }
@@ -1035,10 +1076,21 @@ fn interpolate(
     prompt: &str,
     index: usize,
 ) -> Result<Value, String> {
+    interpolate_inner(value, parameters, prompt, index, false)
+}
+
+fn interpolate_inner(
+    value: &Value,
+    parameters: &Value,
+    prompt: &str,
+    index: usize,
+    defer_index: bool,
+) -> Result<Value, String> {
     match value {
         Value::String(text) => {
             let lookup = |name: &str| match name {
                 "prompt" => Ok(json!(prompt)),
+                "index" if defer_index => Ok(json!("${index}")),
                 "index" => Ok(json!(index)),
                 _ => {
                     let mut parts = name.split('.');
@@ -1084,12 +1136,17 @@ fn interpolate(
         }
         Value::Array(values) => values
             .iter()
-            .map(|value| interpolate(value, parameters, prompt, index))
+            .map(|value| interpolate_inner(value, parameters, prompt, index, defer_index))
             .collect::<Result<Vec<_>, _>>()
             .map(Value::Array),
         Value::Object(values) => values
             .iter()
-            .map(|(key, value)| Ok((key.clone(), interpolate(value, parameters, prompt, index)?)))
+            .map(|(key, value)| {
+                Ok((
+                    key.clone(),
+                    interpolate_inner(value, parameters, prompt, index, defer_index)?,
+                ))
+            })
             .collect::<Result<serde_json::Map<_, _>, String>>()
             .map(Value::Object),
         value => Ok(value.clone()),
@@ -1407,9 +1464,7 @@ fn lower_leaf(
     }
     map.insert("depends_on".into(), json!(dependencies));
     map.entry("access").or_insert_with(|| json!("read_only"));
-    if let Some(role) = role {
-        map.entry("title").or_insert_with(|| json!(role));
-    }
+    map.entry("title").or_insert_with(|| json!(id));
     let control = matches!(
         map.get("kind").and_then(Value::as_str),
         Some("gate" | "loop" | "composite" | "land")
@@ -1653,6 +1708,10 @@ impl StageBuilder<'_> {
         for mut item in list {
             let when = item.get("when").and_then(Value::as_str).unwrap_or_default();
             if !when.is_empty() && !tags.contains(&when) {
+                self.layers.warnings.borrow_mut().push(format!(
+                    "preset {}: omitted lens {}: requires risk tag {when}",
+                    self.name, item["name"]
+                ));
                 continue;
             }
             let tier = item.get("tier").and_then(Value::as_str).unwrap_or_default();
@@ -1660,6 +1719,10 @@ impl StageBuilder<'_> {
                 let name = item["name"].as_str().unwrap_or_default().to_owned();
                 if when.is_empty() {
                     if governed >= limit {
+                        self.layers.warnings.borrow_mut().push(format!(
+                            "preset {}: omitted lens {name}: review shape has {limit} slots",
+                            self.name
+                        ));
                         continue;
                     }
                     governed += 1;
@@ -1705,7 +1768,15 @@ impl StageBuilder<'_> {
                 return Err("for_each and count are exclusive".into());
             }
             match interpolate(list, &self.parameters, self.prompt, 1)? {
-                Value::Array(list) => self.select_items(list)?.into_iter().map(Some).collect(),
+                Value::Array(list) => {
+                    // Only the lenses parameter is governed by review shape.
+                    let list = if list_is_lenses(object.get("for_each")) {
+                        self.select_items(list)?
+                    } else {
+                        list
+                    };
+                    list.into_iter().map(Some).collect()
+                }
                 _ => return Err("for_each must name a list parameter".into()),
             }
         } else {
@@ -1820,6 +1891,12 @@ impl StageBuilder<'_> {
                         .as_object()
                         .ok_or("entry parameters must be a table")?
                     {
+                        // Read roots are host-injected context, optional at each
+                        // child interface. Other misspellings remain errors.
+                        if key == "read_roots" && config.pointer("/parameters/read_roots").is_none()
+                        {
+                            continue;
+                        }
                         override_value(
                             &mut config,
                             &format!("parameters.{key}"),
@@ -1833,6 +1910,11 @@ impl StageBuilder<'_> {
                 if let Some(sets) = object.remove("set") {
                     for item in sets.as_array().ok_or("stage set must be a list")? {
                         let path = item["path"].as_str().unwrap_or_default();
+                        if path == "read_roots"
+                            && config.pointer("/parameters/read_roots").is_none()
+                        {
+                            continue;
+                        }
                         let value = interpolate(
                             &item["value"],
                             &self.parameters,
@@ -1866,7 +1948,13 @@ impl StageBuilder<'_> {
                     }
                 }
                 if let Some(roles) = object.remove("roles") {
-                    let roles = interpolate(&roles, &self.parameters, self.prompt, index as usize)?;
+                    let roles = interpolate_inner(
+                        &roles,
+                        &self.parameters,
+                        self.prompt,
+                        index as usize,
+                        true,
+                    )?;
                     let target = config
                         .as_object_mut()
                         .ok_or("preset must be a table")?
@@ -2219,8 +2307,9 @@ fn configured(globals: &provenant_cli::Globals) -> Result<Layers, String> {
 fn report(command: &str, result: Result<Value, String>, globals: &provenant_cli::Globals) -> u8 {
     match result {
         Ok(data) => {
-            let human = serde_json::to_string_pretty(&data).unwrap_or_default() + "\n";
-            crate::emit(
+            let human = presentation::human(&data);
+            let summary = provenant_cli::Summary::verbatim(&human, None);
+            crate::emit_summarised(
                 &provenant_records::CommandResult::new(
                     command,
                     provenant_records::Outcome::Ok,
@@ -2229,6 +2318,7 @@ fn report(command: &str, result: Result<Value, String>, globals: &provenant_cli:
                 globals,
                 &human,
                 true,
+                Some(&summary),
             )
         }
         Err(error) => crate::fail(
@@ -2563,6 +2653,9 @@ fn explain(expansion: Expansion, globals: &provenant_cli::Globals) -> u8 {
             substitution["reason"].as_str().unwrap_or("-")
         ));
     }
+    for warning in &expansion.warnings {
+        human.push_str(&format!("Warning: {warning}\n"));
+    }
     let data = json!({"roles": expansion.roles, "substitutions": expansion.substitutions, "graph": expansion.document, "origins": expansion.origins, "limits":limits,"execution":metrics,"validation_error":validation_error,"review_shape":expansion.review_shape});
     let output = if globals.json {
         serde_json::to_vec(&provenant_records::CommandResult::new(
@@ -2880,6 +2973,12 @@ pub fn run(
             }
         });
         let mut expansion = expand_with(&layers, name, prompt, &params, &request.preset_set)?;
+        {
+            use std::io::Write;
+            for warning in &expansion.warnings {
+                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+            }
+        }
         if !placement.skipped.is_empty() {
             expansion.document["provenance"]["experiments"] = json!(placement.skipped);
         }

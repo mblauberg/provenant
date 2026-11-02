@@ -2,6 +2,241 @@ use super::preset::{Expansion, Layers, expand};
 use provenant_fabric_runtime::read_roots::ReadRoots;
 use serde_json::{Value, json};
 
+#[test]
+fn big_batch_keeps_seven_untyped_lanes_at_every_risk_tier() {
+    for risk in ["routine", "substantial", "crucial", "terminal"] {
+        let mut layers = Layers::empty();
+        layers.review = Some(shapes());
+        let lanes: Vec<_> = (1..=7).map(|n| json!({"name": format!("lane{n}"), "worktree": format!("/repo/lane{n}"), "scope": ["src"], "spec": "#1"})).collect();
+        let expanded = super::preset::expand_with(
+            &layers,
+            "big-batch",
+            "brief",
+            &[
+                ("lanes".into(), json!(lanes)),
+                ("risk_tier".into(), json!(risk)),
+            ],
+            &[],
+        )
+        .unwrap();
+        let nodes = expanded.document["nodes"].as_array().unwrap();
+        let group = nodes.iter().find(|node| node["id"] == "lanes").unwrap();
+        assert_eq!(
+            group["composite"]["nodes"].as_array().unwrap().len(),
+            7,
+            "{risk}"
+        );
+    }
+}
+
+#[test]
+fn nested_role_index_belongs_to_each_child_count_copy() {
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "test",
+            "indexed-child",
+            r#"
+stages = [{ id = "q", role = "scout", count = 3 }]
+"#,
+        )
+        .unwrap();
+    layers.insert("test", "indexed-parent", r#"
+stages = [{ id = "child", preset = "indexed-child", roles = { scout = { prompt = "Question ${index} for ${topic}", title = "Q${index}" } } }]
+[parameters]
+topic = "compiler"
+"#).unwrap();
+    let expanded = expand(&layers, "indexed-parent", "brief", &[]).unwrap();
+    let children = expanded.document["nodes"][0]["composite"]["nodes"]
+        .as_array()
+        .unwrap();
+    for (position, child) in children.iter().enumerate() {
+        let index = position + 1;
+        assert!(
+            child["prompt"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("Question {index} for compiler"))
+        );
+        assert_eq!(child["title"], format!("Q{index}"));
+    }
+}
+
+#[test]
+fn node_titles_default_to_node_ids() {
+    let mut layers = Layers::empty();
+    layers
+        .insert("test", "questions", "stages = [{id='q2', role='scout'}]")
+        .unwrap();
+    let expanded = expand(&layers, "questions", "brief", &[]).unwrap();
+    assert_eq!(expanded.document["nodes"][0]["title"], "q2");
+}
+
+#[test]
+fn injected_read_roots_are_optional_for_child_interfaces() {
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "test",
+            "optional-context",
+            r#"
+stages = [{id="child", preset="single", parameters={read_roots=["/repo/other"]}}]
+"#,
+        )
+        .unwrap();
+    assert!(expand(&layers, "optional-context", "brief", &[]).is_ok());
+    assert!(
+        expand(
+            &layers,
+            "optional-context",
+            "brief",
+            &["child.read_roots=['/repo/extra']".into()]
+        )
+        .is_ok()
+    );
+    let error = expand(
+        &layers,
+        "optional-context",
+        "brief",
+        &["child.typo=1".into()],
+    )
+    .unwrap_err();
+    assert!(error.contains("typo"), "{error}");
+}
+
+#[test]
+fn required_typed_parameters_name_the_missing_value_and_accept_overrides() {
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "test",
+            "required",
+            "stages=[{id='task', prompt='${topic}'}]\n[parameters]\ntopic={type='string'}",
+        )
+        .unwrap();
+    let error = expand(&layers, "required", "brief", &[]).unwrap_err();
+    assert!(
+        error.contains("parameters.topic") && error.contains("required parameter"),
+        "{error}"
+    );
+    let expanded = expand(
+        &layers,
+        "required",
+        "brief",
+        &["parameters.topic='compiler'".into()],
+    )
+    .unwrap();
+    assert_eq!(expanded.document["nodes"][0]["prompt"], "compiler");
+    assert!(
+        expand(
+            &layers,
+            "required",
+            "brief",
+            &["parameters.topic=42".into()]
+        )
+        .unwrap_err()
+        .contains("must be string")
+    );
+}
+
+#[test]
+fn omitted_lenses_are_recorded_in_explain_provenance() {
+    let mut layers = Layers::empty();
+    layers.review = Some(shapes());
+    let expanded = expand(
+        &layers,
+        "review-council",
+        "brief",
+        &["parameters.risk_tier='routine'".into()],
+    )
+    .unwrap();
+    assert!(!expanded.warnings.is_empty());
+    assert!(
+        expanded
+            .warnings
+            .iter()
+            .all(|warning| warning.contains("omitted lens"))
+    );
+    assert_eq!(
+        expanded.document["provenance"]["warnings"],
+        json!(expanded.warnings)
+    );
+}
+
+#[test]
+fn scope_preset_refuses_tree_write_broadening() {
+    let layers = Layers::empty();
+    let expanded = expand(&layers, "scope", "brief", &[]).unwrap();
+    assert_eq!(expanded.document["nodes"][0]["access"], "read_only");
+    for override_ in [
+        "roles.scope.access='worktree_write'",
+        "scope.access='full'",
+        "scope.write_scope=['.']",
+        "scope.kind='land'",
+        "scope.delivery='pr'",
+    ] {
+        let error = expand(&layers, "scope", "brief", &[override_.into()]).unwrap_err();
+        assert!(
+            error.contains("scope preset refuses"),
+            "{override_}: {error}"
+        );
+    }
+    // The same floor applies when scope is composed as a child.
+    let mut layers = layers;
+    layers
+        .insert(
+            "test",
+            "unsafe-scope",
+            "stages=[{id='child',preset='scope',roles={scope={access='full'}}}]",
+        )
+        .unwrap();
+    assert!(
+        expand(&layers, "unsafe-scope", "brief", &[])
+            .unwrap_err()
+            .contains("scope preset refuses")
+    );
+    layers
+        .insert(
+            "test",
+            "inherited-scope",
+            "extends='scope'\n[roles.scope]\naccess='full'",
+        )
+        .unwrap();
+    assert!(
+        expand(&layers, "inherited-scope", "brief", &[])
+            .unwrap_err()
+            .contains("scope preset refuses")
+    );
+    layers
+        .insert("test", "scope-delivery", "extends='scope'\ndelivery='pr'")
+        .unwrap();
+    assert!(
+        expand(&layers, "scope-delivery", "brief", &[])
+            .unwrap_err()
+            .contains("scope preset refuses")
+    );
+    layers.insert("test", "scope-before-write", "stages=[{id='scope',preset='scope'},{id='writer',access='worktree_write',worktree='/repo/lane',write_scope=['src']}]").unwrap();
+    assert!(expand(&layers, "scope-before-write", "brief", &[]).is_ok());
+}
+
+#[test]
+fn preset_role_titles_keep_user_and_inherited_overrides() {
+    let mut layers = Layers::empty();
+    layers
+        .roles
+        .add("user", "[roles.scout]\ntitle='User question ${index}'")
+        .unwrap();
+    layers
+        .insert(
+            "test",
+            "user-title",
+            "stages=[{id='q2',role='scout.codebase'}]\n[parameters]\nread_roots=[]",
+        )
+        .unwrap();
+    let expanded = expand(&layers, "user-title", "brief", &[]).unwrap();
+    assert_eq!(expanded.document["nodes"][0]["title"], "User question 1");
+}
+
 fn nodes(name: &str) -> serde_json::Value {
     expand(&Layers::empty(), name, "brief", &[])
         .unwrap()
@@ -512,29 +747,29 @@ fn bundled_expansions_match_golden_graphs() {
     assert_eq!(
         nodes("single"),
         json!([
-            {"id":"task", "access":"read_only", "prompt":"brief", "route":{"alias":"senior"}, "depends_on":[]}
+            {"id":"task", "title":"task", "access":"read_only", "prompt":"brief", "route":{"alias":"senior"}, "depends_on":[]}
         ])
     );
     assert_eq!(
         nodes("chain"),
         json!([
-            {"id":"first", "access":"read_only", "prompt":"brief", "route":{"alias":"senior"}, "depends_on":[]},
-            {"id":"second", "access":"read_only", "prompt":"brief", "route":{"alias":"senior"}, "depends_on":["first"], "inputs":[{"node":"first","outputs":["result"]}]}
+            {"id":"first", "title":"first", "access":"read_only", "prompt":"brief", "route":{"alias":"senior"}, "depends_on":[]},
+            {"id":"second", "title":"second", "access":"read_only", "prompt":"brief", "route":{"alias":"senior"}, "depends_on":["first"], "inputs":[{"node":"first","outputs":["result"]}]}
         ])
     );
     assert_eq!(
         nodes("fan-out"),
         json!([
-            {"id":"branch-1", "access":"read_only", "prompt":"brief", "route":{"alias":"senior"}, "depends_on":[]},
-            {"id":"branch-2", "access":"read_only", "prompt":"brief", "route":{"alias":"senior"}, "depends_on":[]}
+            {"id":"branch-1", "title":"branch-1", "access":"read_only", "prompt":"brief", "route":{"alias":"senior"}, "depends_on":[]},
+            {"id":"branch-2", "title":"branch-2", "access":"read_only", "prompt":"brief", "route":{"alias":"senior"}, "depends_on":[]}
         ])
     );
     assert_eq!(
         nodes("fan-out-synthesise"),
         json!([
-            {"id":"branch-1", "access":"read_only", "prompt":"brief", "route":{"alias":"senior"}, "depends_on":[]},
-            {"id":"branch-2", "access":"read_only", "prompt":"brief", "route":{"alias":"senior"}, "depends_on":[]},
-            {"id":"synthesis", "kind":"synthesise", "access":"read_only", "prompt":"brief", "route":{"alias":"senior"}, "depends_on":["branch-1","branch-2"], "inputs":[{"node":"branch-1","outputs":["result"]},{"node":"branch-2","outputs":["result"]}]}
+            {"id":"branch-1", "title":"branch-1", "access":"read_only", "prompt":"brief", "route":{"alias":"senior"}, "depends_on":[]},
+            {"id":"branch-2", "title":"branch-2", "access":"read_only", "prompt":"brief", "route":{"alias":"senior"}, "depends_on":[]},
+            {"id":"synthesis", "title":"synthesis", "kind":"synthesise", "access":"read_only", "prompt":"brief", "route":{"alias":"senior"}, "depends_on":["branch-1","branch-2"], "inputs":[{"node":"branch-1","outputs":["result"]},{"node":"branch-2","outputs":["result"]}]}
         ])
     );
     for name in ["single", "chain", "fan-out", "fan-out-synthesise"] {
@@ -553,7 +788,7 @@ fn expansion_golden(name: &str) {
     let mut actual = serde_json::to_string_pretty(&expanded.document).unwrap();
     actual.push('\n');
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
+        .join("assets/presets/fixtures")
         .join(format!("{name}.expansion.json"));
     if std::env::var_os("UPDATE_GOLDEN").is_some() {
         std::fs::write(&path, &actual).unwrap();
@@ -1612,7 +1847,7 @@ fn typed_parameters_validate_and_name_the_parameter_and_origin() {
     assert!(
         expand(&layers, "bad", "brief", &[])
             .unwrap_err()
-            .contains("needs a default")
+            .contains("required parameter is missing")
     );
 }
 
