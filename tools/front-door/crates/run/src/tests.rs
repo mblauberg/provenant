@@ -1944,46 +1944,50 @@ fn publication_deferred_effects_survive_commit_and_replay() -> TestResult {
 
 #[test]
 fn publication_lock_timeout_retains_exact_sealed_decision() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let context = context(temp.path())?;
-    let clock = clock();
-    let cancel = CancelToken::new();
-    let call = call(&clock, &cancel);
-    let store = RunStore::open(&context, &call)?;
-    let input = input();
-    let id = input.attempts[0].attempt_id;
-    store.create(&input, &call)?;
-    seal_exit_fixture(&store, &input)?;
-    let run = store.run_dir(input.run_id, false)?;
-    let lock = run.try_lock(
-        std::ffi::OsStr::new("publication.lock"),
-        provenant_os::fs::LockMode::Exclusive,
-    )?;
-    assert!(
-        store
-            .publish_terminal(id, 1, &publication(), &exit(), &call)
-            .is_err()
-    );
-    let attempt = store.attempt_dir(input.run_id, id, false)?;
-    let sealed = crate::artifacts::read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?
-        .ok_or("decision not sealed")?;
-    assert!(matches!(
-        store.record(id, &call)?.state,
-        AttemptState::Queued { .. }
-    ));
-    drop(lock);
-    drop(store);
-    let store = RunStore::open(&context, &call)?;
-    let recovered = store.recover_terminal(id, &exit(), &call)?;
-    assert_eq!(
-        crate::artifacts::read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?.unwrap(),
-        sealed
-    );
-    let pending: AttemptRecord = crate::db::decode_attempt(&sealed)?;
-    assert_eq!(recovered.state, pending.state);
-    assert_eq!(recovered.result, pending.result);
-    assert_eq!(store.events(0, 64, None, &call)?.len(), 2);
-    Ok(())
+    provenant_sqlite::with_busy_timeout(std::time::Duration::from_millis(50), || -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let input = input();
+        let id = input.attempts[0].attempt_id;
+        store.create(&input, &call)?;
+        seal_exit_fixture(&store, &input)?;
+        let run = store.run_dir(input.run_id, false)?;
+        let lock = run.try_lock(
+            std::ffi::OsStr::new("publication.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
+        assert!(
+            store
+                .publish_terminal(id, 1, &publication(), &exit(), &call)
+                .is_err()
+        );
+        let attempt = store.attempt_dir(input.run_id, id, false)?;
+        let sealed =
+            crate::artifacts::read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?
+                .ok_or("decision not sealed")?;
+        assert!(matches!(
+            store.record(id, &call)?.state,
+            AttemptState::Queued { .. }
+        ));
+        drop(lock);
+        drop(store);
+        let store = RunStore::open(&context, &call)?;
+        let recovered = store.recover_terminal(id, &exit(), &call)?;
+        assert_eq!(
+            crate::artifacts::read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?
+                .unwrap(),
+            sealed
+        );
+        let pending: AttemptRecord = crate::db::decode_attempt(&sealed)?;
+        assert_eq!(recovered.state, pending.state);
+        assert_eq!(recovered.result, pending.result);
+        assert_eq!(store.events(0, 64, None, &call)?.len(), 2);
+        Ok(())
+    })
 }
 
 #[test]

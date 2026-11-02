@@ -491,67 +491,69 @@ mod tests {
 
     #[test]
     fn live_guardian_fences_busy_replaced_and_corrupt_store() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("run.sqlite3");
-        let original = Connection::open(&path).unwrap();
-        original.execute_batch("PRAGMA journal_mode=DELETE; CREATE TABLE admission (attempt TEXT); INSERT INTO admission VALUES ('live');").unwrap();
-        let db = Connection::open_in_memory().unwrap();
-        db.execute_batch(LEASES).unwrap();
-        let clock = TestClock::new(WallTime::from_micros(0).unwrap(), MonoTime::from_micros(0));
-        let boot = clock.boot_identity().unwrap();
-        let live = match SystemProcessObserver.observe(i64::from(std::process::id())) {
-            ProcessObservation::Present(fact) => fact.identity,
-            _ => panic!("current guardian unavailable"),
-        };
-        let identity = serde_json::to_string(&live).unwrap();
-        let owner_id = store_identity(&path).unwrap();
-        db.execute(
-            "INSERT INTO leases VALUES ('live','p',?1,'writer',?2,?3,?4)",
-            params![dir.path().as_os_str().as_bytes(), boot, identity, owner_id],
-        )
-        .unwrap();
-        original.execute_batch("BEGIN EXCLUSIVE").unwrap();
-        prune(&db, &clock).unwrap();
-        assert!(
-            writers_full(&db, 1).unwrap(),
-            "busy store retains a live lease"
-        );
-        original.execute_batch("ROLLBACK").unwrap();
-        drop(original);
-        std::fs::write(&path, b"corrupt").unwrap();
-        prune(&db, &clock).unwrap();
-        assert!(
-            writers_full(&db, 1).unwrap(),
-            "corrupt original store retains a live lease"
-        );
-        std::fs::rename(&path, dir.path().join("original.sqlite3")).unwrap();
-        prune(&db, &clock).unwrap();
-        assert!(
-            writers_full(&db, 1).unwrap(),
-            "missing store retains a live lease"
-        );
-        let replacement = Connection::open(&path).unwrap();
-        replacement
-            .execute_batch("CREATE TABLE admission (attempt TEXT)")
+        provenant_sqlite::with_busy_timeout(std::time::Duration::from_millis(50), || {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("run.sqlite3");
+            let original = Connection::open(&path).unwrap();
+            original.execute_batch("PRAGMA journal_mode=DELETE; CREATE TABLE admission (attempt TEXT); INSERT INTO admission VALUES ('live');").unwrap();
+            let db = Connection::open_in_memory().unwrap();
+            db.execute_batch(LEASES).unwrap();
+            let clock = TestClock::new(WallTime::from_micros(0).unwrap(), MonoTime::from_micros(0));
+            let boot = clock.boot_identity().unwrap();
+            let live = match SystemProcessObserver.observe(i64::from(std::process::id())) {
+                ProcessObservation::Present(fact) => fact.identity,
+                _ => panic!("current guardian unavailable"),
+            };
+            let identity = serde_json::to_string(&live).unwrap();
+            let owner_id = store_identity(&path).unwrap();
+            db.execute(
+                "INSERT INTO leases VALUES ('live','p',?1,'writer',?2,?3,?4)",
+                params![dir.path().as_os_str().as_bytes(), boot, identity, owner_id],
+            )
             .unwrap();
-        drop(replacement);
-        prune(&db, &clock).unwrap();
-        assert!(
-            writers_full(&db, 1).unwrap(),
-            "replacement cannot prove row removal"
-        );
-        let mut dead = live;
-        dead.native_start = dead.native_start.saturating_add(1);
-        db.execute(
-            "UPDATE leases SET guardian=?1",
-            [serde_json::to_string(&dead).unwrap()],
-        )
-        .unwrap();
-        prune(&db, &clock).unwrap();
-        assert!(
-            !writers_full(&db, 1).unwrap(),
-            "absent guardian releases the lease"
-        );
+            original.execute_batch("BEGIN EXCLUSIVE").unwrap();
+            prune(&db, &clock).unwrap();
+            assert!(
+                writers_full(&db, 1).unwrap(),
+                "busy store retains a live lease"
+            );
+            original.execute_batch("ROLLBACK").unwrap();
+            drop(original);
+            std::fs::write(&path, b"corrupt").unwrap();
+            prune(&db, &clock).unwrap();
+            assert!(
+                writers_full(&db, 1).unwrap(),
+                "corrupt original store retains a live lease"
+            );
+            std::fs::rename(&path, dir.path().join("original.sqlite3")).unwrap();
+            prune(&db, &clock).unwrap();
+            assert!(
+                writers_full(&db, 1).unwrap(),
+                "missing store retains a live lease"
+            );
+            let replacement = Connection::open(&path).unwrap();
+            replacement
+                .execute_batch("CREATE TABLE admission (attempt TEXT)")
+                .unwrap();
+            drop(replacement);
+            prune(&db, &clock).unwrap();
+            assert!(
+                writers_full(&db, 1).unwrap(),
+                "replacement cannot prove row removal"
+            );
+            let mut dead = live;
+            dead.native_start = dead.native_start.saturating_add(1);
+            db.execute(
+                "UPDATE leases SET guardian=?1",
+                [serde_json::to_string(&dead).unwrap()],
+            )
+            .unwrap();
+            prune(&db, &clock).unwrap();
+            assert!(
+                !writers_full(&db, 1).unwrap(),
+                "absent guardian releases the lease"
+            );
+        })
     }
 
     #[test]
