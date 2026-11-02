@@ -577,7 +577,7 @@ fn lane_owner_reassignment_holds_custody_and_preserves_adopted_owners() -> Resul
         origin: WorktreeOrigin::Lane,
         label: None,
     };
-    save_lane_owner_when_free(&context, &tree, &owner, &cancel())?;
+    save_lane_owner_when_free(&context, &tree, &owner, false, &cancel())?;
     let state = context
         .project_state
         .open_verified_directory(&state_dir_name(&info.path))?;
@@ -593,21 +593,21 @@ fn lane_owner_reassignment_holds_custody_and_preserves_adopted_owners() -> Resul
         ..owner.clone()
     };
     assert!(matches!(
-        save_lane_owner_when_free(&context, &tree, &next, &cancel()),
+        save_lane_owner_when_free(&context, &tree, &next, false, &cancel()),
         Err(WorktreeError::LockBusy)
     ));
     assert_eq!(load_owner(&tree)?, Some(owner.clone()));
     drop(held);
     fs::write(info.path.join("dirty"), "keep")?;
     assert!(matches!(
-        save_lane_owner_when_free(&context, &tree, &next, &cancel()),
+        save_lane_owner_when_free(&context, &tree, &next, false, &cancel()),
         Err(WorktreeError::Dirty)
     ));
     fs::remove_file(info.path.join("dirty"))?;
     owner.origin = WorktreeOrigin::Adopted;
     owner.label = Some("manual".into());
     save_owner(&tree, &owner)?;
-    assert!(save_lane_owner_when_free(&context, &tree, &next, &cancel()).is_err());
+    assert!(save_lane_owner_when_free(&context, &tree, &next, false, &cancel()).is_err());
     assert_eq!(load_owner(&tree)?, Some(owner));
     Ok(())
 }

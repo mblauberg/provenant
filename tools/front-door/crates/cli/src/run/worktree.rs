@@ -57,6 +57,7 @@ pub(super) fn own_worktree(
     operation_id: &OperationId,
     edge: &Edge<'_>,
     workers: &dyn provenant_confinement::worktrees::WorkerObserver,
+    terminal_attempt: impl Fn(provenant_core::AttemptId) -> bool,
     created: &mut Option<(PathBuf, String)>,
     clock: &SystemClock,
     cancel: &CancelToken,
@@ -92,6 +93,21 @@ pub(super) fn own_worktree(
             });
             let (info, pinned) = match existing {
                 Some(info) => {
+                    if let Some(base) = requested_base {
+                        let git = provenant_os::git::git_executable()
+                            .ok_or(worktrees::WorktreeError::InvalidRequest)?;
+                        let resolved = run::resolve_git_base(&git, context.repo.root_path(), base)
+                            .map_err(|_| worktrees::WorktreeError::BaseNotFound {
+                                base: base.to_owned(),
+                            })?;
+                        let base = provenant_core::GitOid::parse(&resolved)
+                            .map_err(|_| worktrees::WorktreeError::InvalidOutput)?;
+                        if !worktrees::is_ancestor(context, base, info.head, cancel)? {
+                            return Err(worktrees::WorktreeError::BranchExistsWithBase {
+                                branch: branch.clone(),
+                            });
+                        }
+                    }
                     let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
                     let owner = worktrees::load_owner(&tree)?;
                     if owner
@@ -112,7 +128,16 @@ pub(super) fn own_worktree(
                             });
                         }
                         WriterState::Unknown => {
-                            return Err(worktrees::WorktreeError::UnknownWriter);
+                            let settled = owner
+                                .as_ref()
+                                .and_then(|owner| owner.attempt_id)
+                                .is_some_and(&terminal_attempt);
+                            if !settled
+                                || worktrees::cache_writer_probe(context.project_state, &info.path)
+                                    .is_err()
+                            {
+                                return Err(worktrees::WorktreeError::UnknownWriter);
+                            }
                         }
                     }
                     (info, None)
@@ -142,6 +167,10 @@ pub(super) fn own_worktree(
                 owner_refused = true;
                 return Err(worktrees::WorktreeError::UnknownWriter);
             }
+            let terminal_prior = prior
+                .as_ref()
+                .and_then(|prior| prior.attempt_id)
+                .is_some_and(&terminal_attempt);
             let owner = match prior {
                 Some(owner) if owner.operation_id.as_ref() == Some(operation_id) => owner,
                 prior => WorktreeOwner {
@@ -173,7 +202,13 @@ pub(super) fn own_worktree(
             if created.as_ref().is_some_and(|(path, _)| path == &info.path) {
                 worktrees::save_owner(&verified, &owner)?;
             } else {
-                worktrees::save_lane_owner_when_free(context, &verified, &owner, cancel)?;
+                worktrees::save_lane_owner_when_free(
+                    context,
+                    &verified,
+                    &owner,
+                    terminal_prior,
+                    cancel,
+                )?;
             }
             let base = provenant_core::GitOid::parse(&owner.base)
                 .map_err(|_| worktrees::WorktreeError::InvalidRequest)?;

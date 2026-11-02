@@ -1643,6 +1643,19 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
                 .collect()
         }
     }
+    struct Unknown;
+    impl WorkerObserver for Unknown {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, WorkerState::Unknown))
+                .collect()
+        }
+    }
     if reexec_test_in_lane("run::tests::dispatch_reuses_only_free_lane_or_unowned_worktree")? {
         return Ok(());
     }
@@ -1908,6 +1921,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
             &OperationId::parse("replacement-lane")?,
             &edge,
             &Free,
+            |_| false,
             &mut None,
             &clock,
             &cancel,
@@ -1928,6 +1942,60 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
             );
         }
     }
+
+    let prior_attempt = AttemptId::from_bytes([222; 16]);
+    let (path, head) =
+        worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+            let context = &worktrees::WorktreeContext {
+                workers: &Free,
+                ..*context
+            };
+            let info = worktrees::create(
+                context,
+                WorktreeCreate {
+                    branch: "terminal-unknown".into(),
+                    base: Some("HEAD".into()),
+                },
+                &cancel,
+            )?;
+            let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
+            worktrees::save_owner(
+                &tree,
+                &WorktreeOwner {
+                    attempt_id: Some(prior_attempt),
+                    operation_id: Some(
+                        "terminal-prior"
+                            .parse()
+                            .map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
+                    ),
+                    branch: "terminal-unknown".into(),
+                    base: info.head.to_string(),
+                    host,
+                    created_at: WallTime::from_micros(1)
+                        .map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
+                    origin: WorktreeOrigin::Lane,
+                    label: None,
+                },
+            )?;
+            Ok((info.path, info.head))
+        })?;
+    let reused = super::own_worktree(
+        &super::OwnedWorktree {
+            branch: "terminal-unknown".into(),
+            host,
+            created_at: WallTime::from_micros(2)?,
+        },
+        Some("HEAD"),
+        &OperationId::parse("terminal-replacement")?,
+        &edge,
+        &Unknown,
+        |attempt| attempt == prior_attempt,
+        &mut None,
+        &clock,
+        &cancel,
+    )?;
+    assert_eq!(reused.0.path, path);
+    assert_eq!(reused.0.head, head);
     Ok(())
 }
 
@@ -2074,6 +2142,7 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
         &operation,
         &edge,
         &Unknown,
+        |_| false,
         &mut None,
         &clock,
         &cancel,

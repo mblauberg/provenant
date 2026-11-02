@@ -1023,6 +1023,12 @@ pub(super) fn dispatch_inner(
             &command.operation_id,
             edge,
             workers,
+            |attempt| {
+                session
+                    .store
+                    .record(attempt, &call)
+                    .is_ok_and(|record| matches!(record.state, run::AttemptState::Terminal { .. }))
+            },
             created,
             &clock,
             &cancel,

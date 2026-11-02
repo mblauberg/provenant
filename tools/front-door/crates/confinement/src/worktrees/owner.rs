@@ -80,6 +80,7 @@ pub fn save_lane_owner_when_free(
     context: &WorktreeContext<'_>,
     worktree: &VerifiedWorktree,
     owner: &WorktreeOwner,
+    terminal_prior: bool,
     cancel: &CancelToken,
 ) -> Result<(), WorktreeError> {
     if owner.origin != WorktreeOrigin::Lane {
@@ -107,11 +108,15 @@ pub fn save_lane_owner_when_free(
             WorkerState::Live => WorktreeError::LiveWriter,
             _ => WorktreeError::UnknownWriter,
         })?;
-    if context
+    let observed = context
         .workers
         .observe_roots(&[tree.path().into()])
         .get(tree.path())
-        != Some(&WorkerState::Free)
+        .copied()
+        .unwrap_or(WorkerState::Unknown);
+    if observed == WorkerState::Live
+        || observed == WorkerState::Busy
+        || observed == WorkerState::Unknown && !terminal_prior
     {
         return Err(live_refusal(context.workers, tree.path()));
     }

@@ -84,6 +84,12 @@ need no registration or adoption. Another project's checkout is refused.
 A held writer lock reports busy; lifecycle removal also refuses an observed
 live process and names its pid and command when available.
 
+A new writer may reuse a registered worktree from a terminal lane when the tree is clean and
+writer custody is free. Dirty trees, held locks and observed live writers still refuse. When
+`--base` is supplied for a branch that already exists, Provenant reuses its worktree only when
+the branch contains that base; otherwise the refusal says to omit `--base`. If the branch
+exists without a worktree, omit `--base` to check it out.
+
 Choose `--deliver none`, `push`, `integrate:integration` or `pr`. Push and PR
 use origin and the lane branch. Integration targets must already exist;
 `integrate:origin/integration` selects a remote branch. Local targets must be
