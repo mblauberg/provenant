@@ -149,10 +149,12 @@ refreshes tokens. This is an accepted limit. A lane is not granted other
 providers' credential stores, and GitHub CLI configuration stays denied
 ([#2432](https://github.com/mblauberg/provenant/issues/2432)).
 
-Codex receives the lane's private state directory as both `CODEX_HOME` and
-`HOME`. Codex discovers `~/.agents/skills` from `HOME` independently of
-`CODEX_HOME`; using the private directory keeps the host's user skills outside
-the lane and avoids a denied scan. Repository-local skills remain discoverable.
+Codex scans `$HOME/.agents/skills` at startup, independently of `CODEX_HOME`.
+`HOME` is unchanged for the lane, so HOME-derived defaults keep working. A
+Codex lane (read-only or worktree-write) is granted the host's
+`~/.agents/skills` directory read-only when it exists at prepare time, so the
+scan succeeds. There is no write grant for it. Repository-local skills remain
+discoverable.
 
 ## Claude network access
 

@@ -96,17 +96,18 @@ fn prepare(
     ];
     let mut runtime_reads = vec![subtree(package)];
     let tool_writes = Vec::new();
+    // Codex scans `$HOME/.agents/skills` at startup independently of
+    // CODEX_HOME. Grant the host's user skills read-only so the scan succeeds.
+    let user_skills = input.home.join(".agents/skills");
+    if user_skills.is_dir() {
+        runtime_reads.push(subtree(user_skills));
+    }
     let mut setup = vec![SetupStep::Symlink {
         link: codex_home.join("auth.json"),
         target: credential.clone(),
     }];
     let path = format!("{}:/usr/bin:/bin", input.home.join(".cargo/bin").display());
     let mut env = base_env(input, &plan.scratch.path, &path);
-    // Codex discovers user skills from `$HOME/.agents/skills` independently
-    // of CODEX_HOME. Point HOME at this lane's private state so the host's
-    // user skill directory is outside discovery as well as the sandbox.
-    env.retain(|(key, _)| key != "HOME");
-    env.push(("HOME".into(), codex_home.into()));
     input
         .provenant
         .environment(&plan.scratch.path, &mut env, &mut setup, false)?;

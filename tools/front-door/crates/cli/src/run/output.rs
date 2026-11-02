@@ -617,21 +617,24 @@ fn provider_error_from_stderr(bytes: &[u8]) -> Option<String> {
     Some(crate::bounded_text(&redacted, 160))
 }
 
+/// Warning-level lines start with `warn`/`warning` (optionally bracketed or
+/// followed by a colon), or are tracing-formatted: an RFC3339 timestamp, then
+/// exactly `WARN`.
 fn warning_level_stderr_line(line: &str) -> bool {
-    let line = line.trim_start();
-    let lower = line.to_ascii_lowercase();
-    let mut tokens = lower.split_whitespace();
-    let first = tokens.next().unwrap_or_default();
-    let is_warning_level =
-        |token: &str| matches!(token.trim_matches(['[', ']', ':']), "warn" | "warning");
-    is_warning_level(first)
-        || (first.contains('-') && first.contains('t')
-            && tokens.take(2).any(is_warning_level))
-        // The tracing formatter used by Codex omits the level from this
-        // loader warning, so identify it by its stable target and message.
-        || lower.contains(
-            "codex_skills_extension::loader::host: failed to scan skill path",
-        )
+    let mut tokens = line.split_whitespace();
+    let Some(first) = tokens.next() else {
+        return false;
+    };
+    let level = first.trim_matches(['[', ']', ':']).to_ascii_lowercase();
+    if matches!(level.as_str(), "warn" | "warning") {
+        return true;
+    }
+    let bytes = first.as_bytes();
+    let timestamp = bytes.len() > 4
+        && bytes[..4].iter().all(u8::is_ascii_digit)
+        && bytes[4] == b'-'
+        && first.contains('T');
+    timestamp && tokens.next() == Some("WARN")
 }
 
 #[cfg(test)]
@@ -639,12 +642,20 @@ mod tests {
     use super::provider_error_from_stderr;
 
     #[test]
-    fn provider_error_uses_failure_before_trailing_codex_skills_warning() {
+    fn provider_error_uses_failure_before_trailing_tracing_warning() {
         let stderr = b"provider process failed: exit code 1\n\
-codex_skills_extension::loader::host: failed to scan skill path file:///Users/alice/.agents/skills: Operation not permitted\n";
+2026-11-02T00:00:00.123456Z  WARN codex_core: skill scan failed\n";
         assert_eq!(
             provider_error_from_stderr(stderr).as_deref(),
             Some("provider process failed: exit code 1")
+        );
+    }
+
+    #[test]
+    fn provider_error_keeps_non_warning_lines_that_mention_warn() {
+        assert_eq!(
+            provider_error_from_stderr(b"test-failed WARN: assertion failed\n").as_deref(),
+            Some("test-failed WARN: assertion failed")
         );
     }
 
@@ -663,7 +674,7 @@ codex_skills_extension::loader::host: failed to scan skill path file:///Users/al
     fn provider_error_does_not_headline_a_warning_without_a_failure_line() {
         assert_eq!(
             provider_error_from_stderr(
-                b"codex_skills_extension::loader::host: failed to scan skill path: Operation not permitted\n"
+                b"WARN: skill scan failed\n2026-11-02T00:00:00Z WARN cleanup failed\n"
             ),
             None
         );

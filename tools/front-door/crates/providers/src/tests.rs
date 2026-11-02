@@ -4423,7 +4423,6 @@ fn codex_read_only_toolchain_uses_private_build_and_cargo_home_linked_to_shared_
         ))
         .unwrap();
     let env = |key: &str| spec.env.iter().find(|(k, _)| k == key).unwrap().1.clone();
-    assert_eq!(env("HOME"), "/fixture/state");
     assert_eq!(env("CODEX_HOME"), "/fixture/state");
     assert_eq!(env("CARGO_TARGET_DIR"), "/fixture/scratch/target");
     assert_eq!(env("RUSTUP_HOME"), "/fixture/home/.rustup");
@@ -4469,6 +4468,61 @@ fn codex_read_only_toolchain_uses_private_build_and_cargo_home_linked_to_shared_
                 .any(|g| g.path == std::path::Path::new(dir))
         );
     }
+}
+
+#[test]
+fn codex_grants_host_user_skills_read_only_when_present() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    let prompt = Prompt::new("fixture".into());
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().canonicalize()?;
+    let skills = home.join(".agents/skills");
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        let plan = fixture_access_plan(access, Some("login"), false);
+        let prepare = || {
+            crate::codex::Codex.prepare(PrepareInput {
+                home: &home,
+                ..fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None)
+            })
+        };
+        // Absent directory: no grant.
+        let spec = prepare()?;
+        assert!(
+            !spec
+                .profile
+                .spec
+                .runtime_reads
+                .iter()
+                .any(|grant| covers(grant, &skills)),
+            "{access:?}"
+        );
+        std::fs::create_dir_all(&skills)?;
+        let spec = prepare()?;
+        let spec = &spec.profile.spec;
+        assert!(
+            spec.runtime_reads
+                .contains(&crate::launch::subtree(&skills)),
+            "{access:?}"
+        );
+        let writable = spec
+            .tool_writes
+            .iter()
+            .chain(&spec.state_writes)
+            .chain(
+                spec.authentication
+                    .iter()
+                    .flat_map(|auth| &auth.in_place_writes),
+            )
+            .chain(std::iter::once(&plan.permissions().scratch))
+            .chain(&plan.permissions().private_state);
+        for grant in writable {
+            assert!(!covers(grant, &skills), "{access:?}: {grant:?}");
+        }
+        std::fs::remove_dir(&skills)?;
+    }
+    Ok(())
 }
 
 fn covers(grant: &provenant_confinement::permissions::PathGrant, path: &std::path::Path) -> bool {
