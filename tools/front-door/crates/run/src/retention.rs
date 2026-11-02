@@ -506,7 +506,13 @@ fn collect_temporary(
     let name = OsStr::new("tmp");
     match attempt.metadata_at(name, false) {
         Ok(_) => {}
-        Err(error) if error.is_not_found() => return Ok(()),
+        // A crash after removing `tmp` can leave its short alias dangling.
+        Err(error) if error.is_not_found() => {
+            if !dry_run {
+                crate::short_temporary::remove(attempt);
+            }
+            return Ok(());
+        }
         Err(error) => return Err(error.into()),
     }
     let mut measured = provenant_os::disk::DiskReport::new(path.into(), 0);

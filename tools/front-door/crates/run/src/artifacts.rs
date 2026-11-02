@@ -18,6 +18,9 @@ pub(crate) fn subdir(parent: &Directory, name: &OsStr, create: bool) -> Result<D
 }
 
 pub(crate) fn remove_temporary_best_effort(attempt: &Directory) -> provenant_os::fs::Result<()> {
+    // The alias goes first, so `tmp` still marks the attempt for GC if this is
+    // interrupted.
+    crate::short_temporary::remove(attempt);
     remove_entry_tree(attempt, OsStr::new("tmp"))
 }
 
@@ -29,6 +32,7 @@ pub(crate) fn remove_temporary_best_effort(attempt: &Directory) -> provenant_os:
 pub(crate) fn remove_unreserved_terminal_temporary(
     attempt: &Directory,
 ) -> provenant_os::fs::Result<()> {
+    crate::short_temporary::remove(attempt);
     let name = OsStr::new("tmp");
     let metadata = match attempt.metadata_at(name, false) {
         Ok(metadata) => metadata,

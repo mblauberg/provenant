@@ -31,6 +31,7 @@ mod service;
 #[cfg(test)]
 mod service_tests;
 pub mod settlement;
+mod short_temporary;
 mod store;
 mod transcript;
 pub use service::{DispatchRequest, DispatchTask, ErrorKind, Service};
