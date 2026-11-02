@@ -483,6 +483,7 @@ fn launch_retry_kind(error: &(dyn Error + 'static)) -> bool {
             | FacadeError::HomeUnavailable
             | FacadeError::Io { .. }
             | FacadeError::DispatchUnobserved { .. }
+            | FacadeError::HostDeliveryIo { .. }
             | FacadeError::LaunchUnknown { .. }
     )
 }

@@ -3918,6 +3918,41 @@ fn an_unobserved_writer_disk_check_is_a_retryable_launch_error() {
 }
 
 #[test]
+fn a_host_git_limit_reason_reaches_the_graph_retry_and_the_blocked_node() {
+    let reason = "host writer delivery failed at Prepare (worktree): git worktree list output exceeded the 8388608-byte host limit";
+    let error = || crate::coordination::facade::FacadeError::HostDeliveryIo {
+        reason: reason.into(),
+    };
+    let document = graph(vec![node("one", route("first"))]);
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: [(1, error())].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    advance(&document, &mut owner, &mut journal).unwrap();
+    let retry = retry_of(journal.0.as_ref().unwrap());
+    assert_eq!(retry.failures, 1);
+    assert_eq!(retry.reason.as_deref(), Some(reason));
+
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: (1..=4).map(|call| (call, error())).collect(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    advance(&document, &mut owner, &mut journal).unwrap();
+    for now in [6, 17, 38] {
+        owner.now = Some(at(now));
+        advance(&document, &mut owner, &mut journal).unwrap();
+    }
+    let progress = &journal.0.as_ref().unwrap().nodes[0];
+    assert_eq!(progress.state, NodeState::Blocked);
+    let text = progress.advance_error.as_deref().unwrap();
+    assert!(text.contains(reason), "{text}");
+}
+
+#[test]
 fn launch_errors_past_the_retry_limit_block_the_node() {
     let document = graph(vec![node("one", route("first"))]);
     let mut owner = ErrorLauncher {

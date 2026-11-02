@@ -1191,6 +1191,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn git_text_refuses_stdout_past_its_bound() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("big"), vec![b'a'; 128 * 1024]).unwrap();
+        let error = git_text(
+            temp.path(),
+            &["diff", "--no-index", "--no-color", "/dev/null", "big"],
+        )
+        .expect_err("truncated output must not read as complete");
+        assert!(
+            error.contains("output exceeded the 65536-byte limit"),
+            "{error}"
+        );
+        assert!(error.contains("diff"), "{error}");
+        // Output within the bound is still returned whole.
+        let text = git_text(temp.path(), &["--version"]).unwrap();
+        assert!(text.starts_with("git version"), "{text}");
+    }
+
+    #[test]
     fn account_directory_returns_only_a_registered_match() {
         use provenant_providers::identity::RegisteredAccount;
         let accounts = vec![
