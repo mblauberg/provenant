@@ -219,6 +219,9 @@ pub struct Review {
     /// Task kind used to select a shape
     #[arg(long)]
     pub kind: Option<String>,
+    /// Add a conditional review lens (security, concurrency, or terminal)
+    #[arg(long = "risk-tag", value_parser = clap::builder::PossibleValuesParser::new(provenant_routing::risk_tag_names()))]
+    pub risk_tags: Vec<String>,
     /// Git range whose changed paths select the shape
     #[arg(long)]
     pub range: Option<String>,
@@ -226,6 +229,9 @@ pub struct Review {
     /// (repeatable); see `provenant route resolve --help`
     #[arg(long = "exclude", value_name = "SELECTOR")]
     pub exclude: Vec<String>,
+    /// Show the selected panel without dispatching reviewers
+    #[arg(long)]
+    pub explain: bool,
     /// Overall wait limit (seconds or a duration such as 30m)
     #[arg(long, default_value = "3600", value_parser = duration_seconds)]
     pub wait: u64,

@@ -213,6 +213,13 @@ pub enum FacadeError {
     DispatchRefused { reason: String },
     #[error("{reason}")]
     DispatchUnobserved { reason: String },
+    /// A host Git refusal that names its step and the limit. The reason holds
+    /// redacted diagnostics only, never raw source text. On the peer wire it
+    /// is an `io` error with the reason in `operation`, because releases that
+    /// predate it reject codes they do not know; it decodes back as `Io`.
+    #[serde(serialize_with = "host_delivery_io_wire", skip_deserializing)]
+    #[error("{reason}")]
+    HostDeliveryIo { reason: String },
     #[error("local worktree does not exist; create it with `provenant worktree create`")]
     WorktreeMissing,
     #[error(
@@ -253,6 +260,18 @@ pub enum FacadeError {
     },
 }
 
+fn host_delivery_io_wire<S: serde::Serializer>(
+    reason: &str,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeStruct;
+    let mut wire = serializer.serialize_struct("FacadeError", 3)?;
+    wire.serialize_field("code", "io")?;
+    wire.serialize_field("operation", reason)?;
+    wire.serialize_field("path", &None::<String>)?;
+    wire.end()
+}
+
 impl FacadeError {
     pub const fn code(&self) -> &'static str {
         match self {
@@ -274,6 +293,7 @@ impl FacadeError {
             Self::ConfinementRefused => "confinement_refused",
             Self::DispatchRefused { .. } => "dispatch_refused",
             Self::DispatchUnobserved { .. } => "dispatch_unobserved",
+            Self::HostDeliveryIo { .. } => "io",
             Self::WorktreeMissing => "worktree_missing",
             Self::WorktreeUnregistered { .. } => "worktree_unregistered",
             Self::BaseUnreachable => "base_unreachable",
@@ -533,6 +553,32 @@ mod diagnostic_tests {
                 operation: "openat read".into(),
                 path: None,
             }
+        );
+    }
+
+    #[test]
+    fn host_delivery_io_stays_an_io_error_on_the_peer_wire() {
+        let reason = "host writer delivery failed at Prepare (worktree): git worktree list output exceeded the 8388608-byte host limit";
+        let error = FacadeError::HostDeliveryIo {
+            reason: reason.into(),
+        };
+        let wire = serde_json::to_value(&error).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"code": "io", "operation": reason, "path": null})
+        );
+        assert_eq!(error.code(), "io");
+        // A release that predates the variant decodes the frame as plain I/O.
+        assert_eq!(
+            serde_json::from_value::<FacadeError>(wire).unwrap(),
+            FacadeError::io(reason)
+        );
+        // The variant name itself is never a wire code.
+        assert!(
+            serde_json::from_value::<FacadeError>(
+                serde_json::json!({"code": "host_delivery_io", "reason": reason})
+            )
+            .is_err()
         );
     }
 

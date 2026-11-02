@@ -1139,6 +1139,12 @@ Destinations supplied in flags are also checked before creating an owned tree.
 Accepted operations compare and replay their immutable inputs before checking
 current branch protection; later protection changes do not invalidate replay.
 Actual delivery still rechecks protection.
+Host Git output is bounded per call. A `worktree list` listing may use the
+8 MiB capture default, so a repository with many linked worktrees can still be
+checked; other calls keep 16 KiB, and `--show-origin` keeps 1 MiB. Output over
+its bound is refused at the stage that read it, and the error names the
+command and the limit. The MCP and graph edges keep that text. A truncated
+listing is never treated as complete.
 
 Integration prepares objects without holding an application lock through Git.
 It fast-forwards when possible, otherwise uses merge-tree and commit-tree to
@@ -1148,12 +1154,18 @@ checked out in any worktree is refused. Publication uses expected-old ref
 comparison locally or an explicit remote lease after an ancestry proof.
 A concurrent publisher can win; the losing delivery records an integration
 failure for explicit host pickup rather than adding another retry counter.
+A graph worktree whose node integrates into a local branch must sit on a
+different branch; graph admission refuses a worktree on its own integration
+target. The batch worktree sits on a separate branch and is synced by the
+graph's launch fast-forward, so integration never checks out a branch for it.
 Before resolving an origin integration target, the host refreshes the exact
 remote branch and refuses delivery if the refresh fails. Final graph PR
 delivery follows the same refresh rule.
 
 `lane deliver ATTEMPT [--deliver MODE]` uses the recorded destination, or
-origin push when the settled lane recorded none. It requires a succeeded
+origin push when the settled lane recorded none. An explicit `integrate:`
+override naming the recorded target keeps a recorded fast-forward-only guard,
+so pickup cannot merge a refused loop round. It requires a succeeded
 writer, released custody, no new reservation, a clean tree and the exact
 receipt head. After reviewing a `review_required` writer, the chair can use
 `lane deliver --accept-review ATTEMPT` to accept its protected changes and

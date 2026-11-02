@@ -21,6 +21,22 @@ Stop: an unexplained wire difference, missing authority or the lane budget.
 Delivery: local commit only; chair owns integration and external actions.
 ```
 
+Writer briefs also set these rules, because each one prevents a failure seen
+in practice:
+
+- Commit after each step, before running its tests. A lane that loses its
+  session, quota or settlement then leaves recoverable commits, not a dirty
+  tree that another writer must adopt.
+- Run filtered tests for the touched code, plus lint and format on the touched
+  crates or packages. The full suite runs in CI on the pull request.
+- Record environment failures and failures in untouched code, then skip them.
+  Do not repair them inside the slice.
+- Give a budget of about 35 to 60 minutes and a priority order, so a stop part
+  way still returns the most valuable items.
+- Name one writer per worktree, and forbid checkout, switch or detach in any
+  other checkout. When a lane ends partial, confirm its process has exited
+  before a new writer adopts the worktree.
+
 Name dependency seams before parallelising. Two writers changing the same
 schema and its callers are coupled until that seam has landed. A read-only
 hypothesis fan-out can run while a single writer owns the eventual fix.

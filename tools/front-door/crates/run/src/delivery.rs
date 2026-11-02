@@ -412,6 +412,7 @@ impl HostDeliveryContext {
             remote,
             branch: destination,
             open_pr,
+            fast_forward_only: false,
         };
         validate(&request)?;
         Ok(Some(request))
@@ -1034,6 +1035,7 @@ impl HostDeliveryContext {
                     Some("rev-parse") if args.contains(&"--absolute-git-dir") => "git dir",
                     Some("rev-parse") => "HEAD",
                     Some("config") => "credential helper",
+                    Some("worktree") => "worktree",
                     _ if args.contains(&"fetch") => "fetch",
                     _ => "git executable",
                 };
@@ -1119,15 +1121,8 @@ impl HostDeliveryContext {
         options.env = Some(&environment);
         options.stdin = Some(input);
         let commit_log = tool == "git" && args.first() == Some(&"log");
-        // A configuration listing with origins can exceed an ordinary reply.
-        let listing = args.contains(&"--show-origin");
-        options.stdout = StreamPolicy::Capture {
-            limit: match (commit_log, listing) {
-                (true, _) => 56_000,
-                (false, true) => 1024 * 1024,
-                (false, false) => 16 * 1024,
-            },
-        };
+        let limit = stdout_limit(commit_log, args);
+        options.stdout = StreamPolicy::Capture { limit };
         options.stop_on_output_limit = commit_log;
         options.stderr = if stage == Stage::Prepare {
             StreamPolicy::Capture { limit: 4096 }
@@ -1147,12 +1142,19 @@ impl HostDeliveryContext {
             && output.termination == Termination::Exit(1)
             && output.stdout.bytes.is_empty();
         let bounded_log = commit_log && output.stdout.truncated && output.overflow_stopped;
+        if output.stdout.truncated && !commit_log {
+            return Err(RunError::DeliveryLimit {
+                stage,
+                tool: if tool == "gh" { "gh" } else { "git" },
+                command: git_subcommand(args),
+                limit,
+            });
+        }
         if (output.termination != Termination::Exit(0)
             && !absent_helpers
             && !absent_default
             && !bounded_log)
             || output.timed_out
-            || output.stdout.truncated && !commit_log
             || output.stdout.read_failed
             || output.drain_truncated
         {
@@ -1469,6 +1471,9 @@ impl HostDeliveryContext {
             .is_ok()
         {
             head
+        } else if request.fast_forward_only {
+            // A loop round never merges: the target moved since the round began.
+            return Err(RunError::IntegrationHeadMoved);
         } else {
             // A configured merge driver may execute arbitrary repository code.
             if !self
@@ -1630,7 +1635,10 @@ impl HostDeliveryContext {
             return Err(RunError::Delivery(Stage::Head));
         }
         self.refuse_protected_target(writer, &request.branch)
-            .map_err(|_| RunError::Delivery(Stage::Prepare))?;
+            .map_err(|error| match error {
+                RunError::DeliveryLimit { .. } => error,
+                _ => RunError::Delivery(Stage::Prepare),
+            })?;
         self.clean(writer)?;
         if matches!(request.mode, crate::DeliveryMode::Integrate(_)) {
             self.integrate(writer, request, head)?;
@@ -1797,6 +1805,64 @@ pub(super) fn prepare_error(step: &'static str, detail: impl std::fmt::Display) 
     RunError::DeliveryPrepare {
         step,
         reason: prepare_reason(detail),
+    }
+}
+
+/// The stdout limit for one host Git or forge call, chosen from its argv. A
+/// worktree listing grows with the linked worktrees, so it gets the crate's
+/// capture default; every other call keeps its bound.
+pub(super) fn stdout_limit(commit_log: bool, args: &[&str]) -> usize {
+    if commit_log {
+        56_000
+    } else if args.contains(&"--show-origin") {
+        // A configuration listing with origins can exceed an ordinary reply.
+        1024 * 1024
+    } else if args.starts_with(&["worktree", "list"]) {
+        provenant_os::exec::DEFAULT_CAPTURE_LIMIT
+    } else {
+        16 * 1024
+    }
+}
+
+/// The failed receipt state for a delivery error. A staged error keeps its
+/// stage; a host limit or prepare refusal also keeps its redacted reason under
+/// `reason`, which older readers retain as an extra field. Any other error is
+/// a failed push.
+pub(crate) fn failed_state(error: &RunError) -> WriterDeliveryState {
+    let (stage, reason) = match error {
+        RunError::Delivery(stage) => (*stage, None),
+        RunError::IntegrationHeadMoved => (Stage::Integrate, None),
+        RunError::DeliveryLimit { stage, .. } => (*stage, Some(prepare_reason(error))),
+        RunError::DeliveryPrepare { .. } => (Stage::Prepare, Some(prepare_reason(error))),
+        _ => (Stage::Push, None),
+    };
+    let mut extra = provenant_records::ExtraFields::default();
+    if let Some(reason) = reason {
+        extra.insert("reason".into(), reason.into());
+    }
+    WriterDeliveryState::Failed { extra, stage }
+}
+
+/// The subcommand words of a host call, for diagnostics. Global options and
+/// their values (`-c <name=value>`, `-C <path>`, `--git-dir <path>`,
+/// `--work-tree <path>`) are skipped, as are `--option=value` forms.
+pub(super) fn git_subcommand(args: &[&str]) -> String {
+    let mut words = Vec::new();
+    let mut iter = args.iter().copied();
+    while let Some(word) = iter.next() {
+        match word {
+            "-c" | "-C" | "--git-dir" | "--work-tree" | "--namespace" | "--exec-path" => {
+                iter.next();
+            }
+            _ if word.starts_with('-') => {}
+            _ => words.push(word),
+        }
+    }
+    let mut words = words.into_iter();
+    let verb = words.next().unwrap_or("git");
+    match (verb, words.next()) {
+        ("worktree", Some(sub)) => format!("worktree {sub}"),
+        _ => verb.to_owned(),
     }
 }
 
@@ -2148,14 +2214,7 @@ impl crate::RunStore {
                 extra: Default::default(),
                 pull_request,
             },
-            Err(RunError::Delivery(stage)) => WriterDeliveryState::Failed {
-                extra: Default::default(),
-                stage,
-            },
-            Err(_) => WriterDeliveryState::Failed {
-                extra: Default::default(),
-                stage: Stage::Push,
-            },
+            Err(error) => failed_state(&error),
         };
         let receipt = WriterDeliveryReceipt {
             extra: Default::default(),
@@ -2252,14 +2311,7 @@ pub(crate) fn deliver_once(
                     extra: Default::default(),
                     pull_request,
                 },
-                Err(RunError::Delivery(stage)) => WriterDeliveryState::Failed {
-                    extra: Default::default(),
-                    stage,
-                },
-                Err(_) => WriterDeliveryState::Failed {
-                    extra: Default::default(),
-                    stage: Stage::Push,
-                },
+                Err(error) => failed_state(&error),
             }
         };
     }

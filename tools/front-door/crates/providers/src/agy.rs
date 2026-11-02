@@ -32,14 +32,200 @@ const SECURITY: &str = "/usr/bin/security";
 const SHELL: &str = "/bin/zsh";
 const KEYCHAIN: &str = "Library/Keychains/login.keychain-db";
 
+/// The keychain an account signs in with, from its registered directory.
+///
+/// A directory that is the user's real `home` is the shared login keychain
+/// (`Ok(None)`). Any other directory is an isolated account whose own `HOME`
+/// holds its keychain, and that mode never depends on whether the file exists:
+/// a missing keychain, or one that is not a regular file (a symlink would
+/// point at a file elsewhere), is an error naming the path, so a keychain that
+/// vanishes after registration or verification fails closed instead of
+/// falling back to the shared login keychain. That holds for a keychain that
+/// is gone when it is checked; see [`ProbeHome`] for the window while a probe
+/// runs.
+///
+/// This only selects which keychain a lane links. The guard against a wrong
+/// sign-in is the identity pinned at registration and re-verified on launch.
+pub fn account_keychain(
+    directory: &std::path::Path,
+    home: &std::path::Path,
+) -> Result<Option<std::path::PathBuf>, crate::ProviderError> {
+    let canonical = |path: &std::path::Path| std::fs::canonicalize(path).ok();
+    if directory == home
+        || canonical(directory)
+            .zip(canonical(home))
+            .is_some_and(|(directory, home)| directory == home)
+    {
+        return Ok(None);
+    }
+    isolated_keychain(directory, home).map(|(keychain, _)| Some(keychain))
+}
+
+/// The one check that an account directory holds its own keychain, shared by
+/// registration, both probes and launch preparation: the keychain path, with
+/// its identity, or the error naming it. The file must be a regular file and
+/// its fully resolved path must be exactly `<resolved directory>/Library/
+/// Keychains/login.keychain-db`, so a symlink anywhere along it (the file, or
+/// `Library` or `Library/Keychains` pointing at another home's) is refused.
+/// A hard link is no better: the file must have a single link and must not be
+/// the same device and inode as the real `home`'s login keychain, which is only
+/// ever stat'ed, never opened.
+fn isolated_keychain(
+    directory: &std::path::Path,
+    home: &std::path::Path,
+) -> Result<(std::path::PathBuf, std::fs::Metadata), crate::ProviderError> {
+    use std::os::unix::fs::MetadataExt;
+    let keychain = directory.join(KEYCHAIN);
+    let own = std::fs::canonicalize(directory)
+        .ok()
+        .zip(std::fs::canonicalize(&keychain).ok())
+        .is_some_and(|(directory, resolved)| resolved == directory.join(KEYCHAIN));
+    match std::fs::symlink_metadata(&keychain) {
+        Ok(metadata)
+            if own
+                && metadata.file_type().is_file()
+                && metadata.nlink() == 1
+                && !std::fs::metadata(home.join(KEYCHAIN))
+                    .is_ok_and(|real| identity(&real) == identity(&metadata)) =>
+        {
+            Ok((keychain, metadata))
+        }
+        _ => Err(crate::ProviderError::IsolatedKeychainUnavailable(
+            keychain.display().to_string(),
+        )),
+    }
+}
+
+/// The `ExecError::Io` operation of a probe refused because its isolated
+/// keychain was no longer the one selected.
+pub const KEYCHAIN_OPERATION: &str = "isolated keychain";
+
+/// The `HOME` an agy identity probe runs under, with the isolated keychain that
+/// selected it.
+///
+/// The probe itself is unconfined, and `HOME` is all that makes the agent use
+/// the account's keychain: if that file vanished, macOS could fall through to
+/// the shared login keychain and the probe would record the wrong account.
+/// [`ProbeHome::guard`] therefore re-checks the keychain (same device and
+/// inode, still a regular file inside the account directory) immediately
+/// before spawning and again once the probe returns, and refuses the result if
+/// either check fails.
+///
+/// Residual race: the agent opens the keychain at some point between the two
+/// checks, so any temporary replacement, absence or symlink swap during the
+/// probe that is undone, with the original inode restored, before the second
+/// check is not observable. The probe can then have read another keychain
+/// without the result being refused. Closing it needs a seatbelt profile
+/// denying the real home's `Library/Keychains` to the probe, which cannot be
+/// verified against a real agy without touching a real keychain.
+#[derive(Debug)]
+pub struct ProbeHome {
+    home: std::path::PathBuf,
+    held: Option<Held>,
+}
+
+#[derive(Debug)]
+struct Held {
+    directory: std::path::PathBuf,
+    home: std::path::PathBuf,
+    id: (u64, u64),
+}
+
+fn identity(metadata: &std::fs::Metadata) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    (metadata.dev(), metadata.ino())
+}
+
+impl ProbeHome {
+    /// The `HOME` for `directory`, refusing an isolated account whose keychain
+    /// is not available. The user's own home needs no guard.
+    pub fn select(
+        directory: &std::path::Path,
+        home: &std::path::Path,
+    ) -> Result<Self, crate::ProviderError> {
+        if account_keychain(directory, home)?.is_none() {
+            return Ok(Self {
+                home: home.to_owned(),
+                held: None,
+            });
+        }
+        let (_, metadata) = isolated_keychain(directory, home)?;
+        Ok(Self {
+            home: directory.to_owned(),
+            held: Some(Held {
+                directory: directory.to_owned(),
+                home: home.to_owned(),
+                id: identity(&metadata),
+            }),
+        })
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.home
+    }
+
+    /// Fails unless the isolated keychain is still the selected file.
+    pub fn verify(&self) -> Result<(), crate::ProviderError> {
+        let Some(held) = &self.held else {
+            return Ok(());
+        };
+        let (keychain, metadata) = isolated_keychain(&held.directory, &held.home)?;
+        if identity(&metadata) == held.id {
+            Ok(())
+        } else {
+            Err(crate::ProviderError::IsolatedKeychainUnavailable(
+                keychain.display().to_string(),
+            ))
+        }
+    }
+
+    /// Runs probes through `executor` under this home's keychain check.
+    pub fn guard<'a>(
+        &'a self,
+        executor: &'a dyn provenant_os::exec::Executor,
+    ) -> GuardedExecutor<'a> {
+        GuardedExecutor {
+            executor,
+            home: self,
+        }
+    }
+}
+
+/// An executor that checks the keychain before spawning and after the probe
+/// returns, failing with [`KEYCHAIN_OPERATION`] when it changed.
+pub struct GuardedExecutor<'a> {
+    executor: &'a dyn provenant_os::exec::Executor,
+    home: &'a ProbeHome,
+}
+
+impl provenant_os::exec::Executor for GuardedExecutor<'_> {
+    fn execute(
+        &self,
+        options: provenant_os::exec::ExecOptions<'_>,
+    ) -> Result<provenant_os::exec::ExecOutcome, provenant_os::exec::ExecError> {
+        let refused = |error: crate::ProviderError| provenant_os::exec::ExecError::Io {
+            operation: KEYCHAIN_OPERATION,
+            source: std::io::Error::other(match error {
+                crate::ProviderError::IsolatedKeychainUnavailable(path) => path,
+                other => other.to_string(),
+            }),
+        };
+        self.home.verify().map_err(refused)?;
+        let outcome = self.executor.execute(options)?;
+        self.home.verify().map_err(refused)?;
+        Ok(outcome)
+    }
+}
+
 /// Agy runs with the attempt's private state as `HOME`, so it sees none of the
 /// user's Gemini or Antigravity configuration, MCP servers, plugins, hooks,
 /// sidecars or knowledge: its state lives and dies in the private home. Its
-/// sign-in is in the login keychain, so the private home links only that one
-/// file, read-only. Headless mode auto-denies every tool permission it cannot
-/// prompt for, so lanes auto-approve tools: our confinement profile, not
-/// agy's prompts, bounds what a lane can do. Its own sandbox cannot nest
-/// inside ours.
+/// sign-in is in a keychain, so the private home links only that one file,
+/// read-only: an isolated account's own keychain, otherwise the user's login
+/// keychain. Headless mode auto-denies every
+/// tool permission it cannot prompt for, so lanes auto-approve tools: our
+/// confinement profile, not agy's prompts, bounds what a lane can do. Its own
+/// sandbox cannot nest inside ours.
 fn prepare(
     input: &PrepareInput<'_>,
     access: Access,
@@ -47,8 +233,7 @@ fn prepare(
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
     let plan = input.confined.permissions();
-    // Agy's keychain sign-in cannot be selected through a registered directory.
-    if plan.selected_authentication.as_deref() != Some("keychain") || input.account.is_some() {
+    if plan.selected_authentication.as_deref() != Some("keychain") {
         return Err(ProviderError::UnsupportedPolicy);
     }
     input.prompt.check_argv()?;
@@ -57,7 +242,11 @@ fn prepare(
         .as_ref()
         .ok_or(ProviderError::UnsupportedPolicy)?
         .path;
-    let keychain = input.home.join(KEYCHAIN);
+    let keychain = match input.account {
+        Some(account) => account_keychain(account.directory(), input.home)?,
+        None => None,
+    }
+    .unwrap_or_else(|| input.home.join(KEYCHAIN));
     let mut argv: Vec<OsString> = [
         input.executable.as_os_str(),
         "--output-format".as_ref(),

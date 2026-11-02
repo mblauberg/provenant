@@ -5,6 +5,13 @@ capacity_retry_seconds = 30
 capacity_retry_max_seconds = 600
 retry_delay_ceiling_seconds = 3600
 pacing_overrides = []
+[review.size]
+small_lines = 150
+small_files = 3
+small_crates = 1
+medium_lines = 1000
+medium_files = 15
+medium_crates = 3
 [opencode_go]
 min_monthly_allowance_usd = 60
 [routes]
@@ -14,11 +21,11 @@ min_monthly_allowance_usd = 60
 [review.shapes.quick]
 reviewers = [{ pool = "junior", count = 1 }]
 [review.shapes.standard]
-reviewers = [{ pool = "junior", count = 2, distinct_families = true }]
+reviewers = [{ pool = "junior", count = 3, distinct_families = true }]
 [review.shapes.deep]
 reviewers = [
-  { pool = "junior", count = 4, lenses = ["correctness-spec", "security-privacy", "concurrency-data-errors", "tests"], distinct_families = true },
-  { pool = "senior", count = 2, distinct_families = true },
+  { pool = "junior", count = 4, distinct_families = true },
+  { pool = "senior", count = 4, distinct_families = true },
 ]
 [review.select]
 default = "standard"
@@ -28,4 +35,28 @@ substantial = "standard"
 crucial = "deep"
 terminal = "deep"
 [review.select.by_kind]
+integration = "deep"
+docs = "quick"
+refactor = "standard"
 [review.select.by_paths]
+[review.select.by_size]
+small = "quick"
+medium = "standard"
+large = "deep"
+# Base lenses fill a shape's slots in this order. A kind may replace the order
+# (docs) or add lenses outside the slot cap (refactor); risk tags add more.
+[review.lenses]
+order = [
+  "correctness-spec",
+  "tests",
+  "design-fit-reuse",
+  "simplicity",
+  "conventions-readability",
+  "refactor-cleanup",
+  "reliability",
+  "flexibility",
+]
+[review.lenses.by_kind.docs]
+order = ["conventions-readability"]
+[review.lenses.by_kind.refactor]
+add = ["refactor-cleanup", "design-fit-reuse"]

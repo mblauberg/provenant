@@ -2488,8 +2488,10 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--shape` | `{"description": "Override the selected review shape", "name": "shape"}` |
 | `--risk` | `{"description": "Risk tier used to select a shape", "name": "risk"}` |
 | `--kind` | `{"description": "Task kind used to select a shape", "name": "kind"}` |
+| `--risk-tag` | `{"description": "Add a conditional review lens (security, concurrency, or terminal)", "name": "risk_tags", "repeatable": true, "values": ["security", "concurrency", "terminal"]}` |
 | `--range` | `{"description": "Git range whose changed paths select the shape", "name": "range"}` |
 | `--exclude` | `{"description": "Keep a provider, account or exact model out of every reviewer pool (repeatable); see &#96;provenant route resolve --help&#96;", "name": "exclude", "repeatable": true}` |
+| `--explain` | `{"defaults": ["false"], "description": "Show the selected panel without dispatching reviewers", "name": "explain", "values": ["true", "false"]}` |
 | `--wait` | `{"bounds": [1, 14400], "defaults": ["3600"], "description": "Overall wait limit (seconds or a duration such as 30m)", "name": "wait"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
@@ -2505,8 +2507,10 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
         "shape",
         "risk",
         "kind",
+        "risk_tags",
         "range",
         "exclude",
+        "explain",
         "wait"
       ],
       "multiple": true,

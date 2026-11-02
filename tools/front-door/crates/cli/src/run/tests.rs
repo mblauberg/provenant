@@ -857,6 +857,34 @@ fn unsafe_store_path_reason_survives_cli_conversion() {
 }
 
 #[test]
+fn host_delivery_limit_keeps_its_text_as_typed_io_detail() {
+    for (tool, command, text) in [
+        (
+            "git",
+            "worktree list",
+            "host writer delivery failed at Integrate: git worktree list output exceeded the 8388608-byte host limit",
+        ),
+        (
+            "gh",
+            "pr",
+            "host writer delivery failed at Integrate: gh pr output exceeded the 8388608-byte host limit",
+        ),
+    ] {
+        let failure = super::Fail::from(provenant_run::RunError::DeliveryLimit {
+            stage: provenant_records::run::WriterDeliveryStage::Integrate,
+            tool,
+            command: command.into(),
+            limit: provenant_os::exec::DEFAULT_CAPTURE_LIMIT,
+        });
+        assert_eq!(failure.message, text);
+        assert_eq!(failure.kind, ErrorKind::Io);
+        let detail = failure.detail.expect("typed detail");
+        assert_eq!(detail.code(), "io");
+        assert_eq!(detail.to_string(), text);
+    }
+}
+
+#[test]
 fn stats_summary_reports_cost_coverage() {
     use provenant_telemetry::{CostTotal, Money, Totals};
     let mut totals = Totals {
@@ -1198,7 +1226,6 @@ fn dispatch_existing_worktree_checks_custody_and_replays() -> Result<(), Box<dyn
     use provenant_confinement::worktrees::{self, WorktreeOrigin, WorktreeOwner};
     use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
     use provenant_supervisor::custody::{self, Scope};
-    use std::ffi::OsString;
     use std::os::unix::fs::DirBuilderExt;
     const MARKER: &str = "PROVENANT_TEST_WORKTREE_ADMISSION";
     let executor = SystemExecutor::new(1)?;
@@ -1307,14 +1334,8 @@ fn dispatch_existing_worktree_checks_custody_and_replays() -> Result<(), Box<dyn
                     command
                 })
             };
-            let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
             let switch = |args: &[&str]| -> Result<(), Box<dyn std::error::Error>> {
-                let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
-                    .chain(args.iter().map(OsString::from))
-                    .collect();
-                let out =
-                    executor.execute(ExecOptions::new(&argv, &tree, Duration::from_secs(5)))?;
-                assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+                provenant_os::fixture::run_git(&tree, args)?;
                 Ok(())
             };
             switch(&["switch", "--detach"])?;
@@ -1490,7 +1511,6 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
     let mut inputs = RootInputs::new(home.clone(), project.clone());
     inputs.state_dir = Some(root.join("state"));
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
     for args in [
         vec!["init", "-q"],
         vec![
@@ -1504,14 +1524,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
             "base",
         ],
     ] {
-        let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
-            .chain(args.into_iter().map(OsString::from))
-            .collect();
-        let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(10));
-        options.stdout = StreamPolicy::Capture { limit: 65_536 };
-        options.stderr = StreamPolicy::Capture { limit: 65_536 };
-        let out = executor.execute(options)?;
-        assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+        provenant_os::fixture::run_git(&project, &args)?;
     }
     let edge = Edge {
         roots: &roots,
@@ -1540,17 +1553,12 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
             &cancel,
         )
     })?;
-    let primary = {
-        let argv = vec![
-            git.as_os_str().to_owned(),
-            "symbolic-ref".into(),
-            "--short".into(),
-            "HEAD".into(),
-        ];
-        let output = executor.execute(ExecOptions::new(&argv, &project, Duration::from_secs(5)))?;
-        assert_eq!(output.termination, Termination::Exit(0));
-        String::from_utf8(output.stdout.bytes)?.trim().to_owned()
-    };
+    let primary = String::from_utf8(provenant_os::fixture::run_git(
+        &project,
+        &["symbolic-ref", "--short", "HEAD"],
+    )?)?
+    .trim()
+    .to_owned();
     for (index, (target, placement, delivery)) in ["main", "master", primary.as_str()]
         .into_iter()
         .flat_map(|target| {
@@ -1833,16 +1841,7 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
     let mut inputs = RootInputs::new(home.clone(), project.clone());
     inputs.state_dir = Some(root.join("state"));
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    let run_git = |args: &[&str]| -> Result<_, Box<dyn std::error::Error>> {
-        let argv: Vec<OsString> = std::iter::once(git.as_os_str().to_owned())
-            .chain(args.iter().map(OsString::from))
-            .collect();
-        let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(10));
-        options.stdout = StreamPolicy::Capture { limit: 65_536 };
-        options.stderr = StreamPolicy::Capture { limit: 65_536 };
-        Ok(executor.execute(options)?)
-    };
+    let run_git = |args: &[&str]| provenant_os::fixture::run_git(&project, args);
     for args in [
         &["init", "-q"][..],
         &[
@@ -1856,8 +1855,7 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
             "base",
         ][..],
     ] {
-        let out = run_git(args)?;
-        assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+        run_git(args)?;
     }
     let edge = Edge {
         roots: &roots,
@@ -1916,17 +1914,20 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
             "{:?}",
             reply.result
         );
-        let branch = run_git(&[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            "refs/heads/preflight-lane",
-        ])?;
-        assert_ne!(branch.termination, Termination::Exit(0), "{branch:?}");
+        // `rev-parse --verify --quiet` exits non-zero when the branch does not exist.
+        assert!(
+            run_git(&[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "refs/heads/preflight-lane",
+            ])
+            .is_err()
+        );
     }
     // A relative base is resolved in the source checkout exactly once.
     // The new tree has no HEAD^, so admission must use creation's receipt.
-    let out = run_git(&[
+    run_git(&[
         "-c",
         "user.name=Fixture",
         "-c",
@@ -1936,7 +1937,6 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
         "-qm",
         "second",
     ])?;
-    assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
@@ -3998,6 +3998,125 @@ fn clean_exit() -> ExitObservation {
 }
 
 #[test]
+fn opencode_stderr_quota_settles_and_records_refusal() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    use provenant_quota::Admission;
+    use provenant_records::{
+        ResolvedRoute, RouteConfidentiality, RouteEligibility, RouteReadiness,
+    };
+    use std::os::unix::fs::PermissionsExt;
+    if crate::fabric::in_lane() {
+        // A lane suppresses the host quota writes this test observes.
+        return Ok(());
+    }
+    let temp = tempfile::tempdir()?;
+    let state = temp.path().join("state");
+    std::fs::create_dir(&state)?;
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+    let provider_state = state.join("runs/run/attempts/attempt/provider-state");
+    let argv = ["/bin/sh", "-c", "printf '%s\\n' 'AI.Error.QuotaExceeded: Go usage limit exceeded retryAfterMs=60000' >&2; exit 1"].map(std::ffi::OsString::from);
+    let mut options = ExecOptions::new(&argv, temp.path(), Duration::from_secs(30));
+    options.stdout = StreamPolicy::Capture { limit: 8192 };
+    options.stderr = StreamPolicy::Capture { limit: 8192 };
+    let output = SystemExecutor::new(1)?.execute(options)?;
+    assert_eq!(output.termination, Termination::Exit(1));
+    let route = run::RouteRecord {
+        provider: Some("opencode".into()),
+        model: Some("opencode/opencode-go/example".into()),
+        account_key: Some("go".into()),
+        account_label: Some("go".into()),
+        ..Default::default()
+    };
+    let mut exit = clean_exit();
+    exit.termination = Some(provenant_os::exec::Termination::Exit(1));
+    let decoded = Registry::default().decode_captures(
+        &route,
+        &output.stdout.bytes,
+        &output.stderr.bytes,
+        &exit,
+        &provider_state,
+        None,
+    )?;
+    assert_eq!(decoded.outcome, run::Outcome::QuotaLimited);
+    let records = crate::quota::read_cache_at(&state)?;
+    assert_eq!(
+        records.len(),
+        1,
+        "host refusal missing; lane environment suppresses host quota writes"
+    );
+    let refusal = &records[0].refusals[0];
+    assert_eq!(refusal.pool.as_deref(), Some("opencode-go"));
+    assert_eq!(
+        refusal.resets_unix_seconds,
+        Some(refusal.observed_unix_seconds + 60)
+    );
+    let resolved = ResolvedRoute {
+        extra: Default::default(),
+        adapter: "opencode".into(),
+        model: "opencode-go/example".into(),
+        effort: None,
+        catalogue_revision: "fixture".into(),
+        account_key: Some("go".into()),
+        host: "host".into(),
+        alternatives: Default::default(),
+        exclusions: vec![],
+        eligibility: RouteEligibility::Eligible,
+        readiness: RouteReadiness::Ready {
+            extra: Default::default(),
+            availability_ref: "fixture".into(),
+            expires_unix_seconds: i64::MAX,
+        },
+        confidentiality: RouteConfidentiality {
+            extra: Default::default(),
+            evidence_ref: "fixture".into(),
+        },
+        pool_selection: None,
+    };
+    let pools = vec!["opencode-go".into()];
+    let check = |now_unix_seconds| {
+        Admission {
+            policies: &[],
+            now_unix_seconds,
+            records: &records,
+            pools: &pools,
+        }
+        .check(&resolved)
+    };
+    assert!(check(refusal.observed_unix_seconds).is_err());
+    assert!(check(refusal.observed_unix_seconds + 60).is_ok());
+    Ok(())
+}
+
+#[test]
+fn opencode_stderr_quota_text_does_not_overturn_a_successful_run()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir()?;
+    let state = temp.path().join("state");
+    std::fs::create_dir(&state)?;
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+    let provider_state = state.join("runs/run/attempts/attempt/provider-state");
+    let mut exit = clean_exit();
+    exit.termination = Some(provenant_os::exec::Termination::Exit(0));
+    let decoded = Registry::default().decode_captures(
+        &opencode_decode_route(),
+        include_bytes!("../../../../tests/fixtures/providers/opencode/v2.2.0-success.jsonl"),
+        b"AI.Error.QuotaExceeded: Go usage limit exceeded retryAfterMs=60000\n",
+        &exit,
+        &provider_state,
+        None,
+    )?;
+    assert_eq!(decoded.outcome, run::Outcome::Succeeded);
+    assert!(
+        crate::quota::read_cache_at(&state)
+            .map(|records| records.iter().all(|record| record.refusals.is_empty()))
+            .unwrap_or(true),
+        "a successful run must not persist a quota refusal"
+    );
+    Ok(())
+}
+
+#[test]
 fn opencode_unavailable_model_reaches_the_decoded_outcome() {
     let route = run::RouteRecord {
         provider: Some("opencode".into()),
@@ -4115,12 +4234,13 @@ fn capacity_store_failure_does_not_change_settlement() -> Result<(), Box<dyn std
     // The malformed on-disk record makes the store update fail after the
     // settlement path creates the lock. The lock proves it attempted the write.
     assert!(!state.join("quota/quota.lock").exists());
-    let decoded = Registry::default().decode_with_context(
+    let decoded = Registry::default().decode_captures(
         &route,
         stream,
+        &[],
         &exit,
         Path::new("/nonexistent"),
-        &context,
+        Some(&context),
     )?;
     assert!(state.join("quota/quota.lock").is_file());
     assert_eq!(std::fs::read(&bad_record)?, b"invalid quota record");
@@ -4253,8 +4373,14 @@ fn invalid_sealed_root_never_writes_to_registry_root() -> Result<(), Box<dyn std
     let stream = br#"{"type":"turn.failed","error":{"message":"at capacity","codex_error_info":"server_overloaded"}}"#;
     let mut exit = clean_exit();
     exit.termination = Some(Termination::Exit(1));
-    let decoded =
-        registry.decode_with_context(&route, stream, &exit, Path::new("/nonexistent"), &context)?;
+    let decoded = registry.decode_captures(
+        &route,
+        stream,
+        &[],
+        &exit,
+        Path::new("/nonexistent"),
+        Some(&context),
+    )?;
     assert_eq!(decoded.outcome, run::Outcome::ModelUnavailable);
     assert!(
         decoded
@@ -4376,13 +4502,14 @@ fn opencode_decode_with_context_reads_home_data_when_xdg_is_unset()
         "glm-5.3-flash-free",
     )?;
     // The success fixture's stream reports no model; the session record
-    // beside the holder home supplies it through `decode_with_context`.
-    let decoded = Registry::default().decode_with_context(
+    // beside the holder home supplies it through `decode_captures`.
+    let decoded = Registry::default().decode_captures(
         &opencode_decode_route(),
         include_bytes!("../../../../tests/fixtures/providers/opencode/v2.2.0-success.jsonl"),
+        &[],
         &clean_exit(),
         Path::new("/nonexistent"),
-        &context,
+        Some(&context),
     )?;
     assert_eq!(decoded.outcome, run::Outcome::Succeeded);
     assert_eq!(decoded.session.as_deref(), Some("ses_x"));
@@ -4422,12 +4549,13 @@ fn absolute_xdg_data_home_wins_over_home_for_decode_with_context()
         "opencode",
         "home-decoy",
     )?;
-    let decoded = Registry::default().decode_with_context(
+    let decoded = Registry::default().decode_captures(
         &opencode_decode_route(),
         include_bytes!("../../../../tests/fixtures/providers/opencode/v2.2.0-success.jsonl"),
+        &[],
         &clean_exit(),
         Path::new("/nonexistent"),
-        &context,
+        Some(&context),
     )?;
     assert_eq!(decoded.outcome, run::Outcome::Succeeded);
     assert_eq!(
@@ -4473,8 +4601,16 @@ fn capacity_guardian_context_records_and_reports_config_failure()
     let mut exit = clean_exit();
     exit.termination = Some(provenant_os::exec::Termination::Exit(1));
     let registry = Registry::default();
-    let decode =
-        || registry.decode_with_context(&route, stream, &exit, Path::new("/nonexistent"), &context);
+    let decode = || {
+        registry.decode_captures(
+            &route,
+            stream,
+            &[],
+            &exit,
+            Path::new("/nonexistent"),
+            Some(&context),
+        )
+    };
     std::fs::write(state.join("config.toml"), "invalid = [")?;
     let failed = decode()?;
     assert_eq!(failed.outcome, run::Outcome::ModelUnavailable);
@@ -4514,8 +4650,14 @@ fn capacity_guardian_context_records_and_reports_config_failure()
         #[cfg(feature = "fixture")]
         fixture_state_write: false,
     });
-    let nested_result =
-        registry.decode_with_context(&route, stream, &exit, Path::new("/nonexistent"), &nested)?;
+    let nested_result = registry.decode_captures(
+        &route,
+        stream,
+        &[],
+        &exit,
+        Path::new("/nonexistent"),
+        Some(&nested),
+    )?;
     assert_eq!(nested_result.outcome, run::Outcome::ModelUnavailable);
     assert_eq!(std::fs::read(state.join("quota/key/codex.json"))?, before);
     assert!(!nested.roots.state_root.join("quota").exists());

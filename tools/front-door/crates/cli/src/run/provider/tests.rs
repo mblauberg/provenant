@@ -269,6 +269,243 @@ fn version_probe_reports_outcomes_without_disclosing_output()
     Ok(())
 }
 
+/// Agy has registered accounts and a local login. A user with no agy
+/// registration gets a synthetic `local` entry, which has no registered identity
+/// to probe: it must observe as available on the user's own login, while a
+/// registered agy key is still verified against a fresh identity probe.
+#[test]
+fn unregistered_agy_observes_on_its_local_login_without_an_identity_probe()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_os::exec::{
+        CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
+    };
+
+    #[derive(Default)]
+    struct Agy(std::sync::Mutex<Vec<Vec<String>>>);
+    impl Executor for Agy {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            let argv: Vec<String> = options
+                .argv
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            let version = argv.get(1).is_some_and(|arg| arg == "--version");
+            self.0.lock().unwrap().push(argv);
+            // The identity probe fails, as it does for an unsigned-in HOME.
+            let (code, bytes) = if version {
+                (0, b"agy 1.0.0\n".to_vec())
+            } else {
+                (1, Vec::new())
+            };
+            Ok(ExecOutcome {
+                termination: Termination::Exit(code),
+                timed_out: false,
+                stdout: CapturedStream {
+                    total_bytes: bytes.len() as u64,
+                    bytes,
+                    ..CapturedStream::default()
+                },
+                stderr: CapturedStream::default(),
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: false,
+                elapsed_micros: 80_000,
+            })
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let root = canonical(temp.path())?;
+    for path in ["home", "project", "state"] {
+        std::fs::create_dir_all(root.join(path))?;
+    }
+    let home = root.join("home");
+    let roots = provenant_core::RootInputs {
+        state_dir: Some(root.join("state")),
+        ..provenant_core::RootInputs::new(home.clone(), root.join("project"))
+    }
+    .resolve(&provenant_os::fs::SystemPathResolver)?;
+    let agy = Agy::default();
+    let executor = provenant_providers::host::HostProbeExecutor::new(&agy, &root.join("state"))?;
+    let probe = Probe {
+        roots: Some(&roots),
+        executor: &executor,
+        home: &home,
+        user: "fixture".as_ref(),
+        scratch: &root,
+    };
+    let entry = |key: &str| {
+        serde_json::from_value(serde_json::json!({
+            "adapter": "agy", "label": "default", "key": key, "directory": home,
+        }))
+    };
+
+    // The synthetic entry preparation adds when nothing is registered.
+    let local = observe_account(
+        &entry("local")?,
+        Path::new("/fixture/agy"),
+        &probe,
+        "r",
+        100,
+    )?;
+    assert_eq!(local.account_key.as_deref(), Some("local"));
+    assert_eq!(local.version, "agy 1.0.0");
+    assert!(
+        agy.0
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|argv| argv[1] == "--version"),
+        "no identity probe for the local login"
+    );
+
+    // A registered key is still verified: the failed probe refuses the account.
+    let error = observe_account(
+        &entry("agy-google-fixture")?,
+        Path::new("/fixture/agy"),
+        &probe,
+        "r",
+        100,
+    )
+    .err()
+    .ok_or("registered agy account skipped its identity probe")?
+    .to_string();
+    assert!(
+        agy.0.lock().unwrap().iter().any(|argv| argv[1] == "-p"),
+        "registered agy runs the /usage identity probe"
+    );
+    assert!(!error.is_empty());
+    Ok(())
+}
+
+/// A registered isolated agy account whose keychain vanished must be refused
+/// without probing: the shared login may not be signed in under the second
+/// account's key.
+#[test]
+fn agy_account_whose_isolated_keychain_vanished_is_refused()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_os::exec::{
+        CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
+    };
+
+    /// Signs in as one Google account per `HOME`, as a keychain-backed agy does.
+    struct Agy {
+        home: std::path::PathBuf,
+        isolated: std::path::PathBuf,
+        probed_homes: std::sync::Mutex<Vec<std::path::PathBuf>>,
+    }
+    impl Executor for Agy {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            let argv: Vec<String> = options
+                .argv
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            let bytes = if argv[1] == "--version" {
+                b"agy 1.0.0\n".to_vec()
+            } else {
+                let home = options
+                    .env
+                    .unwrap_or_default()
+                    .iter()
+                    .find(|(key, _)| key == "HOME")
+                    .map(|(_, value)| std::path::PathBuf::from(value))
+                    .expect("probe sets HOME");
+                self.probed_homes.lock().unwrap().push(home.clone());
+                let email = if home == self.isolated {
+                    "second@example.test"
+                } else {
+                    assert_eq!(home, self.home, "probe HOME is a known sign-in");
+                    "first@example.test"
+                };
+                let log = argv
+                    .iter()
+                    .position(|arg| arg == "--log-file")
+                    .map(|index| std::path::PathBuf::from(&argv[index + 1]))
+                    .expect("probe names a log file");
+                std::fs::write(
+                    log,
+                    format!("OAuth: authenticated successfully as {email}\n"),
+                )
+                .expect("write probe log");
+                br#"{"status":"SUCCESS"}"#.to_vec()
+            };
+            Ok(ExecOutcome {
+                termination: Termination::Exit(0),
+                timed_out: false,
+                stdout: CapturedStream {
+                    total_bytes: bytes.len() as u64,
+                    bytes,
+                    ..CapturedStream::default()
+                },
+                stderr: CapturedStream::default(),
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: false,
+                elapsed_micros: 80_000,
+            })
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let root = canonical(temp.path())?;
+    let home = root.join("home");
+    let isolated = root.join("agy-second");
+    let keychain = isolated.join("Library/Keychains/login.keychain-db");
+    for path in [&home, &root.join("project"), &root.join("state")] {
+        std::fs::create_dir_all(path)?;
+    }
+    std::fs::create_dir_all(keychain.parent().unwrap())?;
+    std::fs::write(&keychain, b"")?;
+    let roots = provenant_core::RootInputs {
+        state_dir: Some(root.join("state")),
+        ..provenant_core::RootInputs::new(home.clone(), root.join("project"))
+    }
+    .resolve(&provenant_os::fs::SystemPathResolver)?;
+    let agy = Agy {
+        home: home.clone(),
+        isolated: isolated.clone(),
+        probed_homes: Default::default(),
+    };
+    let executor = provenant_providers::host::HostProbeExecutor::new(&agy, &root.join("state"))?;
+    let probe = Probe {
+        roots: Some(&roots),
+        executor: &executor,
+        home: &home,
+        user: "fixture".as_ref(),
+        scratch: &root,
+    };
+    let key = format!(
+        "agy-{}",
+        provenant_providers::identity::agy_fingerprint(
+            b"OAuth: authenticated successfully as second@example.test\n"
+        )
+        .ok_or("fingerprint")?
+    );
+    let entry = serde_json::from_value(serde_json::json!({
+        "adapter": "agy", "label": "second", "key": key, "directory": isolated,
+    }))?;
+    let observe = || observe_account(&entry, Path::new("/fixture/agy"), &probe, "r", 100);
+
+    // Registered with its own keychain, the account observes under its own HOME.
+    assert_eq!(observe()?.account_key.as_deref(), Some(key.as_str()));
+    // With the keychain gone, the probe must not sign in as the first account.
+    std::fs::remove_file(&keychain)?;
+    let error = observe()
+        .err()
+        .ok_or("account observed after its keychain vanished")?
+        .to_string();
+    assert!(
+        error.contains(&keychain.display().to_string()) && error.contains("isolated keychain"),
+        "{error}"
+    );
+    assert!(
+        !agy.probed_homes.lock().unwrap().contains(&home),
+        "the shared login must not be probed for the isolated account"
+    );
+    Ok(())
+}
+
 #[test]
 fn credential_messages_suggest_signin_only_for_missing_or_expired_tokens() {
     use provenant_providers::ProviderError;
@@ -656,6 +893,48 @@ fn executable_discovery_after_wait_observes_the_completed_update()
     })
 }
 
+/// Initialise a repository with one commit in `project` under a minimal explicit
+/// environment, and return the canonical Git executable it used.
+fn init_fixture_repository(
+    executor: &provenant_os::exec::SystemExecutor,
+    project: &std::path::Path,
+    git_home: &std::path::Path,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    use provenant_os::exec::{ExecOptions, Executor, Termination};
+    use std::time::Duration;
+    let git = provenant_os::git::git_executable()
+        .ok_or("git unavailable")?
+        .canonicalize()?;
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "Initial",
+        ],
+    ] {
+        let argv: Vec<_> = std::iter::once(git.as_os_str().to_owned())
+            .chain(args.into_iter().map(Into::into))
+            .collect();
+        let env = [
+            ("HOME".into(), git_home.as_os_str().to_owned()),
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ];
+        let mut options = ExecOptions::new(&argv, project, Duration::from_secs(5));
+        options.env = Some(&env);
+        let output = executor.execute(options)?;
+        assert_eq!(output.termination, Termination::Exit(0), "{output:?}");
+    }
+    Ok(git)
+}
+
 #[test]
 fn writer_plan_stages_scratch_in_private_temporary_directory()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -683,37 +962,8 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
     for path in [&home, &state, &project, &assets, &git_home] {
         std::fs::DirBuilder::new().mode(0o700).create(path)?;
     }
-    let git = provenant_os::git::git_executable()
-        .ok_or("git unavailable")?
-        .canonicalize()?;
     let executor = SystemExecutor::new(1)?;
-    for args in [
-        vec!["init", "-q", "-b", "main"],
-        vec![
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "Initial",
-        ],
-    ] {
-        let argv: Vec<_> = std::iter::once(git.as_os_str().to_owned())
-            .chain(args.into_iter().map(Into::into))
-            .collect();
-        let env = [
-            ("HOME".into(), git_home.as_os_str().to_owned()),
-            ("PATH".into(), "/usr/bin:/bin".into()),
-            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-        ];
-        let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(5));
-        options.env = Some(&env);
-        let output = executor.execute(options)?;
-        assert_eq!(output.termination, Termination::Exit(0), "{output:?}");
-    }
+    let git = init_fixture_repository(&executor, &project, &git_home)?;
     let roots = provenant_core::RootInputs {
         state_dir: Some(state.clone()),
         ..provenant_core::RootInputs::new(home.clone(), project.clone())

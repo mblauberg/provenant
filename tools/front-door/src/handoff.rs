@@ -106,7 +106,14 @@ fn git(dir: &Path, args: &[&str], timeout: Duration) -> Result<(bool, String), R
     let mut options = ExecOptions::new(&argv, dir, timeout);
     options.env = Some(&environment);
     options.stdin = Some(b"");
-    options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
+    // A worktree listing grows with the linked worktrees, so it gets the same
+    // capture default as delivery. Any other output keeps its bound.
+    let limit = if args.starts_with(&["worktree", "list"]) {
+        provenant_os::exec::DEFAULT_CAPTURE_LIMIT
+    } else {
+        64 * 1024
+    };
+    options.stdout = StreamPolicy::Capture { limit };
     options.stderr = StreamPolicy::Capture { limit: 4096 };
     let out = SystemExecutor::new(1)?.execute(options)?;
     if out.timed_out {
@@ -114,6 +121,19 @@ fn git(dir: &Path, args: &[&str], timeout: Duration) -> Result<(bool, String), R
             Outcome::Timeout,
             "GIT",
             format!("git {} timed out", args.join(" ")),
+        ));
+    }
+    // A partial listing must not look complete to the caller. A mutating call
+    // has already run, so its chatty output is not worth reporting as failure.
+    let mutating = matches!(args.first(), Some(&("add" | "commit" | "push")));
+    if out.stdout.truncated && !mutating {
+        return Err(Refusal::new(
+            Outcome::Error,
+            "GIT",
+            format!(
+                "git {} output exceeded the {limit}-byte limit",
+                args.join(" ")
+            ),
         ));
     }
     let ok = out.termination == Termination::Exit(0);
@@ -1171,6 +1191,25 @@ pub(crate) fn receive(
 #[allow(dead_code, unused_imports)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_text_refuses_stdout_past_its_bound() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("big"), vec![b'a'; 128 * 1024]).unwrap();
+        let error = git_text(
+            temp.path(),
+            &["diff", "--no-index", "--no-color", "/dev/null", "big"],
+        )
+        .expect_err("truncated output must not read as complete");
+        assert!(
+            error.contains("output exceeded the 65536-byte limit"),
+            "{error}"
+        );
+        assert!(error.contains("diff"), "{error}");
+        // Output within the bound is still returned whole.
+        let text = git_text(temp.path(), &["--version"]).unwrap();
+        assert!(text.starts_with("git version"), "{text}");
+    }
 
     #[test]
     fn account_directory_returns_only_a_registered_match() {

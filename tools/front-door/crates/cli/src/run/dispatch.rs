@@ -720,6 +720,7 @@ pub(super) fn dispatch_inner(
                 remote,
                 branch,
                 open_pr: command.open_pr,
+                fast_forward_only: false,
             });
     if let Some(mode) = &command.deliver {
         let branch = if let Some(path) = &command.access.worktree {
@@ -1147,6 +1148,7 @@ pub(super) fn replay_owned_dispatch(
                 remote,
                 branch,
                 open_pr: command.open_pr,
+                fast_forward_only: false,
             }),
     };
     let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
@@ -1418,6 +1420,18 @@ impl run::Providers for PreparedProvider<'_> {
     }
     fn failure_diagnostic(&self, route: &run::RouteRecord, stderr: &[u8]) -> Option<String> {
         self.fallback.failure_diagnostic(route, stderr)
+    }
+    fn decode_captures(
+        &self,
+        route: &run::RouteRecord,
+        stdout: &[u8],
+        stderr: &[u8],
+        exit: &ExitObservation,
+        provider_state: &Path,
+        context: Option<&run::HolderContext>,
+    ) -> Result<run::Decoded, String> {
+        self.fallback
+            .decode_captures(route, stdout, stderr, exit, provider_state, context)
     }
 }
 

@@ -288,9 +288,20 @@ fn expand_loops(
             if child.loop_body.is_some()
                 || child.kind == Some(NodeKind::Loop)
                 || child.on_fail.is_some()
-                || child.delivery.is_some()
+                || child.delivery.as_ref().is_some_and(|mode| {
+                    !matches!(mode, provenant_records::run::DeliveryMode::Integrate(_))
+                })
             {
-                return Err("loop body cannot nest loops or deliver or route on_fail");
+                return Err(
+                    "loop body cannot nest loops or route on_fail, and may only deliver by integrate:",
+                );
+            }
+            if let Some(provenant_records::run::DeliveryMode::Integrate(target)) = &child.delivery
+                && document.integration_branch.as_deref() != Some(target.as_str())
+            {
+                return Err(
+                    "loop body integrate: requires graph integration_branch equal to the node target",
+                );
             }
             if child.land.is_some() {
                 return Err("loop body cannot land");

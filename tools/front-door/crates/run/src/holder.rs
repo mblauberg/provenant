@@ -590,19 +590,18 @@ impl RunStore {
             },
             (Some(route), false) => {
                 let stdout = read_sealed(attempt, "stdout.log", CAPTURE_LIMIT)?.unwrap_or_default();
-                completion
-                    .holder_context()
-                    .map_or_else(
-                        || providers.decode(route, &stdout, exit, &provider_state),
-                        |context| {
-                            providers.decode_with_context(
-                                route,
-                                &stdout,
-                                exit,
-                                &provider_state,
-                                context,
-                            )
-                        },
+                let stderr = read_sealed(attempt, "stderr.log", CAPTURE_LIMIT)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                providers
+                    .decode_captures(
+                        route,
+                        &stdout,
+                        &stderr,
+                        exit,
+                        &provider_state,
+                        completion.holder_context(),
                     )
                     .map_err(RunError::ProviderEvidence)?
             }

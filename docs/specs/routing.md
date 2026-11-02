@@ -234,12 +234,15 @@ adapter, session, account, host, model and controls.
 memory; only a redacted summary persists, and there is no raw caller argv.
 Each adapter is subordinate to the outer profile: Codex's own sandbox is
 off; Claude gets its token on a descriptor closed before spawn, never in the
-environment; Agy's private home links only the login keychain; Cursor
+environment; Agy's private home links only one keychain, the selected account's own
+(`Library/Keychains/login.keychain-db` in its registered directory, refused when
+missing) or, for the user's own home, the login keychain; Cursor
 executes only its resolved version; OpenCode denies shell and web fetch.
 Exact argv is pinned by `tests/fixtures/providers/<adapter>/recordings.json`.
 - Why: the launch spec carries credentials and authority.
 - Test: `crates/providers/src/tests.rs::selected_accounts_control_provider_environment_and_exact_authentication_grants`;
-  `::agy_runs_in_a_private_home_that_links_only_the_login_keychain`
+  `::agy_runs_in_a_private_home_that_links_only_the_login_keychain`;
+  `::agy_isolated_account_links_its_own_keychain_and_grants_only_that_path`
 - Owner: `crates/providers/src/`
 
 ### Agy read-only commands and denials

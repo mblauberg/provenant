@@ -2887,15 +2887,46 @@ fn cursor_launches_fresh_and_resume_with_edits_only_for_writers() -> Result<(), 
     Ok(())
 }
 
+/// An agy registration of the user's own login: its directory is the fixture
+/// home, so lanes share the login keychain.
+pub(super) fn legacy_agy_account() -> identity::RegisteredAccount {
+    agy_account_at(Path::new("/fixture/home"))
+}
+
+pub(super) fn agy_account_at(directory: &Path) -> identity::RegisteredAccount {
+    identity::RegisteredAccount::new("agy", "opaque-account", directory.into())
+        .expect("fixture account")
+}
+
+#[test]
+fn agy_registers_at_a_shallow_home_but_other_adapters_keep_the_depth_floor() {
+    use identity::RegisteredAccount;
+    for directory in ["/Users/me", "/home/me"] {
+        assert!(RegisteredAccount::new("agy", "opaque-account", directory.into()).is_ok());
+        assert!(matches!(
+            RegisteredAccount::new("claude", "opaque-account", directory.into()),
+            Err(ProviderError::InvalidPath)
+        ));
+    }
+    for directory in ["/", "relative/dir", "/Users/../me"] {
+        assert!(matches!(
+            RegisteredAccount::new("agy", "opaque-account", directory.into()),
+            Err(ProviderError::InvalidPath)
+        ));
+    }
+}
+
 #[test]
 fn agy_includes_attempt_scratch_in_the_workspace() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
     let route = route("agy", "fixture-model");
+    let account = legacy_agy_account();
     for access in [Access::ReadOnly, Access::WorktreeWrite] {
         let plan = fixture_access_plan(access, Some("keychain"), false);
         for git_context in [false, true] {
             let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
             input.git_context = git_context;
+            input.account = Some(&account);
             let spec = agy::Agy.prepare(input)?;
             assert_eq!(
                 spec.argv.windows(2).any(|pair| {
@@ -2912,14 +2943,11 @@ fn agy_includes_attempt_scratch_in_the_workspace() -> Result<(), ProviderError> 
 fn agy_turns_are_bounded_only_by_the_supervisor_deadline() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
     let route = route("agy", "fixture-model");
+    let account = legacy_agy_account();
     let plan = fixture_access_plan(Access::ReadOnly, Some("keychain"), false);
-    let spec = agy::Agy.prepare(fixture_input(
-        &route,
-        &plan,
-        &prompt,
-        Path::new("/fixture/repo"),
-        None,
-    ))?;
+    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.account = Some(&account);
+    let spec = agy::Agy.prepare(input)?;
     // Zero switches off agy's own print timeout, which would end a turn early.
     assert!(
         spec.argv
@@ -2934,11 +2962,14 @@ fn agy_writers_exec_what_codex_writers_exec() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
     let repo = Path::new("/fixture/repo");
     let agy_route = route("agy", "fixture-model");
+    let account = legacy_agy_account();
     let mut codex_route = route("codex", "fixture-model");
     codex_route.account_key = None;
     for access in [Access::ReadOnly, Access::WorktreeWrite] {
         let plan = fixture_access_plan(access, Some("keychain"), false);
-        let spec = agy::Agy.prepare(fixture_input(&agy_route, &plan, &prompt, repo, None))?;
+        let mut input = fixture_input(&agy_route, &plan, &prompt, repo, None);
+        input.account = Some(&account);
+        let spec = agy::Agy.prepare(input)?;
         assert!(
             spec.env
                 .iter()
@@ -2993,6 +3024,7 @@ fn agy_read_only_adds_read_roots_outside_the_working_directory() -> Result<(), P
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
     let prompt = Prompt::new("fixture prompt".into());
     let route = route("agy", "fixture-model");
+    let account = legacy_agy_account();
     let reader = fixture_access_plan(Access::ReadOnly, Some("keychain"), false);
     let mut permissions = reader.permissions().clone();
     permissions.read_roots.push(PathGrant {
@@ -3007,13 +3039,15 @@ fn agy_read_only_adds_read_roots_outside_the_working_directory() -> Result<(), P
         agy_state: None,
     })
     .expect("fixture read-only plan");
-    let spec = agy::Agy.prepare(fixture_input(
+    let mut input = fixture_input(
         &route,
         &plan,
         &prompt,
         Path::new("/fixture/repo/crates"),
         None,
-    ))?;
+    );
+    input.account = Some(&account);
+    let spec = agy::Agy.prepare(input)?;
     let added: Vec<_> = spec
         .argv
         .windows(2)
@@ -3749,7 +3783,7 @@ fn agy_account_probe_logs_under_the_host_probe_root() {
         Path::new("/bin/agy"),
         Path::new("/home/test"),
         OsStr::new("test"),
-        Path::new("/home/test/.agy"),
+        Path::new("/home/test"),
         &host_root,
     )
     .unwrap();
@@ -3775,7 +3809,7 @@ fn agy_account_probe_removes_its_log_directory_when_the_command_fails() {
         Path::new("/bin/agy"),
         Path::new("/home/test"),
         OsStr::new("test"),
-        Path::new("/home/test/.agy"),
+        Path::new("/home/test"),
         &host_root,
     );
     assert!(matches!(result, Err(ProviderError::UnknownIdentity)));
@@ -3804,7 +3838,7 @@ fn agy_account_probe_reports_a_missing_probe_root_as_a_probe_failure() {
         Path::new("/bin/agy"),
         Path::new("/home/test"),
         OsStr::new("test"),
-        Path::new("/home/test/.agy"),
+        Path::new("/home/test"),
         &missing,
     )
     .unwrap_err();
@@ -3812,6 +3846,14 @@ fn agy_account_probe_reports_a_missing_probe_root_as_a_probe_failure() {
     assert!(error.to_string().contains(missing.to_str().unwrap()));
     assert_eq!(executor.0.load(Ordering::SeqCst), 0);
     assert_eq!(std::fs::read_dir(&host_root).unwrap().count(), 0);
+}
+
+/// An isolated agy account directory holds its own keychain as a regular file,
+/// which the probe requires before it runs.
+fn write_agy_keychain(directory: &Path) {
+    let keychain = directory.join(KEYCHAIN_FILE);
+    std::fs::create_dir_all(keychain.parent().unwrap()).unwrap();
+    std::fs::write(keychain, b"").unwrap();
 }
 
 #[test]
@@ -3834,7 +3876,9 @@ fn registration_reports_probe_directory_failures_from_the_executor() {
         // database exists, so give it one to reach the probe.
         let identity = tempfile::tempdir().unwrap();
         std::fs::write(identity.path().join("state.vscdb"), b"").unwrap();
-        let directory = if adapter == "cursor" {
+        // An isolated agy account must hold its own keychain to reach the probe.
+        write_agy_keychain(identity.path());
+        let directory = if matches!(adapter, "cursor" | "agy") {
             identity.path()
         } else {
             Path::new("/home/test/identity")
@@ -3875,7 +3919,9 @@ fn registration_names_probe_directory_failures() {
     for adapter in ["claude", "cursor", "agy"] {
         let identity = tempfile::tempdir().unwrap();
         std::fs::write(identity.path().join("state.vscdb"), b"").unwrap();
-        let directory = if adapter == "cursor" {
+        // An isolated agy account must hold its own keychain to reach the probe.
+        write_agy_keychain(identity.path());
+        let directory = if matches!(adapter, "cursor" | "agy") {
             identity.path()
         } else {
             Path::new("/home/test/identity")
@@ -3915,6 +3961,8 @@ fn registration_keeps_other_executor_failures_as_unknown_identity() {
         }
     }
     let state = tempfile::tempdir().unwrap();
+    let agy = tempfile::tempdir().unwrap();
+    write_agy_keychain(agy.path());
     for adapter in ["claude", "cursor", "agy"] {
         for busy in [false, true] {
             let result = crate::accounts::detect_with_org(
@@ -3923,13 +3971,29 @@ fn registration_keeps_other_executor_failures_as_unknown_identity() {
                 Path::new("/bin/provider"),
                 Path::new("/home/test"),
                 OsStr::new("test"),
-                Path::new("/home/test/identity"),
+                if adapter == "agy" {
+                    agy.path()
+                } else {
+                    Path::new("/home/test/identity")
+                },
                 state.path(),
             );
             assert!(matches!(result, Err(ProviderError::UnknownIdentity)));
             assert_eq!(std::fs::read_dir(state.path()).unwrap().count(), 0);
         }
     }
+    // The user's own login has no isolated keychain to guard, so the guard
+    // passes the executor's failure through unchanged.
+    let result = crate::accounts::detect_with_org(
+        &Fail { busy: false },
+        "agy",
+        Path::new("/bin/provider"),
+        Path::new("/home/test"),
+        OsStr::new("test"),
+        Path::new("/home/test"),
+        state.path(),
+    );
+    assert!(matches!(result, Err(ProviderError::UnknownIdentity)));
 }
 
 #[test]
@@ -4775,8 +4839,15 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
         };
         let outcome = replay(adapter, recording, EXIT)?.1;
         let route = route(id, outcome.model().unwrap_or("fixture-model"));
-        let account_dir = std::path::Path::new("/fixture/identities/opaque");
-        let account = matches!(id, "claude" | "codex")
+        // An isolated agy account holds its own keychain as a regular file.
+        let agy_dir = tempfile::tempdir().unwrap();
+        write_agy_keychain(agy_dir.path());
+        let account_dir = if id == "agy" {
+            agy_dir.path()
+        } else {
+            std::path::Path::new("/fixture/identities/opaque")
+        };
+        let account = matches!(id, "claude" | "codex" | "agy")
             .then(|| identity::RegisteredAccount::new(id, "opaque-account", account_dir.into()))
             .transpose()?;
         let account_token =
@@ -4841,7 +4912,11 @@ fn agy_runs_in_a_private_home_that_links_only_the_login_keychain() -> Result<(),
     let cwd = std::path::Path::new("/fixture/repo");
     for (access, edits) in [(Access::ReadOnly, false), (Access::WorktreeWrite, true)] {
         let plan = fixture_access_plan(access, Some("keychain"), false);
-        let spec = agy::Agy.prepare(fixture_input(&route, &plan, &prompt, cwd, None))?;
+        // The user's own login is registered at the home directory itself.
+        let account = legacy_agy_account();
+        let mut input = fixture_input(&route, &plan, &prompt, cwd, None);
+        input.account = Some(&account);
+        let spec = agy::Agy.prepare(input)?;
         let argv: Vec<_> = spec.argv.iter().map(|arg| arg.to_string_lossy()).collect();
         // Headless lanes auto-approve tools within the outer profile.
         assert!(
@@ -4878,6 +4953,492 @@ fn agy_runs_in_a_private_home_that_links_only_the_login_keychain() -> Result<(),
                 .all(|grant| !grant.path.starts_with("/fixture/home/.gemini"))
         );
     }
+    Ok(())
+}
+
+#[test]
+fn agy_isolated_account_links_its_own_keychain_and_grants_only_that_path()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let directory = root.path().join("home/.agy-second");
+    std::fs::create_dir_all(directory.join("Library/Keychains"))?;
+    let keychain = directory.join("Library/Keychains/login.keychain-db");
+    std::fs::write(&keychain, "")?;
+    let account = identity::RegisteredAccount::new("agy", "opaque-account", directory)?;
+    let prompt = Prompt::new("fixture prompt".into());
+    let route = route("agy", "gemini-3.8-flash");
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        let plan = fixture_access_plan(access, Some("keychain"), false);
+        let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+        input.account = Some(&account);
+        let spec = agy::Agy.prepare(input)?;
+        assert!(spec.env.contains(&("HOME".into(), "/fixture/state".into())));
+        assert!(spec.setup.contains(&SetupStep::Symlink {
+            link: "/fixture/state/Library/Keychains/login.keychain-db".into(),
+            target: keychain.clone(),
+        }));
+        // The user's login keychain is neither linked nor granted.
+        let login = Path::new("/fixture/home/Library/Keychains/login.keychain-db");
+        assert!(!spec.setup.iter().any(|step| matches!(
+            step,
+            SetupStep::Symlink { target, .. } if target == login
+        )));
+        let auth = &spec.profile.spec.authentication;
+        assert_eq!(auth.len(), 1);
+        assert_eq!(auth[0].roots, [crate::launch::exact(&keychain)]);
+        assert!(auth[0].in_place_writes.is_empty());
+        // Another account's route is refused rather than launched.
+        let mut other = route.clone();
+        other.account_key = Some("another-account".into());
+        let mut input = fixture_input(&other, &plan, &prompt, Path::new("/fixture/repo"), None);
+        input.account = Some(&account);
+        assert!(matches!(
+            agy::Agy.prepare(input),
+            Err(ProviderError::IdentityMismatch)
+        ));
+    }
+    // The keychain vanishes after registration and observation: the launch
+    // fails closed, naming the path, and never links or grants the shared one.
+    std::fs::remove_file(&keychain)?;
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        let plan = fixture_access_plan(access, Some("keychain"), false);
+        let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+        input.account = Some(&account);
+        match agy::Agy.prepare(input) {
+            Err(ProviderError::IsolatedKeychainUnavailable(path)) => {
+                assert_eq!(path, keychain.display().to_string());
+            }
+            Err(other) => panic!("unexpected error {other}"),
+            Ok(spec) => panic!(
+                "launched without the isolated keychain: {:?} {:?}",
+                spec.setup, spec.profile.spec.authentication
+            ),
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn agy_own_login_keeps_the_shared_keychain_and_an_isolated_directory_never_does()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let prompt = Prompt::new("fixture prompt".into());
+    let route = route("agy", "gemini-3.8-flash");
+    let plan = fixture_access_plan(Access::ReadOnly, Some("keychain"), false);
+    let account = legacy_agy_account();
+    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.account = Some(&account);
+    let spec = agy::Agy.prepare(input)?;
+    let login = Path::new("/fixture/home/Library/Keychains/login.keychain-db");
+    assert!(spec.setup.contains(&SetupStep::Symlink {
+        link: "/fixture/state/Library/Keychains/login.keychain-db".into(),
+        target: login.into(),
+    }));
+    assert_eq!(
+        spec.profile.spec.authentication[0].roots,
+        [crate::launch::exact(login)]
+    );
+    // A directory other than the home is isolated even with no keychain file,
+    // or with a directory where the file belongs.
+    let directory = root.path().join("home/.gemini");
+    for prepare_dir in [false, true] {
+        std::fs::create_dir_all(&directory)?;
+        if prepare_dir {
+            std::fs::create_dir_all(directory.join("Library/Keychains/login.keychain-db"))?;
+        }
+        let isolated = agy_account_at(&directory);
+        let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+        input.account = Some(&isolated);
+        assert!(matches!(
+            agy::Agy.prepare(input),
+            Err(ProviderError::IsolatedKeychainUnavailable(_))
+        ));
+    }
+    // An unregistered route cannot launch an adapter that pins its account.
+    let input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    assert!(matches!(
+        agy::Agy.prepare(input),
+        Err(ProviderError::UnknownIdentity)
+    ));
+    Ok(())
+}
+
+const KEYCHAIN_FILE: &str = "Library/Keychains/login.keychain-db";
+
+#[test]
+fn agy_keychain_symlink_is_not_an_isolated_account_keychain()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let home = root.path().join("home");
+    let directory = home.join(".agy-second");
+    std::fs::create_dir_all(directory.join("Library/Keychains"))?;
+    let elsewhere = root.path().join("elsewhere.keychain-db");
+    std::fs::write(&elsewhere, "")?;
+    let keychain = directory.join("Library/Keychains/login.keychain-db");
+    std::os::unix::fs::symlink(&elsewhere, &keychain)?;
+    assert!(matches!(
+        agy::account_keychain(&directory, &home),
+        Err(ProviderError::IsolatedKeychainUnavailable(path)) if path == keychain.display().to_string()
+    ));
+    std::fs::remove_file(&keychain)?;
+    std::fs::write(&keychain, "")?;
+    assert_eq!(agy::account_keychain(&directory, &home)?, Some(keychain));
+    // The user's own home is the shared login keychain, however it is spelled.
+    assert_eq!(agy::account_keychain(&home, &home)?, None);
+    std::os::unix::fs::symlink(&home, root.path().join("alias"))?;
+    assert_eq!(
+        agy::account_keychain(&root.path().join("alias"), &home)?,
+        None
+    );
+    Ok(())
+}
+
+#[test]
+fn agy_keychain_behind_a_symlinked_parent_is_not_an_isolated_account_keychain()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let home = root.path().join("home");
+    // The user's real keychain directory, holding a regular file.
+    std::fs::create_dir_all(home.join("Library/Keychains"))?;
+    std::fs::write(home.join(KEYCHAIN_FILE), "")?;
+    let refused = |directory: &std::path::Path| {
+        matches!(
+            agy::account_keychain(directory, &home),
+            Err(ProviderError::IsolatedKeychainUnavailable(path))
+                if path == directory.join(KEYCHAIN_FILE).display().to_string()
+        )
+    };
+    // `Library/Keychains` is a link to the real one.
+    let keychains = root.path().join("keychains-link");
+    std::fs::create_dir_all(keychains.join("Library"))?;
+    std::os::unix::fs::symlink(
+        home.join("Library/Keychains"),
+        keychains.join("Library/Keychains"),
+    )?;
+    assert!(std::fs::symlink_metadata(keychains.join(KEYCHAIN_FILE)).is_ok());
+    assert!(refused(&keychains));
+    // `Library` itself is a link to the real one.
+    let library = root.path().join("library-link");
+    std::fs::create_dir_all(&library)?;
+    std::os::unix::fs::symlink(home.join("Library"), library.join("Library"))?;
+    assert!(std::fs::symlink_metadata(library.join(KEYCHAIN_FILE)).is_ok());
+    assert!(refused(&library));
+    // A real directory tree is still accepted.
+    let own = root.path().join("own");
+    std::fs::create_dir_all(own.join("Library/Keychains"))?;
+    std::fs::write(own.join(KEYCHAIN_FILE), "")?;
+    assert_eq!(
+        agy::account_keychain(&own, &home)?,
+        Some(own.join(KEYCHAIN_FILE))
+    );
+    Ok(())
+}
+
+#[test]
+fn unregistered_agy_launches_on_the_login_keychain_under_the_local_key() {
+    let prompt = Prompt::new("fixture prompt".into());
+    let mut route = route("agy", "gemini-3.8-flash");
+    let plan = fixture_access_plan(Access::ReadOnly, Some("keychain"), false);
+    // Preparation's synthetic entry routes on key `local` with no pinned account.
+    route.account_key = Some("local".into());
+    let input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    let spec = agy::Agy.prepare(input).expect("unregistered agy launches");
+    let login = Path::new("/fixture/home/Library/Keychains/login.keychain-db");
+    assert!(spec.setup.contains(&SetupStep::Symlink {
+        link: "/fixture/state/Library/Keychains/login.keychain-db".into(),
+        target: login.into(),
+    }));
+    // The carve-out is only the synthetic key: a registered key needs its account.
+    route.account_key = Some("agy-google-fixture".into());
+    let input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    assert!(matches!(
+        agy::Agy.prepare(input),
+        Err(ProviderError::UnknownIdentity)
+    ));
+    // The other registered-account adapters have no such carve-out.
+    route.adapter = "codex".into();
+    route.account_key = Some("local".into());
+    let plan = fixture_access_plan(Access::ReadOnly, Some("login"), false);
+    let input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    assert!(matches!(
+        codex::Codex.prepare(input),
+        Err(ProviderError::UnknownIdentity)
+    ));
+}
+
+/// A fake `agy` that signs in as one Google account per `HOME`, recording
+/// each probe's `HOME`.
+struct AgySignIns {
+    accounts: Vec<(std::path::PathBuf, &'static str)>,
+    homes: std::sync::Mutex<Vec<std::path::PathBuf>>,
+}
+impl provenant_os::exec::Executor for AgySignIns {
+    fn execute(
+        &self,
+        options: provenant_os::exec::ExecOptions<'_>,
+    ) -> Result<provenant_os::exec::ExecOutcome, provenant_os::exec::ExecError> {
+        let home: std::path::PathBuf = options
+            .env
+            .unwrap_or_default()
+            .iter()
+            .find(|(key, _)| key == "HOME")
+            .map(|(_, value)| value.into())
+            .expect("probe sets HOME");
+        let log = options
+            .argv
+            .iter()
+            .position(|arg| arg == "--log-file")
+            .map(|index| std::path::PathBuf::from(&options.argv[index + 1]))
+            .expect("probe names a log file");
+        let email = self
+            .accounts
+            .iter()
+            .find(|(directory, _)| *directory == home)
+            .expect("probe HOME is a known sign-in")
+            .1;
+        std::fs::write(
+            log,
+            format!("OAuth: authenticated successfully as {email} (test)\n"),
+        )
+        .unwrap();
+        self.homes.lock().unwrap().push(home);
+        Ok(provenant_os::exec::ExecOutcome {
+            termination: provenant_os::exec::Termination::Exit(0),
+            stdout: provenant_os::exec::CapturedStream {
+                bytes: br#"{"status":"SUCCESS"}"#.to_vec(),
+                ..Default::default()
+            },
+            stderr: Default::default(),
+            timed_out: false,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: false,
+            elapsed_micros: 0,
+        })
+    }
+}
+
+#[test]
+fn agy_registration_identity_comes_from_the_directory_it_is_signed_in_under()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let real_home = root.path().join("home");
+    let isolated = real_home.join(".agy-second");
+    let without_keychain = real_home.join(".gemini");
+    std::fs::create_dir_all(isolated.join("Library/Keychains"))?;
+    std::fs::write(isolated.join("Library/Keychains/login.keychain-db"), "")?;
+    std::fs::create_dir_all(&without_keychain)?;
+    let probes = AgySignIns {
+        accounts: vec![
+            (real_home.clone(), "first@example.test"),
+            (isolated.clone(), "second@example.test"),
+        ],
+        homes: Default::default(),
+    };
+    let probe_root = root.path().join("probes");
+    std::fs::create_dir_all(&probe_root)?;
+    let detect = |directory: &Path| {
+        crate::accounts::detect(
+            &probes,
+            "agy",
+            Path::new("/opt/homebrew/bin/agy"),
+            &real_home,
+            OsStr::new("u"),
+            directory,
+            &probe_root,
+        )
+    };
+    let legacy_key = detect(&real_home)?;
+    let isolated_key = detect(&isolated)?;
+    assert!(legacy_key.starts_with("agy-google-"));
+    assert!(isolated_key.starts_with("agy-google-"));
+    assert_ne!(legacy_key, isolated_key);
+    assert_eq!(
+        *probes.homes.lock().unwrap(),
+        [real_home.clone(), isolated.clone()]
+    );
+    // An isolated directory whose keychain is missing or vanishes is refused
+    // without a probe, so it can never record the shared login's key.
+    assert!(matches!(
+        detect(&without_keychain),
+        Err(ProviderError::IsolatedKeychainUnavailable(_))
+    ));
+    std::fs::remove_file(isolated.join("Library/Keychains/login.keychain-db"))?;
+    assert!(matches!(
+        detect(&isolated),
+        Err(ProviderError::IsolatedKeychainUnavailable(_))
+    ));
+    assert_eq!(probes.homes.lock().unwrap().len(), 2);
+    Ok(())
+}
+
+#[test]
+fn agy_keychain_hard_linked_to_another_file_or_the_real_login_is_refused()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let home = root.path().join("home");
+    let directory = home.join(".agy-second");
+    let keychain = directory.join(KEYCHAIN_FILE);
+    std::fs::create_dir_all(keychain.parent().ok_or("parent")?)?;
+    std::fs::create_dir_all(home.join("Library/Keychains"))?;
+    let real = home.join(KEYCHAIN_FILE);
+    let refused = |home: &std::path::Path| {
+        matches!(
+            agy::account_keychain(&directory, home),
+            Err(ProviderError::IsolatedKeychainUnavailable(path))
+                if path == keychain.display().to_string()
+        )
+    };
+
+    // A hard link to the real login keychain's inode (also two links).
+    std::fs::write(&real, "")?;
+    std::fs::hard_link(&real, &keychain)?;
+    assert!(refused(&home));
+    // Any hard link is refused, even one whose other name is elsewhere.
+    std::fs::remove_file(&keychain)?;
+    std::fs::write(&keychain, "")?;
+    std::fs::hard_link(&keychain, root.path().join("other-name"))?;
+    assert!(refused(&home));
+    std::fs::remove_file(root.path().join("other-name"))?;
+    assert_eq!(
+        agy::account_keychain(&directory, &home)?,
+        Some(keychain.clone())
+    );
+
+    // A single-link file whose device and inode match the injected real
+    // home's keychain, here reached through that home's symlink to it.
+    let injected = root.path().join("injected-home");
+    std::fs::create_dir_all(injected.join("Library/Keychains"))?;
+    std::os::unix::fs::symlink(&keychain, injected.join(KEYCHAIN_FILE))?;
+    assert!(refused(&injected));
+    // A real home without a keychain does not match anything.
+    assert!(agy::account_keychain(&directory, &root.path().join("empty"))?.is_some());
+
+    // The probe guard applies the same check to the real home it was given.
+    let selected = agy::ProbeHome::select(&directory, &home)?;
+    assert!(selected.verify().is_ok());
+    std::fs::hard_link(&keychain, root.path().join("late-link"))?;
+    assert!(selected.verify().is_err());
+    Ok(())
+}
+
+/// Runs `inner`, then applies `change` to the keychain, as a competing process
+/// would while the probe is running.
+struct ChangesKeychain<'a> {
+    inner: &'a AgySignIns,
+    change: Box<dyn Fn() + Send + Sync>,
+}
+impl provenant_os::exec::Executor for ChangesKeychain<'_> {
+    fn execute(
+        &self,
+        options: provenant_os::exec::ExecOptions<'_>,
+    ) -> Result<provenant_os::exec::ExecOutcome, provenant_os::exec::ExecError> {
+        let outcome = self.inner.execute(options);
+        (self.change)();
+        outcome
+    }
+}
+
+#[test]
+fn agy_probe_refuses_a_keychain_that_changes_between_selection_and_execution()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_os::exec::{ExecOptions, Executor};
+    let root = tempfile::tempdir()?;
+    let real_home = root.path().join("home");
+    let isolated = real_home.join(".agy-second");
+    let keychain = isolated.join(KEYCHAIN_FILE);
+    std::fs::create_dir_all(keychain.parent().ok_or("parent")?)?;
+    let reset = || -> std::io::Result<()> {
+        let _ = std::fs::remove_file(&keychain);
+        std::fs::write(&keychain, "")
+    };
+    let probes = AgySignIns {
+        accounts: vec![(isolated.clone(), "second@example.test")],
+        homes: Default::default(),
+    };
+    let argv: Vec<std::ffi::OsString> = vec!["agy".into(), "--log-file".into(), "/dev/null".into()];
+    let env = [("HOME".into(), isolated.clone().into_os_string())];
+    let run = |executor: &dyn Executor| {
+        let mut options =
+            ExecOptions::new(&argv, Path::new("/"), std::time::Duration::from_secs(5));
+        options.env = Some(&env);
+        executor.execute(options).map(|_| ())
+    };
+    let refused = |result: Result<(), provenant_os::exec::ExecError>| {
+        matches!(
+            result,
+            Err(provenant_os::exec::ExecError::Io { operation, .. })
+                if operation == agy::KEYCHAIN_OPERATION
+        )
+    };
+
+    // Gone after selection and before the spawn: nothing is spawned.
+    reset()?;
+    let selected = agy::ProbeHome::select(&isolated, &real_home)?;
+    std::fs::remove_file(&keychain)?;
+    assert!(refused(run(&selected.guard(&probes))));
+    assert!(probes.homes.lock().unwrap().is_empty());
+
+    // Replaced by another file before the spawn: same path, new identity.
+    reset()?;
+    let selected = agy::ProbeHome::select(&isolated, &real_home)?;
+    // Renamed over the old file, so both inodes exist at once and cannot be
+    // the same one.
+    let sibling = keychain.with_extension("new");
+    std::fs::write(&sibling, "other")?;
+    std::fs::rename(&sibling, &keychain)?;
+    assert!(refused(run(&selected.guard(&probes))));
+    assert!(probes.homes.lock().unwrap().is_empty());
+
+    // Gone, or swapped for a symlink, while the probe runs: the result is refused.
+    for swap_in_link in [false, true] {
+        reset()?;
+        let selected = agy::ProbeHome::select(&isolated, &real_home)?;
+        let (path, elsewhere) = (keychain.clone(), root.path().join("elsewhere"));
+        let racing = ChangesKeychain {
+            inner: &probes,
+            change: Box::new(move || {
+                std::fs::remove_file(&path).unwrap();
+                if swap_in_link {
+                    std::fs::write(&elsewhere, "").unwrap();
+                    std::os::unix::fs::symlink(&elsewhere, &path).unwrap();
+                }
+            }),
+        };
+        assert!(refused(run(&selected.guard(&racing))));
+    }
+    // The probe did run in those two cases; only its result was refused.
+    assert_eq!(probes.homes.lock().unwrap().len(), 2);
+
+    // An unchanged keychain passes, and the user's own home is never guarded.
+    reset()?;
+    let selected = agy::ProbeHome::select(&isolated, &real_home)?;
+    assert!(run(&selected.guard(&probes)).is_ok());
+    let own = agy::ProbeHome::select(&real_home, &real_home)?;
+    assert_eq!(own.path(), real_home);
+    assert!(own.verify().is_ok());
+
+    // Through registration: a keychain removed during the probe is not recorded.
+    reset()?;
+    let probe_root = root.path().join("probes");
+    std::fs::create_dir_all(&probe_root)?;
+    let path = keychain.clone();
+    let racing = ChangesKeychain {
+        inner: &probes,
+        change: Box::new(move || std::fs::remove_file(&path).unwrap()),
+    };
+    assert!(matches!(
+        crate::accounts::detect(
+            &racing,
+            "agy",
+            Path::new("/opt/homebrew/bin/agy"),
+            &real_home,
+            OsStr::new("u"),
+            &isolated,
+            &probe_root,
+        ),
+        Err(ProviderError::IsolatedKeychainUnavailable(_))
+    ));
     Ok(())
 }
 

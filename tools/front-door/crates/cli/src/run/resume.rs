@@ -84,7 +84,7 @@ pub fn lane(command: crate::Lane, edge: &Edge<'_>) -> Reply {
                 run::prepare_writer(writer, edge.roots.state.as_path(), record.project_id)?;
             let branch = launch.branch.as_str().trim_start_matches("refs/heads/");
             let destination = match deliver {
-                Some(mode) => run::HostDeliveryContext::destination(mode, branch)?,
+                Some(mode) => override_destination(mode, branch, task.deliver.as_ref())?,
                 None if task.deliver.is_none() => {
                     run::HostDeliveryContext::destination(run::DeliveryMode::Push, branch)?
                 }
@@ -106,6 +106,24 @@ pub fn lane(command: crate::Lane, edge: &Edge<'_>) -> Reply {
             ))
         })(),
     )
+}
+
+/// Rebuild an explicit host pickup destination. An override aimed at the same
+/// destination as the recorded request keeps its fast-forward-only guard, so a
+/// refused loop round cannot be merged by naming its target again.
+fn override_destination(
+    mode: run::DeliveryMode,
+    branch: &str,
+    recorded: Option<&run::WriterDeliveryRequest>,
+) -> Result<Option<run::WriterDeliveryRequest>, run::RunError> {
+    let mut destination = run::HostDeliveryContext::destination(mode, branch)?;
+    if let (Some(request), Some(recorded)) = (destination.as_mut(), recorded)
+        && recorded.fast_forward_only
+        && recorded.mode == request.mode
+    {
+        request.fast_forward_only = true;
+    }
+    Ok(destination)
 }
 
 pub(super) fn fallback_history(cwd: &Path, base: &str, displaced: bool) -> String {
@@ -583,4 +601,45 @@ pub(super) fn resume_inner(
     });
     data["fallback_reason"] = json!(continuation);
     Ok((data, human, timed_out))
+}
+
+#[cfg(test)]
+mod resume_delivery_tests {
+    use super::*;
+
+    fn recorded(target: &str, fast_forward_only: bool) -> run::WriterDeliveryRequest {
+        let mut request = run::HostDeliveryContext::destination(
+            run::DeliveryMode::Integrate(target.into()),
+            "attempt/branch",
+        )
+        .unwrap()
+        .unwrap();
+        request.fast_forward_only = fast_forward_only;
+        request
+    }
+
+    fn pickup(
+        target: &str,
+        recorded: Option<&run::WriterDeliveryRequest>,
+    ) -> run::WriterDeliveryRequest {
+        override_destination(
+            run::DeliveryMode::Integrate(target.into()),
+            "attempt/branch",
+            recorded,
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    #[test]
+    fn resume_pickup_keeps_the_recorded_fast_forward_only_guard() {
+        let round = recorded("batch/graph", true);
+        assert!(pickup("batch/graph", Some(&round)).fast_forward_only);
+        // A different target is a deliberate redirect, not the refused round.
+        assert!(!pickup("batch/other", Some(&round)).fast_forward_only);
+        // An ordinary recorded integrate stays mergeable.
+        let plain = recorded("batch/graph", false);
+        assert!(!pickup("batch/graph", Some(&plain)).fast_forward_only);
+        assert!(!pickup("batch/graph", None).fast_forward_only);
+    }
 }
