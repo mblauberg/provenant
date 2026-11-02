@@ -201,6 +201,9 @@ pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Setting
                 "Claude registration requires its fixed ~/.claude-<label> directory".into(),
             );
         }
+        if adapter == "agy" {
+            check_agy_directory(&directory, home)?;
+        }
         let executable = crate::run::provider_executable(adapter)?;
         // The probe root must exist first. The config lock is taken later and
         // is not held over the probe, which can run for seconds.
@@ -282,6 +285,29 @@ pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Setting
         });
     }
     Ok(settings)
+}
+
+/// An agy registration is either the user's own login (`home` itself, on the
+/// shared login keychain) or an isolated account whose directory is its own
+/// `HOME` and holds its own keychain as a regular file. Without that file the
+/// probe would sign in as the first account and record its key under the new
+/// label, so any other directory is refused.
+fn check_agy_directory(directory: &Path, home: &Path) -> Result<(), String> {
+    let own_login = provenant_os::fs::canonicalize(home).unwrap_or_else(|_| home.to_owned());
+    if directory == home || directory == own_login {
+        return Ok(());
+    }
+    if provenant_providers::agy::account_keychain(directory).is_some() {
+        return Ok(());
+    }
+    Err(format!(
+        "agy account directory {} has no Library/Keychains/login.keychain-db \
+         (a regular file, not a symlink); create the isolated keychain and sign in \
+         there first (docs/runbooks/providers.md, Agy accounts), or register the \
+         default login with --directory {}",
+        directory.display(),
+        home.display()
+    ))
 }
 
 fn headline_name(value: provenant_quota::Headline) -> &'static str {
@@ -578,6 +604,32 @@ mod tests {
                 ("codex", home.join(".codex-alt")),
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn agy_registration_requires_an_isolated_keychain_file_or_the_home_login()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().canonicalize()?.join("u");
+        std::fs::create_dir(&home)?;
+        let second = home.join(".agy-second");
+        let keychains = second.join("Library/Keychains");
+        std::fs::create_dir_all(&keychains)?;
+        // The user's own login registers without an isolated keychain.
+        assert!(check_agy_directory(&home, &home).is_ok());
+        // An isolated directory with no keychain is refused with the requirement.
+        let refused = check_agy_directory(&second, &home).unwrap_err();
+        assert!(refused.contains("login.keychain-db"), "{refused}");
+        assert!(refused.contains("create the isolated keychain"), "{refused}");
+        // A symlinked keychain is another file's, not the account's own.
+        let elsewhere = home.join("elsewhere.keychain-db");
+        std::fs::write(&elsewhere, b"")?;
+        std::os::unix::fs::symlink(&elsewhere, keychains.join("login.keychain-db"))?;
+        assert!(check_agy_directory(&second, &home).is_err());
+        std::fs::remove_file(keychains.join("login.keychain-db"))?;
+        std::fs::write(keychains.join("login.keychain-db"), b"")?;
+        assert!(check_agy_directory(&second, &home).is_ok());
         Ok(())
     }
 

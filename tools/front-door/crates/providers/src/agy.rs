@@ -42,7 +42,7 @@ const KEYCHAIN: &str = "Library/Keychains/login.keychain-db";
 /// changes the identity and is refused. A symlink is not treated as an isolated
 /// keychain, so the account falls back to the shared login keychain rather than
 /// following a link to a file elsewhere.
-pub(crate) fn account_keychain(directory: &std::path::Path) -> Option<std::path::PathBuf> {
+pub fn account_keychain(directory: &std::path::Path) -> Option<std::path::PathBuf> {
     let keychain = directory.join(KEYCHAIN);
     std::fs::symlink_metadata(&keychain)
         .is_ok_and(|metadata| metadata.file_type().is_file())
