@@ -323,10 +323,8 @@ mod tests {
     #[test]
     fn xcode_grants_are_read_and_execute_on_the_toolchain_only() {
         let root = tempfile::tempdir().unwrap();
-        let toolchain = fake(
-            &std::fs::canonicalize(root.path()).unwrap(),
-            "Toolchains/XcodeDefault.xctoolchain/usr/bin/swift",
-        );
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        let toolchain = fake(&root, "Toolchains/XcodeDefault.xctoolchain/usr/bin/swift");
         let reads = toolchain.reads();
         assert!(
             reads
@@ -340,9 +338,12 @@ mod tests {
                 .any(|grant| grant.path.ends_with("Xcode.app/Contents")
                     && grant.scope == provenant_confinement::permissions::PathScope::Subtree)
         );
-        assert!(reads.iter().all(|grant| {
-            grant.path.starts_with(&root) || grant.path.starts_with("/Library/Preferences")
-        }));
+        assert!(
+            reads.iter().all(|grant| {
+                grant.path.starts_with(&root) || grant.path == Path::new(XCODE_LICENCE)
+            }),
+            "{reads:?}"
+        );
         assert_eq!(toolchain.executables().len(), 1);
     }
 
@@ -420,7 +421,7 @@ mod tests {
         assert!(reads.iter().chain(&execs).all(|grant| {
             grant.path.starts_with(&root)
                 || grant.path.starts_with("/lane/scratch/bin")
-                || grant.path.starts_with("/Library/Preferences")
+                || grant.path == Path::new(XCODE_LICENCE)
         }));
 
         let (mut reads, mut execs, mut setup) = (Vec::new(), Vec::new(), Vec::new());
@@ -456,16 +457,16 @@ mod tests {
             &std::fs::canonicalize(root.path()).unwrap(),
             "usr/bin/swift",
         );
-        assert!(toolchain
-            .shim(
-                Path::new("/lane/ca\nche"),
-                Path::new("/lane/scratch"),
-                true
-            )
-            .is_err());
-        assert!(toolchain
-            .shim(Path::new("relative"), Path::new("/lane/scratch"), true)
-            .is_err());
+        assert!(
+            toolchain
+                .shim(Path::new("/lane/ca\nche"), Path::new("/lane/scratch"), true)
+                .is_err()
+        );
+        assert!(
+            toolchain
+                .shim(Path::new("relative"), Path::new("/lane/scratch"), true)
+                .is_err()
+        );
     }
 
     #[test]
