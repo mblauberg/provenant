@@ -4025,7 +4025,8 @@ fn fixture_owner_repro(ready_path: &std::path::Path) -> Result {
         "1s",
         "--json",
     ])?;
-    assert_eq!(code(&output), 0, "{output:?}");
+    // The provider is still running when the one-second wait ends (exit 124).
+    assert!(matches!(code(&output), 0 | 124), "{output:?}");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         if let Some(identity) = find_guardian_identity(&rig.state)? {
