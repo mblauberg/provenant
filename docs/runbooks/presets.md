@@ -620,18 +620,34 @@ commit bindings. Planner output cannot refer to named presets.
 `provenant run --preset big-batch --plan on` replaces the static `lanes` stage
 with a principal planner that chooses from the preset's `[plan]` catalogue:
 `writer-lane` (write scope, acceptance subset, route, budget) and
-`wave-barrier`. Supply the registered writer worktrees with
-`--set 'parameters.worktrees=["/path/a","/path/b"]'`; the planner may assign
-only those. A lane budget above `[domains.fabric.plan] lane_deadline_seconds`,
-overlapping write scopes inside one wave and a worktree outside the list refuse
-the plan before anything is admitted.
+`wave-barrier`. Each planned lane runs the writer, the default lens legs and
+the evaluator, as the static lane does. The planner sits after `scout` so the
+plan uses the research; position is per preset. The planner may assign only the
+registered writer worktrees: the project's linked worktrees by default, or
+`--set 'parameters.worktrees=["/path/a","/path/b"]'`. Overlapping write scopes
+inside one wave, a worktree outside the list and a budget above the graph
+timeout refuse the plan before anything is admitted. A lane budget is advisory:
+graph nodes have no per-node timer, so only `limits.graph_timeout_seconds`
+is enforced.
 
-`--plan` defaults to `[domains.fabric.plan] mode` (`auto`). `auto` plans when the
-brief lists more than `auto.acceptance_items` acceptance items, names at least
-`auto.batch_issues` issues or writes to more than `auto.write_crates` crates, or
-when no lanes are supplied; `--explain` prints the decision and its reason. If
-the planner route is not defined, the preset runs its deterministic defaults and
-the reason is recorded in the graph provenance and printed as a warning.
+`--plan` defaults to `[domains.fabric.plan] mode` (`auto`). `auto` stays off when
+`lanes` has any origin other than the bundled default, including a project or
+user preset. Otherwise, for `big-batch` unset lanes force it on; the thresholds
+(`auto.acceptance_items`, `auto.batch_issues`, `auto.write_crates`) then only
+change the reason that `--explain` prints. `--plan on` with explicit lanes
+discards them and warns. `--plan on` on a preset with no catalogue is an error
+on the command line; a configured `on` runs the static graph and says why.
+
+The planner route is resolved the way dispatch resolves it, honouring
+`--exclude`, `routing.exclude`, account evidence and quota. If it cannot serve
+(excluded, exhausted, unauthenticated, undefined), or an extending preset
+inherits `[plan]` without the stage it replaces, the preset runs its
+deterministic defaults and the reason is recorded in the graph provenance and
+printed as a warning.
+
+If the planner node itself fails at run time, no fallback runs: its dependents
+block and the graph fails with the node's error. Rerun with `--plan off`, or
+resume after fixing the route with `provenant fabric graph resume`.
 
 A preset opts in with a `[plan]` table: `replaces` (the stage to swap),
 `explicit` (parameters that, when set, keep the static graph), `guidance` and

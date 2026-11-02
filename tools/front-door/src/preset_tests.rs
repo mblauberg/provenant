@@ -2549,6 +2549,7 @@ mod planner_front_end {
             unavailable: unavailable.map(str::to_owned),
             from_cli: true,
             paths: Vec::new(),
+            worktrees: Vec::new(),
         });
         layers
     }
@@ -2670,6 +2671,64 @@ mod planner_front_end {
             "plan: on -> off (preset declares no planner patterns)"
         );
         assert!(!ids(&quiet).contains(&"plan".to_owned()));
+    }
+
+    #[test]
+    fn plan_on_warns_when_it_discards_explicit_lanes() {
+        let lanes = vec![(
+            "lanes".into(),
+            json!([{"name":"one","worktree":"/w","scope":["src"],"spec":""}]),
+        )];
+        let expansion = run(
+            &layers(PlanMode::On, None),
+            "big-batch",
+            "brief",
+            lanes.clone(),
+        );
+        assert!(ids(&expansion).contains(&"plan".to_owned()));
+        assert!(
+            expansion
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("--plan on discards the explicit lanes")),
+            "{:?}",
+            expansion.warnings
+        );
+        // Without explicit lanes there is nothing to discard.
+        let quiet = run(
+            &layers(PlanMode::On, None),
+            "big-batch",
+            "brief",
+            Vec::new(),
+        );
+        assert!(
+            quiet
+                .warnings
+                .iter()
+                .all(|warning| !warning.contains("discards"))
+        );
+        // Auto never overrides explicit lanes, so it never warns.
+        let auto = run(&layers(PlanMode::Auto, None), "big-batch", "brief", lanes);
+        assert!(
+            auto.warnings
+                .iter()
+                .all(|warning| !warning.contains("discards"))
+        );
+    }
+
+    #[test]
+    fn worktrees_default_to_the_projects_linked_worktrees_unless_listed() {
+        let mut project = layers(PlanMode::On, None);
+        project.plan.as_mut().unwrap().worktrees = vec!["/repo/w1".into(), "/repo/w2".into()];
+        let defaulted = run(&project, "big-batch", "brief", Vec::new());
+        let enumerated = |expansion: &super::super::preset::Expansion| {
+            expansion.document["nodes"][1]["plan"]["patterns"][0]["parameters"]["worktree"]["enum"]
+                .clone()
+        };
+        assert_eq!(enumerated(&defaulted), json!(["/repo/w1", "/repo/w2"]));
+        // A chair-supplied list wins over the discovered one.
+        let listed = run(&project, "big-batch", "brief", worktrees());
+        assert_eq!(enumerated(&listed), json!(["/repo/lane1", "/repo/lane2"]));
     }
 
     #[test]
@@ -2878,6 +2937,100 @@ mod planner_front_end {
         );
         // Never a weaker planner: no node stands in for the planner.
         assert!(!ids(&degraded).contains(&"plan".to_owned()));
+    }
+
+    /// A planned writer lane is the static `generator-evaluator` lane, written
+    /// independently: expand that preset on its own and compare node by node.
+    #[test]
+    fn a_planned_lane_keeps_the_static_lanes_review_steps() {
+        let planned = run(
+            &layers(PlanMode::On, None),
+            "big-batch",
+            "brief",
+            worktrees(),
+        );
+        let catalogue = &planned.document["nodes"][1]["plan"]["patterns"][0];
+        assert_eq!(catalogue["name"], "writer-lane");
+        // The default lens roster and the evaluator, with no review shape
+        // selecting a roster; shape-selected rosters are a follow-up.
+        let unplanned = Layers::empty();
+        let lane = expand_with(
+            &unplanned,
+            "generator-evaluator",
+            "brief",
+            &[
+                ("worktree".into(), json!("${worktree}")),
+                ("scope".into(), json!(["${scope}"])),
+                ("delivery".into(), json!("integrate:batch/graph")),
+            ],
+            &[],
+        )
+        .unwrap();
+        let mut expected = Vec::new();
+        for node in lane.document["nodes"].as_array().unwrap() {
+            match node.get("composite") {
+                Some(inner) => {
+                    for leg in inner["nodes"].as_array().unwrap() {
+                        let mut leg = leg.clone();
+                        leg["source"] = node["source"].clone();
+                        expected.push(leg);
+                    }
+                }
+                None => expected.push(node.clone()),
+            }
+        }
+        let project = |node: &Value| {
+            json!({
+                "id": node["id"],
+                "role": node["role"],
+                "role_digest": node["role_digest"],
+                "access": node["access"],
+                "kind": node.get("kind"),
+                "route": node["route"]["alias"],
+                "distinct_from": node.get("distinct_from"),
+                "dispositions": node.get("dispositions"),
+                "source": node.get("source").map(|source| source["type"].clone()),
+                "read_roots": node.get("read_roots"),
+                "prompt": node["prompt"],
+            })
+        };
+        let by_id = |nodes: &[Value]| {
+            let mut rows: Vec<Value> = nodes.iter().map(project).collect();
+            rows.sort_by_key(|row| row["id"].as_str().unwrap().to_owned());
+            rows
+        };
+        let mut actual: Vec<Value> = catalogue["nodes"].as_array().unwrap().clone();
+        // The writer's route is the pattern's `route` parameter and its brief is
+        // the lane's own; the review steps match the static ones exactly.
+        for node in &mut actual {
+            if node["id"] == "implement" {
+                node["route"] = json!({"alias": "senior"});
+            }
+        }
+        let (actual, expected) = (by_id(&actual), by_id(&expected));
+        assert_eq!(actual.len(), 4);
+        for (planned, static_lane) in actual.iter().zip(&expected) {
+            if planned["id"] == "implement" {
+                for key in ["role", "role_digest", "access", "source"] {
+                    assert_eq!(planned[key], static_lane[key], "implement {key}");
+                }
+            } else {
+                assert_eq!(planned, static_lane);
+            }
+        }
+        let ids: Vec<_> = actual
+            .iter()
+            .map(|row| row["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "evaluate",
+                "implement",
+                "lens-correctness-spec",
+                "lens-simplicity"
+            ]
+        );
     }
 
     /// The planned document is a checked-in fixture the runtime plan tests run.

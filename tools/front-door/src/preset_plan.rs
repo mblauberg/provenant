@@ -25,6 +25,8 @@ pub struct PlanContext {
     pub from_cli: bool,
     /// Paths the caller declared for the work, counted with the brief's.
     pub paths: Vec<String>,
+    /// The project's linked worktrees: the default a planner may assign.
+    pub worktrees: Vec<String>,
 }
 
 /// What the front-end decided, and why. Recorded in the graph's provenance.
@@ -36,6 +38,8 @@ pub struct Decision {
     pub route: String,
     /// Set when planning was wanted but the preset runs on its defaults.
     pub degraded: Option<String>,
+    /// Warnings the decision raises for the chair.
+    pub warnings: Vec<String>,
 }
 
 impl Decision {
@@ -261,6 +265,7 @@ pub fn decide(
                 reason: "preset declares no planner patterns".into(),
                 route: ctx.route.clone(),
                 degraded: None,
+                warnings: Vec::new(),
             })),
             _ => Ok(None),
         };
@@ -282,6 +287,7 @@ pub fn decide(
         reason,
         route: ctx.route.clone(),
         degraded: None,
+        warnings: Vec::new(),
     };
     // An extending preset can inherit `[plan]` without the stage it shapes.
     let replaces = catalogue.get("replaces").and_then(Value::as_str);
@@ -316,6 +322,24 @@ pub fn decide(
             ctx.route, decision.reason
         );
     }
+    // `--plan on` is the chair's word, but explicit lanes are the chair's too:
+    // say which of them the planner replaces.
+    if decision.applied && ctx.mode == PlanMode::On {
+        let given: Vec<&str> = catalogue
+            .get("explicit")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|parameter| explicit(origins, parameter))
+            .collect();
+        if !given.is_empty() {
+            decision.warnings.push(format!(
+                "--plan on discards the explicit {}; the planner shapes the work instead",
+                given.join(", ")
+            ));
+        }
+    }
     Ok(Some(decision))
 }
 
@@ -336,6 +360,18 @@ pub fn apply(
         .and_then(Value::as_str)
         .ok_or_else(|| format!("preset {name}: plan.replaces must name a stage"))?
         .to_owned();
+    // Unless the chair listed worktrees, the project's own linked ones are the
+    // set a planner may assign.
+    if !explicit(origins, "worktrees")
+        && !ctx.worktrees.is_empty()
+        && let Some(slot) = config.pointer_mut("/parameters/worktrees")
+    {
+        let listed = json!(ctx.worktrees);
+        match slot.get_mut("default") {
+            Some(default) => *default = listed,
+            None => *slot = listed,
+        }
+    }
     let worktrees: Vec<Value> = config
         .pointer("/parameters/worktrees")
         .map(|value| value.get("default").unwrap_or(value))
@@ -474,11 +510,26 @@ fn lower_pattern(
                 kept.push((key, value));
             }
         }
-        let task = match pattern.get("brief").and_then(Value::as_str) {
+        // A node's own brief, then the pattern's, follows the subject text.
+        let suffix = entry
+            .remove("brief")
+            .and_then(|text| text.as_str().map(str::to_owned))
+            .or_else(|| {
+                pattern
+                    .get("brief")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            });
+        let task = match suffix {
             Some(suffix) => format!("{brief}\n\n{suffix}"),
             None => brief.clone(),
         };
-        let mut node = lower_leaf(layers, &entry, roles, &bound, &task, 1, &id, &[])?;
+        // A lens leg names its lens the way a `for_each` item would.
+        let mut values = bound.clone();
+        if let Some(item) = entry.remove("item") {
+            values["item"] = item;
+        }
+        let mut node = lower_leaf(layers, &entry, roles, &values, &task, 1, &id, &[])?;
         for (key, value) in kept {
             node[key] = interpolate(&value, &bound, &task, 1)?;
         }

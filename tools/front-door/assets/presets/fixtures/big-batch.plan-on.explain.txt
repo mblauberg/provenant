@@ -135,6 +135,7 @@ Roles:
   plan.wave  origin=bundled digest=<digest>
   refactor-principal  origin=preset digest=<digest>
   repairer  origin=preset digest=<digest>
+  review.evaluator  origin=bundled digest=<digest>
   review.synthesis  origin=bundled digest=<digest>
   review.verify  origin=bundled digest=<digest>
   scout.codebase  origin=bundled digest=<digest>

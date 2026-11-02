@@ -70,8 +70,6 @@ pub struct PlanConfig {
     pub mode: PlanMode,
     /// Route alias the planner node runs on.
     pub route: String,
-    /// Longest wall-clock budget a planned lane may be given, in seconds.
-    pub lane_deadline_seconds: u64,
     /// Most nodes and pattern instances one plan may emit.
     pub max_nodes: usize,
     pub auto: PlanAuto,
@@ -104,7 +102,6 @@ impl Default for PlanConfig {
         Self {
             mode: PlanMode::Auto,
             route: "principal".into(),
-            lane_deadline_seconds: 3600,
             max_nodes: 24,
             auto: PlanAuto::default(),
         }
@@ -667,9 +664,6 @@ impl DomainConfig for FabricConfig {
         if !crate::graph::valid_identifier(&plan.route) {
             reject("plan.route".into());
         }
-        if !(60..=14_400).contains(&plan.lane_deadline_seconds) {
-            reject("plan.lane_deadline_seconds".into());
-        }
         if !(1..=512).contains(&plan.max_nodes) {
             reject("plan.max_nodes".into());
         }
@@ -782,7 +776,6 @@ fn boundary_existing(error: &SectionError) -> bool {
         "graph.limits",
         "graph.budget",
         "graph.allowed_read_roots",
-        "plan.lane_deadline_seconds",
         "plan.max_nodes",
         "ssh_executable",
         "home_hosts",

@@ -47,7 +47,6 @@ store_busy_timeout_ms = 30000 # wait for a contended store before reporting cont
 [plan]
 mode = "auto" # auto, on or off; --plan overrides it
 route = "principal" # route alias the planner node runs on
-lane_deadline_seconds = 3600 # longest budget a planned lane may be given, 60-14400
 max_nodes = 24 # nodes and pattern instances one plan may emit, 1-512
 
 [plan.auto]

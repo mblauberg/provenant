@@ -968,28 +968,20 @@ fn pattern_routes_may_vary_only_over_a_closed_list() {
     assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
 }
 
-/// Substitute `${name}` in a pattern template the way the runtime does, so the
-/// expected static composite is written from the catalogue, not from the code under test.
-fn fill(value: &Value, parameters: &serde_json::Map<String, Value>) -> Value {
-    match value {
-        Value::String(text) => {
-            if let Some(name) = text.strip_prefix("${").and_then(|rest| rest.strip_suffix('}'))
-                && let Some(value) = parameters.get(name)
-            {
-                return value.clone();
-            }
-            let mut text = text.clone();
-            for (name, value) in parameters {
-                if let Some(plain) = value.as_str().map(str::to_owned).or_else(|| value.as_i64().map(|n| n.to_string())) {
-                    text = text.replace(&format!("${{{name}}}"), &plain);
-                }
-            }
-            Value::String(text)
-        }
-        Value::Array(items) => Value::Array(items.iter().map(|item| fill(item, parameters)).collect()),
-        Value::Object(map) => Value::Object(map.iter().map(|(key, item)| (key.clone(), fill(item, parameters))).collect()),
-        other => other.clone(),
+#[test]
+fn pattern_read_roots_may_follow_only_a_closed_list() {
+    let mut doc = pattern_planner(4);
+    doc.nodes[0].plan.as_mut().unwrap().patterns[0].nodes[0]["read_roots"] = json!(["${label}"]);
+    assert!(plans::validate_spec(&doc.nodes[0]).is_err(), "free text names any root");
+    {
+        let parameter = doc.nodes[0].plan.as_mut().unwrap().patterns[0]
+            .parameters
+            .get_mut("label")
+            .unwrap();
+        parameter.default = Some(json!("/repo/a"));
+        parameter.allowed = vec![json!("/repo/a"), json!("/repo/b")];
     }
+    assert!(plans::validate_spec(&doc.nodes[0]).is_ok());
 }
 
 #[test]
@@ -1005,7 +997,6 @@ fn planned_big_batch_expands_to_its_static_composite_and_records_the_patterns() 
     doc.nodes.retain(|node| node.id == "plan");
     doc.nodes[0].depends_on.clear();
     doc.nodes[0].inputs.clear();
-    let catalogue = doc.nodes[0].plan.as_ref().unwrap().patterns.clone();
     doc.nodes.push(serde_json::from_value(json!({
         "id":"after", "access":"read_only", "prompt":"Check all slices",
         "depends_on":["plan"], "route":{"alias":"senior"}
@@ -1027,7 +1018,10 @@ fn planned_big_batch_expands_to_its_static_composite_and_records_the_patterns() 
         lane("c", "/repo/lane1", "src/a", json!({"depends_on":["barrier"]})),
     ];
     let fragment = format!("```fragment\n{}\n```", json!({"schema_version":1,"nodes":[],"patterns":instances}));
-    let mut owner = fixture_owner(&[&fragment, "a done", "b done", "barrier done", "c done", "checked"]);
+    // Every lane runs a writer, two lens legs and an evaluator, then the barrier and consumer.
+    let mut results = vec![fragment.as_str()];
+    results.extend(std::iter::repeat_n("done\nVERDICT: PASS", 40));
+    let mut owner = fixture_owner(&results);
     let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
     let expansion = &run.checkpoint.expansions[0];
@@ -1037,43 +1031,56 @@ fn planned_big_batch_expands_to_its_static_composite_and_records_the_patterns() 
     assert_eq!(expansion.patterns[0].parameters["route"], "junior");
     assert_eq!(expansion.patterns[2].parameters, json!({"wave":"one"}));
 
-    // The same shape written as a static composite, from the catalogue's own templates.
-    let mut static_doc = doc.clone();
-    for (id, name, parameters, depends, inputs) in [
-        ("a", "writer-lane", &expansion.patterns[0].parameters, vec!["plan"], json!([])),
-        ("b", "writer-lane", &expansion.patterns[1].parameters, vec!["plan"], json!([])),
-        ("barrier", "wave-barrier", &expansion.patterns[2].parameters, vec!["plan--a", "plan--b"],
-         json!([{"node":"plan--a","outputs":["commit"]},{"node":"plan--b","outputs":["commit"]}])),
-        ("c", "writer-lane", &expansion.patterns[3].parameters, vec!["plan--barrier"], json!([])),
-    ] {
-        let pattern = catalogue.iter().find(|p| p.name == name).unwrap();
-        let parameters = parameters.as_object().unwrap();
-        let mut nodes = Vec::new();
-        for template in &pattern.nodes {
-            let mut node = fill(template, parameters);
-            let map = node.as_object_mut().unwrap();
-            let mut contract = String::new();
-            if let Some(scope) = map.get("write_scope").and_then(Value::as_array) {
-                let scope: Vec<_> = scope.iter().filter_map(Value::as_str).collect();
-                contract.push_str(&format!("\n\nWrite scope: {}\n", scope.join(", ")));
-            } else {
-                contract.push_str("\n\n");
-            }
-            let checks: Vec<_> = map["acceptance_checks"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
-            contract.push_str(&format!("Acceptance checks:\n{}", checks.join("\n")));
-            let prompt = format!("{}{contract}", map["prompt"].as_str().unwrap());
-            map.insert("prompt".into(), json!(prompt));
-            nodes.push(node);
+    // Each planned lane is the static lane written independently: the golden
+    // expansion of the static preset, flattened. Same roles and digests, access,
+    // family separation, dispositions, source and dependency edges.
+    let golden: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../assets/presets/fixtures/big-batch.expansion.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let lane = &golden["nodes"].as_array().unwrap().iter().find(|n| n["id"] == "lanes").unwrap()["composite"]["nodes"][0];
+    let mut static_nodes: Vec<Value> = Vec::new();
+    for child in lane["composite"]["nodes"].as_array().unwrap() {
+        match child.get("composite") {
+            // Legs inherit the lens composite's source, which flat nodes carry themselves.
+            Some(inner) => static_nodes.extend(inner["nodes"].as_array().unwrap().iter().cloned().map(|mut leg| {
+                leg["source"] = child["source"].clone();
+                leg
+            })),
+            None => static_nodes.push(child.clone()),
         }
-        static_doc.nodes.push(serde_json::from_value(json!({
-            "id": format!("plan--{id}"), "kind":"composite", "access":"read_only",
-            "depends_on": depends, "inputs": inputs,
-            "composite": {"nodes": nodes, "exports": pattern.exports}
-        })).unwrap());
     }
-    let expanded = composites::expand(&static_doc, &plans::generous()).unwrap();
-    let expected: Vec<_> = expanded.nodes.into_iter().filter(|n| n.id.starts_with("plan--")).collect();
-    assert_eq!(by_id(expansion.nodes.clone()), by_id(expected));
+    let project = |nodes: &[Value], prefix: &str| -> Vec<Value> {
+        let mut rows: Vec<Value> = nodes
+            .iter()
+            .map(|node| {
+                json!({
+                    "id": node["id"].as_str().unwrap().trim_start_matches(prefix),
+                    "role": node["role"],
+                    "role_digest": node["role_digest"],
+                    "access": node["access"],
+                    "kind": node.get("kind").filter(|kind| *kind != "composite"),
+                    "distinct_from": node.get("distinct_from"),
+                    "dispositions": node.get("dispositions"),
+                    "source": node["source"]["type"],
+                })
+            })
+            .collect();
+        rows.sort_by_key(|row| row["id"].as_str().unwrap().to_owned());
+        rows
+    };
+    let planned: Vec<Value> = expansion.nodes.iter().filter(|n| n.id.starts_with("plan--a--")).map(|n| serde_json::to_value(n).unwrap()).collect();
+    assert_eq!(planned.len(), 4);
+    assert_eq!(project(&planned, "plan--a--"), project(&static_nodes, ""));
+    // The evaluator waits for the lens legs and the writer, as the static one does.
+    let evaluate = planned.iter().find(|n| n["id"] == "plan--a--evaluate").unwrap();
+    assert_eq!(evaluate["depends_on"], json!(["plan--a--lens-correctness-spec", "plan--a--lens-simplicity", "plan--a--implement"]));
+    // A lane's exports carry the evaluator's verdict for the barrier and later waves.
+    assert!(expansion.patterns[0].nodes.iter().any(|id| id == "plan--a--evaluate"));
 }
 
 #[test]

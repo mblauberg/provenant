@@ -941,6 +941,9 @@ pub fn expand_with(
             "planner unavailable, running the preset's deterministic defaults: {why}"
         ));
     }
+    if let Some(decision) = &plan {
+        warnings.extend(decision.warnings.iter().cloned());
+    }
     for (role, used) in &roles {
         origins.insert(
             format!("roles.{role}"),
@@ -2304,17 +2307,21 @@ fn visit_nodes(
 
 /// The project's primary checkout and registered worktrees, which a graph node
 /// may always read. Outside a repository the project is only its own directory.
+/// The worktrees of the project `directory` belongs to, main checkout first.
+fn project_worktrees(directory: &Path) -> Vec<PathBuf> {
+    crate::handoff::git_text(directory, &["worktree", "list", "--porcelain"])
+        .map(|listing| {
+            listing
+                .lines()
+                .filter_map(|line| line.strip_prefix("worktree "))
+                .map(std::path::PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_else(|_| vec![directory.to_path_buf()])
+}
+
 fn discover_read_roots(directory: &Path, allowed: &[String], extra: &[PathBuf]) -> ReadRoots {
-    let mut project: Vec<PathBuf> =
-        crate::handoff::git_text(directory, &["worktree", "list", "--porcelain"])
-            .map(|listing| {
-                listing
-                    .lines()
-                    .filter_map(|line| line.strip_prefix("worktree "))
-                    .map(std::path::PathBuf::from)
-                    .collect()
-            })
-            .unwrap_or_else(|_| vec![directory.to_path_buf()]);
+    let mut project = project_worktrees(directory);
     project.extend(extra.iter().cloned());
     ReadRoots::new(project, allowed)
 }
@@ -2389,6 +2396,12 @@ pub(crate) fn bind_run_context(
                 let mut confined = Vec::new();
                 for root in &roots {
                     let text = root.as_str().ok_or("read_roots entries must be strings")?;
+                    // A planner catalogue names the root by a closed-list
+                    // parameter (a registered worktree); the runtime fills it.
+                    if text.starts_with("${") {
+                        confined.push(root.clone());
+                        continue;
+                    }
                     let path = Path::new(text);
                     let path = if path.is_absolute() {
                         path.to_path_buf()
@@ -2853,8 +2866,14 @@ pub fn run(
             layers.plan = Some(planner::PlanContext {
                 mode,
                 from_cli: request.preset_plan.is_some(),
+                // Linked worktrees, not the main checkout, can host a writer lane.
+                worktrees: project_worktrees(&directory)
+                    .iter()
+                    .skip(1)
+                    .map(|path| path.display().to_string())
+                    .collect(),
                 route: settings.route.clone(),
-                lane_deadline_seconds: settings.lane_deadline_seconds,
+                lane_deadline_seconds: config.domains.fabric.limits.graph_timeout_seconds,
                 max_nodes: settings.max_nodes,
                 auto: settings.auto.clone(),
                 unavailable,

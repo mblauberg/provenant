@@ -107,9 +107,10 @@ pub(super) fn validate(pattern: &PatternSpec) -> Result<(), &'static str> {
             if let Some(value) = node.get(key) {
                 placeholders(value, &mut named)?;
             }
-            // A route may pick from a closed list the pattern fixes, so every
-            // value the fragment can choose is one the catalogue already names.
-            let closed = matches!(key, "route" | "routes")
+            // A route, or the read root that follows a registered worktree, may
+            // pick from a closed list the pattern fixes, so every value the
+            // fragment can choose is one the catalogue already names.
+            let closed = matches!(key, "route" | "routes" | "read_roots")
                 && named.iter().all(|name| {
                     pattern.parameters.get(name).is_some_and(|parameter| {
                         parameter.kind == PatternParameterKind::String

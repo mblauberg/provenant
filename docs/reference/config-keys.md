@@ -493,27 +493,20 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
     "settings": {
       "auto.acceptance_items": {
         "default": "6",
-        "effect": "`auto` turns planning on when the subject lists more acceptance items than this.",
+        "effect": "`auto` turns planning on when the subject lists more acceptance items than this (nested sub-bullets are not counted). For big-batch unset lanes already force on, so this only changes the reason.",
         "min": 1,
         "type": "int"
       },
       "auto.batch_issues": {
         "default": "2",
-        "effect": "`auto` turns planning on when one batch names at least this many issues.",
+        "effect": "`auto` turns planning on when one batch names at least this many distinct issues (`#N`, decimal, at most six digits). For big-batch unset lanes already force on, so this only changes the reason.",
         "min": 1,
         "type": "int"
       },
       "auto.write_crates": {
         "default": "2",
-        "effect": "`auto` turns planning on when the subject's write scope touches more crates than this.",
+        "effect": "`auto` turns planning on when the subject's write scope touches more crates than this. For big-batch unset lanes already force on, so this only changes the reason.",
         "min": 1,
-        "type": "int"
-      },
-      "lane_deadline_seconds": {
-        "default": "3600",
-        "effect": "Longest wall-clock budget a planner may give one planned lane. A larger budget refuses the plan before admission.",
-        "max": 14400,
-        "min": 60,
         "type": "int"
       },
       "max_nodes": {
@@ -526,13 +519,13 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
       "mode": {
         "allowed": "auto, on or off",
         "default": "auto",
-        "effect": "Default for `provenant run --preset --plan`. on puts a principal planner node in front of the preset graph so it can shape the graph from the preset's pattern catalogue; off keeps the preset's static graph; auto decides from the subject size. `--explain` prints the decision and its reason.",
+        "effect": "Default for `provenant run --preset --plan`. on puts a principal planner node in front of the preset graph so it can shape the graph from the preset's pattern catalogue; off keeps the preset's static graph; auto stays off when the preset's shape parameter has any non-bundled origin and otherwise plans when the subject is large or its shape is unset; for big-batch unset lanes always force on, so the auto.* thresholds only change the recorded reason. `--explain` prints the decision and its reason.",
         "type": "enum"
       },
       "route": {
         "allowed": "a pool alias",
         "default": "principal",
-        "effect": "Route alias the planner node runs on. When it is unavailable the run falls back to the preset's deterministic defaults and records the reason; a weaker planner is never substituted.",
+        "effect": "Route alias the planner node runs on. When it is unavailable (undefined, excluded, exhausted or unauthenticated) the run falls back to the preset's deterministic defaults and records the reason; a weaker planner is never substituted.",
         "type": "string"
       }
     }
