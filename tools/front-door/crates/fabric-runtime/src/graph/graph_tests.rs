@@ -607,6 +607,77 @@ fn a_synthesis_must_dispose_of_every_selected_upstream_finding_exactly_once() {
 }
 
 #[test]
+fn synthesis_recovers_upheld_findings_when_verifier_block_is_truncated() {
+    let mut lens = node("lens", route("first"));
+    lens.require_findings = true;
+
+    let mut verify = node("verify", route("first"));
+    verify.depends_on = vec!["lens".into()];
+    verify.inputs = vec![GraphInput {
+        extra: Default::default(),
+        node: "lens".into(),
+        outputs: vec![OutputKind::Result, OutputKind::Findings],
+    }];
+
+    let mut synthesis = node("synthesis", route("first"));
+    synthesis.kind = Some(NodeKind::Synthesise);
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.depends_on = vec!["lens".into(), "verify".into()];
+    synthesis.inputs = vec![
+        GraphInput {
+            extra: Default::default(),
+            node: "lens".into(),
+            outputs: vec![OutputKind::Findings],
+        },
+        GraphInput {
+            extra: Default::default(),
+            node: "verify".into(),
+            outputs: vec![OutputKind::Result, OutputKind::Findings],
+        },
+    ];
+
+    let upheld = "F1 remains valid: UPHELD because the call still panics.\n```findings\n{\"schema_version\":1,\"findings\":[";
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(AttemptOutcome::Succeeded, upheld),
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(&entry(
+                    ",\"disposition\":\"accepted\",\"reason\":\"Verifier reproduced the panic\"",
+                )),
+            ),
+        ]
+        .into(),
+        ..Default::default()
+    };
+
+    let run = advance(
+        &graph(vec![lens, verify, synthesis]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+
+    assert_eq!(run.status, GraphStatus::Complete);
+    let verification = run.checkpoint.nodes[1].outputs.as_ref().unwrap();
+    assert!(verification.findings.is_empty());
+    assert!(
+        verification
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("findings block"))
+    );
+    let synthesis = run.checkpoint.nodes[2].outputs.as_ref().unwrap();
+    assert_eq!(synthesis.findings[0].id, "F1");
+    assert_eq!(
+        synthesis.findings[0].disposition.as_deref(),
+        Some("accepted")
+    );
+    assert!(owner.prompts[2].contains("UPHELD because the call still panics"));
+}
+
+#[test]
 fn a_synthesis_without_valid_dispositions_settles_as_failed_with_a_reason() {
     let cases = [
         (findings_text(&entry("")), "disposition_invalid"),
