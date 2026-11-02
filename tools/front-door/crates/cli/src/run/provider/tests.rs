@@ -376,6 +376,124 @@ fn unregistered_agy_observes_on_its_local_login_without_an_identity_probe()
     Ok(())
 }
 
+/// A registered isolated agy account whose keychain vanished must be refused:
+/// the probe may not fall back to the shared login and accept its sign-in under
+/// the second account's key.
+#[test]
+fn agy_account_whose_isolated_keychain_vanished_is_refused() -> Result<(), Box<dyn std::error::Error>>
+{
+    use provenant_os::exec::{
+        CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
+    };
+
+    /// Signs in as one Google account per `HOME`, as a keychain-backed agy does.
+    struct Agy {
+        home: std::path::PathBuf,
+        isolated: std::path::PathBuf,
+    }
+    impl Executor for Agy {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            let argv: Vec<String> = options
+                .argv
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            let bytes = if argv[1] == "--version" {
+                b"agy 1.0.0\n".to_vec()
+            } else {
+                let home = options
+                    .env
+                    .unwrap_or_default()
+                    .iter()
+                    .find(|(key, _)| key == "HOME")
+                    .map(|(_, value)| std::path::PathBuf::from(value))
+                    .expect("probe sets HOME");
+                let email = if home == self.isolated {
+                    "second@example.test"
+                } else {
+                    assert_eq!(home, self.home, "probe HOME is a known sign-in");
+                    "first@example.test"
+                };
+                let log = argv
+                    .iter()
+                    .position(|arg| arg == "--log-file")
+                    .map(|index| std::path::PathBuf::from(&argv[index + 1]))
+                    .expect("probe names a log file");
+                std::fs::write(
+                    log,
+                    format!("OAuth: authenticated successfully as {email}\n"),
+                )
+                .expect("write probe log");
+                br#"{"status":"SUCCESS"}"#.to_vec()
+            };
+            Ok(ExecOutcome {
+                termination: Termination::Exit(0),
+                timed_out: false,
+                stdout: CapturedStream {
+                    total_bytes: bytes.len() as u64,
+                    bytes,
+                    ..CapturedStream::default()
+                },
+                stderr: CapturedStream::default(),
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: false,
+                elapsed_micros: 80_000,
+            })
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let root = canonical(temp.path())?;
+    let home = root.join("home");
+    let isolated = root.join("agy-second");
+    let keychain = isolated.join("Library/Keychains/login.keychain-db");
+    for path in [&home, &root.join("project"), &root.join("state")] {
+        std::fs::create_dir_all(path)?;
+    }
+    std::fs::create_dir_all(keychain.parent().unwrap())?;
+    std::fs::write(&keychain, b"")?;
+    let roots = provenant_core::RootInputs {
+        state_dir: Some(root.join("state")),
+        ..provenant_core::RootInputs::new(home.clone(), root.join("project"))
+    }
+    .resolve(&provenant_os::fs::SystemPathResolver)?;
+    let agy = Agy {
+        home: home.clone(),
+        isolated: isolated.clone(),
+    };
+    let executor = provenant_providers::host::HostProbeExecutor::new(&agy, &root.join("state"))?;
+    let probe = Probe {
+        roots: Some(&roots),
+        executor: &executor,
+        home: &home,
+        user: "fixture".as_ref(),
+        scratch: &root,
+    };
+    let key = format!(
+        "agy-{}",
+        provenant_providers::identity::agy_fingerprint(
+            b"OAuth: authenticated successfully as second@example.test\n"
+        )
+        .ok_or("fingerprint")?
+    );
+    let entry = serde_json::from_value(serde_json::json!({
+        "adapter": "agy", "label": "second", "key": key, "directory": isolated,
+    }))?;
+    let observe = || observe_account(&entry, Path::new("/fixture/agy"), &probe, "r", 100);
+
+    // Registered with its own keychain, the account observes under its own HOME.
+    assert_eq!(observe()?.account_key.as_deref(), Some(key.as_str()));
+    // With the keychain gone, the probe must not sign in as the first account.
+    std::fs::remove_file(&keychain)?;
+    let error = observe()
+        .err()
+        .ok_or("account observed after its keychain vanished")?
+        .to_string();
+    assert!(error.contains("changed identity"), "{error}");
+    Ok(())
+}
+
 #[test]
 fn credential_messages_suggest_signin_only_for_missing_or_expired_tokens() {
     use provenant_providers::ProviderError;
