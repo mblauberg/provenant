@@ -746,7 +746,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
-| `id` | `{"description": "Graph ID", "name": "id", "positional": true, "required": true}` |
+| `id` | `{"description": "Graph ID, project-local document path or document SHA-256 hash", "name": "id", "positional": true, "required": true}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -770,7 +770,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
-| `id` | `{"description": "Graph ID", "name": "id", "positional": true, "required": true}` |
+| `id` | `{"description": "Graph ID, project-local document path or document SHA-256 hash", "name": "id", "positional": true, "required": true}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -794,7 +794,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
-| `--document` | `{"description": "Project-local graph document", "name": "document", "required": true}` |
+| `--document` | `{"description": "Graph ID, project-local graph document or document SHA-256 hash", "name": "document", "required": true}` |
 | `--extend` | `{"description": "Raise a limit, budget or loop allowance, or decide a paused loop (KEY=VALUE); may be repeated", "name": "extend", "repeatable": true}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |

@@ -225,6 +225,24 @@ impl FileJournal {
         Ok(ids)
     }
 
+    /// The execution bound to a graph in any state, without taking the lock.
+    pub fn execution(
+        root: &StateRoot,
+        project: ProjectId,
+        graph_id: &str,
+    ) -> Result<Option<GraphExecution>, JournalError> {
+        if !valid_identifier(graph_id) {
+            return Err(JournalError::InvalidGraphId);
+        }
+        match graph_directory(root, project) {
+            Ok(directory) => {
+                Ok(load_checkpoint(&directory, graph_id)?.map(|stored| stored.execution))
+            }
+            Err(error) if error.is_not_found() => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     pub fn pending_execution(
         root: &StateRoot,
         project: ProjectId,

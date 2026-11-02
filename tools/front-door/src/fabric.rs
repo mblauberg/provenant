@@ -4471,82 +4471,91 @@ fn exact_route_refused(model: &str, excluded_families: &[String], require_distin
 }
 
 impl Factory {
-    fn graph_selector_id(&self, selector: &str) -> Result<String, FacadeError> {
-        use provenant_fabric_runtime::graph::FileJournal;
-        let path_like = Path::new(selector).is_absolute()
-            || selector.contains('/')
-            || selector.contains('\\')
-            || selector.ends_with(".json");
-        if !path_like {
-            match FileJournal::read_checkpoint(
-                &self.context.roots.state,
-                self.context.identity.project,
-                selector,
-            ) {
-                Ok(Some(_)) => return Ok(selector.to_owned()),
-                Ok(None) => {}
-                Err(error) if error.is_unreadable() => return Ok(selector.to_owned()),
-                Err(_) => {}
-            }
+    /// Read a project-local graph document through the confined, bounded helpers.
+    fn read_graph_document(
+        &self,
+        path: &Path,
+    ) -> Result<provenant_fabric_runtime::graph::GraphDocument, FacadeError> {
+        let path = provenant_os::fs::canonicalize(path)
+            .map_err(|_| FacadeError::io("read project-local graph document; a bare name is read only from .provenant/scratch/graphs, so pass the explicit path of a legacy .agent-run/graphs document"))?;
+        if !path.starts_with(&self.cwd) {
+            return Err(FacadeError::ConfinementRefused);
         }
+        let bytes = provenant_os::fs::FileHandle::open_source(&path)
+            .and_then(|mut file| file.read_bounded(8_388_608))
+            .map_err(|_| FacadeError::io("access graph journal"))?;
+        decode_graph_document(&bytes)
+    }
 
+    /// The one selector resolver for graph status, cancel and resume: a graph
+    /// ID, a project-local document path or a document SHA-256 hash (prefix)
+    /// becomes the graph ID and, when one is retained or named, its document.
+    fn resolve_graph(
+        &self,
+        selector: &str,
+    ) -> Result<
+        (
+            String,
+            Option<provenant_fabric_runtime::graph::GraphDocument>,
+        ),
+        FacadeError,
+    > {
+        use provenant_fabric_runtime::graph::FileJournal;
+        let refused = || FacadeError::DispatchRefused {
+            reason: graph_selector_forms(),
+        };
         let path = Path::new(selector);
-        if path_like {
-            let path = if path.is_absolute() {
-                path.to_path_buf()
+        if path.is_absolute() || selector.contains(['/', '\\']) || selector.ends_with(".json") {
+            let path = if path.components().count() == 1 && !self.cwd.join(path).exists() {
+                self.cwd.join(".provenant/scratch/graphs").join(path)
             } else {
                 self.cwd.join(path)
             };
-            if let Ok(path) = provenant_os::fs::canonicalize(&path)
-                && path.starts_with(&self.cwd)
-                && let Ok(bytes) = provenant_os::fs::FileHandle::open_source(&path)
-                    .and_then(|mut file| file.read_bounded(8_388_608))
-                && let Ok(document) = decode_graph_document(&bytes)
-            {
-                return Ok(document.graph_id);
-            }
-        }
-
-        let mut hash = selector.strip_prefix("sha256:").unwrap_or(selector);
-        hash = hash.strip_prefix("preset-").unwrap_or(hash);
-        hash = hash.strip_suffix(".json").unwrap_or(hash);
-        if hash.is_empty() || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(FacadeError::DispatchRefused {
-                reason: graph_selector_forms(),
-            });
-        }
-        let graphs = self.cwd.join(".provenant/scratch/graphs");
-        let Ok(entries) = std::fs::read_dir(graphs) else {
-            return Err(FacadeError::DispatchRefused {
-                reason: graph_selector_forms(),
-            });
-        };
-        let mut matches = Vec::new();
-        for entry in entries.flatten() {
-            if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
-                continue;
-            }
-            let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("json") {
-                continue;
-            }
-            let Ok(bytes) = std::fs::read(&path) else {
-                continue;
+            return match self.read_graph_document(&path) {
+                Ok(document) => Ok((document.graph_id.clone(), Some(document))),
+                Err(FacadeError::Io { .. }) => Err(refused()),
+                Err(error) => Err(error),
             };
-            let digest = provenant_records::CanonicalV1::file_digest(&bytes).to_string();
-            if digest
-                .strip_prefix("sha256:")
-                .is_some_and(|value| value.starts_with(hash))
+        }
+        match FileJournal::execution(
+            &self.context.roots.state,
+            self.context.identity.project,
+            selector,
+        ) {
+            Ok(Some(execution)) => return Ok((selector.to_owned(), Some(execution.document))),
+            Err(error) if error.is_unreadable() => return Ok((selector.to_owned(), None)),
+            _ => {}
+        }
+        let hash = selector.strip_prefix("sha256:").unwrap_or(selector);
+        if hash.is_empty() || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(refused());
+        }
+        let Ok((graphs, entries)) = (|| {
+            let graphs = [".provenant", "scratch", "graphs"].iter().try_fold(
+                provenant_os::fs::Directory::open_anchor(&self.cwd)?,
+                |directory, name| directory.open_verified_directory(std::ffi::OsStr::new(name)),
+            )?;
+            let entries = graphs.entries()?;
+            Ok::<_, provenant_os::fs::FsError>((graphs, entries))
+        })() else {
+            return Err(refused());
+        };
+        let mut found = Vec::new();
+        for name in entries.flatten() {
+            // Symlinked and non-regular entries fail the no-follow bounded read.
+            if let Ok(bytes) = graphs.read_bounded(&name, 8_388_608)
+                && provenant_records::CanonicalV1::file_digest(&bytes)
+                    .to_string()
+                    .strip_prefix("sha256:")
+                    .is_some_and(|digest| digest.starts_with(&hash.to_ascii_lowercase()))
                 && let Ok(document) = decode_graph_document(&bytes)
             {
-                matches.push(document.graph_id);
+                found.push(document);
             }
         }
-        match matches.as_slice() {
-            [id] => Ok(id.clone()),
-            _ => Err(FacadeError::DispatchRefused {
-                reason: graph_selector_forms(),
-            }),
+        match <[_; 1]>::try_from(found) {
+            Ok([document]) => Ok((document.graph_id.clone(), Some(document))),
+            Err(_) => Err(refused()),
         }
     }
 
@@ -4561,11 +4570,11 @@ impl Factory {
         let input = match input {
             GraphInput::Status { extra, id } => GraphInput::Status {
                 extra,
-                id: self.graph_selector_id(&id)?,
+                id: self.resolve_graph(&id)?.0,
             },
             GraphInput::Cancel { extra, id } => GraphInput::Cancel {
                 extra,
-                id: self.graph_selector_id(&id)?,
+                id: self.resolve_graph(&id)?.0,
             },
             input => input,
         };
@@ -4592,60 +4601,23 @@ impl Factory {
                     },
                 )
                 .map_err(scratch_prepare_error)?;
-                let retained = if resume
-                    && !document.is_absolute()
-                    && document.components().count() == 1
-                    && !self.cwd.join(document).exists()
-                {
-                    document
-                        .to_str()
-                        .and_then(|id| {
-                            FileJournal::pending_execution(
-                                &self.context.roots.state,
-                                self.context.identity.project,
-                                id,
-                            )
-                            .ok()
-                            .flatten()
-                        })
-                        .map(|execution| execution.document)
-                } else {
-                    None
-                };
-                let document = if let Some(document) = retained {
-                    document
+                let document = if resume {
+                    self.resolve_graph(&document.to_string_lossy())?
+                        .1
+                        .ok_or_else(|| FacadeError::DispatchRefused {
+                            reason: graph_selector_forms(),
+                        })?
                 } else {
                     let path = if document.is_absolute() {
                         document.clone()
                     } else if document.components().count() == 1
                         && !self.cwd.join(document).exists()
                     {
-                        let graphs = scratch.join("graphs");
-                        let ordinary = graphs.join(document);
-                        if ordinary.exists() {
-                            ordinary
-                        } else {
-                            let value = document.to_string_lossy();
-                            let value = value.strip_prefix("sha256:").unwrap_or(&value);
-                            let value = value.strip_prefix("preset-").unwrap_or(value);
-                            let hash = value.strip_suffix(".json").unwrap_or(value);
-                            graphs.join(format!("preset-{hash}.json"))
-                        }
+                        scratch.join("graphs").join(document)
                     } else {
                         self.cwd.join(document)
                     };
-                    let path = provenant_os::fs::canonicalize(&path).map_err(|_| {
-                        FacadeError::DispatchRefused {
-                            reason: graph_selector_forms(),
-                        }
-                    })?;
-                    if !path.starts_with(&self.cwd) {
-                        return Err(FacadeError::ConfinementRefused);
-                    }
-                    let bytes = provenant_os::fs::FileHandle::open_source(&path)
-                        .and_then(|mut file| file.read_bounded(8_388_608))
-                        .map_err(|_| FacadeError::io("access graph journal"))?;
-                    decode_graph_document(&bytes)?
+                    self.read_graph_document(&path)?
                 };
                 if let Some(branch) = &document.integration_branch {
                     provenant_run::HostDeliveryContext::validate_integration_target(
@@ -4729,12 +4701,12 @@ impl Factory {
             _ => None,
         };
         let id = match &input {
-            GraphInput::Status { id, .. } | GraphInput::Cancel { id, .. } => id.clone(),
+            GraphInput::Status { id, .. } | GraphInput::Cancel { id, .. } => id.as_str(),
             _ => document
                 .as_ref()
                 .ok_or(FacadeError::InvalidInput)?
                 .graph_id
-                .clone(),
+                .as_str(),
         };
         // An unreadable record has no trustworthy node or attempt state.
         let unreadable_snapshot = |message: String| {
@@ -4765,7 +4737,7 @@ impl Factory {
                     pause_asks: 0,
                     limit_notes: Vec::new(),
                     schema_version: 1,
-                    graph_id: id.clone(),
+                    graph_id: id.to_owned(),
                     plan_digest: String::new(),
                     nodes: Vec::new(),
                 },
@@ -4776,7 +4748,7 @@ impl Factory {
             let mut checkpoint = match FileJournal::read_checkpoint(
                 &self.context.roots.state,
                 self.context.identity.project,
-                &id,
+                id,
             ) {
                 Ok(checkpoint) => checkpoint.ok_or(FacadeError::NotFound)?,
                 Err(error) if error.is_unreadable() => {
@@ -4796,7 +4768,7 @@ impl Factory {
             let sidecar_error = FileJournal::read_advance_error(
                 &self.context.roots.state,
                 self.context.identity.project,
-                &id,
+                id,
             )
             .map_err(|_| FacadeError::io("access graph journal"))?;
             run.advance_error = sidecar_error.or(run.advance_error);
@@ -4806,7 +4778,7 @@ impl Factory {
             && FileJournal::retire_unreadable(
                 &self.context.roots.state,
                 self.context.identity.project,
-                &id,
+                id,
                 budget,
                 cancel,
                 &self.clock,
@@ -4820,14 +4792,14 @@ impl Factory {
         let mut journal = FileJournal::open(
             &self.context.roots.state,
             self.context.identity.project,
-            &id,
+            id,
             budget,
             cancel,
             &self.clock,
         )
         .map_err(|_| FacadeError::io("access graph journal"))?;
         if let Some(document) = &document {
-            let integration_base = if journal.load(&id).map_err(graph_journal_error)?.is_some() {
+            let integration_base = if journal.load(id).map_err(graph_journal_error)?.is_some() {
                 journal.integration_base()
             } else if let Some(branch) = &document.integration_branch {
                 let reference = match branch.strip_prefix("origin/") {
@@ -4910,14 +4882,14 @@ impl Factory {
             FileJournal::set_advance_error(
                 &self.context.roots.state,
                 self.context.identity.project,
-                &id,
+                id,
                 None,
             )
             .map_err(|_| FacadeError::io("access graph journal"))?;
             return Ok(run);
         }
         let mut checkpoint = journal
-            .load(&id)
+            .load(id)
             .map_err(graph_journal_error)?
             .ok_or(FacadeError::NotFound)?;
         if matches!(input, GraphInput::Cancel { .. }) {
