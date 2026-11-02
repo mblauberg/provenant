@@ -20,6 +20,8 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
         "definite_failed",
         "binding_mismatch",
         "head_mismatch",
+        "writer_busy",
+        "effects_busy",
     ] {
         let fixture = PrepareFixture::new()?;
         let execution = registered_landed_writer_fixture(&fixture)?;
@@ -185,6 +187,36 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
                 .contains(&id),
             !mode.ends_with("_legacy")
         );
+        if matches!(mode, "writer_busy" | "effects_busy") {
+            // A busy lock leaves the effect pending without an error.
+            let slot = store.writer_custody_directory(&record, &fixture.writer)?;
+            let (directory, name) = if mode == "writer_busy" {
+                (&slot, "writer.lock")
+            } else {
+                (&attempt, "terminal-effects.lock")
+            };
+            let held = directory.try_lock(
+                std::ffi::OsStr::new(name),
+                provenant_os::fs::LockMode::Exclusive,
+            )?;
+            store.reconcile_terminal_effects(&record, &call)?;
+            assert!(matches!(
+                store
+                    .record(id, &call)?
+                    .settlement_receipts
+                    .unwrap()
+                    .delivery,
+                EffectDisposition::Pending
+            ));
+            assert!(
+                !fixture
+                    .root
+                    .join("remote.git/refs/heads/published/lane")
+                    .exists(),
+                "{mode}: nothing is delivered while the lock is busy"
+            );
+            drop(held);
+        }
         store.reconcile_terminal_effects(&record, &call)?;
         let recovered = store.record(id, &call)?;
         assert_eq!(recovered.head, Some(head));
@@ -194,7 +226,10 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
             decision
         );
         let receipts = recovered.settlement_receipts.unwrap();
-        if matches!(mode, "pending" | "retryable" | "late_cancel") {
+        if matches!(
+            mode,
+            "pending" | "retryable" | "late_cancel" | "writer_busy" | "effects_busy"
+        ) {
             assert!(
                 matches!(receipts.delivery, EffectDisposition::Done),
                 "{mode}: {receipts:?}"

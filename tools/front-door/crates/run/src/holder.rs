@@ -768,10 +768,15 @@ impl RunStore {
         completion: &Completion<'_>,
         call: &Request<'_>,
     ) -> Result<()> {
-        let _effects = attempt.try_lock(
+        // Another driver is already settling these effects; it is not a failure.
+        let _effects = match attempt.try_lock(
             std::ffi::OsStr::new("terminal-effects.lock"),
             provenant_os::fs::LockMode::Exclusive,
-        )?;
+        ) {
+            Ok(lock) => lock,
+            Err(provenant_os::fs::FsError::LockTimeout { .. }) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
         let current = self.record(record.attempt_id, call)?;
         let Some(receipts) = current.settlement_receipts else {
             return Ok(());
@@ -850,6 +855,24 @@ impl RunStore {
                     )?;
                     return Ok(());
                 }
+                // Without custody, a later writer may own the worktree. Wait
+                // for its writer lock rather than deliver beneath it.
+                let slot = if completion.custody().is_none() {
+                    self.writer_custody_directory(record, writer).ok()
+                } else {
+                    None
+                };
+                let _writer = match slot.as_ref().map(|slot| {
+                    slot.try_lock(
+                        std::ffi::OsStr::new("writer.lock"),
+                        provenant_os::fs::LockMode::Exclusive,
+                    )
+                }) {
+                    Some(Ok(lock)) => Some(lock),
+                    Some(Err(provenant_os::fs::FsError::LockTimeout { .. })) => return Ok(()),
+                    Some(Err(error)) => return Err(error.into()),
+                    None => None,
+                };
                 let cancel = CancelToken::new();
                 let host = match completion {
                     Completion::Live {
