@@ -50,23 +50,27 @@ pub struct AttemptRow {
     pub cache_read: Option<u64>,
 }
 
+/// Total tokens for an attempt, or `None` when the record is partial.
+///
+/// Every provider reports input and output, so either one missing means the
+/// attempt was not measured. Cache and reasoning counters are added when
+/// present: a provider without caching or reasoning omits them legitimately.
+pub fn measured_tokens(u: &provenant_records::Usage) -> Option<u64> {
+    let core = u
+        .uncached_input?
+        .saturating_add(u.output_excluding_reasoning?);
+    Some(
+        [u.cache_read, u.cache_write, u.reasoning]
+            .into_iter()
+            .flatten()
+            .fold(core, u64::saturating_add),
+    )
+}
+
 impl AttemptRow {
     /// Project a terminal attempt fact. Unmeasured usage stays `None`.
     pub fn from_fact(fact: &AttemptFact) -> Self {
-        let u = &fact.usage;
-        let parts = [
-            u.uncached_input,
-            u.cache_read,
-            u.cache_write,
-            u.output_excluding_reasoning,
-            u.reasoning,
-        ];
-        let tokens = parts.iter().any(Option::is_some).then(|| {
-            parts
-                .iter()
-                .flatten()
-                .fold(0u64, |a, b| a.saturating_add(*b))
-        });
+        let tokens = measured_tokens(&fact.usage);
         let route = fact.resolved_route.as_ref().map(|r| {
             format!(
                 "{}/{}",
@@ -85,7 +89,7 @@ impl AttemptRow {
             ),
             route,
             tokens,
-            cache_read: u.cache_read,
+            cache_read: fact.usage.cache_read,
         }
     }
 

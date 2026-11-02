@@ -36,9 +36,11 @@ Rules:
   (the reducer returns an error); none are silently deduplicated.
 - An attempt joins a PR when its `work_item` is `#N`, `pr:N` or one of the
   PR's `work_items`. A label claimed by two PRs joins nothing.
-- Tokens are the sum of the five disjoint usage categories. An attempt with no
-  measured category adds zero tokens and is counted in
-  `linked_without_tokens`; it is never silently treated as measured.
+- Tokens are the sum of the disjoint usage categories. Input and output must
+  both be measured; cache and reasoning counters add when present, since a
+  provider without caching or reasoning omits them. An attempt missing input
+  or output adds zero tokens and is counted in `linked_without_tokens`; it is
+  never silently treated as measured.
 - Each token lands in exactly one category: `chair`, `failed_attempt`
   (non-success terminal state), `review` (role contains "review"), `repair`
   (role contains "repair" or "fix"), else `worker`. Per-category totals sum to

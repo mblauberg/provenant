@@ -273,3 +273,26 @@ fn render_reports_intervals_and_coverage() {
         assert!(text.contains(needle), "{needle}\n{text}");
     }
 }
+
+#[test]
+fn partial_usage_is_unmeasured_but_absent_optional_categories_are_not() {
+    use provenant_records::Usage;
+    let full = Usage {
+        uncached_input: Some(1000),
+        cache_read: Some(500),
+        output_excluding_reasoning: Some(200),
+        ..Usage::default()
+    };
+    assert_eq!(measured_tokens(&full), Some(1700));
+    let no_output = Usage {
+        output_excluding_reasoning: None,
+        ..full.clone()
+    };
+    assert_eq!(measured_tokens(&no_output), None);
+    let no_input = Usage {
+        uncached_input: None,
+        ..full
+    };
+    assert_eq!(measured_tokens(&no_input), None);
+    assert_eq!(measured_tokens(&Usage::default()), None);
+}
