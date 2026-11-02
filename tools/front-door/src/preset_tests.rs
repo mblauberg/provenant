@@ -1858,6 +1858,13 @@ fn review_council_verifies_between_the_lenses_and_the_synthesis() {
         .map(|node| node["id"].as_str().unwrap())
         .collect();
     assert_eq!(ids, ["subject", "lenses", "verify", "synthesis"]);
+    assert_eq!(
+        node(&expanded.document, "lenses")["composite"]["allow_partial"],
+        true
+    );
+    assert!(
+        node(&expanded.document, "lenses")["composite"]["nodes"][0]["require_findings"] == true
+    );
     let verify = node(&expanded.document, "verify");
     assert_eq!(verify["distinct_from"], "dependencies");
     assert_eq!(verify["source"], json!({"type": "node", "node": "subject"}));
@@ -1866,10 +1873,29 @@ fn review_council_verifies_between_the_lenses_and_the_synthesis() {
     let synthesis = node(&expanded.document, "synthesis");
     assert_eq!(synthesis["depends_on"], json!(["verify", "subject"]));
     assert!(
+        verify["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|input| input["node"] == "lenses")
+    );
+    assert!(
         synthesis["prompt"]
             .as_str()
             .unwrap()
             .contains("disposition")
+    );
+    assert!(
+        synthesis["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("mark the result degraded")
+    );
+    assert!(
+        verify["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("unavailable lens names")
     );
     let skipped = expand(
         &Layers::empty(),
@@ -1883,6 +1909,13 @@ fn review_council_verifies_between_the_lenses_and_the_synthesis() {
     .unwrap();
     let synthesis = node(&skipped.document, "synthesis");
     assert_eq!(synthesis["depends_on"], json!(["lenses", "subject"]));
+    assert!(
+        synthesis["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|input| input["node"] != "verify")
+    );
     assert!(!skipped.document.to_string().contains("\"id\":\"verify\""));
 }
 

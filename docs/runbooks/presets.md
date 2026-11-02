@@ -352,6 +352,13 @@ falsify every finding (`verifiers = 0` skips it), and the synthesis gives each
 finding one disposition: accepted, rejected or deferred, with a reason. The
 `generator-evaluator` evaluator does the same over its lens findings.
 
+The `review-council` lens fan-in accepts partial success. A failed lens or one
+without a valid findings block is recorded as unavailable with its cause;
+verification and synthesis receive successful lens output and the unavailable
+summary. If the surviving reviews fall below the risk tier minimum, synthesis
+must mark the result degraded and request a same-family substitute through a
+different lens, or ask the chair to choose one. The review minimum is unchanged.
+
 The routing review shapes are canonical for who reviews. A lens whose `tier`
 is empty takes its pool from the review selection for `risk_tier` or the
 `review_shape` override. See [review shapes](model-routing.md#review-shapes)

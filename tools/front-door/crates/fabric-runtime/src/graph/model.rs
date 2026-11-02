@@ -1,5 +1,9 @@
 use super::*;
 
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 /// Persisted retry wait on a node whose launch failed with a transient kind.
 /// The wait belongs to the node's current attempt: it is recorded under the
 /// attempt key, so a later retry observes or relaunches exactly that attempt,
@@ -199,6 +203,8 @@ pub struct GraphNode {
     /// Require this exact, case-sensitive line (ignoring surrounding whitespace)
     /// in a successful result. A missing line fails the node without fallback.
     pub required_verdict: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub require_findings: bool,
 }
 
 impl GraphNode {

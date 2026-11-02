@@ -1274,6 +1274,7 @@ fn lower_leaf(
             "fallback_tier",
             "purpose",
             "dispositions",
+            "require_findings",
             "continues",
             "land",
         ]
@@ -1942,7 +1943,10 @@ impl StageBuilder<'_> {
                     .remove("exports")
                     .or_else(|| config.get("exports").cloned())
                     .unwrap_or_else(|| selected_inputs(&ends, &json!(["result", "findings"])));
-                (composite(&id, children, exports, deps, &outputs), true)
+                (
+                    composite(&id, children, exports, deps, &outputs, false),
+                    true,
+                )
             } else if let Some(parallel) = object.remove("parallel") {
                 let entries = parallel
                     .as_array()
@@ -1962,14 +1966,24 @@ impl StageBuilder<'_> {
                 let exports = object
                     .remove("exports")
                     .unwrap_or_else(|| selected_inputs(&ends, &json!(["result", "findings"])));
-                (composite(&id, children, exports, deps, &outputs), true)
+                let allow_partial = object
+                    .remove("allow_partial")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                (
+                    composite(&id, children, exports, deps, &outputs, allow_partial),
+                    true,
+                )
             } else if let Some(stages) = object.remove("stages") {
                 let mut children = Vec::new();
                 let ends = self.sequence(&stages, "", &[], &mut children, depth + 1)?;
                 let exports = object
                     .remove("exports")
                     .unwrap_or_else(|| selected_inputs(&ends, &json!(["result", "findings"])));
-                (composite(&id, children, exports, deps, &outputs), true)
+                (
+                    composite(&id, children, exports, deps, &outputs, false),
+                    true,
+                )
             } else {
                 (
                     lower_leaf(
@@ -2086,8 +2100,14 @@ fn composite(
     exports: Value,
     deps: &[String],
     outputs: &Value,
+    allow_partial: bool,
 ) -> Value {
-    let mut node = json!({"id":id,"kind":"composite","access":"read_only","depends_on":deps,"composite":{"nodes":nodes,"exports":exports}});
+    let mut spec = json!({"nodes":nodes,"exports":exports});
+    if allow_partial {
+        spec["allow_partial"] = json!(true);
+    }
+    let mut node =
+        json!({"id":id,"kind":"composite","access":"read_only","depends_on":deps,"composite":spec});
     if !deps.is_empty() {
         node["inputs"] = selected_inputs(deps, outputs);
     }

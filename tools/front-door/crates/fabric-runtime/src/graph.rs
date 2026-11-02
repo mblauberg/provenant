@@ -341,6 +341,7 @@ struct PlannedNode {
     routes: Vec<GraphRoute>,
     #[serde(skip_serializing_if = "Option::is_none")]
     required_verdict: Option<String>,
+    require_findings: bool,
 }
 
 /// Node labels override graph defaults. Scheduler identity comes from the plan.
@@ -1560,8 +1561,20 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     .warnings
                                     .retain(|warning| warning != FINDINGS_INVALID);
                             }
-                            let disposition_error =
-                                disposition_error(&node.dispositions, &upstream_findings, &outputs);
+                            let disposition_error = if node.require_findings
+                                && (outputs.result.is_none()
+                                    || outputs
+                                        .warnings
+                                        .iter()
+                                        .any(|warning| warning == FINDINGS_INVALID))
+                            {
+                                Some((
+                                    "findings_required",
+                                    "the findings block is missing or invalid".to_owned(),
+                                ))
+                            } else {
+                                disposition_error(&node.dispositions, &upstream_findings, &outputs)
+                            };
                             let outcome = if warned {
                                 AttemptOutcome::OtherFailure
                             } else if outcome == AttemptOutcome::Succeeded

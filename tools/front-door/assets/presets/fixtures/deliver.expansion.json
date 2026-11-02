@@ -3,7 +3,7 @@
     "pattern": "deliver",
     "preset": "deliver"
   },
-  "graph_id": "preset-4e158365214a4ed968ff506ae9316c32",
+  "graph_id": "preset-947302cc0f8d8c99f25e1e4829ac80c2",
   "nodes": [
     {
       "acceptance_checks": [
@@ -184,6 +184,7 @@
           {
             "access": "read_only",
             "composite": {
+              "allow_partial": true,
               "exports": [
                 {
                   "node": "lens-correctness-spec",
@@ -261,6 +262,7 @@
                       "when": "always"
                     }
                   ],
+                  "require_findings": true,
                   "role": "lens.correctness-spec",
                   "role_digest": "sha256:66edc8ef69eeb5004626f5ae107398279933ba08680bff9345b58af6817aa99f",
                   "route": {
@@ -295,6 +297,7 @@
                       "when": "always"
                     }
                   ],
+                  "require_findings": true,
                   "role": "lens.tests",
                   "role_digest": "sha256:223eb7c046173da610fbd8082a6cda7ff20521ec23b6a3a465bee13b81c89117",
                   "route": {
@@ -319,6 +322,7 @@
                       "when": "always"
                     }
                   ],
+                  "require_findings": true,
                   "role": "lens.design-fit-reuse",
                   "role_digest": "sha256:18354a40f4c4349ba5e4e47ba960bc66995bf9968e0058068005a1ef84aa9684",
                   "route": {
@@ -343,6 +347,7 @@
                       "when": "always"
                     }
                   ],
+                  "require_findings": true,
                   "role": "lens.simplicity",
                   "role_digest": "sha256:a5a65ce4bd99ff3d3bee2f7120f1ce492fc17bdc84f1a197ac71cd4fc7da72d3",
                   "route": {
@@ -367,6 +372,7 @@
                       "when": "always"
                     }
                   ],
+                  "require_findings": true,
                   "role": "lens.conventions-readability",
                   "role_digest": "sha256:76edd2cc80f7ae5ffd623765c114c8d4eea315fe4468c24105c1d2576d4ed904",
                   "route": {
@@ -391,6 +397,7 @@
                       "when": "always"
                     }
                   ],
+                  "require_findings": true,
                   "role": "lens.refactor-cleanup",
                   "role_digest": "sha256:2f642c437dc75cfe9f100ab834588d05830ec6e554c1b6dcddbe5d9e978a352a",
                   "route": {
@@ -415,6 +422,7 @@
                       "when": "always"
                     }
                   ],
+                  "require_findings": true,
                   "role": "lens.reliability",
                   "role_digest": "sha256:be9d48658308d9e7062af6d335ff10b38a028dbe02062aac67a2f264fcc492e3",
                   "route": {
@@ -439,6 +447,7 @@
                       "when": "always"
                     }
                   ],
+                  "require_findings": true,
                   "role": "lens.flexibility",
                   "role_digest": "sha256:88b3d4256f70839dc882f5b0c4b21f45f82c5c7cb01561fc44ee2606cf9330db",
                   "route": {
@@ -482,7 +491,7 @@
                 ]
               }
             ],
-            "prompt": "You falsify review findings. A finding stands only if you cannot break it.\n\nVerify the lens findings for: brief\nTry to falsify every finding against the pinned commit: reproduce it, look for\nthe code or test that contradicts it, and check it against the spec. Re-emit\nevery finding verbatim with one of UPHELD, FALSIFIED or UNVERIFIABLE and your\nevidence. Add any finding the lenses missed and mark it NEW. Do not edit files.\nEnd with a findings block (schema_version 1) whose entries keep each finding's\nid and add \"verification\": \"upheld\", \"falsified\" or \"unverifiable\".\n",
+            "prompt": "You falsify review findings. A finding stands only if you cannot break it.\n\nThe input includes successful lens findings and any unavailable lens names and reasons. Preserve those unavailable details in your result so synthesis can assess review coverage.",
             "role": "review.verify",
             "role_digest": "sha256:1b76693d13635aa0106f7bf34f48335c9c19bd59703932ab86c6aca9a988d0d0",
             "route": {
@@ -515,7 +524,7 @@
               }
             ],
             "kind": "synthesise",
-            "prompt": "You reconcile review findings into one verdict with a disposition for each.\n\nReconcile independent review findings against evidence for: brief\nDo not take a majority vote. Weigh each finding by its evidence and, where a\nverifier ran, by its UPHELD or FALSIFIED mark. Give every finding exactly one\ndisposition with a one-line reason: accepted (must be fixed), rejected\n(evidence refutes it) or deferred (valid, not for this change). End with a\nfenced findings block (schema_version 1) with one entry per finding id; each\nentry carries \"disposition\" (accepted, rejected or deferred) and \"reason\".\nA finding without a disposition is incomplete. Emit one exact\nVERDICT: PASS only when no accepted finding remains and acceptance evidence is\nsatisfied, otherwise VERDICT: FAIL.\n",
+            "prompt": "You reconcile review findings into one verdict with a disposition for each.\n\nThe verifier input includes successful lens output and any unavailable lens names and reasons. Count successful independent reviews against the review ladder minimum for risk tier . If the council is below that minimum, mark the result degraded and ask for a same-family substitute through a different lens, or ask the chair to choose one. Do not report an ordinary complete review.",
             "role": "review.synthesis",
             "role_digest": "sha256:7b8230ad9a34ce36ef5b05bbf287644e291f18dd4784f1d54c1fd4ee4c3a0f6c",
             "route": {

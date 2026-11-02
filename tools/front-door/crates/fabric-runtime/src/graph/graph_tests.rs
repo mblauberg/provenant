@@ -212,6 +212,7 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
         route: Some(route),
         routes: None,
         required_verdict: None,
+        require_findings: false,
     }
 }
 
@@ -906,6 +907,125 @@ fn composite_rejects_ambiguous_exports_and_blocks_on_child_failure() {
             .unwrap()
             .checkpoint,
         run.checkpoint
+    );
+}
+
+#[test]
+fn review_composite_keeps_successful_lenses_and_records_unavailable_members() {
+    let findings = "```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"low\",\"file\":\"a.rs\",\"line\":1,\"summary\":\"review note\",\"status\":\"open\"}]}\n```";
+    let synthesis_findings = "```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"low\",\"file\":\"a.rs\",\"line\":1,\"summary\":\"review note\",\"status\":\"open\",\"disposition\":\"accepted\",\"reason\":\"verified\"}]}\n```";
+    let mut verify = node("verify", route("fixture"));
+    verify.depends_on.push("lenses".into());
+    verify.inputs.push(GraphInput {
+        extra: Default::default(),
+        node: "lenses".into(),
+        outputs: vec![OutputKind::Result],
+    });
+    let mut synthesis = node("synthesis", route("fixture"));
+    synthesis.kind = Some(NodeKind::Synthesise);
+    synthesis.dispositions = ["accepted", "rejected", "deferred"]
+        .map(str::to_owned)
+        .to_vec();
+    synthesis.depends_on.push("verify".into());
+    synthesis.depends_on.push("lenses".into());
+    synthesis.inputs.push(GraphInput {
+        extra: Default::default(),
+        node: "lenses".into(),
+        outputs: vec![OutputKind::Result, OutputKind::Findings],
+    });
+    let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 1, "graph_id": "partial-review", "nodes": [
+            {"id":"lenses", "kind":"composite", "access":"read_only",
+             "composite":{"allow_partial":true,"nodes":[
+                {"id":"lens-a","access":"read_only","prompt":"a","require_findings":true,"route":{"alias":"fixture"}},
+                {"id":"lens-b","access":"read_only","prompt":"b","require_findings":true,"route":{"alias":"fixture"}},
+                {"id":"lens-c","access":"read_only","prompt":"c","require_findings":true,"route":{"alias":"fixture"}}
+             ],"exports":[
+                {"node":"lens-a","outputs":["result","findings"]},
+                {"node":"lens-b","outputs":["result","findings"]},
+                {"node":"lens-c","outputs":["result","findings"]}
+             ]}}
+        ]
+    })).unwrap();
+    document.nodes.extend([verify, synthesis]);
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([
+            terminal_with_result(AttemptOutcome::Succeeded, findings),
+            terminal_with_result(AttemptOutcome::Succeeded, "result without findings"),
+            terminal(AttemptOutcome::AdapterUnavailable),
+            terminal_with_result(AttemptOutcome::Succeeded, "verified"),
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &format!(
+                    "DEGRADED: only one of three lens reviews succeeded; ask the chair for a substitute through a different lens.\n{synthesis_findings}"
+                ),
+            ),
+        ]),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(
+        run.status,
+        GraphStatus::Complete,
+        "{:?}",
+        run.checkpoint.pause_reason
+    );
+    let state = |id: &str| {
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == id || node.id.ends_with(&format!("--{id}")))
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing {id}: {:?}",
+                    run.checkpoint
+                        .nodes
+                        .iter()
+                        .map(|node| &node.id)
+                        .collect::<Vec<_>>()
+                )
+            })
+    };
+    assert_eq!(state("lenses").state, NodeState::Succeeded);
+    assert_eq!(state("verify").state, NodeState::Succeeded);
+    assert_eq!(state("lens-b").state, NodeState::Failed);
+    let receipt = state("lenses").outputs.as_ref().unwrap();
+    assert_eq!(receipt.findings.len(), 1);
+    assert_eq!(receipt.findings[0].id, "F1");
+    assert!(
+        receipt
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("lens-b") && warning.contains("findings block"))
+    );
+    assert!(
+        receipt
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("lens-c") && warning.contains("adapter"))
+    );
+    assert!(
+        receipt
+            .result
+            .as_ref()
+            .unwrap()
+            .excerpt
+            .contains("Unavailable lenses:")
+    );
+    assert!(owner.prompts[3].contains("lens-b"));
+    assert!(owner.prompts[3].contains("F1"));
+    assert!(owner.prompts[4].contains("lens-c"));
+    assert!(owner.prompts[4].contains("F1"));
+    assert!(
+        state("synthesis")
+            .outputs
+            .as_ref()
+            .unwrap()
+            .result
+            .as_ref()
+            .unwrap()
+            .excerpt
+            .contains("DEGRADED")
     );
 }
 
@@ -2492,6 +2612,7 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
         route: None,
         routes: Some(routes.clone()),
         required_verdict: None,
+        require_findings: false,
     }]);
     let mut owner = FakeOwner {
         observations: VecDeque::from([
@@ -2727,6 +2848,7 @@ fn pending_and_unknown_keep_observing_the_same_route_without_fallback() {
             route: None,
             routes: Some(routes.clone()),
             required_verdict: None,
+            require_findings: false,
         }]);
         let mut owner = FakeOwner {
             observations: VecDeque::from([first, terminal(AttemptOutcome::Succeeded)]),
@@ -3035,6 +3157,7 @@ fn terminal_task_failure_does_not_try_a_fallback_route() {
         route: None,
         routes: Some(vec![route("first"), route("second")]),
         required_verdict: None,
+        require_findings: false,
     }]);
     let mut owner = FakeOwner {
         observations: VecDeque::from([terminal(AttemptOutcome::TaskFailed)]),

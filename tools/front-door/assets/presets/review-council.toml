@@ -1,10 +1,10 @@
 stages = [
   { id = "subject", role = "plan.review" },
-  { id = "lenses", parallel = [
-    { id = "lens", for_each = "${lenses}", role = "lens.${item.name}" },
+  { id = "lenses", allow_partial = true, parallel = [
+    { id = "lens", for_each = "${lenses}", role = "lens.${item.name}", require_findings = true },
   ], source = { type = "node", node = "subject" } },
-  { id = "verify", role = "review.verify", count = "${verifiers}", source = { type = "node", node = "subject" } },
-  { id = "synthesis", role = "review.synthesis" },
+  { id = "verify", role = "review.verify", count = "${verifiers}", source = { type = "node", node = "subject" }, prompt = "The input includes successful lens findings and any unavailable lens names and reasons. Preserve those unavailable details in your result so synthesis can assess review coverage." },
+  { id = "synthesis", role = "review.synthesis", prompt = "The verifier input includes successful lens output and any unavailable lens names and reasons. Count successful independent reviews against the review ladder minimum for risk tier ${risk_tier}. If the council is below that minimum, mark the result degraded and ask for a same-family substitute through a different lens, or ask the chair to choose one. Do not report an ordinary complete review." },
 ]
 exports = [{ node = "synthesis", outputs = ["result", "findings", "verdict", "commit"] }]
 
@@ -32,7 +32,7 @@ for_each = "lenses"
 name = "lens-${item.name}"
 exports = [{ node = "lens", outputs = ["result", "findings"] }]
 nodes = [
-  { id = "lens", role = "lens.${item.name}", source = "${subject}", tier = "${tier}", acceptance_checks = ["Review the pinned commit through this lens only", "End with one exact VERDICT line"] },
+  { id = "lens", role = "lens.${item.name}", source = "${subject}", tier = "${tier}", require_findings = true, acceptance_checks = ["Review the pinned commit through this lens only", "End with one exact VERDICT line"] },
 ]
 
 [plan.patterns.parameters]

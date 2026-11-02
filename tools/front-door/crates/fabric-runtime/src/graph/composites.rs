@@ -2,9 +2,15 @@
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompositeSpec {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_partial: bool,
     pub nodes: Vec<GraphNode>,
     pub exports: Vec<GraphInput>,
 }
@@ -292,6 +298,7 @@ fn children(
             node.source = None;
             node.read_roots.clear();
             node.composite = Some(CompositeSpec {
+                allow_partial: spec.allow_partial,
                 nodes: Vec::new(),
                 exports: spec
                     .exports
@@ -330,6 +337,29 @@ fn outputs(
         remaining: None,
     };
     let mut results = Vec::new();
+    for member in &node_members(spec, positions) {
+        let progress = &checkpoint.nodes[*member];
+        if progress.state == NodeState::Failed {
+            let reason = progress
+                .advance_error
+                .as_deref()
+                .or_else(|| {
+                    progress
+                        .attempts
+                        .last()
+                        .and_then(|attempt| attempt.outcome.as_ref())
+                        .map(|outcome| match outcome {
+                            AttemptOutcome::AdapterUnavailable => "adapter unavailable",
+                            _ => "lens failed",
+                        })
+                })
+                .unwrap_or("lens failed");
+            selected.warnings.push(bounded(
+                &format!("unavailable {}: {reason}", progress.id),
+                WARNING_BYTES,
+            ));
+        }
+    }
     for export in &spec.exports {
         let Some(source) = checkpoint.nodes[positions[&export.node]].outputs.as_ref() else {
             continue;
@@ -374,6 +404,27 @@ fn outputs(
             })
         }
     };
+    if !selected.warnings.is_empty() {
+        let unavailable = selected.warnings.join("\n");
+        let excerpt = selected
+            .result
+            .as_ref()
+            .map_or_else(String::new, |result| result.excerpt.clone());
+        let combined = if excerpt.is_empty() {
+            unavailable
+        } else {
+            format!("{excerpt}\n\nUnavailable lenses:\n{unavailable}")
+        };
+        let digest = CanonicalV1::file_digest(combined.as_bytes()).to_string();
+        let bounded_excerpt = bounded(&combined, COMPOSITE_EXCERPT_BYTES);
+        selected.result = Some(ResultOutput {
+            extra: Default::default(),
+            digest,
+            truncated: bounded_excerpt.len() < combined.len(),
+            excerpt: bounded_excerpt,
+            path: None,
+        });
+    }
     let total = selected.findings.len();
     selected.findings.truncate(MAX_FINDINGS);
     while canonical_len(&selected.findings) > FINDINGS_BYTES {
@@ -385,6 +436,13 @@ fn outputs(
             .push("composite exported findings exceed cap".into());
     }
     selected
+}
+
+fn node_members(spec: &CompositeSpec, positions: &BTreeMap<String, usize>) -> Vec<usize> {
+    spec.exports
+        .iter()
+        .map(|export| positions[&export.node])
+        .collect()
 }
 
 pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
@@ -416,6 +474,36 @@ fn state(
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,
 ) -> NodeState {
+    if node
+        .composite
+        .as_ref()
+        .is_some_and(|spec| spec.allow_partial)
+    {
+        let members: Vec<_> = node
+            .composite_members
+            .iter()
+            .map(|child| checkpoint.nodes[positions[child]].state)
+            .collect();
+        if members
+            .iter()
+            .any(|state| matches!(state, NodeState::Pending | NodeState::Running))
+        {
+            return if members.iter().any(|state| *state != NodeState::Pending) {
+                NodeState::Running
+            } else {
+                NodeState::Pending
+            };
+        }
+        if members
+            .iter()
+            .any(|state| matches!(state, NodeState::Blocked | NodeState::Skipped))
+        {
+            return NodeState::Blocked;
+        }
+        // A review group can still produce a useful degraded receipt when no
+        // member succeeds: the boundary exports the unavailable causes below.
+        return NodeState::Succeeded;
+    }
     match dependency_state(node, plan, checkpoint, positions) {
         Some(NodeState::Pending)
             if node
