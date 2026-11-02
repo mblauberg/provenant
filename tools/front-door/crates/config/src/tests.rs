@@ -207,6 +207,7 @@ fn provider_state_retention_defaults_overrides_and_validation() {
         let text = format!("schema_version=1\n[retention]\nprovider_state_days={value}");
         let config = load(&roots(), Some(text.as_bytes())).unwrap();
         assert_warning(&config, rule);
+        assert_warning_message(&config, "retention.provider_state_days:");
         assert_eq!(config.retention.provider_state_days, 7);
     }
 }
@@ -233,6 +234,7 @@ fn session_revision_retention_defaults_overrides_and_validation() {
         let text = format!("schema_version=1\n[retention]\nsession_revisions={value}");
         let config = load(&roots(), Some(text.as_bytes())).unwrap();
         assert_warning(&config, rule);
+        assert_warning_message(&config, "retention.session_revisions:");
         assert_eq!(config.retention.session_revisions, 8);
     }
 }
@@ -276,6 +278,7 @@ fn chair_log_retention_defaults_overrides_and_validation() {
         let text = format!("schema_version=1\n[retention]\n{key}={value}");
         let config = load(&roots(), Some(text.as_bytes())).unwrap();
         assert_warning(&config, &format!("{key}_range"));
+        assert_warning_message(&config, &format!("retention.{key}:"));
         assert_eq!(config.retention, RetentionSettings::default());
     }
 }
@@ -322,6 +325,10 @@ fn gc_settings_parse_defaults_overrides_and_warn_on_invalid_values() {
         let text = format!("schema_version=1\n[gc]\n{field}");
         let config = load(&roots(), Some(text.as_bytes())).unwrap();
         assert_warning(&config, rule);
+        assert_warning_message(
+            &config,
+            &format!("gc.{}:", field.split('=').next().unwrap()),
+        );
         assert_eq!(config.gc.idle_days, 7);
     }
 }
@@ -939,8 +946,18 @@ fn assert_warning<T>(config: &ResolvedConfig<T>, rule: &str) {
             Path::new("config.toml")
         );
         assert!(warning.line > 0);
-        assert!(warning.message.contains(":"));
     }
+}
+
+fn assert_warning_message<T>(config: &ResolvedConfig<T>, expected: &str) {
+    assert!(
+        config
+            .warnings
+            .iter()
+            .any(|warning| warning.message.starts_with(expected)),
+        "missing message {expected:?}: {:?}",
+        config.warnings
+    );
 }
 
 #[test]

@@ -433,11 +433,12 @@ fn pattern_expansion_counts_against_the_graph_node_limit() {
     assert!(run.checkpoint.expansions.is_empty());
 }
 
-fn assert_pattern_parameter_error(doc: &GraphDocument, parameters: Value, _reason: &str) {
+fn assert_pattern_parameter_error(doc: &GraphDocument, parameters: Value, reason: &str) {
     let mut owner = fixture_owner(&[&pattern_result(json!({"id":"impl", "pattern":"generator", "parameters":parameters}))]);
     let run = advance(doc, &mut owner, &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+    assert!(run.checkpoint.pause_reason.as_deref().unwrap_or_default().contains(reason), "{:?}", run.checkpoint.pause_reason);
     assert!(run.checkpoint.expansions.is_empty());
 }
 

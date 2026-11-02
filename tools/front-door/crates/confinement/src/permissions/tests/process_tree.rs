@@ -15,7 +15,7 @@ const ROOT: &str = "PROVENANT_TREE_FIXTURE_ROOT";
 const HOST: &str = "PROVENANT_TREE_FIXTURE_HOST";
 const PEER: &str = "PROVENANT_TREE_FIXTURE_PEER";
 const HELPER: &str = "PROVENANT_TREE_FIXTURE_HELPER";
-const READER: &str = "permissions::tests::process_tree::process_tree_reader_fixture";
+const READER: &str = "permissions::tests::process_tree::lane_process_tree_sample_is_private_under_production_profiles";
 
 const TREE_HELPER: &str = r#"
 #include <errno.h>
@@ -100,7 +100,6 @@ fn host_swap(
     Ok([bytes("used")?, bytes("total")?])
 }
 
-#[test]
 fn process_tree_reader_fixture() -> Result<(), Box<dyn std::error::Error>> {
     let Some(role) = std::env::var_os(ROLE) else {
         return Ok(());
@@ -240,6 +239,10 @@ fn process_tree_reader_fixture() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn lane_process_tree_sample_is_private_under_production_profiles()
 -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var_os("PROVENANT_TREE_FIXTURE_ROLE").is_some() {
+        return process_tree_reader_fixture();
+    }
+
     let executor = SystemExecutor::new(3)?;
     let cancel = CancelToken::new();
     let env = [("LC_ALL".into(), "C".into())];

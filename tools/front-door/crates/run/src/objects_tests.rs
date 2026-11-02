@@ -984,8 +984,10 @@ fn unrelated_corrupt_shared_history_does_not_get_scanned() -> TestResult {
 
 #[test]
 fn cancellation_kills_a_blocking_import_within_two_seconds() -> TestResult {
+    use provenant_core::Clock;
     use std::time::Instant;
     let fixture = Fixture::new("sha1")?;
+    let clock = provenant_os::clock::SystemClock::new();
     let wrapper = fixture.root.join("blocking-git");
     let entered = fixture.root.join("entered");
     fs::write(
@@ -1024,6 +1026,7 @@ fn cancellation_kills_a_blocking_import_within_two_seconds() -> TestResult {
             std::thread::sleep(Duration::from_millis(10));
         }
         let seen = entered.exists();
+        let cancelled_at = clock.mono_now();
         let receipt = provenant_supervisor::custody::request_stop(
             attempt.try_clone()?,
             crate::tests::exit().scope,
@@ -1035,6 +1038,14 @@ fn cancellation_kills_a_blocking_import_within_two_seconds() -> TestResult {
             provenant_supervisor::custody::StopReceipt::Requested
         );
         assert!(worker.join().map_err(|_| "import panicked")?.is_err());
+        assert!(
+            clock
+                .mono_now()
+                .as_micros()
+                .saturating_sub(cancelled_at.as_micros())
+                < 2_000_000,
+            "cancellation exceeded two seconds"
+        );
         assert!(seen, "never reached import");
         fixture.assert_not_published();
         Ok(())
