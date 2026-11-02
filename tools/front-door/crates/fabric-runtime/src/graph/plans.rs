@@ -2,6 +2,8 @@
 use super::*;
 use std::collections::BTreeMap;
 
+const FALLBACK_RETRY_CONTEXT: &str = "\n[planner-fragment-retry-context:";
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanSpec {
     #[serde(flatten)]
@@ -1178,8 +1180,15 @@ pub(super) fn settle(
         }
         Err(reason) => {
             if let Some(spec) = node.plan.as_ref().filter(|spec| spec.fallback.is_some()) {
-                let fallback_reason =
-                    bounded(&format!("planner fragment invalid: {reason}"), NOTE_BYTES);
+                let fragment_error = checkpoint.nodes[index]
+                    .expansion_pause
+                    .as_deref()
+                    .and_then(retry_fragment_error)
+                    .unwrap_or_else(|| bounded(&reason, NOTE_BYTES));
+                let fallback_reason = bounded(
+                    &format!("planner fragment invalid: {fragment_error}"),
+                    NOTE_BYTES,
+                );
                 let fallback = (|| {
                     let addition = fallback_expansion(&node.id, spec, source)?;
                     let mut preview = document.clone();
@@ -1203,6 +1212,20 @@ pub(super) fn settle(
                         checkpoint.nodes[index].state = NodeState::Succeeded;
                         checkpoint.nodes[index].expansion_pause = None;
                         checkpoint.nodes[index].fragment = None;
+                        if checkpoint.pause_reason.as_ref().is_some_and(|reason| {
+                            reason.starts_with("node ") && reason.contains(" expansion paused:")
+                        }) {
+                            checkpoint.pause_reason = checkpoint.nodes.iter().find_map(|node| {
+                                node.expansion_pause
+                                    .as_deref()
+                                    .map(pause_reason_for_display)
+                                    .map(str::to_owned)
+                            });
+                            checkpoint.pause_code = checkpoint
+                                .pause_reason
+                                .as_ref()
+                                .map(|_| "invalid_plan_expansion".into());
+                        }
                         let outputs = checkpoint.nodes[index].outputs.get_or_insert_with(|| {
                             super::outputs::make_outputs(None, None, None, None, None)
                         });
@@ -1216,15 +1239,21 @@ pub(super) fn settle(
                         return Some((preview, plan, positions));
                     }
                     Err(fallback_error) => {
-                        let reason = bounded(
+                        let display_reason = bounded(
                             &format!(
                                 "node {} fallback expansion paused: {fallback_error}",
                                 node.id
                             ),
+                            1000,
+                        );
+                        let retry_context =
+                            provenant_core::hex(bounded(&fragment_error, 1500).as_bytes());
+                        let persisted_reason = bounded(
+                            &format!("{display_reason}{FALLBACK_RETRY_CONTEXT}{retry_context}"),
                             MAX_ADVANCE_ERROR_BYTES,
                         );
-                        checkpoint.nodes[index].expansion_pause = Some(reason.clone());
-                        checkpoint.pause_reason = Some(reason);
+                        checkpoint.nodes[index].expansion_pause = Some(persisted_reason);
+                        checkpoint.pause_reason = Some(display_reason);
                         checkpoint.pause_code = Some("invalid_plan_expansion".into());
                         return None;
                     }
@@ -1309,4 +1338,15 @@ fn fallback_reason(progress: &NodeProgress) -> String {
         |detail| format!("planner attempt failed ({outcome}): {detail}"),
     );
     bounded(&reason, NOTE_BYTES)
+}
+
+fn retry_fragment_error(pause: &str) -> Option<String> {
+    let (_, context) = pause.rsplit_once(FALLBACK_RETRY_CONTEXT)?;
+    String::from_utf8(provenant_core::unhex(context)?).ok()
+}
+
+pub(super) fn pause_reason_for_display(reason: &str) -> &str {
+    reason
+        .rsplit_once(FALLBACK_RETRY_CONTEXT)
+        .map_or(reason, |(display, _)| display)
 }

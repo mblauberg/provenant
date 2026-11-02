@@ -657,6 +657,13 @@ mod result_tests {
             .find(|line| line.starts_with("Pause reason: "))
             .unwrap_or_default();
         assert!(reason_line.chars().count() <= 1024 + "Pause reason: ".chars().count() + 1);
+
+        run.checkpoint.pause_reason = Some("before\u{1b}[31mafter".into());
+        let human = super::graph_display(&run, "fabric graph status", &globals);
+        assert!(human.contains("Pause reason: before[31mafter"));
+        assert!(!human.contains('\u{1b}'));
+        let summary = super::graph_human::graph_summary(&serde_json::to_value(&run).unwrap());
+        assert!(summary.lines.iter().any(|line| line == "paused: before[31mafter"));
     }
 
     #[test]

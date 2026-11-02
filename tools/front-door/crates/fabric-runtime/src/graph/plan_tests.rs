@@ -288,6 +288,113 @@ fn fallback_expansion_over_a_structural_limit_pauses_with_a_reason() {
 }
 
 #[test]
+fn missing_fragment_fallback_retries_after_raising_the_structural_limit() {
+    let document = two_step_fallback_document();
+    let limits = crate::config::GraphLimits {
+        nodes: 3,
+        ..Default::default()
+    };
+    let mut owner = FakeOwner {
+        observations: [terminal_with_result(
+            AttemptOutcome::Succeeded,
+            "planner returned no fragment block",
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let paused = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &limits,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(paused.status, GraphStatus::Paused);
+    assert!(paused
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "plan")
+        .unwrap()
+        .fragment
+        .is_none());
+    assert!(paused.checkpoint.expansions.is_empty());
+
+    let mut owner = fixture_owner(&["first result", "second result", "done"]);
+    let resumed = resume_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &Default::default(),
+        &Default::default(),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(resumed.status, GraphStatus::Complete, "{:?}", resumed.checkpoint.pause_reason);
+    assert!(resumed.checkpoint.successful());
+    assert_eq!(resumed.checkpoint.expansions.len(), 1);
+    let plan = resumed
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "plan")
+        .unwrap();
+    assert!(plan
+        .outputs
+        .as_ref()
+        .unwrap()
+        .plan
+        .as_ref()
+        .unwrap()
+        .fallback_reason
+        .contains("fragment block missing"));
+    let ids: Vec<_> = owner.calls.iter().map(|call| call.0.node_id.as_str()).collect();
+    assert_eq!(ids, ["plan--fallback--first", "plan--fallback--second", "after"]);
+}
+
+#[test]
+fn ordinary_advance_clears_pause_after_admitting_retried_fallback() {
+    let document = two_step_fallback_document();
+    let limits = crate::config::GraphLimits {
+        nodes: 3,
+        ..Default::default()
+    };
+    let mut owner = FakeOwner {
+        observations: [terminal_with_result(
+            AttemptOutcome::Succeeded,
+            "planner returned no fragment block",
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let paused = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &limits,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(paused.status, GraphStatus::Paused);
+
+    let mut owner = fixture_owner(&["first result", "second result", "done"]);
+    let advanced = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &Default::default(),
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(advanced.status, GraphStatus::Complete, "{:?}", advanced.checkpoint.pause_reason);
+    assert!(advanced.checkpoint.successful());
+    assert_eq!(advanced.checkpoint.expansions.len(), 1);
+}
+
+#[test]
 fn planner_prelaunch_failure_runs_static_fallback_without_an_attempt() {
     let document: GraphDocument = serde_json::from_value(json!({
         "schema_version":1, "graph_id":"planned-fallback-prelaunch", "nodes":[

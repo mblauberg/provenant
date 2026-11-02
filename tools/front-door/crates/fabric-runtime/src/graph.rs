@@ -874,6 +874,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 && node
                                     .plan
                                     .as_ref()
+                                    .is_some_and(|spec| spec.fallback.is_some()))
+                            || (n.state == NodeState::Succeeded
+                                && n.expansion_pause.is_some()
+                                && node
+                                    .plan
+                                    .as_ref()
                                     .is_some_and(|spec| spec.fallback.is_some())))
                 })
                 && let Some((next_expanded, next_plan, next_positions)) =
@@ -889,11 +895,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 continue 'schedule;
             }
         }
-        if let Some(reason) = checkpoint
-            .nodes
-            .iter()
-            .find_map(|n| n.expansion_pause.clone())
-        {
+        if let Some(reason) = checkpoint.nodes.iter().find_map(|node| {
+            node.expansion_pause
+                .as_deref()
+                .map(plans::pause_reason_for_display)
+                .map(str::to_owned)
+        }) {
             checkpoint.pause_reason = Some(reason);
             checkpoint.pause_code = Some("invalid_plan_expansion".into());
         }

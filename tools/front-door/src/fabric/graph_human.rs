@@ -192,14 +192,7 @@ pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
     )
 }
 
-/// Pause reasons are persisted with a byte cap; keep human rendering bounded
-/// too, including for checkpoints written by older versions.
+/// Sanitize and bound even pause reasons from older checkpoints before printing.
 fn bounded_reason(reason: &str) -> String {
-    let mut chars = reason.chars();
-    let bounded: String = chars.by_ref().take(1024).collect();
-    if chars.next().is_some() {
-        format!("{bounded}…")
-    } else {
-        bounded
-    }
+    provenant_fabric_runtime::hosts::plain_text(reason, 1024)
 }

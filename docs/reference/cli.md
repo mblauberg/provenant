@@ -2529,6 +2529,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `id` | `{"description": "Show this run, task or attempt ID, including settled lanes", "name": "id", "positional": true}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "description": "Maximum full records per page", "name": "limit"}` |
 | `--cursor` | `{"description": "Continue a full-record page from its cursor", "name": "cursor"}` |
+| `--graph-cursor` | `{"description": "Continue a paused graph page from its cursor", "name": "graph_cursor"}` |
 | `--all` | `{"defaults": ["false"], "description": "Include full records and older lanes", "name": "all", "values": ["true", "false"]}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
@@ -2542,6 +2543,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
         "id",
         "limit",
         "cursor",
+        "graph_cursor",
         "all"
       ],
       "multiple": true,

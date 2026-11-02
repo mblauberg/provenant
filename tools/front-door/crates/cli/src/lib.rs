@@ -1113,6 +1113,7 @@ mod tests {
         valid(&["status"]);
         valid(&["status", &"a".repeat(32)]);
         valid(&["status", "abcdef12", "--all"]);
+        valid(&["status", "--graph-cursor", "20"]);
         valid(&["lanes", "--all", "--id", "abcdef12"]);
         valid(&["status", "--all", "--json"]);
         valid(&["land", "1947"]);

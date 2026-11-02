@@ -163,7 +163,7 @@ Start a read-only lane:
 printf '%s\n' 'Summarise this repository structure in three bullets.' | \
   provenant run \
     --prompt-stdin --route junior
-provenant status                        # active and recent lanes
+provenant status                        # active/recent lanes and paused graph reasons
 ```
 
 A writer lane gets its own worktree, and the host pushes the verified result:

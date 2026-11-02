@@ -1472,6 +1472,9 @@ pub struct Status {
     /// Continue a full-record page from its cursor
     #[arg(long, hide = true)]
     pub cursor: Option<u64>,
+    /// Continue a paused graph page from its cursor
+    #[arg(long)]
+    pub graph_cursor: Option<u64>,
     /// Include full records and older lanes
     #[arg(long)]
     pub all: bool,
