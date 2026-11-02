@@ -52,9 +52,16 @@ impl ReviewSize {
         let mut lines = 0usize;
         let mut files = 0usize;
         let mut crates = std::collections::BTreeSet::new();
-        let roots: Vec<&str> = tree.split('\0').filter_map(|path| {
-            if path == "Cargo.toml" { Some("") } else { path.strip_suffix("/Cargo.toml") }
-        }).collect();
+        let roots: Vec<&str> = tree
+            .split('\0')
+            .filter_map(|path| {
+                if path == "Cargo.toml" {
+                    Some("")
+                } else {
+                    path.strip_suffix("/Cargo.toml")
+                }
+            })
+            .collect();
         for row in numstat.split('\0').filter(|row| !row.is_empty()) {
             let mut fields = row.splitn(3, '\t');
             let (Some(added), Some(removed), Some(path)) =
@@ -68,7 +75,16 @@ impl ReviewSize {
             };
             lines = lines.saturating_add(added).saturating_add(removed);
             files += 1;
-            if let Some(root) = roots.iter().filter(|root| root.is_empty() || path.strip_prefix(**root).is_some_and(|suffix| suffix.starts_with('/'))).max_by_key(|root| root.len()) {
+            if let Some(root) = roots
+                .iter()
+                .filter(|root| {
+                    root.is_empty()
+                        || path
+                            .strip_prefix(**root)
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                })
+                .max_by_key(|root| root.len())
+            {
                 crates.insert(*root);
             }
         }
@@ -482,8 +498,17 @@ mod tests {
     fn numstat_counts_manifest_roots_and_binary_changes() {
         let size = ReviewSize::default();
         let trees = "Cargo.toml\0apps/a/Cargo.toml\0apps/b/Cargo.toml\0";
-        assert_eq!(size.classify_numstat("20\t3\tapps/a/src/main.rs\0", trees), "small");
-        assert_eq!(size.classify_numstat("20\t3\tapps/a/src/main.rs\01\t1\tapps/b/src/lib.rs\0", trees), "medium");
+        assert_eq!(
+            size.classify_numstat("20\t3\tapps/a/src/main.rs\0", trees),
+            "small"
+        );
+        assert_eq!(
+            size.classify_numstat(
+                "20\t3\tapps/a/src/main.rs\01\t1\tapps/b/src/lib.rs\0",
+                trees
+            ),
+            "medium"
+        );
         assert_eq!(size.classify_numstat("-\t-\timage.png\0", trees), "large");
     }
 
