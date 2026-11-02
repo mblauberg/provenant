@@ -56,6 +56,10 @@ detail_codes! {
     TOOLCHAIN_PIN_CUSTOM = "toolchain_pin_custom",
     TOOLCHAIN_PIN_ABSENT_OR_AMBIGUOUS = "toolchain_pin_absent_or_ambiguous",
     TOOLCHAIN_NOT_FIXED_RELEASE = "toolchain_not_fixed_release",
+    RELEASE_TOOLCHAIN_MISSING = "release_toolchain_missing",
+    COMPILER_HOST_MISSING = "compiler_host_missing",
+    TOOLCHAIN_PIN_INVALID = "toolchain_pin_invalid",
+    TOOLCHAIN_PIN_CHANNEL_MISSING = "toolchain_pin_channel_missing",
 }
 
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]

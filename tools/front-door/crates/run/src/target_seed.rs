@@ -126,7 +126,7 @@ pub(crate) fn lane_rustc_metadata(
     if candidates.len() != 1 {
         return Err(codes::RELEASE_TOOLCHAIN_AMBIGUOUS_OR_MISSING);
     }
-    let candidate = candidates.pop().ok_or("release_toolchain_missing")?;
+    let candidate = candidates.pop().ok_or(codes::RELEASE_TOOLCHAIN_MISSING)?;
     if !candidate.file_type().is_ok_and(|kind| kind.is_dir()) {
         return Err(codes::TOOLCHAIN_NOT_DIRECTORY);
     }
@@ -173,7 +173,7 @@ pub(crate) fn lane_rustc_metadata(
     let host = version
         .lines()
         .find_map(|line| line.strip_prefix("host: "))
-        .ok_or("compiler_host_missing")?
+        .ok_or(codes::COMPILER_HOST_MISSING)?
         .to_owned();
     if candidate.file_name() != std::ffi::OsStr::new(&format!("{channel}-{host}")) {
         return Err(codes::COMPILER_HOST_MISMATCH);
@@ -234,14 +234,14 @@ fn lane_release_pin(worktree: &Path, home: &Path) -> Result<String, &'static str
             let toolchain = doc
                 .get("toolchain")
                 .and_then(|v| v.as_table())
-                .ok_or("toolchain_pin_invalid")?;
+                .ok_or(codes::TOOLCHAIN_PIN_INVALID)?;
             if toolchain.contains_key("path") {
                 return Err(codes::TOOLCHAIN_PIN_CUSTOM);
             }
             toolchain
                 .get("channel")
                 .and_then(|v| v.as_str())
-                .ok_or("toolchain_pin_channel_missing")?
+                .ok_or(codes::TOOLCHAIN_PIN_CHANNEL_MISSING)?
                 .to_owned()
         }
         (false, true) => read(&legacy, codes::TOOLCHAIN_PIN_UNREADABLE)?
