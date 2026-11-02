@@ -229,6 +229,12 @@ pub(crate) fn writer_dispatch_uses_lane_cache_and_narrow_provider_state() -> Res
         return Ok(());
     }
     let rig = fixture()?;
+    // The cargo seed is on by default; this test is about the lane cache and
+    // provider state, so it pins the seed off.
+    fs::write(
+        rig.state.join("config.toml"),
+        "[domains.fabric.lanes.cargo_seed]\nenabled = false\n",
+    )?;
     let (_, context) = writer_context(&rig)?;
     let cleanup = super::worktree_tests::writer_process_cleanup(&context);
     let (_, attempt) = dispatch(&rig, "writer", "compose-writer")?;
