@@ -247,6 +247,11 @@ pub struct LaneAccess {
     pub read_roots: Vec<std::path::PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub write_roots: Vec<std::path::PathBuf>,
+    /// A graph node's materialised upstream results, read-only. The host
+    /// grants it from its own graph-inputs directory under the state root,
+    /// where a `--read-root` may not reach; any other path is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inputs_root: Option<std::path::PathBuf>,
 }
 impl LaneAccess {
     pub fn is_default(&self) -> bool {

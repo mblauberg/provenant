@@ -289,10 +289,56 @@ fn fixture() -> Result {
             std::env::var("CLAUDE_CODE_AUTO_COMPACT_WINDOW")?.as_str(),
             "275000"
         );
+        let answer = if prompt.contains("fixture large result") {
+            // Far past the 4 KiB excerpt a consuming node's prompt carries.
+            let mut text: String = (0..2000)
+                .map(|n| format!("finding {n:04} body\n"))
+                .collect();
+            text.push_str("END-OF-LARGE-RESULT");
+            text
+        } else if let Some(name) = prompt
+            .lines()
+            .find_map(|line| line.strip_prefix("fixture case result "))
+        {
+            format!("case-result-{name}")
+        } else if prompt.contains("fixture read upstream file") {
+            // The prompt lists each materialised file as `- label: PATH (N bytes)`.
+            let path = prompt
+                .lines()
+                .skip_while(|line| *line != "<UPSTREAM_FILES>")
+                .find_map(|line| line.strip_prefix("- producer: "))
+                .and_then(|line| line.split_once(" ("))
+                .map(|(path, _)| PathBuf::from(path))
+                .ok_or("upstream file entry")?;
+            let text = fs::read_to_string(&path)?;
+            let sibling = path.with_file_name("other.md");
+            // Upstreams whose ids differ only by case each keep their own file.
+            let mut cases = String::new();
+            for label in ["Review", "review"] {
+                let entry = format!("- {label}: ");
+                let path = prompt
+                    .lines()
+                    .skip_while(|line| *line != "<UPSTREAM_FILES>")
+                    .find_map(|line| line.strip_prefix(entry.as_str()))
+                    .and_then(|line| line.split_once(" ("))
+                    .map(|(path, _)| PathBuf::from(path))
+                    .ok_or("case upstream file entry")?;
+                cases.push_str(&format!("; {label}={}", fs::read_to_string(path)?));
+            }
+            format!(
+                "read {} bytes; tail {}; sibling write denied {}; parent listing denied {}{cases}",
+                text.len(),
+                text.lines().last().unwrap_or_default(),
+                fs::write(&sibling, b"x").is_err(),
+                fs::read_dir(path.parent().and_then(|p| p.parent()).ok_or("parent")?).is_err(),
+            )
+        } else {
+            "OK".to_owned()
+        };
         for frame in [
             json!({"type":"system","subtype":"init","session_id":"fixture-session"}),
-            json!({"type":"assistant","session_id":"fixture-session","parent_tool_use_id":null,"message":{"model":"claude-sonnet-5-5","role":"assistant","content":[{"type":"text","text":"OK"}],"usage":{"input_tokens":1,"output_tokens":1}}}),
-            json!({"type":"result","session_id":"fixture-session","subtype":"success","is_error":false,"result":"OK"}),
+            json!({"type":"assistant","session_id":"fixture-session","parent_tool_use_id":null,"message":{"model":"claude-sonnet-5-5","role":"assistant","content":[{"type":"text","text":answer}],"usage":{"input_tokens":1,"output_tokens":1}}}),
+            json!({"type":"result","session_id":"fixture-session","subtype":"success","is_error":false,"result":answer}),
         ] {
             writeln!(io::stdout(), "{frame}")?;
         }
@@ -2261,6 +2307,106 @@ fn graph_settlement_records_a_failed_advance_for_status() -> Result {
     Ok(())
 }
 
+/// A node whose upstream result is far past the excerpt budget reads the whole
+/// of it from the file the host materialised in its own inputs directory, and
+/// nothing else beside it.
+fn graph_node_reads_full_upstream_result_from_its_inputs_directory() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = claude_fixture()?;
+    let cleanup = rig.process_cleanup();
+    for path in [
+        ".cargo/bin",
+        ".cargo/registry",
+        ".cargo/git",
+        "Library/pnpm",
+        "Library/Caches/pnpm",
+        ".cache/node",
+        ".rustup/toolchains",
+        ".codex",
+        ".claude/hooks",
+        ".kiro/settings",
+        ".gemini/config",
+        ".cursor/extensions",
+        ".npm",
+    ] {
+        fs::create_dir_all(rig.home.join(path))?;
+    }
+    fs::write(rig.home.join(".rustup/settings.toml"), "")?;
+    let route = json!({"adapter":"claude","model":"claude/claude-sonnet-5-5","effort":"medium","account":"pro"});
+    fs::write(
+        rig.project.join("graph.json"),
+        serde_json::to_vec(
+            &json!({"schema_version":1,"graph_id":"full-inputs","nodes":[
+                {"id":"producer","prompt":"fixture large result","access":"read_only","route":route},
+                {"id":"Review","prompt":"fixture case result Review","access":"read_only","route":route},
+                {"id":"review","prompt":"fixture case result review","access":"read_only","route":route},
+                {"id":"consumer","prompt":"fixture read upstream file","access":"read_only",
+                 "depends_on":["producer","Review","review"],
+                 "inputs":[{"node":"producer","outputs":["result"]},
+                           {"node":"Review","outputs":["result"]},
+                           {"node":"review","outputs":["result"]}],"route":route}
+            ]}),
+        )?,
+    )?;
+    let started = rig.command(&[
+        "fabric",
+        "graph",
+        "run",
+        "--document",
+        "graph.json",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&started),
+        0,
+        "{}",
+        String::from_utf8_lossy(&started.stdout.bytes)
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let status = loop {
+        let status = rig.command(&["fabric", "graph", "status", "full-inputs", "--json"])?;
+        assert_eq!(code(&status), 0, "{status:?}");
+        let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
+        if status["data"]["status"] == "complete" {
+            break status;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "graph did not complete: {status}"
+        );
+        std::thread::park_timeout(std::time::Duration::from_millis(50));
+    };
+    let nodes = status["data"]["checkpoint"]["nodes"]
+        .as_array()
+        .ok_or("nodes")?;
+    let producer = &nodes[0]["outputs"]["result"];
+    assert_eq!(producer["truncated"], true, "{status}");
+    assert!(producer["excerpt"].as_str().ok_or("excerpt")?.len() <= 4096);
+    let consumer = nodes
+        .iter()
+        .find(|node| node["id"] == "consumer")
+        .ok_or("consumer")?;
+    let excerpt = consumer["outputs"]["result"]["excerpt"]
+        .as_str()
+        .ok_or("consumer excerpt")?;
+    let full = (0..2000)
+        .map(|n| format!("finding {n:04} body\n"))
+        .collect::<String>()
+        + "END-OF-LARGE-RESULT";
+    assert_eq!(
+        excerpt,
+        format!(
+            "read {} bytes; tail END-OF-LARGE-RESULT; sibling write denied true; parent listing denied true; Review=case-result-Review; review=case-result-review",
+            full.len()
+        ),
+        "{status}"
+    );
+    cleanup.disarm();
+    Ok(())
+}
+
 fn graph_settlement_advances_writer_and_account_routed_review() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -3889,6 +4035,7 @@ fn main() -> ExitCode {
                 "host_native_preparation_uses_the_provider_contract",
                 "unconfigured_host_native_repair_launches_alias_fallback",
                 "graph_settlement_advances_writer_and_account_routed_review",
+                "graph_node_reads_full_upstream_result_from_its_inputs_directory",
                 "graph_settlement_records_a_failed_advance_for_status",
                 "opencode_free_pool_cools_second_model",
                 "opencode_free_reset_cools_pool_until_reset_and_restores",
@@ -3950,6 +4097,9 @@ fn main() -> ExitCode {
                     }
                     "graph_settlement_advances_writer_and_account_routed_review" => {
                         graph_settlement_advances_writer_and_account_routed_review()
+                    }
+                    "graph_node_reads_full_upstream_result_from_its_inputs_directory" => {
+                        graph_node_reads_full_upstream_result_from_its_inputs_directory()
                     }
                     "graph_settlement_records_a_failed_advance_for_status" => {
                         graph_settlement_records_a_failed_advance_for_status()

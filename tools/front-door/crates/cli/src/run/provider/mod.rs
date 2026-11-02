@@ -29,6 +29,7 @@ use observation::*;
 use preparation::*;
 
 pub(crate) use confinement::{find_executable, resolve_executable};
+pub use confinement::{graph_inputs_directory, graph_node_inputs_directory};
 pub(super) use continuation::continuation_available;
 pub(super) use fixtures::start_fabric_relay;
 #[cfg(feature = "fixture")]

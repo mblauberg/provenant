@@ -203,6 +203,19 @@ pub trait AttemptOwner {
         })
     }
 
+    /// Write each requested upstream result, verified and redacted as
+    /// `provenant output --full` reads it, into a directory only this attempt
+    /// may read, within `cap` bytes in total. Idempotent by `key`. A host that
+    /// cannot materialise returns `None` and the prompt keeps its excerpts.
+    fn materialise_inputs(
+        &mut self,
+        _key: &AttemptKey,
+        _requests: &[InputRequest],
+        _cap: usize,
+    ) -> Option<MaterialisedInputs> {
+        None
+    }
+
     fn observe_or_start(
         &mut self,
         key: &AttemptKey,
@@ -1357,7 +1370,22 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .last()
                     .and_then(|attempt| attempt.input_cap)
                     .unwrap_or(limits.node_prompt_bytes);
-                let prompt = render_input(node, &checkpoint, &positions, input_cap).0;
+                let mut prompt = render_input(node, &checkpoint, &positions, input_cap).0;
+                // An accepted attempt is only observed, so its files exist
+                // already and its prompt is not sent again.
+                let materialised = if stored_ref.is_some() {
+                    None
+                } else {
+                    let requests = upstream_results(node, &plan, &checkpoint, &positions);
+                    if requests.is_empty() {
+                        None
+                    } else {
+                        owner.materialise_inputs(&key, &requests, NODE_INPUT_FILE_BYTES)
+                    }
+                };
+                if let Some(materialised) = &materialised {
+                    prompt.push_str(&render_files(&materialised.entries));
+                }
                 // The writer is the nearest writing node along the source chain,
                 // so a framing node between a lens and the writer is skipped.
                 let mut distinct_attempts: Vec<String> = Vec::new();
@@ -1424,6 +1452,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         prompt: &prompt,
                         required_verdict: node.required_verdict.as_deref(),
                         deadline_seconds: node.deadline_seconds,
+                        inputs_dir: materialised
+                            .as_ref()
+                            .and_then(|inputs| inputs.directory.as_deref()),
                     },
                     &route,
                     node.access,

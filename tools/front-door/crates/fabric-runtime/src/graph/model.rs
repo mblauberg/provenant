@@ -885,6 +885,41 @@ pub struct NodeInput<'a> {
     pub prompt: &'a str,
     pub required_verdict: Option<&'a str>,
     pub deadline_seconds: Option<u64>,
+    /// Host directory holding this attempt's materialised upstream results.
+    /// The lane receives read access to it and nothing else of the host's
+    /// private state.
+    pub inputs_dir: Option<&'a std::path::Path>,
+}
+
+/// One upstream result a node's prompt points at as a file. `attempt_ref` is
+/// the host-qualified attempt that produced it, absent when none was recorded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputRequest {
+    pub label: String,
+    pub attempt_ref: Option<String>,
+}
+
+/// What became of one requested upstream result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MaterialisedInput {
+    /// Written in full, or cut at the per-node cap when `omitted` is non-zero.
+    File {
+        label: String,
+        path: std::path::PathBuf,
+        bytes: u64,
+        omitted: u64,
+    },
+    /// Not written because the per-node cap was already reached.
+    Capped { label: String },
+    /// Not available here; the reason is shown to the node.
+    Unavailable { label: String, reason: String },
+}
+
+/// The host's answer: one entry per request, in request order.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MaterialisedInputs {
+    pub directory: Option<std::path::PathBuf>,
+    pub entries: Vec<MaterialisedInput>,
 }
 
 /// Host polling policy. Defaults observe pending gates once per tick; hosts

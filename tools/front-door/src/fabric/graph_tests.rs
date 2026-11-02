@@ -744,6 +744,97 @@ mod result_tests {
     }
 
     #[test]
+    fn labels_differing_only_by_case_get_distinct_lowercase_files() {
+        use super::graph_inputs::file_name;
+        let (upper, lower) = (file_name("Review"), file_name("review"));
+        assert_ne!(upper, lower);
+        for name in [&upper, &lower] {
+            let stem = name.strip_suffix(".md").expect("markdown file");
+            assert!(
+                stem.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            );
+        }
+        assert_eq!(file_name("review"), lower, "stable across calls");
+    }
+
+    #[test]
+    fn upstream_results_on_other_hosts_are_named_unavailable_without_a_fetch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use provenant_fabric_runtime::graph::{
+            AttemptKey, InputRequest, MaterialisedInput, MaterialisedInputs,
+        };
+        struct FreeWorkers;
+        impl WorkerObserver for FreeWorkers {
+            fn observe_roots(
+                &self,
+                _roots: &[PathBuf],
+            ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::WorkerState>
+            {
+                Default::default()
+            }
+        }
+        let rig = crate::worktree_tests::support::TestRig::new()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project)
+                .map_err(|error| format!("open fixture context: {error}"))?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &FreeWorkers,
+        };
+        let request = |label: &str, attempt_ref: Option<&str>| InputRequest {
+            label: label.into(),
+            attempt_ref: attempt_ref.map(str::to_owned),
+        };
+        let key = AttemptKey {
+            extra: Default::default(),
+            graph_id: "g".into(),
+            node_id: "consumer".into(),
+            route_index: 0,
+        };
+        let inputs = graph_inputs::materialise(
+            &factory,
+            &CancelToken::new(),
+            &key,
+            &[
+                request("review", Some("workshop/abc123")),
+                request("never-ran", None),
+            ],
+            1024,
+        );
+        assert_eq!(
+            inputs,
+            MaterialisedInputs {
+                directory: None,
+                entries: vec![
+                    MaterialisedInput::Unavailable {
+                        label: "review".into(),
+                        reason: "on host workshop; remote materialisation tracked in #2665".into(),
+                    },
+                    MaterialisedInput::Unavailable {
+                        label: "never-ran".into(),
+                        reason: "no attempt was recorded for it".into(),
+                    },
+                ],
+            }
+        );
+        assert!(
+            !rig.state.join("fabric").join("graph-inputs").exists(),
+            "no directory is made when nothing is local"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn graph_status_shows_waiting_ci_checks_head_and_live_elapsed() {
         let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
             serde_json::from_value(serde_json::json!({
