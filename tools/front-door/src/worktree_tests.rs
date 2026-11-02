@@ -184,6 +184,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "lane_prepare_isolates_nested_state",
             "lane_prepare_isolates_nested_writer_state",
             "lane_prepare_isolates_nested_publishing_state",
+            "lane_builds_and_tests_swift_in_a_registered_worktree",
             "read_only_dispatch_applies_bound_git_and_project_writes",
             "writer_dispatch_uses_lane_cache_and_narrow_provider_state",
             "writer_dispatch_edits_a_linked_worktree",
@@ -245,6 +246,9 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "lane_prepare_isolates_nested_state" => lane_prepare_isolates_nested_state(),
                 "lane_prepare_isolates_nested_writer_state" => {
                     lane_prepare_isolates_nested_writer_state()
+                }
+                "lane_builds_and_tests_swift_in_a_registered_worktree" => {
+                    lane_builds_and_tests_swift_in_a_registered_worktree()
                 }
                 "lane_prepare_isolates_nested_publishing_state" => {
                     lane_prepare_isolates_nested_publishing_state()
@@ -2756,7 +2760,32 @@ fn lane_prepare_isolates_nested_publishing_state() -> Result {
     lane_prepare_cases(&[("codex", true, true, 95), ("claude", true, true, 96)])
 }
 
+/// A writer builds and tests a SwiftPM package in its registered worktree.
+/// A real compile cannot share the shell probe's per-test budget (#2627), so
+/// it is one case with its own nextest timeout.
+fn lane_builds_and_tests_swift_in_a_registered_worktree() -> Result {
+    let selected = cfg!(target_os = "macos")
+        && Path::new("/usr/bin/swift").exists()
+        && provenant_providers::swift_toolchain_available(&|name| std::env::var_os(name));
+    if !selected {
+        provenant_test_support::skip_sandbox_dependent_test("no Swift toolchain is selected")?;
+        return Ok(());
+    }
+    lane_prepare_with(&[("claude", true, false, 97)], Probe::Swift)
+}
+
+/// Which native proof a lane case runs inside its compiled profile.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Probe {
+    Shell,
+    Swift,
+}
+
 fn lane_prepare_cases(cases: &[(&str, bool, bool, u8)]) -> Result {
+    lane_prepare_with(cases, Probe::Shell)
+}
+
+fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
     use provenant_confinement::permissions::PathScope;
     let rig = repository()?;
     let cleanup = provenant_supervisor::fixture::ProcessCleanupGuard::new(&rig.state);
@@ -2853,9 +2882,11 @@ fn lane_prepare_cases(cases: &[(&str, bool, bool, u8)]) -> Result {
     // Clone immutable tools into the isolated home. No test reads host
     // provider configuration, login state or Cargo credentials.
     #[cfg(target_os = "macos")]
-    if cases.iter().any(|&(adapter, writer, publishing, _)| {
-        native_shell_probe_case(adapter, writer, publishing)
-    }) {
+    if probe == Probe::Shell
+        && cases.iter().any(|&(adapter, writer, publishing, _)| {
+            native_shell_probe_case(adapter, writer, publishing)
+        })
+    {
         clone_rust_toolchain(&rig, &home)?;
     }
     let executable = rig.root.join("provider/bin/codex");
@@ -3277,7 +3308,7 @@ fn lane_prepare_cases(cases: &[(&str, bool, bool, u8)]) -> Result {
             frames.as_bytes(),
             &config,
             &parent_context,
-            native_shell_probe_case(adapter, writer, publishing),
+            native_shell_probe_case(adapter, writer, publishing).then_some(probe),
         )
         .map_err(|e| format!("confined {adapter} writer={writer}: {e}"))?;
     }
@@ -3449,7 +3480,7 @@ fn verify_lane_profile(
     frames: &[u8],
     config: &dyn Fn(u8) -> String,
     parent: &provenant_run::HolderContext,
-    native_shell_probe: bool,
+    probe: Option<Probe>,
 ) -> Result {
     use provenant_confinement::permissions::{
         AccessMode, AnchoredDirectory, Anchors, BackendContext, FixtureOperation, FixtureOutcome,
@@ -3541,7 +3572,48 @@ fn verify_lane_profile(
     // Native shell proof, separate from live provider/Bash/token-scrub proof.
     // Read-only Claude has no cargo on PATH, so the narrowest probe-capable
     // profile is a non-publishing writer.
-    if cfg!(target_os = "macos") && native_shell_probe {
+    if cfg!(target_os = "macos") && probe == Some(Probe::Swift) {
+        // The package lives in the registered worktree, so `.build` does too;
+        // the rig's temporary directory removes both.
+        let package = launch.cwd.join(".swift-probe");
+        fs::create_dir_all(package.join("Sources/LaneProbe"))?;
+        fs::create_dir_all(package.join("Tests/LaneProbeTests"))?;
+        fs::write(
+            package.join("Package.swift"),
+            "// swift-tools-version:5.9\nimport PackageDescription\nlet package = Package(name: \"LaneProbe\", targets: [.target(name: \"LaneProbe\"), .testTarget(name: \"LaneProbeTests\", dependencies: [\"LaneProbe\"])])\n",
+        )?;
+        fs::write(
+            package.join("Sources/LaneProbe/LaneProbe.swift"),
+            "public func answer() -> Int { 42 }\n",
+        )?;
+        fs::write(
+            package.join("Tests/LaneProbeTests/LaneProbeTests.swift"),
+            "import XCTest\n@testable import LaneProbe\nfinal class LaneProbeTests: XCTestCase { func testAnswer() { XCTAssertEqual(answer(), 42) } }\n",
+        )?;
+        let argv = [
+            "/bin/sh",
+            "-c",
+            concat!(
+                "set -eu; test \"$(command -v swift)\" = \"$TMPDIR/bin/swift\"; ",
+                "cd .swift-probe; swift build; swift test; printf 'lane-swift: PASS\\n'"
+            ),
+        ]
+        .map(OsString::from);
+        let command = compiled.command(&argv, &provenant_core::AttemptId::from_bytes([0; 16]))?;
+        let mut options = ExecOptions::new(&command, &launch.cwd, Duration::from_secs(120));
+        options.process_group = true;
+        options.cleanup_process_group = true;
+        options.env = Some(&launch.environment);
+        let output = executor.execute(options)?;
+        assert_eq!(
+            code(&output),
+            0,
+            "swift probe: {}",
+            String::from_utf8_lossy(&output.stderr.bytes)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout.bytes).contains("lane-swift: PASS"));
+    }
+    if cfg!(target_os = "macos") && probe == Some(Probe::Shell) {
         let scratch = &confinement.plan.permissions().scratch.path;
         let project = scratch.join("cargo-probe");
         fs::create_dir_all(project.join("src"))?;

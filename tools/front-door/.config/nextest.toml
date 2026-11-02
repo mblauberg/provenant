@@ -82,3 +82,12 @@ test-group = "serial-process"
 [[profile.lane.overrides]]
 filter = 'package(provenant-supervisor) | (package(=provenant) & binary(=worktrees))'
 test-group = "serial-process"
+
+# A real SwiftPM compile and test run cannot fit the 30 s default budget.
+[[profile.default.overrides]]
+filter = 'test(=lane_builds_and_tests_swift_in_a_registered_worktree)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = 'test(=lane_builds_and_tests_swift_in_a_registered_worktree)'
+slow-timeout = { period = "30s", terminate-after = 4 }
