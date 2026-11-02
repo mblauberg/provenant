@@ -758,9 +758,20 @@ executable with inherited `GIT_*` variables unset. Clearing those variables
 alone is insufficient when `git` resolves to the lane wrapper on `PATH`, since
 the wrapper restores the lane binding. Test fixtures use native Git directly
 and clear those variables before supplying any fixture-specific settings.
-The small Git wrapper has one source and restores
-scrubbed environment or supplies publishing credentials; it does not inspect
-Git commands or route their objects.
+The small Git wrapper has one source and one installation path for the pinned
+executable and its configuration. It restores the lane binding and the scrubbed
+identity after a subprocess clears its environment, and supplies publishing
+credentials when the lane may publish; it does not inspect Git commands or
+route their objects. It stays because environment variables alone do not
+survive `env -i`-style subprocesses. The restore needs `git` to resolve to the
+wrapper: a subprocess that also drops `PATH` reaches system Git, which finds
+the shared repository through the worktree's `.git` file. That Git can read
+shared metadata, which the sandbox grants read-only, but cannot write it, and
+it loses the publishing credential. Per-adapter tests for every writer adapter
+(Claude, Codex, Cursor, Agy and OpenCode) prove the pinned executable, the
+private refs, index and objects, the identity scrub and publishing credentials
+under a cleared environment that keeps `PATH`. The command adapter does not
+support writer mode.
 
 When a run operation returns `RunError` because the host cannot find a Git
 executable, it reports "Git executable unavailable" with the `GIT` code.
