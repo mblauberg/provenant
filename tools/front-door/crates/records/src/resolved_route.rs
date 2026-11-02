@@ -126,6 +126,35 @@ pub enum RouteReadiness {
         reason: RouteExclusionReason,
     },
 }
+impl RouteReadiness {
+    /// Readiness that was never observed. The receipt has no unknown status
+    /// and an older reader rejects an unrecognised one, so unknown projects
+    /// onto the existing unavailable status with its established reason.
+    pub fn unknown() -> Self {
+        Self::Unavailable {
+            extra: Default::default(),
+            reason: RouteExclusionReason::UnknownAvailability,
+        }
+    }
+    /// Readiness whose evidence has expired; it projects like [`Self::unknown`].
+    pub fn stale() -> Self {
+        Self::Unavailable {
+            extra: Default::default(),
+            reason: RouteExclusionReason::StaleAvailability,
+        }
+    }
+    /// Whether this is the projection of unknown readiness, never a verdict.
+    pub fn is_unknown(&self) -> bool {
+        matches!(
+            self,
+            Self::Unavailable {
+                reason: RouteExclusionReason::UnknownAvailability
+                    | RouteExclusionReason::StaleAvailability,
+                ..
+            }
+        )
+    }
+}
 /// A resolved candidate is always confidential; the resolver verifies the
 /// referenced policy evidence. Deserializing a projection never verifies it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

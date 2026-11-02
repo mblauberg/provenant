@@ -385,5 +385,19 @@ fn route_exclusion_reason_codes_round_trip() -> TestResult {
             v
         })?;
     }
+    // Unknown readiness projects onto existing wire names: a new status would
+    // fail to decode in an older reader.
+    for (readiness, reason) in [
+        (RouteReadiness::unknown(), "unknown_availability"),
+        (RouteReadiness::stale(), "stale_availability"),
+    ] {
+        assert!(readiness.is_unknown());
+        assert_eq!(
+            serde_json::to_value(&readiness)?,
+            json!({"status":"unavailable","reason":reason})
+        );
+    }
+    assert!(serde_json::from_value::<RouteReadiness>(json!({"status":"unknown"})).is_err());
+    assert!(!serde_json::from_value::<RouteReadiness>(readiness())?.is_unknown());
     Ok(())
 }
