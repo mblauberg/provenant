@@ -9,12 +9,13 @@
 
 ## Test safeguards
 
-- Never edit, delete, skip or loosen a test or assertion to get green. If a test contradicts the spec, stop and report the conflict as `blocked` (see #2589). (ImpossibleBench; EvilGenie)
+- Agents tamper with tests that block them, mostly by editing the test; an explicit stop-and-report route cuts this sharply. Hence the rule in the skill body. (ImpossibleBench; EvilGenie)
 - Every test asserts observable behaviour; printed values alone are not an oracle. (All Smoke, No Alarm; Chen et al.)
 - Derive expected values from the spec, never from the implementation's current output.
 - An assertion helper must fail on a known-bad input; prove that once when writing it.
 - Declare each test's size: small is hermetic and about 1 s or less; medium uses a local filesystem or DB; large is opt-in. Never wait out a real timeout or sleep as proof; inject clocks, busy timeouts and limits. (Google test sizes)
-- Compare unordered collections as sets and seed every RNG. (Hora and Robbes)
+- Compare unordered collections as sets and seed every RNG; most flaky generated tests assume an order. (ICSE-SEIP 2026 flaky LLM tests)
+- Agents over-mock; mock only the edges in [boundaries](boundaries.md), never the unit under test. (Hora and Robbes)
 - Make every skip visible with a reason and an owner or issue; never use a silent early return.
 - Put timing and performance claims in an opt-in benchmark, not the default run.
 - Record the command and its output as evidence of done.
