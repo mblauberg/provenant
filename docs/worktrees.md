@@ -203,7 +203,11 @@ commit in a scratch checkout, using `cargo build --locked --all-targets` and
 under the state directory's `cargo-target-seeds/generations/`. The manifest
 records the commit, full `rustc -vV`, host triple, profile, features and flags.
 Refresh `origin/main` before building when a newer seed is wanted. This is a
-host operation: only build seeds from a trusted `origin/main`.
+host operation: only build seeds from a trusted `origin/main`. The host's
+`refresh` entry point rebuilds only when `origin/main` has moved past the newest
+complete generation, and does nothing while another seed build holds the build
+lock, so at most one build runs. The host tick does not call it yet (#2484), so
+run `provenant worktree seed-build` after a fetch until it does.
 
 Fresh writer targets are cloned from the newest generation whose full rustc
 version and host triple match the lane's toolchain. Cargo fingerprints decide

@@ -115,10 +115,8 @@ fn checkout_commit(project: &Path, checkout: &Path, commit: &str) -> Result<()> 
     Ok(())
 }
 
-pub fn build(state: &Path, project: &Path) -> Result<String> {
-    if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some() {
-        return Err(io::Error::other("target seeds can only be built on the host").into());
-    }
+/// The pinned remote-tracking commit every seed build starts from.
+fn origin_main(project: &Path) -> Result<String> {
     let output = git(
         project,
         &[
@@ -131,9 +129,91 @@ pub fn build(state: &Path, project: &Path) -> Result<String> {
     if !matches!(commit.len(), 40 | 64) || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(io::Error::other("invalid origin/main commit").into());
     }
-    publish(state, |stage| {
+    Ok(commit)
+}
+
+/// What a refresh did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Refresh {
+    /// The newest complete generation already builds this `origin/main`.
+    Current,
+    /// Another host seed build holds the build lock; nothing was started.
+    Busy,
+    /// A new generation was published.
+    Built(String),
+}
+
+/// Rebuild the seed when `origin/main` has moved past the newest complete
+/// generation, at most one build at a time. Call after a fetch that may have
+/// advanced `origin/main`; it does nothing when the seed is current or a build
+/// is running, and never builds from a lane checkout (the build uses a scratch
+/// clone of the pinned `origin/main`).
+// The host tick calls this once per project; wiring it in is tracked on #2484.
+#[allow(dead_code)]
+pub fn refresh(state: &Path, project: &Path) -> Result<Refresh> {
+    refuse_in_lane()?;
+    let commit = origin_main(project)?;
+    refresh_with(state, &commit, |stage| build_into(stage, project, &commit))
+}
+
+fn refresh_with(
+    state: &Path,
+    head: &str,
+    build: impl FnOnce(&Path) -> Result<Manifest>,
+) -> Result<Refresh> {
+    if newest_generation_commit(state).as_deref() == Some(head) {
+        return Ok(Refresh::Current);
+    }
+    match publish(state, build) {
+        Ok(id) => Ok(Refresh::Built(id)),
+        Err(error)
+            if matches!(
+                error.downcast_ref::<provenant_os::fs::FsError>(),
+                Some(provenant_os::fs::FsError::LockTimeout { .. })
+            ) =>
+        {
+            Ok(Refresh::Busy)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// The commit the newest complete generation was built from.
+fn newest_generation_commit(state: &Path) -> Option<String> {
+    let generations = target_seed::store_path(state).join("generations");
+    let mut names: Vec<_> = fs::read_dir(generations)
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+        .map(|entry| entry.path())
+        .collect();
+    names.sort();
+    names.into_iter().rev().find_map(|path| {
+        (fs::read(path.join("complete")).ok()? == b"complete\n")
+            .then(|| fs::read(path.join("manifest.json")).ok())
+            .flatten()
+            .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok())
+            .map(|manifest| manifest.commit)
+    })
+}
+
+fn refuse_in_lane() -> Result<()> {
+    if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some() {
+        return Err(io::Error::other("target seeds can only be built on the host").into());
+    }
+    Ok(())
+}
+
+pub fn build(state: &Path, project: &Path) -> Result<String> {
+    refuse_in_lane()?;
+    let commit = origin_main(project)?;
+    publish(state, |stage| build_into(stage, project, &commit))
+}
+
+fn build_into(stage: &Path, project: &Path, commit: &str) -> Result<Manifest> {
+    {
         let checkout = stage.join("checkout");
-        checkout_commit(project, &checkout, &commit)?;
+        checkout_commit(project, &checkout, commit)?;
         let worktree = checkout.join("tools/front-door");
         let target = stage.join("target");
         fs::create_dir(&target)?;
@@ -172,12 +252,12 @@ pub fn build(state: &Path, project: &Path) -> Result<String> {
         Ok(Manifest {
             rustc_vv,
             host_triple,
-            commit,
+            commit: commit.to_owned(),
             profile: "dev".into(),
             features: vec!["default".into()],
             flags,
         })
-    })
+    }
 }
 
 fn publish(state: &Path, build: impl FnOnce(&Path) -> Result<Manifest>) -> Result<String> {
@@ -339,6 +419,79 @@ mod tests {
             0
         );
     }
+    #[allow(dead_code)] // The harness-free target includes this module without its tests.
+    fn manifest(commit: &str) -> Manifest {
+        Manifest {
+            rustc_vv: "version".into(),
+            host_triple: "host".into(),
+            commit: commit.into(),
+            profile: "dev".into(),
+            features: vec![],
+            flags: vec![],
+        }
+    }
+    #[allow(dead_code)] // The harness-free target includes this module without its tests.
+    fn built(stage: &Path, commit: &str) -> Result<Manifest> {
+        fs::create_dir(stage.join("target"))?;
+        Ok(manifest(commit))
+    }
+    #[allow(dead_code)] // The harness-free target includes this module without its tests.
+    fn freeze(state: &Path) {
+        let generations = target_seed::store_path(state).join("generations");
+        for entry in fs::read_dir(generations).unwrap() {
+            make_directories_writable(&entry.unwrap().path()).unwrap();
+        }
+    }
+
+    #[test]
+    fn refresh_builds_only_when_origin_main_has_advanced() {
+        let state = tempfile::tempdir().unwrap();
+        let builds = std::cell::Cell::new(0);
+        let run = |head: &str| {
+            refresh_with(state.path(), head, |stage| {
+                builds.set(builds.get() + 1);
+                built(stage, head)
+            })
+            .unwrap()
+        };
+        assert!(matches!(run("aaa"), Refresh::Built(_)));
+        assert_eq!(run("aaa"), Refresh::Current);
+        assert_eq!(builds.get(), 1, "a current seed is not rebuilt");
+        // An incomplete newer generation does not count as current.
+        let generations = target_seed::store_path(state.path()).join("generations");
+        fs::create_dir(generations.join("99999999999999999999-partial")).unwrap();
+        assert_eq!(
+            newest_generation_commit(state.path()).as_deref(),
+            Some("aaa")
+        );
+        assert!(matches!(run("bbb"), Refresh::Built(_)));
+        assert_eq!(run("bbb"), Refresh::Current);
+        assert_eq!(builds.get(), 2);
+        freeze(state.path());
+    }
+
+    #[test]
+    fn refresh_runs_one_build_at_a_time_and_failure_publishes_nothing() {
+        let state = tempfile::tempdir().unwrap();
+        {
+            // Another host build holds the build lock: no second build starts.
+            target_seed::lock_store(state.path()).map(drop).unwrap();
+            let _running = target_seed::lock_build(state.path()).unwrap();
+            let outcome = refresh_with(state.path(), "aaa", |_| panic!("must not build"));
+            assert_eq!(outcome.unwrap(), Refresh::Busy);
+        }
+        let failed = refresh_with(state.path(), "aaa", |_| {
+            Err(io::Error::other("build failed").into())
+        });
+        assert!(failed.is_err());
+        assert_eq!(newest_generation_commit(state.path()), None);
+        assert!(matches!(
+            refresh_with(state.path(), "aaa", |stage| built(stage, "aaa")).unwrap(),
+            Refresh::Built(_)
+        ));
+        freeze(state.path());
+    }
+
     #[test]
     fn success_publishes_read_only_generation() {
         let state = tempfile::tempdir().unwrap();
