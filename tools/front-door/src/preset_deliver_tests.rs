@@ -68,6 +68,12 @@ struct Host {
     distinct: Vec<(String, Vec<String>)>,
     routes: Vec<(String, GraphRoute)>,
     host_native_unavailable: bool,
+    /// Head of the integration branch; a writer that integrates moves it.
+    integration: Option<String>,
+    /// Read-only nodes whose id contains one of these fail their verdict.
+    failing: Vec<String>,
+    /// Delivery mode and fast-forward restriction each launch was given.
+    deliveries: Vec<(String, Option<provenant_records::run::DeliveryMode>, bool)>,
 }
 
 impl CiStatus for Host {
@@ -111,6 +117,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for Host {
     fn actor(&self) -> String {
         "deliver-test".into()
     }
+    fn integration_head(&mut self) -> Result<Option<String>, Self::Error> {
+        Ok(self.integration.clone())
+    }
     fn ci_status(&mut self) -> Option<&mut dyn CiStatus> {
         Some(self)
     }
@@ -146,6 +155,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for Host {
         replay: Replay<'_>,
     ) -> Result<AttemptObservation, Self::Error> {
         self.launched.push(key.node_id.clone());
+        self.deliveries.push((
+            key.node_id.clone(),
+            replay.delivery.cloned(),
+            replay.fast_forward_only,
+        ));
         self.routes.push((key.node_id.clone(), route.clone()));
         if self.host_native_unavailable && route.adapter.as_deref() == Some("host-native") {
             return Ok(AttemptObservation::Terminal {
@@ -176,8 +190,13 @@ impl provenant_fabric_runtime::graph::AttemptOwner for Host {
                 key.node_id
             )
         } else {
+            let verdict = if self.failing.iter().any(|part| key.node_id.contains(part)) {
+                "FAIL"
+            } else {
+                "PASS"
+            };
             format!(
-                "Checked {}.\n```findings\n{{\"schema_version\":1,\"findings\":[]}}\n```\nVERDICT: PASS\n",
+                "Checked {}.\n```findings\n{{\"schema_version\":1,\"findings\":[]}}\n```\nVERDICT: {verdict}\n",
                 key.node_id
             )
         };
@@ -188,6 +207,12 @@ impl provenant_fabric_runtime::graph::AttemptOwner for Host {
             self.commits += 1;
             let commit = format!("{:040x}", self.commits);
             self.head = Some(commit.clone());
+            if matches!(
+                replay.delivery,
+                Some(provenant_records::run::DeliveryMode::Integrate(_))
+            ) {
+                self.integration = Some(commit.clone());
+            }
             Some(commit)
         } else {
             node.source_commit.map(str::to_owned)
@@ -848,4 +873,141 @@ fn repository_roles_never_lower_a_custom_land_role() {
     )
     .unwrap();
     assert_eq!(tier().as_deref(), Some("crucial"));
+}
+
+#[test]
+fn big_batch_lanes_deliver_then_the_council_gates_the_principal_and_repairer() {
+    use provenant_records::run::DeliveryMode;
+    let integrate = DeliveryMode::Integrate("batch/graph".into());
+    let lanes = "parameters.lanes=[{name='a',worktree='/repo/a',scope=['x'],spec='#1'},{name='b',worktree='/repo/b',scope=['y'],spec='#2'}]";
+    let expanded = expand(
+        &Layers::empty(),
+        "big-batch",
+        "the batch",
+        &[
+            lanes.into(),
+            "parameters.batch_worktree='/repo/batch'".into(),
+            "parameters.external=0".into(),
+            "parameters.width=1".into(),
+            format!("parameters.base='{BASE}'"),
+        ],
+    )
+    .unwrap();
+    // Writers start from the commit the host resolves `HEAD` to.
+    fn pin(value: &mut Value) {
+        match value {
+            Value::Object(map) => {
+                if map.get("type") == Some(&json!("commit"))
+                    && map.get("commit") == Some(&json!("HEAD"))
+                {
+                    map.insert("commit".into(), json!(BASE));
+                }
+                map.values_mut().for_each(pin);
+            }
+            Value::Array(values) => values.iter_mut().for_each(pin),
+            _ => {}
+        }
+    }
+    let mut value = expanded.document;
+    pin(&mut value);
+    let document: GraphDocument = serde_json::from_value(value).unwrap();
+    let mut host = Host {
+        integration: Some(BASE.into()),
+        // Round one's review rejects, so a second repair round runs.
+        failing: vec!["repair--r1--review".into()],
+        ..Host::default()
+    };
+    let mut journal = Journal::default();
+    let run = drive(&document, &mut host, &mut journal);
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint);
+    let position = |id: &str| {
+        host.launched
+            .iter()
+            .position(|launched| launched == id)
+            .unwrap_or_else(|| panic!("{id} never launched: {:?}", host.launched))
+    };
+    let delivery = |id: &str| {
+        host.deliveries
+            .iter()
+            .find(|(node, ..)| node == id)
+            .unwrap_or_else(|| panic!("no launch of {id}"))
+            .clone()
+    };
+    // Lanes deliver into the integration branch and may merge there.
+    let lane_writers: Vec<&str> = host
+        .launched
+        .iter()
+        .map(String::as_str)
+        .filter(|id| id.starts_with("lanes") && id.ends_with("--implement"))
+        .collect();
+    assert_eq!(lane_writers.len(), 2, "{:?}", host.launched);
+    for writer in &lane_writers {
+        let (_, mode, fast_forward) = delivery(writer);
+        assert_eq!(
+            (mode, fast_forward),
+            (Some(integrate.clone()), false),
+            "{writer}"
+        );
+    }
+    // The council reviews only after every lane has integrated; the principal
+    // follows the council and the repair rounds follow the principal.
+    let council: Vec<usize> = host
+        .launched
+        .iter()
+        .enumerate()
+        .filter(|(_, id)| id.starts_with("council"))
+        .map(|(index, _)| index)
+        .collect();
+    assert!(!council.is_empty(), "{:?}", host.launched);
+    let last_lane = lane_writers.iter().map(|id| position(id)).max().unwrap();
+    assert!(council.iter().all(|index| *index > last_lane));
+    let (refactor, first, second) = (
+        position("refactor"),
+        position("repair--r1--fix"),
+        position("repair--r2--fix"),
+    );
+    assert!(council.iter().all(|index| *index < refactor));
+    assert!(refactor < first && first < second, "{:?}", host.launched);
+    let (_, mode, fast_forward) = delivery("refactor");
+    assert_eq!((mode, fast_forward), (Some(integrate.clone()), false));
+    // Repair rounds integrate by fast-forward only.
+    for round in ["repair--r1--fix", "repair--r2--fix"] {
+        let (_, mode, fast_forward) = delivery(round);
+        assert_eq!(
+            (mode, fast_forward),
+            (Some(integrate.clone()), true),
+            "{round}"
+        );
+    }
+    // The principal starts from the council's pinned combined head.
+    let source = |id: &str| {
+        host.sources
+            .iter()
+            .find(|(node, _)| node == id)
+            .and_then(|(_, source)| source.clone())
+    };
+    let combined = progress(&run.checkpoint, "refactor").source_commit.clone();
+    assert_eq!(source("refactor"), combined);
+    assert!(combined.is_some());
+    // Each repair round continues the worktree and descends from the head the
+    // previous delivery left on the integration branch, never a stale pin.
+    assert_eq!(source("repair--r1--fix"), None);
+    assert_eq!(source("repair--r2--fix"), None);
+    let head = |id: &str| {
+        progress(&run.checkpoint, id)
+            .outputs
+            .as_ref()
+            .unwrap()
+            .commit
+            .clone()
+    };
+    let (principal, round_one, round_two) = (
+        head("refactor"),
+        head("repair--r1--fix"),
+        head("repair--r2--fix"),
+    );
+    assert!(principal.is_some() && round_one.is_some() && round_two.is_some());
+    assert_ne!(principal, round_one);
+    assert_ne!(round_one, round_two);
+    assert_eq!(host.integration, round_two);
 }

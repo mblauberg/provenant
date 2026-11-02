@@ -431,6 +431,7 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
         remote: "origin".into(),
         branch: "published/lane".into(),
         open_pr: false,
+        fast_forward_only: false,
     });
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;
@@ -502,6 +503,7 @@ fn requested_delivery_that_never_ran_is_recorded_not_attempted() -> TestResult {
         remote: "origin".into(),
         branch: "published/lane".into(),
         open_pr: false,
+        fast_forward_only: false,
     });
     store.create(&input, &call)?;
     seal_exit_fixture(&store, &input)?;

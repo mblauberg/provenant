@@ -289,6 +289,10 @@ pub enum RunError {
     #[error("host writer delivery failed at {0:?}")]
     Delivery(WriterDeliveryStage),
     #[error(
+        "host writer delivery failed at Integrate (integration_head_moved): the integration target moved after the round began and a loop round only fast-forwards it; rerun the graph to review the new head"
+    )]
+    IntegrationHeadMoved,
+    #[error(
         "host writer delivery failed at Prepare (origin refresh): default branch collides with another branch name"
     )]
     OriginDefaultCollision,

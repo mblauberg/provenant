@@ -483,6 +483,18 @@ repair contexts. Existing clean ancestor contexts fast-forward safely at
 admission; divergent contexts need chair reconciliation. Automatic worktree
 provisioning is outside this workflow.
 
+Create the batch worktree on its own branch, never on the integration branch.
+Lanes, the principal and repairs all deliver into the integration branch, which
+Git refuses to move while a worktree has it checked out, and graph admission
+refuses such a graph. The graph fast-forwards the batch worktree to the
+council's pinned integration head when the principal launches, and each
+repair then continues from the head the previous delivery left there:
+
+```sh
+git branch batch/graph BASE
+git worktree add -b batch/work /absolute/path/to/batch-writer BASE
+```
+
 Bind each batch context explicitly, one `lanes` entry per writer:
 
 ```sh

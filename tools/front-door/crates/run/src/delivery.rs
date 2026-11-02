@@ -412,6 +412,7 @@ impl HostDeliveryContext {
             remote,
             branch: destination,
             open_pr,
+            fast_forward_only: false,
         };
         validate(&request)?;
         Ok(Some(request))
@@ -1470,6 +1471,9 @@ impl HostDeliveryContext {
             .is_ok()
         {
             head
+        } else if request.fast_forward_only {
+            // A loop round never merges: the target moved since the round began.
+            return Err(RunError::IntegrationHeadMoved);
         } else {
             // A configured merge driver may execute arbitrary repository code.
             if !self
@@ -1827,6 +1831,7 @@ pub(super) fn stdout_limit(commit_log: bool, args: &[&str]) -> usize {
 pub(crate) fn failed_state(error: &RunError) -> WriterDeliveryState {
     let (stage, reason) = match error {
         RunError::Delivery(stage) => (*stage, None),
+        RunError::IntegrationHeadMoved => (Stage::Integrate, None),
         RunError::DeliveryLimit { stage, .. } => (*stage, Some(prepare_reason(error))),
         RunError::DeliveryPrepare { .. } => (Stage::Prepare, Some(prepare_reason(error))),
         _ => (Stage::Push, None),

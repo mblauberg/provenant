@@ -676,6 +676,7 @@ pub(super) fn dispatch_inner(
                 remote,
                 branch,
                 open_pr: command.open_pr,
+                fast_forward_only: false,
             });
     if let Some(mode) = &command.deliver {
         let branch = if let Some(path) = &command.access.worktree {
@@ -1103,6 +1104,7 @@ pub(super) fn replay_owned_dispatch(
                 remote,
                 branch,
                 open_pr: command.open_pr,
+                fast_forward_only: false,
             }),
     };
     let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)

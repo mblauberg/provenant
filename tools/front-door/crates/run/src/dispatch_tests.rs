@@ -251,6 +251,7 @@ fn host_refuses_child_authority_beyond_its_parent_task() -> TestResult {
         remote: "origin".into(),
         branch: branch.into(),
         open_pr,
+        fast_forward_only: false,
     };
     let read_only = input().request.tasks[0].clone();
     let mut writing = read_only.clone();

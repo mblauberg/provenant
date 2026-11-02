@@ -37,6 +37,7 @@ impl GraphJournal for MemoryJournal {
 struct FakeOwner {
     deliveries: usize,
     delivery_modes: Vec<Option<provenant_records::run::DeliveryMode>>,
+    fast_forward_only: Vec<bool>,
     observations: VecDeque<AttemptObservation>,
     calls: Vec<(AttemptKey, GraphRoute)>,
     titles: Vec<String>,
@@ -155,6 +156,7 @@ impl AttemptOwner for FakeOwner {
         self.titles.push(node.title.to_owned());
         self.prompts.push(node.prompt.to_owned());
         self.delivery_modes.push(replay.delivery.cloned());
+        self.fast_forward_only.push(replay.fast_forward_only);
         self.stored_refs.push(replay.stored_ref.map(str::to_owned));
         self.launch_actors.push(replay.launch_actor.to_owned());
         self.calls.push((key.clone(), route.clone()));
