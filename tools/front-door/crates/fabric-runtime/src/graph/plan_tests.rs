@@ -746,7 +746,10 @@ fn expansion_at_node_budget_reads_journal_once() {
             self.inner.save(checkpoint)
         }
     }
-    let limits = crate::config::GraphLimits::default();
+    let limits = crate::config::GraphLimits {
+        nodes: 4,
+        ..Default::default()
+    };
     let count = limits.nodes / 2;
     let nodes = (0..count).map(|index| {
         let mut node = planner(1).nodes.remove(0);

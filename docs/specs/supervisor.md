@@ -710,6 +710,11 @@ reuse and unsupported queries leave every root that could contain the process
 unknown. A failed query is never an empty observation. Host-authorised
 exceptions below remain accepted risks rather than non-occupancy proofs.
 
+When an occupancy path cannot be canonicalised, its absolute raw spelling is
+compared with each root and its `/private` alias. Only roots it could be under
+remain unknown; relative, empty or parent-containing paths cannot rule out any
+root. Refusal details include the raw occupancy path.
+
 The native observer reads the executable and every open filesystem descriptor
 without privileged helpers: `/proc/<pid>/{exe,fd}` on Linux and libproc
 (`proc_pidpath`, `PROC_PIDLISTFDS`, `PROC_PIDFDVNODEPATHINFO`) on macOS. It

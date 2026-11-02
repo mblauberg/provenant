@@ -889,6 +889,62 @@ fn occupancy_is_placed_per_root_and_partial_results_remain_conservative()
     let partial = observe(vec![file], false);
     assert_eq!(partial[&a], WorkerState::Live);
     assert_eq!(partial[&b], WorkerState::Unknown);
+
+    // A symlink loop makes canonicalisation fail without relying on permissions.
+    let outside = base.join("loop");
+    std::os::unix::fs::symlink("loop", &outside)?;
+    let outside_states = observe(vec![outside], true);
+    assert_eq!(outside_states[&a], WorkerState::Free);
+    assert_eq!(outside_states[&b], WorkerState::Free);
+    let inside = a.join("loop");
+    std::os::unix::fs::symlink("loop", &inside)?;
+    let alias = if let Ok(suffix) = inside.strip_prefix("/private") {
+        Path::new("/").join(suffix)
+    } else {
+        Path::new("/private").join(inside.strip_prefix("/")?)
+    };
+    assert!(occupancy_path_could_be_under(&alias, &a));
+    assert!(occupancy_path_could_be_under(
+        &inside,
+        alias.parent().unwrap()
+    ));
+    let alias_root = alias.parent().unwrap().to_path_buf();
+    let (alias_states, alias_details) = observe_worker_roots(
+        &[alias_root.clone(), b.clone()],
+        &processes,
+        &Occupancy {
+            cwd: base.clone(),
+            paths: vec![inside.clone()],
+            complete: true,
+        },
+        &current,
+        false,
+    );
+    assert_eq!(alias_states[&alias_root], WorkerState::Unknown);
+    assert_eq!(alias_states[&b], WorkerState::Free);
+    assert!(alias_details[&alias_root].contains(&inside.display().to_string()));
+    {
+        let path = inside;
+        let (states, details) = observe_worker_roots(
+            &roots,
+            &processes,
+            &Occupancy {
+                cwd: base.clone(),
+                paths: vec![path.clone()],
+                complete: true,
+            },
+            &current,
+            false,
+        );
+        assert_eq!(states[&a], WorkerState::Unknown);
+        assert_eq!(states[&b], WorkerState::Free);
+        assert!(details[&a].contains(&path.display().to_string()));
+    }
+    for path in [PathBuf::new(), PathBuf::from("relative")] {
+        let states = observe(vec![path], true);
+        assert_eq!(states[&a], WorkerState::Unknown);
+        assert_eq!(states[&b], WorkerState::Unknown);
+    }
     Ok(())
 }
 
@@ -2222,7 +2278,7 @@ mod narrowing {
         let (state, detail, audit) = observe(
             path_scripted(
                 OccupancyObservation {
-                    paths: vec![PathBuf::from(LOOP)],
+                    paths: vec![PathBuf::new()],
                     complete: true,
                     gap: None,
                 },
