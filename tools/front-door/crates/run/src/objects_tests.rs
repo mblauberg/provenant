@@ -15,6 +15,209 @@ use std::{
 type TestResult<T = ()> = std::result::Result<T, Box<dyn Error>>;
 
 #[test]
+fn private_view_binding_refuses_replaced_directories_and_foreign_paths() -> TestResult {
+    for component in ["", "git-common", "git-objects"] {
+        let mut fixture = Fixture::new("sha1")?;
+        let (attempt, scratch) = fixture.overlay()?;
+        let target = scratch.join(component);
+        fs::rename(&target, fixture.root.join("retained-view"))?;
+        fs::create_dir(&target)?;
+        if component.is_empty() {
+            fs::create_dir(target.join("git-common"))?;
+            fs::create_dir(target.join("git-objects"))?;
+        }
+        assert!(super::bound_source(&attempt).is_err(), "{component}");
+        fixture.assert_not_published();
+    }
+    let mut fixture = Fixture::new("sha1")?;
+    let (attempt, _) = fixture.overlay()?;
+    let other_attempt = fixture.root.join("other-attempt");
+    fs::create_dir_all(other_attempt.join("tmp/candidate-0/git-common"))?;
+    fs::create_dir(other_attempt.join("tmp/candidate-0/git-objects"))?;
+    assert!(
+        super::bind(
+            &Directory::open_anchor(&other_attempt)?,
+            &attempt.current_path()?.join("tmp/candidate-0")
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn private_view_reads_legacy_bindings_but_refuses_incomplete_identity_versions() -> TestResult {
+    for version in [1, 2, 3] {
+        let temp = tempfile::tempdir()?;
+        let path = fs::canonicalize(temp.path())?;
+        fs::create_dir_all(path.join("tmp/candidate-0/git-common"))?;
+        fs::create_dir(path.join("tmp/candidate-0/git-objects"))?;
+        let attempt = Directory::open_anchor(&path)?;
+        crate::artifacts::seal(
+            &attempt,
+            "writer-objects.json",
+            &crate::db::bytes(
+                &serde_json::json!({ "schema_version": version, "candidate": "candidate-0" }),
+            )?,
+            crate::RECORD_LIMIT,
+        )?;
+        let source = super::bound_source(&attempt);
+        if version == 1 {
+            assert!(source?.is_some());
+        } else {
+            assert!(source.is_err());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn private_view_refuses_shared_objects_as_an_import_source() -> TestResult {
+    let fixture = Fixture::new("sha1")?;
+    let info = fixture.common_objects().join("info");
+    let sentinel = info.join("commit-graph");
+    fs::write(&sentinel, b"host-owned accelerator")?;
+    assert!(
+        super::settle(
+            &fixture.git,
+            fixture.worktree.repo(),
+            Some(&Directory::open_anchor(&fixture.common_objects())?),
+            fixture.head
+        )
+        .is_err()
+    );
+    assert_eq!(fs::read(&sentinel)?, b"host-owned accelerator");
+    fixture.assert_not_published();
+    Ok(())
+}
+
+#[test]
+fn private_view_restarts_import_and_publication_in_shallow_repositories() -> TestResult {
+    for format in ["sha1", "sha256"] {
+        let mut fixture = Fixture::new(format)?;
+        fs::write(
+            fixture.project.join(".git/shallow"),
+            format!("{}\n", fixture.base),
+        )?;
+        let (attempt, _) = fixture.overlay()?;
+        for checkpoint in 0..4 {
+            // Reopen from the durable binding at each restart, including after
+            // sanitisation removed alternates and after publication removed its ref.
+            let source = super::bound_source(&attempt)?.ok_or("private view")?;
+            let head = super::private_tip(&source, "refs/heads/lane")?;
+            super::settle(
+                &fixture.git,
+                fixture.worktree.repo(),
+                Some(&source.objects),
+                head,
+            )?;
+            if checkpoint >= 2 {
+                super::publish_branch(
+                    &fixture.git,
+                    fixture.worktree.repo(),
+                    "refs/heads/lane",
+                    fixture.base,
+                    head,
+                )?;
+            }
+            let expected = if checkpoint >= 2 { head } else { fixture.base };
+            assert_eq!(
+                super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+                expected
+            );
+            let staging = fixture.project.join(".git");
+            assert!(
+                !fs::read_dir(staging)?.any(|entry| entry.is_ok_and(|entry| entry
+                    .file_name()
+                    .as_encoded_bytes()
+                    .starts_with(b"tmp-provenant-import-")))
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn private_view_recovers_after_import_and_publication_acknowledgement_failures() -> TestResult {
+    for format in ["sha1", "sha256"] {
+        let mut fixture = Fixture::new(format)?;
+        let (attempt, _) = fixture.overlay()?;
+        let wrapper = fixture.root.join("interrupted-git");
+        // Return failure after Git successfully receives the objects. Settlement
+        // has not recorded import success, but the staging ref now retains them.
+        fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\n'{}' \"$@\" || exit $?\nfor arg do\ncase \"$arg\" in push) exit 1;; esac\ndone\n",
+                fixture.git.display()
+            ),
+        )?;
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+        let source = super::bound_source(&attempt)?.ok_or("private view")?;
+        assert!(
+            super::settle(
+                &wrapper,
+                fixture.worktree.repo(),
+                Some(&source.objects),
+                fixture.head
+            )
+            .is_err()
+        );
+        let stage = format!("refs/provenant/import/{}", fixture.head);
+        assert_eq!(
+            super::resolve_ref(&fixture.git, fixture.worktree.repo(), &stage)?,
+            fixture.head
+        );
+        assert_eq!(
+            super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+            fixture.base
+        );
+        drop(source);
+        let source = super::bound_source(&attempt)?.ok_or("reopened view")?;
+        super::settle(
+            &fixture.git,
+            fixture.worktree.repo(),
+            Some(&source.objects),
+            fixture.head,
+        )?;
+        // Refuse only cleanup: the branch CAS has succeeded when this fails.
+        fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nfor arg do\ncase \"$arg\" in -d) exit 1;; esac\ndone\nexec '{}' \"$@\"\n",
+                fixture.git.display()
+            ),
+        )?;
+        assert!(
+            super::publish_branch(
+                &wrapper,
+                fixture.worktree.repo(),
+                "refs/heads/lane",
+                fixture.base,
+                fixture.head
+            )
+            .is_err()
+        );
+        assert_eq!(
+            super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+            fixture.head
+        );
+        assert_eq!(
+            super::resolve_ref(&fixture.git, fixture.worktree.repo(), &stage)?,
+            fixture.head
+        );
+        super::publish_branch(
+            &fixture.git,
+            fixture.worktree.repo(),
+            "refs/heads/lane",
+            fixture.base,
+            fixture.head,
+        )?;
+        assert!(super::resolve_ref(&fixture.git, fixture.worktree.repo(), &stage).is_err());
+    }
+    Ok(())
+}
+
+#[test]
 fn foreign_alternates_are_refused_without_importing_foreign_objects() -> TestResult {
     let fixture = Fixture::new("sha1")?;
     let foreign = fixture.root.join("foreign-objects");
