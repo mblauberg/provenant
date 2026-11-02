@@ -1107,6 +1107,12 @@ edge and continuation slots, including when every current attempt has settled.
 
 ### Typed node outputs
 
+Human `graph status GRAPH --full` lists every saved checkpoint node in order,
+including composite and loop members, with its state and latest recorded route
+and attempt reference (or `none` when absent). It also shows node errors and
+pending CI details. Status reads the checkpoint without advancing the graph;
+JSON retains the complete checkpoint representation.
+
 Settled nodes record version 2 outputs in the checkpoint, exposed by graph
 status JSON. A result's `digest` is `sha256:` followed by the lowercase
 SHA-256 of the complete stored result's raw bytes. This identifies the stored

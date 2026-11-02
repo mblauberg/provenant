@@ -523,6 +523,192 @@ mod graph_ask_inbox_tests {
 
 #[cfg(test)]
 mod result_tests {
+    #[allow(dead_code)] // The custom worktree driver includes this module without libtest.
+    fn graph_status_fixture() -> provenant_fabric_runtime::graph::GraphRun {
+        let checkpoint = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": "fixture", "plan_digest": "digest",
+            "nodes": [
+                {"id":"ordinary", "state":"failed", "worktree":null,
+                 "advance_error":"repair this", "attempts":[
+                    {"launched":true,"key":{"graph_id":"fixture","node_id":"ordinary","route_index":0},
+                     "route":{"alias":"first"},"state":"terminal","attempt_ref":"old","outcome":"task_failed","launch_actor":"actor"},
+                    {"launched":true,"key":{"graph_id":"fixture","node_id":"ordinary","route_index":1},
+                     "route":{"adapter":"codex","model":"latest","effort":"high"},"state":"terminal","attempt_ref":"new","outcome":"task_failed","launch_actor":"actor"}]},
+                {"id":"composite", "state":"running", "worktree":null, "children":["member"], "attempts":[]},
+                {"id":"member", "state":"running", "worktree":null, "attempts":[],
+                 "ci":{"state":"pending","summary":"waiting","head_sha":"abc","check_names":["build"],"elapsed_seconds":12}},
+                {"id":"loop-member", "state":"pending", "worktree":null, "attempts":[],
+                 "round":{"loop_id":"loop","round":1,"node_id":"member","until":false,"previous_gate":null}}
+            ]
+        })).unwrap();
+        super::graph_snapshot(checkpoint)
+    }
+
+    #[test]
+    fn graph_status_full_lists_checkpoint_nodes_attempts_and_errors() {
+        let run = graph_status_fixture();
+        let full = super::graph_human::graph_human_full(&run);
+        let rows: Vec<_> = full.lines().filter(|line| line.starts_with("  ")).collect();
+        assert_eq!(rows.len(), 4);
+        for (row, id) in rows
+            .iter()
+            .zip(["ordinary", "composite", "member", "loop-member"])
+        {
+            assert!(row.starts_with(&format!("  {id}: ")), "{row}");
+        }
+        assert!(
+            rows[0]
+                .contains("adapter=codex model=latest effort=high attempt=new error=repair this")
+        );
+        assert!(!rows[0].contains("first"));
+        assert!(rows[1].contains("route=none attempt=none"));
+        assert!(rows[2].contains("CI waiting elapsed=12s checks=build head=abc"));
+        assert!(full.contains("Advance error: repair this"));
+        let mut without_ref = run.clone();
+        without_ref.checkpoint.nodes[0]
+            .attempts
+            .last_mut()
+            .unwrap()
+            .attempt_ref = None;
+        assert!(
+            super::graph_human::graph_human_full(&without_ref)
+                .contains("model=latest effort=high attempt=none")
+        );
+    }
+
+    #[test]
+    fn graph_status_compact_and_json_remain_unchanged() {
+        let run = graph_status_fixture();
+        let ordinary = super::graph_human(&run);
+        let globals = provenant_cli::Globals::default();
+        assert_eq!(
+            super::graph_display(&run, "fabric graph status", &globals),
+            ordinary
+        );
+        let globals = provenant_cli::Globals {
+            full: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            super::graph_display(&run, "fabric graph status", &globals),
+            super::graph_human::graph_human_full(&run)
+        );
+        assert_eq!(
+            super::graph_display(&run, "fabric graph run", &globals),
+            ordinary
+        );
+        assert!(ordinary.contains("  ordinary: Failed\n"));
+        assert!(ordinary.contains("  composite: Running (1 members)\n"));
+        assert!(ordinary.contains("  member: Running CI waiting"));
+        assert!(!ordinary.contains("loop-member"));
+        assert!(!ordinary.contains("attempt="));
+        let result = provenant_records::CommandResult::new(
+            "fabric graph status",
+            provenant_records::Outcome::Ok,
+            &run,
+        );
+        let mut outputs = Vec::new();
+        for full in [false, true] {
+            let globals = provenant_cli::Globals {
+                json: true,
+                full,
+                ..Default::default()
+            };
+            assert_eq!(
+                super::graph_display(&run, "fabric graph status", &globals),
+                ordinary
+            );
+            let mut bytes = Vec::new();
+            provenant_cli::render(
+                &result,
+                globals.render_mode(&ordinary, false, None),
+                &mut bytes,
+            )
+            .unwrap();
+            outputs.push(bytes);
+        }
+        assert_eq!(outputs[0], outputs[1]);
+        let json: serde_json::Value = serde_json::from_slice(&outputs[0]).unwrap();
+        assert_eq!(json["data"], serde_json::to_value(&run).unwrap());
+    }
+
+    #[test]
+    fn graph_status_reads_without_advancing_checkpoint() -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        use provenant_fabric_runtime::graph::{
+            FileJournal, GraphDocument, GraphExecution, GraphJournal,
+        };
+        struct FreeWorkers;
+        impl WorkerObserver for FreeWorkers {
+            fn observe_roots(
+                &self,
+                roots: &[PathBuf],
+            ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::WorkerState>
+            {
+                roots
+                    .iter()
+                    .cloned()
+                    .map(|root| (root, provenant_confinement::worktrees::WorkerState::Free))
+                    .collect()
+            }
+        }
+        let rig = crate::worktree_tests::support::TestRig::new()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots.clone(), &rig.home, &rig.project)
+                .map_err(|error| format!("open fixture context: {error}"))?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let project = factory.context.identity.project;
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1, "graph_id":"fixture", "nodes":[
+                {"id":"ordinary","role":"plan","access":"read_only","prompt":"test"}]
+        }))?;
+        let checkpoint = graph_status_fixture().checkpoint;
+        let mut journal = FileJournal::open(
+            &roots.state,
+            project,
+            "fixture",
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        journal.bind(GraphExecution {
+            extra: Default::default(),
+            integration_base: None,
+            directory: rig.project.clone(),
+            document,
+        })?;
+        journal.save(&checkpoint)?;
+        drop(journal);
+        let before = FileJournal::read_checkpoint(&roots.state, project, "fixture")?.unwrap();
+        let status = factory.graph(
+            GraphInput::Status {
+                extra: Default::default(),
+                id: "fixture".into(),
+            },
+            budget,
+            &cancel,
+        )?;
+        assert_eq!(status.checkpoint, before);
+        assert_eq!(
+            FileJournal::read_checkpoint(&roots.state, project, "fixture")?.unwrap(),
+            before
+        );
+        Ok(())
+    }
+
     #[test]
     fn graph_status_shows_waiting_ci_checks_head_and_live_elapsed() {
         let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =

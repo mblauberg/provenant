@@ -1,4 +1,12 @@
 pub(crate) fn graph_human(run: &provenant_fabric_runtime::graph::GraphRun) -> String {
+    graph_human_view(run, false)
+}
+
+pub(super) fn graph_human_full(run: &provenant_fabric_runtime::graph::GraphRun) -> String {
+    graph_human_view(run, true)
+}
+
+fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool) -> String {
     let members: std::collections::BTreeSet<_> = run
         .checkpoint
         .nodes
@@ -11,10 +19,36 @@ pub(crate) fn graph_human(run: &provenant_fabric_runtime::graph::GraphRun) -> St
             node.state == provenant_fabric_runtime::graph::NodeState::Running
                 && ci.state == provenant_fabric_runtime::graph::CiState::Pending
         });
-        if (members.contains(&node.id) || node.round.is_some()) && waiting_ci.is_none() {
+        if !full && (members.contains(&node.id) || node.round.is_some()) && waiting_ci.is_none() {
             continue;
         }
         human.push_str(&format!("  {}: {:?}", node.id, node.state));
+        if full {
+            if let Some(attempt) = node.attempts.last() {
+                let route = &attempt.route;
+                for (name, value) in [
+                    ("adapter", &route.adapter),
+                    ("name", &route.name),
+                    ("model", &route.model),
+                    ("alias", &route.alias),
+                    ("effort", &route.effort),
+                    ("account", &route.account),
+                ] {
+                    if let Some(value) = value {
+                        human.push_str(&format!(" {name}={value}"));
+                    }
+                }
+                human.push_str(&format!(
+                    " attempt={}",
+                    attempt.attempt_ref.as_deref().unwrap_or("none")
+                ));
+            } else {
+                human.push_str(" route=none attempt=none");
+            }
+            if let Some(error) = &node.advance_error {
+                human.push_str(&format!(" error={error}"));
+            }
+        }
         if let Some(ci) = waiting_ci {
             human.push_str(&format!(
                 " {}",
