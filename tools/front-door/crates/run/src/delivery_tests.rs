@@ -3573,6 +3573,63 @@ fn delivery_cancellation_stops_its_running_git_child()
 }
 
 #[test]
+fn delivery_cancelled_receipt_preserves_start_without_permanent_failure()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let host = fixture.prepare()?;
+    let attempt_path = fixture.root.join("cancelled-attempt");
+    std::fs::create_dir(&attempt_path)?;
+    let attempt = Directory::open_anchor(&attempt_path)?;
+    let cancel = provenant_core::CancelToken::new();
+    cancel.cancel();
+    let receipt = crate::delivery::deliver_once(
+        &host.cancellable(&cancel),
+        &fixture.writer,
+        &fixture.request,
+        &attempt,
+        "cancelled test",
+    )?;
+    assert!(matches!(receipt.state, WriterDeliveryState::Failed { .. }));
+    assert!(attempt_path.join("delivery-started.json").exists());
+    assert!(attempt_path.join("delivery-cancelled.json").exists());
+    assert!(!attempt_path.join("delivery.json").exists());
+    assert_eq!(
+        crate::delivery::deliver_once(
+            &host,
+            &fixture.writer,
+            &fixture.request,
+            &attempt,
+            "recovery"
+        )?,
+        receipt
+    );
+    Ok(())
+}
+
+#[test]
+fn publication_cleanup_never_removes_another_import_pin()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let execution = registered_landed_writer_fixture(&fixture)?;
+    let head = fixture.prepare()?.head(&fixture.writer)?;
+    let reference = format!("refs/provenant/import/{head}");
+    fixture.git(&["update-ref", &reference, &head.to_string()])?;
+    let attempt_path = fixture.root.join("old-attempt");
+    std::fs::create_dir(&attempt_path)?;
+    let attempt = Directory::open_anchor(&attempt_path)?;
+    let scope = crate::tests::exit().scope;
+    crate::writer::cleanup_git_pins(
+        execution.state_root.as_path(),
+        &fixture.writer,
+        &attempt,
+        scope,
+        Some(head),
+    )?;
+    fixture.git(&["show-ref", "--verify", &reference])?;
+    Ok(())
+}
+
+#[test]
 fn host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;

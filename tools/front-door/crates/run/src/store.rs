@@ -10,6 +10,28 @@ use provenant_supervisor::custody::ExitObservation;
 use rusqlite::{OptionalExtension, params};
 use std::ffi::OsStr;
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FAIL_EFFECT_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct TerminalEffects {
+    pub schema_version: u64,
+    pub scope: provenant_supervisor::custody::Scope,
+    pub effects: Vec<(SettlementEffect, EffectDisposition)>,
+}
+
+pub(crate) fn import_cancelled(
+    attempt: &provenant_os::fs::Directory,
+    scope: provenant_supervisor::custody::Scope,
+) -> Result<bool> {
+    Ok(read_sealed(attempt, "import-cancelled.json", RECORD_LIMIT)?
+        .map(|raw| crate::db::decode_unversioned::<provenant_supervisor::custody::Scope>(&raw))
+        .transpose()?
+        .is_some_and(|saved| saved == scope))
+}
+
 pub struct NewAttempt {
     pub attempt_id: AttemptId,
     pub task_id: TaskId,
@@ -175,7 +197,9 @@ impl RunStore {
                 };
                 if (outcome == Outcome::Cancelled
                     && !stored.never_spawned
-                    && stored.cancel_delivered_before_exit != Some(true))
+                    && stored.cancel_delivered_before_exit != Some(true)
+                    && !(pending.terminal_evidence == Some(TerminalEvidence::ImportCancellation)
+                        && import_cancelled(&dir, Self::scope(&current))?))
                     || (outcome == Outcome::Cancelled
                         && stored.never_spawned
                         && stored.stop_reason
@@ -214,7 +238,12 @@ impl RunStore {
         disposition: EffectDisposition,
         call: &Request<'_>,
     ) -> Result<SettlementReceipts> {
-        if let EffectDisposition::Failed { reason, .. } = &disposition
+        #[cfg(test)]
+        if FAIL_EFFECT_WRITE.with(|fault| fault.get()) {
+            return Err(RunError::Contention);
+        }
+        if let EffectDisposition::Failed { reason, .. }
+        | EffectDisposition::Cancelled { reason, .. } = &disposition
             && (reason.is_empty() || reason.len() > 4096)
         {
             return Err(RunError::Validation("invalid effect failure reason"));
@@ -262,10 +291,10 @@ impl RunStore {
             if disposition == CancellationDisposition::Effective && attempt.cancellation_disposition != Some(CancellationDisposition::Effective) { return Err(RunError::Conflict); }
             let raw: Option<Vec<u8>> = tx.query_row("SELECT record FROM settlement_receipts WHERE attempt=?1 AND generation=?2", params![id.to_string(), sql_int(generation)?], |row| row.get(0)).optional()?;
             let mut receipts: SettlementReceipts = raw.as_deref().map(crate::db::decode_unversioned).transpose()?.unwrap_or_default();
-            if disposition == CancellationDisposition::AcknowledgedIneffective {
+            if disposition == CancellationDisposition::AcknowledgedIneffective && !matches!(receipts.cancellation, Some(CancellationDisposition::DeliveryEffective | CancellationDisposition::ImportEffective)) {
                 receipts.late_cancellation_acknowledged = true;
             }
-            if receipts.cancellation.is_none() || disposition == CancellationDisposition::Effective {
+            if receipts.cancellation.is_none() || matches!(disposition, CancellationDisposition::Effective | CancellationDisposition::DeliveryEffective | CancellationDisposition::ImportEffective) {
                 receipts.cancellation = Some(disposition);
             }
             let changed = tx.execute("INSERT INTO settlement_receipts(attempt,generation,record) VALUES (?1,?2,?3) ON CONFLICT(attempt) DO UPDATE SET record=excluded.record WHERE generation=excluded.generation", params![id.to_string(), sql_int(generation)?, bytes(&receipts)?])?;
@@ -600,6 +629,7 @@ impl RunStore {
         if publication.outcome == Outcome::Cancelled
             && !exit.never_spawned
             && exit.cancel_delivered_before_exit != Some(true)
+            && !import_cancelled(&self.attempt_dir(old.run_id, id, false)?, Self::scope(&old))?
         {
             return Err(RunError::Validation(
                 "cancellation delivery before exit is unproven",
@@ -826,7 +856,11 @@ impl RunStore {
             reason: publication.reason.clone(),
         };
         next.schema_version = 2;
-        next.terminal_evidence = Some(if publication.outcome == Outcome::Unsettled {
+        let import_cancellation = publication.outcome == Outcome::Cancelled
+            && import_cancelled(&self.attempt_dir(old.run_id, id, false)?, Self::scope(&old))?;
+        next.terminal_evidence = Some(if import_cancellation {
+            TerminalEvidence::ImportCancellation
+        } else if publication.outcome == Outcome::Unsettled {
             TerminalEvidence::Unsettled {
                 reason: publication
                     .reason
@@ -844,7 +878,9 @@ impl RunStore {
         next.publication_error = None;
         next.exit_evidence = durable_exit;
         let attempt = self.attempt_dir(old.run_id, id, false)?;
-        if publication.outcome == Outcome::Cancelled
+        if import_cancellation {
+            next.cancellation_disposition = Some(CancellationDisposition::ImportEffective);
+        } else if publication.outcome == Outcome::Cancelled
             && (!launched || cancellation_delivered == Some(true))
         {
             next.cancellation_disposition = Some(CancellationDisposition::Effective);
@@ -1159,11 +1195,35 @@ impl RunStore {
                 .is_some_and(|task| task.writer.is_some()),
             staged.as_deref(),
         )?;
+        let attempt = self.attempt_dir(old.run_id, id, false)?;
+        let mut receipts = SettlementReceipts {
+            cancellation: next.cancellation_disposition,
+            ..Default::default()
+        };
+        if let Some(raw) = read_sealed(&attempt, "terminal-effects.json", RECORD_LIMIT)? {
+            let effects: TerminalEffects = decode(&raw)?;
+            if effects.schema_version != 1 || effects.scope != Self::scope(old) {
+                return Err(RunError::Conflict);
+            }
+            for (effect, disposition) in effects.effects {
+                *match effect {
+                    SettlementEffect::GitImport => &mut receipts.git_import,
+                    SettlementEffect::ManifestConflict => &mut receipts.manifest_conflict,
+                    SettlementEffect::LockTimeout => &mut receipts.lock_timeout,
+                    SettlementEffect::CleanupCustodyRelease => {
+                        &mut receipts.cleanup_custody_release
+                    }
+                    SettlementEffect::Delivery => &mut receipts.delivery,
+                } = disposition;
+            }
+        }
+        if read_sealed(&attempt, "delivery-cancelled.json", RECORD_LIMIT)?.is_some() {
+            receipts.cancellation = Some(CancellationDisposition::DeliveryEffective);
+        }
         self.write(call, |tx| {
             let changed = tx.execute("UPDATE attempts SET revision=?1,terminal=1,tmp_retained=1,record=?2 WHERE id=?3 AND revision=?4 AND terminal=0", params![sql_int(next.revision)?, bytes(next)?, id.to_string(), sql_int(old.revision)?])?;
             if changed != 1 { return Err(RunError::Conflict); }
             if next.schema_version >= 2 {
-                let receipts = SettlementReceipts { cancellation: next.cancellation_disposition, ..Default::default() };
                 tx.execute("INSERT INTO settlement_receipts(attempt,generation,record) VALUES (?1,?2,?3)", params![id.to_string(), sql_int(next.generation)?, bytes(&receipts)?])?;
             }
             if let Some((successor, wait_seconds)) = &successor { self.insert_policy_successor(tx, successor, *wait_seconds, &request, disk_floor_bytes)?; }
@@ -1203,12 +1263,12 @@ impl RunStore {
                         == provenant_supervisor::machine::StopReason::ExplicitCancellation
             })
         {
-            self.record_cancellation(
+            let _ = self.record_cancellation(
                 id,
                 next.generation,
                 CancellationDisposition::AcknowledgedIneffective,
                 call,
-            )?;
+            );
         }
         if request
             .tasks
@@ -1216,7 +1276,7 @@ impl RunStore {
             .any(|task| task.task_id == old.task_id && task.writer.is_some())
         {
             // A failure is persisted as a retryable effect, never reported done.
-            self.retry_git_cleanup(next, call)?;
+            let _ = self.retry_git_cleanup(next, call);
         }
         self.contribution_diagnostic(next.run_id, self.retain_contribution_route(next, call));
         Ok(())

@@ -5005,7 +5005,8 @@ fn holder_release_temporary_fixture(valid_binding: bool) -> TestResult {
 }
 
 #[test]
-fn holder_commits_decoded_success_only_with_exit_zero_and_observed_identity() -> TestResult {
+fn publication_holder_commits_decoded_success_only_with_exit_zero_and_observed_identity()
+-> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -5041,8 +5042,27 @@ fn holder_commits_decoded_success_only_with_exit_zero_and_observed_identity() ->
         observed.scope.generation = 1;
         observed.terminal_observed = false;
         observed.termination = Some(Termination::Exit(code));
+        if code == 0 {
+            observed.cancel_delivered_before_exit = None;
+            artifacts::seal(
+                &dir,
+                "cancel.json",
+                &crate::db::bytes(&serde_json::json!({
+                    "schema_version": 1, "scope": observed.scope,
+                    "requester": store.context.actor_id, "request_id": "legacy-late-cancel",
+                "reason": provenant_supervisor::machine::StopReason::ExplicitCancellation
+                }))?,
+                RECORD_LIMIT,
+            )?;
+        }
         seal_exit(&store, &observed)?;
         let record = store.finish(id, &dir, &observed, &fake, &call)?;
+        if code == 0 {
+            assert_eq!(
+                record.cancellation_disposition,
+                Some(CancellationDisposition::Unknown)
+            );
+        }
         let AttemptState::Terminal { outcome, .. } = record.state else {
             return Err("not terminal".into());
         };

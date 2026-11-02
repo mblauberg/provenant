@@ -724,6 +724,8 @@ pub enum TerminalEvidence {
     ProcessExit,
     PreLaunchRefusal,
     EffectiveCancellation,
+    /// Host observed cancellation while importing, after the provider exited.
+    ImportCancellation,
     Unsettled {
         reason: String,
     },
@@ -740,6 +742,10 @@ pub enum EffectDisposition {
     #[default]
     Pending,
     Done,
+    Cancelled {
+        reason: String,
+        retryable: bool,
+    },
     Failed {
         reason: String,
         retryable: bool,
@@ -763,6 +769,8 @@ pub enum SettlementEffect {
 #[serde(rename_all = "snake_case")]
 pub enum CancellationDisposition {
     Effective,
+    ImportEffective,
+    DeliveryEffective,
     AcknowledgedIneffective,
     Unknown,
 }

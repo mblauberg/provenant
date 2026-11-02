@@ -2189,6 +2189,11 @@ pub(crate) fn deliver_once(
     attempt: &Directory,
     identity: &str,
 ) -> Result<WriterDeliveryReceipt> {
+    if let Some(raw) =
+        crate::artifacts::read_sealed(attempt, "delivery-cancelled.json", crate::RECORD_LIMIT)?
+    {
+        return crate::db::decode(&raw);
+    }
     if let Some(raw) = crate::artifacts::read_sealed(attempt, "delivery.json", crate::RECORD_LIMIT)?
     {
         return crate::db::decode(&raw);
@@ -2263,9 +2268,21 @@ pub(crate) fn deliver_once(
             }
         };
     }
+    // Keep the start marker: an aborted remote command can have an unknown
+    // outcome. Automatic recovery must not repeat it, but explicit pickup may.
+    let name = if matches!(receipt.state, WriterDeliveryState::Failed { .. })
+        && host
+            .cancellation
+            .as_ref()
+            .is_some_and(|cancel| cancel.is_cancelled())
+    {
+        "delivery-cancelled.json"
+    } else {
+        "delivery.json"
+    };
     crate::artifacts::seal(
         attempt,
-        "delivery.json",
+        name,
         &crate::db::bytes(&receipt)?,
         crate::RECORD_LIMIT,
     )?;

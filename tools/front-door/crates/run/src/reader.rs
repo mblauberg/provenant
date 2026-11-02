@@ -1045,6 +1045,10 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
                     Outcome::Rejected | Outcome::Cancelled,
                 ) if r.provider_launched == Some(false) => {}
                 (Some(TerminalEvidence::EffectiveCancellation), Outcome::Cancelled) => {}
+                (Some(TerminalEvidence::ImportCancellation), Outcome::Cancelled)
+                    if r.exit_evidence.is_some()
+                        && r.cancellation_disposition
+                            == Some(CancellationDisposition::ImportEffective) => {}
                 (Some(TerminalEvidence::Lost { reason: evidence }), Outcome::Lost)
                     if !evidence.is_empty() && reason.as_ref() == Some(evidence) => {}
                 _ => return Err(RunError::Validation("terminal decision evidence")),

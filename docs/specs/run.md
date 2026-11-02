@@ -577,6 +577,24 @@ execution outcome only when delivery to the provider was recorded before its
 exit was observed. A later request is acknowledged as ineffective. Older exit
 records without delivery ordering retain uncertainty.
 
+A verified clean provider success is preserved for legacy guardians with unknown
+cancellation ordering; the cancellation receipt remains `unknown`. A host-observed
+cancellation during Git import has separate `import_cancellation` evidence and
+an `import_effective` receipt: it does not invent delivery to the provider before
+exit. Cancellation during delivery leaves the terminal decision unchanged and
+records `delivery_effective` plus a retryable cancelled delivery effect. Its start
+marker remains durable; automatic recovery cannot duplicate an uncertain remote
+effect, while explicit host pickup may retry it. A cancelled delivery does not
+seal a permanent `delivery.json` failure.
+
+Deferred effect dispositions are sealed in scoped `terminal-effects.json`
+before publication and inserted with the terminal transaction, including on
+replay. Post-commit receipt-write failures cannot withhold the committed decision
+or skip temporary cleanup. Admission is freed when settlement starts, including
+for upgraded guardians without the exit hook. Delayed Git cleanup removes only
+the attempt-scoped base pin; head-keyed import pins belong to the custody-held
+branch publication path and cannot be deleted by a late terminal retry.
+
 The decision is sealed (`terminal-pending.json`) before the revision-checked
 transaction and replayed unchanged after a crash or `SQLITE_BUSY`; one decision
 exists per attempt generation and a conflicting sealed decision is kept beside

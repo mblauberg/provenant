@@ -527,6 +527,12 @@ impl RunStore {
         if matches!(record.state, AttemptState::Terminal { .. }) {
             return Ok(record);
         }
+        // Upgraded guardians may not have called provider_exited. Capacity is
+        // independent of writer custody and is free as soon as exit is known.
+        self.write(call, |tx| {
+            tx.execute("DELETE FROM admission WHERE attempt=?1", [id.to_string()])?;
+            Ok(())
+        })?;
         if let Some(raw) = read_sealed(attempt, "terminal-pending.json", RECORD_LIMIT)? {
             let pending = crate::db::decode_attempt(&raw)?;
             return if pending.exit_evidence.is_some() {
@@ -546,27 +552,16 @@ impl RunStore {
             .clock
             .wall_now()
             .map_err(|_| RunError::Validation("wall clock"))?;
-        // Effects whose failure must not stop the validated decision being
-        // sealed. Their dispositions are persisted after the terminal commit;
-        // a lost write leaves them pending, which later retries treat as unmet.
+        // Seal these dispositions alongside the intent; the terminal transaction
+        // and its replay create the receipts together with the decision.
         let mut deferred: Vec<(SettlementEffect, EffectDisposition)> = Vec::new();
-        let cancellation_requested = read_sealed(attempt, "cancel.json", RECORD_LIMIT)?
-            .and_then(|raw| crate::db::decode::<crate::store::CancellationEvidence>(&raw).ok())
-            .is_some_and(|request| {
-                request.scope == exit.scope
-                    && request.requester == record.verified_owner.unwrap_or(self.context.actor_id)
-                    && request.reason == StopReason::ExplicitCancellation
-            });
-        // A request alone cannot change the execution fact. Older guardians
-        // did not record delivery ordering, so leave those cases uncertain.
-        let cancelled = if exit.never_spawned {
+        // A late request alone cannot invalidate a verified clean exit, even
+        // with a legacy guardian. Its cancellation receipt retains uncertainty.
+        let mut cancelled = if exit.never_spawned {
             exit.stop_reason == Some(StopReason::ExplicitCancellation)
         } else {
             exit.cancel_delivered_before_exit == Some(true)
         };
-        let cancellation_unknown = cancellation_requested
-            && !exit.never_spawned
-            && exit.cancel_delivered_before_exit.is_none();
         let provider_state = self
             .context
             .state_root
@@ -773,7 +768,26 @@ impl RunStore {
                     ))
                 }
                 Err(error) if !matches!(error, RunError::ObjectImportLimit(_)) => {
-                    if cancelled {
+                    let requested = read_sealed(attempt, "cancel.json", RECORD_LIMIT)?
+                        .and_then(|raw| {
+                            crate::db::decode::<crate::store::CancellationEvidence>(&raw).ok()
+                        })
+                        .is_some_and(|request| {
+                            request.scope == exit.scope
+                                && request.requester
+                                    == record.verified_owner.unwrap_or(self.context.actor_id)
+                                && request.reason == StopReason::ExplicitCancellation
+                        });
+                    if cancelled || requested {
+                        cancelled = true;
+                        crate::artifacts::seal(
+                            attempt,
+                            "import-cancelled.json",
+                            &crate::db::bytes(&exit.scope)?,
+                            RECORD_LIMIT,
+                        )?;
+                        decoded.outcome = Outcome::Cancelled;
+                        decoded.reason = Some("cancelled during Git import".into());
                         Ok(false)
                     } else if settlement
                         .as_ref()
@@ -982,6 +996,7 @@ impl RunStore {
                 .is_some_and(|reason| reason.starts_with("runtime deadline exceeded"));
             if let Some(reason) = cancellation_reason(cancellation.as_deref())
                 && !typed_deadline
+                && !crate::store::import_cancelled(attempt, exit.scope)?
             {
                 decoded.reason = Some(format!("cancelled: {reason}"));
             }
@@ -1202,6 +1217,18 @@ impl RunStore {
                     )
                 });
             match delivered {
+                Ok(_) if cancel.is_cancelled() => {
+                    deferred.push((
+                        SettlementEffect::Delivery,
+                        EffectDisposition::Cancelled {
+                            reason: delivery_cancellation_reason(
+                                read_sealed(attempt, "cancel.json", RECORD_LIMIT)?.as_deref(),
+                                false,
+                            ),
+                            retryable: true,
+                        },
+                    ));
+                }
                 Ok(_) => {}
                 Err(error) => {
                     let reason: String = error.to_string().chars().take(1024).collect();
@@ -1219,7 +1246,7 @@ impl RunStore {
                 }
             }
         }
-        if cancellation_unknown || (!cancelled && decoded.outcome == Outcome::Cancelled) {
+        if !cancelled && decoded.outcome == Outcome::Cancelled {
             decoded.outcome = Outcome::Unsettled;
             decoded.reason = Some("cancellation delivery before provider exit is unknown".into());
         } else if cancelled {
@@ -1251,10 +1278,17 @@ impl RunStore {
         if let Some(driver) = &mut settlement {
             driver.advance(crate::settlement::Phase::Record)?;
         }
+        crate::artifacts::seal(
+            attempt,
+            "terminal-effects.json",
+            &crate::db::bytes(&crate::store::TerminalEffects {
+                schema_version: 1,
+                scope: exit.scope,
+                effects: deferred,
+            })?,
+            RECORD_LIMIT,
+        )?;
         let terminal = self.publish_terminal(id, record.revision, &publication, exit, call)?;
-        for (effect, disposition) in deferred {
-            self.record_effect(id, terminal.generation, effect, disposition, call)?;
-        }
         if let Some(driver) = &mut settlement {
             driver.advance(crate::settlement::Phase::Release)?;
         }
@@ -1709,7 +1743,108 @@ mod writer_recovery_tests {
     }
 
     #[test]
-    fn failed_import_becomes_terminal_after_three_attempts_and_releases_custody()
+    fn settlement_import_cancellation_preserves_provider_exit_ordering()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for delivered in [None, Some(false)] {
+            use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
+            use std::ffi::OsStr;
+            let fixture = PrepareFixture::new()?;
+            let execution = registered_landed_writer_fixture(&fixture)?;
+            let (clock, cancel) = (clock(), CancelToken::new());
+            let call = call(&clock, &cancel);
+            let store = RunStore::open(&execution, &call)?;
+            let mut run = input();
+            run.request.tasks[0].writer = Some(fixture.writer.clone());
+            store.create(&run, &call)?;
+            let id = run.attempts[0].attempt_id;
+            store.mark_starting(
+                &store.record(id, &call)?,
+                &route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+            let scope = RunStore::scope(&record);
+            let attempt = store.attempt_dir(run.run_id, id, false)?;
+            let mut launch = crate::prepare_writer(
+                &fixture.writer,
+                execution.state_root.as_path(),
+                execution.project_id,
+            )?;
+            launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+            let candidate = store.temporary_path(id, &call)?.join("candidate-0");
+            std::fs::create_dir_all(&candidate)?;
+            let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+            crate::objects::prepare_bound(
+                &git,
+                launch.worktree.repo(),
+                &attempt,
+                &candidate,
+                launch.branch.as_str(),
+                launch.base,
+            )?;
+            let missing = "a".repeat(40);
+            std::fs::write(
+                candidate.join("git-common").join(launch.branch.as_str()),
+                format!("{missing}\n"),
+            )?;
+            let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
+            let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+                directory,
+                scope,
+                binding,
+                call.lock_budget(),
+                &cancel,
+                &clock,
+            )?;
+            let mut recovery = provenant_supervisor::fixture::bind_writer_attempt(lease, &attempt)?
+                .into_recovery()?;
+            recovery.prepare_settlement()?;
+            let mut observed = crate::tests::exit();
+            observed.scope = scope;
+            crate::dispatch_tests::seal_exit(&store, &observed)?;
+
+            observed.cancel_delivered_before_exit = delivered;
+            // Replace the fixture's exit before validation; ordering remains a fact.
+            attempt.unlink(OsStr::new("process-exit.json"))?;
+            crate::dispatch_tests::seal_exit(&store, &observed)?;
+            crate::artifacts::seal(
+                &attempt,
+                "cancel.json",
+                &crate::db::bytes(&serde_json::json!({
+                    "schema_version": 1, "scope": scope, "requester": execution.actor_id,
+                    "request_id": "import-cancel", "reason": StopReason::ExplicitCancellation
+                }))?,
+                RECORD_LIMIT,
+            )?;
+            let record = store.finish_in_custody(
+                id,
+                &attempt,
+                &observed,
+                Completion::Recovered(Some(&recovery)),
+                &crate::dispatch_tests::Fake::default(),
+                &call,
+            )?;
+            assert!(
+                matches!(record.state, AttemptState::Terminal {outcome: Outcome::Cancelled, reason: Some(ref reason), ..} if reason == "cancelled during Git import")
+            );
+            assert_eq!(
+                record.terminal_evidence,
+                Some(TerminalEvidence::ImportCancellation)
+            );
+            assert_eq!(
+                record.cancellation_disposition,
+                Some(CancellationDisposition::ImportEffective)
+            );
+            assert_eq!(observed.cancel_delivered_before_exit, delivered);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn settlement_failed_import_becomes_terminal_after_three_attempts_and_releases_custody()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
         use std::ffi::OsStr;
@@ -1809,6 +1944,13 @@ mod writer_recovery_tests {
                 &call,
             );
             if index < 2 {
+                let active: i64 = store.db.query_row(
+                    "SELECT COUNT(*) FROM admission WHERE attempt=?1",
+                    [id.to_string()],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(active, 0);
+                assert!(!store.writer_fences()?.is_empty());
                 assert!(
                     matches!(
                         result,
@@ -1949,7 +2091,6 @@ fn cancellation_reason(bytes: Option<&[u8]>) -> Option<String> {
     })
 }
 
-#[cfg(test)]
 fn delivery_cancellation_reason(bytes: Option<&[u8]>, handoff_done: bool) -> String {
     let mut reason = match cancellation_reason(bytes) {
         Some(cancellation) => format!("cancelled during delivery: {cancellation}"),

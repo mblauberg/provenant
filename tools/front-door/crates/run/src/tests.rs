@@ -1561,6 +1561,11 @@ fn publication_crash_worker() -> TestResult {
         return Err("crash phase was not reached".into());
     }
     seal_exit_fixture(&store, &input)?;
+    let attempt = store.attempt_dir(input.run_id, input.attempts[0].attempt_id, false)?;
+    crate::artifacts::seal(&attempt, "terminal-effects.json", &crate::db::bytes(&crate::store::TerminalEffects {
+        schema_version: 1, scope: RunStore::scope(&store.record(input.attempts[0].attempt_id, &call)?),
+        effects: vec![(SettlementEffect::ManifestConflict, EffectDisposition::Failed { reason: "crash-retained conflict".into(), retryable: true })],
+    })?, RECORD_LIMIT)?;
     store.publish_terminal(
         input.attempts[0].attempt_id,
         1,
@@ -1694,6 +1699,10 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
             store.publish_terminal(id, 1, &publication(), &exit(), &call)?;
         }
         assert_eq!(store.events(0, 64, None, &call)?.len(), 2);
+        if !matches!(phase, "reserved" | "withdraw-sealed") {
+            assert!(matches!(store.record(id, &call)?.settlement_receipts.unwrap().manifest_conflict,
+                EffectDisposition::Failed { reason, retryable: true } if reason == "crash-retained conflict"));
+        }
         assert!(store.record(id, &call)?.terminal_evidence.is_some());
         assert!(
             store
@@ -1879,6 +1888,69 @@ fn receipt_cancellation_requires_ordered_delivery() -> TestResult {
             ));
         }
     }
+    Ok(())
+}
+
+#[test]
+fn publication_deferred_effects_survive_commit_and_replay() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let id = input.attempts[0].attempt_id;
+    store.create(&input, &call)?;
+    seal_exit_fixture(&store, &input)?;
+    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let effects = serde_json::json!({
+        "schema_version": 1,
+        "scope": RunStore::scope(&store.record(id, &call)?),
+        "effects": [["manifest_conflict", {"state":"failed", "reason":"conflicting evidence", "retryable":true}]]
+    });
+    crate::artifacts::seal(
+        &attempt,
+        "terminal-effects.json",
+        &serde_json::to_vec(&effects)?,
+        RECORD_LIMIT,
+    )?;
+    store.publish_terminal(id, 1, &publication(), &exit(), &call)?;
+    drop(store);
+    let store = RunStore::open(&context, &call)?;
+    let record = store.replay_terminal(id, &call)?;
+    assert!(
+        matches!(record.settlement_receipts.unwrap().manifest_conflict,
+        EffectDisposition::Failed { reason, retryable: true } if reason == "conflicting evidence")
+    );
+    Ok(())
+}
+
+#[test]
+fn publication_postcommit_effect_failure_still_cleans_temporary() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let mut input = input();
+    input.request.tasks[0].writer = Some(WriterRequest {
+        extra: Default::default(),
+        project: temp.path().into(),
+        worktree: temp.path().into(),
+    });
+    let id = input.attempts[0].attempt_id;
+    store.create(&input, &call)?;
+    seal_exit_fixture(&store, &input)?;
+    let temporary = store.temporary_path(id, &call)?;
+    std::fs::write(temporary.join("payload"), b"temporary")?;
+    crate::store::FAIL_EFFECT_WRITE.with(|fault| fault.set(true));
+    let published = store.publish_terminal(id, 1, &publication(), &exit(), &call);
+    crate::store::FAIL_EFFECT_WRITE.with(|fault| fault.set(false));
+    assert!(matches!(published?.state, AttemptState::Terminal { .. }));
+    assert!(!temporary.exists());
+    assert_eq!(admission_count(&store)?, 0);
     Ok(())
 }
 

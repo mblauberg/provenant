@@ -165,8 +165,9 @@ struct GitPins {
     base: GitOid,
 }
 
-/// Remove only this attempt's host-owned retention refs. This runs before the
-/// terminal record becomes visible, including cancellation and import refusal.
+/// Remove only this attempt's host-owned retention ref after terminal commit.
+/// The head-keyed import ref belongs to publish_branch's custody-protected CAS;
+/// a delayed cleanup must never delete another lane's in-progress import.
 pub(crate) fn cleanup_git_pins(
     state: &Path,
     writer: &WriterRequest,
@@ -193,10 +194,7 @@ pub(crate) fn cleanup_git_pins(
             "open writer repository for Git ref cleanup",
             Some(&writer.project),
         ))?;
-    let mut refs = vec![format!("refs/provenant/lane-base/{}", scope.attempt)];
-    if let Some(head) = head {
-        refs.push(format!("refs/provenant/import/{head}"));
-    }
+    let refs = [format!("refs/provenant/lane-base/{}", scope.attempt)];
     for reference in refs {
         crate::objects::command(
             utility.git_program_path(),
