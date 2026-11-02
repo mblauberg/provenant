@@ -212,8 +212,8 @@ A selector takes one of three forms:
 An unknown selector is refused with the valid forms, before anything is
 submitted.
 
-For one dispatch, pass `--exclude` (repeatable) to `run`, `review` or
-`route resolve`:
+For one dispatch, pass `--exclude` to `run`, `review` or `route resolve`. Repeat
+the flag once per selector; it takes no comma-separated list:
 
 ```sh
 provenant run --route junior --exclude claude --explain
@@ -224,11 +224,25 @@ provenant route resolve junior --exclude claude
 `--explain` and `route resolve` list each exclusion that removed a candidate
 and where it came from. `review` keeps its family separation: it substitutes
 an unused family around the exclusions, and refuses once they exhaust the
-families left.
+families left, naming the exclusions in the refusal.
 
-On a preset or an automatically selected graph, `--exclude` is recorded on the
-graph and every node inherits it (the `routing.graph_exclude` knob, source
-`graph`). A node's pinned `--model` is unaffected.
+Three sources combine as a union, never as a replacement, and each rule keeps
+its source in refusals and `--explain`:
+
+| Source | Set by | Knob |
+|---|---|---|
+| `config` | The standing list in `[knobs]` | `routing.exclude` |
+| `flag` | `--exclude` on this dispatch | `routing.flag_exclude` |
+| `graph` | `--exclude` on a preset or automatically selected graph, inherited by every node | `routing.graph_exclude` |
+
+A list that is not a list of strings, or holds an unknown selector, is
+refused, the same as on the flag. `--explain` and `route resolve` read the
+standing and flag lists the dispatch would use; a graph's list is applied only
+when its nodes launch.
+
+An exclusion applies to named-route pools, to the fallback models of a named
+route, and to a named route that holds a single model. A pinned `--model`, and
+the fallback listed alongside it, are never filtered.
 
 To exclude an exact model from every pool until you remove it, use:
 
@@ -240,7 +254,13 @@ provenant route exclude remove codex/gpt-6-luna
 
 `--until` accepts a future RFC 3339 timestamp or a duration; omit it to keep
 the exclusion until it is removed. `route list` and `route override list`
-also show these rules.
+also show these rules. Adding an exclusion also drops rows that have expired.
+
+A stored row that cannot be read in full does not refuse the configuration.
+If its model parses, the model stays excluded with no schedule; if not, the row
+is ignored. Either way the repair shows as a `note:` on `route exclude list`,
+`route list`, `route override list` and `--explain`, until you fix or remove
+the row.
 
 An explicit `--model` pin always selects the named model, whatever the
 exclusions. Pacing overrides keep their precedence; an exclusion removes

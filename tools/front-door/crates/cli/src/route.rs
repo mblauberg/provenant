@@ -3759,6 +3759,111 @@ mod route_tests {
     }
 
     #[test]
+    fn the_non_graph_run_path_carries_the_flag_into_rules_that_drop_the_provider()
+    -> Result<(), Box<dyn Error>> {
+        use provenant_routing::{ExclusionSelector, ExclusionSource};
+        let fixture = ReviewFixture::new()?;
+        // `run --route test --exclude claude` pushes this override; the task's
+        // profile is built from it exactly as the dispatch builds it.
+        let overrides = vec![format!(
+            "routing.flag_exclude={}",
+            serde_json::Value::from(vec!["claude"])
+        )];
+        let profile =
+            provenant_config::read_with_domains(&fixture.roots, &crate::domains::SECTIONS)?
+                .dispatch_profile(&overrides)?;
+        let rules = super::task_exclusion_rules(&profile, &fixture.roots)?;
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].source, ExclusionSource::Flag);
+        assert_eq!(
+            rules[0].selector,
+            ExclusionSelector::Provider("claude".into())
+        );
+        let route = super::resolve_dispatch(
+            &fixture.request,
+            &fixture.roots,
+            None,
+            ("fixture", 0),
+            &fixture.availability,
+            &fixture.access,
+            "fixture",
+            None,
+            &rules,
+        )?;
+        assert_eq!(route.adapter, "codex");
+        let receipt = route.pool_selection.ok_or("pool selection")?;
+        assert!(receipt.candidates.iter().any(|candidate| {
+            candidate.model == "claude/claude-haiku-5-5"
+                && candidate.exclusion.as_deref() == Some("excluded by flag: provider claude")
+        }));
+        // Required family separation names the exclusions that left no member.
+        let used = [String::from("openai")];
+        let refused = super::resolve_dispatch(
+            &fixture.request,
+            &fixture.roots,
+            None,
+            ("fixture", 0),
+            &fixture.availability,
+            &fixture.access,
+            "fixture",
+            Some((&used, true)),
+            &rules,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            refused,
+            super::DispatchError::FamilySeparation(..)
+        ));
+        assert!(
+            refused
+                .to_string()
+                .contains("excluded by flag: provider claude"),
+            "{refused}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn explain_reads_the_same_union_of_standing_and_flag_exclusions() -> Result<(), Box<dyn Error>>
+    {
+        use provenant_routing::ExclusionSource;
+        let temp = tempfile::tempdir()?;
+        let roots = exclusion_roots(&temp)?;
+        std::fs::write(
+            roots.state.as_path().join("config.toml"),
+            "schema_version=1\n[knobs]\n'routing.exclude'=['codex']\n",
+        )?;
+        let rules = super::effective_exclusion_rules(&["claude".to_owned()], &roots)?;
+        let texts: Vec<_> = rules.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            texts,
+            [
+                "excluded by config: provider codex",
+                "excluded by flag: provider claude"
+            ]
+        );
+        assert!(
+            rules
+                .iter()
+                .any(|rule| rule.source == ExclusionSource::Config)
+        );
+        // A bad standing selector is refused the same as on the flag.
+        std::fs::write(
+            roots.state.as_path().join("config.toml"),
+            "schema_version=1\n[knobs]\n'routing.exclude'=['nosuchprovider']\n",
+        )?;
+        let error = super::effective_exclusion_rules(&[], &roots).unwrap_err();
+        assert!(error.to_string().contains("valid forms"), "{error}");
+        // A malformed list is refused rather than recovered to empty.
+        std::fs::write(
+            roots.state.as_path().join("config.toml"),
+            "schema_version=1\n[knobs]\n'routing.exclude'=['claude', 5]\n",
+        )?;
+        assert!(super::effective_exclusion_rules(&[], &roots).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn review_substitution_skips_refused_unused_families() -> Result<(), Box<dyn Error>> {
         let fixture = ReviewFixture::new()?;
         // The used family is the one codex serves, so Claude is the unused one.
