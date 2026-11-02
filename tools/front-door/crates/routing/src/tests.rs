@@ -4255,6 +4255,42 @@ fn persisted_mismatch_excludes_account_and_selects_another()
 }
 
 #[test]
+fn invalid_account_evidence_excludes_only_that_account() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let availability = two_accounts();
+    let mut broken = provenant_quota::AccountRecord::empty(account_scope("opaque-account"));
+    broken.refusals.push(provenant_quota::Refusal {
+        extra: Default::default(),
+        account: account_scope("opaque-account"),
+        model: "test".into(),
+        pool: None,
+        observed_unix_seconds: i64::MAX,
+        resets_unix_seconds: None,
+    });
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &availability;
+    ctx.access = &ACCESS;
+    let records = [broken];
+    ctx.accounts = &records;
+    let route = resolve(&request("codex/test")?, &ctx)?;
+    assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+    assert_eq!(route.account_key.as_deref(), Some("other-account"));
+    // Alone, the broken account is unavailable for a reason that names the evidence.
+    let single = [availability[0].clone()];
+    ctx.availability = &single;
+    let route = resolve(&request("codex/test")?, &ctx)?;
+    assert!(matches!(
+        route.readiness,
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::InvalidAccountEvidence,
+            ..
+        }
+    ));
+    Ok(())
+}
+
+#[test]
 fn live_scoped_refusal_excludes_only_the_matching_account_and_model()
 -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;

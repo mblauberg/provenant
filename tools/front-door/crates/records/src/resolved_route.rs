@@ -164,4 +164,6 @@ pub enum RouteExclusionReason {
     FreeTierRefused,
     /// A live provider refusal scoped to the model or its verified pool.
     ProviderRefused,
+    /// The account's persisted quota evidence is malformed, so only that account is excluded.
+    InvalidAccountEvidence,
 }

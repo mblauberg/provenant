@@ -374,6 +374,7 @@ fn route_exclusion_reason_codes_round_trip() -> TestResult {
         "account_mismatch",
         "free_tier_refused",
         "provider_refused",
+        "invalid_account_evidence",
     ] {
         let reason: RouteExclusionReason = serde_json::from_value(json!(code))?;
         assert_eq!(serde_json::to_value(&reason)?, json!(code));

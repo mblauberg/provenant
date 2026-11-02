@@ -992,7 +992,7 @@ fn account_reason<'q>(
     availability: &AvailabilityRecord,
     access: Option<&AccessContext<'_>>,
     context: &'q RoutingContext<'_>,
-) -> Result<(Option<RouteExclusionReason>, Option<&'q QuotaObservation>), RoutingError> {
+) -> (Option<RouteExclusionReason>, Option<&'q QuotaObservation>) {
     let mut reason = availability_reason(Some(availability), context);
     if reason.is_none() && access.is_none_or(|a| a.disclosure_ref.is_empty()) {
         reason = Some(RouteExclusionReason::DisclosureDenied);
@@ -1003,7 +1003,7 @@ fn account_reason<'q>(
     if reason.is_none()
         && let Some(key) = availability.account_key.as_deref()
     {
-        reason = account_block_reason(model, key, context)?;
+        reason = account_block_reason(model, key, context);
     }
     // Explicit exact IDs use the executable/account preflight too. The provider
     // owns model availability; named routes and pools require catalogue entries.
@@ -1048,15 +1048,16 @@ fn account_reason<'q>(
     {
         reason = Some(RouteExclusionReason::PacingReserve);
     }
-    Ok((reason, quota))
+    (reason, quota)
 }
 /// Persisted mismatch or refusal evidence, assessed by the same quota function
-/// that admission rechecks before launch. Invalid evidence is an error.
+/// that admission rechecks before launch. Invalid evidence excludes only the
+/// account it belongs to; it is never read as proof the account is ready.
 fn account_block_reason(
     model: &ModelId,
     account_key: &str,
     context: &RoutingContext<'_>,
-) -> Result<Option<RouteExclusionReason>, RoutingError> {
+) -> Option<RouteExclusionReason> {
     let pools = context.catalogue.admission_pools(model);
     let admission = provenant_quota::Admission {
         policies: context.quota_policies,
@@ -1064,14 +1065,14 @@ fn account_block_reason(
         records: context.accounts,
         pools: &pools,
     };
-    Ok(admission
-        .account_block(model.adapter(), account_key, model.model())
-        .map_err(|_| RoutingError::Availability)?
-        .map(|block| match block {
+    match admission.account_block(model.adapter(), account_key, model.model()) {
+        Err(_) => Some(RouteExclusionReason::InvalidAccountEvidence),
+        Ok(block) => block.map(|block| match block {
             provenant_quota::AccountBlock::Mismatch => RouteExclusionReason::AccountMismatch,
             provenant_quota::AccountBlock::FreeTierRefusal => RouteExclusionReason::FreeTierRefused,
             provenant_quota::AccountBlock::ScopedRefusal => RouteExclusionReason::ProviderRefused,
-        }))
+        }),
+    }
 }
 /// The account's latest reading for this model, only a fresh one when
 /// `fresh`. Only a fresh reading may refuse the route; a stale one still ranks
@@ -1297,14 +1298,14 @@ fn candidate(
             policy_refused |= !permitted;
             permitted
         })
-        .map(|a| -> Result<_, RoutingError> {
-            let (reason, _) = account_reason(model, a, access, context)?;
+        .map(|a| {
+            let (reason, _) = account_reason(model, a, access, context);
             let (policy, _, _, _) = effective_profile(context, model, a.account_key.as_deref());
             let (headroom, _, standby) =
                 pacing_factor_basis_points(policy, model, a.account_key.as_deref(), context);
             let spent = latest_reading(model, a, context, false)
                 .is_some_and(|q| reading_exhausted(&q.snapshot, model, context));
-            Ok((
+            (
                 a,
                 reason,
                 (
@@ -1313,9 +1314,9 @@ fn candidate(
                     !standby,
                     headroom,
                 ),
-            ))
+            )
         })
-        .collect::<Result<_, _>>()?;
+        .collect();
     if evaluated.is_empty() && policy_refused {
         return Err(RoutingError::ReadOnlyPolicy);
     }

@@ -342,9 +342,10 @@ account before choosing one, so a blocked account yields to another serving the
 same model; blocks surface as the reason codes `account_mismatch`,
 `free_tier_refused` and `provider_refused`. Admission reuses the same function on
 freshly reloaded records immediately before launch, so a refusal written after
-resolution still prevents it. Invalid evidence is an error; absent evidence is
+resolution still prevents it. Invalid evidence excludes only the account it
+belongs to (`invalid_account_evidence`) and fails admission; absent evidence is
 not proof of readiness. Cooldown stays a selection preference, never a block.
-Compatibility: the three reason codes are new `RouteExclusionReason` variants;
+Compatibility: the four reason codes are new `RouteExclusionReason` variants;
 older readers that reject unknown variants cannot read records carrying them.
 - Why: one probe outage or model limit must not take a provider offline.
 - Test: `crates/quota/src/admission.rs::unknown_and_stale_do_not_manufacture_exhaustion`;
@@ -353,6 +354,7 @@ older readers that reject unknown variants cannot read records carrying them.
   `crates/routing/src/tests.rs::spent_account_is_skipped_for_an_available_one_even_when_its_reading_is_stale`;
   `crates/quota/src/admission.rs::tests::account_block_types_mismatch_free_and_scoped_refusals`;
   `crates/routing/src/tests.rs::persisted_mismatch_excludes_account_and_selects_another`;
+  `::invalid_account_evidence_excludes_only_that_account`;
   `::live_scoped_refusal_excludes_only_the_matching_account_and_model`;
   `crates/cli/src/route.rs::tests::refused_account_falls_through_to_another_for_the_same_model`;
   `crates/records/tests/forward_compatibility.rs::route_exclusion_reason_codes_round_trip`
