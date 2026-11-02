@@ -1939,10 +1939,13 @@ mod tests {
             "must match original fd identity"
         );
         let temp = tempfile::tempdir()?;
+        // macOS reaches the default temporary directory through the /var
+        // symlink, which the no-follow walk refuses before checking ownership.
+        let root = std::fs::canonicalize(temp.path())?;
         // Keep a genuinely root-owned executable descriptor. Only an ancestor
         // can fail this assertion; skipping its check would reach a missing leaf.
         assert_eq!(
-            check_root_owned_executable_chain(&temp.path().join("missing-image"), &file),
+            check_root_owned_executable_chain(&root.join("missing-image"), &file),
             Err("root-owned non-writable ancestor required"),
         );
         let path = temp.path().join("image");
