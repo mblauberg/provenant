@@ -4872,6 +4872,18 @@ fn graph_operation(
     provenant_core::OperationId::parse(&format!("graph-{}", provenant_core::hex(digest.as_bytes())))
         .map_err(|_| FacadeError::InvalidInput)
 }
+fn graph_display(
+    run: &provenant_fabric_runtime::graph::GraphRun,
+    command: &str,
+    globals: &provenant_cli::Globals,
+) -> String {
+    if command == "fabric graph status" && globals.full && !globals.json {
+        graph_human::graph_human_full(run)
+    } else {
+        graph_human(run)
+    }
+}
+
 pub fn graph(
     input: provenant_cli::fabric::Graph,
     globals: &provenant_cli::Globals,
@@ -4937,7 +4949,7 @@ pub fn graph(
                     globals,
                 );
             }
-            let human = graph_human(&data);
+            let human = graph_display(&data, command, globals);
             crate::emit(
                 &provenant_records::CommandResult::new(
                     command,

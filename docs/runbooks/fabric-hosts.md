@@ -455,7 +455,13 @@ an empty list and, when a result exists, a warning rather than failing the node.
 ```sh
 provenant fabric graph run --document graph.json
 provenant fabric graph status write-review
+provenant fabric graph status write-review --full
 ```
+
+The full view lists every saved node, including composite and loop members, in
+checkpoint order with its state, latest route and attempt reference. `none`
+marks a missing route or attempt reference. Node errors and pending CI details
+are shown alongside the affected node.
 
 The run command returns after starting ready nodes. Settlement automatically
 starts dependants and updates the checkpoint to complete. `status` only reads
