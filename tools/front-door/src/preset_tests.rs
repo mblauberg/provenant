@@ -1176,15 +1176,15 @@ fn read_roots_are_confined_to_the_project_or_the_host_allow_list()
 }
 
 /// Stand-in for the routing review configuration: low risk is one junior,
-/// high risk is six, otherwise two.
+/// high risk is eight, otherwise three.
 fn shapes() -> super::preset::ShapeSelector {
     Box::new(|named, risk, kind, _, _, _| {
         let (name, source, count) = match (named, risk, kind) {
             (_, _, Some("integration")) => ("deep", "by_kind", 8),
-            (Some("standard"), _, _) => ("standard", "override", 2),
+            (Some("standard"), _, _) => ("standard", "override", 3),
             (_, Some("crucial"), _) => ("deep", "by_risk", 8),
             (_, Some("routine"), _) => ("quick", "by_risk", 1),
-            _ => ("standard", "default", 2),
+            _ => ("standard", "default", 3),
         };
         Ok(super::preset::ShapeHint {
             name: name.into(),
@@ -1244,7 +1244,7 @@ fn integration_review_expands_all_base_lenses_and_resolves_roles() {
     let document = council(
         &[
             "parameters.worktree='/repo/lane'",
-            "parameters.subject={type='integration'}",
+            "parameters.kind='integration'",
         ],
         true,
     )
@@ -1304,7 +1304,11 @@ fn refactor_panel_uses_its_slots_for_kind_priorities() {
     .unwrap();
     assert_eq!(
         lens_ids(&document),
-        ["lens-correctness-spec", "lens-refactor-cleanup"]
+        [
+            "lens-correctness-spec",
+            "lens-tests",
+            "lens-refactor-cleanup"
+        ]
     );
 }
 
@@ -1361,7 +1365,7 @@ fn lens_tiers_come_from_the_review_shape_unless_overridden() {
     let nodes = document["nodes"][1]["composite"]["nodes"]
         .as_array()
         .unwrap();
-    assert_eq!(nodes.len(), 2);
+    assert_eq!(nodes.len(), 3);
     assert!(nodes.iter().all(|node| node["route"]["alias"] == "junior"));
     let document = council(
         &[

@@ -136,9 +136,9 @@ pub fn lens_priority(kind: Option<&str>) -> &'static [&'static str] {
         Some("docs") => &["conventions-readability"],
         Some("refactor") => &[
             "correctness-spec",
+            "tests",
             "refactor-cleanup",
             "design-fit-reuse",
-            "tests",
             "simplicity",
             "conventions-readability",
             "reliability",

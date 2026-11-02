@@ -118,7 +118,7 @@ distinct model families. Configure them in the selected state's `config.toml`:
 reviewers = [{ pool = "junior", count = 1 }]
 
 [domains.routing.review.shapes.standard]
-reviewers = [{ pool = "junior", count = 2, distinct_families = true }]
+reviewers = [{ pool = "junior", count = 3, distinct_families = true }]
 
 [domains.routing.review.shapes.deep]
 reviewers = [
@@ -146,7 +146,9 @@ crate roots in the subject-versus-base diff. Small is at most 150 lines,
 larger or binary changes are large. Configure these limits under
 `domains.routing.review.size`. The risk tier sets a floor. Integration heads
 select deep; docs select the readability lens; refactors prioritize correctness,
-refactor-cleanup and design fit. Risk tags add their conditional lenses.
+tests and refactor-cleanup. The standard shape has three slots: correctness-spec,
+tests, then one kind lens (refactor-cleanup for refactors, otherwise
+design-fit-reuse). Risk tags add their conditional lenses.
 
 For example, review a commit with changed paths from a Git range:
 
