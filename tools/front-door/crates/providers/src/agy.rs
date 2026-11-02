@@ -40,7 +40,9 @@ const KEYCHAIN: &str = "Library/Keychains/login.keychain-db";
 /// a missing keychain, or one that is not a regular file (a symlink would
 /// point at a file elsewhere), is an error naming the path, so a keychain that
 /// vanishes after registration or verification fails closed instead of
-/// falling back to the shared login keychain.
+/// falling back to the shared login keychain. That holds for a keychain that
+/// is gone when it is checked; see [`ProbeHome`] for the window while a probe
+/// runs.
 ///
 /// This only selects which keychain a lane links. The guard against a wrong
 /// sign-in is the identity pinned at registration and re-verified on launch.
@@ -56,7 +58,7 @@ pub fn account_keychain(
     {
         return Ok(None);
     }
-    isolated_keychain(directory).map(|(keychain, _)| Some(keychain))
+    isolated_keychain(directory, home).map(|(keychain, _)| Some(keychain))
 }
 
 /// The one check that an account directory holds its own keychain, shared by
@@ -65,16 +67,29 @@ pub fn account_keychain(
 /// its fully resolved path must be exactly `<resolved directory>/Library/
 /// Keychains/login.keychain-db`, so a symlink anywhere along it (the file, or
 /// `Library` or `Library/Keychains` pointing at another home's) is refused.
+/// A hard link is no better: the file must have a single link and must not be
+/// the same device and inode as the real `home`'s login keychain, which is only
+/// ever stat'ed, never opened.
 fn isolated_keychain(
     directory: &std::path::Path,
+    home: &std::path::Path,
 ) -> Result<(std::path::PathBuf, std::fs::Metadata), crate::ProviderError> {
+    use std::os::unix::fs::MetadataExt;
     let keychain = directory.join(KEYCHAIN);
     let own = std::fs::canonicalize(directory)
         .ok()
         .zip(std::fs::canonicalize(&keychain).ok())
         .is_some_and(|(directory, resolved)| resolved == directory.join(KEYCHAIN));
     match std::fs::symlink_metadata(&keychain) {
-        Ok(metadata) if own && metadata.file_type().is_file() => Ok((keychain, metadata)),
+        Ok(metadata)
+            if own
+                && metadata.file_type().is_file()
+                && metadata.nlink() == 1
+                && !std::fs::metadata(home.join(KEYCHAIN))
+                    .is_ok_and(|real| identity(&real) == identity(&metadata)) =>
+        {
+            Ok((keychain, metadata))
+        }
         _ => Err(crate::ProviderError::IsolatedKeychainUnavailable(
             keychain.display().to_string(),
         )),
@@ -96,9 +111,11 @@ pub const KEYCHAIN_OPERATION: &str = "isolated keychain";
 /// before spawning and again once the probe returns, and refuses the result if
 /// either check fails.
 ///
-/// Residual race: the agent opens the keychain after the first check and
-/// before it exits, so a keychain swapped for another regular file and back
-/// within that window is not observable. Closing it needs a seatbelt profile
+/// Residual race: the agent opens the keychain at some point between the two
+/// checks, so any temporary replacement, absence or symlink swap during the
+/// probe that is undone, with the original inode restored, before the second
+/// check is not observable. The probe can then have read another keychain
+/// without the result being refused. Closing it needs a seatbelt profile
 /// denying the real home's `Library/Keychains` to the probe, which cannot be
 /// verified against a real agy without touching a real keychain.
 #[derive(Debug)]
@@ -110,6 +127,7 @@ pub struct ProbeHome {
 #[derive(Debug)]
 struct Held {
     directory: std::path::PathBuf,
+    home: std::path::PathBuf,
     id: (u64, u64),
 }
 
@@ -131,11 +149,12 @@ impl ProbeHome {
                 held: None,
             });
         }
-        let (_, metadata) = isolated_keychain(directory)?;
+        let (_, metadata) = isolated_keychain(directory, home)?;
         Ok(Self {
             home: directory.to_owned(),
             held: Some(Held {
                 directory: directory.to_owned(),
+                home: home.to_owned(),
                 id: identity(&metadata),
             }),
         })
@@ -150,7 +169,7 @@ impl ProbeHome {
         let Some(held) = &self.held else {
             return Ok(());
         };
-        let (keychain, metadata) = isolated_keychain(&held.directory)?;
+        let (keychain, metadata) = isolated_keychain(&held.directory, &held.home)?;
         if identity(&metadata) == held.id {
             Ok(())
         } else {

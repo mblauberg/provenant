@@ -5235,6 +5235,56 @@ fn agy_registration_identity_comes_from_the_directory_it_is_signed_in_under()
     Ok(())
 }
 
+#[test]
+fn agy_keychain_hard_linked_to_another_file_or_the_real_login_is_refused()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let home = root.path().join("home");
+    let directory = home.join(".agy-second");
+    let keychain = directory.join(KEYCHAIN_FILE);
+    std::fs::create_dir_all(keychain.parent().ok_or("parent")?)?;
+    std::fs::create_dir_all(home.join("Library/Keychains"))?;
+    let real = home.join(KEYCHAIN_FILE);
+    let refused = |home: &std::path::Path| {
+        matches!(
+            agy::account_keychain(&directory, home),
+            Err(ProviderError::IsolatedKeychainUnavailable(path))
+                if path == keychain.display().to_string()
+        )
+    };
+
+    // A hard link to the real login keychain's inode (also two links).
+    std::fs::write(&real, "")?;
+    std::fs::hard_link(&real, &keychain)?;
+    assert!(refused(&home));
+    // Any hard link is refused, even one whose other name is elsewhere.
+    std::fs::remove_file(&keychain)?;
+    std::fs::write(&keychain, "")?;
+    std::fs::hard_link(&keychain, root.path().join("other-name"))?;
+    assert!(refused(&home));
+    std::fs::remove_file(root.path().join("other-name"))?;
+    assert_eq!(
+        agy::account_keychain(&directory, &home)?,
+        Some(keychain.clone())
+    );
+
+    // A single-link file whose device and inode match the injected real
+    // home's keychain, here reached through that home's symlink to it.
+    let injected = root.path().join("injected-home");
+    std::fs::create_dir_all(injected.join("Library/Keychains"))?;
+    std::os::unix::fs::symlink(&keychain, injected.join(KEYCHAIN_FILE))?;
+    assert!(refused(&injected));
+    // A real home without a keychain does not match anything.
+    assert!(agy::account_keychain(&directory, &root.path().join("empty"))?.is_some());
+
+    // The probe guard applies the same check to the real home it was given.
+    let selected = agy::ProbeHome::select(&directory, &home)?;
+    assert!(selected.verify().is_ok());
+    std::fs::hard_link(&keychain, root.path().join("late-link"))?;
+    assert!(selected.verify().is_err());
+    Ok(())
+}
+
 /// Runs `inner`, then applies `change` to the keychain, as a competing process
 /// would while the probe is running.
 struct ChangesKeychain<'a> {
