@@ -1,6 +1,8 @@
 use super::*;
 use provenant_records::{result_capture::CapturedResult, workflow::ReviewVerdict};
 
+mod shape;
+
 /// Admit reviewers through the ordinary run scheduler and collate their results.
 pub fn review(command: crate::Review, edge: &Edge<'_>) -> Reply {
     let mut data = json!({"reviewers": []});
@@ -77,46 +79,22 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
     ])?
     .trim()
     .to_owned();
-    let paths: Vec<String> =
-        if let Some(range) = selection_range(command.shape.as_deref(), command.range.as_deref())? {
-            git(&["diff", "--no-renames", "--name-only", "-z", range, "--"])?
-                .split('\0')
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-                .collect()
-        } else {
-            vec![]
-        };
     let brief = read_bounded(&command.brief_file)?;
     let domains = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
         .map_err(|e| invalid(e.to_string()))?
         .domains;
-    let size =
-        if let Some(range) = selection_range(command.shape.as_deref(), command.range.as_deref())? {
-            let numstat = git(&["diff", "--numstat", "--no-renames", "-z", range, "--"])?;
-            let base = range
-                .split("..")
-                .next()
-                .filter(|s| !s.is_empty())
-                .unwrap_or("HEAD");
-            let tree = format!(
-                "{}{}",
-                git(&["ls-tree", "-r", "-z", "--name-only", base])?,
-                git(&["ls-tree", "-r", "-z", "--name-only", &head])?
-            );
-            Some(
-                domains
-                    .routing
-                    .review
-                    .size
-                    .classify_numstat(&numstat, &tree),
-            )
-        } else {
-            None
-        };
-    let selected = domains
-        .routing
-        .review
+    let routing = &domains.routing.review;
+    let inputs = shape::inputs(
+        &git,
+        routing,
+        command.shape.as_deref(),
+        command.range.as_deref(),
+        &head,
+        command.kind.as_deref(),
+    )?;
+    let (paths, size) = (inputs.paths, inputs.size);
+    data["warnings"] = json!(inputs.warnings);
+    let selected = routing
         .select_shape(
             command.shape.as_deref(),
             command.risk.as_deref(),
@@ -125,53 +103,11 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
             size,
         )
         .map_err(invalid)?;
-    let mut panel_shape = selected.shape.clone();
-    let priority = provenant_routing::lens_priority(command.kind.as_deref());
-    let mut lens_index = 0;
-    for group in &mut panel_shape.reviewers {
-        if !group.lenses.is_empty() {
-            lens_index += group.count;
-            continue;
-        }
-        group.lenses = (0..group.count)
-            .map(|_| {
-                let lens = priority
-                    .get(lens_index)
-                    .or_else(|| priority.last())
-                    .copied()
-                    .unwrap_or("correctness-spec");
-                lens_index += 1;
-                lens.to_owned()
-            })
-            .collect();
-    }
-    let risk_pool = panel_shape
-        .reviewers
-        .last()
-        .map(|group| group.pool.clone())
-        .unwrap_or_default();
-    for (tag, lens) in [
-        ("security", "security-privacy"),
-        ("concurrency", "concurrency-data-errors"),
-        ("terminal", "adversarial"),
-    ] {
-        if (command.risk_tags.iter().any(|value| value == tag)
-            || (tag == "terminal" && command.risk.as_deref() == Some("terminal")))
-            && !panel_shape
-                .reviewers
-                .iter()
-                .any(|group| group.lenses.iter().any(|existing| existing == lens))
-        {
-            panel_shape
-                .reviewers
-                .push(provenant_routing::ReviewReviewer {
-                    pool: risk_pool.clone(),
-                    count: 1,
-                    lenses: vec![lens.into()],
-                    distinct_families: false,
-                });
-        }
-    }
+    let panel_shape = routing.panel(
+        selected.shape,
+        command.kind.as_deref(),
+        &provenant_routing::risk_lenses(&command.risk_tags, command.risk.as_deref()),
+    );
     if panel_shape
         .reviewers
         .iter()
@@ -618,23 +554,6 @@ fn review_task(slot: &ReviewSlot, head: &str, brief: &str, families: Vec<String>
     }
 }
 
-fn selection_range<'a>(
-    shape: Option<&str>,
-    range: Option<&'a str>,
-) -> Result<Option<&'a str>, Fail> {
-    if shape.is_some() {
-        return Ok(None);
-    }
-    if range.is_some_and(|range| range.starts_with('-')) {
-        return Err(Fail::new(
-            Status::Invalid,
-            ErrorKind::Invalid,
-            "git range must not begin with -",
-        ));
-    }
-    Ok(range)
-}
-
 fn review_collect(edge: &Edge<'_>, data: &mut Value) -> Result<(), Fail> {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -766,6 +685,9 @@ fn review_text(data: &Value) -> String {
         data["kind"].as_str().unwrap_or("unknown"),
         data["risk"].as_str().unwrap_or("unknown")
     );
+    for warning in data["warnings"].as_array().into_iter().flatten() {
+        text.push_str(&format!("  warning: {}\n", warning.as_str().unwrap_or("")));
+    }
     if let Some(tags) = data["risk_tags"].as_array().filter(|tags| !tags.is_empty()) {
         text.push_str(&format!(
             "  risk tags: {}\n",
@@ -1117,18 +1039,6 @@ mod review_shape_tests {
         assert_eq!(
             aggregate_verdicts(&data),
             json!({"approve":1,"approve_with_nits":0,"request_changes":1,"inconclusive":0,"unknown":1,"not_submitted":1})
-        );
-    }
-    #[test]
-    fn explicit_shape_skips_range_validation() {
-        assert_eq!(
-            selection_range(Some("quick"), Some("-invalid")).unwrap(),
-            None
-        );
-        assert!(selection_range(None, Some("-invalid")).is_err());
-        assert_eq!(
-            selection_range(None, Some("main..HEAD")).unwrap(),
-            Some("main..HEAD")
         );
     }
     #[test]

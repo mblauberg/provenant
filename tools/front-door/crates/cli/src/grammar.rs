@@ -220,7 +220,7 @@ pub struct Review {
     #[arg(long)]
     pub kind: Option<String>,
     /// Add a conditional review lens (security, concurrency, or terminal)
-    #[arg(long = "risk-tag", value_parser = ["security", "concurrency", "terminal"])]
+    #[arg(long = "risk-tag", value_parser = clap::builder::PossibleValuesParser::new(provenant_routing::risk_tag_names()))]
     pub risk_tags: Vec<String>,
     /// Git range whose changed paths select the shape
     #[arg(long)]
