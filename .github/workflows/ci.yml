@@ -374,7 +374,9 @@ jobs:
           CARGO_PROFILE_RELEASE_LTO: "false"
           RUSTC_WRAPPER: .cargo/rustc-wrapper.sh
         run: |
-          cargo run --release --locked --example package-release -- --out "$RUNNER_TEMP/release"
+          cargo run --release --locked --bin package-release -- \
+            --binary "$RUNNER_TEMP/release-target/release/provenant" \
+            --out "$RUNNER_TEMP/release"
           mkdir -p "$RUNNER_TEMP/home"
           HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/release/bin/provenant" \
             --state-dir "$RUNNER_TEMP/state" install --source "$RUNNER_TEMP/release" \
