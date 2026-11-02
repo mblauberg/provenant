@@ -10,7 +10,6 @@ const MAX_EINTR_RETRIES: u64 = 8;
 pub(crate) fn occupancy(pid: i32) -> crate::pid::OccupancyObservation {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        use crate::pid::OccupancyGap;
         #[cfg(target_os = "linux")]
         if linux_holds_nothing(pid) {
             return crate::pid::OccupancyObservation {
@@ -19,33 +18,71 @@ pub(crate) fn occupancy(pid: i32) -> crate::pid::OccupancyObservation {
                 gap: None,
             };
         }
-        let first = occupancy_snapshot(pid);
-        let second = occupancy_snapshot(pid);
-        let stable = first.identities == second.identities;
-        let gap = [
-            first.gap,
-            second.gap,
-            (!stable).then_some(OccupancyGap::Churn),
-        ]
-        .into_iter()
-        .flatten()
-        .reduce(OccupancyGap::worse);
-        let mut paths = first.paths;
-        for path in second.paths {
-            if !paths.contains(&path) {
-                paths.push(path);
-            }
-        }
-        crate::pid::OccupancyObservation {
-            paths,
-            complete: gap.is_none(),
-            gap,
-        }
+        occupancy_with_retries(|| {
+            let first = occupancy_snapshot(pid);
+            let second = occupancy_snapshot(pid);
+            merge_snapshots(first, second)
+        })
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = pid;
         crate::pid::OccupancyObservation::default()
+    }
+}
+
+/// A process that has just exec'd opens and closes descriptors while its
+/// runtime starts. That is churn, not a failure: observe again a bounded
+/// number of times. Every attempt still needs two agreeing snapshots, and a
+/// table that never settles stays incomplete with the paths found so far.
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+fn occupancy_with_retries(
+    mut attempt: impl FnMut() -> crate::pid::OccupancyObservation,
+) -> crate::pid::OccupancyObservation {
+    use crate::pid::OccupancyGap;
+    const ATTEMPTS: usize = 4;
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    let mut last = crate::pid::OccupancyObservation::default();
+    for _ in 0..ATTEMPTS {
+        last = attempt();
+        for path in &last.paths {
+            if !paths.contains(path) {
+                paths.push(path.clone());
+            }
+        }
+        if last.gap != Some(OccupancyGap::Churn) {
+            break;
+        }
+    }
+    last.paths = paths;
+    last
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn merge_snapshots(
+    first: OccupancySnapshot,
+    second: OccupancySnapshot,
+) -> crate::pid::OccupancyObservation {
+    use crate::pid::OccupancyGap;
+    let stable = first.identities == second.identities;
+    let gap = [
+        first.gap,
+        second.gap,
+        (!stable).then_some(OccupancyGap::Churn),
+    ]
+    .into_iter()
+    .flatten()
+    .reduce(OccupancyGap::worse);
+    let mut paths = first.paths;
+    for path in second.paths {
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    crate::pid::OccupancyObservation {
+        paths,
+        complete: gap.is_none(),
+        gap,
     }
 }
 
@@ -464,6 +501,48 @@ fn only_a_refused_descriptor_query_is_the_excusable_gap() {
         DescriptorsDenied.worse(DescriptorsDenied),
         DescriptorsDenied
     );
+}
+
+#[cfg(test)]
+#[test]
+fn startup_churn_is_retried_but_a_table_that_never_settles_stays_incomplete() {
+    use crate::pid::{OccupancyGap, OccupancyObservation};
+    let observation = |paths: &[&str], gap: Option<OccupancyGap>| OccupancyObservation {
+        paths: paths.iter().map(std::path::PathBuf::from).collect(),
+        complete: gap.is_none(),
+        gap,
+    };
+    // Churn that settles on the second attempt is complete and keeps the
+    // paths seen on the churned attempt.
+    let mut calls = 0;
+    let settled = occupancy_with_retries(|| {
+        calls += 1;
+        if calls == 1 {
+            observation(&["/a", "/transient"], Some(OccupancyGap::Churn))
+        } else {
+            observation(&["/a"], None)
+        }
+    });
+    assert_eq!(calls, 2);
+    assert!(settled.complete && settled.gap.is_none());
+    assert_eq!(settled.paths.len(), 2);
+    // Never settling is bounded and stays Churn.
+    let mut calls = 0;
+    let churning = occupancy_with_retries(|| {
+        calls += 1;
+        observation(&["/a"], Some(OccupancyGap::Churn))
+    });
+    assert_eq!(calls, 4);
+    assert!(!churning.complete);
+    assert_eq!(churning.gap, Some(OccupancyGap::Churn));
+    // Any other gap is reported at once, without retries.
+    let mut calls = 0;
+    let denied = occupancy_with_retries(|| {
+        calls += 1;
+        observation(&[], Some(OccupancyGap::DescriptorsDenied))
+    });
+    assert_eq!(calls, 1);
+    assert_eq!(denied.gap, Some(OccupancyGap::DescriptorsDenied));
 }
 
 #[cfg(test)]
@@ -1590,6 +1669,22 @@ mod tests {
                 .spawn()
                 .unwrap(),
         );
+        // A fresh exec opens and closes descriptors while its runtime starts;
+        // observe the settled process (asleep in sleep(1)).
+        #[cfg(target_os = "linux")]
+        for _ in 0..500 {
+            let asleep = std::fs::read_to_string(format!("/proc/{}/stat", child.0.id()))
+                .ok()
+                .and_then(|stat| {
+                    stat.rsplit_once(')')
+                        .map(|(_, tail)| tail.trim_start().starts_with('S'))
+                })
+                == Some(true);
+            if asleep {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         let observation = occupancy(child.0.id() as i32);
         let paths: Vec<_> = observation
             .paths

@@ -277,7 +277,7 @@ pub fn collect(
             }
             continue;
         }
-        if let Err(error) = remove_and_finalize(
+        if let Err(error) = remove_and_finalise(
             context,
             &Removal {
                 entry,
@@ -341,7 +341,7 @@ struct Removal<'a> {
 
 /// Delete output under writer custody alone; the repository lock covers only
 /// the final registration recheck, the Git removal and branch settlement.
-fn remove_and_finalize(
+fn remove_and_finalise(
     context: &WorktreeContext<'_>,
     removal: &Removal<'_>,
     cancel: &CancelToken,
@@ -888,7 +888,7 @@ fn collect_foreign(
         preview_foreign(context, entry, lane, branch, policy, cancel)?;
     } else {
         // remove_tree_when verifies once, under writer custody.
-        remove_and_finalize(
+        remove_and_finalise(
             context,
             &Removal {
                 entry,
