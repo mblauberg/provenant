@@ -186,13 +186,14 @@ fn paused_graph_status(
     Ok(paused_graph_reply(graph_id, checkpoint))
 }
 
+/// Any valid graph id is probed first; a graph checkpoint wins over a lane
+/// target with the same text, and a missing checkpoint falls back to lanes.
 fn graph_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-        && (value.len() == 32 || value.bytes().any(|byte| !byte.is_ascii_hexdigit()))
 }
 
 fn paused_graph_reply(
