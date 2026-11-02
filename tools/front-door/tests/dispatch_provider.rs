@@ -296,6 +296,11 @@ fn fixture() -> Result {
                 .collect();
             text.push_str("END-OF-LARGE-RESULT");
             text
+        } else if let Some(name) = prompt
+            .lines()
+            .find_map(|line| line.strip_prefix("fixture case result "))
+        {
+            format!("case-result-{name}")
         } else if prompt.contains("fixture read upstream file") {
             // The prompt lists each materialised file as `- label: PATH (N bytes)`.
             let path = prompt
@@ -307,8 +312,21 @@ fn fixture() -> Result {
                 .ok_or("upstream file entry")?;
             let text = fs::read_to_string(&path)?;
             let sibling = path.with_file_name("other.md");
+            // Upstreams whose ids differ only by case each keep their own file.
+            let mut cases = String::new();
+            for label in ["Review", "review"] {
+                let entry = format!("- {label}: ");
+                let path = prompt
+                    .lines()
+                    .skip_while(|line| *line != "<UPSTREAM_FILES>")
+                    .find_map(|line| line.strip_prefix(entry.as_str()))
+                    .and_then(|line| line.split_once(" ("))
+                    .map(|(path, _)| PathBuf::from(path))
+                    .ok_or("case upstream file entry")?;
+                cases.push_str(&format!("; {label}={}", fs::read_to_string(path)?));
+            }
             format!(
-                "read {} bytes; tail {}; sibling write denied {}; parent listing denied {}",
+                "read {} bytes; tail {}; sibling write denied {}; parent listing denied {}{cases}",
                 text.len(),
                 text.lines().last().unwrap_or_default(),
                 fs::write(&sibling, b"x").is_err(),
@@ -2322,8 +2340,13 @@ fn graph_node_reads_full_upstream_result_from_its_inputs_directory() -> Result {
         serde_json::to_vec(
             &json!({"schema_version":1,"graph_id":"full-inputs","nodes":[
                 {"id":"producer","prompt":"fixture large result","access":"read_only","route":route},
+                {"id":"Review","prompt":"fixture case result Review","access":"read_only","route":route},
+                {"id":"review","prompt":"fixture case result review","access":"read_only","route":route},
                 {"id":"consumer","prompt":"fixture read upstream file","access":"read_only",
-                 "depends_on":["producer"],"inputs":[{"node":"producer","outputs":["result"]}],"route":route}
+                 "depends_on":["producer","Review","review"],
+                 "inputs":[{"node":"producer","outputs":["result"]},
+                           {"node":"Review","outputs":["result"]},
+                           {"node":"review","outputs":["result"]}],"route":route}
             ]}),
         )?,
     )?;
@@ -2361,7 +2384,11 @@ fn graph_node_reads_full_upstream_result_from_its_inputs_directory() -> Result {
     let producer = &nodes[0]["outputs"]["result"];
     assert_eq!(producer["truncated"], true, "{status}");
     assert!(producer["excerpt"].as_str().ok_or("excerpt")?.len() <= 4096);
-    let excerpt = nodes[1]["outputs"]["result"]["excerpt"]
+    let consumer = nodes
+        .iter()
+        .find(|node| node["id"] == "consumer")
+        .ok_or("consumer")?;
+    let excerpt = consumer["outputs"]["result"]["excerpt"]
         .as_str()
         .ok_or("consumer excerpt")?;
     let full = (0..2000)
@@ -2371,7 +2398,7 @@ fn graph_node_reads_full_upstream_result_from_its_inputs_directory() -> Result {
     assert_eq!(
         excerpt,
         format!(
-            "read {} bytes; tail END-OF-LARGE-RESULT; sibling write denied true; parent listing denied true",
+            "read {} bytes; tail END-OF-LARGE-RESULT; sibling write denied true; parent listing denied true; Review=case-result-Review; review=case-result-review",
             full.len()
         ),
         "{status}"

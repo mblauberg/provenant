@@ -710,6 +710,21 @@ mod result_tests {
     }
 
     #[test]
+    fn labels_differing_only_by_case_get_distinct_lowercase_files() {
+        use super::graph_inputs::file_name;
+        let (upper, lower) = (file_name("Review"), file_name("review"));
+        assert_ne!(upper, lower);
+        for name in [&upper, &lower] {
+            let stem = name.strip_suffix(".md").expect("markdown file");
+            assert!(
+                stem.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            );
+        }
+        assert_eq!(file_name("review"), lower, "stable across calls");
+    }
+
+    #[test]
     fn upstream_results_on_other_hosts_are_named_unavailable_without_a_fetch()
     -> Result<(), Box<dyn std::error::Error>> {
         use super::*;

@@ -50,6 +50,14 @@ fn attempt_directory(factory: &Factory, key: &AttemptKey) -> Option<(PathBuf, Di
     Some((path, directory))
 }
 
+/// The file for one upstream: a digest of its label, so labels that differ
+/// only by case do not share a file on a case-insensitive filesystem. The
+/// prompt maps each label to its file.
+pub(super) fn file_name(label: &str) -> String {
+    let digest = provenant_records::CanonicalV1::file_digest(label.as_bytes());
+    format!("{}.md", provenant_core::hex(digest.bytes()))
+}
+
 /// The longest prefix of `bytes` that is at most `max` long and whole UTF-8.
 fn whole_prefix(bytes: &[u8], max: usize) -> &[u8] {
     let cut = &bytes[..bytes.len().min(max)];
@@ -194,7 +202,7 @@ pub(super) fn materialise(
                 .as_bytes(),
             );
         }
-        let name = format!("{}.md", request.label);
+        let name = file_name(&request.label);
         let written = directory
             .atomic_write_with_permissions(
                 OsStr::new(&name),
