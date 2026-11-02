@@ -3208,13 +3208,15 @@ fn lane_prepare_isolates_nested_state() -> Result {
             };
             let queued = provenant_run::RunStore::open(&queued_context, &call)?;
             assert_eq!(
-                queued.queued_runs(&call)?.len(),
+                queued
+                    .queued_runs(&call, provenant_run::QUEUED_RUNS_PAGE_SIZE)?
+                    .len(),
                 1,
                 "lane launched its own child"
             );
             // This depth probe must not consume startup spacing when the
             // confined fixture raises the host limit again.
-            for run in queued.queued_runs(&call)? {
+            for run in queued.queued_runs(&call, provenant_run::QUEUED_RUNS_PAGE_SIZE)? {
                 queued.refuse_queued(run, "depth probe only", &call)?;
             }
             fs::write(rig.state.join("config.toml"), config(1))?;
