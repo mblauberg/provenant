@@ -129,6 +129,11 @@ pub(super) fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
         .as_array()
         .cloned()
         .unwrap_or_default();
+    if rows.is_empty() {
+        // A route explanation has no lane rows; keep the preview text returned
+        // by dispatch instead of rendering an empty run summary over it.
+        return result;
+    }
     let mut human = format!(
         "operation {}\n",
         result.result.data["operation_id"]
@@ -555,6 +560,39 @@ pub(super) fn dispatch_inner(
     created: &mut Option<(PathBuf, String)>,
     workers: &dyn provenant_confinement::worktrees::WorkerObserver,
 ) -> Result<(Value, String, bool), Fail> {
+    // Explain is a preview-only operation. Return before worktree preflight,
+    // operation replay, or any preparation that could lead to submission.
+    if command.explain {
+        if command.input.manifest.is_some() {
+            return Err(Fail::new(
+                Status::Invalid,
+                ErrorKind::Invalid,
+                "--explain applies to one --route or --model, or to --preset",
+            ));
+        }
+        return crate::route::explain_dispatch(&command.route, edge.roots)
+            .map(|(data, text)| (data, text, false))
+            .map_err(|error| {
+                let refused = matches!(
+                    &error,
+                    crate::route::EdgeError::Routing(routing)
+                        if routing.code() == "no_eligible_pool_member"
+                );
+                Fail::new(
+                    if refused {
+                        Status::Refused
+                    } else {
+                        Status::Invalid
+                    },
+                    if refused {
+                        ErrorKind::Refused
+                    } else {
+                        ErrorKind::Invalid
+                    },
+                    error.to_string(),
+                )
+            });
+    }
     // Check explicit placement before local aliases are normalised away and
     // before writer validation or peer discovery can act on the request.
     if command.host.is_some() && crate::fabric::in_lane() {
@@ -653,37 +691,6 @@ pub(super) fn dispatch_inner(
     let call = request(&clock, &cancel)?;
     if command.route.read_heavy {
         command.knobs.push("routing.workload=read_heavy".into());
-    }
-    if command.explain {
-        if command.input.manifest.is_some() {
-            return Err(Fail::new(
-                Status::Invalid,
-                ErrorKind::Invalid,
-                "--explain applies to one --route or --model, or to --preset",
-            ));
-        }
-        return crate::route::explain_dispatch(&command.route, edge.roots)
-            .map(|(data, text)| (data, text, false))
-            .map_err(|error| {
-                let refused = matches!(
-                    &error,
-                    crate::route::EdgeError::Routing(routing)
-                        if routing.code() == "no_eligible_pool_member"
-                );
-                Fail::new(
-                    if refused {
-                        Status::Refused
-                    } else {
-                        Status::Invalid
-                    },
-                    if refused {
-                        ErrorKind::Refused
-                    } else {
-                        ErrorKind::Invalid
-                    },
-                    error.to_string(),
-                )
-            });
     }
     if !command.route.exclude.is_empty() {
         // Refuse an unknown selector before anything is submitted.
