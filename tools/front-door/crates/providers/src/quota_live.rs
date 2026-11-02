@@ -78,6 +78,9 @@ pub struct LiveQuota {
     refresh_expired: bool,
     claude_default: RefCell<Option<claude::Identity>>,
     clock: SystemClock,
+    /// Stands in for the system executor so tests can see each probe's command.
+    #[cfg(test)]
+    executor: Option<Box<dyn Executor>>,
 }
 fn read(path: &Path) -> Result<Vec<u8>, ProbeFailure> {
     let mut bytes = Vec::new();
@@ -161,6 +164,8 @@ impl LiveQuota {
             refresh_expired: true,
             claude_default: RefCell::new(None),
             clock: SystemClock::new(),
+            #[cfg(test)]
+            executor: None,
         })
     }
     fn now(&self) -> i64 {
@@ -202,7 +207,11 @@ impl LiveQuota {
             return Err(ProbeFailure::Network);
         }
         let system = SystemExecutor::new(1).map_err(|_| ProbeFailure::Network)?;
-        let executor = crate::host::HostProbeExecutor::new(&system, &self.state)
+        #[cfg(test)]
+        let base: &dyn Executor = self.executor.as_deref().unwrap_or(&system);
+        #[cfg(not(test))]
+        let base: &dyn Executor = &system;
+        let executor = crate::host::HostProbeExecutor::new(base, &self.state)
             .map_err(|_| ProbeFailure::ProbeDirectory)?;
         let mut argv = vec![OsString::from(program)];
         argv.extend(args.iter().map(OsString::from));
@@ -569,6 +578,7 @@ mod tests {
             refresh_expired: false,
             claude_default: RefCell::new(None),
             clock: SystemClock::new(),
+            executor: None,
         }
     }
 
@@ -607,28 +617,120 @@ mod tests {
         );
     }
 
+    /// A fake `agy` that signs in as one Google account per `HOME`, recording
+    /// the `HOME` of each `-p /usage` probe the quota path runs.
+    struct AgyUsage {
+        sign_ins: Vec<(PathBuf, &'static str)>,
+        homes: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>>,
+    }
+    impl Executor for AgyUsage {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            assert_eq!(options.argv[0], "agy");
+            assert_eq!(options.argv[1], "-p");
+            assert_eq!(options.argv[2], "/usage");
+            let home: PathBuf = options
+                .env
+                .unwrap_or_default()
+                .iter()
+                .find(|(key, _)| key == "HOME")
+                .map(|(_, value)| value.into())
+                .expect("probe sets HOME");
+            let log = options
+                .argv
+                .iter()
+                .position(|arg| arg == "--log-file")
+                .map(|index| PathBuf::from(&options.argv[index + 1]))
+                .expect("probe names a log file");
+            let email = self
+                .sign_ins
+                .iter()
+                .find(|(directory, _)| *directory == home)
+                .expect("probe HOME is a known sign-in")
+                .1;
+            fs::write(
+                log,
+                format!("OAuth: authenticated successfully as {email}\n"),
+            )
+            .unwrap();
+            self.homes.lock().unwrap().push(home);
+            Ok(ExecOutcome {
+                termination: Termination::Exit(0),
+                stdout: provenant_os::exec::CapturedStream {
+                    bytes: br#"{"status":"SUCCESS"}"#.to_vec(),
+                    ..Default::default()
+                },
+                stderr: Default::default(),
+                timed_out: false,
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: false,
+                elapsed_micros: 0,
+            })
+        }
+    }
+
     #[test]
-    fn agy_probe_runs_under_the_accounts_own_home_only_when_it_holds_a_keychain() {
+    fn agy_quota_probe_runs_under_the_accounts_own_home_only_when_it_holds_a_keychain() {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("home");
+        let state = root.path().join("state");
         let isolated = root.path().join("agy-second");
         let legacy = root.path().join("gemini");
+        fs::create_dir_all(&state).unwrap();
         fs::create_dir_all(isolated.join("Library/Keychains")).unwrap();
         fs::write(isolated.join("Library/Keychains/login.keychain-db"), "").unwrap();
         fs::create_dir_all(&legacy).unwrap();
-        let quota = quota(&home, root.path().join("state"));
-        let account = |dir: &Path| Account {
+        // A keychain that is only a symlink is not the account's own.
+        let linked = root.path().join("agy-linked");
+        fs::create_dir_all(linked.join("Library/Keychains")).unwrap();
+        std::os::unix::fs::symlink(
+            isolated.join("Library/Keychains/login.keychain-db"),
+            linked.join("Library/Keychains/login.keychain-db"),
+        )
+        .unwrap();
+        let homes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut quota = quota(&home, state);
+        quota.executor = Some(Box::new(AgyUsage {
+            sign_ins: vec![
+                (home.clone(), "first@example.test"),
+                (isolated.clone(), "second@example.test"),
+            ],
+            homes: homes.clone(),
+        }));
+        let account = |dir: &Path, email: &str| Account {
             scope: AccountScope {
                 adapter: "agy".into(),
-                account_key: "agy-test".into(),
+                account_key: format!(
+                    "agy-{}",
+                    agy_fingerprint(
+                        format!("OAuth: authenticated successfully as {email}\n").as_bytes()
+                    )
+                    .unwrap()
+                ),
                 label: "test".into(),
             },
             identity_dir: dir.to_owned(),
             options: Value::Null,
         };
-        assert_eq!(quota.agy_home(&account(&isolated)), isolated);
-        assert_eq!(quota.agy_home(&account(&legacy)), home);
-        assert_eq!(quota.agy_home(&account(&root.path().join("absent"))), home);
+        let probe = |dir: &Path, email: &str| {
+            quota.agy(
+                &account(dir, email),
+                quota.now() + 60,
+                &mut QuotaDetails::default(),
+            )
+        };
+        // The isolated account is probed under its own directory, and its
+        // identity check matches the second sign-in, not the login keychain's.
+        probe(&isolated, "second@example.test").unwrap();
+        // Legacy, absent and symlinked-keychain directories share the user's
+        // login keychain, so they probe under the real HOME.
+        probe(&legacy, "first@example.test").unwrap();
+        probe(&root.path().join("absent"), "first@example.test").unwrap();
+        probe(&linked, "first@example.test").unwrap();
+        assert_eq!(
+            *homes.lock().unwrap(),
+            [isolated, home.clone(), home.clone(), home]
+        );
     }
 
     #[test]

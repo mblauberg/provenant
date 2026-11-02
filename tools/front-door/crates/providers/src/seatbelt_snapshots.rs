@@ -77,7 +77,11 @@ fn prepared(
     })
     .expect("snapshot fixture plan");
     let mut route = route(id, if id == "command" { "" } else { "fixture-model" });
-    route.account_key = None;
+    // Agy pins its account; the others launch without one here.
+    let agy_account = (id == "agy").then(super::tests::legacy_agy_account);
+    if agy_account.is_none() {
+        route.account_key = None;
+    }
     let prompt = Prompt::new("fixture prompt".into());
     let token = fixture_token();
     let entry = REGISTRY
@@ -91,6 +95,7 @@ fn prepared(
         Path::new("/fixture/repo"),
         (id == "claude").then_some(&token),
     );
+    input.account = agy_account.as_ref();
     let command = vec!["fixture-command".into(), "--check".into()];
     let runtimes = vec!["/opt/check/bin/python3".into()];
     if id == "command" {
