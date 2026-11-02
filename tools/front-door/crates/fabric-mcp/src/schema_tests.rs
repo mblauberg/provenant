@@ -2,7 +2,22 @@ use super::*;
 use crate::tools::{IdentityReply, InvalidInput, ToolCall};
 use regex::Regex;
 use serde_json::{Map, Number, Value, json};
-use std::{fs, path::Path};
+use std::{cell::RefCell, collections::HashMap, fs, path::Path};
+
+thread_local! {
+    // Generated probes reuse a small set of patterns; compile each once per test worker.
+    static PATTERNS: RefCell<HashMap<String, Option<Regex>>> = RefCell::new(HashMap::new());
+}
+
+fn pattern_matches(pattern: &str, value: &str) -> bool {
+    PATTERNS.with_borrow_mut(|patterns| {
+        patterns
+            .entry(pattern.to_owned())
+            .or_insert_with(|| Regex::new(pattern).ok())
+            .as_ref()
+            .is_some_and(|regex| regex.is_match(value))
+    })
+}
 
 #[test]
 fn generated_schema_snapshot_is_checked_in() {
@@ -134,7 +149,7 @@ fn accepts(root: &Value, schema: &Value, value: &Value) -> bool {
             || schema
                 .get("pattern")
                 .and_then(Value::as_str)
-                .is_some_and(|p| Regex::new(p).map_or(true, |r| !r.is_match(s)))
+                .is_some_and(|pattern| !pattern_matches(pattern, s))
         {
             return false;
         }
