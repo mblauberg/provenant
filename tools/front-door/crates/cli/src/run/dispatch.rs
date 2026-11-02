@@ -54,7 +54,13 @@ pub fn run(mut command: Dispatch, edge: &Edge<'_>) -> Reply {
             command.route.effort = catalogue.model_default_effort(&config.domains.routing, &id);
         }
     }
-    render_run(dispatch(command, edge), edge)
+    let explain = command.explain;
+    let result = dispatch(command, edge);
+    if explain {
+        result
+    } else {
+        render_run(result, edge)
+    }
 }
 
 // A run that names neither a mode nor a target, from a linked worktree, is the
@@ -125,6 +131,12 @@ pub(super) fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
     if result.result.error.is_some() {
         return result;
     }
+    let brief_warnings: Vec<_> = result
+        .human
+        .lines()
+        .filter(|line| line.starts_with("warning: brief references "))
+        .map(str::to_owned)
+        .collect();
     let rows = result.result.data["lanes"]
         .as_array()
         .cloned()
@@ -235,6 +247,10 @@ pub(super) fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
                 "run is still running; keep waiting with `{command}`\n"
             ));
         }
+    }
+    for warning in brief_warnings {
+        human.push_str(&warning);
+        human.push('\n');
     }
     result.summary = Some(crate::Summary::verbatim(&human, next));
     result.human = human;
@@ -662,8 +678,26 @@ pub(super) fn dispatch_inner(
                 "--explain applies to one --route or --model, or to --preset",
             ));
         }
+        let warnings = command
+            .input
+            .prompt_file
+            .as_deref()
+            .map(|path| {
+                let prompt = read_bounded(path)?;
+                Ok::<Vec<String>, Fail>(brief_read_root_warnings(
+                    &prompt,
+                    edge.cwd,
+                    command.access.worktree.as_deref(),
+                    &lane_access.read_roots,
+                    edge.home,
+                ))
+            })
+            .transpose()?;
         return crate::route::explain_dispatch(&command.route, edge.roots)
-            .map(|(data, text)| (data, text, false))
+            .map(|(data, mut text)| {
+                append_brief_warnings(&mut text, warnings.as_deref().unwrap_or_default());
+                (data, text, false)
+            })
             .map_err(|error| {
                 let refused = matches!(
                     &error,
@@ -1002,7 +1036,7 @@ pub(super) fn dispatch_inner(
     } else {
         None
     };
-    let tasks = tasks
+    let tasks: Vec<Submitted> = tasks
         .into_iter()
         .map(
             |(
@@ -1044,6 +1078,22 @@ pub(super) fn dispatch_inner(
             },
         )
         .collect();
+    let brief_warnings = if command.input.manifest.is_none() {
+        tasks
+            .first()
+            .map(|task| {
+                brief_read_root_warnings(
+                    &task.prompt,
+                    edge.cwd,
+                    command.access.worktree.as_deref(),
+                    &lane_access.read_roots,
+                    edge.home,
+                )
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let (record, started) = submit_with_host_and_wait(
         &session,
         edge,
@@ -1058,12 +1108,64 @@ pub(super) fn dispatch_inner(
         None,
         command.wait,
     )?;
-    let (mut data, human, timed_out) =
+    let (mut data, mut human, timed_out) =
         report(&session, &record, &started, command.wait, edge, &call)?;
+    append_brief_warnings(&mut human, &brief_warnings);
     if let Some(worktree) = worktree {
         data["worktree"] = worktree;
     }
     Ok((data, human, timed_out))
+}
+
+fn append_brief_warnings(output: &mut String, warnings: &[String]) {
+    for warning in warnings {
+        output.push_str("warning: ");
+        output.push_str(warning);
+        output.push('\n');
+    }
+}
+
+pub(super) fn brief_read_root_warnings(
+    prompt: &str,
+    cwd: &Path,
+    worktree: Option<&Path>,
+    explicit_roots: &[PathBuf],
+    home: &Path,
+) -> Vec<String> {
+    let mut roots = vec![worktree.unwrap_or(cwd).to_path_buf()];
+    roots.extend(explicit_roots.iter().cloned());
+    let roots: Vec<_> = roots
+        .iter()
+        .filter_map(|root| std::fs::canonicalize(root).ok())
+        .collect();
+    let mut warnings = std::collections::BTreeSet::new();
+    for token in prompt.split_whitespace() {
+        let token = token
+            .trim_matches(|character: char| {
+                matches!(character, '`' | '\'' | '"' | '(' | '[' | '{' | '<')
+            })
+            .trim_end_matches(|character: char| {
+                matches!(character, '`' | '\'' | '"' | ')' | ']' | '}' | '>' | ',' | '.' | ';' | ':')
+            });
+        let candidate = if let Some(relative) = token.strip_prefix("~/") {
+            home.join(relative)
+        } else if token.starts_with('/') {
+            PathBuf::from(token)
+        } else {
+            continue;
+        };
+        let Ok(path) = std::fs::canonicalize(&candidate) else {
+            continue;
+        };
+        if roots.iter().any(|root| path.starts_with(root)) {
+            continue;
+        }
+        warnings.insert(format!(
+            "brief references {} outside the lane's read roots; copy it into the worktree (for example .agent-run/) or add it to --read-root",
+            path.display()
+        ));
+    }
+    warnings.into_iter().collect()
 }
 
 /// Validate the inherited lane context and determine the next submission depth.
