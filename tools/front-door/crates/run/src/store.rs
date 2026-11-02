@@ -87,10 +87,34 @@ impl RunStore {
         if crate::holder::object_import_refused(&attempt, Self::scope(record))?.is_some() {
             return Ok(true);
         }
+        // Only a failed import that can still be retried holds custody. A
+        // pending receipt is a decision sealed without import tracking.
         Ok(self
             .record(record.attempt_id, call)?
             .settlement_receipts
-            .is_none_or(|receipts| matches!(receipts.git_import, EffectDisposition::Done)))
+            .is_none_or(|receipts| {
+                !matches!(
+                    receipts.git_import,
+                    EffectDisposition::Failed {
+                        retryable: true,
+                        ..
+                    } | EffectDisposition::Cancelled {
+                        retryable: true,
+                        ..
+                    }
+                )
+            }))
+    }
+
+    /// Only a succeeded or review-required lane has anything to deliver.
+    pub(crate) fn delivery_outcome(record: &AttemptRecord) -> bool {
+        matches!(
+            record.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Succeeded | Outcome::ReviewRequired,
+                ..
+            }
+        )
     }
 
     /// Terminal attempts with effects still to drive. A row that cannot be
@@ -138,8 +162,7 @@ impl RunStore {
         };
         let receipts: SettlementReceipts = crate::db::decode_unversioned(raw)?;
         let record = self.record(id, call)?;
-        // The sealed decision decided eligibility; its receipt is the answer.
-        let delivery = retryable(&receipts.delivery);
+        let delivery = Self::delivery_outcome(&record) && retryable(&receipts.delivery);
         let manifest = retryable(&receipts.manifest_conflict)
             && (matches!(receipts.manifest_conflict, EffectDisposition::Failed { .. })
                 || self
@@ -1371,11 +1394,6 @@ impl RunStore {
             for (effect, disposition) in effects.effects {
                 *receipts.slot_mut(effect) = disposition;
             }
-        } else {
-            // A decision sealed without effects tracked no import to finish
-            // and made no delivery commitment.
-            receipts.git_import = EffectDisposition::Done;
-            receipts.delivery = EffectDisposition::Done;
         }
         if read_sealed(&attempt, "delivery-cancelled.json", RECORD_LIMIT)?.is_some() {
             receipts.cancellation = Some(CancellationDisposition::DeliveryEffective);

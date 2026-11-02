@@ -776,6 +776,16 @@ impl RunStore {
                     ..
                 }
         ) {
+            if !Self::delivery_outcome(record) {
+                self.record_effect(
+                    record.attempt_id,
+                    record.generation,
+                    SettlementEffect::Delivery,
+                    EffectDisposition::Done,
+                    call,
+                )?;
+                return Ok(());
+            }
             let request = self.request(record.run_id, call)?;
             let task = request
                 .tasks
