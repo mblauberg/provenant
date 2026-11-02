@@ -158,10 +158,17 @@ impl SwiftToolchain {
         let security = quote(&cache.join("security"))?;
         let cache_text = quote(cache)?;
         let scratch_path = quote(&scratch.join("swift-build"))?;
-        let scratch_arg = if read_only {
-            format!("--scratch-path {scratch_path}")
+        // SwiftPM compiles each package manifest into `TMPDIR` and executes
+        // it there. A read-only lane may execute only below its build
+        // directory, so SwiftPM's temporary files go beside the build output.
+        let (scratch_arg, tmpdir) = if read_only {
+            let tmp = quote(&scratch.join("swift-build/tmp"))?;
+            (
+                format!("--scratch-path {scratch_path}"),
+                format!("TMPDIR={tmp}\nmkdir -p \"$TMPDIR\"\nexport TMPDIR\n"),
+            )
         } else {
-            String::new()
+            (String::new(), String::new())
         };
         let cache_hint = if read_only {
             "lane scratch"
@@ -175,7 +182,7 @@ DEVELOPER_DIR={developer}
 CLANG_MODULE_CACHE_PATH={modules}
 export DEVELOPER_DIR CLANG_MODULE_CACHE_PATH
 unset SDKROOT
-real={swift}
+{tmpdir}real={swift}
 sub=${{1-}}
 case "$sub" in
   build|test|run|package)
@@ -377,6 +384,7 @@ mod tests {
             "--disable-sandbox",
             "--cache-path '/lane/cache/swift/cache'",
             "--scratch-path '/lane/scratch/swift-build'",
+            "TMPDIR='/lane/scratch/swift-build/tmp'",
             "--build-system=native",
         ] {
             assert!(text.contains(needle), "{needle} missing from {text}");
@@ -392,6 +400,7 @@ mod tests {
         )
         .unwrap();
         assert!(!writer_text.contains("--scratch-path"), "{writer_text}");
+        assert!(!writer_text.contains("TMPDIR="), "{writer_text}");
     }
 
     #[test]

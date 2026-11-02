@@ -4473,7 +4473,8 @@ fn codex_read_only_toolchain_uses_private_build_and_cargo_home_linked_to_shared_
     for dir in [
         "/fixture/home/.cargo/bin",
         "/fixture/home/.rustup/toolchains",
-        "/fixture/scratch/target",
+        // Scratch holds the target directory and rustdoc's doc-test binaries.
+        "/fixture/scratch",
     ] {
         assert!(
             spec.profile

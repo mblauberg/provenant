@@ -2745,7 +2745,7 @@ fn clone_rust_toolchain(rig: &TestRig, home: &Path) -> Result {
         "toolchain clone: {}",
         String::from_utf8_lossy(&output.stderr.bytes)
     );
-    for tool in ["cargo", "rustc"] {
+    for tool in ["cargo", "rustc", "rustdoc"] {
         std::os::unix::fs::symlink(
             target.join("bin").join(tool),
             home.join(".cargo/bin").join(tool),
@@ -3660,7 +3660,7 @@ fn verify_lane_profile(
         fs::copy(&lock, scratch.join("cargo-probe.lock"))?;
         fs::write(
             project.join("src/lib.rs"),
-            "#[test] fn scratch_build_is_private() { assert_eq!(2 + 2, 4); }\n",
+            "/// ```\n/// assert_eq!(2 + 2, 4);\n/// ```\npub fn doc() {}\n#[test] fn scratch_build_is_private() { assert_eq!(2 + 2, 4); }\n",
         )?;
         let argv = [
             "/bin/sh",
@@ -3684,6 +3684,10 @@ fn verify_lane_profile(
             String::from_utf8_lossy(&output.stdout.bytes).contains("lane-cargo-read-only: PASS")
         );
         assert!(String::from_utf8_lossy(&output.stdout.bytes).contains("1 passed"));
+        // The doc-test is compiled and executed by rustdoc as well.
+        assert!(
+            String::from_utf8_lossy(&output.stdout.bytes).contains("test result: ok. 1 passed")
+        );
     }
     if cfg!(target_os = "macos") && probe == Some(Probe::Shell) {
         let scratch = &confinement.plan.permissions().scratch.path;
