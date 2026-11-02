@@ -499,6 +499,245 @@ fn terminal_archives_an_unfinished_host_sequencer_before_refusal()
 }
 
 #[test]
+fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let execution = registered_landed_writer_fixture(&fixture)?;
+    let (clock, cancel) = (tests::clock(), provenant_core::CancelToken::new());
+    let call = tests::call(&clock, &cancel);
+    let store = RunStore::open(&execution, &call)?;
+    let mut input = tests::input();
+    input.request.tasks[0].writer = Some(fixture.writer.clone());
+    store.create(&input, &call)?;
+    let id = input.attempts[0].attempt_id;
+    let temporary = store.temporary_path(id, &call)?;
+    let launch = crate::prepare_writer(
+        &fixture.writer,
+        execution.state_root.as_path(),
+        execution.project_id,
+    )?;
+    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &tests::route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let scope = RunStore::scope(&store.record(id, &call)?);
+    launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+    let pin = format!("refs/provenant/lane-base/{id}");
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    assert_eq!(
+        crate::objects::resolve_ref(&git, launch.worktree.repo(), &pin)?,
+        launch.base
+    );
+    let marker = fixture.writer.worktree.join(".git");
+    let original = std::fs::read(&marker)?;
+    std::fs::write(&marker, b"gitdir: /nonexistent\n")?;
+    let started = std::time::Instant::now();
+    let error = launch
+        .worktree
+        .repo()
+        .revalidate()
+        .expect_err("changed gitdir must refuse");
+    let reason = provenant_confinement::permissions::PermissionError::from(error).to_string();
+    let terminal = store
+        .withdraw(
+            id,
+            AttemptState::Starting {
+                extra: Default::default(),
+            },
+            Outcome::Rejected,
+            &reason,
+            provenant_core::WallTime::from_micros(150)?,
+            &call,
+        )?
+        .ok_or("refusal missing")?;
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(matches!(
+        terminal.state,
+        AttemptState::Terminal {
+            outcome: Outcome::Rejected,
+            ..
+        }
+    ));
+    assert!(store.open_runs(100, &call)?.contains(&input.run_id));
+    std::fs::write(&marker, original)?;
+
+    // A failed cleanup must retain its retry marker and the pin.
+    let common = fixture.writer.project.join(".git");
+    let unavailable = fixture.writer.project.join("git-unavailable");
+    std::fs::rename(&common, &unavailable)?;
+    let observer = provenant_supervisor::census::SystemProcessObserver;
+    let result = store.reconcile_with_observer(
+        input.run_id,
+        &crate::dispatch_tests::Ready,
+        &call,
+        &observer,
+    )?;
+    assert!(
+        result
+            .iter()
+            .any(|(_, result)| matches!(result, crate::Reconciled::TemporaryRetained { .. }))
+    );
+    assert!(store.open_runs(100, &call)?.contains(&input.run_id));
+    let gc = store.gc_temporary(
+        &Directory::open_anchor(execution.state_root.as_path())?,
+        provenant_core::WallTime::from_micros(86_400_000_150)?,
+        false,
+        &call,
+    )?;
+    assert!(gc.errors.is_empty(), "{:?}", gc.errors);
+    assert!(!temporary.exists());
+    let retained: bool = store.db.query_row(
+        "SELECT tmp_retained FROM attempts WHERE id=?1",
+        [id.to_string()],
+        |row| row.get(0),
+    )?;
+    assert!(retained);
+    let spawned = std::cell::Cell::new(false);
+    assert_eq!(
+        store.reap_with(&call, |_, _| {
+            spawned.set(true);
+            Ok(())
+        })?,
+        1
+    );
+    assert!(spawned.get());
+    std::fs::rename(&unavailable, &common)?;
+    let second = store.reconcile_with_observer(
+        input.run_id,
+        &crate::dispatch_tests::Ready,
+        &call,
+        &observer,
+    )?;
+    assert!(
+        crate::objects::resolve_ref(&git, launch.worktree.repo(), &pin).is_err(),
+        "{second:?} {:?}",
+        store.record(id, &call)?.settlement_receipts
+    );
+    let retained: bool = store.db.query_row(
+        "SELECT tmp_retained FROM attempts WHERE id=?1",
+        [id.to_string()],
+        |row| row.get(0),
+    )?;
+    assert!(!retained);
+
+    // Exercise the actual launch path too: damage the verified marker after
+    // provider preparation and before handoff obtains writer custody.
+    struct WriterProvider {
+        writer: WriterRequest,
+        state: std::path::PathBuf,
+        home: std::path::PathBuf,
+        project: provenant_core::ProjectId,
+    }
+    impl crate::Providers for WriterProvider {
+        fn prepare(
+            &self,
+            task: &TaskRequest,
+            prompt: &str,
+            paths: &LaunchPaths,
+            resume: Option<&AttemptRecord>,
+        ) -> std::result::Result<PreparedLaunch, String> {
+            use provenant_confinement::permissions::{
+                AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions, ProviderProfile,
+                ProviderProfileSpec, WorktreeWriteAuthority,
+            };
+            let writer = crate::prepare_writer(&self.writer, &self.state, self.project)
+                .map_err(|error| error.to_string())?;
+            let authority =
+                WorktreeWriteAuthority::for_worktree(&writer.worktree, &writer.branch, &self.home)
+                    .map_err(|error| error.to_string())?;
+            let grant = |path: std::path::PathBuf| PathGrant {
+                path,
+                scope: PathScope::Subtree,
+            };
+            let plan =
+                provenant_confinement::ConfinedPlan::new(provenant_confinement::PlanRequest {
+                    scope: provenant_core::WorkScope::Project(self.project),
+                    codex: provenant_confinement::CodexPolicy::Clean,
+                    extensions: provenant_confinement::ExtensionPolicy::Deny,
+                    agy_state: None,
+                    permissions: PlanPermissions {
+                        read_only: None,
+                        mode: AccessMode::WorktreeWrite(Box::new(authority)),
+                        scratch: grant(paths.scratch.clone()),
+                        private_state: Some(grant(paths.provider_state.clone())),
+                        read_roots: vec![grant(self.writer.worktree.clone())],
+                        protected_roots: vec![],
+                        secret_roots: vec![],
+                        selected_authentication: None,
+                        include_continuation: false,
+                        write_roots: vec![],
+                        network: NetworkAccess::Provider,
+                        nested_confinement: false,
+                    },
+                })
+                .map_err(|error| error.to_string())?;
+            let mut prepared = crate::dispatch_tests::Ready.prepare(task, prompt, paths, resume)?;
+            prepared.confinement = Some(crate::LaunchConfinement {
+                plan,
+                profile: ProviderProfile {
+                    spec: ProviderProfileSpec::default(),
+                    observations: Default::default(),
+                },
+                writer: Some(writer),
+                home: self.home.clone(),
+                cargo_registry_seed: false,
+                state_root: self.state.clone(),
+            });
+            Ok(prepared)
+        }
+        fn decode(
+            &self,
+            route: &RouteRecord,
+            output: &[u8],
+            exit: &provenant_supervisor::custody::ExitObservation,
+            path: &Path,
+        ) -> std::result::Result<Decoded, String> {
+            crate::dispatch_tests::Ready.decode(route, output, exit, path)
+        }
+    }
+    let fixture = PrepareFixture::new()?;
+    let execution = registered_landed_writer_fixture(&fixture)?;
+    let store = RunStore::open(&execution, &call)?;
+    let mut input = tests::input();
+    input.request.tasks[0].writer = Some(fixture.writer.clone());
+    store.create(&input, &call)?;
+    let marker = fixture.writer.worktree.join(".git");
+    let original = std::fs::read(&marker)?;
+    let provider = WriterProvider {
+        writer: fixture.writer.clone(),
+        state: execution.state_root.as_path().to_owned(),
+        home: fixture.root.join("home"),
+        project: execution.project_id,
+    };
+    let started = std::time::Instant::now();
+    let result = store.start(
+        input.run_id,
+        &provider,
+        &|_, _| {
+            std::fs::write(&marker, b"gitdir: /nonexistent\n").map_err(RunError::Io)?;
+            Ok(Vec::new())
+        },
+        &call,
+    )?;
+    let elapsed = started.elapsed();
+    std::fs::write(&marker, original)?;
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "launch refusal took {elapsed:?}"
+    );
+    assert!(
+        matches!(&result[..], [crate::Started::Refused { reason, .. }] if reason.contains("could not be revalidated")),
+        "{result:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn terminal_outcomes_remove_the_launch_base_pin_and_interrupted_import_ref()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     for outcome in [Outcome::Succeeded, Outcome::Cancelled, Outcome::Failed] {

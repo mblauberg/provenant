@@ -80,7 +80,7 @@ pub enum PermissionError {
     Filesystem(#[source] provenant_os::fs::FsError),
     #[error("sandbox probe execution failed")]
     Execution(#[source] provenant_os::exec::ExecError),
-    #[error("verified repository authority could not be revalidated: {0:?}: {0}")]
+    #[error("verified repository authority could not be revalidated: {kind}: {0}", kind = .0.variant())]
     Repository(#[from] crate::repo::RepoError),
     #[error("bounded Git HEAD read failed")]
     HeadRead(#[source] std::io::Error),
