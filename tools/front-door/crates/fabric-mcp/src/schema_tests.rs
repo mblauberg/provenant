@@ -2,7 +2,22 @@ use super::*;
 use crate::tools::{IdentityReply, InvalidInput, ToolCall};
 use regex::Regex;
 use serde_json::{Map, Number, Value, json};
-use std::{fs, path::Path};
+use std::{cell::RefCell, collections::HashMap, fs, path::Path};
+
+thread_local! {
+    // Generated probes reuse a small set of patterns; compile each once per test worker.
+    static PATTERNS: RefCell<HashMap<String, Option<Regex>>> = RefCell::new(HashMap::new());
+}
+
+fn pattern_matches(pattern: &str, value: &str) -> bool {
+    PATTERNS.with_borrow_mut(|patterns| {
+        patterns
+            .entry(pattern.to_owned())
+            .or_insert_with(|| Regex::new(pattern).ok())
+            .as_ref()
+            .is_some_and(|regex| regex.is_match(value))
+    })
+}
 
 #[test]
 fn generated_schema_snapshot_is_checked_in() {
@@ -134,7 +149,7 @@ fn accepts(root: &Value, schema: &Value, value: &Value) -> bool {
             || schema
                 .get("pattern")
                 .and_then(Value::as_str)
-                .is_some_and(|p| Regex::new(p).map_or(true, |r| !r.is_match(s)))
+                .is_some_and(|pattern| !pattern_matches(pattern, s))
         {
             return false;
         }
@@ -1083,6 +1098,28 @@ fn published_output_schemas_accept_real_runtime_records() {
 }
 
 #[test]
+fn submit_optional_fields_are_named_cases() {
+    for (case, check) in [
+        (
+            "bounded work context",
+            submit_accepts_optional_bounded_work_context as fn(),
+        ),
+        ("bounded git base", submit_accepts_optional_bounded_git_base),
+        ("head length bound", submit_head_matches_schema_length_bound),
+        ("task title", submit_accepts_optional_task_title),
+    ] {
+        if let Err(panic) = std::panic::catch_unwind(check) {
+            if let Some(message) = panic.downcast_ref::<String>() {
+                panic!("submit {case}: {message}");
+            }
+            if let Some(message) = panic.downcast_ref::<&str>() {
+                panic!("submit {case}: {message}");
+            }
+            panic!("submit {case} failed");
+        }
+    }
+}
+
 fn submit_accepts_optional_bounded_work_context() {
     use provenant_fabric_runtime::coordination::facade::SubmitInput;
     let schema = &all_catalogue()
@@ -1112,7 +1149,6 @@ fn submit_accepts_optional_bounded_work_context() {
     assert!(tasks[0].context.is_none());
 }
 
-#[test]
 fn submit_accepts_optional_bounded_git_base() {
     use provenant_fabric_runtime::coordination::facade::SubmitInput;
 
@@ -1135,7 +1171,6 @@ fn submit_accepts_optional_bounded_git_base() {
     assert!(ToolCall::parse("fabric_run", input).is_err());
 }
 
-#[test]
 fn submit_head_matches_schema_length_bound() {
     let schema = &all_catalogue()
         .iter()
@@ -1154,7 +1189,6 @@ fn submit_head_matches_schema_length_bound() {
     assert!(ToolCall::parse("fabric_run", input).is_err());
 }
 
-#[test]
 fn submit_accepts_optional_task_title() {
     use provenant_fabric_runtime::coordination::facade::SubmitInput;
 
