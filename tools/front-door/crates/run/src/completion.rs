@@ -165,6 +165,21 @@ fn read_snapshot(attempt: &Directory) -> Result<Option<Handoff>> {
         .transpose()
 }
 
+/// The slot-wait rule every writer lane is told. A writer's `cargo` commands
+/// that compile take one of the host's shared build slots, and a lane that
+/// stopped to report the wait cost a whole task (#2484).
+pub const BUILD_SLOT_GUIDANCE: &str = "Build slots: your `cargo` commands that compile wait for one of the host's shared build slots, and other lanes and projects hold them. A wait is normal and bounded; the command proceeds when a slot frees. Keep waiting. Do not stop, abandon the task or report review_required because a build is queued; use the time to review or plan.\n";
+
+/// The text placed before a lane's task: model policy, the build-slot rule for
+/// writers only, then the handoff file.
+pub fn lane_preamble(model_guidance: &str, writer: bool, handoff: &Path) -> String {
+    format!(
+        "{model_guidance}\n{}{}",
+        if writer { BUILD_SLOT_GUIDANCE } else { "" },
+        handoff_progress_guidance(handoff)
+    )
+}
+
 pub fn handoff_progress_guidance(path: &Path) -> String {
     format!(
         "Progress handoff JSON: {}. Update this file atomically throughout the task and repeat its current value in the final handoff fence. It is lane state, never a repository file or a commit.\n",
@@ -178,6 +193,19 @@ mod tests {
     use crate::tests::{call, clock, context, exit, input, publication, seal_observation};
     use provenant_records::AbsolutePath;
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn writer_preamble_states_the_slot_wait_rule_and_read_only_does_not() {
+        let handoff = Path::new("/state/handoff.json");
+        let writer = lane_preamble("Model policy.", true, handoff);
+        assert_eq!(
+            writer,
+            "Model policy.\nBuild slots: your `cargo` commands that compile wait for one of the host's shared build slots, and other lanes and projects hold them. A wait is normal and bounded; the command proceeds when a slot frees. Keep waiting. Do not stop, abandon the task or report review_required because a build is queued; use the time to review or plan.\nProgress handoff JSON: /state/handoff.json. Update this file atomically throughout the task and repeat its current value in the final handoff fence. It is lane state, never a repository file or a commit.\n"
+        );
+        let reader = lane_preamble("Model policy.", false, handoff);
+        assert!(!reader.contains("Build slots"));
+        assert!(reader.starts_with("Model policy.\nProgress handoff JSON"));
+    }
 
     fn snapshot(status: &str) -> Vec<u8> {
         serde_json::json!({"schema_version":2,"status":status,"note":"Parser committed; renderer remains.","remaining":["Finish renderer"],"decisions":["Keep the parser API"],"verify":["Parser tests passed"]}).to_string().into_bytes()

@@ -200,7 +200,12 @@ repeats the message about every 60 seconds. While it waits it also writes
 `build-slot-wait.PID` (one per command) in the lane's scratch directory, and `lanes` and
 `status` show the lane as waiting (`build slot: ...`) the way they show an
 admission wait. The host trusts only which of two fixed waits the file names
-and that it was refreshed in the last 150 seconds. It gives up after
+and that it was refreshed in the last 150 seconds. A slot wait also records when
+it began and how many slots were held, so `lanes` shows
+`build slot: queued N of M; H of S slots held`: N is the lane's place among this
+project's waiting lanes, oldest first, M how many of them wait, and H of S the
+slots held by any project on the host. Writer lanes are told in their preamble
+that this wait is normal and bounded, and to keep waiting rather than stop. It gives up after
 `build_wait_minutes` (default 30) with an error that names the slot count and
 suggests `provenant lanes` to find the holders. The same bounded wait and
 progress message apply while the command waits for another build's

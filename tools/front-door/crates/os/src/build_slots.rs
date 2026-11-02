@@ -44,6 +44,16 @@ pub enum WaitKind {
     Slot,
     CargoLock,
 }
+/// A slot wait as its marker reports it: when it began, how many of the
+/// `limit` slots were held when it last refreshed. The lane writes this, so
+/// the reader bounds it and shows it as information only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SlotWait {
+    pub since: u64,
+    pub held: u64,
+    pub limit: u64,
+}
+
 impl WaitKind {
     /// The marker body for a wait observed at `now_secs`.
     pub fn marker(self, now_secs: u64) -> String {
@@ -53,11 +63,24 @@ impl WaitKind {
         };
         format!("{name} {now_secs}")
     }
+    /// The marker body for a slot wait that began at `wait.since`.
+    pub fn slot_marker(now_secs: u64, wait: SlotWait) -> String {
+        format!(
+            "slot {now_secs} {} {} {}",
+            wait.since, wait.held, wait.limit
+        )
+    }
     /// The wait a marker body names, if it is well formed and fresh at
     /// `now_secs`. A lane writes this text, so anything else is ignored.
     pub fn from_marker(text: &str, now_secs: u64) -> Option<Self> {
-        let (name, at) = text.trim().split_once(' ')?;
+        let mut fields = text.split_whitespace();
+        let (name, at) = (fields.next()?, fields.next()?);
         let at: u64 = at.parse().ok()?;
+        // Nothing more, or exactly the three numbers of a slot wait.
+        let rest: Vec<_> = fields.collect();
+        if !(rest.is_empty() || rest.len() == 3 && rest.iter().all(|f| f.parse::<u64>().is_ok())) {
+            return None;
+        }
         if now_secs.saturating_sub(at) > WAIT_MARKER_FRESH.as_secs() {
             return None;
         }
@@ -66,6 +89,28 @@ impl WaitKind {
             "lock" => Some(Self::CargoLock),
             _ => None,
         }
+    }
+    /// The start time and slot counts of a fresh slot-wait marker, if it
+    /// carries them and they are plausible (1 to 64 slots, no more held than
+    /// exist, a start no later than now).
+    pub fn slot_wait(text: &str, now_secs: u64) -> Option<SlotWait> {
+        if Self::from_marker(text, now_secs)? != Self::Slot {
+            return None;
+        }
+        let fields: Vec<u64> = text
+            .split_whitespace()
+            .skip(2)
+            .map(str::parse)
+            .collect::<std::result::Result<_, _>>()
+            .ok()?;
+        let [since, held, limit] = fields[..] else {
+            return None;
+        };
+        ((1..=64).contains(&limit) && held <= limit && since <= now_secs).then_some(SlotWait {
+            since,
+            held,
+            limit,
+        })
     }
 }
 
@@ -375,6 +420,35 @@ impl SlotGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slot_wait_markers_carry_bounded_queue_information() {
+        let wait = SlotWait {
+            since: 90,
+            held: 2,
+            limit: 3,
+        };
+        let text = WaitKind::slot_marker(100, wait);
+        assert_eq!(text, "slot 100 90 2 3");
+        assert_eq!(WaitKind::from_marker(&text, 100), Some(WaitKind::Slot));
+        assert_eq!(WaitKind::slot_wait(&text, 100), Some(wait));
+        // The old two-field marker still names the wait, without counts.
+        assert_eq!(WaitKind::from_marker("slot 100", 100), Some(WaitKind::Slot));
+        assert_eq!(WaitKind::slot_wait("slot 100", 100), None);
+        assert_eq!(WaitKind::slot_wait("lock 100 90 2 3", 100), None);
+        for forged in [
+            "slot 100 90 4 3",
+            "slot 100 90 0 0",
+            "slot 100 90 0 65",
+            "slot 100 101 0 3",
+            "slot 100 90 2",
+            "slot 100 90 2 3 4",
+            "slot 100 90 x 3",
+        ] {
+            assert_eq!(WaitKind::slot_wait(forged, 100), None, "{forged}");
+        }
+        assert_eq!(WaitKind::slot_wait(&text, 1000), None, "stale");
+    }
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicU64, Ordering};
 

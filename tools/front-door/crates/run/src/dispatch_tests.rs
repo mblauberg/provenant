@@ -7879,11 +7879,60 @@ fn lane_waits_report_a_running_lane_waiting_for_a_build_slot() -> TestResult {
             .waiting_for
             .contains("lock")
     );
+    // A marker with the wait's start and slot counts shows the queue position.
+    std::fs::write(&marker, "slot 0 0 2 3")?;
+    assert_eq!(
+        store.lane_waits(&records, &call)[0].waiting_for,
+        "build slot: queued 1 of 1; 2 of 3 slots held"
+    );
+    // Implausible counts fall back to the plain wait.
+    for forged in [
+        "slot 0 0 4 3",
+        "slot 0 0 0 65",
+        "slot 0 0 0 0",
+        "slot 0 9 1 3",
+        "slot 0 0 1",
+    ] {
+        std::fs::write(&marker, forged)?;
+        let waits = store.lane_waits(&records, &call);
+        assert!(
+            waits.is_empty()
+                || waits[0]
+                    .waiting_for
+                    .contains("one of the host's build slots"),
+            "{forged}"
+        );
+    }
     // Text the lane invents is ignored, and so is a marker that is not a file.
     for forged in ["disk 0", "slot", "slot x", "slot 0 and more words"] {
         std::fs::write(&marker, forged)?;
         assert!(store.lane_waits(&records, &call).is_empty(), "{forged}");
     }
+    // Waits queue oldest first: the lane that began waiting later is second.
+    let other_tmp = attempt(other_id, records[1].run_id).join("tmp/candidate-0");
+    std::fs::create_dir_all(&other_tmp)?;
+    let other_marker = other_tmp.join(format!("{WAIT_MARKER}.200"));
+    std::fs::write(&marker, "slot 0 0 3 3")?;
+    std::fs::write(&other_marker, "slot 0 0 3 3")?;
+    let waits = store.lane_waits(&records, &call);
+    let text = |lane: AttemptId| {
+        waits
+            .iter()
+            .find(|wait| wait.attempt_id == lane)
+            .map(|wait| wait.waiting_for.clone())
+    };
+    // Equal starts break by attempt id, so each lane has a distinct place.
+    let mut places = [text(id), text(other_id)];
+    places.sort();
+    assert_eq!(
+        places,
+        [
+            Some("build slot: queued 1 of 2; 3 of 3 slots held".to_owned()),
+            Some("build slot: queued 2 of 2; 3 of 3 slots held".to_owned())
+        ]
+    );
+    std::fs::remove_file(&other_marker)?;
+    std::fs::write(&marker, "disk 0")?;
     // One marker per command: a sibling's marker going away leaves the wait.
     let sibling = tmp.join(format!("{WAIT_MARKER}.101"));
     std::fs::write(&sibling, "slot 0")?;
