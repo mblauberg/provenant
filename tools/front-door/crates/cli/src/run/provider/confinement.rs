@@ -6,9 +6,11 @@ pub fn graph_inputs_directory(state_root: &Path) -> PathBuf {
     state_root.join("fabric").join("graph-inputs")
 }
 
-/// The one inputs directory a graph node may read: its own, named by the
-/// project, graph and node. `None` when an identifier is not a single path
-/// component, so no value can name a parent or another node's directory.
+/// The one inputs directory a graph node may read: its own, named by a digest
+/// of its project, graph and node. The digest keeps names that a
+/// case-insensitive filesystem would merge (`Review` and `review`), or that
+/// are not path-safe, in separate directories. `None` when the project is not
+/// a single path component.
 pub fn graph_node_inputs_directory(
     state_root: &Path,
     project: impl std::fmt::Display,
@@ -16,18 +18,20 @@ pub fn graph_node_inputs_directory(
     node_id: &str,
 ) -> Option<PathBuf> {
     let project = project.to_string();
-    let single = |name: &str| !matches!(name, "" | "." | "..") && !name.contains(['/', '\\', '\0']);
-    if ![project.as_str(), graph_id, node_id]
-        .into_iter()
-        .all(single)
-    {
+    if matches!(project.as_str(), "" | "." | "..") || project.contains(['/', '\\', '\0']) {
         return None;
     }
+    // Length-prefixed, so no two tuples share an encoding.
+    let mut tuple = b"provenant graph inputs v1".to_vec();
+    for part in [project.as_str(), graph_id, node_id] {
+        tuple.extend_from_slice(&(part.len() as u64).to_be_bytes());
+        tuple.extend_from_slice(part.as_bytes());
+    }
+    let digest = provenant_records::CanonicalV1::file_digest(&tuple);
     Some(
         graph_inputs_directory(state_root)
             .join(project)
-            .join(graph_id)
-            .join(node_id),
+            .join(provenant_core::hex(digest.bytes())),
     )
 }
 

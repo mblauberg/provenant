@@ -32,8 +32,8 @@ fn open_or_create(parent: &Directory, name: &str) -> Result<Directory, provenant
     }
 }
 
-/// The directory for one graph node, created on first use. It is named by
-/// project, graph and node, which the host recomputes to grant it, so every
+/// The directory for one graph node, created on first use. It is named by a
+/// digest of project, graph and node, which the host recomputes to grant it, so every
 /// route of a node shares it: the files are the same for each.
 fn attempt_directory(factory: &Factory, key: &AttemptKey) -> Option<(PathBuf, Directory)> {
     let state = factory.context.roots.state.as_path();

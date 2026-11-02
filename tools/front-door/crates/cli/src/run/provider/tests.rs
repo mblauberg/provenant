@@ -2926,9 +2926,21 @@ fn a_task_may_read_only_its_own_nodes_graph_inputs() -> Result<(), Box<dyn std::
     }
     // A task naming no graph node has no directory to be granted.
     assert!(check(None, &inputs("g", "mine")).is_err());
-    // Identifiers that are not one path component never name a directory.
-    let traversal = context("g", "..");
-    assert!(check(Some(&traversal), &shared.join(project).join("g").join("..")).is_err());
+    // Names a case-insensitive filesystem would merge, and names that are not
+    // path-safe, still get separate directories, and one is refused the other.
+    assert_ne!(inputs("g", "Review"), inputs("g", "review"));
+    assert_ne!(inputs("G", "review"), inputs("g", "review"));
+    assert_ne!(inputs("g", ".."), inputs("g", "."));
+    for (graph, node) in [("g", "Review"), ("g", "review"), ("g", "..")] {
+        std::fs::create_dir_all(inputs(graph, node))?;
+    }
+    let upper = context("g", "Review");
+    let lower = context("g", "review");
+    assert!(check(Some(&upper), &inputs("g", "Review")).is_ok());
+    assert!(check(Some(&lower), &inputs("g", "review")).is_ok());
+    assert!(check(Some(&upper), &inputs("g", "review")).is_err());
+    assert!(check(Some(&lower), &inputs("g", "Review")).is_err());
+    assert!(check(Some(&context("g", "..")), &shared.join(project).join("g")).is_err());
     // A link standing in for the node's directory is not followed.
     std::fs::remove_dir(inputs("g", "mine"))?;
     std::os::unix::fs::symlink(inputs("g", "sibling"), inputs("g", "mine"))?;
