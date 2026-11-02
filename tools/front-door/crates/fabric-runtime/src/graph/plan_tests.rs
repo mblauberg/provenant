@@ -895,6 +895,7 @@ fn two_instances(first: Value, second: Value) -> String {
 #[test]
 fn disjoint_waves_refuse_overlapping_scopes_unless_a_dependency_orders_them() {
     let mut doc = pattern_planner(8);
+    doc.integration_branch = Some("integration".into());
     doc.nodes[0].plan.as_mut().unwrap().disjoint_waves = true;
     let one = json!({"id":"one", "pattern":"generator", "parameters":{"scope":["src/a"]}});
     let clash = json!({"id":"two", "pattern":"generator", "parameters":{"scope":["src/a/b"]}});
@@ -918,6 +919,7 @@ fn disjoint_waves_refuse_overlapping_scopes_unless_a_dependency_orders_them() {
 
     // Without the switch, overlapping instances keep sharing one checkout.
     let mut plain = pattern_planner(8);
+    plain.integration_branch = Some("integration".into());
     plain.nodes[0].plan.as_mut().unwrap().disjoint_waves = false;
     let results = ["implemented", "reviewed", "implemented", "reviewed", "checked"];
     let mut owner = fixture_owner(&[&[two_instances(one, clash).as_str()][..], &results[..]].concat());

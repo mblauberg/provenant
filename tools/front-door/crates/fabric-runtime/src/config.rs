@@ -24,9 +24,91 @@ pub struct FabricConfig {
     pub graph: GraphConfig,
     #[serde(default)]
     pub lanes: Lanes,
+    /// The planner front-end: whether `provenant run --preset` runs a planner.
+    #[serde(default)]
+    pub plan: PlanConfig,
     /// The front door reads and validates pipeline experiments. The runtime only accepts the key.
     #[serde(default, skip_serializing)]
     pub pipelines: provenant_config::experiment::PipelineExperiments,
+}
+
+/// Whether a preset run puts a principal planner in front of its graph.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlanMode {
+    /// Plan large or underspecified work; skip small or fully specified work.
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
+impl PlanMode {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "auto" => Some(Self::Auto),
+            "on" => Some(Self::On),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+}
+
+/// `[domains.fabric.plan]`. The planner never widens authority: the route is
+/// a pool alias, and every bound below only narrows what a plan may express.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PlanConfig {
+    /// The default for `--plan`.
+    pub mode: PlanMode,
+    /// Route alias the planner node runs on.
+    pub route: String,
+    /// Longest wall-clock budget a planned lane may be given, in seconds.
+    pub lane_deadline_seconds: u64,
+    /// Most nodes and pattern instances one plan may emit.
+    pub max_nodes: usize,
+    pub auto: PlanAuto,
+}
+
+/// Thresholds for the `auto` rule; a subject past any one turns planning on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PlanAuto {
+    /// More acceptance items than this in the brief.
+    pub acceptance_items: usize,
+    /// Write scope spanning more crates than this.
+    pub write_crates: usize,
+    /// At least this many distinct issues named in one brief.
+    pub batch_issues: usize,
+}
+
+impl Default for PlanAuto {
+    fn default() -> Self {
+        Self {
+            acceptance_items: 6,
+            write_crates: 2,
+            batch_issues: 2,
+        }
+    }
+}
+
+impl Default for PlanConfig {
+    fn default() -> Self {
+        Self {
+            mode: PlanMode::Auto,
+            route: "principal".into(),
+            lane_deadline_seconds: 3600,
+            max_nodes: 24,
+            auto: PlanAuto::default(),
+        }
+    }
 }
 
 /// Named command policy supplied by host configuration, never by task prompts.
@@ -581,6 +663,25 @@ impl DomainConfig for FabricConfig {
                 reject(format!("graph.land.projects.{project}"));
             }
         }
+        let plan = &self.plan;
+        if !crate::graph::valid_identifier(&plan.route) {
+            reject("plan.route".into());
+        }
+        if !(60..=14_400).contains(&plan.lane_deadline_seconds) {
+            reject("plan.lane_deadline_seconds".into());
+        }
+        if !(1..=512).contains(&plan.max_nodes) {
+            reject("plan.max_nodes".into());
+        }
+        for (name, value) in [
+            ("acceptance_items", plan.auto.acceptance_items),
+            ("write_crates", plan.auto.write_crates),
+            ("batch_issues", plan.auto.batch_issues),
+        ] {
+            if value == 0 {
+                reject(format!("plan.auto.{name}"));
+            }
+        }
         let limits = &self.graph.limits;
         for (name, value) in [
             ("nodes", limits.nodes),
@@ -681,6 +782,8 @@ fn boundary_existing(error: &SectionError) -> bool {
         "graph.limits",
         "graph.budget",
         "graph.allowed_read_roots",
+        "plan.lane_deadline_seconds",
+        "plan.max_nodes",
         "ssh_executable",
         "home_hosts",
     ]
@@ -873,6 +976,7 @@ mod tests {
             ssh_executable: Some(PathBuf::from("/opt/homebrew/bin/ssh")),
             graph: GraphConfig::default(),
             lanes: Lanes::default(),
+            plan: Default::default(),
             limits: Limits {
                 body_bytes: 65536,
                 input_frame_bytes: 1048576,

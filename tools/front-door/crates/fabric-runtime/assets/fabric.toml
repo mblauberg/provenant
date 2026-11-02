@@ -41,6 +41,20 @@ peer_seconds = 30
 graph_timeout_seconds = 14400
 store_busy_timeout_ms = 30000 # wait for a contended store before reporting contention, 0-600000; 0 fails fast
 
+# The planner front-end for `provenant run --preset`: a principal planner shapes
+# the graph from the preset's allow-listed patterns when --plan is on, or when
+# --plan is auto and the work is large or underspecified.
+[plan]
+mode = "auto" # auto, on or off; --plan overrides it
+route = "principal" # route alias the planner node runs on
+lane_deadline_seconds = 3600 # longest budget a planned lane may be given, 60-14400
+max_nodes = 24 # nodes and pattern instances one plan may emit, 1-512
+
+[plan.auto]
+acceptance_items = 6 # more acceptance items than this turns planning on
+write_crates = 2 # a write scope spanning more crates than this turns it on
+batch_issues = 2 # this many distinct issues in one brief turns it on
+
 [graph]
 ci_poll_overrides = {}
 

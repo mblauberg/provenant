@@ -561,6 +561,7 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
                 "preset",
                 "preset_set",
                 "preset_params_file",
+                "preset_plan",
                 "explain",
                 "route",
                 "model",
@@ -700,9 +701,11 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
         }
         Command::Dispatch(dispatch) | Command::Run(dispatch) => {
             if dispatch.preset.is_none()
-                && (!dispatch.preset_set.is_empty() || dispatch.preset_params_file.is_some())
+                && (!dispatch.preset_set.is_empty()
+                    || dispatch.preset_params_file.is_some()
+                    || dispatch.preset_plan.is_some())
             {
-                return invalid("--set and --params-file require --preset");
+                return invalid("--set, --params-file and --plan require --preset");
             }
             if matches!(inv.command, Command::Dispatch(_))
                 && dispatch.input.manifest.is_none()
@@ -1012,7 +1015,10 @@ fn requirements(path: &str, name: &str) -> Vec<String> {
     let names: &[&str] = match (path, name) {
         (_, "condition") => &["wait"],
         ("provenant run" | "provenant dispatch", "preset") => &["prompt_file"],
-        ("provenant run" | "provenant dispatch", "preset_set" | "preset_params_file") => {
+        (
+            "provenant run" | "provenant dispatch",
+            "preset_set" | "preset_params_file" | "preset_plan",
+        ) => {
             &["preset"]
         }
         ("provenant run" | "provenant dispatch", "deliver_remote") => {
@@ -1139,6 +1145,7 @@ mod tests {
             for (name, expected) in [
                 ("preset_set", vec!["preset"]),
                 ("preset_params_file", vec!["preset"]),
+                ("preset_plan", vec!["preset"]),
                 ("preset", vec!["prompt_file"]),
                 ("deliver_remote", vec!["deliver_branch", "writer_target"]),
                 ("deliver_branch", vec!["deliver_remote"]),
