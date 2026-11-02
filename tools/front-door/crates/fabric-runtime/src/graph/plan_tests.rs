@@ -104,6 +104,52 @@ fn failed_planner_runs_static_fallback_and_records_reason() {
     );
 }
 
+#[test]
+fn planner_prelaunch_failure_runs_static_fallback_without_an_attempt() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1, "graph_id":"planned-fallback-prelaunch", "nodes":[
+            {"id":"before", "access":"read_only", "prompt":"Prepare", "route":{"alias":"junior"}},
+            {"id":"plan", "kind":"plan", "access":"read_only", "prompt":"Plan",
+             "route":{"alias":"senior"}, "depends_on":["before"],
+             "inputs":[{"node":"before", "outputs":["result"]}],
+             "plan":{"kinds":["task"], "max_nodes":2,
+             "wire_exports":true,
+             "fallback":{"nodes":[
+                 {"id":"static", "access":"read_only", "prompt":"Static stage", "route":{"alias":"junior"}}
+             ], "exports":[{"node":"static", "outputs":["result"]}]}}},
+            {"id":"after", "access":"read_only", "prompt":"Consume", "route":{"alias":"senior"},
+             "depends_on":["plan"], "inputs":[{"node":"plan", "outputs":["result"]}]}
+        ]
+    })).unwrap();
+    let mut document = document;
+    document.nodes[1].prompt = "x".repeat(100);
+    let mut owner = fixture_owner(&[&"u".repeat(3000), "static result", "done"]);
+    let limits = crate::config::GraphLimits {
+        node_prompt_bytes: 2000,
+        ..Default::default()
+    };
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut MemoryJournal::default(),
+        &limits,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    assert_eq!(owner.calls.len(), 3, "{:?}", run.checkpoint.nodes);
+    assert!(owner.calls[1].0.node_id.contains("plan--fallback--static"));
+    assert_eq!(owner.calls[2].0.node_id, "after");
+    assert!(owner.prompts[2].contains("static result"));
+    let plan = run.checkpoint.nodes.iter().find(|node| node.id == "plan").unwrap();
+    assert!(plan.attempts.is_empty());
+    assert_eq!(plan.state, NodeState::Succeeded);
+    assert_eq!(
+        plan.outputs.as_ref().unwrap().plan.as_ref().unwrap().fallback_reason,
+        "planner attempt failed (unknown failure): node plan: selected upstream outputs do not fit; increase node_prompt_bytes and restart the graph"
+    );
+}
+
 fn pattern_result(instance: Value) -> String {
     format!(
         "```fragment\n{}\n```",

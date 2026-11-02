@@ -1052,12 +1052,13 @@ pub(super) fn settle(
             return None;
         }
         checkpoint.nodes[index].state = NodeState::Succeeded;
-        if let Some(outputs) = &mut checkpoint.nodes[index].outputs {
-            outputs.plan = Some(PlanOutput {
-                extra: Default::default(),
-                fallback_reason: reason,
-            });
-        }
+        let outputs = checkpoint.nodes[index]
+            .outputs
+            .get_or_insert_with(|| super::outputs::make_outputs(None, None, None, None, None));
+        outputs.plan = Some(PlanOutput {
+            extra: Default::default(),
+            fallback_reason: reason,
+        });
         checkpoint.expansions.push(addition);
         loops::reconcile(checkpoint, &plan);
         remaining(checkpoint, &preview, limits);

@@ -862,10 +862,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         plans::remaining(&mut checkpoint, &expanded, limits);
         for node in &plan.nodes {
             if (!checkpoint.cancelled || resume)
-                && checkpoint
-                    .nodes
-                    .iter()
-                    .any(|n| n.id == node.id && (n.handoff.is_some() || n.fragment.is_some()))
+                && checkpoint.nodes.iter().any(|n| {
+                    n.id == node.id
+                        && (n.handoff.is_some()
+                            || n.fragment.is_some()
+                            || (n.state == NodeState::Failed
+                                && node
+                                    .plan
+                                    .as_ref()
+                                    .is_some_and(|spec| spec.fallback.is_some())))
+                })
                 && let Some((next_expanded, next_plan, next_positions)) =
                     plans::settle(node, document, &expanded, &mut checkpoint, None, limits)
             {
@@ -1660,6 +1666,33 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 if !should_continue {
                     break;
                 }
+            }
+            if (!checkpoint.cancelled || resume)
+                && checkpoint.nodes.iter().any(|progress| {
+                    progress.id == plan.nodes[node_index].id
+                        && progress.state == NodeState::Failed
+                        && plan.nodes[node_index]
+                            .plan
+                            .as_ref()
+                            .is_some_and(|spec| spec.fallback.is_some())
+                })
+                && let Some((next_expanded, next_plan, next_positions)) = plans::settle(
+                    &plan.nodes[node_index],
+                    document,
+                    &expanded,
+                    &mut checkpoint,
+                    None,
+                    limits,
+                )
+            {
+                validate_expanded_rows(&checkpoint, &next_plan)?;
+                owner
+                    .validate_expansion(&next_expanded, &checkpoint)
+                    .map_err(GraphError::Run)?;
+                journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                (expanded, plan, positions) = (next_expanded, next_plan, next_positions);
+                resume = false;
+                continue 'schedule;
             }
         }
 

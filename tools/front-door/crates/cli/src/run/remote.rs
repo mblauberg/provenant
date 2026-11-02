@@ -1216,7 +1216,14 @@ pub(super) fn output(
             "attempt required",
         ));
     };
-    read_output(command, host, attempt, Peer::open_for(edge, [placement])?)
+    let peer = Peer::open_for(edge, [placement])?;
+    let record = peer
+        .records(&[(host, attempt)])
+        .ok()
+        .and_then(|mut records| records.pop());
+    let (mut data, mut text) = read_output(command, host, attempt, peer)?;
+    add_planner_fallback(command, edge, record.as_ref(), &mut data, &mut text);
+    Ok((data, text))
 }
 
 /// `output --host PEER` or `PEER/ATTEMPT`: the peer's own attempt, with no
@@ -1279,7 +1286,37 @@ pub(super) fn output_on_peer(
         .ok_or_else(|| Fail::new(Status::Invalid, ErrorKind::Invalid, "attempt required"))?;
     let peer = Peer::open(edge)?;
     peer.project()?;
-    read_output(command, host, attempt, peer)
+    let record = peer
+        .records(&[(host, attempt)])
+        .ok()
+        .and_then(|mut records| records.pop());
+    let (mut data, mut text) = read_output(command, host, attempt, peer)?;
+    add_planner_fallback(command, edge, record.as_ref(), &mut data, &mut text);
+    Ok((data, text))
+}
+
+fn add_planner_fallback(
+    command: &Output,
+    edge: &Edge<'_>,
+    record: Option<&run::AttemptRecord>,
+    data: &mut Value,
+    text: &mut String,
+) {
+    if !matches!(command.part, Part::Result) {
+        return;
+    }
+    let Some(record) = record else {
+        return;
+    };
+    let Some(reason) =
+        super::output::planner_fallback_reason(&edge.roots.state, record.project_id, record)
+    else {
+        return;
+    };
+    text.push_str(&format!(
+        "\nPlanner fallback: static stage\nReason: {reason}\n"
+    ));
+    data["planner_fallback"] = json!({"stage":"static", "reason":reason});
 }
 
 fn read_output(

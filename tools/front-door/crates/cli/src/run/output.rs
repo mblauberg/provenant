@@ -75,6 +75,13 @@ pub(super) fn output_summary(data: &Value, text: &str, headed: bool) -> crate::S
             }
         }
     }
+    if headed && let Some(fallback) = data.get("planner_fallback") {
+        lines.push(format!(
+            "planner fallback: {} (reason: {})",
+            fallback["stage"].as_str().unwrap_or("static"),
+            crate::bounded_text(fallback["reason"].as_str().unwrap_or_default(), 160)
+        ));
+    }
     if headed && let Some(files) = data.get("changed_files") {
         lines.push(match files.as_array() {
             Some(paths) => {
@@ -474,6 +481,16 @@ pub(super) fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Valu
     if matches!(command.part, Part::Stderr) && !chunk.complete {
         text.insert_str(0, "[stderr truncated; retained tail]\n");
     }
+    let fallback_reason = if matches!(command.part, Part::Result) {
+        planner_fallback_reason(&edge.roots.state, session.context.project_id, &record)
+    } else {
+        None
+    };
+    if let Some(reason) = &fallback_reason {
+        text.push_str(&format!(
+            "\nPlanner fallback: static stage\nReason: {reason}\n"
+        ));
+    }
     // The text alone cannot tell a clean success from one that needs the chair.
     let (state, reason) = state_and_reason(&record.state);
     let mut data = json!({
@@ -499,6 +516,9 @@ pub(super) fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Valu
         data["changed_files"] = paths;
         data["changed_files_total"] = total;
     }
+    if let Some(reason) = fallback_reason {
+        data["planner_fallback"] = json!({"stage":"static", "reason":reason});
+    }
     if matches!(command.part, Part::Result)
         && matches!(
             record.state,
@@ -519,6 +539,39 @@ pub(super) fn output_inner(mut command: Output, edge: &Edge<'_>) -> Result<(Valu
         data["selected"] = selected;
     }
     Ok((data, text))
+}
+
+pub(super) fn planner_fallback_reason(
+    state_root: &provenant_core::StateRoot,
+    project: provenant_core::ProjectId,
+    record: &run::AttemptRecord,
+) -> Option<String> {
+    use provenant_fabric_runtime::graph::FileJournal;
+
+    let context = record.context.as_ref()?;
+    let graph_id = context.graph_id.as_deref()?;
+    FileJournal::read_checkpoint(state_root, project, graph_id)
+        .ok()?
+        .and_then(|checkpoint| fallback_reason_for_node(&checkpoint, context))
+}
+
+fn fallback_reason_for_node(
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+    context: &provenant_records::run::WorkContext,
+) -> Option<String> {
+    let node_id = context.node_id.as_deref()?;
+    let planner_id = checkpoint
+        .expansions
+        .iter()
+        .find(|expansion| expansion.nodes.iter().any(|node| node.id == node_id))
+        .map_or(node_id, |expansion| expansion.source.as_str());
+    checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == planner_id)
+        .and_then(|node| node.outputs.as_ref())
+        .and_then(|outputs| outputs.plan.as_ref())
+        .map(|plan| plan.fallback_reason.clone())
 }
 
 /// The attempt `output` reads for a RUN or RUN/TASK: the newest settled one,
@@ -865,7 +918,44 @@ pub fn attempt_provider(
 
 #[cfg(test)]
 mod tests {
-    use super::provider_error_from_stderr;
+    use super::{fallback_reason_for_node, output_summary, provider_error_from_stderr};
+    use serde_json::json;
+
+    #[test]
+    fn output_summary_names_planner_fallback_and_reason() {
+        let data = json!({
+            "attempt_id":"attempt",
+            "state":"succeeded",
+            "planner_fallback":{"stage":"static", "reason":"planner route failed"}
+        });
+        let summary = output_summary(&data, "fallback completed", true);
+        let text = summary.lines.join("\n");
+        assert!(text.contains("planner fallback: static (reason: planner route failed)"));
+    }
+
+    #[test]
+    fn output_finds_fallback_reason_for_the_attempt_node() {
+        let checkpoint = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"graph","plan_digest":"digest","nodes":[{
+                "id":"planner", "state":"succeeded", "attempts":[],
+                "outputs":{"schema_version":2,"result":null,"verdict":null,"findings":[],"branch":null,"commit":null,"warnings":[],
+                    "plan":{"fallback_reason":"planner route failed"}}
+            }],
+            "expansions":[{"source":"planner","continuation":false,"nodes":[{
+                "id":"planner--fallback--static","access":"read_only","prompt":"Static stage","route":{"alias":"junior"}
+            }]}]
+        }))
+        .unwrap();
+        let context = provenant_records::run::WorkContext {
+            graph_id: Some("graph".into()),
+            node_id: Some("planner--fallback--static".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            fallback_reason_for_node(&checkpoint, &context).as_deref(),
+            Some("planner route failed")
+        );
+    }
 
     #[test]
     fn provider_error_uses_failure_before_trailing_tracing_warning() {
