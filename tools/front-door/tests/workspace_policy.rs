@@ -377,9 +377,33 @@ fn fixture_git_policy_rejects_named_and_multiple_test_modules() {
     ));
 }
 
+// Whether a path names a test source: a `tests` directory, or a stem of `tests`,
+// `*_test` or `*_tests`.
+fn is_test_source(name: &str) -> bool {
+    let stem = Path::new(name)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default();
+    name.contains("/tests/")
+        || stem == "tests"
+        || stem.ends_with("_test")
+        || stem.ends_with("_tests")
+}
+
+// Counts for the tokens owned by one function body (innermost function wins).
+#[derive(Default)]
+struct ExecutorUse {
+    git_executable: bool,
+    git_env: bool,
+    option_sites: usize,
+    explicit_env: usize,
+}
+
 // Test code that runs the resolved Git through `ExecOptions` must use the fixture
 // helper. With `env` unset the child inherits the lane's GIT_DIR and GIT_WORK_TREE,
 // so a fixture commits into the lane. An explicit `env` does not inherit them.
+// Judged per function body: a function that names the Git executable must give
+// every `ExecOptions::new` an explicit `env`, or call `git_env`, within itself.
 // Works on tokens, so comments and string literals cannot trigger or hide a use.
 fn executor_git_violation(source: &str, test_file: bool) -> bool {
     let scope = if test_file {
@@ -390,18 +414,55 @@ fn executor_git_violation(source: &str, test_file: bool) -> bool {
             .map_or("", |start| &source[start..])
     };
     let tokens = rust_tokens(scope);
-    let calls = |name: &str| {
-        tokens
-            .windows(2)
-            .any(|pair| pair[0] == name && pair[1] == "(")
-    };
-    let explicit_env = tokens.windows(3).any(|triple| {
-        triple[0] == "env" && (triple[1] == "=" || triple[1] == ":") && triple[2] == "Some"
-    });
-    let executor = tokens
-        .windows(3)
-        .any(|triple| triple[0] == "ExecOptions" && triple[1] == "::" && triple[2] == "new");
-    executor && calls("git_executable") && !calls("run_git") && !calls("git_env") && !explicit_env
+    // Owner of each open brace: Some(function id) for a function body, else the parent's.
+    let mut frames: Vec<Option<usize>> = Vec::new();
+    let mut functions: Vec<ExecutorUse> = vec![ExecutorUse::default()];
+    let mut pending: Option<(usize, usize)> = None; // (function id, signature bracket depth)
+    for (index, token) in tokens.iter().enumerate() {
+        let owner = frames.last().copied().flatten().unwrap_or(0);
+        let next = tokens.get(index + 1).copied();
+        let after = tokens.get(index + 2).copied();
+        match *token {
+            "fn" if next
+                .is_some_and(|name| name.starts_with(|c: char| c.is_alphabetic() || c == '_')) =>
+            {
+                functions.push(ExecutorUse::default());
+                pending = Some((functions.len() - 1, 0));
+            }
+            "(" | "[" => {
+                if let Some((_, depth)) = pending.as_mut() {
+                    *depth += 1;
+                }
+            }
+            ")" | "]" => {
+                if let Some((_, depth)) = pending.as_mut() {
+                    *depth = depth.saturating_sub(1);
+                }
+            }
+            ";" if pending.is_some_and(|(_, depth)| depth == 0) => pending = None,
+            "{" => frames.push(match pending.take() {
+                Some((id, _)) => Some(id),
+                None => frames.last().copied().flatten(),
+            }),
+            "}" => {
+                frames.pop();
+            }
+            "git_executable" => functions[owner].git_executable = true,
+            "git_env" if next == Some("(") => functions[owner].git_env = true,
+            "ExecOptions" if next == Some("::") && after == Some("new") => {
+                functions[owner].option_sites += 1;
+            }
+            "env" if matches!(next, Some("=") | Some(":")) && after == Some("Some") => {
+                functions[owner].explicit_env += 1;
+            }
+            _ => {}
+        }
+    }
+    functions.iter().any(|function| {
+        function.git_executable
+            && !function.git_env
+            && function.option_sites > function.explicit_env
+    })
 }
 
 #[test]
@@ -420,11 +481,43 @@ fn executor_git_policy_flags_only_inherited_env() {
         ),
         false
     ));
+    // A Git site without env is still flagged beside an unrelated function that sets env.
+    assert!(executor_git_violation(
+        concat!(
+            "fn git_site() { let git = git_executable(); let o = ExecOptions::new(a, c, d); }\n",
+            "fn other() { let mut o = ExecOptions::new(a, c, d); o.env = Some(&env); }"
+        ),
+        true
+    ));
+    // So is the unscrubbed site of two in one function, and one inside a closure.
+    assert!(executor_git_violation(
+        concat!(
+            "fn f() { let git = git_executable(); ",
+            "let mut a = ExecOptions::new(a, c, d); a.env = Some(&env); ",
+            "let run = || ExecOptions::new(a, c, d); }"
+        ),
+        true
+    ));
+    // Test files named `tests.rs` or `*_test.rs` are scanned in full.
+    for name in [
+        "crates/run/src/tests.rs",
+        "crates/cli/src/run/provider/confinement_test.rs",
+        "crates/x/src/foo_tests.rs",
+        "tests/preset_cli.rs",
+    ] {
+        assert!(is_test_source(name), "{name}");
+        assert!(executor_git_violation(offending, is_test_source(name)));
+    }
+    for name in ["crates/run/src/controls.rs", "crates/run/src/contests.rs"] {
+        assert!(!is_test_source(name), "{name}");
+    }
     for source in [
-        "let git = git_executable()?; run_git(cwd, &[\"init\"])?;",
-        "let git = git_executable()?; let mut o = ExecOptions::new(a, c, d); o.env = Some(&env);",
-        "let git = git_executable()?; let o = ExecOptions { env: Some(&env), ..x };",
-        "let git = git_executable()?; let o = ExecOptions::new(a, c, d); let e = git_env();",
+        "fn f() { let git = git_executable()?; run_git(cwd, &[\"init\"])?; }",
+        "fn f() { let git = git_executable()?; let mut o = ExecOptions::new(a, c, d); o.env = Some(&env); }",
+        "fn f() { let git = git_executable()?; let o = ExecOptions { env: Some(&env), ..x }; }",
+        "fn f() { let git = git_executable()?; let o = ExecOptions::new(a, c, d); let e = git_env(); }",
+        "fn f(a: [u8; 4]) { let git = git_executable()?; let o = ExecOptions::new(a, c, d); let e = git_env(); }",
+        "fn git_site() { git_executable(); run_git(c, a); }\nfn other() { ExecOptions::new(a, c, d); }",
         "// git_executable() ExecOptions::new\nlet s = \"git_executable() ExecOptions::new\";",
     ] {
         assert!(!executor_git_violation(source, true), "{source}");
@@ -445,8 +538,7 @@ fn executor_git_commands_use_the_fixture_helper() -> Result<(), Box<dyn Error>> 
     for path in sources {
         let source = fs::read_to_string(&path)?;
         let name = path.to_string_lossy();
-        let test_file = name.contains("/tests/") || name.ends_with("_tests.rs");
-        if executor_git_violation(&source, test_file) {
+        if executor_git_violation(&source, is_test_source(&name)) {
             return Err(format!(
                 "{} runs Git through ExecOptions with the inherited env; use provenant_os::fixture::run_git",
                 path.display()
