@@ -629,8 +629,8 @@ fn owned_cleanup_rechecks_regenerated_output_and_keep_paths() -> Result<(), Box<
         );
         assert_eq!(
             calls.get(),
-            3,
-            "recheck terminality after output preparation"
+            if keep { 2 } else { 3 },
+            "terminality is rechecked after output preparation"
         );
         if keep {
             assert!(matches!(result, Err(WorktreeError::IgnoredPaths(_))));
