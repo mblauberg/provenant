@@ -32,6 +32,8 @@ pub struct CapturedResult {
     /// blockquotes) count as declarations. Independent of the legacy required-line contract.
     pub verdict: Option<Box<str>>,
     pub verdict_invalid: bool,
+    /// Saturating count of verdict declarations across the complete stream.
+    pub declarations: u8,
     pub digest: String,
     pub excerpt: String,
     pub tail: String,
@@ -161,11 +163,12 @@ impl ResultCapture {
             || String::from_utf8_lossy(&self.tail).len() > TAIL_BYTES;
         let truncated = self.bytes > HEAD_BYTES as u64
             || String::from_utf8_lossy(&self.head).len() > HEAD_BYTES;
-        let (verdict, verdict_invalid) = self.verdict.finish();
+        let (verdict, verdict_invalid, declarations) = self.verdict.finish();
         CapturedResult {
             handoff: self.handoff.finish(),
             verdict,
             verdict_invalid,
+            declarations,
             digest,
             excerpt,
             tail,
@@ -273,14 +276,14 @@ impl VerdictCapture {
         self.head.clear();
     }
 
-    fn finish(mut self) -> (Option<Box<str>>, bool) {
+    fn finish(mut self) -> (Option<Box<str>>, bool, u8) {
         self.end_line();
         // An unterminated handoff fence is not a trailing handoff block.
         let verdict = self
             .final_verdict
             .filter(|_| self.markers == 1 && !self.in_handoff);
         let invalid = self.markers > 0 && verdict.is_none();
-        (verdict, invalid)
+        (verdict, invalid, self.markers)
     }
 }
 

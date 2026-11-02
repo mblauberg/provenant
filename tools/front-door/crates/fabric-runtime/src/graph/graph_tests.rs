@@ -1101,6 +1101,88 @@ fn verdict_fixture(
 }
 
 #[test]
+fn verdict_gate_matches_review_tokens_and_legacy_aliases() {
+    let (document, mut owner) = verdict_fixture(VerdictThreshold::All, &[Some("APPROVE")]);
+    let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default())
+        .unwrap()
+        .checkpoint;
+    assert!(checkpoint.successful());
+    let (mut plan, positions) = validate_plan(&document).unwrap();
+    for (expected, actual, passed) in [
+        ("VERDICT: PASS", "VERDICT: APPROVE", true),
+        ("VERDICT: PASS", "PASS", true),
+        ("VERDICT: PASS", "VERDICT: PASS", true),
+        ("VERDICT: PASS", "VERDICT: APPROVE_WITH_NITS", false),
+        ("APPROVE_WITH_NITS", "VERDICT: APPROVE_WITH_NITS", true),
+        ("VERDICT: FAIL", "VERDICT: REQUEST_CHANGES", true),
+        ("REQUEST_CHANGES", "FAIL", true),
+        ("INCONCLUSIVE", "VERDICT: INCONCLUSIVE", true),
+        ("repair", "repair", true),
+        ("repair", "REPAIR", false),
+        ("LANDED", "LANDED", true),
+        ("LANDED", "VERDICT: LANDED", false),
+    ] {
+        let condition = GateCondition::Verdict {
+            extra: Default::default(),
+            expected: expected.into(),
+            threshold: VerdictThreshold::All,
+        };
+        checkpoint.nodes[0].outputs.as_mut().unwrap().verdict = Some(actual.into());
+        assert_eq!(
+            gate_failure(
+                &condition,
+                &plan.nodes[1],
+                &checkpoint,
+                &positions,
+                &Default::default()
+            )
+            .is_none(),
+            passed,
+            "{expected} vs {actual}"
+        );
+    }
+    // Feed a gate's bare PASS output into another verdict gate.
+    plan.nodes[1].inputs[0].node = "gate".into();
+    let condition = GateCondition::Verdict {
+        extra: Default::default(),
+        expected: "VERDICT: PASS".into(),
+        threshold: VerdictThreshold::All,
+    };
+    assert!(
+        gate_failure(
+            &condition,
+            &plan.nodes[1],
+            &checkpoint,
+            &positions,
+            &Default::default()
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn checkpoint_serde_preserves_stored_verdict_strings() {
+    let (document, mut owner) = verdict_fixture(VerdictThreshold::All, &[Some("PASS")]);
+    let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default())
+        .unwrap()
+        .checkpoint;
+    for stored in [
+        "VERDICT: PASS",
+        "VERDICT: APPROVE",
+        "VERDICT: FAIL",
+        "VERDICT: APPROVE_WITH_NITS",
+        "VERDICT: INCONCLUSIVE",
+    ] {
+        checkpoint.nodes[0].outputs.as_mut().unwrap().verdict = Some(stored.into());
+        let encoded = serde_json::to_value(&checkpoint).unwrap();
+        assert_eq!(encoded["nodes"][0]["outputs"]["verdict"], stored);
+        assert_eq!(encoded["nodes"][1]["outputs"]["verdict"], "PASS");
+        let decoded: GraphCheckpoint = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, checkpoint);
+    }
+}
+
+#[test]
 fn gate_threshold_fixtures_count_missing_verdicts_and_strict_majorities() {
     for (threshold, verdicts, passed) in [
         (

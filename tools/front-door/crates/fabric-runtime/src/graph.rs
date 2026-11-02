@@ -1780,7 +1780,16 @@ fn gate_failure(
                         .outputs
                         .as_ref()
                         .and_then(|outputs| outputs.verdict.as_ref())
-                        == Some(expected)
+                        .is_some_and(|actual| {
+                            use provenant_records::workflow::ReviewVerdict;
+                            match (
+                                ReviewVerdict::from_token(actual),
+                                ReviewVerdict::from_token(expected),
+                            ) {
+                                (Some(actual), Some(expected)) => actual == expected,
+                                _ => actual == expected,
+                            }
+                        })
                 })
                 .count();
             let total = node.inputs.len();

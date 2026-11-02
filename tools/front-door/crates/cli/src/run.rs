@@ -1069,6 +1069,31 @@ fn grouped_token_count(
     }
 }
 
+fn summary_verdict_key(verdict: &str) -> String {
+    provenant_records::workflow::ReviewVerdict::from_token(verdict).map_or_else(
+        || verdict.to_ascii_lowercase(),
+        |verdict| verdict.as_token().to_owned(),
+    )
+}
+
+#[cfg(test)]
+#[test]
+fn graph_summary_uses_canonical_review_tokens() {
+    for (stored, key) in [
+        ("VERDICT: PASS", "APPROVE"),
+        ("PASS", "APPROVE"),
+        ("VERDICT: APPROVE", "APPROVE"),
+        ("VERDICT: FAIL", "REQUEST_CHANGES"),
+        ("FAIL", "REQUEST_CHANGES"),
+        ("VERDICT: APPROVE_WITH_NITS", "APPROVE_WITH_NITS"),
+        ("VERDICT: INCONCLUSIVE", "INCONCLUSIVE"),
+        ("repair", "repair"),
+        ("LANDED", "landed"),
+    ] {
+        assert_eq!(summary_verdict_key(stored), key);
+    }
+}
+
 fn graph_quality_rows(
     facts: &[&provenant_records::AttemptFact],
     store: Option<&run::RunStore>,
@@ -1114,7 +1139,7 @@ fn graph_quality_rows(
                 .as_ref()
                 .and_then(|outputs| outputs.verdict.as_ref())
             {
-                *verdicts.entry(verdict.to_ascii_lowercase()).or_default() += 1;
+                *verdicts.entry(summary_verdict_key(verdict)).or_default() += 1;
             }
         }
         let in_graph: Vec<_> = facts

@@ -533,6 +533,28 @@ pub enum ReviewVerdict {
     Approve,
     ApproveWithNits,
     RequestChanges,
+    Inconclusive,
+}
+impl ReviewVerdict {
+    /// Review vocabulary, accepting the persisted verdict prefix and legacy aliases.
+    pub fn from_token(token: &str) -> Option<Self> {
+        match token.strip_prefix("VERDICT: ").unwrap_or(token) {
+            "APPROVE" | "PASS" => Some(Self::Approve),
+            "APPROVE_WITH_NITS" => Some(Self::ApproveWithNits),
+            "REQUEST_CHANGES" | "FAIL" => Some(Self::RequestChanges),
+            "INCONCLUSIVE" => Some(Self::Inconclusive),
+            _ => None,
+        }
+    }
+
+    pub const fn as_token(self) -> &'static str {
+        match self {
+            Self::Approve => "APPROVE",
+            Self::ApproveWithNits => "APPROVE_WITH_NITS",
+            Self::RequestChanges => "REQUEST_CHANGES",
+            Self::Inconclusive => "INCONCLUSIVE",
+        }
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReviewFact {
@@ -562,6 +584,47 @@ mod tests {
     use super::*;
     use provenant_core::RelativePath;
     use serde_json::json;
+
+    #[test]
+    fn review_verdict_tokens_round_trip_and_reject_unknown() {
+        for (verdict, json_name) in [
+            (ReviewVerdict::Approve, "approve"),
+            (ReviewVerdict::ApproveWithNits, "approve_with_nits"),
+            (ReviewVerdict::RequestChanges, "request_changes"),
+            (ReviewVerdict::Inconclusive, "inconclusive"),
+        ] {
+            let token = verdict.as_token();
+            assert_eq!(ReviewVerdict::from_token(token), Some(verdict));
+            assert_eq!(
+                ReviewVerdict::from_token(&format!("VERDICT: {token}")),
+                Some(verdict)
+            );
+            assert_eq!(serde_json::to_value(verdict).unwrap(), json!(json_name));
+            assert_eq!(
+                serde_json::from_value::<ReviewVerdict>(json!(json_name)).unwrap(),
+                verdict
+            );
+        }
+        assert_eq!(
+            ReviewVerdict::from_token("PASS"),
+            Some(ReviewVerdict::Approve)
+        );
+        assert_eq!(
+            ReviewVerdict::from_token("VERDICT: FAIL"),
+            Some(ReviewVerdict::RequestChanges)
+        );
+        for unknown in [
+            "",
+            "approve",
+            "UNKNOWN",
+            "LANDED",
+            "APPROVED",
+            "PASS extra",
+            " PASS",
+        ] {
+            assert_eq!(ReviewVerdict::from_token(unknown), None);
+        }
+    }
 
     fn time(n: i64) -> UtcMicros {
         UtcMicros::from_micros(n).unwrap()

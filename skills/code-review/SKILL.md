@@ -57,8 +57,9 @@ impossible, style that lint covers, and scope growth. A structural alternative
 blocks only when tied to a defect. A file over 1,000 lines is a prompt to look
 for a cohesion defect, not a finding.
 
-Start with a line `Verdict: approve`, `request_changes` or `inconclusive`;
-graph nodes end with `VERDICT: PASS` or `VERDICT: FAIL`. The author marks each
+End with one final-line declaration using the
+[review wire grammar](../../docs/specs/fabric.md#typed-node-outputs).
+The author marks each
 finding accepted, rejected (with evidence) or deferred. One repair follows and
 re-review covers only that repair. `clean` is a valid verdict.
 
