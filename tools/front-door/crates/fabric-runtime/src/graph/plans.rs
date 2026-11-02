@@ -587,7 +587,7 @@ fn fragment(
     let spec = node.plan.as_ref().ok_or("missing plan configuration")?;
     let mut value: serde_json::Value =
         serde_json::from_str(json).map_err(|e| format!("invalid fragment: {e}"))?;
-    normalize_input_shorthand(&mut value);
+    normalise_input_shorthand(&mut value);
     if let Some(instances) = value
         .get_mut("patterns")
         .and_then(serde_json::Value::as_array_mut)
@@ -778,7 +778,7 @@ fn fragment(
 
 /// Planner fragments commonly abbreviate a result input as its local node ID.
 /// Normalise only this untrusted fragment JSON; persisted graphs remain typed.
-fn normalize_input_shorthand(value: &mut serde_json::Value) {
+fn normalise_input_shorthand(value: &mut serde_json::Value) {
     if let Some(fields) = value.as_object_mut() {
         for key in ["nodes", "patterns"] {
             if let Some(items) = fields

@@ -942,7 +942,7 @@ mod tests {
     }
 
     #[test]
-    fn output_summary_sanitizes_planner_fallback_reason() {
+    fn output_summary_sanitises_planner_fallback_reason() {
         let data = json!({
             "planner_fallback":{"stage":"static", "reason":"fragment \u{1b}[31minvalid"}
         });
@@ -953,7 +953,7 @@ mod tests {
     }
 
     #[test]
-    fn planner_fallback_text_sanitizes_reason_and_keeps_json_value() {
+    fn planner_fallback_text_sanitises_reason_and_keeps_json_value() {
         let reason = "invalid fragment \u{1b}[31mpattern";
         let mut data = serde_json::Value::Null;
         let mut text = String::new();

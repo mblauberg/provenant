@@ -192,7 +192,7 @@ pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
     )
 }
 
-/// Sanitize and bound even pause reasons from older checkpoints before printing.
+/// Sanitise and bound even pause reasons from older checkpoints before printing.
 fn bounded_reason(reason: &str) -> String {
     provenant_fabric_runtime::hosts::plain_text(reason, 1024)
 }
