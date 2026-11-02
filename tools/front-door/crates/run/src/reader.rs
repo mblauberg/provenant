@@ -563,6 +563,21 @@ impl RunStore {
             }
             record.settlement_receipts = Some(crate::db::decode_unversioned(&raw)?);
         }
+        if matches!(
+            record.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Succeeded,
+                ..
+            }
+        ) && let Ok(attempt) = self.attempt_dir(record.run_id, id, false)
+            && let Some(raw) =
+                crate::artifacts::read_sealed(&attempt, "delivery.json", RECORD_LIMIT)?
+        {
+            let delivery: WriterDeliveryReceipt = crate::db::decode(&raw)?;
+            if delivery.head.is_some() && delivery.head == record.head {
+                record.delivery = Some(delivery);
+            }
+        }
         let (checkpoint, checkpoint_readable) = match self.attempt_dir(record.run_id, id, false) {
             Ok(directory) => {
                 let read_checkpoint = match read {

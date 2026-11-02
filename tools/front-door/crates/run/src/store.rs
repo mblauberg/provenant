@@ -25,11 +25,22 @@ pub(crate) struct TerminalEffects {
 pub(crate) fn import_cancelled(
     attempt: &provenant_os::fs::Directory,
     scope: provenant_supervisor::custody::Scope,
+    owner: provenant_core::ActorId,
 ) -> Result<bool> {
-    Ok(read_sealed(attempt, "import-cancelled.json", RECORD_LIMIT)?
+    let marked = read_sealed(attempt, "import-cancelled.json", RECORD_LIMIT)?
         .map(|raw| crate::db::decode_unversioned::<provenant_supervisor::custody::Scope>(&raw))
         .transpose()?
-        .is_some_and(|saved| saved == scope))
+        .is_some_and(|saved| saved == scope);
+    if !marked {
+        return Ok(false);
+    }
+    Ok(read_sealed(attempt, "cancel.json", RECORD_LIMIT)?
+        .and_then(|raw| decode::<CancellationEvidence>(&raw).ok())
+        .is_some_and(|request| {
+            request.scope == scope
+                && request.requester == owner
+                && request.reason == provenant_supervisor::machine::StopReason::ExplicitCancellation
+        }))
 }
 
 pub struct NewAttempt {
@@ -67,6 +78,104 @@ pub struct TerminalPublication<'a> {
     pub partial_signals: Vec<PartialSignal>,
 }
 impl RunStore {
+    /// A sealed decision is not a certificate that an unfinished import can
+    /// relinquish its reservation or private object inputs.
+    pub(crate) fn import_release_permitted(
+        &self,
+        record: &AttemptRecord,
+        call: &Request<'_>,
+    ) -> Result<bool> {
+        let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+        if crate::holder::object_import_refused(&attempt, Self::scope(record))?.is_some() {
+            return Ok(true);
+        }
+        let Some(raw) = read_sealed(&attempt, "terminal-effects.json", RECORD_LIMIT)? else {
+            return Ok(true);
+        };
+        let initial: TerminalEffects = decode(&raw)?;
+        if initial.schema_version != 1 || initial.scope != Self::scope(record) {
+            return Err(RunError::Conflict);
+        }
+        if initial.effects.iter().any(|(effect, disposition)| {
+            *effect == SettlementEffect::GitImport
+                && !matches!(disposition, EffectDisposition::Done)
+        }) {
+            return Ok(self
+                .record(record.attempt_id, call)?
+                .settlement_receipts
+                .is_some_and(|receipts| matches!(receipts.git_import, EffectDisposition::Done)));
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn pending_effect_attempts(
+        &self,
+        run: RunId,
+        call: &Request<'_>,
+    ) -> Result<Vec<AttemptId>> {
+        let request = self.request(run, call)?;
+        let mut query = self.db.prepare("SELECT a.id,r.record FROM attempts a JOIN settlement_receipts r ON r.attempt=a.id WHERE a.run=?1 AND a.project=?2 AND a.terminal=1")?;
+        let rows = query.query_map(
+            params![run.to_string(), self.context.project_id.to_string()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )?;
+        let mut pending = Vec::new();
+        let retryable = |effect: &EffectDisposition| {
+            matches!(
+                effect,
+                EffectDisposition::Pending
+                    | EffectDisposition::Failed {
+                        retryable: true,
+                        ..
+                    }
+                    | EffectDisposition::Cancelled {
+                        retryable: true,
+                        ..
+                    }
+            )
+        };
+        for row in rows {
+            call.check()?;
+            let (id, raw) = row?;
+            let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
+            let receipts: SettlementReceipts = crate::db::decode_unversioned(&raw)?;
+            let record = self.record(id, call)?;
+            let task = request
+                .tasks
+                .iter()
+                .find(|task| task.task_id == record.task_id)
+                .ok_or(RunError::NotFound)?;
+            let delivery = task.writer.is_some()
+                && task.deliver.is_some()
+                && matches!(
+                    record.state,
+                    AttemptState::Terminal {
+                        outcome: Outcome::Succeeded | Outcome::ReviewRequired,
+                        ..
+                    }
+                )
+                && retryable(&receipts.delivery);
+            let manifest = retryable(&receipts.manifest_conflict)
+                && (matches!(receipts.manifest_conflict, EffectDisposition::Failed { .. })
+                    || self
+                        .attempt_dir(run, id, false)
+                        .and_then(|attempt| {
+                            crate::artifacts::subdir(&attempt, OsStr::new("quarantine"), false)
+                        })
+                        .is_ok_and(|archive| {
+                            read_sealed(&archive, "manifest-intended.json", RECORD_LIMIT)
+                                .ok()
+                                .flatten()
+                                .is_some()
+                        }));
+            let import = retryable(&receipts.git_import)
+                && !self.import_release_permitted(&record, call).unwrap_or(true);
+            if delivery || manifest || import {
+                pending.push(id);
+            }
+        }
+        Ok(pending)
+    }
     /// A result-only orphan predates durable terminal intent. The trusted
     /// provider/confinement edge must revalidate its terminal facts; the file's
     /// presence alone never establishes success, route identity or completeness.
@@ -141,7 +250,7 @@ impl RunStore {
         if committed {
             self.settle_cleanup(&record, call);
         }
-        Ok(record)
+        self.record(id, call)
     }
     /// Replay with `publication.lock` already held. The flag reports whether
     /// this call committed the row, so the caller owes post-commit cleanup.
@@ -199,7 +308,11 @@ impl RunStore {
                     && !stored.never_spawned
                     && stored.cancel_delivered_before_exit != Some(true)
                     && !(pending.terminal_evidence == Some(TerminalEvidence::ImportCancellation)
-                        && import_cancelled(&dir, Self::scope(&current))?))
+                        && import_cancelled(
+                            &dir,
+                            Self::scope(&current),
+                            current.verified_owner.unwrap_or(self.context.actor_id),
+                        )?))
                     || (outcome == Outcome::Cancelled
                         && stored.never_spawned
                         && stored.stop_reason
@@ -217,6 +330,9 @@ impl RunStore {
             let mut decision = current.clone();
             decision.settlement_receipts = None;
             decision.custody_pending = None;
+            // Delivery is a post-commit receipt projected by record(), not a
+            // replacement of the immutable decision's delivery snapshot.
+            decision.delivery = pending.delivery.clone();
             return if decision == pending {
                 Ok((current, false))
             } else {
@@ -296,6 +412,7 @@ impl RunStore {
             }
             if receipts.cancellation.is_none() || matches!(disposition, CancellationDisposition::Effective | CancellationDisposition::DeliveryEffective | CancellationDisposition::ImportEffective) {
                 receipts.cancellation = Some(disposition);
+                if matches!(disposition,CancellationDisposition::DeliveryEffective | CancellationDisposition::ImportEffective) { receipts.late_cancellation_acknowledged = false; }
             }
             let changed = tx.execute("INSERT INTO settlement_receipts(attempt,generation,record) VALUES (?1,?2,?3) ON CONFLICT(attempt) DO UPDATE SET record=excluded.record WHERE generation=excluded.generation", params![id.to_string(), sql_int(generation)?, bytes(&receipts)?])?;
             if changed != 1 { return Err(RunError::Conflict); }
@@ -596,15 +713,6 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
         let old = self.record(id, call)?;
-        let dir = self.run_dir(old.run_id, false)?;
-        let writer = dir.lock(
-            OsStr::new("publication.lock"),
-            LockMode::Exclusive,
-            call.lock_budget(),
-            call.cancel,
-            call.clock,
-        )?;
-        let old = self.record(id, call)?;
         let durable_exit = sealed_exit(&self.attempt_dir(old.run_id, id, false)?, exit)?;
         let outcome_exit = match exit.termination {
             Some(Termination::Exit(code)) => Some(code),
@@ -629,7 +737,11 @@ impl RunStore {
         if publication.outcome == Outcome::Cancelled
             && !exit.never_spawned
             && exit.cancel_delivered_before_exit != Some(true)
-            && !import_cancelled(&self.attempt_dir(old.run_id, id, false)?, Self::scope(&old))?
+            && !import_cancelled(
+                &self.attempt_dir(old.run_id, id, false)?,
+                Self::scope(&old),
+                old.verified_owner.unwrap_or(self.context.actor_id),
+            )?
         {
             return Err(RunError::Validation(
                 "cancellation delivery before exit is unproven",
@@ -657,13 +769,16 @@ impl RunStore {
             outcome_exit,
             !exit.never_spawned,
             exit.cancel_delivered_before_exit,
+            false,
             call,
         );
-        drop(writer);
-        if let Ok(record) = &result {
-            self.settle_cleanup(record, call);
+        match result {
+            Ok(record) => {
+                self.settle_cleanup(&record, call);
+                self.record(id, call)
+            }
+            Err(error) => Err(error),
         }
-        result
     }
     /// End an attempt that never reached a provider: refused before spawn or
     /// cancelled while queued. It has no custody to release and no exit.
@@ -756,15 +871,40 @@ impl RunStore {
             partial_signals: Vec::new(),
         };
         let result = self
-            .commit_terminal(old, revision, &publication, None, None, false, None, call)
+            .commit_terminal(
+                old,
+                revision,
+                &publication,
+                None,
+                None,
+                false,
+                None,
+                true,
+                call,
+            )
             .map(Some);
         drop(writer);
-        if let Ok(Some(record)) = &result {
-            self.settle_cleanup(record, call);
+        match result {
+            Ok(Some(record)) => {
+                self.settle_cleanup(&record, call);
+                self.record(id, call).map(Some)
+            }
+            other => other,
         }
-        result
     }
-    fn settle_cleanup(&self, record: &AttemptRecord, call: &Request<'_>) {
+    pub(crate) fn settle_cleanup(&self, record: &AttemptRecord, call: &Request<'_>) {
+        if !self.import_release_permitted(record, call).unwrap_or(false) {
+            let _ = self.set_temporary_retained(record.attempt_id, true, call);
+            return;
+        }
+        if self.request(record.run_id, call).is_ok_and(|request| {
+            request
+                .tasks
+                .iter()
+                .any(|task| task.task_id == record.task_id && task.writer.is_some())
+        }) {
+            let _ = self.retry_git_cleanup(record, call);
+        }
         // The terminal record retains tmp before cleanup; clear that hint only
         // after removal succeeds.
         if let Ok(attempt_dir) = self.attempt_dir(record.run_id, record.attempt_id, false) {
@@ -790,8 +930,8 @@ impl RunStore {
         }
     }
     /// Seal result and terminal intent, then commit the attempt, run summary,
-    /// operation state, released admission and event together. The caller
-    /// holds the run's publication lock.
+    /// operation state, released admission and event together. Sealing precedes
+    /// acquisition of the publication lock; withdrawals already hold it.
     #[expect(
         clippy::too_many_arguments,
         reason = "one commit point for every terminal path"
@@ -805,6 +945,7 @@ impl RunStore {
         outcome_exit: Option<i64>,
         launched: bool,
         cancellation_delivered: Option<bool>,
+        publication_locked: bool,
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
         let id = old.attempt_id;
@@ -857,7 +998,11 @@ impl RunStore {
         };
         next.schema_version = 2;
         let import_cancellation = publication.outcome == Outcome::Cancelled
-            && import_cancelled(&self.attempt_dir(old.run_id, id, false)?, Self::scope(&old))?;
+            && import_cancelled(
+                &self.attempt_dir(old.run_id, id, false)?,
+                Self::scope(&old),
+                old.verified_owner.unwrap_or(self.context.actor_id),
+            )?;
         next.terminal_evidence = Some(if import_cancellation {
             TerminalEvidence::ImportCancellation
         } else if publication.outcome == Outcome::Unsettled {
@@ -915,8 +1060,10 @@ impl RunStore {
             };
             if let Some(raw) = raw {
                 let receipt: WriterDeliveryReceipt = decode(&raw)?;
-                next.head = receipt.head;
-                next.delivery = Some(receipt);
+                if receipt.head.is_some() && (next.head.is_none() || next.head == receipt.head) {
+                    next.head = receipt.head;
+                    next.delivery = Some(receipt);
+                }
             } else if let Some(deliver) = self
                 .request(old.run_id, call)?
                 .tasks
@@ -931,7 +1078,7 @@ impl RunStore {
                     schema_version: 1,
                     remote: deliver.remote,
                     branch: deliver.branch,
-                    head: None,
+                    head: next.head,
                     review_acceptance: None,
                     state: WriterDeliveryState::NotAttempted {
                         extra: Default::default(),
@@ -1007,7 +1154,19 @@ impl RunStore {
         }
         #[cfg(test)]
         crate::tests::crash_at("sealed");
-        self.commit_terminal_record(&old, &next, call)?;
+        if publication_locked {
+            self.commit_terminal_record(&old, &next, call)?;
+        } else {
+            let run = self.run_dir(old.run_id, false)?;
+            let _lock = run.lock(
+                OsStr::new("publication.lock"),
+                LockMode::Exclusive,
+                call.lock_budget(),
+                call.cancel,
+                call.clock,
+            )?;
+            self.replay_terminal_locked(id, call)?;
+        }
         #[cfg(test)]
         crate::tests::crash_at("committed");
         // Return the projection readers see, including the receipt row.
@@ -1139,12 +1298,42 @@ impl RunStore {
         let cleanup = (|| -> Result<()> {
             let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
             let head = crate::settlement::pinned_head(&attempt, Self::scope(record))?;
+            let slot = self.writer_custody_directory(record, writer).ok();
+            let lock = slot.as_ref().and_then(|slot| {
+                slot.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)
+                    .ok()
+            });
+            let mut remove_import_pin = lock.is_some();
+            if let Some(slot) = &slot {
+                let own = slot.metadata()?;
+                match self.writer_fence_listing() {
+                    Ok(listing) => {
+                        if !listing.issues.is_empty() {
+                            remove_import_pin = false;
+                        }
+                        for fence in listing.reservations {
+                            if fence.scope == Self::scope(record) {
+                                continue;
+                            }
+                            if let Some(path) = fence.custody_directory() {
+                                let other =
+                                    provenant_os::fs::Directory::open_anchor(path)?.metadata()?;
+                                if own.device == other.device && own.inode == other.inode {
+                                    remove_import_pin = false;
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => remove_import_pin = false,
+                }
+            }
             crate::writer::cleanup_git_pins(
                 self.context.state_root.as_path(),
                 writer,
                 &attempt,
                 Self::scope(record),
                 head,
+                remove_import_pin,
             )
         })();
         let disposition = match cleanup {
@@ -1269,14 +1458,6 @@ impl RunStore {
                 CancellationDisposition::AcknowledgedIneffective,
                 call,
             );
-        }
-        if request
-            .tasks
-            .iter()
-            .any(|task| task.task_id == old.task_id && task.writer.is_some())
-        {
-            // A failure is persisted as a retryable effect, never reported done.
-            let _ = self.retry_git_cleanup(next, call);
         }
         self.contribution_diagnostic(next.run_id, self.retain_contribution_route(next, call));
         Ok(())

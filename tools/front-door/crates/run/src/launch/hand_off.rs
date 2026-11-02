@@ -73,7 +73,7 @@ impl RunStore {
                     .custody
                     .take()
                     .ok_or_else(|| local("writer custody", &"missing"))?;
-                acquire_writer(directory, scope, binding)
+                self.acquire_writer_fenced(directory, scope, binding, acquire_writer, call)
             }
             // Readers take the same injected acquisition as writers, so a
             // fixture guardian and its reservation share one boot observer.

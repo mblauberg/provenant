@@ -1562,10 +1562,22 @@ fn publication_crash_worker() -> TestResult {
     }
     seal_exit_fixture(&store, &input)?;
     let attempt = store.attempt_dir(input.run_id, input.attempts[0].attempt_id, false)?;
-    crate::artifacts::seal(&attempt, "terminal-effects.json", &crate::db::bytes(&crate::store::TerminalEffects {
-        schema_version: 1, scope: RunStore::scope(&store.record(input.attempts[0].attempt_id, &call)?),
-        effects: vec![(SettlementEffect::ManifestConflict, EffectDisposition::Failed { reason: "crash-retained conflict".into(), retryable: true })],
-    })?, RECORD_LIMIT)?;
+    crate::artifacts::seal(
+        &attempt,
+        "terminal-effects.json",
+        &crate::db::bytes(&crate::store::TerminalEffects {
+            schema_version: 1,
+            scope: RunStore::scope(&store.record(input.attempts[0].attempt_id, &call)?),
+            effects: vec![(
+                SettlementEffect::ManifestConflict,
+                EffectDisposition::Failed {
+                    reason: "crash-retained conflict".into(),
+                    retryable: true,
+                },
+            )],
+        })?,
+        RECORD_LIMIT,
+    )?;
     store.publish_terminal(
         input.attempts[0].attempt_id,
         1,
@@ -1700,8 +1712,10 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
         }
         assert_eq!(store.events(0, 64, None, &call)?.len(), 2);
         if !matches!(phase, "reserved" | "withdraw-sealed") {
-            assert!(matches!(store.record(id, &call)?.settlement_receipts.unwrap().manifest_conflict,
-                EffectDisposition::Failed { reason, retryable: true } if reason == "crash-retained conflict"));
+            assert!(
+                matches!(store.record(id, &call)?.settlement_receipts.unwrap().manifest_conflict,
+                EffectDisposition::Failed { reason, retryable: true } if reason == "crash-retained conflict")
+            );
         }
         assert!(store.record(id, &call)?.terminal_evidence.is_some());
         assert!(
@@ -1927,6 +1941,50 @@ fn publication_deferred_effects_survive_commit_and_replay() -> TestResult {
 }
 
 #[test]
+fn publication_lock_timeout_retains_exact_sealed_decision() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let id = input.attempts[0].attempt_id;
+    store.create(&input, &call)?;
+    seal_exit_fixture(&store, &input)?;
+    let run = store.run_dir(input.run_id, false)?;
+    let lock = run.try_lock(
+        std::ffi::OsStr::new("publication.lock"),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
+    assert!(
+        store
+            .publish_terminal(id, 1, &publication(), &exit(), &call)
+            .is_err()
+    );
+    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let sealed = crate::artifacts::read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?
+        .ok_or("decision not sealed")?;
+    assert!(matches!(
+        store.record(id, &call)?.state,
+        AttemptState::Queued { .. }
+    ));
+    drop(lock);
+    drop(store);
+    let store = RunStore::open(&context, &call)?;
+    let recovered = store.recover_terminal(id, &exit(), &call)?;
+    assert_eq!(
+        crate::artifacts::read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?.unwrap(),
+        sealed
+    );
+    let pending: AttemptRecord = crate::db::decode_attempt(&sealed)?;
+    assert_eq!(recovered.state, pending.state);
+    assert_eq!(recovered.result, pending.result);
+    assert_eq!(store.events(0, 64, None, &call)?.len(), 2);
+    Ok(())
+}
+
+#[test]
 fn publication_postcommit_effect_failure_still_cleans_temporary() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
@@ -1951,6 +2009,103 @@ fn publication_postcommit_effect_failure_still_cleans_temporary() -> TestResult 
     assert!(matches!(published?.state, AttemptState::Terminal { .. }));
     assert!(!temporary.exists());
     assert_eq!(admission_count(&store)?, 0);
+    Ok(())
+}
+
+#[test]
+fn publication_manifest_recovery_preserves_conflict_until_intent_is_established() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = input();
+    let id = input.attempts[0].attempt_id;
+    store.create(&input, &call)?;
+    seal_exit_fixture(&store, &input)?;
+    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let archive = crate::artifacts::subdir(&attempt, std::ffi::OsStr::new("quarantine"), true)?;
+    let scope = RunStore::scope(&store.record(id, &call)?);
+    let intended = crate::db::bytes(
+        &serde_json::json!({"schema_version":1,"scope":scope,"kind":"quarantine_manifest","disposition":"read_only"}),
+    )?;
+    crate::artifacts::seal(
+        &archive,
+        "manifest.json",
+        b"conflicting evidence",
+        RECORD_LIMIT,
+    )?;
+    assert!(
+        crate::holder::seal_manifest(&archive, "manifest.json", &intended, RECORD_LIMIT).is_err()
+    );
+    crate::artifacts::seal(
+        &attempt,
+        "terminal-effects.json",
+        &crate::db::bytes(&crate::store::TerminalEffects {
+            schema_version: 1,
+            scope,
+            effects: vec![(
+                SettlementEffect::ManifestConflict,
+                EffectDisposition::Failed {
+                    reason: "conflict".into(),
+                    retryable: true,
+                },
+            )],
+        })?,
+        RECORD_LIMIT,
+    )?;
+    store.publish_terminal(id, 1, &publication(), &exit(), &call)?;
+    drop(store);
+    let store = RunStore::open(&context, &call)?;
+    assert!(
+        store
+            .pending_effect_attempts(input.run_id, &call)?
+            .contains(&id)
+    );
+    store.reconcile_terminal_effects(&store.record(id, &call)?, &call)?;
+    assert_eq!(
+        crate::artifacts::read_sealed(&archive, "manifest.json", RECORD_LIMIT)?.unwrap(),
+        b"conflicting evidence"
+    );
+    assert!(matches!(
+        store
+            .record(id, &call)?
+            .settlement_receipts
+            .unwrap()
+            .manifest_conflict,
+        EffectDisposition::Failed {
+            retryable: true,
+            ..
+        }
+    ));
+    // Model explicit host resolution while preserving the conflicting evidence.
+    let path = context
+        .state_root
+        .as_path()
+        .join(format!("runs/{}/attempts/{id}/quarantine", input.run_id));
+    std::fs::rename(
+        path.join("manifest.json"),
+        path.join("manifest.conflict.json"),
+    )?;
+    store.reconcile_terminal_effects(&store.record(id, &call)?, &call)?;
+    assert_eq!(
+        crate::artifacts::read_sealed(&archive, "manifest.json", RECORD_LIMIT)?.unwrap(),
+        intended
+    );
+    assert!(matches!(
+        store
+            .record(id, &call)?
+            .settlement_receipts
+            .unwrap()
+            .manifest_conflict,
+        EffectDisposition::Done
+    ));
+    assert!(
+        !store
+            .pending_effect_attempts(input.run_id, &call)?
+            .contains(&id)
+    );
     Ok(())
 }
 

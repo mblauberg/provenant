@@ -106,6 +106,25 @@ impl std::fmt::Debug for HostDeliveryContext {
 }
 
 impl HostDeliveryContext {
+    pub(crate) fn prepare_recovery(
+        self,
+        writer: &WriterRequest,
+        request: &WriterDeliveryRequest,
+        head: GitOid,
+        base: GitOid,
+    ) -> Result<Self> {
+        let mut host = self.prepare(writer, request)?;
+        if host.head(writer)? != head {
+            return Err(RunError::Validation(
+                "worktree head differs from sealed delivery head",
+            ));
+        }
+        host.bound
+            .as_mut()
+            .ok_or(RunError::Validation("delivery binding missing"))?
+            .base_head = base;
+        Ok(host)
+    }
     pub(crate) fn cancellable(&self, cancel: &provenant_core::CancelToken) -> Self {
         let mut context = self.clone();
         context.cancellation = Some(cancel.clone());
@@ -2175,6 +2194,13 @@ impl crate::RunStore {
                 crate::RECORD_LIMIT,
             )?;
             publish_pickup(&attempt, &request, &receipt)?;
+            let _ = self.record_effect(
+                id,
+                record.generation,
+                crate::SettlementEffect::Delivery,
+                crate::EffectDisposition::Done,
+                call,
+            );
         }
         Ok(receipt)
     }
@@ -2198,17 +2224,18 @@ pub(crate) fn deliver_once(
     {
         return crate::db::decode(&raw);
     }
-    if host
-        .bound
-        .as_ref()
-        .is_none_or(|bound| bound.destination != *request)
+    let started =
+        crate::artifacts::read_sealed(attempt, "delivery-started.json", crate::RECORD_LIMIT)?;
+    if started.is_none()
+        && host
+            .bound
+            .as_ref()
+            .is_none_or(|bound| bound.destination != *request)
     {
         return Err(RunError::Validation(
             "delivery destination changed after launch",
         ));
     }
-    let started =
-        crate::artifacts::read_sealed(attempt, "delivery-started.json", crate::RECORD_LIMIT)?;
     let mut receipt = match &started {
         Some(raw) => crate::db::decode(raw)?,
         None => WriterDeliveryReceipt {

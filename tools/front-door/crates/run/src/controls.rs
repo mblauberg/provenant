@@ -2293,6 +2293,11 @@ impl RunStore {
                 (Vec::new(), Some(error.to_string()))
             }
         };
+        for id in self.pending_effect_attempts(run, call)? {
+            if !ids.contains(&id.to_string()) {
+                ids.push(id.to_string());
+            }
+        }
         for fence in fences {
             if fence.scope.run == run && !ids.contains(&fence.scope.attempt.to_string()) {
                 ids.push(fence.scope.attempt.to_string());
@@ -2720,6 +2725,24 @@ impl RunStore {
             return Ok(Some(Reconciled::uncertain(UncertainReason::HostStalled)));
         }
         if matches!(record.state, AttemptState::Terminal { .. }) {
+            if !self.import_release_permitted(&record, call)? {
+                let directory = self.attempt_dir(record.run_id, id, false)?;
+                let handle = custody::reattach(directory.try_clone()?, Self::scope(&record))
+                    .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
+                if let Observation::Exited(exit) =
+                    custody::observe(&handle, call.lock_budget(), call.cancel, call.clock)
+                        .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?
+                {
+                    self.finish(id, &directory, &exit, providers, call)?;
+                }
+                let current = self.record(id, call)?;
+                if !self.import_release_permitted(&current, call)? {
+                    return Ok(Some(Reconciled::Settling {
+                        phase: "import".into(),
+                    }));
+                }
+            }
+            self.reconcile_terminal_effects(&record, call)?;
             return self.reconcile_terminal_temporary(&record, call, observer);
         }
         self.reconcile_live_attempt(&record, providers, call, observer)
@@ -2782,7 +2805,12 @@ impl RunStore {
                     }
                     Ok(Observation::Exited(exit)) => {
                         let attempt = dir()?;
-                        self.finish(id, &attempt, &exit, providers, call)?;
+                        let finished = self.finish(id, &attempt, &exit, providers, call)?;
+                        if !self.import_release_permitted(&finished, call)? {
+                            return Ok(Reconciled::Settling {
+                                phase: "import".into(),
+                            });
+                        }
                         custody::publish_release(&attempt, scope)
                             .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
                         Ok(Reconciled::Finished)

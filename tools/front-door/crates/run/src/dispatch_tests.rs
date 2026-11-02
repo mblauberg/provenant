@@ -14,6 +14,58 @@ use std::{
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
 #[test]
+fn publication_legacy_result_orphan_retains_manifest_failure() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let input = input();
+    store.create(&input, &call)?;
+    let id = input.attempts[0].attempt_id;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let record = store.claim(id, &clock, &call)?.ok_or("claim")?;
+    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    artifacts::seal(&attempt, "stdout.log", b"answer", CAPTURE_LIMIT)?;
+    artifacts::seal(&attempt, "result.md", b"legacy result", RESULT_LIMIT)?;
+    let archive = artifacts::subdir(&attempt, std::ffi::OsStr::new("quarantine"), true)?;
+    artifacts::seal(
+        &archive,
+        "manifest.json",
+        b"conflicting evidence",
+        RECORD_LIMIT,
+    )?;
+    let observed = ExitObservation {
+        scope: RunStore::scope(&record),
+        ..exit()
+    };
+    seal_exit(&store, &observed)?;
+    let providers = Fake {
+        observed: Some(route()),
+        ..Fake::default()
+    };
+    let record = store.finish(id, &attempt, &observed, &providers, &call)?;
+    assert!(matches!(
+        record.settlement_receipts.unwrap().manifest_conflict,
+        EffectDisposition::Failed {
+            retryable: true,
+            ..
+        }
+    ));
+    assert_eq!(
+        artifacts::read_sealed(&attempt, "result.md", RESULT_LIMIT)?.unwrap(),
+        b"legacy result"
+    );
+    Ok(())
+}
+
+#[test]
 fn terminal_dependency_waits_for_custody_release() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
@@ -2872,7 +2924,7 @@ pub(super) struct Fake {
     refuse: bool,
     policy_task: Option<TaskId>,
     observed: Option<RouteRecord>,
-    decoded: Cell<usize>,
+    pub(super) decoded: Cell<usize>,
     prepared: Cell<usize>,
     resumed: Cell<Option<AttemptId>>,
     prompt: RefCell<String>,

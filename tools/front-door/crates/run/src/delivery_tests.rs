@@ -7,6 +7,214 @@ use provenant_os::fs::Directory;
 use std::{ffi::OsString, path::Path, time::Duration};
 
 #[test]
+fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    for mode in [
+        "pending",
+        "retryable",
+        "uncertain",
+        "cancelled",
+        "late_cancel",
+    ] {
+        let fixture = PrepareFixture::new()?;
+        let execution = registered_landed_writer_fixture(&fixture)?;
+        let host = fixture.prepare()?;
+        let base = host.head(&fixture.writer)?;
+        fixture.commit(&fixture.writer.worktree, "writer change")?;
+        let head = host.head(&fixture.writer)?;
+        let (clock, cancel) = (tests::clock(), provenant_core::CancelToken::new());
+        let call = tests::call(&clock, &cancel);
+        let store = RunStore::open(&execution, &call)?;
+        let mut input = tests::input();
+        input.request.tasks[0].writer = Some(fixture.writer.clone());
+        input.request.tasks[0].deliver = Some(fixture.request.clone());
+        store.create(&input, &call)?;
+        let id = input.attempts[0].attempt_id;
+        let attempt = store.attempt_dir(input.run_id, id, false)?;
+        let scope = RunStore::scope(&store.record(id, &call)?);
+        let mut driver =
+            crate::settlement::Guard::claim(&attempt, scope, &clock)?.ok_or("driver")?;
+        driver.set_base(base)?;
+        driver.set_head(head)?;
+        driver.advance(crate::settlement::Phase::Record)?;
+        drop(driver);
+        artifacts::seal(
+            &attempt,
+            "writer-terminal.json",
+            &db::bytes(&writer::WriterTerminal {
+                schema_version: 1,
+                head,
+                protected_paths: vec![],
+            })?,
+            RECORD_LIMIT,
+        )?;
+        let initial = if mode == "retryable" {
+            EffectDisposition::Failed {
+                reason: "prepare failed before start".into(),
+                retryable: true,
+            }
+        } else {
+            EffectDisposition::Pending
+        };
+        artifacts::seal(
+            &attempt,
+            "terminal-effects.json",
+            &db::bytes(&store::TerminalEffects {
+                schema_version: 1,
+                scope,
+                effects: vec![
+                    (SettlementEffect::GitImport, EffectDisposition::Done),
+                    (SettlementEffect::ManifestConflict, EffectDisposition::Done),
+                    (SettlementEffect::Delivery, initial),
+                ],
+            })?,
+            RECORD_LIMIT,
+        )?;
+        let lock = attempt.try_lock(
+            std::ffi::OsStr::new("custody.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
+        drop(lock);
+        dispatch_tests::seal_exit(&store, &tests::exit())?;
+        let record = store.publish_terminal(id, 1, &tests::publication(), &tests::exit(), &call)?;
+        let decision =
+            artifacts::read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?.unwrap();
+        if mode == "uncertain" {
+            artifacts::seal(
+                &attempt,
+                "delivery-started.json",
+                &db::bytes(&WriterDeliveryReceipt {
+                    extra: Default::default(),
+                    schema_version: 1,
+                    remote: fixture.request.remote.clone(),
+                    branch: fixture.request.branch.clone(),
+                    head: Some(head),
+                    review_acceptance: None,
+                    state: WriterDeliveryState::Failed {
+                        extra: Default::default(),
+                        stage: WriterDeliveryStage::Interrupted,
+                    },
+                })?,
+                RECORD_LIMIT,
+            )?;
+        } else if mode == "cancelled" {
+            let token = provenant_core::CancelToken::new();
+            token.cancel();
+            deliver_once(
+                &host.cancellable(&token),
+                &fixture.writer,
+                &fixture.request,
+                &attempt,
+                "cancelled",
+            )?;
+        } else if mode == "late_cancel" {
+            let completed = deliver_once(
+                &host,
+                &fixture.writer,
+                &fixture.request,
+                &attempt,
+                "completed",
+            )?;
+            let token = provenant_core::CancelToken::new();
+            token.cancel();
+            assert_eq!(
+                deliver_once(
+                    &host.cancellable(&token),
+                    &fixture.writer,
+                    &fixture.request,
+                    &attempt,
+                    "late cancel"
+                )?,
+                completed
+            );
+        }
+        drop(store);
+        let store = RunStore::open(&execution, &call)?;
+        assert!(
+            store
+                .pending_effect_attempts(input.run_id, &call)?
+                .contains(&id)
+        );
+        store.reconcile_terminal_effects(&record, &call)?;
+        let recovered = store.record(id, &call)?;
+        assert_eq!(recovered.head, Some(head));
+        assert_eq!(recovered.state, record.state);
+        assert_eq!(
+            artifacts::read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?.unwrap(),
+            decision
+        );
+        let receipts = recovered.settlement_receipts.unwrap();
+        if matches!(mode, "pending" | "retryable" | "late_cancel") {
+            assert!(
+                matches!(receipts.delivery, EffectDisposition::Done),
+                "{mode}: {receipts:?}"
+            );
+            assert_ne!(
+                receipts.cancellation,
+                Some(CancellationDisposition::DeliveryEffective)
+            );
+            fixture.git(&[
+                "--git-dir",
+                fixture.root.join("remote.git").to_str().ok_or("remote")?,
+                "show-ref",
+                "--verify",
+                &format!("refs/heads/{}", fixture.request.branch),
+            ])?;
+        } else {
+            assert!(
+                !fixture
+                    .root
+                    .join("remote.git/refs/heads/published/lane")
+                    .exists(),
+                "uncertain delivery must not repeat"
+            );
+            if mode == "cancelled" {
+                assert!(matches!(
+                    receipts.delivery,
+                    EffectDisposition::Cancelled {
+                        retryable: true,
+                        ..
+                    }
+                ));
+                assert_eq!(
+                    receipts.cancellation,
+                    Some(CancellationDisposition::DeliveryEffective)
+                );
+                let pickup = store.deliver(
+                    id,
+                    None,
+                    HostDeliveryContext::new(fixture.environment.clone()),
+                    false,
+                    &call,
+                )?;
+                assert!(matches!(
+                    pickup.state,
+                    WriterDeliveryState::Delivered { .. }
+                ));
+                store.reconcile_terminal_effects(&store.record(id, &call)?, &call)?;
+                assert!(matches!(
+                    store
+                        .record(id, &call)?
+                        .settlement_receipts
+                        .unwrap()
+                        .delivery,
+                    EffectDisposition::Done
+                ));
+            } else {
+                assert!(matches!(
+                    receipts.delivery,
+                    EffectDisposition::Failed {
+                        retryable: false,
+                        ..
+                    }
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn prepare_reports_missing_git_with_git_code() -> std::result::Result<(), Box<dyn std::error::Error>>
 {
     let fixture = PrepareFixture::new()?;
@@ -3611,21 +3819,44 @@ fn publication_cleanup_never_removes_another_import_pin()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;
     let execution = registered_landed_writer_fixture(&fixture)?;
+    let (clock, cancel) = (tests::clock(), provenant_core::CancelToken::new());
+    let call = tests::call(&clock, &cancel);
+    let store = RunStore::open(&execution, &call)?;
+    let mut input = tests::input();
+    input.request.tasks[0].writer = Some(fixture.writer.clone());
+    store.create(&input, &call)?;
+    let id = input.attempts[0].attempt_id;
+    dispatch_tests::seal_exit(&store, &tests::exit())?;
+    let record = store.publish_terminal(id, 1, &tests::publication(), &tests::exit(), &call)?;
     let head = fixture.prepare()?.head(&fixture.writer)?;
+    let mut launch = crate::prepare_writer(
+        &fixture.writer,
+        execution.state_root.as_path(),
+        execution.project_id,
+    )?;
+    let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
+    let scope = provenant_supervisor::custody::Scope {
+        attempt: provenant_core::AttemptId::from_bytes([99; 16]),
+        ..tests::exit().scope
+    };
+    let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+        directory,
+        scope,
+        binding,
+        call.lock_budget(),
+        &cancel,
+        &clock,
+    )?;
     let reference = format!("refs/provenant/import/{head}");
     fixture.git(&["update-ref", &reference, &head.to_string()])?;
-    let attempt_path = fixture.root.join("old-attempt");
-    std::fs::create_dir(&attempt_path)?;
-    let attempt = Directory::open_anchor(&attempt_path)?;
-    let scope = crate::tests::exit().scope;
-    crate::writer::cleanup_git_pins(
-        execution.state_root.as_path(),
-        &fixture.writer,
-        &attempt,
-        scope,
-        Some(head),
-    )?;
+    let attempt = store.attempt_dir(input.run_id, id, false)?;
+    let mut driver = crate::settlement::Guard::claim(&attempt, RunStore::scope(&record), &clock)?
+        .ok_or("old driver")?;
+    driver.set_head(head)?;
+    drop(driver);
+    store.retry_git_cleanup(&record, &call)?;
     fixture.git(&["show-ref", "--verify", &reference])?;
+    lease.withdraw_unlaunched()?;
     Ok(())
 }
 
