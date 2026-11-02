@@ -4504,12 +4504,42 @@ impl Factory {
         let refused = || FacadeError::DispatchRefused {
             reason: graph_selector_forms(),
         };
+        // An exact graph ID wins over every other form, but a hex ID that is
+        // also a hash prefix of a document declaring another graph is ambiguous.
+        let hash = selector.strip_prefix("sha256:").unwrap_or(selector);
+        let hex = !hash.is_empty() && hash.bytes().all(|byte| byte.is_ascii_hexdigit());
+        match FileJournal::execution(
+            &self.context.roots.state,
+            self.context.identity.project,
+            selector,
+        ) {
+            Ok(Some(execution)) => {
+                if hex
+                    && let Ok(found) = self.documents_by_hash(hash)
+                    && found.iter().any(|document| document.graph_id != selector)
+                {
+                    return Err(refused());
+                }
+                return Ok((selector.to_owned(), Some(execution.document)));
+            }
+            Err(error) if error.is_unreadable() => return Ok((selector.to_owned(), None)),
+            _ => {}
+        }
+        // Then a document path: any path-shaped selector, or a bare name of an
+        // existing file in the working directory or the scratch graphs directory.
         let path = Path::new(selector);
-        if path.is_absolute() || selector.contains(['/', '\\']) || selector.ends_with(".json") {
-            let path = if path.components().count() == 1 && !self.cwd.join(path).exists() {
-                self.cwd.join(".provenant/scratch/graphs").join(path)
+        let scratch = self.cwd.join(".provenant/scratch/graphs").join(path);
+        let local = self.cwd.join(path);
+        if path.is_absolute()
+            || selector.contains(['/', '\\'])
+            || selector.ends_with(".json")
+            || local.is_file()
+            || scratch.is_file()
+        {
+            let path = if path.components().count() == 1 && !local.exists() {
+                scratch
             } else {
-                self.cwd.join(path)
+                local
             };
             return match self.read_graph_document(&path) {
                 Ok(document) => Ok((document.graph_id.clone(), Some(document))),
@@ -4517,49 +4547,47 @@ impl Factory {
                 Err(error) => Err(error),
             };
         }
-        match FileJournal::execution(
-            &self.context.roots.state,
-            self.context.identity.project,
-            selector,
-        ) {
-            Ok(Some(execution)) => return Ok((selector.to_owned(), Some(execution.document))),
-            Err(error) if error.is_unreadable() => return Ok((selector.to_owned(), None)),
-            _ => {}
-        }
         // An unknown ID, or a hash with no match, is not found; an ambiguous
         // prefix or an unsafe graphs directory is refused.
-        let hash = selector.strip_prefix("sha256:").unwrap_or(selector);
-        if hash.is_empty() || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        if !hex {
             return Err(FacadeError::NotFound);
         }
-        let Ok((graphs, entries)) = (|| {
-            let graphs = [".provenant", "scratch", "graphs"].iter().try_fold(
-                provenant_os::fs::Directory::open_anchor(&self.cwd)?,
-                |directory, name| directory.open_verified_directory(std::ffi::OsStr::new(name)),
-            )?;
-            let entries = graphs.entries()?;
-            Ok::<_, provenant_os::fs::FsError>((graphs, entries))
-        })() else {
+        let Ok(found) = self.documents_by_hash(hash) else {
             return Err(refused());
         };
-        let mut found = Vec::new();
-        for name in entries.flatten() {
-            // Symlinked and non-regular entries fail the no-follow bounded read.
-            if let Ok(bytes) = graphs.read_bounded(&name, 8_388_608)
-                && provenant_records::CanonicalV1::file_digest(&bytes)
-                    .to_string()
-                    .strip_prefix("sha256:")
-                    .is_some_and(|digest| digest.starts_with(&hash.to_ascii_lowercase()))
-                && let Ok(document) = decode_graph_document(&bytes)
-            {
-                found.push(document);
-            }
-        }
         match <[_; 1]>::try_from(found) {
             Ok([document]) => Ok((document.graph_id.clone(), Some(document))),
             Err(found) if found.is_empty() => Err(FacadeError::NotFound),
             Err(_) => Err(refused()),
         }
+    }
+
+    /// The scratch graph documents whose SHA-256 starts with `hash`. Symlinked
+    /// and non-regular entries fail the no-follow bounded read; an unsafe
+    /// graphs directory is an error.
+    fn documents_by_hash(
+        &self,
+        hash: &str,
+    ) -> Result<Vec<provenant_fabric_runtime::graph::GraphDocument>, provenant_os::fs::FsError>
+    {
+        let graphs = [".provenant", "scratch", "graphs"].iter().try_fold(
+            provenant_os::fs::Directory::open_anchor(&self.cwd)?,
+            |directory, name| directory.open_verified_directory(std::ffi::OsStr::new(name)),
+        )?;
+        let prefix = hash.to_ascii_lowercase();
+        let mut found = Vec::new();
+        for name in graphs.entries()?.flatten() {
+            if let Ok(bytes) = graphs.read_bounded(&name, 8_388_608)
+                && provenant_records::CanonicalV1::file_digest(&bytes)
+                    .to_string()
+                    .strip_prefix("sha256:")
+                    .is_some_and(|digest| digest.starts_with(&prefix))
+                && let Ok(document) = decode_graph_document(&bytes)
+            {
+                found.push(document);
+            }
+        }
+        Ok(found)
     }
 
     fn graph(
@@ -5137,6 +5165,7 @@ pub fn graph(
             )
         }
         Err(error) => {
+            let mut message = error.to_string();
             let (outcome, code) = if matches!(
                 error.downcast_ref::<CoordinationError>(),
                 Some(CoordinationError::LaneMutation)
@@ -5149,6 +5178,7 @@ pub fn graph(
                 error.downcast_ref::<FacadeError>(),
                 Some(FacadeError::NotFound)
             ) {
+                message = graph_selector_forms();
                 (provenant_records::Outcome::Invalid, "not_found")
             } else if let Some(error @ FacadeError::DispatchRefused { .. }) =
                 error.downcast_ref::<FacadeError>()
@@ -5157,7 +5187,7 @@ pub fn graph(
             } else {
                 (provenant_records::Outcome::Error, "graph_owner")
             };
-            crate::fail(command, outcome, code, &error.to_string(), globals)
+            crate::fail(command, outcome, code, &message, globals)
         }
     }
 }

@@ -248,6 +248,68 @@ fn preset_wait_completes_a_retained_gate_graph_and_replays_it()
             status["data"]["checkpoint"]["nodes"]
         );
     }
+    // Selector precedence: an exact graph ID (even one ending `.json`) wins
+    // over path forms; an existing bare file name is a path; a hex ID that is
+    // also a hash prefix of a document declaring another graph is ambiguous.
+    let relabelled = |graph_id: &str| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&document)?)?;
+        value["graph_id"] = graph_id.into();
+        Ok(serde_json::to_vec(&value)?)
+    };
+    let scratch = project.join(".provenant/scratch/graphs");
+    let other = relabelled("other-graph")?;
+    std::fs::write(scratch.join("other"), &other)?;
+    std::fs::write(scratch.join("bare"), relabelled("dotted.json")?)?;
+    let other_hash = provenant_records::CanonicalV1::file_digest(&other).to_string();
+    let hex_id = &other_hash[7..15];
+    for retained in ["dotted.json", hex_id] {
+        let file = project.join(format!("{retained}.doc"));
+        std::fs::write(&file, relabelled(retained)?)?;
+        let run_graph = fixture_cli()
+            .current_dir(&project)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["--json", "--state-dir"])
+            .arg(temp.path().join("state"))
+            .args(["fabric", "graph", "run", "--document"])
+            .arg(&file)
+            .output()?;
+        assert!(
+            run_graph.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run_graph.stdout)
+        );
+    }
+    assert_eq!(
+        graph("status", "dotted.json")?["data"]["checkpoint"]["graph_id"],
+        "dotted.json"
+    );
+    assert_eq!(
+        graph("status", "bare")?["data"]["checkpoint"]["graph_id"],
+        "dotted.json"
+    );
+    let ambiguous = fixture_cli()
+        .current_dir(&project)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .args(["--json", "--state-dir"])
+        .arg(temp.path().join("state"))
+        .args(["fabric", "graph", "status", hex_id])
+        .output()?;
+    assert!(!ambiguous.status.success());
+    let ambiguous: serde_json::Value = serde_json::from_slice(&ambiguous.stdout)?;
+    assert_eq!(
+        ambiguous["error"]["code"], "dispatch_refused",
+        "{ambiguous}"
+    );
+    assert!(
+        ambiguous["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("accepted forms")),
+        "{ambiguous}"
+    );
+    std::fs::remove_file(scratch.join("bare"))?;
+    std::fs::remove_file(scratch.join("other"))?;
     let unknown = fixture_cli()
         .current_dir(&project)
         .env("PROVENANT_ROOT", &root)
@@ -264,6 +326,12 @@ fn preset_wait_completes_a_retained_gate_graph_and_replays_it()
     assert!(!unknown.status.success());
     let unknown: serde_json::Value = serde_json::from_slice(&unknown.stdout)?;
     assert_eq!(unknown["error"]["code"], "not_found", "{unknown}");
+    assert!(
+        unknown["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("accepted forms")),
+        "{unknown}"
+    );
     assert_eq!(
         unknown["error"]["repair"], "run `provenant help fabric graph status`",
         "{unknown}"
