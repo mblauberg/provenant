@@ -370,6 +370,8 @@ pub fn detect_with_org(
 ) -> Result<(String, Option<String>), ProviderError> {
     let cwd = Path::new(crate::claude::PROBE_CWD);
     if adapter == "agy" {
+        // An isolated account is signed in under its own directory as `HOME`.
+        let home = crate::agy::account_keychain(directory).map_or(home, |_| directory);
         return detect_agy(executor, executable, home, user, cwd, probe_root)
             .map(|key| (key, None));
     }

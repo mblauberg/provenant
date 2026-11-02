@@ -32,11 +32,20 @@ const SECURITY: &str = "/usr/bin/security";
 const SHELL: &str = "/bin/zsh";
 const KEYCHAIN: &str = "Library/Keychains/login.keychain-db";
 
+/// The keychain file an isolated account keeps in its registered directory,
+/// which is that account's own `HOME`. A directory without it is a legacy
+/// registration that shares the user's login keychain.
+pub(crate) fn account_keychain(directory: &std::path::Path) -> Option<std::path::PathBuf> {
+    let keychain = directory.join(KEYCHAIN);
+    keychain.is_file().then_some(keychain)
+}
+
 /// Agy runs with the attempt's private state as `HOME`, so it sees none of the
 /// user's Gemini or Antigravity configuration, MCP servers, plugins, hooks,
 /// sidecars or knowledge: its state lives and dies in the private home. Its
-/// sign-in is in the login keychain, so the private home links only that one
-/// file, read-only. Headless mode auto-denies every tool permission it cannot
+/// sign-in is in a keychain, so the private home links only that one file,
+/// read-only: the selected account's own keychain when its directory holds
+/// one, otherwise the user's login keychain. Headless mode auto-denies every tool permission it cannot
 /// prompt for, so lanes auto-approve tools: our confinement profile, not
 /// agy's prompts, bounds what a lane can do. Its own sandbox cannot nest
 /// inside ours.
@@ -47,8 +56,7 @@ fn prepare(
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
     let plan = input.confined.permissions();
-    // Agy's keychain sign-in cannot be selected through a registered directory.
-    if plan.selected_authentication.as_deref() != Some("keychain") || input.account.is_some() {
+    if plan.selected_authentication.as_deref() != Some("keychain") {
         return Err(ProviderError::UnsupportedPolicy);
     }
     input.prompt.check_argv()?;
@@ -57,7 +65,10 @@ fn prepare(
         .as_ref()
         .ok_or(ProviderError::UnsupportedPolicy)?
         .path;
-    let keychain = input.home.join(KEYCHAIN);
+    let keychain = input
+        .account
+        .and_then(|account| account_keychain(account.directory()))
+        .unwrap_or_else(|| input.home.join(KEYCHAIN));
     let mut argv: Vec<OsString> = [
         input.executable.as_os_str(),
         "--output-format".as_ref(),

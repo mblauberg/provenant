@@ -166,6 +166,38 @@ Read-only lanes gain no workspace or shared-cache writes. Credential and
 keychain restrictions, including the existing networked read-only `gh` policy,
 still apply.
 
+## Agy accounts
+
+Agy has no account switch, so a second Google account gets its own `HOME`
+holding its own login keychain. The registered `directory` is that home. When
+it contains `Library/Keychains/login.keychain-db`, the lane's private home links
+that file instead of the user's login keychain, the grant covers exactly that
+path, and registration and the quota probe run `agy -p /usage` with
+`HOME=<directory>`. A directory without the file keeps the shared login
+keychain, so an existing registration is unchanged. Agy accounts are pinned: a
+launch verifies the signed-in Google account against the registered key.
+
+Add an account (macOS; the empty keychain password and no lock timeout are
+deliberate, so a headless lane never prompts):
+
+1. `D=~/.agy-second; mkdir -p $D/Library/Keychains`
+2. `HOME=$D security create-keychain -p '' $D/Library/Keychains/login.keychain-db`
+3. `HOME=$D security default-keychain -s $D/Library/Keychains/login.keychain-db`
+4. `HOME=$D security set-keychain-settings $D/Library/Keychains/login.keychain-db`
+   (no lock timeout, no lock on sleep), then
+   `HOME=$D security unlock-keychain -p '' $D/Library/Keychains/login.keychain-db`.
+5. `HOME=$D agy`, run `/login`, finish the browser sign-in with the second
+   Google account, then exit.
+6. Check `HOME=$D agy -p /usage --output-format json` returns `SUCCESS`, and
+   `HOME=$D security find-generic-password -s gemini -a antigravity` finds the
+   item (omit `-w` so no secret prints). The real login keychain is unchanged.
+7. `provenant accounts register --adapter agy --directory $D <label>`, then
+   `provenant quota`.
+
+The keychain file holds the OAuth token, readable by the same user's processes,
+as the shared login keychain does. If the sign-in is lost (revocation or
+Workspace re-authentication), repeat step 5.
+
 ## OpenCode
 
 ```text

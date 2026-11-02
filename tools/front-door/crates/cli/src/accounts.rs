@@ -120,7 +120,8 @@ pub fn resolve(settings: &Settings, account: &str) -> Result<String, String> {
 /// Account configuration directories, in entry order. Only adapters whose
 /// accounts are separate configuration directories (`registered_account`:
 /// Claude and Codex) qualify. For the others the registered directory is an
-/// identity or ledger location, not where the client reads skills and settings.
+/// identity or ledger location, not where the client reads skills and settings;
+/// Agy's is the account's keychain home, which lanes never read.
 /// Directories are canonical (symlinks and `..` resolved), and two
 /// registrations of one directory count once.
 pub fn homes(settings: &Settings) -> Vec<provenant_config::AccountHome> {
@@ -130,7 +131,7 @@ pub fn homes(settings: &Settings) -> Vec<provenant_config::AccountHome> {
         .values()
         .filter_map(|entry| {
             let spec = provenant_records::AdapterSpec::get(&entry.adapter)?;
-            if !spec.registered_account {
+            if !spec.registered_account || spec.name == "agy" {
                 return None;
             }
             let home = provenant_config::shared_settings::canonical(&entry.directory);

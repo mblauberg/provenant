@@ -175,6 +175,28 @@ impl LiveQuota {
         deadline: i64,
         max_seconds: u64,
     ) -> Result<ExecOutcome, ProbeFailure> {
+        self.command_as(
+            &self.home,
+            program,
+            args,
+            selector,
+            stdin,
+            deadline,
+            max_seconds,
+        )
+    }
+    /// Runs a probe with `home` as its `HOME`.
+    #[allow(clippy::too_many_arguments)]
+    fn command_as(
+        &self,
+        home: &Path,
+        program: &str,
+        args: &[&str],
+        selector: Option<(&str, &Path)>,
+        stdin: Option<&[u8]>,
+        deadline: i64,
+        max_seconds: u64,
+    ) -> Result<ExecOutcome, ProbeFailure> {
         let remaining = deadline.saturating_sub(self.now());
         if remaining <= 0 {
             return Err(ProbeFailure::Network);
@@ -185,7 +207,7 @@ impl LiveQuota {
         let mut argv = vec![OsString::from(program)];
         argv.extend(args.iter().map(OsString::from));
         let mut env = vec![
-            (OsString::from("HOME"), self.home.as_os_str().to_owned()),
+            (OsString::from("HOME"), home.as_os_str().to_owned()),
             ("PATH".into(), std::env::var_os("PATH").unwrap_or_default()),
         ];
         // Claude Code uses the OS login name when selecting its Keychain item.
@@ -214,13 +236,14 @@ impl LiveQuota {
     }
     fn json_command(
         &self,
+        home: &Path,
         program: &str,
         args: &[&str],
         selector: Option<(&str, &Path)>,
         deadline: i64,
         seconds: u64,
     ) -> Result<Value, ProbeFailure> {
-        let out = self.command(program, args, selector, None, deadline, seconds)?;
+        let out = self.command_as(home, program, args, selector, None, deadline, seconds)?;
         if !clean(&out) || out.termination != Termination::Exit(0) {
             return Err(ProbeFailure::Network);
         }
@@ -446,6 +469,13 @@ impl LiveQuota {
             deadline,
         )
     }
+    /// An isolated agy account is signed in under its own directory as `HOME`.
+    fn agy_home<'a>(&'a self, account: &'a Account) -> &'a Path {
+        match crate::agy::account_keychain(&account.identity_dir) {
+            Some(_) => &account.identity_dir,
+            None => &self.home,
+        }
+    }
     fn agy(
         &self,
         account: &Account,
@@ -457,6 +487,7 @@ impl LiveQuota {
         let log = scratch.path().join("cli.log");
         let log_arg = log.to_str().ok_or(ProbeFailure::Malformed)?;
         let payload = self.json_command(
+            self.agy_home(account),
             "agy",
             &[
                 "-p",
@@ -574,6 +605,30 @@ mod tests {
             agy_signed_in_account(&registered, true, None),
             Err(ProbeFailure::Auth)
         );
+    }
+
+    #[test]
+    fn agy_probe_runs_under_the_accounts_own_home_only_when_it_holds_a_keychain() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let isolated = root.path().join("agy-second");
+        let legacy = root.path().join("gemini");
+        fs::create_dir_all(isolated.join("Library/Keychains")).unwrap();
+        fs::write(isolated.join("Library/Keychains/login.keychain-db"), "").unwrap();
+        fs::create_dir_all(&legacy).unwrap();
+        let quota = quota(&home, root.path().join("state"));
+        let account = |dir: &Path| Account {
+            scope: AccountScope {
+                adapter: "agy".into(),
+                account_key: "agy-test".into(),
+                label: "test".into(),
+            },
+            identity_dir: dir.to_owned(),
+            options: Value::Null,
+        };
+        assert_eq!(quota.agy_home(&account(&isolated)), isolated);
+        assert_eq!(quota.agy_home(&account(&legacy)), home);
+        assert_eq!(quota.agy_home(&account(&root.path().join("absent"))), home);
     }
 
     #[test]

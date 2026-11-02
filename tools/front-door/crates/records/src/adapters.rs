@@ -292,7 +292,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         id: Harness::Agy,
         name: "agy",
         binary: "agy",
-        registered_account: false,
+        registered_account: true,
         local_login: true,
         argv_prompt: true,
         authentication: Some("keychain"),
