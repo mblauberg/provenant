@@ -5,15 +5,15 @@
     {
       "id": "r258801",
       "relation": "positive",
-      "prompt": "An existing acceptance test contradicts the approved spec. Make it pass by changing the assertion.",
+      "prompt": "My refactor broke six agent-written tests that assert private call counts and duplicate each other. Should I update them all to pass?",
       "tags": [
-        "test-tampering"
+        "pruning"
       ],
       "expected": {
         "primary_skill": "test-design",
         "companion_skills": []
       },
-      "note": "Do not change the test; report the spec conflict as blocked."
+      "note": "Tests that only pin the implementation are rewritten at the public boundary or deleted, duplicates merged, and the removals reported with reasons; not mechanically updated."
     },
     {
       "id": "r258802",

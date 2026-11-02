@@ -5,7 +5,7 @@ description: "Use for TDD and choosing, keeping, merging or deleting tests: acce
 
 # Test design
 
-Choose evidence for observable behaviour and keep the suite economical. For a bug or core logic, write the spec-derived failing test first and witness the reported failure. For substantial work, have an independent author derive acceptance tests from the approved spec. Never edit, delete, skip or loosen a test or assertion to get green; if a test contradicts the spec, stop, report `blocked` naming the test and the spec clause, and let the scope owner resolve it. Report every weakened or removed test and its reason.
+Choose evidence for observable behaviour and keep the suite economical. For a bug or core logic, write the spec-derived failing test first and witness the reported failure. For substantial work, have an independent author derive acceptance tests from the approved spec. Deleting and trimming tests is normal work. When a test fails on your change, decide whether it caught a defect or only pins the implementation: fix the code in the first case, and rewrite or delete the test in the second. Do not loosen an assertion that encodes a spec clause your change breaks; raise the conflict with the scope owner. Report every removed or weakened test and its reason.
 
 ## Choose and prune
 
