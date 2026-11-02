@@ -35,7 +35,9 @@ pub fn short_tempdir<T: AsRef<Path>>(
                 io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem
             ) =>
         {
-            tempdir(&create)?
+            // A lane's TMPDIR is a short alias of its long attempt directory;
+            // canonicalising it would restore the long path.
+            create(&std::env::temp_dir())?
         }
         Err(error) => return Err(error),
     };
