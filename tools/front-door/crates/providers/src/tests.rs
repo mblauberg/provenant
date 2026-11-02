@@ -384,20 +384,38 @@ fn prepared_writer_git_environment_is_private_for_every_adapter() -> Result<(), 
                 Path::new("/fixture/repo"),
                 (id == "claude").then_some(&token),
             ))?;
-            for (key, path) in [
-                ("GIT_DIR", "/fixture/scratch/git-common"),
-                ("GIT_COMMON_DIR", "/fixture/scratch/git-common"),
-                ("GIT_WORK_TREE", "/fixture/repo"),
-                ("GIT_OBJECT_DIRECTORY", "/fixture/scratch/git-objects"),
+            // The binding lives in the Git shim, never in the ambient environment.
+            for key in [
+                "GIT_DIR",
+                "GIT_COMMON_DIR",
+                "GIT_WORK_TREE",
+                "GIT_OBJECT_DIRECTORY",
             ] {
-                assert_eq!(
-                    spec.env
-                        .iter()
-                        .find(|(name, _)| name == key)
-                        .map(|(_, value)| value.as_os_str()),
-                    (access == Access::WorktreeWrite).then_some(std::ffi::OsStr::new(path)),
-                    "{id} {key}"
-                );
+                assert!(spec.env.iter().all(|(name, _)| name != key), "{id} {key}");
+            }
+            let bound = spec.git_wrapper.bound.as_ref();
+            assert_eq!(bound.is_some(), access == Access::WorktreeWrite, "{id}");
+            if let Some(bound) = bound {
+                assert_eq!(bound.worktree, Path::new("/fixture/repo"));
+                for (key, path) in [
+                    ("GIT_DIR", "/fixture/scratch/git-common"),
+                    ("GIT_COMMON_DIR", "/fixture/scratch/git-common"),
+                    ("GIT_WORK_TREE", "/fixture/repo"),
+                    ("GIT_OBJECT_DIRECTORY", "/fixture/scratch/git-objects"),
+                ] {
+                    assert_eq!(
+                        bound
+                            .env
+                            .iter()
+                            .find(|(name, _)| name == key)
+                            .map(|(_, value)| value.as_os_str()),
+                        Some(std::ffi::OsStr::new(path)),
+                        "{id} {key}"
+                    );
+                }
+                for key in ["GIT_AUTHOR_NAME", "GIT_COMMITTER_EMAIL"] {
+                    assert!(spec.env.iter().all(|(name, _)| name != key), "{id} {key}");
+                }
             }
             if access == Access::WorktreeWrite {
                 let path = &spec.env.iter().find(|(key, _)| key == "PATH").unwrap().1;
