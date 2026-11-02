@@ -452,6 +452,84 @@ fn oversized_expansions_fail_before_graph_state_for_run_and_explain()
 }
 
 #[test]
+fn preset_explain_warns_once_per_brief_path_outside_the_bound_read_roots()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let elsewhere = tempfile::tempdir()?;
+    let source = temp.path().join("source");
+    std::fs::create_dir(&source)?;
+    std::fs::write(source.join("inside.md"), "in-root")?;
+    let outside = std::fs::canonicalize(elsewhere.path())?.join("design-quality-lens.md");
+    std::fs::write(&outside, "rubric")?;
+    let missing = elsewhere.path().join("missing.md");
+    let prompt = temp.path().join("brief");
+    std::fs::write(
+        &prompt,
+        format!(
+            "Apply `{}` and {} again; also {} and {}.",
+            outside.display(),
+            outside.display(),
+            source.join("inside.md").display(),
+            missing.display()
+        ),
+    )?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let run = |json: bool| -> Result<std::process::Output, Box<dyn std::error::Error>> {
+        let mut command = fixture_cli();
+        command
+            .current_dir(temp.path())
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"));
+        if json {
+            command.arg("--json");
+        }
+        command
+            .arg("--state-dir")
+            .arg(temp.path().join("state"))
+            .args(["run", "--preset", "single", "--prompt-file"])
+            .arg(&prompt)
+            .arg("--read-root")
+            .arg(&source)
+            .arg("--explain");
+        Ok(command.output()?)
+    };
+    let output = run(true)?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let warnings = result["data"]["warnings"]
+        .as_array()
+        .ok_or("warnings must travel as data")?;
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    let text = warnings[0].as_str().ok_or("warning text")?;
+    assert!(text.contains(&outside.display().to_string()), "{text}");
+    assert!(text.contains("--read-root"), "{text}");
+    let human = String::from_utf8(run(false)?.stdout)?;
+    assert_eq!(
+        human.matches("warning: brief references").count(),
+        1,
+        "{human}"
+    );
+    assert!(!temp.path().join("state").exists());
+
+    // A brief that cites only in-root and missing paths prints no warning.
+    std::fs::write(
+        &prompt,
+        format!(
+            "See {} and {}.",
+            source.join("inside.md").display(),
+            missing.display()
+        ),
+    )?;
+    let quiet: serde_json::Value = serde_json::from_slice(&run(true)?.stdout)?;
+    assert!(quiet["data"].get("warnings").is_none(), "{quiet}");
+    Ok(())
+}
+
+#[test]
 fn run_refuses_a_read_root_outside_the_project() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let outside = tempfile::tempdir()?;

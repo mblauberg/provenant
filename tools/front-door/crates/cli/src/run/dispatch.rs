@@ -131,12 +131,6 @@ pub(super) fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
     if result.result.error.is_some() {
         return result;
     }
-    let brief_warnings: Vec<_> = result
-        .human
-        .lines()
-        .filter(|line| line.starts_with("warning: brief references "))
-        .map(str::to_owned)
-        .collect();
     let rows = result.result.data["lanes"]
         .as_array()
         .cloned()
@@ -248,10 +242,7 @@ pub(super) fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
             ));
         }
     }
-    for warning in brief_warnings {
-        human.push_str(&warning);
-        human.push('\n');
-    }
+    human.push_str(&warnings_text(&result.result.data));
     result.summary = Some(crate::Summary::verbatim(&human, next));
     result.human = human;
     result.read_only = false;
@@ -694,8 +685,9 @@ pub(super) fn dispatch_inner(
             })
             .transpose()?;
         return crate::route::explain_dispatch(&command.route, edge.roots)
-            .map(|(data, mut text)| {
-                append_brief_warnings(&mut text, warnings.as_deref().unwrap_or_default());
+            .map(|(mut data, mut text)| {
+                record_warnings(&mut data, warnings.unwrap_or_default());
+                text.push_str(&warnings_text(&data));
                 (data, text, false)
             })
             .map_err(|error| {
@@ -1110,22 +1102,36 @@ pub(super) fn dispatch_inner(
     )?;
     let (mut data, mut human, timed_out) =
         report(&session, &record, &started, command.wait, edge, &call)?;
-    append_brief_warnings(&mut human, &brief_warnings);
+    record_warnings(&mut data, brief_warnings);
+    human.push_str(&warnings_text(&data));
     if let Some(worktree) = worktree {
         data["worktree"] = worktree;
     }
     Ok((data, human, timed_out))
 }
 
-fn append_brief_warnings(output: &mut String, warnings: &[String]) {
-    for warning in warnings {
-        output.push_str("warning: ");
-        output.push_str(warning);
-        output.push('\n');
+/// Carry submit-time warnings as `data["warnings"]`, so JSON consumers see them.
+fn record_warnings(data: &mut Value, warnings: Vec<String>) {
+    if !warnings.is_empty()
+        && let Some(map) = data.as_object_mut()
+    {
+        map.insert("warnings".into(), json!(warnings));
     }
 }
 
-pub(super) fn brief_read_root_warnings(
+/// Render `data["warnings"]` as human lines.
+pub fn warnings_text(data: &Value) -> String {
+    data["warnings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|warning| format!("warning: {}\n", plain_text(warning, usize::MAX)))
+        .collect()
+}
+
+/// Existing absolute or `~/` paths in a brief that no effective read root covers.
+pub fn brief_read_root_warnings(
     prompt: &str,
     cwd: &Path,
     worktree: Option<&Path>,
@@ -1145,7 +1151,10 @@ pub(super) fn brief_read_root_warnings(
                 matches!(character, '`' | '\'' | '"' | '(' | '[' | '{' | '<')
             })
             .trim_end_matches(|character: char| {
-                matches!(character, '`' | '\'' | '"' | ')' | ']' | '}' | '>' | ',' | '.' | ';' | ':')
+                matches!(
+                    character,
+                    '`' | '\'' | '"' | ')' | ']' | '}' | '>' | ',' | '.' | ';' | ':'
+                )
             });
         let candidate = if let Some(relative) = token.strip_prefix("~/") {
             home.join(relative)

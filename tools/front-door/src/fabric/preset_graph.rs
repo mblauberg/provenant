@@ -112,6 +112,7 @@ fn private_graph_directory_refusal(
 pub(crate) fn run_preset_graph(
     document: PathBuf,
     wait_seconds: u64,
+    warnings: &[String],
     globals: &provenant_cli::Globals,
     workers: &'static dyn WorkerObserver,
 ) -> u8 {
@@ -179,12 +180,14 @@ pub(crate) fn run_preset_graph(
                 human.push_str(&result.excerpt);
                 human.push('\n');
             }
+            let mut data =
+                serde_json::json!({"graph":run,"document":document,"continue":continuation});
+            if !warnings.is_empty() {
+                data["warnings"] = serde_json::json!(warnings);
+            }
+            human.push_str(&provenant_cli::run::warnings_text(&data));
             crate::emit(
-                &provenant_records::CommandResult::new(
-                    "run",
-                    outcome,
-                    serde_json::json!({"graph":run,"document":document,"continue":continuation}),
-                ),
+                &provenant_records::CommandResult::new("run", outcome, data),
                 globals,
                 &human,
                 false,
