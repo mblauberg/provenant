@@ -83,11 +83,9 @@ fn process_info_is_same_sandbox_and_reports_own_rss() -> Result<(), Box<dyn std:
         env: &env,
     })?;
     if !matches!(availability, Availability::Available { .. }) {
-        assert_ne!(
-            std::env::var("PROVENANT_CONFINEMENT_REQUIRED").as_deref(),
-            Ok("1"),
+        provenant_test_support::skip_sandbox_dependent_test(format!(
             "native sandbox unavailable: {availability:?}; {diagnostic:?}"
-        );
+        ))?;
         return Ok(());
     }
     let temp = crate::test_support::tempdir()?;

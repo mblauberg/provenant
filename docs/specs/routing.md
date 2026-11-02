@@ -482,8 +482,8 @@ loosened target is refused. Writer-only grants come
 from confinement's writer profile, and each attempt records its write
 allowances and Git grants digest. Writers use a complete private Git directory
 and index under attempt scratch with the shared object store as a read-only
-alternate. Plain Git environment selects these paths; the one wrapper source
-only restores scrubbed environment and publishing credentials. Shared refs,
+alternate. The one wrapper source selects these paths, only for Git acting on
+the lane checkout itself, and supplies publishing credentials. Shared refs,
 config, hooks, info and linked admin metadata stay read-only throughout their
 subtrees. The host imports the pinned result through Git receive quarantine
 and publishes the real branch itself; lane configuration never becomes host

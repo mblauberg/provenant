@@ -1,5 +1,5 @@
-//! Build-only release staging; Cargo does not install examples.
-#[path = "../src/release_smoke.rs"]
+//! Build-only release staging; release archives ship only the `provenant` binary.
+#[path = "../release_smoke.rs"]
 mod release_smoke;
 
 use provenant_core::{CancelToken, PathResolver};
@@ -80,7 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             value if value == OsStr::new("--help") => {
                 writeln!(
                     io::stdout().lock(),
-                    "cargo run --example package-release -- --out ABS [--binary PATH]"
+                    "cargo run --bin package-release -- --out ABS [--binary PATH]"
                 )?;
                 return Ok(());
             }

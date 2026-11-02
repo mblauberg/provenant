@@ -221,6 +221,17 @@ jobs:
           else
             cargo nextest run --profile ci --workspace --locked --features provenant-providers/recording --partition hash:${{ matrix.partition }}/2
           fi
+      - name: Report slowest tests
+        if: always()
+        run: scripts/nextest-slowest tools/front-door/target/nextest/ci/junit.xml "$GITHUB_STEP_SUMMARY"
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rust-nextest-junit-${{ matrix.partition }}
+          path: tools/front-door/target/nextest/ci/junit.xml
+          if-no-files-found: warn
+      # Runs after the upload: it reuses the ci profile and overwrites junit.xml.
       - name: Run quarantined tests (advisory)
         if: matrix.partition == 1
         continue-on-error: true
@@ -240,13 +251,6 @@ jobs:
         working-directory: tools/front-door
         run: |
           cargo test --locked -p provenant-providers --features recording --example record bash_proof_needs_a_matching_successful_tool_result
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: rust-nextest-junit-${{ matrix.partition }}
-          path: tools/front-door/target/nextest/ci/junit.xml
-          if-no-files-found: warn
 
   rust-dependencies:
     name: Rust dependency policy
@@ -411,7 +415,9 @@ jobs:
           CARGO_PROFILE_RELEASE_LTO: "false"
           RUSTC_WRAPPER: .cargo/rustc-wrapper.sh
         run: |
-          cargo run --release --locked --example package-release -- --out "$RUNNER_TEMP/release"
+          cargo run --release --locked --bin package-release -- \
+            --binary "$RUNNER_TEMP/release-target/release/provenant" \
+            --out "$RUNNER_TEMP/release"
           mkdir -p "$RUNNER_TEMP/home"
           HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/release/bin/provenant" \
             --state-dir "$RUNNER_TEMP/state" install --source "$RUNNER_TEMP/release" \

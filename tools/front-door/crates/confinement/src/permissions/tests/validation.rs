@@ -658,11 +658,9 @@ fn directory_discovery_keeps_literal_scope_and_refuses_symlinks()
             if String::from_utf8_lossy(&outcome.stderr.bytes)
                 .contains("sandbox_apply: Operation not permitted")
             {
-                eprintln!("native discovery denial probe unavailable under inherited sandbox");
-                assert_ne!(
-                    std::env::var("PROVENANT_CONFINEMENT_REQUIRED").as_deref(),
-                    Ok("1")
-                );
+                provenant_test_support::skip_sandbox_dependent_test(
+                    "native discovery denial probe unavailable under inherited sandbox",
+                )?;
                 break;
             }
             assert!(denied_probe(&outcome), "{outcome:?}");

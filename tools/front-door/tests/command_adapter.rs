@@ -2,7 +2,7 @@
 #![allow(clippy::disallowed_methods)]
 mod support;
 use serde_json::{Value, json};
-use std::{fs, io::Write, time::Duration};
+use std::{fs, time::Duration};
 use support::{Result, TestRig, code};
 
 #[test]
@@ -40,10 +40,9 @@ fn available() -> Result<bool> {
             env: &[],
         },
     ) {
-        if std::env::var_os("PROVENANT_CONFINEMENT_REQUIRED").is_some() {
-            return Err(error.into());
-        }
-        writeln!(std::io::stderr(), "command fixture skipped: {error}")?;
+        provenant_test_support::skip_sandbox_dependent_test(format!(
+            "command fixture skipped: {error}"
+        ))?;
         return Ok(false);
     }
     Ok(true)

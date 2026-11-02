@@ -421,11 +421,12 @@ fn lane_git_supports_stash_rebase_and_merge_with_shared_metadata_read_only()
         env: &env,
     }) {
         Ok(backend) => backend,
-        Err(error) if std::env::var("PROVENANT_CONFINEMENT_REQUIRED").as_deref() != Ok("1") => {
-            eprintln!("native sandbox unavailable: {error}");
+        Err(error) => {
+            provenant_test_support::skip_sandbox_dependent_test(format!(
+                "native sandbox unavailable: {error}"
+            ))?;
             return Ok(());
         }
-        Err(error) => return Err(error.into()),
     };
     let launch = backend.compile(&plan, &profile, &anchors)?;
     let sbpl = std::str::from_utf8(&launch.profile)?;

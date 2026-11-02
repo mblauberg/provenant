@@ -176,8 +176,9 @@ pub(crate) fn base_env(
 }
 
 /// Writer Git uses a complete private directory, including its index and all
-/// operation state. Shared metadata is read-only. The Git launcher restores
-/// this binding even when a provider's subprocess clears its environment.
+/// operation state. Shared metadata is read-only. The Git launcher applies
+/// this binding inside the worktree, even when a provider's subprocess clears
+/// its environment, and nowhere else.
 pub(crate) fn private_git_objects(
     input: &PrepareInput<'_>,
     spec: &mut LaunchSpec,
@@ -190,7 +191,10 @@ pub(crate) fn private_git_objects(
     }
     let scratch = &input.confined.permissions().scratch.path;
     let private = scratch.join("git-common");
-    spec.env.extend([
+    // The binding and the lane's commit identity stay out of the ambient
+    // environment, so a fixture's `git init` in a temporary directory neither
+    // reads nor commits to the lane. The Git shim applies them inside the worktree.
+    let mut bound = vec![
         ("GIT_DIR".into(), private.clone().into()),
         ("GIT_COMMON_DIR".into(), private.into()),
         ("GIT_WORK_TREE".into(), input.cwd.into()),
@@ -198,7 +202,26 @@ pub(crate) fn private_git_objects(
             "GIT_OBJECT_DIRECTORY".into(),
             scratch.join("git-objects").into(),
         ),
-    ]);
+    ];
+    spec.env.retain(|(key, value)| {
+        let identity = matches!(
+            key.to_str(),
+            Some(
+                "GIT_AUTHOR_NAME"
+                    | "GIT_AUTHOR_EMAIL"
+                    | "GIT_COMMITTER_NAME"
+                    | "GIT_COMMITTER_EMAIL"
+            )
+        );
+        if identity {
+            bound.push((key.clone(), value.clone()));
+        }
+        !identity
+    });
+    spec.git_wrapper.bound = Some(crate::lane::BoundGit {
+        worktree: input.cwd.to_owned(),
+        env: bound,
+    });
     // A single source generates every Git shim, including Claude's scrub shim.
     spec.git_wrapper.scrub = true;
     spec.write_git_wrapper(&scratch.join("bin"), input.provenant.git)?;

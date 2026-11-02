@@ -428,11 +428,12 @@ pub(super) fn writer_backend_available() -> Result<bool> {
     );
     match backend {
         Ok(_) => Ok(true),
-        Err(error) if std::env::var_os("PROVENANT_CONFINEMENT_REQUIRED").is_none() => {
-            writeln!(std::io::stderr(), "writer fixture skipped: {error}")?;
+        Err(error) => {
+            provenant_test_support::skip_sandbox_dependent_test(format!(
+                "writer fixture skipped: {error}"
+            ))?;
             Ok(false)
         }
-        Err(error) => Err(error.into()),
     }
 }
 
@@ -3448,11 +3449,12 @@ fn verify_lane_profile(
         env: &[],
     }) {
         Ok(backend) => backend,
-        Err(error) if std::env::var_os("PROVENANT_CONFINEMENT_REQUIRED").is_none() => {
-            writeln!(std::io::stderr(), "lane profile execution skipped: {error}")?;
+        Err(error) => {
+            provenant_test_support::skip_sandbox_dependent_test(format!(
+                "lane profile execution skipped: {error}"
+            ))?;
             return Ok(());
         }
-        Err(error) => return Err(error.into()),
     };
     let confinement = launch.confinement.as_mut().ok_or("confinement")?;
     // Synthetic fake-provider evidence exercises the compiler only. This does
@@ -3588,6 +3590,16 @@ if (process.argv[2] === 'child') {
             "for f in credentials.toml credentials; do ",
             "if /bin/cat \"$HOME/.cargo/$f\" >/dev/null 2>&1; then exit 13; fi; done; ",
             "if GIT_CONFIG_GLOBAL=/nonexistent/gitconfig git config --global --list >/dev/null 2>&1; then :; else exit 14; fi; ",
+            "lane_root=$PWD; lane_head=$(git rev-parse HEAD); ",
+            "cp \"$TMPDIR/git-common/index\" \"$TMPDIR/index-before-fixture\"; ",
+            "printf 'unstaged lane content\\n' > \"$lane_root/.fixture-git-probe\"; ",
+            "mkdir \"$TMPDIR/fixture-git-probe\"; cd \"$TMPDIR/fixture-git-probe\"; ",
+            "git init -q; printf 'fixture content\\n' > fixture; git add -A; ",
+            "git -c user.name=Fixture -c user.email=fixture@example.test commit -qm base; ",
+            "test -d .git; test \"$(git log -1 --format=%an)\" = Fixture; ",
+            "cd \"$lane_root\"; test \"$(git rev-parse HEAD)\" = \"$lane_head\"; ",
+            "cmp \"$TMPDIR/index-before-fixture\" \"$TMPDIR/git-common/index\"; ",
+            "unlink \"$lane_root/.fixture-git-probe\"; ",
             "git -c user.name=lane -c user.email=lane@example.test commit -q --allow-empty -m probe && ",
             "test \"$(command -v git)\" = \"$TMPDIR/bin/git\" && ",
             "git --version && git status --porcelain && ",

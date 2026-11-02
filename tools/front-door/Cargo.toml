@@ -66,6 +66,7 @@ disallowed_methods = "deny"
 [package]
 name = "provenant"
 version = "1.4.2"
+default-run = "provenant"
 edition.workspace = true
 rust-version.workspace = true
 description = "Provenant command composition and transport edge"
@@ -102,6 +103,7 @@ provenant-records = { workspace = true }
 toml_edit = { workspace = true }
 
 [dev-dependencies]
+provenant-test-support = { path = "crates/test-support" }
 provenant-os = { workspace = true, features = ["fixture"] }
 regex = { workspace = true }
 rusqlite = { workspace = true }

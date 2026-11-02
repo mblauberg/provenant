@@ -230,16 +230,6 @@ fn main() -> BuildResult<()> {
         collect_member_inputs(&workspace, member, &mut watched, &tracked, &mut inputs)?;
     }
 
-    let packager = workspace.join("examples/package-release.rs");
-    watch(&mut watched, packager.clone())?;
-    add_required_file(
-        &workspace,
-        &packager,
-        "examples/package-release.rs".to_owned(),
-        &tracked,
-        &mut inputs,
-    )?;
-
     // External product inputs are assigned their release asset names so the
     // pure digest API only sees normal relative POSIX paths (never ../ paths).
     for (source, release_name) in [
