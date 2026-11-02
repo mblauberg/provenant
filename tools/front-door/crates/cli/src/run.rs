@@ -739,10 +739,6 @@ impl Registry<'_> {
         if let Some(ProviderEvent::Denied { action }) = events
             .iter()
             .find(|event| matches!(event, ProviderEvent::Denied { .. }))
-            && !(adapter.id() == "opencode"
-                && events
-                    .iter()
-                    .any(|event| matches!(event, ProviderEvent::QuotaLimited { .. })))
         {
             if decoded.outcome == run::Outcome::Failed
                 && decoded.reason.as_deref() == Some("provider failed")

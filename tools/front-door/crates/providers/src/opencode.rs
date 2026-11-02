@@ -595,6 +595,9 @@ crate::quota_source!(OpenCode, "opencode");
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::Adapter;
+
     #[test]
     fn stderr_quota_forms_and_retry() {
         use super::{E, stderr_quota};
@@ -621,8 +624,6 @@ mod tests {
         }
         assert!(stderr_quota(b"ordinary failure").is_none());
     }
-    use super::*;
-    use crate::Adapter;
 
     fn store(rows: &[(&str, &str)]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
