@@ -360,9 +360,9 @@ impl run::Providers for Registry<'_> {
         if assessment.refusal.is_some() || assessment.retry.is_some() {
             return Ok(assessment);
         }
-        let model_pool = provenant_routing::Catalogue::bundled()
-            .ok()
-            .and_then(|catalogue| catalogue.quota_pool(&model).map(str::to_owned));
+        let catalogue =
+            provenant_routing::Catalogue::bundled().map_err(|error| error.to_string())?;
+        let policies = provenant_providers::quota_policies(provenant_providers::REGISTRY);
         let other_account = |adapter: &str, key: &str| {
             unspent_alternative(
                 accounts
@@ -371,9 +371,10 @@ impl run::Providers for Registry<'_> {
                     .filter(|entry| entry.adapter == adapter)
                     .map(|entry| entry.key.as_str()),
                 &quota,
+                &policies,
                 key,
                 &model,
-                model_pool.as_deref(),
+                &catalogue,
                 now.unix_seconds(),
             )
         };

@@ -421,8 +421,11 @@ fn an_alternate_account_is_spent_only_by_routing_rule_or_a_live_refusal()
         record
     };
     let keys = ["work", "other"];
-    let alternative =
-        |quota: &[AccountRecord]| unspent_alternative(keys, quota, "work", &model, None, now);
+    let catalogue = provenant_routing::Catalogue::bundled()?;
+    let policies = provenant_providers::quota_policies(provenant_providers::REGISTRY);
+    let alternative = |quota: &[AccountRecord]| {
+        unspent_alternative(keys, quota, &policies, "work", &model, &catalogue, now)
+    };
     // Unknown is not spent.
     assert!(alternative(&[]));
     // An exhausted reading binds until its full windows reset, as routing has it.
@@ -446,22 +449,30 @@ fn an_alternate_account_is_spent_only_by_routing_rule_or_a_live_refusal()
     assert!(!alternative(&cache));
     // It holds only that model, and only for its hour.
     let other = ModelId::parse("codex/gpt-6.1-sol")?;
-    assert!(unspent_alternative(keys, &cache, "work", &other, None, now));
+    assert!(unspent_alternative(
+        keys, &cache, &policies, "work", &other, &catalogue, now
+    ));
     assert!(unspent_alternative(
         keys,
         &cache,
+        &policies,
         "work",
         &model,
-        None,
+        &catalogue,
         now + 3_600
     ));
+    // A persisted account mismatch is spent too, as admission has it.
+    let mut mismatched = AccountRecord::empty(scope("other"));
+    mismatched.last_error = Some(provenant_quota::ProbeFailure::AccountMismatch);
+    assert!(!alternative(&[mismatched]));
     // The spent account itself never counts.
     assert!(!unspent_alternative(
         ["work"],
         &[],
+        &policies,
         "work",
         &model,
-        None,
+        &catalogue,
         now
     ));
     Ok(())
