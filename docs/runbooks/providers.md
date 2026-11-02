@@ -186,26 +186,41 @@ Unregistered and registered agy behave differently at launch:
   Google account against the registered key and skips the route if it differs
   (`changed identity; re-register it`). Register every account you route to.
 
-Add an account (macOS; the empty keychain password and no lock timeout are
-deliberate, so a headless lane never prompts):
+Register the first account, the one signed in on your own login keychain,
+with the home directory itself:
 
-1. `D=~/.agy-second; mkdir -p $D/Library/Keychains`
+```text
+provenant accounts register --adapter agy --directory ~ <label>
+```
+
+Add a second account (macOS; the empty keychain password and no lock timeout
+are deliberate, so a headless lane never prompts). Every `security` command
+below names the isolated keychain file explicitly, and none changes the real
+default keychain:
+
+1. `D=~/.agy-second; mkdir -p $D/Library/Keychains; chmod 700 $D`
 2. `HOME=$D security create-keychain -p '' $D/Library/Keychains/login.keychain-db`
-3. `HOME=$D security default-keychain -s $D/Library/Keychains/login.keychain-db`
-4. `HOME=$D security set-keychain-settings $D/Library/Keychains/login.keychain-db`
+3. `HOME=$D security set-keychain-settings $D/Library/Keychains/login.keychain-db`
    (no lock timeout, no lock on sleep), then
    `HOME=$D security unlock-keychain -p '' $D/Library/Keychains/login.keychain-db`.
-5. `HOME=$D agy`, run `/login`, finish the browser sign-in with the second
+4. `HOME=$D agy`, run `/login`, finish the browser sign-in with the second
    Google account, then exit.
-6. Check `HOME=$D agy -p /usage --output-format json` returns `SUCCESS`, and
+5. Check `HOME=$D agy -p /usage --output-format json` returns `SUCCESS`, and
    `HOME=$D security find-generic-password -s gemini -a antigravity` finds the
    item (omit `-w` so no secret prints). The real login keychain is unchanged.
-7. `provenant accounts register --adapter agy --directory $D <label>`, then
-   `provenant quota`.
+6. `provenant accounts register --adapter agy --directory $D <label>`, then
+   `provenant quota`. Registration refuses a directory that has no regular
+   `Library/Keychains/login.keychain-db` (a symlink does not count), so the
+   second account can never be recorded under the first account's key.
 
-The keychain file holds the OAuth token, readable by the same user's processes,
-as the shared login keychain does. If the sign-in is lost (revocation or
-Workspace re-authentication), repeat step 5.
+The keychain file is plaintext-equivalent credential material: anyone who can
+read it and unlock it holds the OAuth token, as with the shared login keychain.
+Keep the account directory at mode 700 and out of backups and synced folders.
+
+The isolated keychain locks again after a reboot. Repeat
+`HOME=$D security unlock-keychain -p '' $D/Library/Keychains/login.keychain-db`
+before routing to the account, or its launches fail the identity check. If the
+sign-in is lost (revocation or Workspace re-authentication), repeat step 4.
 
 ## OpenCode
 
