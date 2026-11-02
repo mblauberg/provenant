@@ -317,18 +317,20 @@ pub(crate) fn task_exclusion_rules(
     profile: &provenant_records::run::HarnessProfile,
     roots: &Roots,
 ) -> Result<Vec<provenant_routing::ExclusionRule>, EdgeError> {
-    let texts: Vec<String> = profile
-        .knobs
-        .get("routing.exclude")
-        .and_then(serde_json::Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default();
+    let texts = |knob: &str| -> Vec<String> {
+        profile
+            .knobs
+            .get(knob)
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
     let source = if profile
         .overrides
         .iter()
@@ -338,7 +340,22 @@ pub(crate) fn task_exclusion_rules(
     } else {
         provenant_routing::ExclusionSource::Config
     };
-    exclusion_rules(&texts, source, roots)
+    let mut rules = exclusion_rules(&texts("routing.exclude"), source, roots)?;
+    // A graph's list reaches each node as its own knob, so the source reads
+    // "graph" however the graph was started.
+    rules.extend(exclusion_rules(
+        &texts("routing.graph_exclude"),
+        provenant_routing::ExclusionSource::Graph,
+        roots,
+    )?);
+    Ok(rules)
+}
+/// Refuse a selector that is none of the valid forms, for callers that carry
+/// the list to a later dispatch.
+pub fn validate_exclusions(texts: &[String], roots: &Roots) -> Result<(), String> {
+    exclusion_rules(texts, provenant_routing::ExclusionSource::Flag, roots)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 /// What a `route resolve` name stands for.
 #[derive(Debug, PartialEq, Eq)]
