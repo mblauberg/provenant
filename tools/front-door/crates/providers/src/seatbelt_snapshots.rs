@@ -564,7 +564,10 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
             .chain(args.iter().map(std::ffi::OsStr::new))
             .map(Into::into)
             .collect::<Vec<_>>();
-        let output = executor.execute(ExecOptions::new(&argv, &repo, Duration::from_secs(10)))?;
+        let env = provenant_os::fixture::git_env();
+        let mut options = ExecOptions::new(&argv, &repo, Duration::from_secs(10));
+        options.env = Some(&env);
+        let output = executor.execute(options)?;
         assert!(
             output.termination == Termination::Exit(0),
             "git failed: {}",
@@ -666,24 +669,6 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
         .find(|entry| entry.adapter.id() == "agy")
         .unwrap();
     let spec = adapter.adapter.prepare(input)?;
-    for step in &spec.setup {
-        match step {
-            SetupStep::CreateDir(path) if path.starts_with(root.join("scratch")) => {
-                std::fs::create_dir_all(path)?
-            }
-            SetupStep::WriteFile { path, bytes }
-                if path.starts_with(root.join("scratch/git-objects")) =>
-            {
-                std::fs::write(path, bytes)?
-            }
-            SetupStep::WriteExecutable { path, bytes } if path == &root.join("scratch/bin/git") => {
-                std::fs::write(path, bytes)?;
-                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-            }
-            _ => {}
-        }
-    }
-    let object_dir = root.join("scratch/git-objects");
     let directories = required_anchors(plan.permissions(), &spec.profile, None)
         .iter()
         .map(AnchoredDirectory::open_canonical)
@@ -707,10 +692,9 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
             Ok(process)
         };
     let sandboxed_git = |args: &[&str]| {
-        let argv: Vec<std::ffi::OsString> =
-            std::iter::once(root.join("scratch/bin/git").into_os_string())
-                .chain(args.iter().map(Into::into))
-                .collect();
+        let argv: Vec<std::ffi::OsString> = std::iter::once(git.as_os_str().to_owned())
+            .chain(args.iter().map(Into::into))
+            .collect();
         sandboxed(&argv)
     };
     for args in [
@@ -732,53 +716,19 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
             assert!(String::from_utf8_lossy(&output.stdout).contains("diff --git"));
         }
     }
-    // Exercise the applied profile, including scratch writes and common-store confinement.
-    let output = sandboxed_git(&["hash-object", "-w", "--stdin"])?
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-    let mut child = output;
-    use std::io::Write;
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"lane scratch object")?;
-    let output = child.wait_with_output()?;
-    assert!(output.status.success());
-    assert!(
-        output.stderr.is_empty(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let oid = std::str::from_utf8(&output.stdout)?.trim();
-    let relative = format!("{}/{}", &oid[..2], &oid[2..]);
-    assert!(object_dir.join(&relative).is_file());
-    assert!(!common.join("objects").join(&relative).exists());
-    // Bypassing the wrapper must still leave the real store unwritable.
-    let input = root.join("scratch/object-input");
-    std::fs::write(&input, b"lane scratch object")?;
-    let output =
-        sandboxed(&[git.into(), "hash-object".into(), "-w".into(), input.into()])?.output()?;
+    // Read-only agy has no Git wrapper or writeable object overlay. Direct Git
+    // writes must therefore be denied in both the linked-worktree index and
+    // the common object store.
+    let output = sandboxed_git(&["update-index", "--force-write-index"])?.output()?;
     assert!(
         !output.status.success(),
-        "direct Git unexpectedly wrote the common store"
+        "Git unexpectedly wrote the private index"
     );
-    assert!(!common.join("objects").join(relative).exists());
-    let link = object_dir.join("redirect");
-    let output = sandboxed(&[
-        "/bin/ln".into(),
-        "-s".into(),
-        common.join("objects").into(),
-        link.clone().into(),
-    ])?
-    .output()?;
+    let output = sandboxed_git(&["hash-object", "-w", "--stdin"])?.output()?;
     assert!(
         !output.status.success(),
-        "scratch object symlink unexpectedly allowed"
+        "Git unexpectedly wrote the common object store"
     );
-    assert!(std::fs::symlink_metadata(link).is_err());
     let source = std::str::from_utf8(&compiled.profile)?;
     assert!(source.contains(&format!(
         "(allow file-read* (subpath \"{}\"))",
