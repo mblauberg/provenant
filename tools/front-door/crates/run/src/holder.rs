@@ -1215,7 +1215,7 @@ impl RunStore {
                 )
             };
             let last_failure = check.as_ref().err().map(ToString::to_string);
-            let archived = match crate::artifacts::subdir(
+            match crate::artifacts::subdir(
                 attempt,
                 std::ffi::OsStr::new("quarantine"),
                 false,
@@ -1237,13 +1237,12 @@ impl RunStore {
                             },
                         ));
                     }
-                    saved.is_some()
                 }
-                Err(RunError::Filesystem(error)) if error.is_not_found() => false,
+                Err(RunError::Filesystem(error)) if error.is_not_found() => {}
                 Err(error) => return Err(error),
-            };
+            }
             let check = match check {
-                Err(error) if crate::writer::worktree_removed(writer) || archived => Err(error),
+                Err(error) if crate::writer::worktree_removed(writer) => Err(error),
                 Err(RunError::Writer(_) | RunError::WriterProjectMismatch { .. }) => {
                     Err(RunError::ObjectImportLimit(
                         "writer preconditions refused; private Git retained for host recovery",
@@ -2361,7 +2360,13 @@ mod writer_recovery_tests {
     #[test]
     fn settlement_import_fault_seals_retains_fence_and_resumes_without_provider()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        for mode in ["normal", "orphan", "release_boundary", "manifest_conflict"] {
+        for mode in [
+            "normal",
+            "orphan",
+            "release_boundary",
+            "manifest_conflict",
+            "archived_fault",
+        ] {
             use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
             use std::ffi::OsStr;
             let fixture = PrepareFixture::new()?;
@@ -2446,7 +2451,7 @@ mod writer_recovery_tests {
                 )?;
                 crate::artifacts::seal(&attempt, "result.md", b"orphan result", RESULT_LIMIT)?;
             }
-            if mode == "manifest_conflict" {
+            if matches!(mode, "manifest_conflict" | "archived_fault") {
                 let archive = crate::artifacts::subdir(&attempt, OsStr::new("quarantine"), true)?;
                 crate::artifacts::seal(
                     &archive,
@@ -2456,7 +2461,12 @@ mod writer_recovery_tests {
                 )?;
             }
             crate::writer::FAIL_IMPORT
-                .with(|fault| fault.set(matches!(mode, "normal" | "release_boundary")));
+                .with(|fault| {
+                fault.set(matches!(
+                    mode,
+                    "normal" | "release_boundary" | "archived_fault"
+                ))
+            });
             let first = store.finish_in_custody(
                 id,
                 &attempt,
@@ -2579,6 +2589,12 @@ mod writer_recovery_tests {
                     .is_err(),
                 "retained reservation excludes competing writer"
             );
+            if mode == "archived_fault" {
+                // A retryable import failure keeps its fence even though a
+                // manifest already exists; clear it so the retry can seal.
+                let archive = crate::artifacts::subdir(&attempt, OsStr::new("quarantine"), false)?;
+                archive.unlink(OsStr::new("manifest.json"))?;
+            }
             drop(store);
             let store = RunStore::open(&execution, &call)?;
             let journal_name = OsStr::new("settlement-progress.json");
