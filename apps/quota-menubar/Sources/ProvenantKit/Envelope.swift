@@ -67,13 +67,17 @@ public final class CLIClient: @unchecked Sendable {
 
     /// Runs `arguments` plus `--json` and decodes the envelope, which must name `command` (such as "console board")
     /// at envelope version 1. Error envelopes throw `ClientError.command`, whether or not the CLI exited cleanly.
-    public func call<Payload: Decodable & Sendable>(_ arguments: [String], command: String,
+    /// `limit` overrides the client's time limit for this call, for a call that legitimately waits on peers.
+    public func call<Payload: Decodable & Sendable>(_ arguments: [String], command: String, limit: Double? = nil,
                                                     as _: Payload.Type = Payload.self) async throws -> Payload {
-        try await Task.detached(priority: .userInitiated) { [self] in try callSync(arguments, command: command, as: Payload.self) }.value
+        try await Task.detached(priority: .userInitiated) { [self] in
+            try callSync(arguments, command: command, limit: limit, as: Payload.self)
+        }.value
     }
 
-    func callSync<Payload: Decodable & Sendable>(_ arguments: [String], command: String, as _: Payload.Type) throws -> Payload {
-        let run = try execute(arguments + ["--json"])
+    func callSync<Payload: Decodable & Sendable>(_ arguments: [String], command: String, limit: Double? = nil,
+                                                 as _: Payload.Type) throws -> Payload {
+        let run = try execute(arguments + ["--json"], limit: limit ?? self.limit)
         return try Self.decode(run, command: command, as: Payload.self)
     }
 
@@ -112,7 +116,7 @@ public final class CLIClient: @unchecked Sendable {
         enum CodingKeys: String, CodingKey { case schemaVersion = "schema_version", command }
     }
 
-    private func execute(_ arguments: [String]) throws -> CLI.Output {
+    private func execute(_ arguments: [String], limit: Double) throws -> CLI.Output {
         if let runner { return try runner(arguments, limit) }
         let known = lock.withLock { launcher }
         guard let found = known ?? CLI.resolve() else { throw ClientError.notFound }

@@ -214,6 +214,9 @@ public struct InboxClient: Sendable {
     public let replies: ReplyFiles
     public init(cli: CLIClient = CLIClient(), replies: ReplyFiles = .shared) { self.cli = cli; self.replies = replies }
 
+    /// Seconds a first-page listing that asks for peers may run: clearly above `limits.peer_seconds`.
+    static let peerListLimit: Double = 60
+
     struct Listed: Decodable, Sendable {
         let items: [HumanRequest]
         let nextCursor: String?
@@ -234,7 +237,10 @@ public struct InboxClient: Sendable {
             var arguments = ["inbox", "--all-projects", "--state", includeClosed ? "all" : "open", "--limit", String(pageSize)]
             // Peers are read on the first page only; a cursor page is this host's rows.
             if let cursor { arguments += ["--cursor", cursor] } else { arguments += ["--hosts", "all"] }
-            let listed = try await cli.call(arguments, command: "inbox", as: Listed.self)
+            // The peer fan-out waits up to the configured peer deadline (30 s by default) after the local listing, so
+            // a call that asks for peers gets a longer budget than that; otherwise an unreachable peer would time
+            // out the call and hide the local rows.
+            let listed = try await cli.call(arguments, command: "inbox", limit: cursor == nil ? Self.peerListLimit : nil, as: Listed.self)
             return Page(items: Self.attribute(listed), nextCursor: listed.nextCursor, truncated: listed.truncated, peers: listed.peers)
         }
     }

@@ -34,6 +34,28 @@ final class InboxClientTests: XCTestCase {
         XCTAssertFalse(replay.recorded[1].contains("--hosts"))
     }
 
+    func testPeerListingGetsALongerBudgetThanThePeerDeadline() async throws {
+        let seen = LockedBox<[(hosts: Bool, limit: Double)]>([])
+        let client = CLIClient(limit: 30) { arguments, limit in
+            seen.update { $0.append((arguments.contains("--hosts"), limit)) }
+            let file = arguments.contains("--cursor") ? "inbox-page2" : "inbox-page1"
+            return CLI.Output(status: 0, signalled: false, timedOut: false, truncated: false,
+                              out: try Replay.fixture(file), err: "")
+        }
+        let page = try await InboxClient(cli: client).list()
+        XCTAssertEqual(page.items.count, 3)
+        let calls = seen.value
+        XCTAssertEqual(calls.map(\.hosts), [true, false])
+        // The default limits.peer_seconds is 30; the call that fans out to peers must outlast it.
+        XCTAssertGreaterThan(calls[0].limit, 30)
+        XCTAssertEqual(calls[1].limit, 30)
+        let other = CLIClient(limit: 30) { _, limit in
+            XCTAssertEqual(limit, 30)
+            return CLI.Output(status: 0, signalled: false, timedOut: false, truncated: false, out: try Replay.fixture("answer-conflict"), err: "")
+        }
+        _ = try? await other.call(["answer"], command: "answer", as: InboxReceipt.self)
+    }
+
     func testPeerRowsCarryTheirHostLabelProjectAndCoverage() async throws {
         let replay = Replay([(["inbox"], "inbox-peers-complete", 0)])
         let page = try await InboxClient(cli: replay.client).list()
@@ -259,4 +281,12 @@ final class ExecTimeoutTests: XCTestCase {
         XCTAssertEqual(String(decoding: run.out, as: UTF8.self), "hi\n")
         XCTAssertEqual(run.err, "oops\n")
     }
+}
+
+final class LockedBox<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Value
+    init(_ value: Value) { stored = value }
+    var value: Value { lock.withLock { stored } }
+    func update(_ change: (inout Value) -> Void) { lock.withLock { change(&stored) } }
 }
