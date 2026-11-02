@@ -2735,9 +2735,15 @@ impl RunStore {
                         .writer_fences()?
                         .iter()
                         .any(|fence| fence.scope == scope));
+            // Retained custody can only be reattached through the launch
+            // summary; an attempt that never sealed one has nothing to recover.
+            let reattachable = effects_retained
+                && directory
+                    .metadata_at(std::ffi::OsStr::new("launch.json"), false)
+                    .is_ok();
             if !self.import_release_permitted(&record, call)?
                 || self.retained_import_fence(Self::scope(&record))?
-                || effects_retained
+                || reattachable
             {
                 let handle = custody::reattach(directory.try_clone()?, Self::scope(&record))
                     .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
