@@ -4603,3 +4603,36 @@ fn unknown_exclusion_selectors_are_refused_with_the_valid_forms()
     assert!(error.to_string().contains("valid forms: a provider"));
     Ok(())
 }
+
+#[test]
+fn configured_model_exclusion_removes_the_member_from_every_pool()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let model = ModelId::parse("codex/gpt-6-luna")?;
+    let mut config = RoutingConfig::default();
+    config.model_exclusions.push(ModelExclusion {
+        model: model.clone(),
+        schedule: Schedule::default(),
+    });
+    let ctx = context(&catalogue, &config, now()?);
+    let mut seen = 0;
+    for (name, members) in &catalogue.pools {
+        if !members.iter().any(|member| member.model == model) {
+            continue;
+        }
+        seen += 1;
+        let mut query = request("codex/test")?;
+        query.choice = RouteChoice::NamedRoute(RouteName::parse(name)?);
+        let route = resolve(&query, &ctx)?;
+        let receipt = route.pool_selection.ok_or("pool selection")?;
+        let candidate = receipt
+            .candidates
+            .iter()
+            .find(|candidate| candidate.model == model.as_str())
+            .ok_or("candidate")?;
+        assert_eq!(candidate.exclusion.as_deref(), Some("config exclusion"));
+        assert_ne!(receipt.pick, model.as_str());
+    }
+    assert!(seen > 0);
+    Ok(())
+}

@@ -2307,6 +2307,7 @@ pub fn run(
                 ("pools", list.pools.len()),
                 ("pacing entries", list.account_pacing.len()),
                 ("overrides", list.active_overrides.len()),
+                ("model exclusions", list.model_exclusions.len()),
             ];
             let rows = list
                 .named_routes
@@ -2356,7 +2357,13 @@ pub fn run(
                 }
                 (None, _) => tally,
             };
-            let next = if report.overrides.is_empty() {
+            let next = if matches!(command, Route::Exclude(_)) {
+                if report.overrides.is_empty() {
+                    "provenant route exclude add ADAPTER/ID --until 2h"
+                } else {
+                    "provenant route exclude remove ADAPTER/ID"
+                }
+            } else if report.overrides.is_empty() {
                 "provenant route override set --account ACCOUNT --policy POLICY --until 2h"
             } else if report.recorded.is_some() {
                 "provenant route override list"
