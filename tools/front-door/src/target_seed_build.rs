@@ -587,7 +587,7 @@ mod tests {
     }
 
     #[test]
-    fn one_projects_failure_never_clears_anothers_back_off() {
+    fn one_projects_failure_never_clears_another_projects_back_off() {
         let state = tempfile::tempdir().unwrap();
         let (a, b) = (marker_name(Path::new("/a")), marker_name(Path::new("/b")));
         assert_ne!(a, b);
