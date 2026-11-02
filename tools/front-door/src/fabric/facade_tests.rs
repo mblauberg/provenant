@@ -313,6 +313,7 @@ mod peer_tests {
             reaped: vec![],
             omitted_reaped: 0,
             spared: vec![],
+            cancel_delivered_before_exit: None,
             omitted_spared: 0,
             warnings: vec![],
             omitted_warnings: 0,
