@@ -253,7 +253,7 @@ fn count_linux_tasks(proc: &std::path::Path, uid: libc::uid_t) -> io::Result<u64
         }
         let status = match std::fs::read_to_string(entry.path().join("status")) {
             Ok(status) => status,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) if exited(&error) => continue,
             Err(error) => return Err(error),
         };
         let real_uid = status
@@ -274,18 +274,25 @@ fn count_linux_tasks(proc: &std::path::Path, uid: libc::uid_t) -> io::Result<u64
         }
         let threads = match std::fs::read_dir(entry.path().join("task")) {
             Ok(threads) => threads,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) if exited(&error) => continue,
             Err(error) => return Err(error),
         };
         for thread in threads {
             match thread {
                 Ok(_) => tasks = tasks.saturating_add(1),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) if exited(&error) => continue,
                 Err(error) => return Err(error),
             }
         }
     }
     Ok(tasks)
+}
+
+/// A process that exits mid-scan reads as missing (`ENOENT`) or, while it is
+/// being reaped, as `ESRCH`; either way it no longer counts.
+#[cfg(any(target_os = "linux", test))]
+fn exited(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::NotFound || error.raw_os_error() == Some(libc::ESRCH)
 }
 
 /// Bytes available to this unprivileged user on the filesystem holding `file`.

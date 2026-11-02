@@ -188,27 +188,42 @@ jobs:
       - name: Check literal nextest test filters
         working-directory: tools/front-door
         run: python3 ../../scripts/check-nextest-filters
+      - name: Validate flaky-test quarantine
+        id: quarantine
+        working-directory: tools/front-door
+        run: |
+          filter="$(../../scripts/flaky-quarantine)"
+          printf '%s\n' "$filter" > "$RUNNER_TEMP/quarantine-filter"
+          if [ -n "$filter" ]; then
+            echo "Validated quarantined tests: $filter" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'No quarantined tests.' >> "$GITHUB_STEP_SUMMARY"
+          fi
       # Hash partitioning is stable per test, and each runner keeps its own
       # serial-process group, so the serial worktree suites split across both.
       - name: Run workspace tests
         working-directory: tools/front-door
         env:
           NEXTTEST_FILTER: ${{ steps.affected.outputs.nextest_filter }}
+          QUARANTINE_FILTER_FILE: ${{ runner.temp }}/quarantine-filter
         run: |
-          if [ -n "$NEXTTEST_FILTER" ]; then
-            cargo nextest run --profile ci --workspace --locked --features provenant-providers/recording --partition hash:${{ matrix.partition }}/2 -E "$NEXTTEST_FILTER"
+          QUARANTINE_FILTER="$(cat "$QUARANTINE_FILTER_FILE")"
+          filter="$NEXTTEST_FILTER"
+          if [ -n "$QUARANTINE_FILTER" ]; then
+            if [ -n "$filter" ]; then
+              filter="($filter) & not ($QUARANTINE_FILTER)"
+            else
+              filter="not ($QUARANTINE_FILTER)"
+            fi
+          fi
+          if [ -n "$filter" ]; then
+            cargo nextest run --profile ci --workspace --locked --features provenant-providers/recording --partition hash:${{ matrix.partition }}/2 -E "$filter"
           else
             cargo nextest run --profile ci --workspace --locked --features provenant-providers/recording --partition hash:${{ matrix.partition }}/2
           fi
       - name: Report slowest tests
         if: always()
         run: scripts/nextest-slowest tools/front-door/target/nextest/ci/junit.xml "$GITHUB_STEP_SUMMARY"
-      # Cargo does not include example tests in the default nextest selection.
-      - name: Run provider recording example test
-        if: matrix.partition == 1 && steps.affected.outputs.run_provider_example == 'true'
-        working-directory: tools/front-door
-        run: |
-          cargo test --locked -p provenant-providers --features recording --example record bash_proof_needs_a_matching_successful_tool_result
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -216,6 +231,26 @@ jobs:
           name: rust-nextest-junit-${{ matrix.partition }}
           path: tools/front-door/target/nextest/ci/junit.xml
           if-no-files-found: warn
+      # Runs after the upload: it reuses the ci profile and overwrites junit.xml.
+      - name: Run quarantined tests (advisory)
+        if: matrix.partition == 1
+        continue-on-error: true
+        working-directory: tools/front-door
+        env:
+          QUARANTINE_FILTER_FILE: ${{ runner.temp }}/quarantine-filter
+        run: |
+          QUARANTINE_FILTER="$(cat "$QUARANTINE_FILTER_FILE")"
+          if [ -n "$QUARANTINE_FILTER" ]; then
+            cargo nextest run --profile ci --workspace --locked --features provenant-providers/recording --status-level flaky --final-status-level pass -E "$QUARANTINE_FILTER"
+          else
+            echo 'No quarantined tests to run.'
+          fi
+      # Cargo does not include example tests in the default nextest selection.
+      - name: Run provider recording example test
+        if: matrix.partition == 1 && steps.affected.outputs.run_provider_example == 'true'
+        working-directory: tools/front-door
+        run: |
+          cargo test --locked -p provenant-providers --features recording --example record bash_proof_needs_a_matching_successful_tool_result
 
   rust-dependencies:
     name: Rust dependency policy
@@ -321,7 +356,7 @@ jobs:
         # cargo test invocations did.
         run: >-
           cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --test-threads 1
-          -E 'binary(=worktrees) & (test(=lane_prepare_isolates_nested_state)
+          -E 'binary(=worktrees) & (test(=lane_prepare_isolates_nested_state) | test(=lane_prepare_isolates_nested_writer_state) | test(=lane_prepare_isolates_nested_publishing_state)
           | test(=read_only_dispatch_applies_bound_git_and_project_writes)
           | test(=writer_dispatch_uses_lane_cache_and_narrow_provider_state)
           | test(=writer_dispatch_edits_a_linked_worktree)
@@ -461,6 +496,8 @@ jobs:
           { git ls-files '*.sh'; grep -lE '^#!.*\b(ba)?sh\b' scripts/* 2>/dev/null; } | sort -u | xargs -r shellcheck
       - name: Test macOS path selector
         run: scripts/test-select-macos-checks
+      - name: Test flaky-test quarantine
+        run: scripts/test-flaky-quarantine
       - name: Check local Markdown links and fragments
         run: git ls-files '*.md' | lychee --offline --include-fragments --files-from -
       - name: Check retired names

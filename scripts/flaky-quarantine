@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""Validate test quarantines and print their nextest filterset."""
+
+import argparse
+import datetime as dt
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+
+DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "tools/front-door/.config/quarantine.toml"
+PACKAGE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+TEST_RE = re.compile(r"^[A-Za-z0-9_:]+$")
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def parse_config(raw):
+    """Parse the deliberately small TOML schema used by quarantine entries."""
+    entries = []
+    current = None
+    for line_number, line in enumerate(raw.splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line == "[[test]]":
+            current = {}
+            entries.append(current)
+            continue
+        if current is None or "=" not in line:
+            raise ValueError(f"line {line_number}: expected a [[test]] entry or key = value")
+        key, value = (part.strip() for part in line.split("=", 1))
+        if key not in {"package", "name", "issue", "owner", "expires"}:
+            raise ValueError(f"line {line_number}: unknown key {key!r}")
+        if key in current:
+            raise ValueError(f"line {line_number}: duplicate key {key!r}")
+        if value.startswith('"'):
+            try:
+                current[key] = json.loads(value)
+            except json.JSONDecodeError as error:
+                raise ValueError(f"line {line_number}: invalid string for {key}") from error
+            if not isinstance(current[key], str):
+                raise ValueError(f"line {line_number}: {key} must be a string")
+        elif key == "expires" and DATE_RE.fullmatch(value):
+            try:
+                current[key] = dt.date.fromisoformat(value)
+            except ValueError as error:
+                raise ValueError(f"line {line_number}: invalid expiry date") from error
+        else:
+            raise ValueError(f"line {line_number}: invalid value for {key}")
+    return {"test": entries}
+
+
+def read_tests(raw):
+    summary = json.loads(raw)
+    tests = set()
+    for suite in summary.get("rust-suites", {}).values():
+        package = suite["package-name"]
+        tests.update((package, name) for name in suite.get("testcases", {}))
+    return tests
+
+
+def make_filter(config, tests, today):
+    entries = config.get("test", [])
+    errors = []
+    filters = []
+    seen = set()
+    for number, entry in enumerate(entries, 1):
+        label = f"test entry {number}"
+        package = entry.get("package", "").strip()
+        name = entry.get("name", "").strip()
+        issue = entry.get("issue", "").strip()
+        owner = entry.get("owner", "").strip()
+        expires_raw = entry.get("expires", "")
+        if not package or not PACKAGE_RE.fullmatch(package):
+            errors.append(f"{label}: package is missing or invalid")
+        if not name or not TEST_RE.fullmatch(name):
+            errors.append(f"{label}: test name is missing or invalid")
+        if not issue:
+            errors.append(f"{label}: issue is required")
+        if not owner:
+            errors.append(f"{label}: owner is required")
+        if isinstance(expires_raw, dt.date):
+            expires = expires_raw
+        else:
+            try:
+                expires = dt.date.fromisoformat(str(expires_raw))
+            except ValueError:
+                expires = None
+                errors.append(f"{label}: expires must be an ISO date")
+        if expires is not None:
+            if expires <= today:
+                errors.append(f"{label}: quarantine expired on {expires.isoformat()}")
+            elif expires > today + dt.timedelta(days=30):
+                errors.append(f"{label}: expiry must be no more than 30 days away")
+        identity = (package, name)
+        if identity in seen:
+            errors.append(f"{label}: duplicate test {package}::{name}")
+        seen.add(identity)
+        if package and name and identity not in tests:
+            errors.append(f"{label}: unknown test {package}::{name}")
+        if package and name:
+            filters.append(f"(package(={package}) & test(={name}))")
+    if errors:
+        raise ValueError("\n".join(errors))
+    return " | ".join(filters)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--test-list", type=Path, help="Use a saved nextest JSON listing")
+    parser.add_argument("--today", type=dt.date.fromisoformat, default=dt.date.today())
+    args = parser.parse_args()
+
+    try:
+        config = parse_config(args.config.read_text(encoding="utf-8"))
+        entries = config.get("test", [])
+        if not entries:
+            print("")
+            return 0
+        if args.test_list:
+            raw_tests = args.test_list.read_text(encoding="utf-8")
+        else:
+            command = [
+                "cargo", "nextest", "list", "--workspace", "--locked", "--profile", "ci",
+                "--features", "provenant-providers/recording", "--ignore-default-filter",
+                "--message-format", "json",
+            ]
+            raw_tests = subprocess.run(command, cwd=DEFAULT_CONFIG.parents[1], check=True,
+                                       capture_output=True, text=True).stdout
+        print(make_filter(config, read_tests(raw_tests), args.today))
+    except (OSError, subprocess.CalledProcessError, json.JSONDecodeError, KeyError, ValueError) as error:
+        print(f"flaky quarantine check failed: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

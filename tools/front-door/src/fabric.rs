@@ -4471,6 +4471,125 @@ fn exact_route_refused(model: &str, excluded_families: &[String], require_distin
 }
 
 impl Factory {
+    /// Read a project-local graph document through the confined, bounded helpers.
+    fn read_graph_document(
+        &self,
+        path: &Path,
+    ) -> Result<provenant_fabric_runtime::graph::GraphDocument, FacadeError> {
+        let path = provenant_os::fs::canonicalize(path)
+            .map_err(|_| FacadeError::io("read project-local graph document; a bare name is read only from .provenant/scratch/graphs, so pass the explicit path of a legacy .agent-run/graphs document"))?;
+        if !path.starts_with(&self.cwd) {
+            return Err(FacadeError::ConfinementRefused);
+        }
+        let bytes = provenant_os::fs::FileHandle::open_source(&path)
+            .and_then(|mut file| file.read_bounded(8_388_608))
+            .map_err(|_| FacadeError::io("access graph journal"))?;
+        decode_graph_document(&bytes)
+    }
+
+    /// The one selector resolver for graph status, cancel and resume: a graph
+    /// ID, a project-local document path or a document SHA-256 hash (prefix)
+    /// becomes the graph ID and, when one is retained or named, its document.
+    fn resolve_graph(
+        &self,
+        selector: &str,
+    ) -> Result<
+        (
+            String,
+            Option<provenant_fabric_runtime::graph::GraphDocument>,
+        ),
+        FacadeError,
+    > {
+        use provenant_fabric_runtime::graph::FileJournal;
+        let refused = || FacadeError::DispatchRefused {
+            reason: graph_selector_forms(),
+        };
+        // An exact graph ID wins over every other form, but a hex ID that is
+        // also a hash prefix of a document declaring another graph is ambiguous.
+        let hash = selector.strip_prefix("sha256:").unwrap_or(selector);
+        let hex = !hash.is_empty() && hash.bytes().all(|byte| byte.is_ascii_hexdigit());
+        match FileJournal::execution(
+            &self.context.roots.state,
+            self.context.identity.project,
+            selector,
+        ) {
+            Ok(Some(execution)) => {
+                if hex
+                    && let Ok(found) = self.documents_by_hash(hash)
+                    && found.iter().any(|document| document.graph_id != selector)
+                {
+                    return Err(refused());
+                }
+                return Ok((selector.to_owned(), Some(execution.document)));
+            }
+            Err(error) if error.is_unreadable() => return Ok((selector.to_owned(), None)),
+            _ => {}
+        }
+        // Then a document path: any path-shaped selector, or a bare name of an
+        // existing file in the working directory or the scratch graphs directory.
+        let path = Path::new(selector);
+        let scratch = self.cwd.join(".provenant/scratch/graphs").join(path);
+        let local = self.cwd.join(path);
+        if path.is_absolute()
+            || selector.contains(['/', '\\'])
+            || selector.ends_with(".json")
+            || local.is_file()
+            || scratch.is_file()
+        {
+            let path = if path.components().count() == 1 && !local.exists() {
+                scratch
+            } else {
+                local
+            };
+            return match self.read_graph_document(&path) {
+                Ok(document) => Ok((document.graph_id.clone(), Some(document))),
+                Err(FacadeError::Io { .. }) => Err(refused()),
+                Err(error) => Err(error),
+            };
+        }
+        // An unknown ID, or a hash with no match, is not found; an ambiguous
+        // prefix or an unsafe graphs directory is refused.
+        if !hex {
+            return Err(FacadeError::NotFound);
+        }
+        let Ok(found) = self.documents_by_hash(hash) else {
+            return Err(refused());
+        };
+        match <[_; 1]>::try_from(found) {
+            Ok([document]) => Ok((document.graph_id.clone(), Some(document))),
+            Err(found) if found.is_empty() => Err(FacadeError::NotFound),
+            Err(_) => Err(refused()),
+        }
+    }
+
+    /// The scratch graph documents whose SHA-256 starts with `hash`. Symlinked
+    /// and non-regular entries fail the no-follow bounded read; an unsafe
+    /// graphs directory is an error.
+    fn documents_by_hash(
+        &self,
+        hash: &str,
+    ) -> Result<Vec<provenant_fabric_runtime::graph::GraphDocument>, provenant_os::fs::FsError>
+    {
+        let graphs = [".provenant", "scratch", "graphs"].iter().try_fold(
+            provenant_os::fs::Directory::open_anchor(&self.cwd)?,
+            |directory, name| directory.open_verified_directory(std::ffi::OsStr::new(name)),
+        )?;
+        let prefix = hash.to_ascii_lowercase();
+        let mut found = Vec::new();
+        for name in graphs.entries()?.flatten() {
+            if let Ok(bytes) = graphs.read_bounded(&name, 8_388_608)
+                && provenant_records::CanonicalV1::file_digest(&bytes)
+                    .to_string()
+                    .strip_prefix("sha256:")
+                    .is_some_and(|digest| digest.starts_with(&prefix))
+                && let Ok(document) = decode_graph_document(&bytes)
+            {
+                found.push(document);
+            }
+        }
+        Ok(found)
+    }
+
     fn graph(
         &self,
         input: GraphInput,
@@ -4479,6 +4598,17 @@ impl Factory {
     ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
         use provenant_fabric_runtime::coordination::input::ValidateInput;
         use provenant_fabric_runtime::graph::{FileJournal, GraphJournal};
+        let input = match input {
+            GraphInput::Status { extra, id } => GraphInput::Status {
+                extra,
+                id: self.resolve_graph(&id)?.0,
+            },
+            GraphInput::Cancel { extra, id } => GraphInput::Cancel {
+                extra,
+                id: self.resolve_graph(&id)?.0,
+            },
+            input => input,
+        };
         input
             .validate_input(provenant_core::WaitTransport::Cli)
             .map_err(|_| FacadeError::InvalidInput)?;
@@ -4502,22 +4632,24 @@ impl Factory {
                     },
                 )
                 .map_err(scratch_prepare_error)?;
-                let path = if document.is_absolute() {
-                    document.clone()
-                } else if document.components().count() == 1 && !self.cwd.join(document).exists() {
-                    scratch.join("graphs").join(document)
+                let document = if resume {
+                    self.resolve_graph(&document.to_string_lossy())?
+                        .1
+                        .ok_or_else(|| FacadeError::DispatchRefused {
+                            reason: graph_selector_forms(),
+                        })?
                 } else {
-                    self.cwd.join(document)
+                    let path = if document.is_absolute() {
+                        document.clone()
+                    } else if document.components().count() == 1
+                        && !self.cwd.join(document).exists()
+                    {
+                        scratch.join("graphs").join(document)
+                    } else {
+                        self.cwd.join(document)
+                    };
+                    self.read_graph_document(&path)?
                 };
-                let path = provenant_os::fs::canonicalize(&path)
-                    .map_err(|_| FacadeError::io("read project-local graph document; a bare name is read only from .provenant/scratch/graphs, so pass the explicit path of a legacy .agent-run/graphs document"))?;
-                if !path.starts_with(&self.cwd) {
-                    return Err(FacadeError::ConfinementRefused);
-                }
-                let bytes = provenant_os::fs::FileHandle::open_source(&path)
-                    .and_then(|mut file| file.read_bounded(8_388_608))
-                    .map_err(|_| FacadeError::io("access graph journal"))?;
-                let document = decode_graph_document(&bytes)?;
                 if let Some(branch) = &document.integration_branch {
                     provenant_run::HostDeliveryContext::validate_integration_target(
                         &self.cwd, branch,
@@ -4846,6 +4978,10 @@ impl Factory {
     }
 }
 
+fn graph_selector_forms() -> String {
+    "unknown or ambiguous graph selector; accepted forms are a graph ID, a project-local document path, or the document SHA-256 hash".to_owned()
+}
+
 impl Factory {
     /// Close the inbox requests of a checkpoint from before node asks, one
     /// inbox actor at a time.
@@ -5029,6 +5165,7 @@ pub fn graph(
             )
         }
         Err(error) => {
+            let mut message = error.to_string();
             let (outcome, code) = if matches!(
                 error.downcast_ref::<CoordinationError>(),
                 Some(CoordinationError::LaneMutation)
@@ -5041,6 +5178,7 @@ pub fn graph(
                 error.downcast_ref::<FacadeError>(),
                 Some(FacadeError::NotFound)
             ) {
+                message = graph_selector_forms();
                 (provenant_records::Outcome::Invalid, "not_found")
             } else if let Some(error @ FacadeError::DispatchRefused { .. }) =
                 error.downcast_ref::<FacadeError>()
@@ -5049,7 +5187,7 @@ pub fn graph(
             } else {
                 (provenant_records::Outcome::Error, "graph_owner")
             };
-            crate::fail(command, outcome, code, &error.to_string(), globals)
+            crate::fail(command, outcome, code, &message, globals)
         }
     }
 }

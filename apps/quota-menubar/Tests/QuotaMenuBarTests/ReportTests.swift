@@ -177,4 +177,46 @@ final class ReportTests: XCTestCase {
         XCTAssertNil(QuotaReport.Account.worst(QuotaReport.Account.current(
             account.windows.filter { $0.name == "untimed-budget" }, now: now)))
     }
+
+    func testRefusalResetDecodesAndAppearsOnTheMenuBarRow() throws {
+        let json = #"""
+        {
+          "schema_version": 1, "command": "quota show", "status": "ok", "error": null,
+          "data": {
+            "schema_version": 1, "generated_unix_seconds": 1793577600,
+            "accounts": [{
+              "account": {"adapter": "opencode", "account_key": "zen", "label": "zen"},
+              "snapshot": null, "status": "exhausted", "resets_at": "2026-11-02T00:11:00Z",
+              "free_pool_refusal": true,
+              "refusals": [{"model": "opencode/beam-free", "pool": "opencode-free",
+                "resets_at": "2026-11-02T00:11:00Z"}],
+              "age_seconds": null, "next_due_unix_seconds": null, "refreshing": false, "error": null
+            }, {
+              "account": {"adapter": "opencode", "account_key": "no-reset", "label": "no-reset"},
+              "snapshot": {"windows": [{"pool": "opencode-free", "used_basis_points": 10000,
+                "resets_unix_seconds": 1793581200}]},
+              "status": "exhausted", "free_pool_refusal": true,
+              "refusals": [{"model": "opencode/beam-free", "pool": "opencode-free"}],
+              "age_seconds": null, "next_due_unix_seconds": null, "refreshing": false, "error": null
+            }],
+            "sources": [], "coverage": {"total": 1, "known": 0},
+            "refreshing_ids": [], "next_due_unix_seconds": null,
+            "report_path": "/tmp/provenant/quota/report.json"
+          }
+        }
+        """#
+        let report = try decodeShow(json)
+        let account = try XCTUnwrap(report.accounts.first)
+        XCTAssertEqual(account.backAt, try Date("2026-11-02T00:11:00Z", strategy: .iso8601))
+        let row = QuotaMenu.account(account, now: report.generatedAt, alert: report.alertPercent)
+        XCTAssertTrue(row.subtitle?.contains("Refusal recorded for opencode/beam-free") == true)
+        let expiry = Fmt.moment(try Date("2026-11-02T00:11:00Z", strategy: .iso8601), now: report.generatedAt)
+        XCTAssertTrue(row.subtitle?.contains("until \(expiry)") == true, row.subtitle ?? "")
+        let noReset = try XCTUnwrap(report.accounts.last)
+        XCTAssertNil(noReset.backAt)
+        XCTAssertTrue(QuotaMenu.account(noReset, now: report.generatedAt, alert: report.alertPercent)
+            .subtitle?.contains("Refusal recorded for opencode/beam-free") == true)
+        XCTAssertFalse(QuotaMenu.account(noReset, now: report.generatedAt, alert: report.alertPercent)
+            .subtitle?.contains("until") == true)
+    }
 }

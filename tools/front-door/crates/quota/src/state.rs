@@ -308,6 +308,15 @@ pub struct AccountRow {
     pub account: AccountScope,
     pub snapshot: Option<QuotaSnapshot>,
     pub status: QuotaStatus,
+    /// RFC 3339 expiry for an active free-pool refusal, when the provider recorded one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<String>,
+    /// Active provider refusals scoped to a pool or model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refusals: Vec<RefusalRow>,
+    /// Whether a recorded refusal currently holds this account's free pool.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub free_pool_refusal: bool,
     pub age_seconds: Option<u64>,
     pub next_due_unix_seconds: Option<i64>,
     pub refreshing: bool,
@@ -318,6 +327,16 @@ pub struct AccountRow {
     /// Menu bar choices from the matching registered account, when there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<RowDisplay>,
+}
+fn is_false(value: &bool) -> bool {
+    !value
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefusalRow {
+    pub model: String,
+    pub pool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapacityCooldownRow {

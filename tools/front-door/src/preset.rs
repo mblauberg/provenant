@@ -854,7 +854,9 @@ pub fn expand_with(
         let parsed: Value = toml_edit::de::from_str(&format!("value = {raw}"))
             .map_err(|e| format!("{path}: {e}; string values need quotes, for example --set 'parameters.route=\"utility\"'"))?;
         if parsed["value"].is_object() {
-            return Err(format!("{path}: --set requires a scalar or array value"));
+            return Err(format!(
+                "{path}: --set requires a scalar or array value; set table fields with dotted paths, for example --set 'parameters.subject.commit=\"<sha>\"'"
+            ));
         }
         let valid = valid_paths(&config, layers);
         override_value(
@@ -2617,6 +2619,94 @@ pub(crate) fn bind_run_context(
     Ok(())
 }
 
+/// Resolve a preset's default `HEAD` subject from its bound writer worktree.
+/// An explicitly supplied subject stays under the usual project-directory
+/// resolution in `bind_run_context`.
+fn bind_default_subject_to_worktree(
+    expansion: &mut Expansion,
+    directory: &Path,
+    explicit_subject: bool,
+    cli_worktree: Option<&Path>,
+) -> Result<(), String> {
+    if explicit_subject {
+        return Ok(());
+    }
+    let nodes = expansion.document["nodes"]
+        .as_array()
+        .ok_or("missing graph nodes")?;
+    fn has_default_head(nodes: &[Value]) -> bool {
+        nodes.iter().any(|node| {
+            (node.pointer("/source/type").and_then(Value::as_str) == Some("commit")
+                && node.pointer("/source/commit").and_then(Value::as_str) == Some("HEAD"))
+                || ["composite/nodes", "loop/body"]
+                    .iter()
+                    .find_map(|path| node.pointer(&format!("/{path}")).and_then(Value::as_array))
+                    .is_some_and(|nested| has_default_head(nested))
+        })
+    }
+    if !has_default_head(nodes) {
+        return Ok(());
+    }
+    fn writer_path(nodes: &[Value]) -> Option<PathBuf> {
+        for node in nodes {
+            if node["access"] == "worktree_write"
+                && let Some(path) = node.get("worktree").and_then(Value::as_str)
+                && !path.is_empty()
+            {
+                return Some(PathBuf::from(path));
+            }
+            for key in ["composite", "loop"] {
+                let nested = node
+                    .pointer(&format!("/{key}/nodes"))
+                    .or_else(|| node.pointer(&format!("/{key}/body")))
+                    .and_then(Value::as_array);
+                if let Some(path) = nested.and_then(|nested| writer_path(nested)) {
+                    return Some(path);
+                }
+            }
+        }
+        None
+    }
+    let Some(worktree) = writer_path(nodes).or_else(|| cli_worktree.map(Path::to_path_buf)) else {
+        return Ok(());
+    };
+    let worktree = if worktree.is_absolute() {
+        worktree
+    } else {
+        directory.join(worktree)
+    };
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable for subject binding")?;
+    let oid = provenant_run::resolve_git_base(&git, &worktree, "HEAD").map_err(|error| {
+        format!(
+            "cannot resolve default subject in {}: {error}",
+            worktree.display()
+        )
+    })?;
+    let mut resolved = false;
+    visit_nodes(
+        expansion.document["nodes"]
+            .as_array_mut()
+            .ok_or("missing graph nodes")?,
+        &mut |node| {
+            if node.pointer("/source/type").and_then(Value::as_str) == Some("commit")
+                && node.pointer("/source/commit").and_then(Value::as_str) == Some("HEAD")
+            {
+                node["source"]["commit"] = json!(oid);
+                resolved = true;
+            }
+            Ok(())
+        },
+    )?;
+    if resolved {
+        expansion.document["provenance"]["resolved_subject"] = json!({
+            "reference": "HEAD",
+            "worktree": worktree,
+            "commit": oid,
+        });
+    }
+    Ok(())
+}
+
 /// The family constraint a node carries: `any`, `distinct_from_writer`,
 /// `cross_preferred` or `cross_required`, with `+require` when a writer
 /// separation is strict.
@@ -3117,7 +3207,19 @@ pub fn run(
                 params.push((key, value));
             }
         });
+        let explicit_subject = params.iter().any(|(key, _)| key == "subject")
+            || request.preset_set.iter().any(|item| {
+                item.split_once('=').is_some_and(|(path, _)| {
+                    path == "parameters.subject" || path.starts_with("parameters.subject.")
+                })
+            });
         let mut expansion = expand_with(&layers, name, prompt, &params, &request.preset_set)?;
+        bind_default_subject_to_worktree(
+            &mut expansion,
+            &directory,
+            explicit_subject,
+            request.access.worktree.as_deref(),
+        )?;
         {
             use std::io::Write;
             for warning in &expansion.warnings {

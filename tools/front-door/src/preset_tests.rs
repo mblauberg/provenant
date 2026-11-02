@@ -30,6 +30,21 @@ fn big_batch_keeps_seven_untyped_lanes_at_every_risk_tier() {
 }
 
 #[test]
+fn live_writer_cwd_refusal_suggests_running_from_the_main_checkout() {
+    let error = provenant_confinement::worktrees::WorktreeError::LiveProcess(
+        provenant_confinement::worktrees::ObservedProcess {
+            pid: 42,
+            command: Some("zsh".into()),
+        },
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("run from the main checkout or another directory")
+    );
+}
+
+#[test]
 fn nested_role_index_belongs_to_each_child_count_copy() {
     let mut layers = Layers::empty();
     layers
@@ -1081,6 +1096,17 @@ fn invalid_paths_and_toml_values_offer_help() {
     .unwrap_err();
     assert!(error.contains("parameters.route=\"utility\""), "{error}");
     assert!(expand(&layers, "single", "brief", &["parameters.route=[".into()]).is_err());
+    let error = expand(
+        &layers,
+        "generator-evaluator",
+        "brief",
+        &["parameters.subject={type='commit', commit='abc'}".into()],
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("parameters.subject.commit=\"<sha>\""),
+        "{error}"
+    );
 }
 
 #[test]

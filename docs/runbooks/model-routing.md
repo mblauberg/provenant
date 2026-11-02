@@ -58,6 +58,10 @@ it, only for a run that did not succeed. It is scoped to `opencode-go`, or
 interval with a unit (or a bare `retry-after` header value, in seconds) sets
 the refusal expiry. A pool alias is one route entry, so quota on its last
 member reports `usage_limited` rather than re-dispatching.
+`provenant quota` includes a recorded refusal's expiry in `resets_at` using
+RFC 3339 and shows its time in the host's local zone. Human output adds the
+local clock time (and weekday when the expiry is not today); a refusal without
+a recorded reset stays exhausted without a displayed expiry.
 Omit `--effort` on OpenCode free routes: their recorded model controls do not
 support effort, so an explicit value is refused before launch.
 `--confidential` excludes members and fallbacks that train on or retain prompts, or are unclassified.

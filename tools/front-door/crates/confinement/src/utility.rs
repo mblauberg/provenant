@@ -2622,19 +2622,37 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn missing_remote_fetch_propagates_probe_cancel_and_timeout() -> Result<(), Box<dyn Error>> {
-        let mut fixture = Fixture::new()?;
-        add_missing_test_remote(&mut fixture)?;
-        for (behavior, expected) in [
-            (ProbeBehavior::Cancelled, "cancelled"),
-            (ProbeBehavior::TimedOut, "timed out"),
+    fn missing_remote_fetch_propagates_probe_and_fetch_failures() -> Result<(), Box<dyn Error>> {
+        for (case, fetch_termination, probe_behavior) in [
+            (
+                "cancelled probe",
+                Termination::Exit(1),
+                ProbeBehavior::Cancelled,
+            ),
+            (
+                "timed out probe",
+                Termination::Exit(1),
+                ProbeBehavior::TimedOut,
+            ),
+            (
+                "signalled fetch",
+                Termination::Signal(15),
+                ProbeBehavior::Exit(2),
+            ),
+            (
+                "successful probe after failed fetch",
+                Termination::Exit(1),
+                ProbeBehavior::Exit(0),
+            ),
         ] {
+            let mut fixture = Fixture::new()?;
+            add_missing_test_remote(&mut fixture)?;
             let executor = ControlledFetch {
                 executor: &fixture.executor,
-                fetch_termination: Termination::Exit(1),
-                probe_behavior: behavior,
+                fetch_termination,
+                probe_behavior,
             };
-            let error = fetch_missing_remote_branch(
+            let result = fetch_missing_remote_branch(
                 &executor,
                 &fixture.repo,
                 &fixture.runtime,
@@ -2642,59 +2660,22 @@ pub(crate) mod tests {
                 "origin/main",
                 fixture.budget()?,
                 &CancelToken::new(),
-            )
-            .expect_err("probe failure must be propagated");
-            match (expected, error) {
-                ("cancelled", UtilityError::Cancelled) | ("timed out", UtilityError::TimedOut) => {}
-                (_, error) => return Err(format!("unexpected error: {error}").into()),
+            );
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("{case}: fetch unexpectedly succeeded"),
+            };
+            match (case, error) {
+                ("cancelled probe", UtilityError::Cancelled)
+                | ("timed out probe", UtilityError::TimedOut)
+                | ("signalled fetch", UtilityError::Signalled { signal: 15 })
+                | (
+                    "successful probe after failed fetch",
+                    UtilityError::FetchFailed { status: 1, .. },
+                ) => {}
+                (_, error) => return Err(format!("{case}: unexpected error: {error}").into()),
             }
         }
-        Ok(())
-    }
-
-    #[test]
-    fn missing_remote_fetch_signal_is_reported() -> Result<(), Box<dyn Error>> {
-        let mut fixture = Fixture::new()?;
-        add_missing_test_remote(&mut fixture)?;
-        let executor = ControlledFetch {
-            executor: &fixture.executor,
-            fetch_termination: Termination::Signal(15),
-            probe_behavior: ProbeBehavior::Exit(2),
-        };
-        let error = fetch_missing_remote_branch(
-            &executor,
-            &fixture.repo,
-            &fixture.runtime,
-            &fixture.home,
-            "origin/main",
-            fixture.budget()?,
-            &CancelToken::new(),
-        )
-        .expect_err("signalled fetch must fail");
-        assert!(matches!(error, UtilityError::Signalled { signal: 15 }));
-        Ok(())
-    }
-
-    #[test]
-    fn missing_remote_fetch_probe_success_does_not_hide_failure() -> Result<(), Box<dyn Error>> {
-        let mut fixture = Fixture::new()?;
-        add_missing_test_remote(&mut fixture)?;
-        let executor = ControlledFetch {
-            executor: &fixture.executor,
-            fetch_termination: Termination::Exit(1),
-            probe_behavior: ProbeBehavior::Exit(0),
-        };
-        let error = fetch_missing_remote_branch(
-            &executor,
-            &fixture.repo,
-            &fixture.runtime,
-            &fixture.home,
-            "origin/main",
-            fixture.budget()?,
-            &CancelToken::new(),
-        )
-        .expect_err("probe success must not hide fetch failure");
-        assert!(matches!(error, UtilityError::FetchFailed { status: 1, .. }));
         Ok(())
     }
 

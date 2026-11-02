@@ -438,19 +438,38 @@ pub fn report(
                         .unwrap_or(0)
                 })
         });
-        let free_refused = provenant_records::AdapterSpec::get(&record.account.adapter)
+        let refusals: Vec<_> = record
+            .refusals
+            .iter()
+            .filter(|refusal| {
+                refusal.observed_unix_seconds <= now
+                    && refusal
+                        .expires_unix_seconds()
+                        .is_ok_and(|expires| expires > now)
+            })
+            .map(|refusal| crate::RefusalRow {
+                model: refusal.model.clone(),
+                pool: refusal.pool.clone(),
+                resets_at: refusal
+                    .resets_unix_seconds
+                    .filter(|reset| *reset > now)
+                    .and_then(|reset| jiff::Timestamp::from_second(reset).ok())
+                    .map(|timestamp| timestamp.to_string()),
+            })
+            .collect();
+        let free_pool = provenant_records::AdapterSpec::get(&record.account.adapter)
             .and_then(|spec| spec.free_account.map(|(key, _)| (key, spec.free_pool)))
-            .is_some_and(|(key, pool)| {
-                record.account.account_key == key
-                    && record.refusals.iter().any(|refusal| {
-                        refusal.pool.as_deref() == pool
-                            && refusal.observed_unix_seconds <= now
-                            && refusal
-                                .resets_unix_seconds
-                                .unwrap_or(refusal.observed_unix_seconds.saturating_add(3600))
-                                > now
-                    })
-            });
+            .filter(|(key, _)| record.account.account_key == *key)
+            .map(|(_, pool)| pool);
+        let active_free_refusals: Vec<_> = free_pool
+            .map(|pool| {
+                refusals
+                    .iter()
+                    .filter(|refusal| refusal.pool.as_deref() == pool)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let free_refused = !active_free_refusals.is_empty();
         let status = match &record.snapshot {
             _ if free_refused => QuotaStatus::Exhausted,
             _ if auth_required => QuotaStatus::AuthRequired,
@@ -459,10 +478,28 @@ pub fn report(
             None if record.last_error == Some(ProbeFailure::Disabled) => QuotaStatus::Unsupported,
             None => QuotaStatus::Unknown,
         };
+        let reset_seconds = if free_refused {
+            active_free_refusals
+                .iter()
+                .map(|refusal| refusal.resets_at.as_deref())
+                .collect::<Option<Vec<_>>>()
+                .and_then(|resets| {
+                    resets
+                        .into_iter()
+                        .filter_map(|reset| reset.parse::<jiff::Timestamp>().ok())
+                        .max()
+                })
+                .map(|reset| reset.to_string())
+        } else {
+            None
+        };
         accounts.push(AccountRow {
             account: record.account.clone(),
             snapshot: record.snapshot.clone(),
             status,
+            resets_at: reset_seconds,
+            refusals,
+            free_pool_refusal: free_refused,
             age_seconds: age,
             next_due_unix_seconds: next_due(policies, record, Trigger::Timer, Power::Ac)?
                 .map(|d| d.max(now)),
@@ -1534,6 +1571,114 @@ mod zen_tests {
             assert_eq!(report.accounts.len(), 2);
             assert_eq!(report.accounts[0].status, QuotaStatus::Unknown);
             assert_eq!(report.accounts[1].status, expected);
+            assert_eq!(report.accounts[1].resets_at, None);
+            assert_eq!(report.accounts[1].free_pool_refusal, now == 101);
         }
+    }
+
+    #[test]
+    fn zen_quota_row_carries_the_recorded_refusal_expiry_as_rfc3339() {
+        let account = AccountScope {
+            adapter: "opencode".into(),
+            account_key: "zen".into(),
+            label: "zen".into(),
+        };
+        let mut record = AccountRecord::empty(account.clone());
+        record.refusals.push(crate::Refusal {
+            extra: Default::default(),
+            account: account.clone(),
+            model: "opencode/beam-free".into(),
+            pool: Some("opencode-free".into()),
+            observed_unix_seconds: 100,
+            resets_unix_seconds: Some(200),
+        });
+        let report_with_reset = report(
+            crate::source::TEST_POLICIES,
+            &[record.clone()],
+            &[Detection {
+                adapter: "opencode".into(),
+                accounts: Some(vec![account.clone()]),
+                status: QuotaStatus::Available,
+            }],
+            &QuotaQuery { adapter: None },
+            101,
+            "report.json".into(),
+        )
+        .unwrap();
+        assert_eq!(report_with_reset.accounts[0].status, QuotaStatus::Exhausted);
+        assert_eq!(
+            report_with_reset.accounts[0].resets_at.as_deref(),
+            Some("1970-01-01T00:03:20Z")
+        );
+        assert_eq!(
+            serde_json::to_value(&report_with_reset.accounts[0]).unwrap()["resets_at"],
+            "1970-01-01T00:03:20Z"
+        );
+
+        let mut mixed = record;
+        mixed.refusals.push(crate::Refusal {
+            extra: Default::default(),
+            account: mixed.account.clone(),
+            model: "opencode/beam-free-alternate".into(),
+            pool: Some("opencode-free".into()),
+            observed_unix_seconds: 100,
+            resets_unix_seconds: None,
+        });
+        let mixed_report = report(
+            crate::source::TEST_POLICIES,
+            &[mixed],
+            &[Detection {
+                adapter: "opencode".into(),
+                accounts: Some(vec![account]),
+                status: QuotaStatus::Available,
+            }],
+            &QuotaQuery { adapter: None },
+            101,
+            "report.json".into(),
+        )
+        .unwrap();
+        assert_eq!(mixed_report.accounts[0].status, QuotaStatus::Exhausted);
+        assert_eq!(mixed_report.accounts[0].resets_at, None);
+    }
+
+    #[test]
+    fn scoped_refusal_is_reported_without_exhausting_the_account() {
+        let account = AccountScope {
+            adapter: "opencode".into(),
+            account_key: "go".into(),
+            label: "go".into(),
+        };
+        let mut record = AccountRecord::empty(account.clone());
+        record.refusals.push(crate::Refusal {
+            extra: Default::default(),
+            account: account.clone(),
+            model: "opencode/beam-pro".into(),
+            pool: Some("opencode-go".into()),
+            observed_unix_seconds: 100,
+            resets_unix_seconds: Some(200),
+        });
+        let report = report(
+            crate::source::TEST_POLICIES,
+            &[record],
+            &[Detection {
+                adapter: "opencode".into(),
+                accounts: Some(vec![account]),
+                status: QuotaStatus::Available,
+            }],
+            &QuotaQuery { adapter: None },
+            101,
+            "report.json".into(),
+        )
+        .unwrap();
+        let row = &report.accounts[0];
+        assert_eq!(row.status, QuotaStatus::Unknown);
+        assert!(!row.free_pool_refusal);
+        assert_eq!(row.resets_at, None);
+        assert_eq!(row.refusals.len(), 1);
+        assert_eq!(row.refusals[0].pool.as_deref(), Some("opencode-go"));
+        assert_eq!(
+            row.refusals[0].resets_at.as_deref(),
+            Some("1970-01-01T00:03:20Z")
+        );
     }
 }

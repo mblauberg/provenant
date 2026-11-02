@@ -379,6 +379,10 @@ Preset commit parameters accept refs such as `HEAD`; the front door resolves
 them to full immutable object IDs before explain or submission. For example,
 `--set 'parameters.subject.commit="refs/heads/batch/graph"'` pins a council's
 subject. Raw graph commit bindings require the full object ID.
+When a preset's default subject is `HEAD` and a writer worktree is bound, the
+front door resolves that default against the worktree. An explicit `subject`
+continues to take precedence, and a preset without a bound worktree resolves
+`HEAD` from the invoking checkout.
 The runtime pins the source before launch and retains it on replay. A review
 uses that exact subject. A later writer starts in an existing registered
 worktree at that head, or a clean ancestor context fast-forwards to it while
@@ -697,6 +701,11 @@ brief leaves it open.
 
 Preset runs use the normal bounded `run` wait, 240 seconds by default.
 `--wait` accepts seconds or durations such as `30m`, up to four hours.
+After submission, `run --preset` prints the graph ID and a ready-to-run
+`provenant fabric graph status GRAPH_ID` command in both human and JSON output.
+The resume, status and cancel verbs also accept the graph ID, retained document
+path or its SHA-256 hash; the retained path and hash resolve to the document's
+declared graph ID.
 `--concurrency` accepts 1 to 16 and remains bounded by the host ceiling.
 Timeout leaves work running. Graph status retains one composite status and
 the children's attempts, findings and selected exports. Follow the printed

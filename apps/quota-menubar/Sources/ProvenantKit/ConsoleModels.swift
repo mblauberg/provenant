@@ -337,9 +337,16 @@ public struct QuotaShow: Decodable, Equatable, Sendable {
     }
     public struct Snapshot: Decodable, Equatable, Sendable { public let windows: [Window] }
     public struct Account: Decodable, Equatable, Sendable, Identifiable {
+        public struct Refusal: Decodable, Equatable, Sendable {
+            public let model: String
+            public let pool: String?
+            public let resetsAt: String?
+        }
         public let account: Scope
         public let snapshot: Snapshot?
         public let status: String
+        public let resetsAt: String?
+        public let refusals: [Refusal]?
         public let ageSeconds: UInt64?
         public let error: String?
         public var id: String { "\(account.adapter)/\(account.accountKey)" }

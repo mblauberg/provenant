@@ -326,15 +326,8 @@ fn check_fixture_git_sources(path: &Path, pattern: &regex::Regex) -> Result<(), 
     let mut sources = Vec::new();
     rust_sources(path, &mut sources)?;
     for path in sources {
-        let mut source = fs::read_to_string(&path)?;
+        let source = fs::read_to_string(&path)?;
         let name = path.to_string_lossy();
-        // The build script has a production Git command between test items.
-        if name.ends_with("/build.rs") {
-            source = source.replace(
-                "#[cfg(not(test))]\n#[allow(clippy::disallowed_methods)]\nfn inventory_git() -> Command {\n    Command::new(\"git\")\n}",
-                "",
-            );
-        }
         let test_file = name.contains("/tests/") || name.ends_with("_tests.rs");
         if fixture_git_violation(&source, test_file, pattern) {
             return Err(format!("{} spawns Git without the fixture helper", path.display()).into());
@@ -343,40 +336,41 @@ fn check_fixture_git_sources(path: &Path, pattern: &regex::Regex) -> Result<(), 
     Ok(())
 }
 
-// Source before the first test configuration is production. Scan the remainder
-// conservatively, including all test modules and attributes between them.
-fn fixture_git_violation(source: &str, test_file: bool, pattern: &regex::Regex) -> bool {
-    let test_source = if test_file {
-        source
-    } else {
-        source
-            .find("#[cfg(test)]")
-            .map_or("", |start| &source[start..])
-    };
-    pattern.is_match(test_source)
+// The test code in a source: the whole file for a test file, else each
+// `#[cfg(test)]` item up to its closing brace. Production code around it is not.
+fn test_scopes(source: &str, test_file: bool) -> Vec<&str> {
+    let tokens = rust_tokens(source);
+    let offset = |token: &str| token.as_ptr() as usize - source.as_ptr() as usize;
+    let mut scopes = vec![source; usize::from(test_file)];
+    for (index, attribute) in tokens.windows(7).enumerate() {
+        if test_file || attribute != ["#", "[", "cfg", "(", "test", ")", "]"] {
+            continue;
+        }
+        let (mut nesting, mut depth) = (0usize, 0usize);
+        for token in &tokens[index + 7..] {
+            match *token {
+                "(" | "[" => nesting += 1,
+                // Leaving the enclosing group (a parameter or field attribute) ends the item.
+                ")" | "]" | "," if depth + nesting == 0 => break,
+                ")" | "]" => nesting -= 1,
+                ";" if depth + nesting == 0 => break,
+                "{" => depth += 1,
+                "}" if depth <= 1 => {
+                    scopes.push(&source[offset(attribute[0])..=offset(token)]);
+                    break;
+                }
+                "}" => depth -= 1,
+                _ => {}
+            }
+        }
+    }
+    scopes
 }
 
-#[test]
-fn fixture_git_policy_rejects_named_and_multiple_test_modules() {
-    let pattern = regex::Regex::new(
-        r#"Command\s*::\s*new\s*\(\s*(?:"(?:/usr/bin/)?git"|&?(?:(?:self|fixture)\.)?git\b|executable\b)"#,
-    ).unwrap();
-    let source = concat!(
-        "#[cfg(test)]\n#[allow(dead_code)]\nmod git_tests { ",
-        "std::process::Command::new(",
-        "git); }\n#[cfg(test)]\nmod tests {} "
-    );
-    assert!(fixture_git_violation(source, false, &pattern));
-    assert!(fixture_git_violation(
-        concat!("Command::new(", "git)"),
-        true,
-        &pattern
-    ));
-    assert!(!fixture_git_violation(
-        concat!("Command::new(", "git)"),
-        false,
-        &pattern
-    ));
+fn fixture_git_violation(source: &str, test_file: bool, pattern: &regex::Regex) -> bool {
+    test_scopes(source, test_file)
+        .iter()
+        .any(|scope| pattern.is_match(scope))
 }
 
 // Whether a path names a test source: a `tests` directory, or a stem of `tests`,
@@ -408,14 +402,10 @@ struct ExecutorUse {
 // every `ExecOptions::new` an explicit `env`, or call `git_env`, within itself.
 // Works on tokens, so comments and string literals cannot trigger or hide a use.
 fn executor_git_violation(source: &str, test_file: bool) -> bool {
-    let scope = if test_file {
-        source
-    } else {
-        source
-            .find("#[cfg(test)]")
-            .map_or("", |start| &source[start..])
-    };
-    let tokens = rust_tokens(scope);
+    let tokens: Vec<&str> = test_scopes(source, test_file)
+        .into_iter()
+        .flat_map(rust_tokens)
+        .collect();
     // Owner of each open brace: Some(function id) for a function body, else the parent's.
     let mut frames: Vec<Option<usize>> = Vec::new();
     let mut functions: Vec<ExecutorUse> = vec![ExecutorUse::default()];
@@ -476,7 +466,7 @@ fn executor_git_policy_flags_only_inherited_env() {
     assert!(executor_git_violation(offending, true));
     assert!(executor_git_violation(
         concat!(
-            "#[cfg(test)] mod t { ",
+            "#[cfg(test)]\n#[allow(dead_code)]\nmod t { ",
             "fn f() { ",
             "git_executable(); ",
             "ExecOptions::new(); } }"
@@ -524,9 +514,13 @@ fn executor_git_policy_flags_only_inherited_env() {
     ] {
         assert!(!executor_git_violation(source, true), "{source}");
     }
-    // Production code outside a test module is not in scope for this guard.
+    // Production code outside a test module is not in scope, even between two of them.
     assert!(!executor_git_violation(
-        "fn production() { let git = git_executable(); let o = ExecOptions::new(a, c, d); }",
+        concat!(
+            "#[cfg(test)] mod a {}\n",
+            "fn production() { let git = git_executable(); let o = ExecOptions::new(a, c, d); }\n",
+            "#[cfg(test)] mod b {}"
+        ),
         false
     ));
 }
