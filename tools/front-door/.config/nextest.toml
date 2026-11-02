@@ -30,7 +30,6 @@ path = "junit.xml"
 # concurrent_process_writers_on_one_revision_have_one_winner: short socket root.
 # retained_state_copy_skips_entries_swapped_after_their_check: binds a socket.
 # forward_falls_back_only_when_no_agent_accepts: binds a socket.
-# a_request_refused_at_the_cap_is_busy_not_unknown: binds a socket.
 # listen_replaces_a_stale_socket_but_not_a_live_agent: binds a socket.
 # lane_mcp_refuses_coordination_but_allows_reads_and_child_submission: binds a socket.
 default-filter = '''
@@ -55,14 +54,11 @@ not (
     )) |
     (package(=provenant-workflow) & test(=store::tests::concurrency::concurrent_process_writers_on_one_revision_have_one_winner)) |
     (package(=provenant-cli) & test(=run::provider::tests::retained_state_copy_skips_entries_swapped_after_their_check)) |
-    (package(=provenant) & (
-        (binary(=provenant) & (
-            test(=peer_agent::tests::forward_falls_back_only_when_no_agent_accepts) |
-            test(=peer_agent::tests::a_request_refused_at_the_cap_is_busy_not_unknown) |
-            test(=peer_agent::tests::listen_replaces_a_stale_socket_but_not_a_live_agent)
-        )) |
-        (binary(=fabric_transport) & test(=lane_mcp_refuses_coordination_but_allows_reads_and_child_submission))
-    ))
+    (package(=provenant-fabric-runtime) & (
+        test(=peer_agent::tests::forward_falls_back_only_when_no_agent_accepts) |
+        test(=peer_agent::tests::listen_replaces_a_stale_socket_but_not_a_live_agent)
+    )) |
+    (package(=provenant) & binary(=fabric_transport) & test(=lane_mcp_refuses_coordination_but_allows_reads_and_child_submission))
 )
 '''
 
