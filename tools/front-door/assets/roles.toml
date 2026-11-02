@@ -178,6 +178,33 @@ references = [
   { ref = "skill:code-review/references/lenses/tests.md", when = "always", inline = true },
 ]
 
+[roles."lens.reliability"]
+extends = "lens"
+family = "any"
+card = "Lens reliability. Check failure and recovery paths."
+references = [
+  { ref = "skill:code-review/references/reviewer-context.md", when = "always", inline = true },
+  { ref = "skill:code-review/references/lenses/reliability.md", when = "always", inline = true },
+]
+
+[roles."lens.flexibility"]
+extends = "lens"
+family = "any"
+card = "Lens flexibility. Check configuration and coupling."
+references = [
+  { ref = "skill:code-review/references/reviewer-context.md", when = "always", inline = true },
+  { ref = "skill:code-review/references/lenses/flexibility.md", when = "always", inline = true },
+]
+
+[roles."lens.refactor-cleanup"]
+extends = "lens"
+family = "any"
+card = "Lens refactor-cleanup. Check root-cause refactors and removable code."
+references = [
+  { ref = "skill:code-review/references/reviewer-context.md", when = "always", inline = true },
+  { ref = "skill:code-review/references/lenses/refactor-cleanup.md", when = "always", inline = true },
+]
+
 [roles."lens.security-privacy"]
 extends = "lens"
 family = "any"
