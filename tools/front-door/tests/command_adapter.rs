@@ -368,10 +368,18 @@ printf '%s\n' "$PROVENANT_PROCESS_TREE"
                 .any(|process| process["ppid"] == child["pid"]),
             "{value}"
         );
+        // A short-lived helper (grep, sleep) can be sampled as an unreaped
+        // zombie with no resident pages, so only the live lane shell must
+        // report memory; every process must still carry a byte count.
         assert!(
             processes
                 .iter()
-                .all(|process| process["rss_bytes"].as_u64().is_some_and(|rss| rss > 0))
+                .all(|process| process["rss_bytes"].as_u64().is_some()),
+            "{value}"
+        );
+        assert!(
+            child["rss_bytes"].as_u64().is_some_and(|rss| rss > 0),
+            "{value}"
         );
     }
     Ok(())
