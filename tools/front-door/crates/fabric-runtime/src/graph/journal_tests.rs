@@ -173,6 +173,7 @@ fn advance_error_is_recorded_replaced_and_cleared_and_rebind_moves_directory() {
     for directory in [base.clone(), base.join("state")] {
         journal
             .bind(GraphExecution {
+                review_base: None,
                 extra: Default::default(),
                 integration_base: None,
                 directory,
@@ -219,6 +220,7 @@ fn checkpoint_reopens_with_project_isolation_and_detects_tampering() {
             FileJournal::open(&root, project, "reopen", budget, &cancel, &clock).unwrap();
         journal
             .bind(GraphExecution {
+                review_base: None,
                 extra: Default::default(),
                 integration_base: Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap()),
                 directory: base.clone(),
@@ -242,6 +244,7 @@ fn checkpoint_reopens_with_project_isolation_and_detects_tampering() {
     assert_eq!(
         FileJournal::pending_execution(&root, project, "reopen").unwrap(),
         Some(GraphExecution {
+            review_base: None,
             extra: Default::default(),
             integration_base: Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap()),
             directory: base.clone(),
@@ -258,6 +261,7 @@ fn checkpoint_reopens_with_project_isolation_and_detects_tampering() {
         );
         assert!(matches!(
             journal.bind(GraphExecution {
+                review_base: None,
                 extra: Default::default(),
                 integration_base: None,
                 directory: base.clone(),

@@ -115,8 +115,25 @@ pub trait CiStatus {
 /// is, never resubmit. Without one, the submission replays under `launch_actor`
 /// (the actor recorded before the first submit) so a changed actor cannot
 /// launch duplicate work. Provider launch and terminal publication remain run's responsibility.
+#[derive(Debug, Error)]
+pub enum ReviewResolveError {
+    #[error("review resolution is unsupported by this host")]
+    Unsupported,
+    #[error("review resolution failed: {0}")]
+    Failed(String),
+}
+
 pub trait AttemptOwner {
     type Error: Error + 'static;
+
+    /// Resolve a deferred review; hosts without support fail closed.
+    fn resolve_review(
+        &mut self,
+        _node: &GraphNode,
+        _subject: &str,
+    ) -> Result<Expansion, ReviewResolveError> {
+        Err(ReviewResolveError::Unsupported)
+    }
 
     /// Pin the integration branch at the instant this node is first admitted.
     fn integration_head(&mut self) -> Result<Option<String>, Self::Error> {
@@ -280,6 +297,8 @@ impl<R: Error + 'static, J: Error + 'static> GraphError<R, J> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct PlannedGraph {
     #[serde(skip_serializing_if = "Option::is_none")]
+    review_base: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     context: Option<provenant_records::run::WorkContext>,
     #[serde(flatten)]
     extra: provenant_records::ExtraFields,
@@ -296,6 +315,10 @@ struct PlannedGraph {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct PlannedNode {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review: Option<ReviewSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    family_group: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     context: Option<provenant_records::run::WorkContext>,
     #[serde(flatten)]
@@ -1443,6 +1466,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 let observation = match owner.observe_or_start(
                     &key,
                     NodeInput {
+                        prior_attempts: &[],
+                        family_peers: &[],
                         context: node_context(&plan, node),
                         read_roots: &node.read_roots,
                         distinct_from_attempts: &distinct_attempts,

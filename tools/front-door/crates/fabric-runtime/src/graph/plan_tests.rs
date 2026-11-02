@@ -504,7 +504,7 @@ fn refused_planner_fragment_retries_after_file_journal_reopen() {
         let mut owner = fixture_owner(&[&output]);
         {
             let mut journal = FileJournal::open(&root, project, &doc.graph_id, budget, &cancel, &clock).unwrap();
-            journal.bind(GraphExecution {extra: Default::default(),  integration_base: None, directory: base.clone(), document: doc.clone() }).unwrap();
+            journal.bind(GraphExecution {review_base: None, extra: Default::default(),  integration_base: None, directory: base.clone(), document: doc.clone() }).unwrap();
             let run = advance_with_budget(&doc, &mut owner, &mut journal, &limits, &Default::default()).unwrap();
             assert_eq!(run.status, GraphStatus::Paused);
             assert!(run.checkpoint.nodes[0].outputs.as_ref().unwrap().result.as_ref().unwrap().truncated);

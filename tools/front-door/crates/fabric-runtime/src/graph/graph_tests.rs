@@ -194,6 +194,8 @@ fn route(adapter: &str) -> GraphRoute {
 
 fn node(id: &str, route: GraphRoute) -> GraphNode {
     GraphNode {
+        review: None,
+        family_group: None,
         context: None,
         extra: Default::default(),
         composite_members: Vec::new(),
@@ -234,6 +236,7 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
 
 fn graph(nodes: Vec<GraphNode>) -> GraphDocument {
     GraphDocument {
+        review_base: None,
         context: None,
         extra: Default::default(),
         decision_session: None,
@@ -1851,6 +1854,8 @@ fn gate_only_graph_obeys_structural_limits_before_evaluating() {
             extra: Default::default(),
         }),
         GraphNode {
+            review: None,
+            family_group: None,
             id: "second".into(),
             ..gate_node(GateCondition::Budget {
                 extra: Default::default(),
@@ -2813,6 +2818,8 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
         route("fourth"),
     ];
     let document = graph(vec![GraphNode {
+        review: None,
+        family_group: None,
         context: None,
         extra: Default::default(),
         composite_members: Vec::new(),
@@ -3050,6 +3057,8 @@ fn pending_and_unknown_keep_observing_the_same_route_without_fallback() {
     ] {
         let routes = vec![route("first"), route("second")];
         let document = graph(vec![GraphNode {
+            review: None,
+            family_group: None,
             context: None,
             extra: Default::default(),
             composite_members: Vec::new(),
@@ -3360,6 +3369,8 @@ fn resume_after_a_crash_before_the_reference_save_replays_under_the_launch_actor
 #[test]
 fn terminal_task_failure_does_not_try_a_fallback_route() {
     let document = graph(vec![GraphNode {
+        review: None,
+        family_group: None,
         context: None,
         extra: Default::default(),
         composite_members: Vec::new(),
@@ -4638,4 +4649,35 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
     }
     impl Error for Untyped {}
     assert!(!launch_retry_kind(&Untyped));
+}
+
+#[test]
+fn review_plan_schema_validation() {
+    let mut reader = node("reader", route("first"));
+    reader.kind = Some(NodeKind::Plan);
+    reader.source = Some(SourceBinding::Commit {
+        commit: "1".repeat(40),
+    });
+    reader.review = Some(ReviewSpec {
+        shape: None,
+        risk_tier: None,
+        kind: None,
+        size: None,
+        risk_tags: vec![],
+        worktree: None,
+        lenses: vec![],
+        min_successful: None,
+        max_nodes: 4,
+    });
+    let mut document = graph(vec![reader]);
+    assert!(validate_plan(&document).is_err());
+    document.schema_version = 2;
+    assert!(validate_plan(&document).is_ok());
+    document.nodes[0].source = None;
+    assert!(validate_plan(&document).is_err());
+    document.nodes[0].source = Some(SourceBinding::Commit {
+        commit: "1".repeat(40),
+    });
+    document.nodes[0].kind = None;
+    assert!(validate_plan(&document).is_err());
 }

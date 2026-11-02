@@ -836,7 +836,7 @@ fn loop_delivery_retry_reopens_failed_wrapper_and_dependants() {
         let mut journal =
             FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
         journal
-            .bind(GraphExecution {extra: Default::default(),
+            .bind(GraphExecution {review_base: None, extra: Default::default(),
                 integration_base: None,
                 directory: base.clone(),
                 document: document.clone(),
@@ -1571,7 +1571,7 @@ fn loop_cancelled_ask_cleanup_replays_after_failure_and_crash() {
         let mut journal =
             FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
         journal
-            .bind(GraphExecution {extra: Default::default(),
+            .bind(GraphExecution {review_base: None, extra: Default::default(),
                 integration_base: None,
                 directory: base.clone(),
                 document: document.clone(),

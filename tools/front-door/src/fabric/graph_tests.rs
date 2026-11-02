@@ -718,7 +718,7 @@ mod result_tests {
             &cancel,
             &factory.clock,
         )?;
-        journal.bind(GraphExecution {
+        journal.bind(GraphExecution {review_base: None,
             extra: Default::default(),
             integration_base: None,
             directory: rig.project.clone(),

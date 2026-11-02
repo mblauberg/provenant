@@ -4903,6 +4903,7 @@ impl Factory {
             };
             journal
                 .bind(provenant_fabric_runtime::graph::GraphExecution {
+                    review_base: None,
                     extra: Default::default(),
                     integration_base,
                     directory: self.cwd.clone(),

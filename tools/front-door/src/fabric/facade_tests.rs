@@ -72,7 +72,7 @@ mod peer_tests {
         }))?;
         let mut journal =
             graph::FileJournal::open(&roots.state, project, "b-good", budget, &cancel, &clock)?;
-        journal.bind(graph::GraphExecution {
+        journal.bind(graph::GraphExecution {review_base: None,
             extra: Default::default(),
             integration_base: None,
             directory: rig.project.clone(),
@@ -641,7 +641,7 @@ mod peer_tests {
             }
             let observation = graph_owner.observe_or_start(
                 &key,
-                graph::NodeInput {
+                graph::NodeInput {prior_attempts: &[], family_peers: &[],
                     context: provenant_records::run::WorkContext {
                         graph_id: Some(key.graph_id.clone()),
                         node_id: Some(key.node_id.clone()),
@@ -885,7 +885,7 @@ mod peer_tests {
                 &cancel,
                 &clock,
             )?;
-            journal.bind(GraphExecution {
+            journal.bind(GraphExecution {review_base: None,
                 extra: Default::default(),
                 integration_base: None,
                 directory: fixture.rig.project.clone(),
@@ -1042,7 +1042,7 @@ mod peer_tests {
                 &cancel,
                 &factory.clock,
             )?;
-            journal.bind(graph::GraphExecution {
+            journal.bind(graph::GraphExecution {review_base: None,
                 extra: Default::default(),
                 integration_base: None,
                 directory: fixture.rig.project.clone(),
@@ -1153,7 +1153,7 @@ mod peer_tests {
             &cancel,
             &factory.clock,
         )?;
-        journal.bind(graph::GraphExecution {
+        journal.bind(graph::GraphExecution {review_base: None,
             extra: Default::default(),
             integration_base: None,
             directory: fixture.rig.project.clone(),
@@ -1215,7 +1215,7 @@ mod peer_tests {
             &cancel,
             &factory.clock,
         )?;
-        journal.bind(graph::GraphExecution {
+        journal.bind(graph::GraphExecution {review_base: None,
             extra: Default::default(),
             integration_base: None,
             directory: fixture.rig.project.clone(),
@@ -1355,7 +1355,7 @@ mod peer_tests {
             &cancel,
             &factory.clock,
         )?;
-        journal.bind(graph::GraphExecution {
+        journal.bind(graph::GraphExecution {review_base: None,
             extra: Default::default(),
             integration_base: None,
             directory: fixture.rig.project.clone(),

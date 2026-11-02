@@ -393,7 +393,7 @@ fn worst_case_land_checkpoint_fits_its_bound() {
 fn assert_fits(document: GraphDocument) {
     let plan = planned(&document);
     let checkpoint = filled_checkpoint(&document, &plan);
-    let execution = GraphExecution {
+    let execution = GraphExecution {review_base: None,
         extra: Default::default(),
         integration_base: Some("1".repeat(40).parse().unwrap()),
         directory: format!("/{}", "\u{1}".repeat(4095)).into(),
@@ -611,7 +611,7 @@ fn a_checkpoint_within_the_byte_limit_loads_past_the_old_member_limit() {
     let mut journal =
         FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
     journal
-        .bind(GraphExecution {
+        .bind(GraphExecution {review_base: None,
             extra: Default::default(),
             integration_base: None,
             directory: base.clone(),
@@ -702,7 +702,7 @@ fn a_delivery_retry_takes_a_fresh_settlement_order() {
         let mut journal =
             FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
         journal
-            .bind(GraphExecution {
+            .bind(GraphExecution {review_base: None,
                 extra: Default::default(),
                 integration_base: None,
                 directory: base.clone(),
@@ -804,7 +804,7 @@ fn ci_failed_checks_and_findings_fit_the_configured_envelope() {
                     node.outputs = Some(ci::outputs(false, Some(ci)));
                 }
             }
-            let execution = GraphExecution {
+            let execution = GraphExecution {review_base: None,
                 extra: Default::default(),
                 integration_base: Some("1".repeat(40).parse().unwrap()),
                 directory: "/fixture".into(),

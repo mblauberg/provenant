@@ -42,7 +42,7 @@ fn tick_advances_expired_asks_and_skips_future_cancelled_and_busy_graphs()
             }}]
         }))?;
         let mut journal = graph::FileJournal::open(&roots.state, project, id, budget, &cancel, &clock)?;
-        journal.bind(graph::GraphExecution { extra: Default::default(), integration_base: None, directory: rig.project.clone(), document: document.clone() })?;
+        journal.bind(graph::GraphExecution {review_base: None,  extra: Default::default(), integration_base: None, directory: rig.project.clone(), document: document.clone() })?;
         seed.at = if id == "c-future" { now } else { provenant_core::WallTime::from_micros(now.as_micros() - 120_000_000)? };
         let mut run = graph::advance_with_budget(&document, &mut seed, &mut journal, &Default::default(), &Default::default())?;
         assert_eq!(run.checkpoint.nodes[0].state, graph::NodeState::Running);

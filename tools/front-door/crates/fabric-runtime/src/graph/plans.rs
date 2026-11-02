@@ -112,6 +112,8 @@ pub struct PatternInstantiation {
 /// document remains the digest authority, just as it does for loop rounds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Expansion {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<ReviewResolution>,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     pub source: String,
@@ -665,6 +667,7 @@ fn fragment(
         })
         .collect();
     let local = GraphDocument {
+        review_base: None,
         context: document.context.clone(),
         extra: Default::default(),
         schema_version: 1,
@@ -768,6 +771,7 @@ fn fragment(
     }
     coordinate(&mut nodes, document, checkpoint)?;
     Ok(Expansion {
+        review: None,
         extra: Default::default(),
         source: node.id.clone(),
         continuation: false,
@@ -969,6 +973,7 @@ fn continuation(
     }
     child.round = None;
     Ok(Expansion {
+        review: None,
         extra: Default::default(),
         source: node.id.clone(),
         continuation: true,
@@ -1301,6 +1306,7 @@ pub(super) fn fallback_expansion(
     let expanded = composites::expand(&with_root, &generous())
         .map_err(|error| format!("fallback stage does not expand: {error}"))?;
     Ok(Expansion {
+        review: None,
         extra: Default::default(),
         source: node_id.to_owned(),
         continuation: false,
