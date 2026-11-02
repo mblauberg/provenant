@@ -185,17 +185,50 @@ jobs:
         uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         with:
           tool: cargo-nextest@0.9.149
+      - name: Validate flaky-test quarantine
+        id: quarantine
+        run: |
+          filter="$(../../scripts/flaky-quarantine)"
+          printf '%s\n' "$filter" > "$RUNNER_TEMP/quarantine-filter"
+          if [ -n "$filter" ]; then
+            echo "Validated quarantined tests: $filter" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'No quarantined tests.' >> "$GITHUB_STEP_SUMMARY"
+          fi
       # Hash partitioning is stable per test, and each runner keeps its own
       # serial-process group, so the serial worktree suites split across both.
       - name: Run workspace tests
         working-directory: tools/front-door
         env:
           NEXTTEST_FILTER: ${{ steps.affected.outputs.nextest_filter }}
+          QUARANTINE_FILTER_FILE: ${{ runner.temp }}/quarantine-filter
         run: |
-          if [ -n "$NEXTTEST_FILTER" ]; then
-            cargo nextest run --profile ci --workspace --locked --features provenant-providers/recording --partition hash:${{ matrix.partition }}/2 -E "$NEXTTEST_FILTER"
+          QUARANTINE_FILTER="$(cat "$QUARANTINE_FILTER_FILE")"
+          filter="$NEXTTEST_FILTER"
+          if [ -n "$QUARANTINE_FILTER" ]; then
+            if [ -n "$filter" ]; then
+              filter="($filter) & not ($QUARANTINE_FILTER)"
+            else
+              filter="not ($QUARANTINE_FILTER)"
+            fi
+          fi
+          if [ -n "$filter" ]; then
+            cargo nextest run --profile ci --workspace --locked --features provenant-providers/recording --partition hash:${{ matrix.partition }}/2 -E "$filter"
           else
             cargo nextest run --profile ci --workspace --locked --features provenant-providers/recording --partition hash:${{ matrix.partition }}/2
+          fi
+      - name: Run quarantined tests (advisory)
+        if: matrix.partition == 1
+        continue-on-error: true
+        working-directory: tools/front-door
+        env:
+          QUARANTINE_FILTER_FILE: ${{ runner.temp }}/quarantine-filter
+        run: |
+          QUARANTINE_FILTER="$(cat "$QUARANTINE_FILTER_FILE")"
+          if [ -n "$QUARANTINE_FILTER" ]; then
+            cargo nextest run --profile ci --workspace --locked --features provenant-providers/recording --status-level flaky --final-status-level pass -E "$QUARANTINE_FILTER"
+          else
+            echo 'No quarantined tests to run.'
           fi
       # Cargo does not include example tests in the default nextest selection.
       - name: Run provider recording example test
@@ -453,6 +486,8 @@ jobs:
           { git ls-files '*.sh'; grep -lE '^#!.*\b(ba)?sh\b' scripts/* 2>/dev/null; } | sort -u | xargs -r shellcheck
       - name: Test macOS path selector
         run: scripts/test-select-macos-checks
+      - name: Test flaky-test quarantine
+        run: scripts/test-flaky-quarantine
       - name: Check local Markdown links and fragments
         run: git ls-files '*.md' | lychee --offline --include-fragments --files-from -
       - name: Check retired names

@@ -1,0 +1,66 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+scratch=$(mktemp -d)
+
+cat > "$scratch/tests.json" <<'JSON'
+{"rust-suites":{"suite":{"package-name":"provenant-cli","testcases":{"network::flaky_case":{},"network::stable_case":{}}}}}
+JSON
+
+write_config() {
+  cat > "$scratch/quarantine.toml"
+}
+
+python3=${PYTHON:-python3}
+
+write_config <<'TOML'
+[[test]]
+package = "provenant-cli"
+name = "network::flaky_case"
+issue = "#2599"
+owner = "maintainer"
+expires = 2030-01-20
+TOML
+filter=$("$python3" "$repo_root/scripts/flaky-quarantine" --config "$scratch/quarantine.toml" --test-list "$scratch/tests.json" --today 2030-01-01)
+test "$filter" = '(package(=provenant-cli) & test(=network::flaky_case))'
+
+expect_failure() {
+  expected=$1
+  if "$python3" "$repo_root/scripts/flaky-quarantine" --config "$scratch/quarantine.toml" --test-list "$scratch/tests.json" --today 2030-01-01 >"$scratch/output" 2>&1; then
+    echo "Expected failure containing: $expected" >&2
+    exit 1
+  fi
+  grep -F "$expected" "$scratch/output" >/dev/null
+}
+
+write_config <<'TOML'
+[[test]]
+package = "provenant-cli"
+name = "network::flaky_case"
+issue = "#2599"
+owner = "maintainer"
+expires = 2029-12-31
+TOML
+expect_failure 'quarantine expired'
+
+write_config <<'TOML'
+[[test]]
+package = "provenant-cli"
+name = "network::flaky_case"
+owner = "maintainer"
+expires = 2030-01-20
+TOML
+expect_failure 'issue is required'
+
+write_config <<'TOML'
+[[test]]
+package = "provenant-cli"
+name = "network::missing_case"
+issue = "#2599"
+owner = "maintainer"
+expires = 2030-01-20
+TOML
+expect_failure 'unknown test provenant-cli::network::missing_case'
+
+echo 'Flaky quarantine checks passed.'

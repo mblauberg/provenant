@@ -1,0 +1,2 @@
+# Add entries only for tests with an open issue and remove them in the fixing PR.
+# Expiry is limited to 30 days from the day the CI check runs.
