@@ -648,6 +648,68 @@ fn policy_empty_result_falls_back_without_a_chair_turn() -> Result {
     cleanup.disarm();
     Ok(())
 }
+fn submit_prints_each_brief_read_root_warning_once() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = policy_codex_fixture()?;
+    let cleanup = rig.process_cleanup();
+    let elsewhere = tempfile::tempdir()?;
+    let outside = fs::canonicalize(elsewhere.path())?.join("rubric.md");
+    fs::write(&outside, "rubric")?;
+    let prompt = rig.root.join("prompt.txt");
+    fs::write(
+        &prompt,
+        format!(
+            "fixture policy result; apply {} and {} again",
+            outside.display(),
+            outside.display()
+        ),
+    )?;
+    let submit = |json: bool, id: &str| {
+        let mut args = vec![
+            "run",
+            "--model",
+            "codex/gpt-6-luna",
+            "--effort",
+            "low",
+            "--operation-id",
+            id,
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt path")?,
+            "--wait",
+            "3s",
+        ];
+        if json {
+            args.push("--json");
+        }
+        rig.command(&args)
+    };
+    let text = submit(false, "brief-warning-text")?;
+    let human = String::from_utf8_lossy(&text.stdout.bytes).into_owned();
+    assert_eq!(
+        human
+            .lines()
+            .filter(|line| line.contains(&outside.display().to_string()))
+            .count(),
+        1,
+        "{human}"
+    );
+    assert_eq!(
+        human.matches("warning: brief references").count(),
+        1,
+        "{human}"
+    );
+    let json = submit(true, "brief-warning-json")?;
+    let data: Value = serde_json::from_slice(&json.stdout.bytes)?;
+    assert_eq!(
+        data["data"]["warnings"].as_array().map(Vec::len),
+        Some(1),
+        "{data}"
+    );
+    cleanup.disarm();
+    Ok(())
+}
 fn stats_reports_partial_signals_outside_graph_groups() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -3817,6 +3879,7 @@ fn main() -> ExitCode {
                 "policy_empty_result_falls_back_without_a_chair_turn",
                 "policy_incomplete_result_continues_the_retained_session",
                 "stats_reports_partial_signals_outside_graph_groups",
+                "submit_prints_each_brief_read_root_warning_once",
                 "interrupted_progress_recovers_on_another_account_in_the_same_worktree",
                 "capacity_settlement_resumes_the_same_session",
                 "review_fans_out_and_collects_fake_provider",
@@ -3864,6 +3927,7 @@ fn main() -> ExitCode {
                     "policy_empty_result_falls_back_without_a_chair_turn" => policy_empty_result_falls_back_without_a_chair_turn(),
                     "policy_incomplete_result_continues_the_retained_session" => policy_incomplete_result_continues_the_retained_session(),
                     "stats_reports_partial_signals_outside_graph_groups" => stats_reports_partial_signals_outside_graph_groups(),
+                    "submit_prints_each_brief_read_root_warning_once" => submit_prints_each_brief_read_root_warning_once(),
                     "interrupted_progress_recovers_on_another_account_in_the_same_worktree" => interrupted_progress_recovers_on_another_account_in_the_same_worktree(),
                     "capacity_settlement_resumes_the_same_session" => capacity_settlement_resumes_the_same_session(),
                     "review_fans_out_and_collects_fake_provider" => review_fans_out_and_collects_fake_provider(),
