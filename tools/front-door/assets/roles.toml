@@ -166,6 +166,14 @@ Lens: ${item.name}. Subject: ${prompt}
 Base (diff reference): ${base}
 Spec (acceptance criteria): ${spec}
 Check correctness against the spec as well as this lens.
+End with a findings block (schema_version 1) whose findings are a JSON array,
+with at most 32 entries and an empty array when there are no findings. Use this
+canonical array form:
+```findings
+{"schema_version":1,"findings":[{"id":"F1","severity":"high","file":"src/lib.rs","line":12,"summary":"Describe the finding","status":"open"}]}
+```
+For no findings, use `{"schema_version":1,"findings":[]}`.
+Put the findings block before the verdict line.
 End with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not
 include another verdict line elsewhere in the result.
 """
@@ -222,6 +230,14 @@ Base (diff reference): ${base}
 Spec (acceptance criteria): ${spec}
 Check correctness against the spec as well as this lens.
 ${mutation_testing}
+End with a findings block (schema_version 1) whose findings are a JSON array,
+with at most 32 entries and an empty array when there are no findings. Use this
+canonical array form:
+```findings
+{"schema_version":1,"findings":[{"id":"F1","severity":"high","file":"src/lib.rs","line":12,"summary":"Describe the finding","status":"open"}]}
+```
+For no findings, use `{"schema_version":1,"findings":[]}`.
+Put the findings block before the verdict line.
 End with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not
 include another verdict line elsewhere in the result.
 """

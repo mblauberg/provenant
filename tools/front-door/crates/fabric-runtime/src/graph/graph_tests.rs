@@ -1067,7 +1067,12 @@ fn partial_composite_exports_only_successful_members_and_lists_the_unavailable()
             .unwrap()
     };
     assert_eq!(run.status, GraphStatus::Complete);
+    assert_eq!(node("lens-a").state, NodeState::Succeeded);
     assert_eq!(node("lens-b").state, NodeState::Failed);
+    assert_eq!(
+        node("lens-b").advance_error_code.as_deref(),
+        Some("findings_required")
+    );
     assert_eq!(node("verify").state, NodeState::Succeeded);
     let lenses = node("lenses").outputs.as_ref().unwrap();
     assert_eq!(lenses.findings.len(), 1);
