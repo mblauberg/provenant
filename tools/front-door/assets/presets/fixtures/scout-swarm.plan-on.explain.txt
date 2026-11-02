@@ -11,3 +11,4 @@ Roles:
   scout.codebase  origin=bundled digest=<digest>
   scout.external  origin=bundled digest=<digest>
 Substituted scout: web -> junior (route web is not defined in the routing configuration)
+Substituted external: web -> junior (route web is not defined in the routing configuration)
