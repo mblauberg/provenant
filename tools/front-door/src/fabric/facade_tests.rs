@@ -11,6 +11,10 @@ fn cli_failure_uses_stderr_without_structured_json() {
 fn scratch_prepare_io_error_retains_its_cause() {
     let error = scratch_prepare_error("exclude lock timed out");
     assert!(error.to_string().contains("exclude lock timed out"));
+    assert!(error.to_string().contains("prepare project scratch"));
+    assert!(error.to_string().contains(".provenant/scratch"));
+    assert!(matches!(error, FacadeError::Io { path: Some(path), .. }
+        if path == ".provenant/scratch"));
 }
 
 #[cfg(test)]

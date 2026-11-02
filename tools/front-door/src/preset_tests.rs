@@ -647,6 +647,89 @@ fn graph_attempt_input_carries_preset_selection_context() {
 }
 
 #[test]
+fn preset_wait_retries_an_injected_scratch_failure_after_graph_admission() {
+    let mut scratch = super::fabric::PreparedScratch::default();
+    let mut attempts = 0;
+    let result = loop {
+        attempts += 1;
+        match scratch.get_or_prepare(|| {
+            if attempts == 1 {
+                Err(super::fabric::ScratchPreparationError(
+                    provenant_confinement::worktrees::WorktreeError::Filesystem(
+                        provenant_os::fs::FsError::LockTimeout {
+                            path: ".git/info/exclude".into(),
+                            timeout: std::time::Duration::from_millis(100),
+                        },
+                    ),
+                ))
+            } else {
+                Ok(".provenant/scratch".into())
+            }
+        }) {
+            Err(error) if super::fabric::retry_scratch_poll(&error, true) => {
+                continue;
+            }
+            result => break result,
+        }
+    };
+    assert_eq!(attempts, 2);
+    assert_eq!(result.unwrap(), std::path::Path::new(".provenant/scratch"));
+
+    let scratch_error = super::fabric::ScratchPreparationError(
+        provenant_confinement::worktrees::WorktreeError::Filesystem(
+            provenant_os::fs::FsError::LockTimeout {
+                path: ".git/info/exclude".into(),
+                timeout: std::time::Duration::from_millis(100),
+            },
+        ),
+    );
+    assert!(!super::fabric::retry_scratch_poll(&scratch_error, false));
+    let permanent_error = super::fabric::ScratchPreparationError(
+        provenant_confinement::worktrees::WorktreeError::Filesystem(
+            provenant_os::fs::FsError::Symlink {
+                path: ".provenant/scratch".into(),
+                source: std::io::Error::other("symlink"),
+            },
+        ),
+    );
+    assert!(!super::fabric::retry_scratch_poll(&permanent_error, true));
+
+    let exhausted =
+        super::fabric::scratch_prepare_error_message(&scratch_error, Some("admitted-graph"), true);
+    assert!(
+        exhausted
+            .as_deref()
+            .is_some_and(|message| message.contains("admitted-graph")
+                && message.contains(".provenant/scratch")
+                && message.contains("lock acquisition timed out"))
+    );
+    assert_eq!(
+        super::fabric::scratch_prepare_error_message(
+            &permanent_error,
+            Some("admitted-graph"),
+            true,
+        ),
+        None
+    );
+}
+
+#[test]
+fn preset_wait_prepares_scratch_once_across_polls() {
+    let mut scratch = super::fabric::PreparedScratch::default();
+    let mut calls = 0;
+    for _ in 0..5 {
+        let path = scratch
+            .get_or_prepare(|| {
+                calls += 1;
+                Ok(".provenant/scratch".into())
+            })
+            .unwrap();
+        assert_eq!(path, std::path::Path::new(".provenant/scratch"));
+    }
+    assert_eq!(calls, 1);
+}
+
+#[test]
 fn bundled_presets_complete_through_the_real_scheduler_and_replay() {
     use provenant_fabric_runtime::graph::{GraphStatus, NodeState, advance_with_budget};
     for name in [

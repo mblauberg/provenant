@@ -44,6 +44,8 @@ pub fn with_context<T>(
     let registry = child(&state, OsStr::new("worktrees"))?;
     let project_state = child(&registry, OsStr::new(&binding.project_id().to_string()))?;
     let workers = CensusPolicyWorkers::from_roots(&SystemWorkerObserver, roots)?;
+    let lock_budget =
+        WaitBudget::cli(clock.mono_now(), 5).map_err(|_| WorktreeError::InvalidRequest)?;
     action(&WorktreeContext {
         home,
         repo: &repo,
@@ -55,7 +57,6 @@ pub fn with_context<T>(
         clock,
         utility_budget: budget,
         mutation_budget: UtilityBudget::bounded(Duration::from_secs(120))?,
-        lock_budget: WaitBudget::cli(clock.mono_now(), 5)
-            .map_err(|_| WorktreeError::InvalidRequest)?,
+        lock_budget,
     })
 }

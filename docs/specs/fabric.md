@@ -1468,13 +1468,25 @@ checkout's scratch root (never a symlink), so briefs there stay readable from a
 linked worktree. The graph path error and CLI help name
 `.provenant/scratch/graphs`. Scratch is disposable operator data, separate from
 authoritative run state; expiry is owned by GC rather than graph execution.
+
+Foreground preset waits prepare scratch and retain the graph document once
+before the first poll. A setup failure before graph admission fails the command
+with the step, path and cause. For an already-admitted graph, transient scratch
+lock and Git probe timeouts are retried on the next poll; permanent path,
+permission and custody refusals fail immediately. Scratch lock acquisition is
+capped by the preset wait budget; Git probes retain their bounded utility
+timeout. If the wait budget expires during a transient failure, the error
+names the admitted graph ID.
 - Why: graph documents and lane briefs need a discoverable project-local home
   without creating tracked configuration changes.
 - Test: `crates/confinement/src/scratch.rs::scratch_is_local_excluded_idempotent_and_refuses_links`;
+  `crates/confinement/src/scratch.rs::scratch_ensure_respects_the_callers_lock_budget`;
   `crates/confinement/src/scratch.rs::scratch_ignores_legacy_root_and_never_touches_it`;
   `src/preset_tests.rs::graph_publication_repairs_owned_loose_directory`;
   `src/fabric/preset_graph.rs::refusal_names_the_path_mode_and_repair`;
   `src/fabric/facade_tests.rs::bare_graph_miss_names_the_scratch_root_and_searches_no_legacy_root`;
+  `src/preset_tests.rs::preset_wait_prepares_scratch_once_across_polls`,
+  `::preset_wait_retries_an_injected_scratch_failure_after_graph_admission`;
   `crates/cli/src/run/provider.rs::writers_read_the_primary_checkouts_untracked_scratch`.
 - Owner: `crates/confinement/src/scratch.rs`, `crates/cli/src/run/provider.rs`, `src/fabric.rs`
 

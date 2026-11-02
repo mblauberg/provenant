@@ -717,6 +717,15 @@ that, naming the omitted bytes); `--full` reads the full byte window and
 their objects remain readable; peer summaries report this evidence as
 unavailable rather than guessing a diff.
 
+Foreground `run --preset` prepares and retains the graph document in
+`.provenant/scratch` before its first graph poll, using one preparation per
+wait. A failure there names the preparation step, path and cause. An
+already-admitted graph retries transient lock and Git probe timeouts while
+permanent path, permission and custody refusals fail immediately. Scratch lock
+acquisition is capped by the preset wait budget; Git probes retain their
+bounded utility timeout. If the wait budget expires during retries, the error
+includes the graph ID so operators can continue with `fabric graph status`.
+
 `--tail N` works locally and on peers, is clamped to 500 lines and retains at
 most `--max-bytes`. Peer tails page within a shared 30-second budget and
 refuse a changing artifact. Event tails retain whole records; local receipt
