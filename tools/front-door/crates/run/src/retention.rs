@@ -468,7 +468,14 @@ fn collect_temporary(
     let name = OsStr::new("tmp");
     match attempt.metadata_at(name, false) {
         Ok(_) => {}
-        Err(error) if error.is_not_found() => return Ok(()),
+        // A crash after removing `tmp` can leave the macOS short root behind;
+        // the removal below also clears it when `tmp` is already gone.
+        Err(error) if error.is_not_found() => {
+            if !dry_run {
+                crate::artifacts::remove_unreserved_terminal_temporary(attempt)?;
+            }
+            return Ok(());
+        }
         Err(error) => return Err(error.into()),
     }
     let mut measured = provenant_os::disk::DiskReport::new(path.into(), 0);

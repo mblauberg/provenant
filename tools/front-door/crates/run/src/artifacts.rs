@@ -22,8 +22,10 @@ pub(crate) fn subdir(parent: &Directory, name: &OsStr, create: bool) -> Result<D
 }
 
 pub(crate) fn remove_temporary_best_effort(attempt: &Directory) -> provenant_os::fs::Result<()> {
-    remove_entry_tree(attempt, OsStr::new("tmp"))?;
-    remove_macos_temporary_root(attempt)
+    // Remove the short root first, so `tmp` still marks the attempt for GC if
+    // this is interrupted.
+    remove_macos_temporary_root(attempt)?;
+    remove_entry_tree(attempt, OsStr::new("tmp"))
 }
 
 #[cfg(target_os = "macos")]
