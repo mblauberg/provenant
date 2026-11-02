@@ -189,7 +189,7 @@ mod peer_tests {
                 budget,
                 &cancel
             ),
-            Err(FacadeError::DispatchRefused { .. })
+            Err(FacadeError::NotFound)
         ));
         Ok(())
     }

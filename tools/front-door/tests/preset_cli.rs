@@ -262,8 +262,12 @@ fn preset_wait_completes_a_retained_gate_graph_and_replays_it()
         ])
         .output()?;
     assert!(!unknown.status.success());
-    let unknown_text = String::from_utf8(unknown.stdout)?;
-    assert!(unknown_text.contains("accepted forms"), "{unknown_text}");
+    let unknown: serde_json::Value = serde_json::from_slice(&unknown.stdout)?;
+    assert_eq!(unknown["error"]["code"], "not_found", "{unknown}");
+    assert_eq!(
+        unknown["error"]["repair"], "run `provenant help fabric graph status`",
+        "{unknown}"
+    );
     let human = fixture_cli()
         .current_dir(&project)
         .env("PROVENANT_ROOT", &root)

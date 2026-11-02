@@ -4526,9 +4526,11 @@ impl Factory {
             Err(error) if error.is_unreadable() => return Ok((selector.to_owned(), None)),
             _ => {}
         }
+        // An unknown ID, or a hash with no match, is not found; an ambiguous
+        // prefix or an unsafe graphs directory is refused.
         let hash = selector.strip_prefix("sha256:").unwrap_or(selector);
         if hash.is_empty() || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(refused());
+            return Err(FacadeError::NotFound);
         }
         let Ok((graphs, entries)) = (|| {
             let graphs = [".provenant", "scratch", "graphs"].iter().try_fold(
@@ -4555,6 +4557,7 @@ impl Factory {
         }
         match <[_; 1]>::try_from(found) {
             Ok([document]) => Ok((document.graph_id.clone(), Some(document))),
+            Err(found) if found.is_empty() => Err(FacadeError::NotFound),
             Err(_) => Err(refused()),
         }
     }
