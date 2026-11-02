@@ -73,7 +73,15 @@ fn review_explain_snapshots_integration_panel() -> Result<(), Box<dyn std::error
         .arg(temp.path().join("state"))
         .args(["review", "HEAD", "--brief-file"])
         .arg(&brief)
-        .args(["--kind", "integration", "--risk", "routine", "--risk-tag", "security", "--explain"])
+        .args([
+            "--kind",
+            "integration",
+            "--risk",
+            "routine",
+            "--risk-tag",
+            "security",
+            "--explain",
+        ])
         .output()?;
     assert!(
         output.status.success(),

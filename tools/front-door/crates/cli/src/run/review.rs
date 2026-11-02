@@ -145,10 +145,31 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
             })
             .collect();
     }
-    let risk_pool = panel_shape.reviewers.first().map(|group| group.pool.clone()).unwrap_or_default();
-    for (tag, lens) in [("security", "security-privacy"), ("concurrency", "concurrency-data-errors"), ("terminal", "adversarial")] {
-        if (command.risk_tags.iter().any(|value| value == tag) || (tag == "terminal" && command.risk.as_deref() == Some("terminal"))) && !panel_shape.reviewers.iter().any(|group| group.lenses.iter().any(|existing| existing == lens)) {
-            panel_shape.reviewers.push(provenant_routing::ReviewReviewer { pool: risk_pool.clone(), count: 1, lenses: vec![lens.into()], distinct_families: false });
+    let risk_pool = panel_shape
+        .reviewers
+        .first()
+        .map(|group| group.pool.clone())
+        .unwrap_or_default();
+    for (tag, lens) in [
+        ("security", "security-privacy"),
+        ("concurrency", "concurrency-data-errors"),
+        ("terminal", "adversarial"),
+    ] {
+        if (command.risk_tags.iter().any(|value| value == tag)
+            || (tag == "terminal" && command.risk.as_deref() == Some("terminal")))
+            && !panel_shape
+                .reviewers
+                .iter()
+                .any(|group| group.lenses.iter().any(|existing| existing == lens))
+        {
+            panel_shape
+                .reviewers
+                .push(provenant_routing::ReviewReviewer {
+                    pool: risk_pool.clone(),
+                    count: 1,
+                    lenses: vec![lens.into()],
+                    distinct_families: false,
+                });
         }
     }
     if panel_shape
@@ -746,7 +767,13 @@ fn review_text(data: &Value) -> String {
         data["risk"].as_str().unwrap_or("unknown")
     );
     if let Some(tags) = data["risk_tags"].as_array().filter(|tags| !tags.is_empty()) {
-        text.push_str(&format!("  risk tags: {}\n", tags.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")));
+        text.push_str(&format!(
+            "  risk tags: {}\n",
+            tags.iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
     if let Some(rows) = data["reviewers"].as_array() {
         for row in rows {
