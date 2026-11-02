@@ -185,9 +185,7 @@ pub(crate) fn run_preset_graph(
                     return Err(scratch_prepare_error(error).into());
                 }
             };
-            if waiting.remaining(factory.clock.mono_now()).as_micros() == 0 && last_run.is_none() {
-                return Err("preset wait budget expired before polling".into());
-            }
+            // Poll at least once once scratch is ready, as before #2512.
             let document_path = match &retained_document {
                 Some(path) => path.clone(),
                 None => {
