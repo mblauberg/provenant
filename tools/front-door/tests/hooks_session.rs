@@ -206,6 +206,22 @@ fn session_start_warns_once_only_when_disk_is_below_headroom() -> Result {
 fn restart_hook_reports_in_flight_lanes_and_prs_named_by_the_chair() -> Result {
     let rig = TestRig::new()?;
     let lane = create_lane(&rig)?;
+    let cli = rig.command(&["--json", "lanes"])?;
+    assert_eq!(code(&cli), 0, "{:?}", cli.stderr.bytes);
+    let cli: Value = serde_json::from_slice(&cli.stdout.bytes)?;
+    assert!(
+        cli["data"]["lanes"].as_array().is_some_and(|lanes| {
+            lanes.iter().any(|entry| {
+                format!(
+                    "{}/{}/{}",
+                    entry["run_id"].as_str().unwrap_or("?"),
+                    entry["task_id"].as_str().unwrap_or("?"),
+                    entry["attempt_id"].as_str().unwrap_or("?")
+                ) == lane
+            })
+        }),
+        "{cli}"
+    );
     let checkpoint = store(&rig, "restart-session")?;
     save(
         &checkpoint,

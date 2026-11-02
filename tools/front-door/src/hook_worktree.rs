@@ -221,7 +221,7 @@ pub fn create(globals: &Globals) -> u8 {
         let branch = branch_for(&input.name)?;
         let deadline = Instant::now() + WORK_TIME;
         let executor = SystemExecutor::new(1)?;
-        let cli = Cli::new(globals, &input.cwd, &executor).ok_or("cannot find this executable")?;
+        let cli = Cli::new(globals, &input.cwd, &executor)?;
         let state = state_root(globals, &input.cwd)?;
         let created = cli.data(&["worktree", "create", &branch], WORK_TIME, deadline);
         let path = match created {
@@ -292,7 +292,7 @@ pub fn remove(globals: &Globals) -> u8 {
             .ok_or("no directory to run from")?;
         let deadline = Instant::now() + WORK_TIME;
         let executor = SystemExecutor::new(1)?;
-        let cli = Cli::new(globals, &cwd, &executor).ok_or("cannot find this executable")?;
+        let cli = Cli::new(globals, &cwd, &executor)?;
         let list = cli.data(&["worktree", "list"], LIST_TIME, deadline)?;
         // Only a linked worktree this project's owner lists is removable; the
         // first entry is the primary checkout.

@@ -172,6 +172,11 @@ pub struct WorktreeLine {
     pub dirty: String,
     pub writer: String,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unavailable {
+    pub source: String,
+    pub reason: String,
+}
 
 /// One collected view. A section the collector could not read is named in
 /// `unavailable` rather than shown as empty, so absence never reads as "none".
@@ -188,7 +193,7 @@ pub struct SessionState {
     /// PR numbers the chair named whose status could not be read.
     pub prs_unread: Vec<PrUnread>,
     pub worktrees: Vec<WorktreeLine>,
-    pub unavailable: Vec<String>,
+    pub unavailable: Vec<Unavailable>,
     /// How commands the output shows reach the store the collector used.
     pub commands: CommandPrefix,
 }
@@ -236,45 +241,43 @@ impl SessionState {
         };
         // A lane section with no lanes and no partial note is omitted: an empty
         // count says nothing the agent can act on.
-        if !self.unavailable.iter().any(|name| name == "lanes") {
-            if !self.active.is_empty() || self.active_more.is_some() {
-                sections.push(lanes("Lanes in flight", &self.active, &self.active_more));
-            }
-            let mut settled = lanes(
-                "Lanes settled since the last chair save",
-                &self.settled,
-                &self.settled_more,
-            );
-            let mut counts = std::collections::BTreeMap::new();
-            for lane in &self.settled {
-                *counts.entry(clean(&lane.state, 32)).or_insert(0usize) += 1;
-            }
-            let failures: Vec<_> = self
-                .settled
-                .iter()
-                .filter(|lane| lane.state != "succeeded")
-                .collect();
-            settled.lines = if counts.is_empty() {
-                vec![]
-            } else {
-                vec![
-                    counts
-                        .iter()
-                        .map(|(state, count)| format!("{state}: {count}"))
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                ]
-            };
-            settled.lines.extend(
-                failures
+        if !self.active.is_empty() || self.active_more.is_some() {
+            sections.push(lanes("Lanes in flight", &self.active, &self.active_more));
+        }
+        let mut settled = lanes(
+            "Lanes settled since the last chair save",
+            &self.settled,
+            &self.settled_more,
+        );
+        let mut counts = std::collections::BTreeMap::new();
+        for lane in &self.settled {
+            *counts.entry(clean(&lane.state, 32)).or_insert(0usize) += 1;
+        }
+        let failures: Vec<_> = self
+            .settled
+            .iter()
+            .filter(|lane| lane.state != "succeeded")
+            .collect();
+        settled.lines = if counts.is_empty() {
+            vec![]
+        } else {
+            vec![
+                counts
                     .iter()
-                    .take(SECTION_LINES)
-                    .map(|lane| lane.render()),
-            );
-            settled.more = failures.len().saturating_sub(SECTION_LINES);
-            if !self.settled.is_empty() || self.settled_more.is_some() {
-                sections.push(settled);
-            }
+                    .map(|(state, count)| format!("{state}: {count}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ]
+        };
+        settled.lines.extend(
+            failures
+                .iter()
+                .take(SECTION_LINES)
+                .map(|lane| lane.render()),
+        );
+        settled.more = failures.len().saturating_sub(SECTION_LINES);
+        if !self.settled.is_empty() || self.settled_more.is_some() {
+            sections.push(settled);
         }
         if !self.prs.is_empty() || !self.prs_unread.is_empty() {
             let mut lines: Vec<String> = self
@@ -328,7 +331,12 @@ impl SessionState {
                 partial: None,
             });
         }
-        if worktrees && !self.unavailable.iter().any(|name| name == "worktrees") {
+        if worktrees
+            && !self
+                .unavailable
+                .iter()
+                .any(|unavailable| unavailable.source == "worktrees")
+        {
             sections.push(Section {
                 title: format!("Worktrees ({})", self.worktrees.len()),
                 lines: self
@@ -351,7 +359,11 @@ impl SessionState {
         }
         for name in &self.unavailable {
             sections.push(Section {
-                title: format!("{} unavailable", clean(name, 32)),
+                title: format!(
+                    "{} unavailable: {}",
+                    clean(&name.source, 32),
+                    clean(&name.reason, 120)
+                ),
                 lines: vec![],
                 more: 0,
                 partial: None,
@@ -660,12 +672,33 @@ mod tests {
     #[test]
     fn unreadable_sections_are_named_not_shown_empty() {
         let state = SessionState {
-            unavailable: vec!["lanes".into()],
+            unavailable: vec![Unavailable {
+                source: "lanes".into(),
+                reason: "timed out".into(),
+            }],
             ..Default::default()
         };
         let digest = state.digest(DIGEST_LIMIT);
-        assert!(digest.contains("lanes unavailable"));
+        assert!(digest.contains("lanes unavailable: timed out"));
         assert!(!digest.contains("Lanes in flight"));
+    }
+
+    #[test]
+    fn available_lane_sections_remain_visible_when_another_lane_query_fails() {
+        let state = SessionState {
+            active: vec![lane("r/t/a")],
+            unavailable: vec![Unavailable {
+                source: "settled lanes".into(),
+                reason: "timed out".into(),
+            }],
+            ..Default::default()
+        };
+        let digest = state.digest(DIGEST_LIMIT);
+        assert!(digest.contains("Lanes in flight (1)"), "{digest}");
+        assert!(
+            digest.contains("settled lanes unavailable: timed out"),
+            "{digest}"
+        );
     }
 
     #[test]
