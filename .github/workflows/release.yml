@@ -44,7 +44,7 @@ jobs:
         run: |
           cargo build --release --locked --bin provenant
           codesign --force --sign - "$CARGO_TARGET_DIR/release/provenant"
-          cargo run --release --locked --example package-release -- --out "$RUNNER_TEMP/release"
+          cargo run --release --locked --bin package-release -- --binary "$CARGO_TARGET_DIR/release/provenant" --out "$RUNNER_TEMP/release"
           "$PROVENANT_ROOT/apps/quota-menubar/bundle" "$RUNNER_TEMP/apps"
           apps_archive="$RUNNER_TEMP/provenant-apps-aarch64-apple-darwin.tar.gz"
           tar -czf "$apps_archive" -C "$RUNNER_TEMP/apps" .
