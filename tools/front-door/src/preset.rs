@@ -11,6 +11,9 @@ const DEPTH: usize = 8;
 #[path = "preset_cli.rs"]
 mod presentation;
 
+#[path = "preset_plan.rs"]
+pub mod planner;
+
 /// The review shape selected for one review stage. Review shapes are canonical
 /// for who reviews; presets compose them, so lens counts and tiers default from here.
 /// Picks a review shape from a stage's `review_shape` and `risk_tier`. The host
@@ -46,6 +49,8 @@ pub struct Layers {
     repo_files: BTreeSet<String>,
     /// Resolve without repository layers, for the landing floor.
     exclude_repo: std::cell::Cell<bool>,
+    /// The planner front-end's host inputs. `None` never plans.
+    pub plan: Option<planner::PlanContext>,
 }
 
 #[derive(Debug)]
@@ -60,6 +65,8 @@ pub struct Expansion {
     /// Requested routes replaced by a fallback, for example a missing web route.
     pub substitutions: Vec<Value>,
     pub warnings: Vec<String>,
+    /// The planner decision, for a preset that declares planner patterns.
+    pub plan: Option<planner::Decision>,
 }
 
 impl Layers {
@@ -869,6 +876,21 @@ pub fn expand_with(
         )
         .map_err(|error| format!("{error}; valid parameter and slot paths: {valid}"))?;
     }
+    let mut plan = None;
+    let mut catalogue = None;
+    if let Some(context) = &layers.plan {
+        plan = planner::decide(context, name, &config, &origins, prompt)?;
+        if plan.as_ref().is_some_and(|decision| decision.applied) {
+            catalogue = Some(planner::apply(
+                layers,
+                context,
+                name,
+                &mut config,
+                &origins,
+                prompt,
+            )?);
+        }
+    }
     let mut nodes = Vec::new();
     build(
         layers,
@@ -882,6 +904,9 @@ pub fn expand_with(
         &mut origins,
         &mut repo_files,
     )?;
+    if let Some(catalogue) = catalogue {
+        planner::attach(&mut nodes, catalogue)?;
+    }
     origins.retain(|path, _| !path.ends_with("$scope_read_only"));
     if let Some(trusted) = trusted
         && (!repo_files.is_empty() || repo_roles)
@@ -918,7 +943,12 @@ pub fn expand_with(
     }
     let roles: BTreeMap<String, Value> = layers.used_roles.take().into_iter().collect();
     let substitutions = layers.substitutions.take();
-    let warnings = layers.warnings.take();
+    let mut warnings = layers.warnings.take();
+    if let Some(why) = plan.as_ref().and_then(|decision| decision.degraded.as_ref()) {
+        warnings.push(format!(
+            "planner unavailable, running the preset's deterministic defaults: {why}"
+        ));
+    }
     for (role, used) in &roles {
         origins.insert(
             format!("roles.{role}"),
@@ -935,6 +965,9 @@ pub fn expand_with(
         "substitutions": substitutions,
         "warnings": warnings,
     });
+    if let Some(decision) = &plan {
+        document["provenance"]["plan"] = decision.to_json();
+    }
     if serde_json::to_vec(&document)
         .map_err(|e| e.to_string())?
         .len()
@@ -958,6 +991,7 @@ pub fn expand_with(
         roles,
         substitutions,
         warnings,
+        plan,
     })
 }
 
@@ -1596,6 +1630,7 @@ fn build_stages(
                 "delivery",
                 "decision_session",
                 "pattern",
+                "plan",
             ]
             .contains(&key.as_str())
         })
@@ -2628,6 +2663,10 @@ fn explain(expansion: Expansion, globals: &provenant_cli::Globals) -> u8 {
     if let Some(shape) = &expansion.review_shape {
         human.push_str(&format!("Review shape: {shape}\n"));
     }
+    if let Some(decision) = &expansion.plan {
+        human.push_str(&format!("{}\n", decision.line()));
+        human.push_str(&format!("Planner route: {}\n", decision.route));
+    }
     if !validation_error.is_null() {
         human.push_str(&format!("Requires configuration: {validation_error}\n"));
     }
@@ -2656,7 +2695,7 @@ fn explain(expansion: Expansion, globals: &provenant_cli::Globals) -> u8 {
     for warning in &expansion.warnings {
         human.push_str(&format!("Warning: {warning}\n"));
     }
-    let data = json!({"roles": expansion.roles, "substitutions": expansion.substitutions, "graph": expansion.document, "origins": expansion.origins, "limits":limits,"execution":metrics,"validation_error":validation_error,"review_shape":expansion.review_shape});
+    let data = json!({"roles": expansion.roles, "substitutions": expansion.substitutions, "graph": expansion.document, "origins": expansion.origins, "limits":limits,"execution":metrics,"validation_error":validation_error,"review_shape":expansion.review_shape,"plan":expansion.plan.as_ref().map(planner::Decision::to_json)});
     let output = if globals.json {
         serde_json::to_vec(&provenant_records::CommandResult::new(
             "run",
@@ -2865,6 +2904,30 @@ pub fn run(
         };
         let mut layers = configured(globals)?;
         layers.known_routes = Some(config.domains.routing.routes.keys().cloned().collect());
+        {
+            let settings = &config.domains.fabric.plan;
+            let mode = match request.preset_plan.as_deref() {
+                Some(text) => provenant_fabric_runtime::config::PlanMode::parse(text)
+                    .ok_or_else(|| format!("--plan must be auto, on or off: {text}"))?,
+                None => settings.mode,
+            };
+            let unavailable = (!config.domains.routing.routes.contains_key(&settings.route))
+                .then(|| {
+                    format!(
+                        "route {} is not defined in the routing configuration",
+                        settings.route
+                    )
+                });
+            layers.plan = Some(planner::PlanContext {
+                mode,
+                route: settings.route.clone(),
+                lane_deadline_seconds: settings.lane_deadline_seconds,
+                max_nodes: settings.max_nodes,
+                auto: settings.auto.clone(),
+                unavailable,
+                paths: request.selection_paths.clone(),
+            });
+        }
         let review = config.domains.routing.review.clone();
         layers.review = Some(Box::new(move |named, risk| {
             let selected = review.select_shape(named, risk, None, &[])?;

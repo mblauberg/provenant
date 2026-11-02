@@ -967,3 +967,139 @@ fn pattern_routes_may_vary_only_over_a_closed_list() {
     let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
 }
+
+/// Substitute `${name}` in a pattern template the way the runtime does, so the
+/// expected static composite is written from the catalogue, not from the code under test.
+fn fill(value: &Value, parameters: &serde_json::Map<String, Value>) -> Value {
+    match value {
+        Value::String(text) => {
+            if let Some(name) = text.strip_prefix("${").and_then(|rest| rest.strip_suffix('}'))
+                && let Some(value) = parameters.get(name)
+            {
+                return value.clone();
+            }
+            let mut text = text.clone();
+            for (name, value) in parameters {
+                if let Some(plain) = value.as_str().map(str::to_owned).or_else(|| value.as_i64().map(|n| n.to_string())) {
+                    text = text.replace(&format!("${{{name}}}"), &plain);
+                }
+            }
+            Value::String(text)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(|item| fill(item, parameters)).collect()),
+        Value::Object(map) => Value::Object(map.iter().map(|(key, item)| (key.clone(), fill(item, parameters))).collect()),
+        other => other.clone(),
+    }
+}
+
+#[test]
+fn planned_big_batch_expands_to_its_static_composite_and_records_the_patterns() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/presets/fixtures/big-batch.plan.json");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut doc: GraphDocument = serde_json::from_str(&text).unwrap();
+    // Run the planner node alone, ahead of one consumer.
+    doc.nodes.retain(|node| node.id == "plan");
+    doc.nodes[0].depends_on.clear();
+    doc.nodes[0].inputs.clear();
+    let catalogue = doc.nodes[0].plan.as_ref().unwrap().patterns.clone();
+    doc.nodes.push(serde_json::from_value(json!({
+        "id":"after", "access":"read_only", "prompt":"Check all slices",
+        "depends_on":["plan"], "route":{"alias":"senior"}
+    })).unwrap());
+
+    let lane = |id: &str, tree: &str, scope: &str, extra: Value| {
+        let mut instance = json!({"id":id, "pattern":"writer-lane", "parameters":{
+            "lane":id, "worktree":tree, "scope":[scope], "acceptance":[format!("{id} works")],
+            "route":"junior", "budget_seconds":1800}});
+        instance.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        instance
+    };
+    let instances = vec![
+        lane("a", "/repo/lane1", "src/a", json!({})),
+        lane("b", "/repo/lane2", "src/b", json!({})),
+        json!({"id":"barrier", "pattern":"wave-barrier", "parameters":{"wave":"one"},
+               "depends_on":["a","b"],
+               "inputs":[{"node":"a","outputs":["commit"]},{"node":"b","outputs":["commit"]}]}),
+        lane("c", "/repo/lane1", "src/a", json!({"depends_on":["barrier"]})),
+    ];
+    let fragment = format!("```fragment\n{}\n```", json!({"schema_version":1,"nodes":[],"patterns":instances}));
+    let mut owner = fixture_owner(&[&fragment, "a done", "b done", "barrier done", "c done", "checked"]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    let expansion = &run.checkpoint.expansions[0];
+    let recorded: Vec<_> = expansion.patterns.iter().map(|p| (p.id.as_str(), p.name.as_str())).collect();
+    assert_eq!(recorded, [("plan--a", "writer-lane"), ("plan--b", "writer-lane"), ("plan--barrier", "wave-barrier"), ("plan--c", "writer-lane")]);
+    assert_eq!(expansion.patterns[0].parameters["budget_seconds"], 1800);
+    assert_eq!(expansion.patterns[0].parameters["route"], "junior");
+    assert_eq!(expansion.patterns[2].parameters, json!({"wave":"one"}));
+
+    // The same shape written as a static composite, from the catalogue's own templates.
+    let mut static_doc = doc.clone();
+    for (id, name, parameters, depends, inputs) in [
+        ("a", "writer-lane", &expansion.patterns[0].parameters, vec!["plan"], json!([])),
+        ("b", "writer-lane", &expansion.patterns[1].parameters, vec!["plan"], json!([])),
+        ("barrier", "wave-barrier", &expansion.patterns[2].parameters, vec!["plan--a", "plan--b"],
+         json!([{"node":"plan--a","outputs":["commit"]},{"node":"plan--b","outputs":["commit"]}])),
+        ("c", "writer-lane", &expansion.patterns[3].parameters, vec!["plan--barrier"], json!([])),
+    ] {
+        let pattern = catalogue.iter().find(|p| p.name == name).unwrap();
+        let parameters = parameters.as_object().unwrap();
+        let mut nodes = Vec::new();
+        for template in &pattern.nodes {
+            let mut node = fill(template, parameters);
+            let map = node.as_object_mut().unwrap();
+            let mut contract = String::new();
+            if let Some(scope) = map.get("write_scope").and_then(Value::as_array) {
+                let scope: Vec<_> = scope.iter().filter_map(Value::as_str).collect();
+                contract.push_str(&format!("\n\nWrite scope: {}\n", scope.join(", ")));
+            } else {
+                contract.push_str("\n\n");
+            }
+            let checks: Vec<_> = map["acceptance_checks"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+            contract.push_str(&format!("Acceptance checks:\n{}", checks.join("\n")));
+            let prompt = format!("{}{contract}", map["prompt"].as_str().unwrap());
+            map.insert("prompt".into(), json!(prompt));
+            nodes.push(node);
+        }
+        static_doc.nodes.push(serde_json::from_value(json!({
+            "id": format!("plan--{id}"), "kind":"composite", "access":"read_only",
+            "depends_on": depends, "inputs": inputs,
+            "composite": {"nodes": nodes, "exports": pattern.exports}
+        })).unwrap());
+    }
+    let expanded = composites::expand(&static_doc, &plans::generous()).unwrap();
+    let expected: Vec<_> = expanded.nodes.into_iter().filter(|n| n.id.starts_with("plan--")).collect();
+    assert_eq!(by_id(expansion.nodes.clone()), by_id(expected));
+}
+
+#[test]
+fn planned_big_batch_refuses_overlapping_waves_and_budgets_over_the_lane_deadline() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/presets/fixtures/big-batch.plan.json");
+    let mut doc: GraphDocument = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    doc.nodes.retain(|node| node.id == "plan");
+    doc.nodes[0].depends_on.clear();
+    doc.nodes[0].inputs.clear();
+    let lane = |id: &str, tree: &str, scope: &str, budget: u64| json!({"id":id, "pattern":"writer-lane", "parameters":{
+        "lane":id, "worktree":tree, "scope":[scope], "acceptance":["works"], "budget_seconds":budget}});
+    let cases = [
+        ("overlap", vec![lane("a", "/repo/lane1", "src", 600), lane("b", "/repo/lane2", "src/b", 600)]),
+        ("budget", vec![lane("a", "/repo/lane1", "src/a", 3601)]),
+        ("worktree", vec![lane("a", "/elsewhere", "src/a", 600)]),
+    ];
+    for (label, instances) in cases {
+        let fragment = format!("```fragment\n{}\n```", json!({"schema_version":1,"nodes":[],"patterns":instances}));
+        let mut owner = fixture_owner(&[&fragment]);
+        let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+        assert_eq!(run.status, GraphStatus::Paused, "{label}");
+        assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"), "{label}");
+        assert!(run.checkpoint.expansions.is_empty(), "{label}");
+        assert_eq!(owner.calls.len(), 1, "{label}");
+    }
+    // The same two lanes are admitted once they are ordered or disjoint.
+    let fragment = format!("```fragment\n{}\n```", json!({"schema_version":1,"nodes":[],"patterns":[lane("a", "/repo/lane1", "src/a", 3600), lane("b", "/repo/lane2", "src/b", 60)]}));
+    let mut owner = fixture_owner(&[&fragment, "a", "b"]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.checkpoint.expansions.len(), 1, "{:?}", run.checkpoint.pause_reason);
+}

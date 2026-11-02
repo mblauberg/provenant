@@ -21,6 +21,39 @@ cost = "scouts + lanes x (1 writer + lenses) + council + refactor + up to 2 repa
 select_when = "Several partitioned slices of one approved spec land together on a batch branch."
 tags = ["write", "review", "batch"]
 
+[plan]
+# With --plan on, a principal planner replaces the static lanes stage. It
+# instantiates only these patterns; the council and repair stages still run.
+replaces = "lanes"
+explicit = ["lanes"]
+guidance = """Split the work into waves of writer lanes. Give each lane its own worktree, a literal write scope disjoint from the other lanes in its wave, the subset of acceptance items it owns, a route and a budget. End every wave with a wave-barrier whose depends_on and inputs name that wave's lanes, and make the next wave's lanes depend on the barrier."""
+
+[[plan.patterns]]
+name = "writer-lane"
+brief = "Lane ${lane}. Time budget: ${budget_seconds} seconds; commit your work and stop with a handoff before it passes."
+exports = [{ node = "implement", outputs = ["branch", "commit"] }]
+nodes = [
+  { id = "implement", role = "write.implement", title = "Lane ${lane}", worktree = "${worktree}", delivery = "integrate:${integration_branch}", tier = "${route}", write_scope = "${scope}", acceptance_checks = "${acceptance}" },
+]
+
+[plan.patterns.parameters]
+lane = { type = "string", doc = "Short lane name." }
+worktree = { type = "string", enum = "${worktrees}", doc = "Registered writer worktree for the lane." }
+scope = { type = "list", min = 1, doc = "Literal relative paths the lane may change; disjoint within a wave." }
+acceptance = { type = "list", min = 1, doc = "The acceptance items this lane owns." }
+route = { type = "string", default = "senior", enum = ["junior", "senior", "principal"], doc = "Route alias for the lane." }
+budget_seconds = { type = "integer", default = "${plan_lane_deadline_seconds}", min = 60, max = "${plan_lane_deadline_seconds}", doc = "Wall-clock budget for the lane, at most the lane deadline." }
+
+[[plan.patterns]]
+name = "wave-barrier"
+exports = [{ node = "barrier", outputs = ["result", "findings"] }]
+nodes = [
+  { id = "barrier", role = "plan.wave", title = "Wave ${wave} barrier", acceptance_checks = ["Every lane in the wave met its acceptance subset", "Cross-lane conflicts are recorded"] },
+]
+
+[plan.patterns.parameters]
+wave = { type = "string", doc = "Wave name." }
+
 [parameters]
 width = { type = "integer", default = 4, min = 1, max = 32, doc = "Scouts in the opening swarm." }
 external = { type = "integer", default = 1, min = 0, max = 8, doc = "External scouts that research outward; 0 opts out." }
@@ -32,6 +65,7 @@ spec = { type = "string", default = "", doc = "Issue number or file the batch an
 risk_tier = { type = "string", default = "", doc = "Risk tier that selects the review shape." }
 review_shape = { type = "string", default = "", doc = "Explicit review shape override." }
 risk_tags = { type = "list", default = [], doc = "Tags that trigger conditional lenses." }
+worktrees = { type = "list", default = [], doc = "Registered writer worktrees a planner may assign to its lanes; empty leaves the choice open." }
 # One entry per lane: name, worktree, scope and spec. Supply with --params-file.
 lanes = [
   { name = "one", worktree = "", scope = ["."], spec = "" },
