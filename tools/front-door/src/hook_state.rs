@@ -118,6 +118,19 @@ impl<'a> Cli<'a> {
     }
 }
 
+fn unavailable_sources(state: &mut SessionState, want: &Want, reason: String) {
+    state.unavailable.push(Unavailable {
+        source: "lanes".into(),
+        reason: reason.clone(),
+    });
+    if want.worktrees {
+        state.unavailable.push(Unavailable {
+            source: "worktrees".into(),
+            reason,
+        });
+    }
+}
+
 pub fn collect(globals: &Globals, cwd: &Path, want: &Want, deadline: Instant) -> SessionState {
     let mut state = SessionState {
         commands: CommandPrefix::new(globals.state_dir.as_deref(), cwd),
@@ -126,20 +139,22 @@ pub fn collect(globals: &Globals, cwd: &Path, want: &Want, deadline: Instant) ->
     let executor = match SystemExecutor::new(4 + want.pr_refs.len()) {
         Ok(executor) => executor,
         Err(error) => {
-            state.unavailable.push(Unavailable {
-                source: "lanes".into(),
-                reason: format!("command executor unavailable: {error}"),
-            });
+            unavailable_sources(
+                &mut state,
+                want,
+                format!("command executor unavailable: {error}"),
+            );
             return state;
         }
     };
     let cli = match Cli::new(globals, cwd, &executor) {
         Ok(cli) => cli,
         Err(error) => {
-            state.unavailable.push(Unavailable {
-                source: "lanes".into(),
-                reason: format!("current executable unavailable: {error}"),
-            });
+            unavailable_sources(
+                &mut state,
+                want,
+                format!("current executable unavailable: {error}"),
+            );
             return state;
         }
     };
@@ -366,6 +381,28 @@ fn pr_status(data: &Value) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn shared_cli_setup_failure_marks_each_requested_source() {
+        use super::*;
+        let want = Want {
+            worktrees: true,
+            settled_after_unix: 0,
+            pr_refs: vec![],
+        };
+        let mut state = SessionState::default();
+        unavailable_sources(&mut state, &want, "executable unavailable".into());
+
+        let names: Vec<_> = state
+            .unavailable
+            .iter()
+            .map(|unavailable| unavailable.source.as_str())
+            .collect();
+        assert_eq!(names, ["lanes", "worktrees"]);
+        let digest = state.digest(provenant_workflow::session::DIGEST_LIMIT);
+        assert!(digest.contains("lanes unavailable: executable unavailable"));
+        assert!(digest.contains("worktrees unavailable: executable unavailable"));
+    }
 
     #[test]
     fn lanes_degrade_when_fields_are_absent() {

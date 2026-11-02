@@ -174,7 +174,9 @@ pub struct WorktreeLine {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unavailable {
+    /// The lane, worktree or other hook source that could not be read.
     pub source: String,
+    /// A bounded explanation of why the source could not be read.
     pub reason: String,
 }
 
@@ -681,11 +683,8 @@ mod tests {
         let digest = state.digest(DIGEST_LIMIT);
         assert!(digest.contains("lanes unavailable: timed out"));
         assert!(!digest.contains("Lanes in flight"));
-    }
 
-    #[test]
-    fn available_lane_sections_remain_visible_when_another_lane_query_fails() {
-        let state = SessionState {
+        let partial = SessionState {
             active: vec![lane("r/t/a")],
             unavailable: vec![Unavailable {
                 source: "settled lanes".into(),
@@ -693,7 +692,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let digest = state.digest(DIGEST_LIMIT);
+        let digest = partial.digest(DIGEST_LIMIT);
         assert!(digest.contains("Lanes in flight (1)"), "{digest}");
         assert!(
             digest.contains("settled lanes unavailable: timed out"),
