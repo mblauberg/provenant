@@ -70,12 +70,13 @@ pub fn git_env() -> Vec<(OsString, OsString)> {
     if let Some(dir) =
         crate::git::git_executable().and_then(|git| git.parent().map(Path::to_path_buf))
     {
-        let path = std::env::join_paths(std::iter::once(dir).chain(std::env::split_paths(
+        // A PATH that cannot be joined is left as inherited, not replaced by an empty one.
+        if let Ok(path) = std::env::join_paths(std::iter::once(dir).chain(std::env::split_paths(
             &std::env::var_os("PATH").unwrap_or_default(),
-        )))
-        .unwrap_or_default();
-        env.retain(|(key, _)| key != "PATH");
-        env.push(("PATH".into(), path));
+        ))) {
+            env.retain(|(key, _)| key != "PATH");
+            env.push(("PATH".into(), path));
+        }
     }
     env.push(("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()));
     env.push(("GIT_CONFIG_NOSYSTEM".into(), "1".into()));
@@ -166,6 +167,7 @@ mod tests {
                 ],
             )?;
             assert!(fixture.join(".git/HEAD").is_file());
+            fs::write(Path::new(&root).join("child-ran"), b"")?;
             return Ok(());
         }
 
@@ -220,6 +222,12 @@ mod tests {
             .env("GIT_CEILING_DIRECTORIES", temp.path())
             .status()?;
         assert!(status.success());
+        // A filter that matched no test also exits zero; the child must have run its body.
+        assert!(
+            temp.path().join("child-ran").is_file(),
+            "the child test did not run"
+        );
+        assert!(temp.path().join("fixture/.git/HEAD").is_file());
         assert_eq!(before, lane_snapshot(&lane)?);
         Ok(())
     }
