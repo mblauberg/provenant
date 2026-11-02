@@ -741,6 +741,7 @@ impl Driver<'_> {
         .map_err(|_| CustodyError::InvalidRecord)?;
         let mut input_offset = 0;
         let mut stop_reason = None;
+        let mut cancel_delivered_before_exit = false;
         let mut exit = None;
         let mut host_closed = false;
         let mut stop_at = None;
@@ -928,6 +929,11 @@ impl Driver<'_> {
                         stop_reason.get_or_insert(reason);
                         stop_at.get_or_insert(now);
                         let outcome = stop_delivery_outcome(child.stop(false));
+                        if reason == machine::StopReason::ExplicitCancellation
+                            && outcome == DeliveryOutcome::Delivered
+                        {
+                            cancel_delivered_before_exit = true;
+                        }
                         self.record_delivery(
                             self.reservation.provider.clone(),
                             reason,
@@ -959,6 +965,12 @@ impl Driver<'_> {
             {
                 let reason = stop_reason.unwrap_or(machine::StopReason::PostTerminalCleanup);
                 let outcome = stop_delivery_outcome(child.stop(true));
+                if exit.is_none()
+                    && reason == machine::StopReason::ExplicitCancellation
+                    && outcome == DeliveryOutcome::Delivered
+                {
+                    cancel_delivered_before_exit = true;
+                }
                 self.record_delivery(
                     self.reservation.provider.clone(),
                     reason,
@@ -1229,6 +1241,7 @@ impl Driver<'_> {
             never_spawned: false,
             priority: child.priority,
             stop_reason,
+            cancel_delivered_before_exit: Some(cancel_delivered_before_exit),
             delivered_signals: self.delivered_signals.clone(),
             reaped: self.reaped.clone(),
             omitted_reaped: self.omitted_reaped,

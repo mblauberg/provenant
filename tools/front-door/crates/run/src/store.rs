@@ -84,7 +84,7 @@ impl RunStore {
     ) -> Result<AttemptRecord> {
         let old = self.record(id, call)?;
         let dir = self.attempt_dir(old.run_id, id, false)?;
-        let pending: AttemptRecord = decode(
+        let pending: AttemptRecord = crate::db::decode_attempt(
             &read_sealed(&dir, AttemptFile::TerminalPending.name(), RECORD_LIMIT)?
                 .ok_or(RunError::TerminalRecoveryRequired)?,
         )?;
@@ -98,45 +98,252 @@ impl RunStore {
         {
             return Err(RunError::Conflict);
         }
-        let AttemptState::Terminal {
-            outcome,
+        if sealed_exit(&dir, exit)? != pending.exit_evidence.ok_or(RunError::Conflict)? {
+            return Err(RunError::Conflict);
+        }
+        self.replay_terminal(id, call)
+    }
+    /// Commit the exact scoped decision sealed before a failed transaction.
+    pub fn replay_terminal(&self, id: AttemptId, call: &Request<'_>) -> Result<AttemptRecord> {
+        let current = self.record(id, call)?;
+        let run = self.run_dir(current.run_id, false)?;
+        let guard = run.lock(
+            OsStr::new("publication.lock"),
+            LockMode::Exclusive,
+            call.lock_budget(),
+            call.cancel,
+            call.clock,
+        )?;
+        let (record, committed) = self.replay_terminal_locked(id, call)?;
+        drop(guard);
+        if committed {
+            self.settle_cleanup(&record, call);
+        }
+        Ok(record)
+    }
+    /// Replay with `publication.lock` already held. The flag reports whether
+    /// this call committed the row, so the caller owes post-commit cleanup.
+    fn replay_terminal_locked(
+        &self,
+        id: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<(AttemptRecord, bool)> {
+        let current = self.record(id, call)?;
+        let dir = self.attempt_dir(current.run_id, id, false)?;
+        let pending: AttemptRecord = crate::db::decode_attempt(
+            &read_sealed(&dir, AttemptFile::TerminalPending.name(), RECORD_LIMIT)?
+                .ok_or(RunError::TerminalRecoveryRequired)?,
+        )?;
+        super::reader::validate_attempt(&pending)?;
+        if pending.attempt_id != id
+            || pending.run_id != current.run_id
+            || pending.project_id != current.project_id
+            || pending.task_id != current.task_id
+            || pending.operation_id != current.operation_id
+            || pending.generation != current.generation
+            || !matches!(pending.state, AttemptState::Terminal { .. })
+            || pending.settlement_receipts.is_some()
+            || pending.custody_pending.is_some()
+        {
+            return Err(RunError::Conflict);
+        }
+        if let Some(result) = &pending.result {
+            self.artifact_bytes(current.run_id, result, RESULT_LIMIT)?;
+        }
+        if let Some(exit) = &pending.exit_evidence {
+            let raw = self.artifact_bytes(current.run_id, exit, RECORD_LIMIT)?;
+            let stored: SealedExit = decode(&raw)?;
+            let AttemptState::Terminal { exit_code, .. } = pending.state else {
+                return Err(RunError::Conflict);
+            };
+            let observed = match stored.termination {
+                Some(Termination::Exit(code)) => Some(code),
+                _ => None,
+            };
+            if stored.scope != Self::scope(&current)
+                || stored.unresolved_cleanup
+                || stored.settlement_evidence
+                    == provenant_supervisor::custody::SettlementEvidence::Unresolved
+                || observed != exit_code
+                || pending.provider_launched != Some(!stored.never_spawned)
+            {
+                return Err(RunError::Conflict);
+            }
+            if pending.schema_version == 2 {
+                let AttemptState::Terminal { outcome, .. } = pending.state else {
+                    return Err(RunError::Conflict);
+                };
+                if (outcome == Outcome::Cancelled
+                    && !stored.never_spawned
+                    && stored.cancel_delivered_before_exit != Some(true))
+                    || (outcome == Outcome::Cancelled
+                        && stored.never_spawned
+                        && stored.stop_reason
+                            != Some(
+                                provenant_supervisor::machine::StopReason::ExplicitCancellation,
+                            ))
+                    || (stored.cancel_delivered_before_exit == Some(true)
+                        && outcome != Outcome::Cancelled)
+                {
+                    return Err(RunError::Conflict);
+                }
+            }
+        }
+        if matches!(current.state, AttemptState::Terminal { .. }) {
+            let mut decision = current.clone();
+            decision.settlement_receipts = None;
+            decision.custody_pending = None;
+            return if decision == pending {
+                Ok((current, false))
+            } else {
+                Err(RunError::Conflict)
+            };
+        }
+        if current.revision.checked_add(1) != Some(pending.revision) {
+            return Err(RunError::Conflict);
+        }
+        self.commit_terminal_record(&current, &pending, call)?;
+        Ok((self.record(id, call)?, true))
+    }
+    /// Persist one independently retryable effect without modifying the decision.
+    pub fn record_effect(
+        &self,
+        id: AttemptId,
+        generation: u64,
+        effect: SettlementEffect,
+        disposition: EffectDisposition,
+        call: &Request<'_>,
+    ) -> Result<SettlementReceipts> {
+        if let EffectDisposition::Failed { reason, .. } = &disposition
+            && (reason.is_empty() || reason.len() > 4096)
+        {
+            return Err(RunError::Validation("invalid effect failure reason"));
+        }
+        let receipts = self.write(call, |tx| {
+            let raw: Vec<u8> = tx.query_row("SELECT record FROM attempts WHERE id=?1 AND project=?2 AND terminal=1", params![id.to_string(), self.context.project_id.to_string()], |row| row.get(0)).optional()?.ok_or(RunError::NotFound)?;
+            let attempt: AttemptRecord = crate::db::decode_attempt(&raw)?;
+            if attempt.generation != generation { return Err(RunError::Conflict); }
+            let existing: Option<(i64, Vec<u8>)> = tx.query_row("SELECT generation,record FROM settlement_receipts WHERE attempt=?1", [id.to_string()], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
+            let mut receipts: SettlementReceipts = match existing {
+                Some((saved, raw)) if saved == sql_int(generation)? => crate::db::decode_unversioned(&raw)?,
+                Some(_) => return Err(RunError::Conflict),
+                None => SettlementReceipts::default(),
+            };
+            let slot = match effect {
+                SettlementEffect::GitImport => &mut receipts.git_import,
+                SettlementEffect::ManifestConflict => &mut receipts.manifest_conflict,
+                SettlementEffect::LockTimeout => &mut receipts.lock_timeout,
+                SettlementEffect::CleanupCustodyRelease => &mut receipts.cleanup_custody_release,
+                SettlementEffect::Delivery => &mut receipts.delivery,
+            };
+            if matches!(slot, EffectDisposition::Done) && *slot != disposition { return Err(RunError::Conflict); }
+            *slot = disposition.clone();
+            tx.execute("INSERT INTO settlement_receipts(attempt,generation,record) VALUES (?1,?2,?3) ON CONFLICT(attempt) DO UPDATE SET record=excluded.record", params![id.to_string(), sql_int(generation)?, bytes(&receipts)?])?;
+            Ok(receipts)
+        })?;
+        provenant_os::changes::hint(
+            self.context.state_root.as_path(),
+            &[provenant_os::changes::Scope::Board],
+        );
+        Ok(receipts)
+    }
+    /// Record whether a cancellation was effective, without rewriting the decision.
+    pub fn record_cancellation(
+        &self,
+        id: AttemptId,
+        generation: u64,
+        disposition: CancellationDisposition,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        self.write(call, |tx| {
+            let raw: Vec<u8> = tx.query_row("SELECT record FROM attempts WHERE id=?1 AND project=?2 AND terminal=1", params![id.to_string(), self.context.project_id.to_string()], |row| row.get(0)).optional()?.ok_or(RunError::NotFound)?;
+            let attempt = crate::db::decode_attempt(&raw)?;
+            if attempt.generation != generation { return Err(RunError::Conflict); }
+            if disposition == CancellationDisposition::Effective && attempt.cancellation_disposition != Some(CancellationDisposition::Effective) { return Err(RunError::Conflict); }
+            let raw: Option<Vec<u8>> = tx.query_row("SELECT record FROM settlement_receipts WHERE attempt=?1 AND generation=?2", params![id.to_string(), sql_int(generation)?], |row| row.get(0)).optional()?;
+            let mut receipts: SettlementReceipts = raw.as_deref().map(crate::db::decode_unversioned).transpose()?.unwrap_or_default();
+            if disposition == CancellationDisposition::AcknowledgedIneffective {
+                receipts.late_cancellation_acknowledged = true;
+            }
+            if receipts.cancellation.is_none() || disposition == CancellationDisposition::Effective {
+                receipts.cancellation = Some(disposition);
+            }
+            let changed = tx.execute("INSERT INTO settlement_receipts(attempt,generation,record) VALUES (?1,?2,?3) ON CONFLICT(attempt) DO UPDATE SET record=excluded.record WHERE generation=excluded.generation", params![id.to_string(), sql_int(generation)?, bytes(&receipts)?])?;
+            if changed != 1 { return Err(RunError::Conflict); }
+            Ok(())
+        })?;
+        provenant_os::changes::hint(
+            self.context.state_root.as_path(),
+            &[provenant_os::changes::Scope::Board],
+        );
+        Ok(())
+    }
+    /// Seal an inconclusive terminal decision without inventing an exit.
+    /// Custody and its fence remain independent of this decision.
+    pub fn settle_unsettled(
+        &self,
+        id: AttemptId,
+        expected_revision: u64,
+        reason: &str,
+        finished_at: WallTime,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        if reason.is_empty() || reason.len() > 4096 {
+            return Err(RunError::Validation("invalid unsettled reason"));
+        }
+        let current = self.record(id, call)?;
+        let run = self.run_dir(current.run_id, false)?;
+        let guard = run.lock(
+            OsStr::new("publication.lock"),
+            LockMode::Exclusive,
+            call.lock_budget(),
+            call.cancel,
+            call.clock,
+        )?;
+        let current = self.record(id, call)?;
+        if matches!(current.state, AttemptState::Terminal { .. })
+            || current.revision != expected_revision
+        {
+            return Err(RunError::Conflict);
+        }
+        let mut next = current.clone();
+        next.schema_version = 2;
+        next.revision = expected_revision.checked_add(1).ok_or(RunError::Conflict)?;
+        next.terminal_evidence = Some(TerminalEvidence::Unsettled {
+            reason: reason.into(),
+        });
+        next.state = AttemptState::Terminal {
+            extra: Default::default(),
+            outcome: Outcome::Unsettled,
+            exit_code: None,
             finished_at,
-            ref reason,
-            ..
-        } = pending.state
-        else {
-            return Err(RunError::Validation("pending publication is not terminal"));
+            reason: Some(reason.into()),
         };
-        let result = pending
-            .result
-            .as_ref()
-            .ok_or(RunError::Validation("pending result missing"))?;
-        let raw = self.artifact_bytes(old.run_id, result, RESULT_LIMIT)?;
-        let text = std::str::from_utf8(&raw)
-            .map_err(|_| RunError::Validation("pending result is not UTF-8"))?;
-        let publication = TerminalPublication {
-            outcome,
-            finished_at,
-            started_at: pending.started_at,
-            provider_ms: pending.provider_ms,
-            reason: reason.clone(),
-            result: text,
-            complete: result.complete,
-            redacted: result.redacted,
-            resolved_route: pending.resolved_route.clone(),
-            applied_route: pending.applied_route.clone(),
-            observed_route: pending.observed_route.clone(),
-            usage: pending.usage.clone(),
-            session: pending.session.clone(),
-            partial_signals: pending.partial_signals.clone(),
-        };
-        self.publish_terminal(
-            id,
-            pending.revision.checked_sub(1).ok_or(RunError::Conflict)?,
-            &publication,
-            exit,
-            call,
-        )
+        super::reader::validate_attempt(&next)?;
+        let attempt = self.attempt_dir(current.run_id, id, false)?;
+        let intent = bytes(&next)?;
+        if let Some(saved) =
+            read_sealed(&attempt, AttemptFile::TerminalPending.name(), RECORD_LIMIT)?
+        {
+            if saved != intent {
+                let name = format!(
+                    "terminal-pending.conflict-{}.json",
+                    provenant_core::hex(CanonicalV1::file_digest(&intent).bytes())
+                );
+                seal(&attempt, &name, &intent, RECORD_LIMIT)?;
+                return Err(RunError::TerminalRecoveryRequired);
+            }
+        } else {
+            seal(
+                &attempt,
+                AttemptFile::TerminalPending.name(),
+                &intent,
+                RECORD_LIMIT,
+            )?;
+        }
+        self.commit_terminal_record(&current, &next, call)?;
+        drop(guard);
+        self.record(id, call)
     }
     /// Reserve records first, seal the exact request/prompts, then acknowledge.
     /// Repeating a prepared operation repairs a publication gap with the same
@@ -290,9 +497,10 @@ impl RunStore {
                     title: task.title.clone(),
                     continuation: input.request.fresh_continuation.as_ref().map(|_| "fresh".into()),
                     profile: task.profile.clone(),
-                    schema_version: 1, attempt_id: new.attempt_id, run_id: run.run_id, project_id: run.project_id, task_id: task.task_id, operation_id: run.operation_id.clone(), attempt_number: u64::try_from(number).map_err(|_| RunError::Validation("attempt number"))?, revision: 1, generation: 0,
+                    schema_version: 2, attempt_id: new.attempt_id, run_id: run.run_id, project_id: run.project_id, task_id: task.task_id, operation_id: run.operation_id.clone(), attempt_number: u64::try_from(number).map_err(|_| RunError::Validation("attempt number"))?, revision: 1, generation: 0,
                     delivery_id: task.delivery_id, retry_of: input.request.parent, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, granted_tracking_ref: None, subject: None, head: None, protected_paths: Vec::new(), delivery: None, verified_owner: Some(context.actor_id), session: None,
                 queued_at: input.created_at, started_at: None, priority: None, requested_priority: None, last_output_at: None, provider_silent_for_ms: provenant_records::run::Transient(None), process_observation_valid: provenant_records::run::Transient(false), provider_silence_suppressed: provenant_records::run::Transient(false), provider_launched: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, partial_signals: Vec::new(), state: AttemptState::Queued { extra: Default::default() }, usage: UsageRecord::default(),
+                    terminal_evidence: None, cancellation_disposition: None, settlement_receipts: None, custody_pending: None,
                     prompt: ArtifactRecord {extra: Default::default(),  path: artifact_path(new.attempt_id, AttemptFile::Prompt.name())?, digest: task.prompt_digest, bytes: new.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None, skipped_routes: Vec::new(),
                     trace: provenant_records::Trace {extra: Default::default(),
                         host: self.host,
@@ -389,6 +597,28 @@ impl RunStore {
         {
             return Err(RunError::Validation("success lacks verified provider exit"));
         }
+        if publication.outcome == Outcome::Cancelled
+            && !exit.never_spawned
+            && exit.cancel_delivered_before_exit != Some(true)
+        {
+            return Err(RunError::Validation(
+                "cancellation delivery before exit is unproven",
+            ));
+        }
+        if publication.outcome == Outcome::Cancelled
+            && exit.never_spawned
+            && exit.stop_reason
+                != Some(provenant_supervisor::machine::StopReason::ExplicitCancellation)
+        {
+            return Err(RunError::Validation("prelaunch cancellation is unproven"));
+        }
+        if exit.cancel_delivered_before_exit == Some(true)
+            && publication.outcome != Outcome::Cancelled
+        {
+            return Err(RunError::Validation(
+                "effective cancellation contradicts outcome",
+            ));
+        }
         let result = self.commit_terminal(
             old,
             expected_revision,
@@ -396,6 +626,7 @@ impl RunStore {
             Some(durable_exit),
             outcome_exit,
             !exit.never_spawned,
+            exit.cancel_delivered_before_exit,
             call,
         );
         drop(writer);
@@ -451,7 +682,7 @@ impl RunStore {
             RECORD_LIMIT,
         )? {
             Some(raw) => {
-                let saved: AttemptRecord = decode(&raw)?;
+                let saved: AttemptRecord = crate::db::decode_attempt(&raw)?;
                 super::reader::validate_attempt(&saved)?;
                 match saved.state {
                     AttemptState::Terminal {
@@ -495,7 +726,7 @@ impl RunStore {
             partial_signals: Vec::new(),
         };
         let result = self
-            .commit_terminal(old, revision, &publication, None, None, false, call)
+            .commit_terminal(old, revision, &publication, None, None, false, None, call)
             .map(Some);
         drop(writer);
         if let Ok(Some(record)) = &result {
@@ -543,6 +774,7 @@ impl RunStore {
         durable_exit: Option<ArtifactRecord>,
         outcome_exit: Option<i64>,
         launched: bool,
+        cancellation_delivered: Option<bool>,
         call: &Request<'_>,
     ) -> Result<AttemptRecord> {
         let id = old.attempt_id;
@@ -593,9 +825,46 @@ impl RunStore {
             finished_at: publication.finished_at,
             reason: publication.reason.clone(),
         };
+        next.schema_version = 2;
+        next.terminal_evidence = Some(if publication.outcome == Outcome::Unsettled {
+            TerminalEvidence::Unsettled {
+                reason: publication
+                    .reason
+                    .clone()
+                    .ok_or(RunError::Validation("unsettled reason missing"))?,
+            }
+        } else if publication.outcome == Outcome::Cancelled && cancellation_delivered == Some(true)
+        {
+            TerminalEvidence::EffectiveCancellation
+        } else if durable_exit.is_some() {
+            TerminalEvidence::ProcessExit
+        } else {
+            TerminalEvidence::PreLaunchRefusal
+        });
         next.publication_error = None;
         next.exit_evidence = durable_exit;
         let attempt = self.attempt_dir(old.run_id, id, false)?;
+        if publication.outcome == Outcome::Cancelled
+            && (!launched || cancellation_delivered == Some(true))
+        {
+            next.cancellation_disposition = Some(CancellationDisposition::Effective);
+        } else if let Some(raw) = read_sealed(&attempt, "cancel.json", RECORD_LIMIT)? {
+            if let Ok(request) = decode::<CancellationEvidence>(&raw) {
+                if request.scope == Self::scope(&old)
+                    && request.requester == old.verified_owner.unwrap_or(self.context.actor_id)
+                    && request.reason
+                        == provenant_supervisor::machine::StopReason::ExplicitCancellation
+                {
+                    next.cancellation_disposition = Some(match cancellation_delivered {
+                        Some(true) => CancellationDisposition::Effective,
+                        Some(false) => CancellationDisposition::AcknowledgedIneffective,
+                        None => CancellationDisposition::Unknown,
+                    });
+                }
+            } else {
+                next.cancellation_disposition = Some(CancellationDisposition::Unknown);
+            }
+        }
         if let Some(raw) = read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)? {
             let writer: crate::writer::WriterTerminal = decode(&raw)?;
             next.head = Some(writer.head);
@@ -655,9 +924,35 @@ impl RunStore {
             AttemptFile::TerminalPending.name(),
             RECORD_LIMIT,
         )? {
-            Some(saved) if saved != intent => return Err(RunError::TerminalRecoveryRequired),
+            Some(saved) if saved != intent => {
+                let name = format!(
+                    "terminal-pending.conflict-{}.json",
+                    provenant_core::hex(CanonicalV1::file_digest(&intent).bytes())
+                );
+                seal(&attempt_dir, &name, &intent, RECORD_LIMIT)?;
+                return Err(RunError::TerminalRecoveryRequired);
+            }
             Some(_) => {}
             None => {
+                if let Some(saved) =
+                    read_sealed(&attempt_dir, AttemptFile::Result.name(), RESULT_LIMIT)?
+                    && saved != publication.result.as_bytes()
+                {
+                    let name = format!(
+                        "result.conflict-{}.txt",
+                        provenant_core::hex(
+                            CanonicalV1::file_digest(publication.result.as_bytes()).bytes()
+                        )
+                    );
+                    seal(
+                        &attempt_dir,
+                        &name,
+                        publication.result.as_bytes(),
+                        RESULT_LIMIT,
+                    )?;
+                    // The conflicting rendering is retained above; sealing the
+                    // original path next reports the typed mismatch.
+                }
                 seal(
                     &attempt_dir,
                     AttemptFile::Result.name(),
@@ -679,7 +974,8 @@ impl RunStore {
         self.commit_terminal_record(&old, &next, call)?;
         #[cfg(test)]
         crate::tests::crash_at("committed");
-        Ok(next)
+        // Return the projection readers see, including the receipt row.
+        self.record(id, call)
     }
 
     /// A reboot proves loss without inventing provider output or exit facts.
@@ -719,6 +1015,10 @@ impl RunStore {
         }
         let mut next = old.clone();
         next.revision = old.revision.checked_add(1).ok_or(RunError::Conflict)?;
+        next.schema_version = 2;
+        next.terminal_evidence = Some(TerminalEvidence::Lost {
+            reason: reason.into(),
+        });
         next.state = AttemptState::Terminal {
             extra: Default::default(),
             outcome: Outcome::Lost,
@@ -730,10 +1030,101 @@ impl RunStore {
             reason: Some(reason.into()),
         };
         super::reader::validate_attempt(&next)?;
+        let attempt = self.attempt_dir(old.run_id, old.attempt_id, false)?;
+        let name = AttemptFile::TerminalPending.name();
+        let next = match read_sealed(&attempt, name, RECORD_LIMIT)? {
+            Some(raw) => {
+                let saved: AttemptRecord = crate::db::decode_attempt(&raw)?;
+                super::reader::validate_attempt(&saved)?;
+                // Any scoped decision already sealed for this generation wins.
+                // A non-lost decision is replayed as itself, never as lost, and
+                // a mismatch is a conflict that keeps the sealed evidence.
+                if matches!(
+                    saved.state,
+                    AttemptState::Terminal { outcome, .. } if outcome != Outcome::Lost
+                ) {
+                    let (record, committed) = self.replay_terminal_locked(old.attempt_id, call)?;
+                    if committed {
+                        self.settle_cleanup(&record, call);
+                    }
+                    return Ok(());
+                }
+                if saved.attempt_id != old.attempt_id
+                    || saved.run_id != old.run_id
+                    || saved.project_id != old.project_id
+                    || saved.task_id != old.task_id
+                    || saved.operation_id != old.operation_id
+                    || saved.generation != old.generation
+                    || saved.revision != next.revision
+                    || !matches!(
+                        saved.state,
+                        AttemptState::Terminal {
+                            outcome: Outcome::Lost,
+                            ..
+                        }
+                    )
+                {
+                    return Err(RunError::Conflict);
+                }
+                if let Some(result) = &saved.result {
+                    self.artifact_bytes(old.run_id, result, RESULT_LIMIT)?;
+                }
+                if let Some(exit) = &saved.exit_evidence {
+                    self.artifact_bytes(old.run_id, exit, RECORD_LIMIT)?;
+                }
+                saved
+            }
+            None => {
+                seal(&attempt, name, &bytes(&next)?, RECORD_LIMIT)?;
+                next
+            }
+        };
         // Keep recovery discoverable until fence release, even for readers
         // whose reservations live outside the writer registry. Reconcile
         // recognises this lost state and preserves scratch on every retry.
         self.commit_terminal_record(&old, &next, call)
+    }
+
+    /// Run the post-commit Git pin cleanup of a committed terminal attempt and
+    /// persist the result: `Failed{retryable}` on error, `Done` on success.
+    /// Safe to repeat; callers retry while the receipt is not `Done`.
+    pub fn retry_git_cleanup(
+        &self,
+        record: &AttemptRecord,
+        call: &Request<'_>,
+    ) -> Result<SettlementReceipts> {
+        let request = self.request(record.run_id, call)?;
+        let writer = request
+            .tasks
+            .iter()
+            .find(|task| task.task_id == record.task_id)
+            .and_then(|task| task.writer.as_ref())
+            .ok_or(RunError::Validation("attempt has no writer to clean up"))?;
+        let cleanup = (|| -> Result<()> {
+            let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+            let head = crate::settlement::pinned_head(&attempt, Self::scope(record))?;
+            crate::writer::cleanup_git_pins(
+                self.context.state_root.as_path(),
+                writer,
+                &attempt,
+                Self::scope(record),
+                head,
+            )
+        })();
+        let disposition = match cleanup {
+            Ok(()) => EffectDisposition::Done,
+            Err(error) => EffectDisposition::Failed {
+                reason: error.to_string().chars().take(1024).collect(),
+                retryable: true,
+            },
+        };
+        self.record_effect(
+            record.attempt_id,
+            record.generation,
+            SettlementEffect::CleanupCustodyRelease,
+            disposition,
+            call,
+        )
     }
 
     fn commit_terminal_record(
@@ -747,24 +1138,6 @@ impl RunStore {
         };
         let id = old.attempt_id;
         let request = self.request(old.run_id, call)?;
-        if let Some(writer) = request
-            .tasks
-            .iter()
-            .find(|task| task.task_id == old.task_id)
-            .and_then(|task| task.writer.as_ref())
-        {
-            let attempt = self.attempt_dir(old.run_id, id, false)?;
-            // Only an import journal creates a staging ref. A result-only
-            // terminal head does not prove that this attempt opened Git.
-            let head = crate::settlement::pinned_head(&attempt, Self::scope(old))?;
-            crate::writer::cleanup_git_pins(
-                self.context.state_root.as_path(),
-                writer,
-                &attempt,
-                Self::scope(old),
-                head,
-            )?;
-        }
         let successor = self.policy_successor(old, next, call)?;
         let disk_floor_bytes = if successor.is_some() {
             provenant_config::GcSettings::read(&self.writer_registry)?
@@ -789,6 +1162,10 @@ impl RunStore {
         self.write(call, |tx| {
             let changed = tx.execute("UPDATE attempts SET revision=?1,terminal=1,tmp_retained=1,record=?2 WHERE id=?3 AND revision=?4 AND terminal=0", params![sql_int(next.revision)?, bytes(next)?, id.to_string(), sql_int(old.revision)?])?;
             if changed != 1 { return Err(RunError::Conflict); }
+            if next.schema_version >= 2 {
+                let receipts = SettlementReceipts { cancellation: next.cancellation_disposition, ..Default::default() };
+                tx.execute("INSERT INTO settlement_receipts(attempt,generation,record) VALUES (?1,?2,?3)", params![id.to_string(), sql_int(next.generation)?, bytes(&receipts)?])?;
+            }
             if let Some((successor, wait_seconds)) = &successor { self.insert_policy_successor(tx, successor, *wait_seconds, &request, disk_floor_bytes)?; }
             tx.execute("DELETE FROM admission WHERE attempt=?1", [id.to_string()])?;
             Self::insert_reaction(tx, &reaction)?;
@@ -812,6 +1189,35 @@ impl RunStore {
             self.context.state_root.as_path(),
             &[provenant_os::changes::Scope::Board],
         );
+        // A stop accepted after the decision read cancel.json (but before this
+        // commit became visible) is acknowledged here from the host-sealed,
+        // scope- and requester-checked request, not from mutable lane state.
+        // A stop sealed later is acknowledged by `cancel` seeing the terminal row.
+        if next.cancellation_disposition.is_none()
+            && let Ok(attempt) = self.attempt_dir(old.run_id, id, false)
+            && let Ok(Some(raw)) = read_sealed(&attempt, "cancel.json", RECORD_LIMIT)
+            && decode::<CancellationEvidence>(&raw).is_ok_and(|request| {
+                request.scope == Self::scope(old)
+                    && request.requester == old.verified_owner.unwrap_or(self.context.actor_id)
+                    && request.reason
+                        == provenant_supervisor::machine::StopReason::ExplicitCancellation
+            })
+        {
+            self.record_cancellation(
+                id,
+                next.generation,
+                CancellationDisposition::AcknowledgedIneffective,
+                call,
+            )?;
+        }
+        if request
+            .tasks
+            .iter()
+            .any(|task| task.task_id == old.task_id && task.writer.is_some())
+        {
+            // A failure is persisted as a retryable effect, never reported done.
+            self.retry_git_cleanup(next, call)?;
+        }
         self.contribution_diagnostic(next.run_id, self.retain_contribution_route(next, call));
         Ok(())
     }
@@ -956,9 +1362,20 @@ struct SealedExit {
     scope: provenant_supervisor::custody::Scope,
     termination: Option<Termination>,
     never_spawned: bool,
+    stop_reason: Option<provenant_supervisor::machine::StopReason>,
+    #[serde(default)]
+    cancel_delivered_before_exit: Option<bool>,
     terminal_observed: bool,
     unresolved_cleanup: bool,
     settlement_evidence: provenant_supervisor::custody::SettlementEvidence,
+}
+#[derive(serde::Deserialize)]
+pub(crate) struct CancellationEvidence {
+    #[serde(rename = "request_id")]
+    pub(crate) _request_id: provenant_core::OperationId,
+    pub(crate) scope: provenant_supervisor::custody::Scope,
+    pub(crate) requester: provenant_core::ActorId,
+    pub(crate) reason: provenant_supervisor::machine::StopReason,
 }
 fn sealed_exit(
     dir: &provenant_os::fs::Directory,
@@ -984,6 +1401,8 @@ fn sealed_exit(
     if stored.scope != exit.scope
         || stored.termination != exit.termination
         || stored.never_spawned != exit.never_spawned
+        || stored.stop_reason != exit.stop_reason
+        || stored.cancel_delivered_before_exit != exit.cancel_delivered_before_exit
         || stored.terminal_observed != exit.terminal_observed
         || stored.unresolved_cleanup
         || stored.settlement_evidence != exit.settlement_evidence

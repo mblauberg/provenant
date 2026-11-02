@@ -1,5 +1,5 @@
 //! Bounded cross-project attempt summaries for local overview surfaces.
-use crate::{AttemptRecord, AttemptState, Outcome, Request, Result, RunStore, db::decode};
+use crate::{AttemptRecord, AttemptState, Outcome, Request, Result, RunStore};
 use provenant_core::{AttemptId, ProjectId, RunId, TaskId};
 use std::collections::BTreeSet;
 
@@ -80,7 +80,7 @@ impl RunStore {
             let run: String = row.get(1)?;
             let task: String = row.get(2)?;
             let id: String = row.get(3)?;
-            let record: AttemptRecord = decode(&row.get::<_, Vec<u8>>(6)?)?;
+            let record: AttemptRecord = crate::db::decode_attempt(&row.get::<_, Vec<u8>>(6)?)?;
             if record.project_id.to_string() != project
                 || record.run_id.to_string() != run
                 || record.task_id.to_string() != task

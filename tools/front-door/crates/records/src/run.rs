@@ -596,6 +596,8 @@ pub enum Outcome {
     PermissionDenied,
     Quarantined,
     Lost,
+    /// Terminal, but the evidence is insufficient to establish another outcome.
+    Unsettled,
     /// A writer succeeded but left uncommitted edits and no new commit.
     Uncommitted,
     InputRequired,
@@ -616,6 +618,7 @@ impl From<Outcome> for crate::AttemptOutcome {
             Outcome::PermissionDenied => Self::PermissionDenied,
             Outcome::Quarantined => Self::Quarantined,
             Outcome::Lost => Self::Lost,
+            Outcome::Unsettled => Self::Unsettled,
             Outcome::Uncommitted => Self::Uncommitted,
             Outcome::InputRequired => Self::InputRequired,
         }
@@ -714,6 +717,72 @@ pub enum WriteSource {
     LaneCache,
 }
 
+/// Evidence on which a terminal decision was based.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TerminalEvidence {
+    ProcessExit,
+    PreLaunchRefusal,
+    EffectiveCancellation,
+    Unsettled {
+        reason: String,
+    },
+    /// The holder is proven lost for the supplied reason.
+    Lost {
+        reason: String,
+    },
+}
+
+/// Independently retried work after a terminal decision.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum EffectDisposition {
+    #[default]
+    Pending,
+    Done,
+    Failed {
+        reason: String,
+        retryable: bool,
+    },
+}
+
+/// Names an independently tracked settlement effect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettlementEffect {
+    GitImport,
+    ManifestConflict,
+    LockTimeout,
+    CleanupCustodyRelease,
+    /// Remote delivery of a succeeded writer lane.
+    Delivery,
+}
+
+/// Disposition of an explicit cancellation request relative to provider exit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CancellationDisposition {
+    Effective,
+    AcknowledgedIneffective,
+    Unknown,
+}
+
+/// Current receipts for the effects following a terminal decision.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettlementReceipts {
+    pub git_import: EffectDisposition,
+    pub manifest_conflict: EffectDisposition,
+    pub lock_timeout: EffectDisposition,
+    pub cleanup_custody_release: EffectDisposition,
+    #[serde(default)]
+    pub delivery: EffectDisposition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancellation: Option<CancellationDisposition>,
+    /// A request received after the terminal decision was acknowledged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub late_cancellation_acknowledged: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -798,6 +867,18 @@ pub struct AttemptRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub partial_signals: Vec<PartialSignal>,
     pub state: AttemptState,
+    /// Absent on records written before terminal decisions were recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_evidence: Option<TerminalEvidence>,
+    /// The cancellation disposition known when the decision was sealed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancellation_disposition: Option<CancellationDisposition>,
+    /// Mutable effect receipts, projected independently of the sealed decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlement_receipts: Option<SettlementReceipts>,
+    /// A terminal attempt can still hold its custody fence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custody_pending: Option<bool>,
     pub usage: UsageRecord,
     pub prompt: ArtifactRecord,
     pub result: Option<ArtifactRecord>,

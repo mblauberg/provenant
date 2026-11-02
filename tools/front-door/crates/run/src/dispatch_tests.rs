@@ -1730,6 +1730,8 @@ fn host_stops_a_launched_child_from_held_scope_not_its_records() -> TestResult {
                 finished_at: record.queued_at,
                 reason: Some("rejected, says the lane".into()),
             };
+            record.terminal_evidence = Some(TerminalEvidence::PreLaunchRefusal);
+            record.provider_launched = Some(false);
             let mut result = record.prompt.clone();
             result.path =
                 artifacts::artifact_path(record.attempt_id, "result.md").expect("result path");
@@ -3051,6 +3053,8 @@ fn settle_with_role(
     artifacts::seal(&dir, "stdout.log", b"stream", CAPTURE_LIMIT)?;
     let mut observed = exit();
     observed.scope = RunStore::scope(&store.record(id, &call)?);
+    // A cancelled outcome requires proof that the stop preceded the exit.
+    observed.cancel_delivered_before_exit = (outcome == Some(Outcome::Cancelled)).then_some(true);
     seal_exit(&store, &observed)?;
     let fake = Fake {
         observed: Some(route()),
@@ -3537,6 +3541,7 @@ fn runtime_deadline_reason_survives_a_cancellation_record() -> TestResult {
     observed.scope = RunStore::scope(&store.record(id, &call)?);
     observed.termination = Some(Termination::Signal(9));
     observed.stop_reason = Some(provenant_supervisor::machine::StopReason::WallDeadline);
+    observed.cancel_delivered_before_exit = Some(true);
     seal_exit(&store, &observed)?;
     let fake = Fake {
         observed: Some(route()),
@@ -5333,6 +5338,7 @@ fn cancel_ends_queued_work_and_stops_admission_before_spawn() -> TestResult {
     observed.termination = None;
     observed.terminal_observed = false;
     observed.settlement_evidence = provenant_supervisor::custody::SettlementEvidence::NeverSpawned;
+    observed.stop_reason = Some(provenant_supervisor::machine::StopReason::ExplicitCancellation);
     seal_exit(&store, &observed)?;
     store.finish(starting, &dir, &observed, &Fake::default(), &call)?;
     assert_eq!(terminal(&store, starting, &call)?, Outcome::Cancelled);
@@ -6030,7 +6036,7 @@ fn reconcile_backfills_legacy_temporary_without_changing_terminal_records() -> T
             std::fs::rename(attempt, attempt.with_extension("moved"))?;
             std::os::unix::fs::symlink(attempt.with_extension("moved"), attempt)?;
         }
-        store.db.execute_batch("DROP INDEX reaction_pending; DROP TABLE reactions; DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; PRAGMA user_version=3;")?;
+        store.db.execute_batch("DROP TABLE settlement_receipts; DROP INDEX reaction_pending; DROP TABLE reactions; DROP INDEX retained_temporary; ALTER TABLE attempts DROP COLUMN tmp_retained; PRAGMA user_version=3;")?;
         drop(store);
 
         let store = RunStore::open(&context, &call)?;
@@ -6039,7 +6045,10 @@ fn reconcile_backfills_legacy_temporary_without_changing_terminal_records() -> T
             std::fs::remove_file(attempt)?;
             std::fs::rename(attempt.with_extension("moved"), attempt)?;
         }
-        assert_eq!(store.record(id, &call)?, before);
+        // Records from before the receipt table carry no receipts.
+        let mut legacy = before.clone();
+        legacy.settlement_receipts = None;
+        assert_eq!(store.record(id, &call)?, legacy);
         assert!(
             store
                 .db
@@ -6100,7 +6109,9 @@ fn reconcile_backfills_legacy_temporary_without_changing_terminal_records() -> T
         }
         drop(store);
         let store = RunStore::open(&context, &call)?;
-        assert_eq!(store.record(id, &call)?, before);
+        let mut legacy = before.clone();
+        legacy.settlement_receipts = None;
+        assert_eq!(store.record(id, &call)?, legacy);
         assert!(store.open_runs(10, &call)?.is_empty());
     }
     Ok(())

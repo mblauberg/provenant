@@ -1684,10 +1684,32 @@ impl RunStore {
             let Some(handle) = &held.handle else {
                 // The latest handle is dropped only after observing guardian
                 // exit. Earlier superseded generations cannot be selected.
+                let record = self.record(id, call)?;
+                if matches!(record.state, AttemptState::Terminal { .. }) {
+                    self.record_cancellation(
+                        id,
+                        record.generation,
+                        CancellationDisposition::AcknowledgedIneffective,
+                        call,
+                    )?;
+                }
                 return Ok(CancelReceipt::AlreadyTerminal);
             };
             let stopped = custody::stop(handle, StopReason::ExplicitCancellation)
                 .map_err(|error| error.to_string());
+            if stopped.is_ok()
+                && let Ok(record) = self.record(id, call)
+                && matches!(record.state, AttemptState::Terminal { .. })
+            {
+                self.record_cancellation(
+                    id,
+                    record.generation,
+                    CancellationDisposition::AcknowledgedIneffective,
+                    call,
+                )?;
+                // The stop receipt still reports what the held handle accepted:
+                // a lane-rewritable record does not decide whether it stopped.
+            }
             return Ok(match stopped {
                 Ok(StopReceipt::Requested) => CancelReceipt::Requested,
                 Ok(StopReceipt::AlreadyRequested) => CancelReceipt::AlreadyRequested,
@@ -1697,7 +1719,15 @@ impl RunStore {
         loop {
             let record = self.record(id, call)?;
             match record.state {
-                AttemptState::Terminal { .. } => return Ok(CancelReceipt::AlreadyTerminal),
+                AttemptState::Terminal { .. } => {
+                    self.record_cancellation(
+                        id,
+                        record.generation,
+                        CancellationDisposition::AcknowledgedIneffective,
+                        call,
+                    )?;
+                    return Ok(CancelReceipt::AlreadyTerminal);
+                }
                 AttemptState::Queued { .. } => {
                     let now = call
                         .clock
@@ -1714,7 +1744,16 @@ impl RunStore {
                         call,
                     ) {
                         Ok(Some(_)) => return Ok(CancelReceipt::Cancelled),
-                        Ok(None) => return Ok(CancelReceipt::AlreadyTerminal),
+                        Ok(None) => {
+                            let terminal = self.record(id, call)?;
+                            self.record_cancellation(
+                                id,
+                                terminal.generation,
+                                CancellationDisposition::AcknowledgedIneffective,
+                                call,
+                            )?;
+                            return Ok(CancelReceipt::AlreadyTerminal);
+                        }
                         // A concurrent start took it; it is no longer queued.
                         Err(RunError::Conflict) => continue,
                         Err(error) => return Err(error),

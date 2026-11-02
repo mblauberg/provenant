@@ -222,7 +222,10 @@ impl RunStore {
         if matches!(
             terminal.state,
             AttemptState::Terminal {
-                outcome: Outcome::Cancelled | Outcome::TimedOut | Outcome::Lost,
+                outcome: Outcome::Cancelled
+                    | Outcome::TimedOut
+                    | Outcome::Lost
+                    | Outcome::Unsettled,
                 ..
             }
         ) || read_sealed(&directory, AttemptFile::Cancel.name(), RECORD_LIMIT)?.is_some()
@@ -729,7 +732,9 @@ mod tests {
         let store = RunStore::open(&context(temp.path())?, &call)?;
         let input = input();
         store.create(&input, &call)?;
-        seal_observation(&store, &input, &exit())?;
+        let mut observed = exit();
+        observed.cancel_delivered_before_exit = Some(true);
+        seal_observation(&store, &input, &observed)?;
         let id = input.attempts[0].attempt_id;
         let old = store.record(id, &call)?;
         store.stage_policy_retry(
@@ -753,7 +758,7 @@ mod tests {
         )?;
         let mut publication = publication();
         publication.outcome = Outcome::Cancelled;
-        store.publish_terminal(id, 1, &publication, &exit(), &call)?;
+        store.publish_terminal(id, 1, &publication, &observed, &call)?;
         assert!(store.pending_attempts(input.run_id, &call)?.is_empty());
         assert_eq!(store.run(input.run_id, &call)?.closure, Closure::Closed);
         Ok(())

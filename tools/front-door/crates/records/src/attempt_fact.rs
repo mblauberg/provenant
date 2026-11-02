@@ -22,6 +22,8 @@ pub enum AttemptOutcome {
     PermissionDenied,
     Quarantined,
     Lost,
+    /// The available evidence cannot establish a more specific outcome.
+    Unsettled,
     Uncommitted,
     InputRequired,
 }

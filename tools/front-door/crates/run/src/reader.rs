@@ -138,7 +138,9 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
             path: output.path,
             digest: output.digest,
         }],
-        None if outcome == Outcome::Lost && exit_code.is_none() => Vec::new(),
+        None if matches!(outcome, Outcome::Lost | Outcome::Unsettled) && exit_code.is_none() => {
+            Vec::new()
+        }
         None => return Err(RunError::Validation("terminal result missing")),
     };
     let transcript = r
@@ -523,7 +525,7 @@ impl RunStore {
     ) -> Result<(RunRecord, AttemptRecord)> {
         call.check()?;
         let (raw, run_id, task_id, number, revision, terminal): (Vec<u8>, String, String, i64, i64, bool) = self.db.query_row("SELECT record,run,task,number,revision,terminal FROM attempts WHERE id=?1 AND project=?2", params![id.to_string(), self.context.project_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))).optional()?.ok_or(RunError::NotFound)?;
-        let mut record: AttemptRecord = decode(&raw)?;
+        let mut record: AttemptRecord = crate::db::decode_attempt(&raw)?;
         if record.attempt_id != id
             || record.project_id != self.context.project_id
             || record.run_id.to_string() != run_id
@@ -539,6 +541,28 @@ impl RunStore {
             return Err(RunError::Validation("attempt run association"));
         }
         validate_attempt(&record)?;
+        let version: i64 = self
+            .db
+            .pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let receipt: Option<(i64, Vec<u8>)> = if version >= 7 {
+            self.db
+                .query_row(
+                    "SELECT generation,record FROM settlement_receipts WHERE attempt=?1",
+                    [id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?
+        } else {
+            None
+        };
+        if let Some((generation, raw)) = receipt {
+            if generation != sql_int(record.generation)?
+                || !matches!(record.state, AttemptState::Terminal { .. })
+            {
+                return Err(RunError::Conflict);
+            }
+            record.settlement_receipts = Some(crate::db::decode_unversioned(&raw)?);
+        }
         let (checkpoint, checkpoint_readable) = match self.attempt_dir(record.run_id, id, false) {
             Ok(directory) => {
                 let read_checkpoint = match read {
@@ -982,7 +1006,7 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
     if !valid_write_grants(&r.write_grants) {
         return Err(RunError::Validation("invalid write grants"));
     }
-    if r.schema_version != 1 || r.attempt_number == 0 || r.revision == 0 {
+    if !matches!(r.schema_version, 1 | 2) || r.attempt_number == 0 || r.revision == 0 {
         return Err(RunError::Validation("attempt version/ordinal"));
     }
     if r.prompt.path != artifact_path(r.attempt_id, AttemptFile::Prompt.name())?
@@ -1004,12 +1028,31 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
         outcome,
         exit_code,
         finished_at,
+        ref reason,
         ..
     } = r.state
     {
+        if r.schema_version == 2 {
+            match (&r.terminal_evidence, outcome) {
+                (Some(TerminalEvidence::Unsettled { reason: evidence }), Outcome::Unsettled)
+                    if !evidence.is_empty()
+                        && evidence.len() <= 4096
+                        && reason.as_ref() == Some(evidence) => {}
+                (Some(TerminalEvidence::ProcessExit), outcome)
+                    if outcome != Outcome::Unsettled && r.exit_evidence.is_some() => {}
+                (
+                    Some(TerminalEvidence::PreLaunchRefusal),
+                    Outcome::Rejected | Outcome::Cancelled,
+                ) if r.provider_launched == Some(false) => {}
+                (Some(TerminalEvidence::EffectiveCancellation), Outcome::Cancelled) => {}
+                (Some(TerminalEvidence::Lost { reason: evidence }), Outcome::Lost)
+                    if !evidence.is_empty() && reason.as_ref() == Some(evidence) => {}
+                _ => return Err(RunError::Validation("terminal decision evidence")),
+            }
+        }
         // A proven reboot loses the attempt without manufacturing an exit or
         // result. Existing telemetry remains as it was at the crash.
-        let lost = outcome == Outcome::Lost && exit_code.is_none();
+        let lost = matches!(outcome, Outcome::Lost | Outcome::Unsettled) && exit_code.is_none();
         if r.result.is_none() && !lost {
             return Err(RunError::Validation("terminal result missing"));
         }

@@ -83,7 +83,7 @@ impl RunStore {
                 more = true;
                 break;
             }
-            let attempt: AttemptRecord = decode(&row.get::<_, Vec<u8>>(5)?)?;
+            let attempt: AttemptRecord = crate::db::decode_attempt(&row.get::<_, Vec<u8>>(5)?)?;
             let run: RunRecord = decode(&row.get::<_, Vec<u8>>(6)?)?;
             if attempt.attempt_id.to_string() != row.get::<_, String>(1)?
                 || attempt.project_id.to_string() != row.get::<_, String>(2)?

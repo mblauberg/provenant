@@ -556,7 +556,7 @@ terminal settlement.
 | --- | --- |
 | `import` | Import the pinned head through Git's quarantined receive path. Repeating the same staging ref is harmless. |
 | `publish` | Compare-and-swap the real branch from its pinned base; the same head already published counts as success. |
-| `record` | Seal result and exit evidence, remove the attempt's base and import refs, then commit the terminal attempt, summary, operation state and event. Recover an interrupted terminal commit from its pending evidence. |
+| `record` | Seal the result and terminal decision before the revision-checked transaction commits the attempt, summary, operation state and event. Replay the same scoped decision after interruption. Retention-ref cleanup follows the transaction. |
 | `release` | Verify the committed outcome and release evidence, then remove the settling reservation. Repeated release accepts the same committed attempt. |
 | `complete` | Settlement is finished; ordinary terminal cleanup may reclaim disposable scratch. Import refusals retain private Git for host recovery. |
 
@@ -569,10 +569,38 @@ publication never certify success. A pending terminal commit remains `settling`
 with `publication_pending: true` and keeps the worktree reservation, while its
 provider has already stopped consuming host build capacity and live custody.
 
+An attempt record version 2 carries the terminal evidence and distinguishes
+`unsettled` from `lost`. Effect receipts are stored independently of the
+immutable decision. A terminal wait view includes `custody_pending`; a pending
+fence still prevents unsafe writer admission. A cancellation determines the
+execution outcome only when delivery to the provider was recorded before its
+exit was observed. A later request is acknowledged as ineffective. Older exit
+records without delivery ordering retain uncertainty.
+
+The decision is sealed (`terminal-pending.json`) before the revision-checked
+transaction and replayed unchanged after a crash or `SQLITE_BUSY`; one decision
+exists per attempt generation and a conflicting sealed decision is kept beside
+it as `terminal-pending.conflict-*.json`, never replacing it. Lost recovery
+converges on any scoped sealed decision instead of overwriting it with `lost`.
+Git import, manifest sealing, remote delivery and cleanup/custody release are
+independent dispositions (`pending`, `done`, `failed{reason,retryable}`).
+Delivery and manifest failures are recorded after the commit and never withhold
+the validated decision; a failed Git pin cleanup is retried with
+`retry_git_cleanup`. A retryable Git import failure still returns an error
+before sealing so the custody fence is not released; recording it as a durable
+effect is not yet done. A stop accepted between the last cancellation read and
+the commit is acknowledged ineffective from the host-sealed request after the
+commit; a lane-rewritable record never decides whether a held handle stops.
+
+Run-store schema 7 is a forward-only migration. Before migrating an existing
+store, the owner takes a timestamped SQLite snapshot including committed WAL
+contents while excluding concurrent writes. Downgrade is unsupported; recovery
+requires the pre-migration copy or a forward repair.
+
 `cancel` durably records the request and signals the supervisor without waiting
 for a writer lock. The settlement driver checks it between phases and polls it
 every 50 ms during import, instruction checks and optional automatic delivery,
-stopping the owned Git child before recording `cancelled`.
+stopping the owned Git child when required.
 Public `reconcile` starts the same binary's detached `internal settle` worker
 only when a non-terminal attempt needs settlement. A run-scoped queued claim
 and worker exclusion deduplicate concurrent requests; a queued claim expires
