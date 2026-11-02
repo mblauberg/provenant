@@ -286,12 +286,14 @@ impl ReviewConfig {
         // Risk establishes a floor; size and integration can demand more coverage.
         {
             let candidates = [
-                (override_name.is_none() && (kind.is_some_and(|k| self.select.by_kind.contains_key(k))
-                    || size.is_some_and(|s| self.select.by_size.contains_key(s)))
-                )
+                (override_name.is_none()
+                    && (kind.is_some_and(|k| self.select.by_kind.contains_key(k))
+                        || size.is_some_and(|s| self.select.by_size.contains_key(s))))
                 .then(|| self.select.select(None, None, kind, &[], size, Some(true))),
-                (override_name.is_none() && kind != Some("docs") && size.is_some_and(|s| self.select.by_size.contains_key(s)))
-                    .then(|| self.select.select(None, None, None, &[], size, Some(true))),
+                (override_name.is_none()
+                    && kind != Some("docs")
+                    && size.is_some_and(|s| self.select.by_size.contains_key(s)))
+                .then(|| self.select.select(None, None, None, &[], size, Some(true))),
                 risk.filter(|r| self.select.by_risk.contains_key(*r))
                     .map(|r| {
                         self.select
@@ -488,8 +490,20 @@ mod tests {
                 .name,
             "standard"
         );
-        assert_eq!(review.select_shape(None, None, Some("refactor"), &[], Some("small")).unwrap().name, "standard");
-        assert_eq!(review.select_shape(None, None, Some("refactor"), &[], Some("large")).unwrap().name, "deep");
+        assert_eq!(
+            review
+                .select_shape(None, None, Some("refactor"), &[], Some("small"))
+                .unwrap()
+                .name,
+            "standard"
+        );
+        assert_eq!(
+            review
+                .select_shape(None, None, Some("refactor"), &[], Some("large"))
+                .unwrap()
+                .name,
+            "deep"
+        );
         assert_eq!(
             review
                 .select_shape(None, Some("crucial"), None, &[], Some("small"))
@@ -497,7 +511,13 @@ mod tests {
                 .name,
             "deep"
         );
-        assert_eq!(review.select_shape(Some("quick"), Some("crucial"), None, &[], None).unwrap().name, "deep");
+        assert_eq!(
+            review
+                .select_shape(Some("quick"), Some("crucial"), None, &[], None)
+                .unwrap()
+                .name,
+            "deep"
+        );
     }
 
     #[test]
