@@ -1299,6 +1299,20 @@ fn review_council_fans_out_one_lens_role_over_the_lens_list() {
 }
 
 #[test]
+fn lens_contract_rejects_two_verdict_lines() {
+    let document = council(&["parameters.worktree='/repo/lane'"], false).unwrap();
+    let lens = &document["nodes"][1]["composite"]["nodes"][0];
+    let prompt = lens["prompt"].as_str().unwrap();
+    assert!(prompt.contains("exactly one verdict line"), "{prompt}");
+
+    let mut capture = provenant_records::result_capture::ResultCapture::new(None);
+    capture.push(b"VERDICT: changes abc123\nVERDICT: FAIL\n");
+    let captured = capture.finish();
+    assert!(captured.verdict.is_none());
+    assert!(captured.verdict_invalid);
+}
+
+#[test]
 fn integration_review_expands_all_base_lenses_and_resolves_roles() {
     let document = council(
         &[
