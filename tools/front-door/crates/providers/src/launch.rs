@@ -345,6 +345,7 @@ pub(crate) fn rust_tools(
         rust_toolchain(input, access, runtime_reads, tool_exec_roots, env, setup);
     }
     system_tools(access, runtime_reads, tool_exec_roots, env);
+    crate::swift::swift_tools(input, access, runtime_reads, tool_exec_roots, env, setup);
     runtime_reads.extend(git_global_files(&input.home.join(".config")));
     // Homebrew resolves bin/git into its versioned keg. Its remote helpers
     // live beside bin/, independently of whether Node enables Homebrew tools.

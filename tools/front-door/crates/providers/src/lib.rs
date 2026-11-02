@@ -21,6 +21,8 @@ pub mod opencode;
 pub mod quota;
 pub mod quota_live;
 mod stream;
+mod swift;
+pub use swift::toolchain_available as swift_toolchain_available;
 pub mod update;
 pub use contract::*;
 pub use launch::{Access, LaunchSpec, PrepareInput, Session, SetupStep, Stdin};

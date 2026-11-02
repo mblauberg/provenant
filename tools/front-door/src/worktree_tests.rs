@@ -3610,10 +3610,40 @@ if (process.argv[2] === 'child') {
             "pnpm --dir \"$TMPDIR/cargo-probe\" run compat; ",
             "printf 'lane-node-pnpm-compat: PASS\\n'; ",
             "elif [ \"${PROVENANT_LANE_TOOLS_REQUIRED:-0}\" = 1 ]; then ",
-            "echo 'required node/pnpm unavailable' >&2; exit 15; fi"
+            "echo 'required node/pnpm unavailable' >&2; exit 15; fi; ",
+            // The package lives in the registered worktree, so `.build` does too.
+            "if [ \"${PROVENANT_LANE_SWIFT:-0}\" = 1 ]; then ",
+            "test \"$(command -v swift)\" = \"$TMPDIR/bin/swift\"; ",
+            "cd \"$lane_root/.swift-probe\"; swift build; swift test; ",
+            "printf 'lane-swift: PASS\\n'; fi"
         )].map(OsString::from);
+        // Gated on a selected Swift toolchain (`xcode-select`), as the grants are.
+        let swift = cfg!(target_os = "macos")
+            && Path::new("/usr/bin/swift").exists()
+            && provenant_providers::swift_toolchain_available(&|name| std::env::var_os(name));
+        if swift {
+            let package = launch.cwd.join(".swift-probe");
+            fs::create_dir_all(package.join("Sources/LaneProbe"))?;
+            fs::create_dir_all(package.join("Tests/LaneProbeTests"))?;
+            fs::write(
+                package.join("Package.swift"),
+                "// swift-tools-version:5.9\nimport PackageDescription\nlet package = Package(name: \"LaneProbe\", targets: [.target(name: \"LaneProbe\"), .testTarget(name: \"LaneProbeTests\", dependencies: [\"LaneProbe\"])])\n",
+            )?;
+            fs::write(
+                package.join("Sources/LaneProbe/LaneProbe.swift"),
+                "public func answer() -> Int { 42 }\n",
+            )?;
+            fs::write(
+                package.join("Tests/LaneProbeTests/LaneProbeTests.swift"),
+                "import XCTest\n@testable import LaneProbe\nfinal class LaneProbeTests: XCTestCase { func testAnswer() { XCTAssertEqual(answer(), 42) } }\n",
+            )?;
+        }
         let command = compiled.command(&argv, &provenant_core::AttemptId::from_bytes([0; 16]))?;
-        let mut options = ExecOptions::new(&command, &launch.cwd, Duration::from_secs(30));
+        let mut options = ExecOptions::new(
+            &command,
+            &launch.cwd,
+            Duration::from_secs(if swift { 300 } else { 30 }),
+        );
         options.process_group = true;
         options.cleanup_process_group = true;
         let mut tool_env = launch.environment.clone();
@@ -3621,6 +3651,10 @@ if (process.argv[2] === 'child') {
         tool_env.push((
             "PROVENANT_LANE_TOOLS_REQUIRED".into(),
             if tools_required { "1" } else { "0" }.into(),
+        ));
+        tool_env.push((
+            "PROVENANT_LANE_SWIFT".into(),
+            if swift { "1" } else { "0" }.into(),
         ));
         options.env = Some(&tool_env);
         let output = executor.execute(options)?;
@@ -3636,6 +3670,10 @@ if (process.argv[2] === 'child') {
                 String::from_utf8_lossy(&output.stdout.bytes)
                     .contains("lane-node-pnpm-compat: PASS")
             );
+        }
+        if swift {
+            assert!(String::from_utf8_lossy(&output.stdout.bytes).contains("lane-swift: PASS"));
+            fs::remove_dir_all(launch.cwd.join(".swift-probe"))?;
         }
     }
     // Start the configured MCP inside the compiled profile too: an

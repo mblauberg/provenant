@@ -584,6 +584,46 @@ fixtures, and only in their own `tmp/candidate-N`. Only a profile declaring
   `crates/confinement/src/permissions.rs::writer_cache_is_private_and_bound_to_repository_and_worktree_identity`
 - Owner: `crates/confinement/src/permissions.rs`, `crates/providers/src/`
 
+### Swift toolchain grants
+
+A writer runs `swift build` and `swift test` in its registered worktree. The
+lane profile cannot host SwiftPM's defaults: nested `sandbox-exec` fails
+(`sandbox_apply: Operation not permitted`, so manifest evaluation dies with
+`posix_spawn` denials), the default XCBuild system creates temporary
+directories in `/var/tmp` (an opaque `permissionDenied` or "Unknown error
+parsing property list"), and SwiftPM and Clang write caches under
+`~/Library` and `~/.cache`. Lanes also pin `DEVELOPER_DIR` to the Command
+Line Tools for Cargo's linker, whose SDK and compiler can disagree.
+
+Preparation therefore resolves the host's Swift toolchain (`DEVELOPER_DIR`,
+the `xcode-select` link, then the standard Xcode location) and, for a writer
+only:
+
+- grants read on the Xcode app's `Contents` and the accepted-licence record,
+  and execute on its `Developer` directory; it grants no write;
+- installs a `swift` shim first on `PATH` that selects that toolchain, moves
+  the Clang module cache and SwiftPM cache, configuration and security
+  directories into the lane cache (`.../swift`), and runs
+  `build`, `test`, `run` and `package` with `--disable-sandbox` (the lane
+  profile already confines every child) and, except for `package`,
+  `--build-system native`, which writes only the scratch path (`.build` in the
+  worktree), `TMPDIR` and the lane cache. Explicit `--build-system` wins.
+
+Writer confinement is unchanged: writes stay in the worktree, attempt scratch
+and the lane cache. A Seatbelt denial is not reported to the sandboxed
+process, and the unified log carries no record of a lane's denials, so the
+shim cannot name the denied path itself. Where SwiftPM or the compiler names
+the path, it appears in the output. On a non-zero exit the shim adds one line
+naming the writable roots and the overrides in force. Read-only lanes (#2542)
+reuse the same toolchain resolution and shim with scratch-only roots; they
+do not receive it yet.
+- Why: a writer that cannot build or test commits untested Swift.
+- Test: `src/worktree_tests.rs::lane_prepare_isolates_nested_state` (builds
+  and tests a SwiftPM package in the worktree through the production profile
+  when a Swift toolchain is selected);
+  `crates/providers/src/swift.rs::install_puts_the_shim_first_on_path_and_grants_no_write`
+- Owner: `crates/providers/src/swift.rs`, `crates/providers/src/launch.rs`
+
 ### Host-side delivery
 
 A writer task may carry `deliver`. Run binds the remote's single push URL and
