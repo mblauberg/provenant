@@ -960,13 +960,32 @@ pub(crate) fn resolve_dispatch(
         host,
         &excluded,
     );
-    let exhausted = matches!(&selected, Err(EdgeError::Routing(error)) if error.code() == "no_eligible_pool_member");
+    // The unused families have no member to take: none is eligible, or the one
+    // chosen is spent or refused. An unavailable one is not spent: stale
+    // availability stays selected rather than relaxing to a used family.
+    let exhausted = match &selected {
+        Err(EdgeError::Routing(error)) => error.code() == "no_eligible_pool_member",
+        Ok(route) => {
+            !excluded.is_empty()
+                && matches!(
+                    route.readiness,
+                    RouteReadiness::Unavailable {
+                        reason: provenant_records::RouteExclusionReason::Exhausted
+                            | provenant_records::RouteExclusionReason::FreeTierRefused
+                            | provenant_records::RouteExclusionReason::ProviderRefused
+                            | provenant_records::RouteExclusionReason::AccountMismatch,
+                        ..
+                    }
+                )
+        }
+        Err(_) => false,
+    };
     if required && exhausted {
         Err(DispatchError::FamilySeparation(
             excluded_families.unwrap_or_default().to_vec(),
         ))
     } else if !excluded.is_empty() && exhausted {
-        resolve_dispatch_excluding(
+        let relaxed = resolve_dispatch_excluding(
             request,
             roots,
             account,
@@ -975,8 +994,14 @@ pub(crate) fn resolve_dispatch(
             access,
             host,
             &[],
-        )
-        .map_err(DispatchError::from)
+        );
+        match (relaxed, selected) {
+            // Relaxing must not trade a spent route for another one.
+            (Ok(route), Ok(spent)) if !matches!(route.readiness, RouteReadiness::Ready { .. }) => {
+                Ok(spent)
+            }
+            (relaxed, _) => relaxed.map_err(DispatchError::from),
+        }
     } else {
         selected.map_err(DispatchError::from)
     }
@@ -3014,6 +3039,109 @@ mod route_tests {
         assert!(matches!(
             deferred.readiness,
             provenant_records::RouteReadiness::Unavailable { .. }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn review_substitution_skips_refused_unused_families() -> Result<(), Box<dyn Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        struct Resolver;
+        impl provenant_core::PathResolver for Resolver {
+            fn resolve_existing_ancestor(
+                &self,
+                path: &std::path::Path,
+            ) -> std::io::Result<std::path::PathBuf> {
+                Ok(path.into())
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let mut inputs =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&Resolver)?;
+        std::fs::create_dir_all(roots.state.as_path())?;
+        std::fs::set_permissions(
+            roots.state.as_path(),
+            std::fs::Permissions::from_mode(0o700),
+        )?;
+        let path = roots.state.as_path().join("config.toml");
+        std::fs::write(
+            &path,
+            "schema_version=1\n[domains.routing.pools]\ntest=[{model='codex/gpt-6-luna',weight=1,effort='high',efforts=['high']},{model='claude/claude-haiku-5-5',weight=1,effort='high',efforts=['high']}]\n",
+        )?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let catalogue = super::Catalogue::bundled()?;
+        let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
+        let availability: Vec<_> = [("codex", "gpt-6-luna"), ("claude", "claude-haiku-5-5")]
+            .into_iter()
+            .map(|(adapter, model)| provenant_providers::AvailabilityRecord {
+                schema_version: 1,
+                adapter: adapter.into(),
+                executable: "/fixture/provider".into(),
+                version: "fixture".into(),
+                fixture_ref: "fixture".into(),
+                catalogue_revision: catalogue.revision().into(),
+                account_key: Some(format!("{adapter}-account")),
+                observed_models: vec![model.into()],
+                observed_unix_seconds: now,
+                expires_unix_seconds: now + 300,
+                last_update: None,
+            })
+            .collect();
+        let access = ["codex", "claude"].map(|adapter| provenant_routing::AccessContext {
+            adapter,
+            disclosure_ref: "fixture",
+            confinement_ref: "fixture",
+        });
+        let request = super::RouteRequest {
+            read_heavy: false,
+            model: None,
+            route: Some("test".into()),
+            effort: None,
+            confidential: false,
+            fallback: vec![],
+        }
+        .to_domain()?;
+        let resolve = |used: &[String], required: bool| {
+            super::resolve_dispatch(
+                &request,
+                &roots,
+                None,
+                ("fixture", 0),
+                &availability,
+                &access,
+                "fixture",
+                Some((used, required)),
+            )
+        };
+        // The used family is the one codex serves, so Claude is the unused one.
+        let used = [String::from("openai")];
+        let unused = resolve(&used, false)?;
+        assert_eq!(unused.adapter, "claude");
+        assert!(matches!(unused.readiness, RouteReadiness::Ready { .. }));
+        // Its only account is refused: review relaxes to the ready, used family
+        // rather than picking the refused member.
+        crate::quota::persist_provider_refusal(
+            roots.state.as_path(),
+            &provenant_records::run::RouteRecord {
+                provider: Some("claude".into()),
+                model: Some("claude/claude-haiku-5-5".into()),
+                account_key: Some("claude-account".into()),
+                account_label: Some("claude-account".into()),
+                ..Default::default()
+            },
+            None,
+            now,
+            Some(now + 3_600),
+        )?;
+        let relaxed = resolve(&used, false)?;
+        assert_eq!(relaxed.adapter, "codex");
+        assert!(matches!(relaxed.readiness, RouteReadiness::Ready { .. }));
+        // A required separation never relaxes.
+        assert!(matches!(
+            resolve(&used, true),
+            Err(super::DispatchError::FamilySeparation(_))
         ));
         Ok(())
     }

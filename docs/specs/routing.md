@@ -99,6 +99,7 @@ The lane's reason names the retry and its attempt number.
   `crates/cli/src/run.rs::tests::an_alternate_account_is_spent_only_by_routing_rule_or_a_live_refusal`;
   `crates/cli/src/run.rs::tests::capacity_and_quota_settlements_retry_within_their_bounds`;
   `crates/cli/src/route.rs::tests::refused_account_falls_through_to_another_for_the_same_model`;
+  `crates/cli/src/route.rs::tests::review_substitution_skips_refused_unused_families`;
   `tests/dispatch_provider.rs::capacity_settlement_resumes_the_same_session`
 - Owner: `crates/cli/src/run.rs`
 
@@ -358,6 +359,7 @@ older readers that reject unknown variants cannot read records carrying them.
   `::free_pool_refusal_excludes_the_account_for_every_free_model`;
   `::live_scoped_refusal_excludes_only_the_matching_account_and_model`;
   `crates/cli/src/route.rs::tests::refused_account_falls_through_to_another_for_the_same_model`;
+  `crates/cli/src/route.rs::tests::review_substitution_skips_refused_unused_families`;
   `crates/records/tests/forward_compatibility.rs::route_exclusion_reason_codes_round_trip`
 - Owner: `crates/quota/src/admission.rs`
 
