@@ -837,7 +837,7 @@ mod tests {
         drop(held);
         // A sibling test thread can fork while the lock is released and briefly
         // hold a copy of its descriptor, so retry the acquire for up to 2 s.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut tries = 0;
         loop {
             seed_pass(
                 &directory,
@@ -847,9 +847,11 @@ mod tests {
                 |_| -> Result<Refresh, Box<dyn std::error::Error>> { panic!("must not refresh") },
             )
             .unwrap();
-            if seed_state(&directory) == "disabled" || std::time::Instant::now() > deadline {
+            tries += 1;
+            if seed_state(&directory) == "disabled" || tries >= 100 {
                 break;
             }
+            #[allow(clippy::disallowed_methods)] // Test-only: bounded 2 s retry.
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert_eq!(seed_state(&directory), "disabled");

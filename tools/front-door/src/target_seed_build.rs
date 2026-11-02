@@ -552,14 +552,16 @@ mod tests {
         }
         // A sibling test thread can fork while the lock above is released and
         // briefly hold a copy of its descriptor, so Busy is retried for 2 s.
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut tries = 0;
         let failed = loop {
             let attempt = refresh_with(state.path(), "p", "aaa", |_| {
                 Err(io::Error::other("build failed").into())
             });
-            if !matches!(attempt, Ok(Refresh::Busy)) || std::time::Instant::now() > deadline {
+            tries += 1;
+            if !matches!(attempt, Ok(Refresh::Busy)) || tries >= 100 {
                 break attempt;
             }
+            #[allow(clippy::disallowed_methods)] // Test-only: bounded 2 s retry.
             std::thread::sleep(Duration::from_millis(20));
         };
         assert!(failed.is_err(), "{failed:?}");
