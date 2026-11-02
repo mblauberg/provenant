@@ -22,6 +22,11 @@ use std::{
     time::Duration,
 };
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FAIL_IMPORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn error<E: std::fmt::Display>(
     operation: &'static str,
     path: Option<&Path>,
@@ -158,6 +163,12 @@ impl WriterLaunch {
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
+struct ImportFence {
+    schema_version: u64,
+    scope: provenant_supervisor::custody::Scope,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GitPins {
     schema_version: u64,
@@ -165,14 +176,16 @@ struct GitPins {
     base: GitOid,
 }
 
-/// Remove only this attempt's host-owned retention refs. This runs before the
-/// terminal record becomes visible, including cancellation and import refusal.
+/// Remove only this attempt's host-owned retention ref after terminal commit.
+/// The head-keyed import ref belongs to publish_branch's custody-protected CAS;
+/// a delayed cleanup must never delete another lane's in-progress import.
 pub(crate) fn cleanup_git_pins(
     state: &Path,
     writer: &WriterRequest,
     attempt: &Directory,
     scope: provenant_supervisor::custody::Scope,
     head: Option<GitOid>,
+    remove_import_pin: bool,
 ) -> Result<()> {
     let pins = crate::artifacts::read_sealed(attempt, "writer-git-pins.json", crate::RECORD_LIMIT)?;
     if let Some(raw) = &pins {
@@ -194,7 +207,7 @@ pub(crate) fn cleanup_git_pins(
             Some(&writer.project),
         ))?;
     let mut refs = vec![format!("refs/provenant/lane-base/{}", scope.attempt)];
-    if let Some(head) = head {
+    if remove_import_pin && let Some(head) = head {
         refs.push(format!("refs/provenant/import/{head}"));
     }
     for reference in refs {
@@ -1110,6 +1123,132 @@ pub(crate) fn worktree_removed(writer: &WriterRequest) -> bool {
 /// A retained reservation, including an exact path for chair recovery.
 pub use provenant_supervisor::custody::WriterReservation as WriterFence;
 impl crate::RunStore {
+    pub(crate) fn retained_import_fence(
+        &self,
+        scope: provenant_supervisor::custody::Scope,
+    ) -> Result<bool> {
+        let Some(fence) = self
+            .writer_fences()?
+            .into_iter()
+            .find(|fence| fence.scope == scope)
+        else {
+            return Ok(false);
+        };
+        let parent = fence
+            .reservation
+            .parent()
+            .ok_or(RunError::Validation("writer evidence missing"))?;
+        let evidence = Directory::open_anchor(parent)?;
+        let Some(raw) =
+            crate::artifacts::read_sealed(&evidence, "import-retained.json", crate::RECORD_LIMIT)?
+        else {
+            return Ok(false);
+        };
+        let marker: ImportFence = crate::db::decode(&raw)?;
+        if marker.schema_version != 1 || marker.scope != scope {
+            return Err(RunError::Conflict);
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn retain_import_fence(&self, record: &crate::AttemptRecord) -> Result<()> {
+        let fence = self
+            .writer_fences()?
+            .into_iter()
+            .find(|fence| fence.scope == Self::scope(record))
+            .ok_or(RunError::Validation("retained writer reservation missing"))?;
+        let parent = fence
+            .reservation
+            .parent()
+            .ok_or(RunError::Validation("writer evidence missing"))?;
+        let evidence = Directory::open_anchor(parent)?;
+        crate::artifacts::seal(
+            &evidence,
+            "import-retained.json",
+            &crate::db::bytes(&ImportFence {
+                schema_version: 1,
+                scope: Self::scope(record),
+            })?,
+            crate::RECORD_LIMIT,
+        )
+    }
+
+    /// Check predecessor import fences after acquisition, while the returned
+    /// lease owns writer.lock. The evidence lives with custody, so this also
+    /// protects writers launched from a different RunStore sharing the registry.
+    pub(crate) fn acquire_writer_fenced(
+        &self,
+        directory: Directory,
+        scope: provenant_supervisor::custody::Scope,
+        binding: WriterBinding,
+        acquire: &dyn Fn(
+            Directory,
+            provenant_supervisor::custody::Scope,
+            WriterBinding,
+        ) -> provenant_supervisor::custody::Result<
+            provenant_supervisor::custody::CustodyLease,
+        >,
+        call: &crate::Request<'_>,
+    ) -> provenant_supervisor::custody::Result<provenant_supervisor::custody::CustodyLease> {
+        let slot = directory.try_clone()?;
+        let lease = acquire(directory, scope, binding)?;
+        let checked = (|| -> Result<()> {
+            call.check()?;
+            let metadata = slot.metadata()?;
+            let listing = self.writer_fence_listing()?;
+            for issue in listing.issues {
+                for parent in issue.reservation.ancestors().skip(1).take(2) {
+                    if let Ok(directory) = Directory::open_anchor(parent) {
+                        let other = directory.metadata()?;
+                        if metadata.device == other.device && metadata.inode == other.inode {
+                            return Err(RunError::Validation(
+                                "predecessor writer fence is unreadable",
+                            ));
+                        }
+                    }
+                }
+            }
+            for fence in listing.reservations {
+                if fence.scope == scope {
+                    continue;
+                }
+                let Some(path) = fence.custody_directory() else {
+                    return Err(RunError::Validation("writer fence slot missing"));
+                };
+                let other = Directory::open_anchor(path)?.metadata()?;
+                if metadata.device != other.device || metadata.inode != other.inode {
+                    continue;
+                }
+                let parent = fence
+                    .reservation
+                    .parent()
+                    .ok_or(RunError::Validation("writer fence evidence missing"))?;
+                let evidence = Directory::open_anchor(parent)?;
+                if let Some(raw) = crate::artifacts::read_sealed(
+                    &evidence,
+                    "import-retained.json",
+                    crate::RECORD_LIMIT,
+                )? {
+                    let retained: ImportFence = crate::db::decode(&raw)?;
+                    if retained.schema_version != 1 || retained.scope != fence.scope {
+                        return Err(RunError::Conflict);
+                    }
+                    return Err(RunError::Validation(
+                        "predecessor writer import remains unresolved",
+                    ));
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = checked {
+            lease.withdraw_unlaunched()?;
+            return Err(provenant_supervisor::custody::CustodyError::Io(
+                std::io::Error::other(error.to_string()),
+            ));
+        }
+        Ok(lease)
+    }
+
     /// The writer's custody directory. When its worktree directory has been
     /// removed, the retained reservation for this attempt names it instead.
     pub(crate) fn writer_custody_directory(
@@ -1326,6 +1465,12 @@ impl WriterLaunch {
         let import_cancel = settlement.cancellation();
         if settlement.phase() == crate::settlement::Phase::Import {
             settlement.begin_import()?;
+            #[cfg(test)]
+            if FAIL_IMPORT.with(|fault| fault.get()) {
+                return Err(RunError::Io(std::io::Error::other(
+                    "injected Git import failure",
+                )));
+            }
             crate::objects::settle_cancel(
                 &git_executable,
                 self.worktree.repo(),
@@ -1484,7 +1629,7 @@ impl WriterLaunch {
         };
         let result =
             archive.read_bounded(OsStr::new("quarantine-result.json"), crate::RECORD_LIMIT)?;
-        crate::artifacts::seal(
+        crate::holder::seal_manifest(
             &archive,
             "manifest.json",
             &crate::db::bytes(&WriterManifest {

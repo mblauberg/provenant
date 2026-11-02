@@ -1120,6 +1120,9 @@ pub struct ProcessExit {
     pub termination: Option<Termination>,
     pub never_spawned: bool,
     pub stop_reason: Option<StopReason>,
+    /// Whether cancellation was delivered to the provider before its exit was observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_delivered_before_exit: Option<bool>,
     pub delivered_signals: Vec<i64>,
     pub reaped: Vec<ProcessIdentity>,
     pub omitted_reaped: u64,
@@ -1153,6 +1156,7 @@ impl ProcessExit {
             termination: None,
             never_spawned: true,
             stop_reason,
+            cancel_delivered_before_exit: Some(false),
             delivered_signals: vec![],
             reaped: vec![],
             omitted_reaped: 0,
@@ -1180,6 +1184,7 @@ impl ProcessExit {
             termination: self.termination,
             never_spawned: self.never_spawned,
             stop_reason: self.stop_reason,
+            cancel_delivered_before_exit: self.cancel_delivered_before_exit,
             delivered_signals: self.delivered_signals.clone(),
             reaped: self.reaped.clone(),
             omitted_reaped: self.omitted_reaped,
@@ -1245,6 +1250,8 @@ struct StoredExit {
     termination: Option<Termination>,
     never_spawned: bool,
     stop_reason: Option<StopReason>,
+    #[serde(default)]
+    cancel_delivered_before_exit: Option<bool>,
     delivered_signals: Vec<i64>,
     reaped: Vec<ProcessIdentity>,
     omitted_reaped: u64,
@@ -1268,6 +1275,8 @@ pub struct ExitObservation {
     pub termination: Option<Termination>,
     pub never_spawned: bool,
     pub stop_reason: Option<StopReason>,
+    /// None means an older exit record did not capture delivery ordering.
+    pub cancel_delivered_before_exit: Option<bool>,
     pub delivered_signals: Vec<i64>,
     pub reaped: Vec<ProcessIdentity>,
     pub omitted_reaped: u64,
@@ -1392,6 +1401,7 @@ pub fn observe(
                     termination: record.termination,
                     never_spawned: record.never_spawned,
                     stop_reason: record.stop_reason,
+                    cancel_delivered_before_exit: record.cancel_delivered_before_exit,
                     delivered_signals: record.delivered_signals,
                     reaped: record.reaped,
                     omitted_reaped: record.omitted_reaped,

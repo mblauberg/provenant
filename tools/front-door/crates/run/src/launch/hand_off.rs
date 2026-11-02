@@ -73,7 +73,7 @@ impl RunStore {
                     .custody
                     .take()
                     .ok_or_else(|| local("writer custody", &"missing"))?;
-                acquire_writer(directory, scope, binding)
+                self.acquire_writer_fenced(directory, scope, binding, acquire_writer, call)
             }
             // Readers take the same injected acquisition as writers, so a
             // fixture guardian and its reservation share one boot observer.
@@ -128,7 +128,9 @@ impl RunStore {
                     .host_delivery
                     .take()
                     .ok_or(RunError::Validation("delivery lacks host context"))?;
-                holder.host_delivery = Some(host.prepare(writer, deliver)?);
+                let host = host.prepare(writer, deliver)?;
+                host.seal_launch_binding(&self.attempt_dir(record.run_id, id, false)?, scope)?;
+                holder.host_delivery = Some(host);
                 holder.encode()
             };
             match prepare() {

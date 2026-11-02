@@ -2694,6 +2694,10 @@ fn persisted_attempt_with(
             finished_at: clock.wall_now()?,
             reason: Some("lost before recording a route".into()),
         };
+        // Version 2 records carry the evidence that justifies the decision.
+        running.terminal_evidence = Some(provenant_run::TerminalEvidence::Lost {
+            reason: "lost before recording a route".into(),
+        });
         let bytes = CanonicalV1::bytes(&running)?.as_bytes().to_vec();
         database.execute(
             "UPDATE attempts SET terminal=1,record=?1 WHERE id=?2",
@@ -2725,6 +2729,7 @@ fn persisted_attempt_with(
         reaped: vec![],
         omitted_reaped: 0,
         spared: vec![],
+        cancel_delivered_before_exit: None,
         omitted_spared: 0,
         warnings: vec![],
         omitted_warnings: 0,
@@ -2917,10 +2922,7 @@ fn cancel_wait_settles_stalled_import_with_durable_exit() -> Result {
     let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
     let lane = &lanes["data"]["lanes"][0];
     assert_eq!(lane["state"], "cancelled", "{lanes}");
-    assert_eq!(
-        lane["reason"], "cancelled: explicit_cancellation",
-        "{lanes}"
-    );
+    assert_eq!(lane["reason"], "cancelled during Git import", "{lanes}");
     Ok(())
 }
 

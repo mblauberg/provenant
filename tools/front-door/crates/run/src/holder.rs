@@ -114,6 +114,12 @@ enum Completion<'a> {
     },
     Recovered(Option<&'a custody::Recovery>),
 }
+
+#[derive(Debug)]
+struct Finished {
+    record: AttemptRecord,
+    release_permitted: bool,
+}
 impl Completion<'_> {
     fn custody(&self) -> Option<&custody::Recovery> {
         match self {
@@ -258,6 +264,27 @@ struct ObjectImportRefusal {
     reason: String,
 }
 
+/// Seal the refusal that keeps the private Git for host recovery.
+fn seal_import_refusal(
+    attempt: &Directory,
+    scope: custody::Scope,
+    worktree: &std::path::Path,
+    reason: &str,
+) -> Result<()> {
+    crate::artifacts::seal(
+        attempt,
+        "object-import-refused.json",
+        &crate::db::bytes(&ObjectImportRefusal {
+            schema_version: 1,
+            scope,
+            kind: "object_import_refusal".into(),
+            worktree: worktree.into(),
+            reason: reason.chars().take(4096).collect(),
+        })?,
+        RECORD_LIMIT,
+    )
+}
+
 pub(crate) fn object_import_refused(
     attempt: &Directory,
     scope: custody::Scope,
@@ -318,7 +345,7 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
     ) -> custody::Result<()> {
         let (context, store) = HolderContext::open(context).map_err(custody_error)?;
         let cancel = CancelToken::new();
-        store
+        let finished = store
             .finish_in_custody(
                 context.attempt_id,
                 attempt,
@@ -333,6 +360,9 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
                 &call(&SystemClock, &cancel).map_err(custody_error)?,
             )
             .map_err(custody_error)?;
+        if !finished.release_permitted {
+            return Err(custody_error(RunError::Contention));
+        }
         if object_import_refused(attempt, exit.scope)
             .map_err(custody_error)?
             .is_none()
@@ -368,6 +398,31 @@ pub(crate) fn release_and_reclaim(
 }
 
 impl RunStore {
+    pub(crate) fn finish_recovered_terminal(
+        &self,
+        id: AttemptId,
+        attempt: &Directory,
+        exit: &ExitObservation,
+        mut recovery: custody::Recovery,
+        providers: &dyn Providers,
+        call: &Request<'_>,
+    ) -> Result<bool> {
+        recovery
+            .prepare_settlement()
+            .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
+        let finished = self.finish_in_custody(
+            id,
+            attempt,
+            exit,
+            Completion::Recovered(Some(&recovery)),
+            providers,
+            call,
+        )?;
+        if finished.release_permitted {
+            self.settle_recovered(attempt, recovery)?;
+        }
+        Ok(finished.release_permitted)
+    }
     /// Commit the terminal record for an exited attempt from supervisor's
     /// durable exit and the sealed stdout capture. Idempotent.
     pub fn finish(
@@ -396,7 +451,7 @@ impl RunStore {
                 .prepare_settlement()
                 .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
         }
-        let record = self.finish_in_custody(
+        let finished = self.finish_in_custody(
             id,
             attempt,
             exit,
@@ -404,12 +459,15 @@ impl RunStore {
             providers,
             call,
         )?;
+        if !finished.release_permitted {
+            return Ok(finished.record);
+        }
         if let Some(recovery) = recovery {
             self.settle_recovered(attempt, recovery)?;
         } else if object_import_refused(attempt, exit.scope)?.is_none() {
             crate::writer::settle_launch_staging(attempt)?;
         }
-        Ok(record)
+        Ok(finished.record)
     }
     fn recover_writer_exit(
         &self,
@@ -485,6 +543,12 @@ impl RunStore {
         attempt: &Directory,
         recovery: custody::Recovery,
     ) -> Result<()> {
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel)?;
+        if !self.import_release_permitted(&self.record(recovery.scope().attempt, &call)?, &call)? {
+            return Err(RunError::Validation("writer import remains unresolved"));
+        }
         if object_import_refused(attempt, recovery.scope())?.is_some() {
             custody::publish_release(attempt, recovery.scope())
                 .map_err(|error| RunError::Io(std::io::Error::other(error)))?;
@@ -508,6 +572,412 @@ impl RunStore {
             .settle(commit, &mut scratch)
             .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))
     }
+    fn finish_effects(
+        &self,
+        record: AttemptRecord,
+        attempt: &Directory,
+        completion: &Completion<'_>,
+        call: &Request<'_>,
+    ) -> Result<Finished> {
+        if !self.import_release_permitted(&record, call)? {
+            let Some(recovery) = completion.custody() else {
+                return Ok(Finished {
+                    record,
+                    release_permitted: false,
+                });
+            };
+            let mut driver = match crate::settlement::Guard::claim(
+                attempt,
+                Self::scope(&record),
+                call.clock,
+            ) {
+                Ok(Some(driver)) => driver,
+                Ok(None) => {
+                    return Ok(Finished {
+                        record,
+                        release_permitted: false,
+                    });
+                }
+                Err(error @ RunError::ObjectImportLimit(_)) => {
+                    let reason = format!(
+                        "settlement exhausted three attempts; private Git retained for host recovery: {error}"
+                    );
+                    self.refuse_pending_import(&record, attempt, &reason, call)?;
+                    return Ok(Finished {
+                        record: self.record(record.attempt_id, call)?,
+                        release_permitted: true,
+                    });
+                }
+                Err(error) => return Err(error),
+            };
+            let request = self.request(record.run_id, call)?;
+            let task = request
+                .tasks
+                .iter()
+                .find(|task| task.task_id == record.task_id)
+                .ok_or(RunError::NotFound)?;
+            let writer = task
+                .writer
+                .as_ref()
+                .ok_or(RunError::Validation("pending import lacks writer"))?;
+            let cancel = driver.cancellation();
+            let imported = crate::prepare_writer(writer, &self.writer_registry, record.project_id)
+                .and_then(|launch| {
+                    crate::settlement::with_cancellation(
+                        attempt,
+                        Self::scope(&record),
+                        &cancel,
+                        || {
+                            launch.terminal(
+                                self.context.state_root.as_path(),
+                                attempt,
+                                recovery,
+                                task.deliver
+                                    .as_ref()
+                                    .map_or("origin", |delivery| delivery.remote.as_str()),
+                                task.base.as_deref(),
+                                &mut driver,
+                            )
+                        },
+                    )
+                });
+            match imported {
+                Ok(_) => {
+                    self.record_effect(
+                        record.attempt_id,
+                        record.generation,
+                        SettlementEffect::GitImport,
+                        EffectDisposition::Done,
+                        call,
+                    )?;
+                }
+                Err(error) if driver.exhausted() => {
+                    let reason = format!(
+                        "settlement exhausted three attempts; private Git retained for host recovery: {error}"
+                    );
+                    self.refuse_pending_import(&record, attempt, &reason, call)?;
+                }
+                // The same precondition refusal the first attempt makes: no
+                // retry can change it without host recovery.
+                Err(error @ (RunError::Writer(_) | RunError::WriterProjectMismatch { .. })) => {
+                    let reason = format!(
+                        "writer preconditions refused; private Git retained for host recovery: {error}"
+                    );
+                    self.refuse_pending_import(&record, attempt, &reason, call)?;
+                }
+                Err(error) => {
+                    self.record_effect(
+                        record.attempt_id,
+                        record.generation,
+                        SettlementEffect::GitImport,
+                        EffectDisposition::Failed {
+                            reason: error.to_string().chars().take(1024).collect(),
+                            retryable: true,
+                        },
+                        call,
+                    )?;
+                    return Ok(Finished {
+                        record: self.record(record.attempt_id, call)?,
+                        release_permitted: false,
+                    });
+                }
+            }
+        }
+        self.retry_terminal_effects(&record, attempt, completion, call)?;
+        self.settle_cleanup(&self.record(record.attempt_id, call)?, call);
+        Ok(Finished {
+            record: self.record(record.attempt_id, call)?,
+            release_permitted: true,
+        })
+    }
+
+    fn refuse_pending_import(
+        &self,
+        record: &AttemptRecord,
+        attempt: &Directory,
+        reason: &str,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        let request = self.request(record.run_id, call)?;
+        let writer = request
+            .tasks
+            .iter()
+            .find(|task| task.task_id == record.task_id)
+            .and_then(|task| task.writer.as_ref())
+            .ok_or(RunError::Validation("pending import lacks writer"))?;
+        seal_import_refusal(attempt, Self::scope(record), &writer.worktree, reason)?;
+        self.record_effect(
+            record.attempt_id,
+            record.generation,
+            SettlementEffect::GitImport,
+            EffectDisposition::Failed {
+                reason: reason.chars().take(1024).collect(),
+                retryable: false,
+            },
+            call,
+        )?;
+        let archive = crate::artifacts::subdir(attempt, std::ffi::OsStr::new("quarantine"), true)?;
+        if read_sealed(&archive, "manifest.json", RECORD_LIMIT)?.is_none() {
+            seal_manifest(
+                &archive,
+                "manifest.json",
+                &crate::db::bytes(&serde_json::json!({
+                    "schema_version":1,"scope":Self::scope(record),"kind":"quarantine_manifest","disposition":"import_refused"
+                }))?,
+                RECORD_LIMIT,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn retry_terminal_effects(
+        &self,
+        record: &AttemptRecord,
+        attempt: &Directory,
+        completion: &Completion<'_>,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        // Another driver is already settling these effects; it is not a failure.
+        let _effects = match attempt.try_lock(
+            std::ffi::OsStr::new("terminal-effects.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        ) {
+            Ok(lock) => lock,
+            Err(provenant_os::fs::FsError::LockTimeout { .. }) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        let current = self.record(record.attempt_id, call)?;
+        let Some(receipts) = current.settlement_receipts else {
+            return Ok(());
+        };
+        if !matches!(receipts.manifest_conflict, EffectDisposition::Done) {
+            let manifest = (|| -> Result<()> {
+                let archive =
+                    crate::artifacts::subdir(attempt, std::ffi::OsStr::new("quarantine"), true)?;
+                let intended = read_sealed(&archive, "manifest-intended.json", RECORD_LIMIT)?
+                    .ok_or(RunError::Validation(
+                        "manifest disposition remains unresolved",
+                    ))?;
+                let value: serde_json::Value = crate::db::decode(&intended)?;
+                if value["scope"]
+                    != serde_json::to_value(Self::scope(record))
+                        .map_err(|_| RunError::Validation("manifest scope"))?
+                {
+                    return Err(RunError::Conflict);
+                }
+                crate::artifacts::seal(&archive, "manifest.json", &intended, RECORD_LIMIT)
+            })();
+            let disposition = match manifest {
+                Ok(()) => EffectDisposition::Done,
+                Err(error) => EffectDisposition::Failed {
+                    reason: error.to_string().chars().take(1024).collect(),
+                    retryable: true,
+                },
+            };
+            self.record_effect(
+                record.attempt_id,
+                record.generation,
+                SettlementEffect::ManifestConflict,
+                disposition,
+                call,
+            )?;
+        }
+        if !matches!(
+            receipts.delivery,
+            EffectDisposition::Done
+                | EffectDisposition::Failed {
+                    retryable: false,
+                    ..
+                }
+        ) {
+            if !Self::delivery_outcome(record) {
+                self.record_effect(
+                    record.attempt_id,
+                    record.generation,
+                    SettlementEffect::Delivery,
+                    EffectDisposition::Done,
+                    call,
+                )?;
+                return Ok(());
+            }
+            let request = self.request(record.run_id, call)?;
+            let task = request
+                .tasks
+                .iter()
+                .find(|task| task.task_id == record.task_id)
+                .ok_or(RunError::NotFound)?;
+            if let (Some(writer), Some(delivery)) = (&task.writer, &task.deliver) {
+                if self
+                    .delivered(record.attempt_id, call)?
+                    .is_some_and(|(request, receipt)| {
+                        request == *delivery
+                            && receipt.head == record.head
+                            && matches!(receipt.state, WriterDeliveryState::Delivered { .. })
+                    })
+                {
+                    self.record_effect(
+                        record.attempt_id,
+                        record.generation,
+                        SettlementEffect::Delivery,
+                        EffectDisposition::Done,
+                        call,
+                    )?;
+                    return Ok(());
+                }
+                // Without custody, a later writer may own the worktree. Wait
+                // for its writer lock rather than deliver beneath it.
+                let slot = if completion.custody().is_none() {
+                    self.writer_custody_directory(record, writer).ok()
+                } else {
+                    None
+                };
+                let _writer = match slot.as_ref().map(|slot| {
+                    slot.try_lock(
+                        std::ffi::OsStr::new("writer.lock"),
+                        provenant_os::fs::LockMode::Exclusive,
+                    )
+                }) {
+                    Some(Ok(lock)) => Some(lock),
+                    Some(Err(provenant_os::fs::FsError::LockTimeout { .. })) => return Ok(()),
+                    Some(Err(error)) => return Err(error.into()),
+                    None => None,
+                };
+                let cancel = CancelToken::new();
+                let host = match completion {
+                    Completion::Live {
+                        delivery: Some(host),
+                        ..
+                    } => Ok((*host).clone()),
+                    _ => {
+                        let host = crate::HostDeliveryContext::capture();
+                        let evidence = [
+                            "delivery.json",
+                            "delivery-started.json",
+                            "delivery-cancelled.json",
+                        ]
+                        .iter()
+                        .try_fold(
+                            false,
+                            |found, name| -> Result<bool> {
+                                Ok(found || read_sealed(attempt, name, RECORD_LIMIT)?.is_some())
+                            },
+                        )?;
+                        if evidence {
+                            Ok(host)
+                        } else {
+                            record
+                                .head
+                                .ok_or(RunError::Validation("sealed delivery head missing"))
+                                .and_then(|head| {
+                                    let base = crate::settlement::pinned_base(
+                                        attempt,
+                                        Self::scope(record),
+                                    )?
+                                    .ok_or(RunError::Validation("sealed delivery base missing"))?;
+                                    host.prepare_recovery(
+                                        writer,
+                                        delivery,
+                                        attempt,
+                                        Self::scope(record),
+                                        head,
+                                        base,
+                                    )
+                                })
+                        }
+                    }
+                };
+                let result = host.and_then(|host| {
+                    crate::settlement::with_cancellation(
+                        attempt,
+                        Self::scope(record),
+                        &cancel,
+                        || {
+                            crate::delivery::deliver_once(
+                                &host.cancellable(&cancel),
+                                writer,
+                                delivery,
+                                attempt,
+                                &format!("Run {}\nAttempt {}", record.run_id, record.attempt_id),
+                            )
+                        },
+                    )
+                });
+                let disposition = match result {
+                    Ok(receipt)
+                        if matches!(
+                            receipt.state,
+                            WriterDeliveryState::Delivered { .. }
+                                | WriterDeliveryState::NoNewCommits { .. }
+                        ) =>
+                    {
+                        EffectDisposition::Done
+                    }
+                    Ok(_)
+                        if read_sealed(attempt, "delivery-cancelled.json", RECORD_LIMIT)?
+                            .is_some() =>
+                    {
+                        self.record_cancellation(
+                            record.attempt_id,
+                            record.generation,
+                            CancellationDisposition::DeliveryEffective,
+                            call,
+                        )?;
+                        EffectDisposition::Cancelled {
+                            reason: delivery_cancellation_reason(
+                                read_sealed(attempt, "cancel.json", RECORD_LIMIT)?.as_deref(),
+                            ),
+                            retryable: true,
+                        }
+                    }
+                    // A sealed result is definite; automatic recovery will not
+                    // repeat it, and explicit pickup remains available.
+                    Ok(WriterDeliveryReceipt {
+                        state: WriterDeliveryState::Failed { stage, .. },
+                        ..
+                    }) if stage != WriterDeliveryStage::Interrupted => EffectDisposition::Failed {
+                        reason: format!("delivery failed at the {stage:?} stage"),
+                        retryable: false,
+                    },
+                    // A start marker without a result: the remote effect is unknown.
+                    Ok(_) => EffectDisposition::Failed {
+                        reason: "delivery outcome is uncertain; explicit host pickup required"
+                            .into(),
+                        retryable: false,
+                    },
+                    Err(error) => EffectDisposition::Failed {
+                        reason: error.to_string().chars().take(1024).collect(),
+                        retryable: !crate::delivery::recovery_refused(&error),
+                    },
+                };
+                self.record_effect(
+                    record.attempt_id,
+                    record.generation,
+                    SettlementEffect::Delivery,
+                    disposition,
+                    call,
+                )?;
+            } else {
+                self.record_effect(
+                    record.attempt_id,
+                    record.generation,
+                    SettlementEffect::Delivery,
+                    EffectDisposition::Done,
+                    call,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn reconcile_terminal_effects(
+        &self,
+        record: &AttemptRecord,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+        self.retry_terminal_effects(record, &attempt, &Completion::Recovered(None), call)
+    }
+
     fn finish_in_custody(
         &self,
         id: AttemptId,
@@ -516,7 +986,7 @@ impl RunStore {
         completion: Completion<'_>,
         providers: &dyn Providers,
         call: &Request<'_>,
-    ) -> Result<AttemptRecord> {
+    ) -> Result<Finished> {
         let recovery = completion.custody();
         let record = self.record(id, call)?;
         if exit.scope != Self::scope(&record)
@@ -525,10 +995,22 @@ impl RunStore {
             return Err(RunError::Validation("terminal custody scope mismatch"));
         }
         if matches!(record.state, AttemptState::Terminal { .. }) {
-            return Ok(record);
+            return self.finish_effects(record, attempt, &completion, call);
         }
-        if read_sealed(attempt, "terminal-pending.json", RECORD_LIMIT)?.is_some() {
-            return self.recover_terminal(id, exit, call);
+        // Upgraded guardians may not have called provider_exited. Capacity is
+        // independent of writer custody and is free as soon as exit is known.
+        self.write(call, |tx| {
+            tx.execute("DELETE FROM admission WHERE attempt=?1", [id.to_string()])?;
+            Ok(())
+        })?;
+        if let Some(raw) = read_sealed(attempt, "terminal-pending.json", RECORD_LIMIT)? {
+            let pending = crate::db::decode_attempt(&raw)?;
+            let record = if pending.exit_evidence.is_some() {
+                self.recover_terminal(id, exit, call)
+            } else {
+                self.replay_terminal(id, call)
+            }?;
+            return self.finish_effects(record, attempt, &completion, call);
         }
         let mut settlement = match crate::settlement::Guard::claim(attempt, exit.scope, call.clock)
         {
@@ -537,16 +1019,21 @@ impl RunStore {
             Err(RunError::ObjectImportLimit(_)) => None,
             Err(error) => return Err(error),
         };
-        // Recovery also frees admission when upgrading an older exited run.
-        self.write(call, |db| {
-            db.execute("DELETE FROM admission WHERE attempt=?1", [id.to_string()])?;
-            Ok(())
-        })?;
         let finished_at = call
             .clock
             .wall_now()
             .map_err(|_| RunError::Validation("wall clock"))?;
-        let cancelled = read_sealed(attempt, "cancel.json", RECORD_LIMIT)?.is_some();
+        // Seal these dispositions alongside the intent; the terminal transaction
+        // and its replay create the receipts together with the decision.
+        let mut deferred: Vec<(SettlementEffect, EffectDisposition)> = Vec::new();
+        let mut import_failed = false;
+        // A late request alone cannot invalidate a verified clean exit, even
+        // with a legacy guardian. Its cancellation receipt retains uncertainty.
+        let mut cancelled = if exit.never_spawned {
+            exit.stop_reason == Some(StopReason::ExplicitCancellation)
+        } else {
+            exit.cancel_delivered_before_exit == Some(true)
+        };
         let provider_state = self
             .context
             .state_root
@@ -640,7 +1127,9 @@ impl RunStore {
         if decoded.outcome != Outcome::Succeeded {
             match exit.stop_reason {
                 Some(StopReason::WallDeadline) => decoded.outcome = Outcome::TimedOut,
-                Some(StopReason::ExplicitCancellation) => decoded.outcome = Outcome::Cancelled,
+                Some(StopReason::ExplicitCancellation) if cancelled => {
+                    decoded.outcome = Outcome::Cancelled
+                }
                 _ => {}
             }
         }
@@ -733,26 +1222,64 @@ impl RunStore {
                 )
             };
             let last_failure = check.as_ref().err().map(ToString::to_string);
-            let archived = match crate::artifacts::subdir(
-                attempt,
-                std::ffi::OsStr::new("quarantine"),
-                false,
-            ) {
-                Ok(archive) => read_sealed(&archive, "manifest.json", RECORD_LIMIT)?.is_some(),
-                Err(RunError::Filesystem(error)) if error.is_not_found() => false,
+            match crate::artifacts::subdir(attempt, std::ffi::OsStr::new("quarantine"), false) {
+                Ok(archive) => {
+                    let saved = read_sealed(&archive, "manifest.json", RECORD_LIMIT)?;
+                    let intended = read_sealed(&archive, "manifest-intended.json", RECORD_LIMIT)?;
+                    if saved
+                        .as_ref()
+                        .zip(intended.as_ref())
+                        .is_some_and(|(saved, intended)| saved != intended)
+                    {
+                        deferred.push((
+                            SettlementEffect::ManifestConflict,
+                            EffectDisposition::Failed {
+                                reason: "manifest conflicts with sealed intended disposition"
+                                    .into(),
+                                retryable: true,
+                            },
+                        ));
+                    }
+                }
+                Err(RunError::Filesystem(error)) if error.is_not_found() => {}
                 Err(error) => return Err(error),
-            };
+            }
+            // A conflicting manifest is itself the import failure: retention
+            // cannot help, and the conflict is a retryable effect of its own.
+            let manifest_conflicted = deferred
+                .iter()
+                .any(|(effect, _)| *effect == SettlementEffect::ManifestConflict);
+            let import_stop_requested = read_sealed(attempt, "cancel.json", RECORD_LIMIT)?
+                .and_then(|raw| crate::db::decode::<crate::store::CancellationEvidence>(&raw).ok())
+                .is_some_and(|request| {
+                    request.requests_stop(
+                        exit.scope,
+                        record.verified_owner.unwrap_or(self.context.actor_id),
+                    )
+                });
             let check = match check {
-                Err(error) if crate::writer::worktree_removed(writer) || archived => Err(error),
+                Err(error) if crate::writer::worktree_removed(writer) || manifest_conflicted => {
+                    Err(error)
+                }
                 Err(RunError::Writer(_) | RunError::WriterProjectMismatch { .. }) => {
                     Err(RunError::ObjectImportLimit(
                         "writer preconditions refused; private Git retained for host recovery",
                     ))
                 }
-                Err(error) if !matches!(error, RunError::ObjectImportLimit(_)) => {
-                    if crate::artifacts::read_sealed(attempt, "cancel.json", RECORD_LIMIT)?
-                        .is_some()
-                    {
+                // An exhausted import cannot progress, so a request to stop is
+                // the only way to settle it other than a refusal.
+                Err(error)
+                    if import_stop_requested
+                        || !matches!(error, RunError::ObjectImportLimit(_)) =>
+                {
+                    if cancelled || import_stop_requested {
+                        cancelled = true;
+                        crate::artifacts::seal(
+                            attempt,
+                            "import-cancelled.json",
+                            &crate::db::bytes(&exit.scope)?,
+                            RECORD_LIMIT,
+                        )?;
                         decoded.outcome = Outcome::Cancelled;
                         decoded.reason = Some("cancelled during Git import".into());
                         Ok(false)
@@ -764,7 +1291,29 @@ impl RunStore {
                             "settlement failed after three attempts; private Git retained for host recovery",
                         ))
                     } else {
-                        return Err(error);
+                        import_failed = true;
+                        self.retain_import_fence(&record)?;
+                        if matches!(
+                            decoded.outcome,
+                            Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
+                        ) {
+                            decoded.outcome = Outcome::Unsettled;
+                        }
+                        let reason = match decoded.reason.take() {
+                            Some(reason) => {
+                                format!("{reason}; writer import remains unresolved: {error}")
+                            }
+                            None => format!("writer import remains unresolved: {error}"),
+                        };
+                        decoded.reason = Some(reason.chars().take(4096).collect());
+                        deferred.push((
+                            SettlementEffect::GitImport,
+                            EffectDisposition::Failed {
+                                reason: error.to_string().chars().take(1024).collect(),
+                                retryable: true,
+                            },
+                        ));
+                        Ok(false)
                     }
                 }
                 other => other,
@@ -776,18 +1325,7 @@ impl RunStore {
                         writer.worktree.display(),
                         last_failure.as_deref().unwrap_or("settlement retry limit")
                     );
-                    crate::artifacts::seal(
-                        attempt,
-                        "object-import-refused.json",
-                        &crate::db::bytes(&ObjectImportRefusal {
-                            schema_version: 1,
-                            scope: exit.scope,
-                            kind: "object_import_refusal".into(),
-                            worktree: writer.worktree.clone(),
-                            reason: reason.clone(),
-                        })?,
-                        RECORD_LIMIT,
-                    )?;
+                    seal_import_refusal(attempt, exit.scope, &writer.worktree, &reason)?;
                     decoded.outcome = Outcome::Failed;
                     decoded.reason = Some(reason);
                 }
@@ -818,17 +1356,20 @@ impl RunStore {
                         kind: &'static str,
                         disposition: &'static str,
                     }
-                    crate::artifacts::seal(
-                        &archive,
-                        "manifest.json",
-                        &crate::db::bytes(&RemovedManifest {
-                            schema_version: 1,
-                            scope: exit.scope,
-                            kind: "quarantine_manifest",
-                            disposition: "worktree_removed",
-                        })?,
-                        RECORD_LIMIT,
-                    )?;
+                    note_manifest(
+                        &mut deferred,
+                        seal_manifest(
+                            &archive,
+                            "manifest.json",
+                            &crate::db::bytes(&RemovedManifest {
+                                schema_version: 1,
+                                scope: exit.scope,
+                                kind: "quarantine_manifest",
+                                disposition: "worktree_removed",
+                            })?,
+                            RECORD_LIMIT,
+                        ),
+                    );
                 }
                 Ok(false) if decoded.outcome == Outcome::Succeeded => {
                     // Edits with no commit are not a success, and nothing is delivered.
@@ -906,17 +1447,20 @@ impl RunStore {
                 kind: &'static str,
                 disposition: &'static str,
             }
-            crate::artifacts::seal(
-                &archive,
-                "manifest.json",
-                &crate::db::bytes(&ReadOnlyManifest {
-                    schema_version: 1,
-                    scope: exit.scope,
-                    kind: "quarantine_manifest",
-                    disposition: "read_only",
-                })?,
-                RECORD_LIMIT,
-            )?;
+            note_manifest(
+                &mut deferred,
+                seal_manifest(
+                    &archive,
+                    "manifest.json",
+                    &crate::db::bytes(&ReadOnlyManifest {
+                        schema_version: 1,
+                        scope: exit.scope,
+                        kind: "quarantine_manifest",
+                        disposition: "read_only",
+                    })?,
+                    RECORD_LIMIT,
+                ),
+            );
         }
         if cancelled
             || decoded.outcome == Outcome::Cancelled
@@ -925,15 +1469,18 @@ impl RunStore {
             let archive =
                 crate::artifacts::subdir(attempt, std::ffi::OsStr::new("quarantine"), true)?;
             if read_sealed(&archive, "manifest.json", RECORD_LIMIT)?.is_none() {
-                crate::artifacts::seal(
-                    &archive,
-                    "manifest.json",
-                    &crate::db::bytes(&serde_json::json!({
-                        "schema_version": 1, "scope": exit.scope, "kind": "quarantine_manifest",
-                        "disposition": if decoded.outcome == Outcome::Cancelled { "cancelled" } else { "import_refused" }
-                    }))?,
-                    RECORD_LIMIT,
-                )?;
+                note_manifest(
+                    &mut deferred,
+                    seal_manifest(
+                        &archive,
+                        "manifest.json",
+                        &crate::db::bytes(&serde_json::json!({
+                            "schema_version": 1, "scope": exit.scope, "kind": "quarantine_manifest",
+                            "disposition": if decoded.outcome == Outcome::Cancelled { "cancelled" } else { "import_refused" }
+                        }))?,
+                        RECORD_LIMIT,
+                    ),
+                );
             }
         }
         // Each durable phase gets a fresh short database budget. An import
@@ -944,7 +1491,6 @@ impl RunStore {
         };
         let call = &record_call;
         let cancellation = read_sealed(attempt, "cancel.json", RECORD_LIMIT)?;
-        let cancelled = cancellation.is_some();
         if cancelled {
             decoded.outcome = Outcome::Cancelled;
             // A typed runtime deadline stays the reason when cancellation also
@@ -955,6 +1501,11 @@ impl RunStore {
                 .is_some_and(|reason| reason.starts_with("runtime deadline exceeded"));
             if let Some(reason) = cancellation_reason(cancellation.as_deref())
                 && !typed_deadline
+                && !crate::store::import_cancelled(
+                    attempt,
+                    exit.scope,
+                    record.verified_owner.unwrap_or(self.context.actor_id),
+                )?
             {
                 decoded.reason = Some(format!("cancelled: {reason}"));
             }
@@ -1143,45 +1694,52 @@ impl RunStore {
         } else {
             partial.clear();
         }
-        // Recovered/result-only publication never starts external delivery.
-        // A succeeded outcome already proves the provider's terminal event in
-        // the sealed stdout, so no live frame observation is required.
+        // External delivery runs only from the committed decision below.
         let result_orphan = read_sealed(attempt, "result.md", RESULT_LIMIT)?.is_some();
-        if !result_orphan
-            && succeeded_before_stop
+        let delivery_applicable = succeeded_before_stop
             && !redaction_failed
             && !cancelled
             && exit.stop_reason.is_none()
             && !exit.unresolved_cleanup
             && exit.publication == custody::PublicationState::Durable
-            && let Completion::Live {
-                delivery: Some(host),
-                ..
-            } = &completion
-            && let (Some(writer), Some(deliver)) = (&task.writer, &task.deliver)
+            && task.writer.is_some()
+            && task.deliver.is_some();
+        deferred.push((
+            SettlementEffect::Delivery,
+            if delivery_applicable {
+                EffectDisposition::Pending
+            } else {
+                EffectDisposition::Done
+            },
+        ));
+        if !import_failed {
+            let disposition = match object_import_refused(attempt, exit.scope)? {
+                Some(reason) => EffectDisposition::Failed {
+                    reason: reason.chars().take(1024).collect(),
+                    retryable: false,
+                },
+                None => EffectDisposition::Done,
+            };
+            deferred.push((SettlementEffect::GitImport, disposition));
+        }
+        if !deferred
+            .iter()
+            .any(|(effect, _)| *effect == SettlementEffect::ManifestConflict)
         {
-            let cancel = settlement
-                .as_ref()
-                .map_or_else(CancelToken::new, |driver| driver.cancellation());
-            let host = host.cancellable(&cancel);
-            crate::settlement::with_cancellation(attempt, exit.scope, &cancel, || {
-                crate::delivery::deliver_once(
-                    &host,
-                    writer,
-                    deliver,
-                    attempt,
-                    &format!("Run {}\nAttempt {id}", record.run_id),
-                )
-            })?;
-            if let Some(cancellation) = read_sealed(attempt, "cancel.json", RECORD_LIMIT)? {
-                decoded.outcome = Outcome::Cancelled;
-                decoded.reason = Some(delivery_cancellation_reason(
-                    Some(&cancellation),
-                    handoff
-                        .as_ref()
-                        .is_some_and(|handoff| !handoff.unfinished()),
-                ));
-            }
+            deferred.push((
+                SettlementEffect::ManifestConflict,
+                if import_failed {
+                    EffectDisposition::Pending
+                } else {
+                    EffectDisposition::Done
+                },
+            ));
+        }
+        if !cancelled && decoded.outcome == Outcome::Cancelled {
+            decoded.outcome = Outcome::Unsettled;
+            decoded.reason = Some("cancellation delivery before provider exit is unknown".into());
+        } else if cancelled {
+            decoded.outcome = Outcome::Cancelled;
         }
         let publication = TerminalPublication {
             outcome: decoded.outcome,
@@ -1202,19 +1760,71 @@ impl RunStore {
             session: decoded.session,
             partial_signals: partial,
         };
-        // A result sealed without intent predates a crash: keep its bytes.
-        if result_orphan {
-            return self.recover_result_only(id, &publication, exit, call);
+        if let Some(raw) = read_sealed(attempt, "terminal-effects.json", RECORD_LIMIT)? {
+            let saved: crate::store::TerminalEffects = crate::db::decode(&raw)?;
+            if saved.schema_version != 1 || saved.scope != exit.scope {
+                return Err(RunError::Conflict);
+            }
+            // An effects/result orphan predates the decision. Keep its initial
+            // receipts; post-commit driving reconciles them with durable effects.
+        } else {
+            crate::artifacts::seal(
+                attempt,
+                "terminal-effects.json",
+                &crate::db::bytes(&crate::store::TerminalEffects {
+                    schema_version: 1,
+                    scope: exit.scope,
+                    effects: deferred,
+                })?,
+                RECORD_LIMIT,
+            )?;
         }
-        if let Some(driver) = &mut settlement {
+        // A result sealed without intent predates a crash: keep its bytes.
+        if !import_failed && let Some(driver) = &mut settlement {
             driver.advance(crate::settlement::Phase::Record)?;
         }
-        let terminal = self.publish_terminal(id, record.revision, &publication, exit, call)?;
+        let terminal = if result_orphan {
+            self.recover_result_only(id, &publication, exit, call)?
+        } else {
+            self.publish_terminal(id, record.revision, &publication, exit, call)?
+        };
+        if import_failed {
+            return Ok(Finished {
+                record: terminal,
+                release_permitted: false,
+            });
+        }
+        let finished = self.finish_effects(terminal, attempt, &completion, call)?;
         if let Some(driver) = &mut settlement {
             driver.advance(crate::settlement::Phase::Release)?;
         }
-        Ok(terminal)
+        Ok(finished)
     }
+}
+
+/// A manifest that cannot be sealed (for instance a conflicting one already
+/// exists, which stays untouched) is a retryable effect, not a reason to
+/// withhold the terminal decision.
+fn note_manifest(deferred: &mut Vec<(SettlementEffect, EffectDisposition)>, sealed: Result<()>) {
+    if let Err(error) = sealed {
+        deferred.push((
+            SettlementEffect::ManifestConflict,
+            EffectDisposition::Failed {
+                reason: error.to_string().chars().take(1024).collect(),
+                retryable: true,
+            },
+        ));
+    }
+}
+
+pub(crate) fn seal_manifest(
+    archive: &Directory,
+    name: &str,
+    bytes: &[u8],
+    limit: u64,
+) -> Result<()> {
+    crate::artifacts::seal(archive, "manifest-intended.json", bytes, limit)?;
+    crate::artifacts::seal(archive, name, bytes, limit)
 }
 
 /// Stored instead of the provider's answer when settlement cannot filter it.
@@ -1649,7 +2259,414 @@ mod writer_recovery_tests {
     }
 
     #[test]
-    fn failed_import_becomes_terminal_after_three_attempts_and_releases_custody()
+    fn settlement_import_cancellation_preserves_provider_exit_ordering()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for delivered in [None, Some(false)] {
+            use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
+            use std::ffi::OsStr;
+            let fixture = PrepareFixture::new()?;
+            let execution = registered_landed_writer_fixture(&fixture)?;
+            let (clock, cancel) = (clock(), CancelToken::new());
+            let call = call(&clock, &cancel);
+            let store = RunStore::open(&execution, &call)?;
+            let mut run = input();
+            run.request.tasks[0].writer = Some(fixture.writer.clone());
+            store.create(&run, &call)?;
+            let id = run.attempts[0].attempt_id;
+            store.mark_starting(
+                &store.record(id, &call)?,
+                &route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+            let scope = RunStore::scope(&record);
+            let attempt = store.attempt_dir(run.run_id, id, false)?;
+            let mut launch = crate::prepare_writer(
+                &fixture.writer,
+                execution.state_root.as_path(),
+                execution.project_id,
+            )?;
+            launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+            let candidate = store.temporary_path(id, &call)?.join("candidate-0");
+            std::fs::create_dir_all(&candidate)?;
+            let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+            crate::objects::prepare_bound(
+                &git,
+                launch.worktree.repo(),
+                &attempt,
+                &candidate,
+                launch.branch.as_str(),
+                launch.base,
+            )?;
+            let missing = "a".repeat(40);
+            std::fs::write(
+                candidate.join("git-common").join(launch.branch.as_str()),
+                format!("{missing}\n"),
+            )?;
+            let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
+            let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+                directory,
+                scope,
+                binding,
+                call.lock_budget(),
+                &cancel,
+                &clock,
+            )?;
+            let mut recovery = provenant_supervisor::fixture::bind_writer_attempt(lease, &attempt)?
+                .into_recovery()?;
+            recovery.prepare_settlement()?;
+            let mut observed = crate::tests::exit();
+            observed.scope = scope;
+            crate::dispatch_tests::seal_exit(&store, &observed)?;
+
+            observed.cancel_delivered_before_exit = delivered;
+            // Replace the fixture's exit before validation; ordering remains a fact.
+            attempt.unlink(OsStr::new("process-exit.json"))?;
+            crate::dispatch_tests::seal_exit(&store, &observed)?;
+            crate::artifacts::seal(
+                &attempt,
+                "cancel.json",
+                &crate::db::bytes(&serde_json::json!({
+                    "schema_version": 1, "scope": scope, "requester": execution.actor_id,
+                    "request_id": "import-cancel", "reason": StopReason::ExplicitCancellation
+                }))?,
+                RECORD_LIMIT,
+            )?;
+            let record = store.finish_in_custody(
+                id,
+                &attempt,
+                &observed,
+                Completion::Recovered(Some(&recovery)),
+                &crate::dispatch_tests::Fake::default(),
+                &call,
+            )?;
+            assert!(
+                matches!(record.record.state, AttemptState::Terminal {outcome: Outcome::Cancelled, reason: Some(ref reason), ..} if reason == "cancelled during Git import")
+            );
+            assert_eq!(
+                record.record.terminal_evidence,
+                Some(TerminalEvidence::ImportCancellation)
+            );
+            assert_eq!(
+                record.record.cancellation_disposition,
+                Some(CancellationDisposition::ImportEffective)
+            );
+            assert_eq!(observed.cancel_delivered_before_exit, delivered);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn settlement_import_fault_seals_retains_fence_and_resumes_without_provider()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for mode in [
+            "normal",
+            "orphan",
+            "release_boundary",
+            "manifest_conflict",
+            "archived_fault",
+        ] {
+            use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
+            use std::ffi::OsStr;
+            let fixture = PrepareFixture::new()?;
+            let execution = registered_landed_writer_fixture(&fixture)?;
+            let (clock, cancel) = (clock(), CancelToken::new());
+            let call = call(&clock, &cancel);
+            let store = RunStore::open(&execution, &call)?;
+            let mut run = input();
+            run.request.tasks[0].writer = Some(fixture.writer.clone());
+            store.create(&run, &call)?;
+            let id = run.attempts[0].attempt_id;
+            store.mark_starting(
+                &store.record(id, &call)?,
+                &route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+            let scope = RunStore::scope(&record);
+            let attempt = store.attempt_dir(run.run_id, id, false)?;
+            let mut launch = crate::prepare_writer(
+                &fixture.writer,
+                execution.state_root.as_path(),
+                execution.project_id,
+            )?;
+            launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+            let candidate = store.temporary_path(id, &call)?.join("candidate-0");
+            std::fs::create_dir_all(&candidate)?;
+            let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+            crate::objects::prepare_bound(
+                &git,
+                launch.worktree.repo(),
+                &attempt,
+                &candidate,
+                launch.branch.as_str(),
+                launch.base,
+            )?;
+            let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
+            let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+                directory,
+                scope,
+                binding,
+                call.lock_budget(),
+                &cancel,
+                &clock,
+            )?;
+            let mut recovery = provenant_supervisor::fixture::bind_writer_attempt(lease, &attempt)?
+                .into_recovery()?;
+            recovery.prepare_settlement()?;
+            let mut observed = crate::tests::exit();
+            observed.scope = scope;
+            crate::dispatch_tests::seal_exit(&store, &observed)?;
+
+            let providers = crate::dispatch_tests::Fake::default();
+            crate::artifacts::seal(
+                &attempt,
+                "launch.json",
+                &crate::db::bytes(&serde_json::json!({
+                    "schema_version":1,"scope":scope,"requester":execution.actor_id
+                }))?,
+                RECORD_LIMIT,
+            )?;
+            if mode == "orphan" {
+                store.retain_import_fence(&record)?;
+                crate::artifacts::seal(
+                    &attempt,
+                    "terminal-effects.json",
+                    &crate::db::bytes(&crate::store::TerminalEffects {
+                        schema_version: 1,
+                        scope,
+                        effects: vec![(
+                            SettlementEffect::GitImport,
+                            EffectDisposition::Failed {
+                                reason: "pre-crash import failure".into(),
+                                retryable: true,
+                            },
+                        )],
+                    })?,
+                    RECORD_LIMIT,
+                )?;
+                crate::artifacts::seal(&attempt, "result.md", b"orphan result", RESULT_LIMIT)?;
+            }
+            if matches!(mode, "manifest_conflict" | "archived_fault") {
+                let archive = crate::artifacts::subdir(&attempt, OsStr::new("quarantine"), true)?;
+                crate::artifacts::seal(
+                    &archive,
+                    "manifest.json",
+                    b"conflicting writer manifest",
+                    RECORD_LIMIT,
+                )?;
+            }
+            crate::writer::FAIL_IMPORT.with(|fault| {
+                fault.set(matches!(
+                    mode,
+                    "normal" | "release_boundary" | "archived_fault"
+                ))
+            });
+            let first = store.finish_in_custody(
+                id,
+                &attempt,
+                &observed,
+                Completion::Recovered(Some(&recovery)),
+                &providers,
+                &call,
+            );
+            crate::writer::FAIL_IMPORT.with(|fault| fault.set(false));
+            let first = first?;
+            if mode == "manifest_conflict" {
+                assert!(matches!(
+                    first.record.settlement_receipts.unwrap().manifest_conflict,
+                    EffectDisposition::Failed {
+                        retryable: true,
+                        ..
+                    }
+                ));
+                let archive = crate::artifacts::subdir(&attempt, OsStr::new("quarantine"), false)?;
+                let path = execution
+                    .state_root
+                    .as_path()
+                    .join(format!("runs/{}/attempts/{id}/quarantine", run.run_id));
+                drop(recovery);
+                drop(store);
+                let store = RunStore::open(&execution, &call)?;
+                store.reconcile_terminal_effects(&store.record(id, &call)?, &call)?;
+                assert_eq!(
+                    read_sealed(&archive, "manifest.json", RECORD_LIMIT)?.unwrap(),
+                    b"conflicting writer manifest"
+                );
+                assert!(matches!(
+                    store
+                        .record(id, &call)?
+                        .settlement_receipts
+                        .unwrap()
+                        .manifest_conflict,
+                    EffectDisposition::Failed {
+                        retryable: true,
+                        ..
+                    }
+                ));
+                std::fs::rename(
+                    path.join("manifest.json"),
+                    path.join("manifest.conflict.json"),
+                )?;
+                store.reconcile_terminal_effects(&store.record(id, &call)?, &call)?;
+                assert!(matches!(
+                    store
+                        .record(id, &call)?
+                        .settlement_receipts
+                        .unwrap()
+                        .manifest_conflict,
+                    EffectDisposition::Done
+                ));
+                let found = store.reconcile_with_observer(
+                    run.run_id,
+                    &providers,
+                    &call,
+                    &provenant_supervisor::census::SystemProcessObserver,
+                )?;
+                assert!(
+                    !found
+                        .iter()
+                        .any(|(_, state)| matches!(state, crate::Reconciled::Uncertain { .. })),
+                    "{found:?}"
+                );
+                assert!(
+                    store.writer_fences()?.is_empty(),
+                    "{:?}",
+                    store.writer_fences()?
+                );
+                continue;
+            }
+            assert!(!first.release_permitted);
+            assert!(matches!(
+                first
+                    .record
+                    .settlement_receipts
+                    .as_ref()
+                    .unwrap()
+                    .git_import,
+                EffectDisposition::Failed {
+                    retryable: true,
+                    ..
+                }
+            ));
+            let decision = read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?
+                .ok_or("sealed decision")?;
+            assert!(!store.writer_fences()?.is_empty());
+            assert!(
+                store.settle_recovered(&attempt, recovery).is_err(),
+                "unresolved import cannot release"
+            );
+            assert!(candidate.join("git-common/HEAD").is_file());
+            let mut competing = crate::prepare_writer(
+                &fixture.writer,
+                execution.state_root.as_path(),
+                execution.project_id,
+            )?;
+            let (directory, binding) = competing.custody.take().ok_or("competing custody")?;
+            let other = custody::Scope {
+                attempt: provenant_core::AttemptId::from_bytes([99; 16]),
+                ..scope
+            };
+            assert!(
+                store
+                    .acquire_writer_fenced(
+                        directory,
+                        other,
+                        binding,
+                        &|directory, scope, binding| {
+                            provenant_supervisor::fixture::acquire_writer_with_binding(
+                                directory,
+                                scope,
+                                binding,
+                                provenant_core::WaitBudget::nonblocking(clock.mono_now()),
+                                &cancel,
+                                &clock,
+                            )
+                        },
+                        &call
+                    )
+                    .is_err(),
+                "retained reservation excludes competing writer"
+            );
+            if mode == "archived_fault" {
+                // A retryable import failure keeps its fence even though a
+                // manifest already exists; clear it so the retry can seal.
+                let archive = crate::artifacts::subdir(&attempt, OsStr::new("quarantine"), false)?;
+                archive.unlink(OsStr::new("manifest.json"))?;
+            }
+            drop(store);
+            let store = RunStore::open(&execution, &call)?;
+            let journal_name = OsStr::new("settlement-progress.json");
+            let mut journal: serde_json::Value =
+                crate::db::decode(&attempt.read_stable(journal_name, RECORD_LIMIT)?)?;
+            journal["retry_after_ms"] = 0.into();
+            attempt
+                .atomic_write(
+                    journal_name,
+                    ".retry-fixture-",
+                    &crate::db::bytes(&journal)?,
+                    provenant_os::fs::PublishMode::Replace,
+                )?
+                .require_durable()?;
+            if mode == "release_boundary" {
+                let directory = store.writer_custody_directory(&first.record, &fixture.writer)?;
+                let mut recovery = store
+                    .recover_writer_exit(directory, scope, &call)?
+                    .ok_or("recovery")?;
+                recovery.prepare_settlement()?;
+                let finished = store.finish_in_custody(
+                    id,
+                    &attempt,
+                    &observed,
+                    Completion::Recovered(Some(&recovery)),
+                    &providers,
+                    &call,
+                )?;
+                assert!(finished.release_permitted);
+                assert!(store.retained_import_fence(scope)?);
+                drop(recovery);
+                let found = store.reconcile_with_observer(
+                    run.run_id,
+                    &providers,
+                    &call,
+                    &provenant_supervisor::census::SystemProcessObserver,
+                )?;
+                assert!(
+                    !found
+                        .iter()
+                        .any(|(_, state)| matches!(state, crate::Reconciled::Uncertain { .. })),
+                    "{found:?}"
+                );
+            } else {
+                store.finish(id, &attempt, &observed, &providers, &call)?;
+            }
+            assert_eq!(
+                providers.decoded.get(),
+                1,
+                "recovery never reruns decoding or the provider"
+            );
+            assert_eq!(
+                read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?.unwrap(),
+                decision
+            );
+            let completed = store.record(id, &call)?;
+            assert!(matches!(
+                completed.settlement_receipts.unwrap().git_import,
+                EffectDisposition::Done
+            ));
+            assert!(store.writer_fences()?.is_empty());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn settlement_failed_import_becomes_terminal_after_three_attempts_and_releases_custody()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
         use std::ffi::OsStr;
@@ -1712,17 +2729,15 @@ mod writer_recovery_tests {
         crate::dispatch_tests::seal_exit(&store, &observed)?;
         for index in 0..3 {
             if index != 0 {
-                assert!(matches!(
-                    store.finish_in_custody(
-                        id,
-                        &attempt,
-                        &observed,
-                        Completion::Recovered(Some(&recovery)),
-                        &crate::dispatch_tests::Fake::default(),
-                        &call,
-                    ),
-                    Err(RunError::Contention)
-                ));
+                let retained = store.finish_in_custody(
+                    id,
+                    &attempt,
+                    &observed,
+                    Completion::Recovered(Some(&recovery)),
+                    &crate::dispatch_tests::Fake::default(),
+                    &call,
+                )?;
+                assert!(!retained.release_permitted);
                 let journal_name = OsStr::new("settlement-progress.json");
                 let mut journal: serde_json::Value =
                     crate::db::decode(&attempt.read_stable(journal_name, RECORD_LIMIT)?)?;
@@ -1749,21 +2764,40 @@ mod writer_recovery_tests {
                 &call,
             );
             if index < 2 {
-                assert!(
-                    matches!(
-                        result,
-                        Err(RunError::OperationIo {
-                            operation: "import lane Git objects",
-                            ..
-                        })
-                    ),
-                    "{result:?}"
-                );
+                let active: i64 = store.db.query_row(
+                    "SELECT COUNT(*) FROM admission WHERE attempt=?1",
+                    [id.to_string()],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(active, 0);
+                assert!(!store.writer_fences()?.is_empty());
+                let finished = result?;
+                assert!(!finished.release_permitted);
+                assert!(matches!(
+                    finished.record.state,
+                    AttemptState::Terminal {
+                        outcome: Outcome::Unsettled,
+                        ..
+                    }
+                ));
+                assert!(matches!(
+                    finished.record.settlement_receipts.unwrap().git_import,
+                    EffectDisposition::Failed {
+                        retryable: true,
+                        ..
+                    }
+                ));
             } else {
-                let refusal = object_import_refused(&attempt, scope)?.ok_or("refusal evidence")?;
-                assert!(
-                    matches!(result?.state, AttemptState::Terminal { outcome: Outcome::Failed, reason: Some(reason), .. } if reason == refusal)
-                );
+                object_import_refused(&attempt, scope)?.ok_or("refusal evidence")?;
+                let finished = result?;
+                assert!(finished.release_permitted);
+                assert!(matches!(
+                    finished.record.state,
+                    AttemptState::Terminal {
+                        outcome: Outcome::Unsettled,
+                        ..
+                    }
+                ));
             }
             let journal: serde_json::Value = crate::db::decode(
                 &attempt.read_stable(OsStr::new("settlement-progress.json"), RECORD_LIMIT)?,
@@ -1889,15 +2923,11 @@ fn cancellation_reason(bytes: Option<&[u8]>) -> Option<String> {
     })
 }
 
-fn delivery_cancellation_reason(bytes: Option<&[u8]>, handoff_done: bool) -> String {
-    let mut reason = match cancellation_reason(bytes) {
+fn delivery_cancellation_reason(bytes: Option<&[u8]>) -> String {
+    match cancellation_reason(bytes) {
         Some(cancellation) => format!("cancelled during delivery: {cancellation}"),
         None => "cancelled during delivery".into(),
-    };
-    if handoff_done {
-        reason.push_str("; handoff declared done but settlement was not successful");
     }
-    reason
 }
 
 #[cfg(test)]
@@ -1915,21 +2945,11 @@ mod friction_tests {
     #[test]
     fn delivery_cancellation_reason_keeps_its_whole_cause() {
         assert_eq!(
-            super::delivery_cancellation_reason(
-                Some(br#"{"reason":"explicit_cancellation"}"#),
-                false
-            ),
+            super::delivery_cancellation_reason(Some(br#"{"reason":"explicit_cancellation"}"#)),
             "cancelled during delivery: explicit_cancellation"
         );
         assert_eq!(
-            super::delivery_cancellation_reason(
-                Some(br#"{"reason":"explicit_cancellation"}"#),
-                true
-            ),
-            "cancelled during delivery: explicit_cancellation; handoff declared done but settlement was not successful"
-        );
-        assert_eq!(
-            super::delivery_cancellation_reason(Some(br#"{"scope":{}}"#), false),
+            super::delivery_cancellation_reason(Some(br#"{"scope":{}}"#)),
             "cancelled during delivery"
         );
     }
