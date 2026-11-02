@@ -1010,48 +1010,68 @@ pub(super) fn settle(
             .position(|progress| progress.id == node.id)?;
         let reason = fallback_reason(&checkpoint.nodes[index]);
         let root_id = format!("{}--fallback", node.id);
-        let root: GraphNode = serde_json::from_value(serde_json::json!({
-            "id": root_id,
-            "kind": "composite",
-            "access": "read_only",
-            "depends_on": spec.fallback_depends_on,
-            "inputs": spec.fallback_inputs,
-            "source": spec.fallback_source,
-            "read_roots": spec.fallback_read_roots,
-            "title": spec.fallback_title,
-            "composite": fallback,
-        }))
-        .ok()?;
-        let mut document_with_fallback = source.clone();
-        document_with_fallback.nodes.push(root);
-        let expansion_document = composites::expand(&document_with_fallback, &generous()).ok()?;
-        let fallback_prefix = format!("{}--fallback", node.id);
-        let addition = Expansion {
-            extra: Default::default(),
-            source: node.id.clone(),
-            continuation: false,
-            nodes: expansion_document
-                .nodes
-                .into_iter()
-                .filter(|child| {
-                    child.id == fallback_prefix
-                        || child.id.starts_with(&format!("{fallback_prefix}--"))
-                })
-                .collect(),
-            patterns: Vec::new(),
+        let built = (|| {
+            let root: GraphNode = serde_json::from_value(serde_json::json!({
+                "id": root_id,
+                "kind": "composite",
+                "access": "read_only",
+                "depends_on": spec.fallback_depends_on,
+                "inputs": spec.fallback_inputs,
+                "source": spec.fallback_source,
+                "read_roots": spec.fallback_read_roots,
+                "title": spec.fallback_title,
+                "composite": fallback,
+            }))
+            .map_err(|error| format!("invalid fallback stage: {error}"))?;
+            let mut document_with_fallback = source.clone();
+            document_with_fallback.nodes.push(root);
+            let expansion_document = composites::expand(&document_with_fallback, &generous())
+                .map_err(|error| format!("fallback stage does not expand: {error}"))?;
+            let addition = Expansion {
+                extra: Default::default(),
+                source: node.id.clone(),
+                continuation: false,
+                nodes: expansion_document
+                    .nodes
+                    .into_iter()
+                    .filter(|child| {
+                        child.id == root_id || child.id.starts_with(&format!("{root_id}--"))
+                    })
+                    .collect(),
+                patterns: Vec::new(),
+            };
+            let mut preview = document.clone();
+            append(&mut preview, &addition);
+            let (plan, positions) =
+                validate_flat_plan(&preview, &generous()).map_err(str::to_owned)?;
+            if let Some(reason) = structural_limit_reason(&preview, &plan, limits) {
+                return Err(reason);
+            }
+            let mut expansions = checkpoint.expansions.clone();
+            expansions.push(addition.clone());
+            if let Some(reason) =
+                envelope::reason(source, &expansions, &checkpoint.extensions, &plan)
+            {
+                return Err(reason);
+            }
+            Ok((addition, plan, positions, preview))
+        })();
+        let (addition, plan, positions, preview) = match built {
+            Ok(built) => built,
+            Err(reason) => {
+                // Same diagnostic as a rejected planner expansion: pause with a reason.
+                let reason = bounded(
+                    &format!("node {} fallback expansion paused: {reason}", node.id),
+                    MAX_ADVANCE_ERROR_BYTES,
+                );
+                checkpoint.nodes[index].expansion_pause = Some(reason.clone());
+                checkpoint.pause_reason = Some(reason);
+                checkpoint.pause_code = Some("invalid_plan_expansion".into());
+                return None;
+            }
         };
-        let mut preview = document.clone();
-        append(&mut preview, &addition);
-        let (plan, positions) = validate_flat_plan(&preview, &generous()).ok()?;
-        if structural_limit_reason(&preview, &plan, limits).is_some() {
-            return None;
-        }
-        let mut expansions = checkpoint.expansions.clone();
-        expansions.push(addition.clone());
-        if envelope::reason(source, &expansions, &checkpoint.extensions, &plan).is_some() {
-            return None;
-        }
         checkpoint.nodes[index].state = NodeState::Succeeded;
+        checkpoint.nodes[index].expansion_pause = None;
         let outputs = checkpoint.nodes[index]
             .outputs
             .get_or_insert_with(|| super::outputs::make_outputs(None, None, None, None, None));

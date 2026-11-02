@@ -552,26 +552,21 @@ pub(super) fn planner_fallback_reason(
     let graph_id = context.graph_id.as_deref()?;
     FileJournal::read_checkpoint(state_root, project, graph_id)
         .ok()?
-        .and_then(|checkpoint| fallback_reason_for_node(&checkpoint, context))
+        .and_then(|checkpoint| fallback_reason_for_graph(&checkpoint))
 }
 
-fn fallback_reason_for_node(
+/// The fallback reason of the graph's planner, when it fell back. Every node of
+/// that graph reports it: the static stage, its dependants (such as a
+/// `synthesis` node outside the expansion) and the planner itself.
+fn fallback_reason_for_graph(
     checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
-    context: &provenant_records::run::WorkContext,
 ) -> Option<String> {
-    let node_id = context.node_id.as_deref()?;
-    let planner_id = checkpoint
-        .expansions
-        .iter()
-        .find(|expansion| expansion.nodes.iter().any(|node| node.id == node_id))
-        .map_or(node_id, |expansion| expansion.source.as_str());
-    checkpoint
-        .nodes
-        .iter()
-        .find(|node| node.id == planner_id)
-        .and_then(|node| node.outputs.as_ref())
-        .and_then(|outputs| outputs.plan.as_ref())
-        .map(|plan| plan.fallback_reason.clone())
+    checkpoint.nodes.iter().find_map(|node| {
+        node.outputs
+            .as_ref()
+            .and_then(|outputs| outputs.plan.as_ref())
+            .map(|plan| plan.fallback_reason.clone())
+    })
 }
 
 /// The attempt `output` reads for a RUN or RUN/TASK: the newest settled one,
@@ -918,7 +913,7 @@ pub fn attempt_provider(
 
 #[cfg(test)]
 mod tests {
-    use super::{fallback_reason_for_node, output_summary, provider_error_from_stderr};
+    use super::{fallback_reason_for_graph, output_summary, provider_error_from_stderr};
     use serde_json::json;
 
     #[test]
@@ -934,27 +929,36 @@ mod tests {
     }
 
     #[test]
-    fn output_finds_fallback_reason_for_the_attempt_node() {
+    fn output_finds_fallback_reason_for_every_node_of_the_graph() {
+        // `synthesis` depends on the expansion but is not part of it.
         let checkpoint = serde_json::from_value(serde_json::json!({
-            "schema_version":1,"graph_id":"graph","plan_digest":"digest","nodes":[{
-                "id":"planner", "state":"succeeded", "attempts":[],
-                "outputs":{"schema_version":2,"result":null,"verdict":null,"findings":[],"branch":null,"commit":null,"warnings":[],
-                    "plan":{"fallback_reason":"planner route failed"}}
-            }],
+            "schema_version":1,"graph_id":"graph","plan_digest":"digest","nodes":[
+                {"id":"planner", "state":"succeeded", "attempts":[],
+                 "outputs":{"schema_version":2,"result":null,"verdict":null,"findings":[],"branch":null,"commit":null,"warnings":[],
+                    "plan":{"fallback_reason":"planner route failed"}}},
+                {"id":"planner--fallback--static", "state":"succeeded", "attempts":[]},
+                {"id":"synthesis", "state":"succeeded", "attempts":[]}
+            ],
             "expansions":[{"source":"planner","continuation":false,"nodes":[{
                 "id":"planner--fallback--static","access":"read_only","prompt":"Static stage","route":{"alias":"junior"}
             }]}]
         }))
         .unwrap();
-        let context = provenant_records::run::WorkContext {
-            graph_id: Some("graph".into()),
-            node_id: Some("planner--fallback--static".into()),
-            ..Default::default()
-        };
         assert_eq!(
-            fallback_reason_for_node(&checkpoint, &context).as_deref(),
+            fallback_reason_for_graph(&checkpoint).as_deref(),
             Some("planner route failed")
         );
+    }
+
+    #[test]
+    fn output_reports_no_fallback_when_no_planner_fell_back() {
+        let checkpoint = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"graph","plan_digest":"digest","nodes":[
+                {"id":"synthesis", "state":"succeeded", "attempts":[]}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(fallback_reason_for_graph(&checkpoint), None);
     }
 
     #[test]

@@ -104,6 +104,96 @@ fn failed_planner_runs_static_fallback_and_records_reason() {
     );
 }
 
+fn two_step_fallback_document() -> GraphDocument {
+    serde_json::from_value(json!({
+        "schema_version":1, "graph_id":"planned-fallback-restart", "nodes":[
+            {"id":"plan", "kind":"plan", "access":"read_only", "prompt":"Plan",
+             "route":{"alias":"senior"},
+             "plan":{"kinds":["task"], "max_nodes":2, "wire_exports":true,
+             "fallback":{"nodes":[
+                 {"id":"first", "access":"read_only", "prompt":"First step", "route":{"alias":"junior"}},
+                 {"id":"second", "access":"read_only", "prompt":"Second step", "route":{"alias":"junior"},
+                  "depends_on":["first"], "inputs":[{"node":"first", "outputs":["result"]}]}
+             ], "exports":[{"node":"second", "outputs":["result"]}]}}},
+            {"id":"after", "access":"read_only", "prompt":"Consume stage", "route":{"alias":"senior"},
+             "depends_on":["plan"], "inputs":[{"node":"plan", "outputs":["result"]}]}
+        ]
+    })).unwrap()
+}
+
+#[test]
+fn restart_after_fallback_expansion_does_not_duplicate_work_or_admit_dependants_early() {
+    let document = two_step_fallback_document();
+    let mut journal = MemoryJournal::default();
+    let mut first_owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::TaskFailed, "planner rejected the brief"),
+            AttemptObservation::Pending { attempt_ref: None },
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let interrupted = advance(&document, &mut first_owner, &mut journal).unwrap();
+    assert_eq!(interrupted.status, GraphStatus::Pending);
+    assert_eq!(interrupted.checkpoint.expansions.len(), 1);
+    let ids: Vec<_> = first_owner.calls.iter().map(|call| call.0.node_id.as_str()).collect();
+    assert_eq!(ids.len(), 2, "{ids:?}");
+    assert!(ids[1].ends_with("--fallback--first"), "{ids:?}");
+    let state = |run: &GraphRun, suffix: &str| {
+        run.checkpoint.nodes.iter().find(|node| node.id.ends_with(suffix)).map(|node| node.state)
+    };
+    assert_eq!(state(&interrupted, "--fallback--second"), Some(NodeState::Pending));
+    assert_eq!(state(&interrupted, "after"), Some(NodeState::Pending));
+
+    let mut second_owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, "first result"),
+            terminal_with_result(AttemptOutcome::Succeeded, "second result"),
+            terminal_with_result(AttemptOutcome::Succeeded, "done"),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut second_owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert!(run.checkpoint.successful());
+    assert_eq!(run.checkpoint.expansions.len(), 1);
+    let ids: Vec<_> = second_owner.calls.iter().map(|call| call.0.node_id.as_str()).collect();
+    assert_eq!(ids.len(), 3, "{ids:?}");
+    assert!(!ids.contains(&"plan"), "{ids:?}");
+    assert!(ids[0].ends_with("--fallback--first"), "{ids:?}");
+    assert!(ids[1].ends_with("--fallback--second"), "{ids:?}");
+    assert_eq!(ids[2], "after");
+    assert!(second_owner.prompts[1].contains("first result"));
+    assert!(second_owner.prompts[2].contains("second result"));
+}
+
+#[test]
+fn fallback_expansion_over_a_structural_limit_pauses_with_a_reason() {
+    let document = two_step_fallback_document();
+    let limits = crate::config::GraphLimits { nodes: 3, ..Default::default() };
+    let mut owner = fixture_owner(&["planner rejected the brief"]);
+    let mut owner = {
+        owner.observations =
+            [terminal_with_result(AttemptOutcome::TaskFailed, "planner rejected the brief")].into();
+        owner
+    };
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut MemoryJournal::default(),
+        &limits,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+    let reason = run.checkpoint.pause_reason.as_deref().unwrap();
+    assert!(reason.contains("plan fallback expansion paused"), "{reason}");
+    assert!(run.checkpoint.expansions.is_empty());
+    assert_eq!(owner.calls.len(), 1);
+}
+
 #[test]
 fn planner_prelaunch_failure_runs_static_fallback_without_an_attempt() {
     let document: GraphDocument = serde_json::from_value(json!({

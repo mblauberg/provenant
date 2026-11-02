@@ -818,10 +818,22 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 }
                 None => false,
             },
-            NodeState::Succeeded => last.is_some_and(|attempt| {
-                attempt.state == AttemptState::Terminal
-                    && attempt.outcome == Some(AttemptOutcome::Succeeded)
-            }),
+            // A planner whose failure was settled by its static fallback is
+            // succeeded though its last attempt failed (or never launched).
+            NodeState::Succeeded => {
+                last.is_some_and(|attempt| {
+                    attempt.state == AttemptState::Terminal
+                        && attempt.outcome == Some(AttemptOutcome::Succeeded)
+                }) || (node
+                    .plan
+                    .as_ref()
+                    .is_some_and(|spec| spec.fallback.is_some())
+                    && progress
+                        .outputs
+                        .as_ref()
+                        .is_some_and(|outputs| outputs.plan.is_some())
+                    && checkpoint.expansions.iter().any(|e| e.source == node.id))
+            }
             NodeState::Failed if progress.advance_error.is_some() => last.is_none_or(|attempt| {
                 attempt.state == AttemptState::Terminal
                     && attempt
