@@ -1792,7 +1792,7 @@ esac
     fs::write(
         &mv,
         format!(
-            "#!/bin/sh\ncase \"$1\" in */.provenant-upgrade.*/*) if [ ! -f '{0}' ]; then touch '{0}'; exit 1; fi ;; esac\nexec /bin/mv \"$@\"\n",
+            "#!/bin/sh\ncase \"$1\" in */.provenant-retained.*/*) if [ ! -f '{0}' ]; then touch '{0}'; exit 1; fi ;; esac\nexec /bin/mv \"$@\"\n",
             rig.root.join("mv-failed-once").display()
         ),
     )?;
@@ -1815,7 +1815,7 @@ esac
             !entry
                 .file_name()
                 .to_string_lossy()
-                .starts_with(".provenant-upgrade.")
+                .starts_with(".provenant-retained.")
         })
     }));
     fs::remove_file(mv)?;
