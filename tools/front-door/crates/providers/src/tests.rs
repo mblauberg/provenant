@@ -3274,6 +3274,12 @@ fn opencode_writer_gets_the_rust_toolchain_in_its_lane_cache()
             "{root:?}"
         );
     }
+    assert!(
+        spec.profile
+            .spec
+            .runtime_reads
+            .contains(&crate::launch::subtree(home.join(".cargo")))
+    );
     // Read-only lanes deny bash, so they get no toolchain: only the search
     // binary OpenCode's grep and glob tools execute.
     let plan = fixture_access_plan(Access::ReadOnly, None, false);
