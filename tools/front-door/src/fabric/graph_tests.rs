@@ -1,0 +1,844 @@
+#[cfg(test)]
+mod graph_review_tests {
+    #[test]
+    fn expanded_review_roles_include_lenses_verification_and_synthesis()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::{config::GraphLimits, graph::GraphDocument};
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": "review-rows",
+            "nodes": [{
+                "id": "council", "kind": "composite", "access": "read_only",
+                "composite": {
+                    "nodes": [
+                        {"id":"subject", "role":"plan.review", "access":"read_only", "prompt":"Frame"},
+                        {"id":"lens", "role":"lens.correctness-spec", "access":"read_only", "prompt":"Review"},
+                        {"id":"verify", "role":"review.verify", "access":"read_only", "prompt":"Verify"},
+                        {"id":"synthesis", "role":"review.synthesis", "access":"read_only", "prompt":"Reconcile"},
+                        {"id":"other", "role":"plan", "access":"read_only", "prompt":"Plan"},
+                        {"id":"writer", "role":"review.verify", "access":"worktree_write", "worktree":"lane", "prompt":"Write"}
+                    ],
+                    "exports": [{"node":"synthesis","outputs":["result"]}]
+                }
+            }]
+        }))?;
+        let expanded = document.expanded(&GraphLimits::default())?;
+        for suffix in ["lens", "verify", "synthesis"] {
+            assert!(super::graph_review_node(
+                &expanded,
+                &format!("council--{suffix}")
+            ));
+        }
+        for suffix in ["subject", "other", "writer"] {
+            assert!(!super::graph_review_node(
+                &expanded,
+                &format!("council--{suffix}")
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(unused_imports, dead_code)] // The custom worktree driver compiles without a test harness.
+mod graph_ask_inbox_tests {
+    use super::*;
+    use provenant_fabric_runtime::{
+        graph::{AskScope, LoopDecision, loop_ask},
+        inbox::{InboxFilter, InboxInput, InboxResult, InboxService},
+    };
+    use provenant_records::inbox::{
+        AnswerAction, AnswerDeliveryState, InteractionChannel, RequestState,
+    };
+
+    #[test]
+    fn graph_ask_inbox_replays_requests_and_acknowledged_answers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("assets"));
+        inputs.state_dir = Some(base.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let host = provenant_core::HostId::from_bytes([1; 16]);
+        let identity = Identity {
+            project: provenant_core::ProjectId::from_bytes([2; 16]),
+            host,
+            inbox: provenant_fabric_runtime::identity::Address::new(host, "chair")?,
+            client: "test".into(),
+            cwd: provenant_records::AbsolutePath::new(&base)?,
+            common_dir: provenant_records::AbsolutePath::new(&base)?,
+            federation: None,
+        };
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let service = InboxService::open(&roots.state, &identity, &clock, &cancel)?;
+        for (index, (option, text, expected)) in [
+            (Some("stop"), None, Some(LoopDecision::Stop)),
+            (Some("accept"), None, Some(LoopDecision::Accept)),
+            (
+                Some("extend"),
+                None,
+                Some(LoopDecision::Extend { rounds: 1 }),
+            ),
+            (
+                None,
+                Some("{\"decision\":\"extend\",\"rounds\":3}"),
+                Some(LoopDecision::Extend { rounds: 3 }),
+            ),
+            (None, Some("extend by two"), None),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut ask = loop_ask("fixture", "review", index + 1, "chair-session");
+            if index == 2 {
+                // A deadline and default reach the inbox as its deadline and recommendation.
+                ask.default = Some("stop".into());
+                ask.wake_at = Some(
+                    clock
+                        .wall_now()?
+                        .checked_add(provenant_core::DurationMicros::from_seconds(3600)?)?,
+                );
+            }
+            let actor = identity.inbox.actor.to_string();
+            let scope = AskScope {
+                graph_id: "fixture",
+                instance_id: "instance-one",
+                actor: &actor,
+                ask: &ask,
+            };
+            assert_eq!(graph_ask_poll(&service, &scope, &cancel)?, None);
+            let InboxResult::Saved { receipt } =
+                service.execute(graph_ask_input(&scope)?, &cancel)?
+            else {
+                return Err("missing ask receipt".into());
+            };
+            service.execute(
+                InboxInput::Answer {
+                    extra: Default::default(),
+                    id: receipt.request_id,
+                    action: if option.is_some() {
+                        AnswerAction::Choose
+                    } else {
+                        AnswerAction::Reply
+                    },
+                    option_id: option.map(String::from),
+                    text: text.map(String::from),
+                    expect_revision: receipt.revision,
+                    channel: InteractionChannel::Cli,
+                    operation_id: None,
+                },
+                &cancel,
+            )?;
+            for _ in 0..2 {
+                let reply = graph_ask_poll(&service, &scope, &cancel)?.ok_or("missing answer")?;
+                assert_eq!(
+                    (reply.option.as_deref(), reply.text.as_deref()),
+                    (option, text)
+                );
+                assert_eq!(reply.actor, actor);
+                assert!(reply.at.is_some());
+                assert_eq!(
+                    LoopDecision::parse(reply.option.as_deref(), reply.text.as_deref()).ok(),
+                    expected
+                );
+            }
+            let InboxResult::Item { item, .. } = service.execute(
+                InboxInput::List {
+                    extra: Default::default(),
+                    id: Some(receipt.request_id),
+                    session: None,
+                    state: InboxFilter::All,
+                    limit: 1,
+                    cursor: None,
+                },
+                &cancel,
+            )?
+            else {
+                return Err("missing answered request".into());
+            };
+            assert_eq!(
+                item.delivery.ok_or("missing delivery")?.state,
+                AnswerDeliveryState::Acknowledged
+            );
+            assert_eq!(item.request.chair_actor, identity.inbox.actor);
+            assert_eq!(item.request.chair_session_id, ask.session);
+            assert_eq!(item.request.request.title, ask.title);
+            assert_eq!(item.request.request.recommended_option_id, ask.default);
+            assert_eq!(item.request.request.deadline, ask.wake_at);
+            if index == 1 {
+                let fresh = AskScope {
+                    instance_id: "instance-two",
+                    ..scope
+                };
+                assert_eq!(
+                    graph_ask_poll(&service, &fresh, &cancel)?,
+                    None,
+                    "same document recreated state must ask again"
+                );
+                graph_ask_close(&service, &fresh, identity.inbox.actor, &cancel)?;
+            }
+            if index == 0 {
+                service.execute(
+                    InboxInput::Close {
+                        extra: Default::default(),
+                        id: receipt.request_id,
+                        state: RequestState::Superseded,
+                        reason: "Replace the decision".into(),
+                        expect_revision: item.request.revision,
+                        operation_id: None,
+                    },
+                    &cancel,
+                )?;
+                assert_eq!(
+                    graph_ask_poll(&service, &scope, &cancel)?,
+                    None,
+                    "a superseded request reused its historical answer"
+                );
+            }
+            graph_ask_close(&service, &scope, identity.inbox.actor, &cancel)?;
+            graph_ask_close(&service, &scope, identity.inbox.actor, &cancel)?;
+            assert_eq!(graph_ask_poll(&service, &scope, &cancel)?, None);
+        }
+        let InboxResult::Listed { items, .. } = service.execute(
+            InboxInput::List {
+                extra: Default::default(),
+                id: None,
+                session: Some("chair-session".into()),
+                state: InboxFilter::All,
+                limit: 50,
+                cursor: None,
+            },
+            &cancel,
+        )?
+        else {
+            return Err("missing inbox listing".into());
+        };
+        assert_eq!(
+            items.len(),
+            6,
+            "replay or cleanup created duplicate decisions"
+        );
+        assert!(
+            items
+                .iter()
+                .all(|item| item.state == RequestState::Superseded)
+        );
+        Ok(())
+    }
+
+    /// A graph owner whose asks go through a real inbox and which runs no agents.
+    struct InboxOwner<'a> {
+        service: &'a InboxService<'a>,
+        clock: &'a SystemClock,
+        cancel: &'a CancelToken,
+        actor: String,
+    }
+
+    impl InboxOwner<'_> {
+        fn budget(&self) -> Result<WaitBudget, FacadeError> {
+            WaitBudget::cli(self.clock.mono_now(), 5).map_err(|_| FacadeError::Busy)
+        }
+    }
+
+    impl provenant_fabric_runtime::graph::AttemptOwner for InboxOwner<'_> {
+        type Error = FacadeError;
+
+        fn actor(&self) -> String {
+            self.actor.clone()
+        }
+        fn node_ask(
+            &mut self,
+            scope: AskScope<'_>,
+        ) -> Result<Option<provenant_fabric_runtime::graph::AskReply>, FacadeError> {
+            graph_ask_poll(self.service, &scope, self.cancel)
+        }
+        fn close_node_ask(&mut self, scope: AskScope<'_>) -> Result<(), FacadeError> {
+            let actor = scope.actor.parse().map_err(|_| FacadeError::StateCorrupt)?;
+            graph_ask_close(self.service, &scope, actor, self.cancel)
+        }
+        fn observe_or_start(
+            &mut self,
+            _key: &provenant_fabric_runtime::graph::AttemptKey,
+            _node: provenant_fabric_runtime::graph::NodeInput<'_>,
+            _route: &provenant_fabric_runtime::graph::GraphRoute,
+            _access: provenant_fabric_runtime::graph::AccessMode,
+            _worktree: Option<&str>,
+            _replay: provenant_fabric_runtime::graph::Replay<'_>,
+        ) -> Result<provenant_fabric_runtime::graph::AttemptObservation, FacadeError> {
+            Err(FacadeError::OwnerUnavailable)
+        }
+    }
+
+    #[derive(Default)]
+    struct MemoryJournal(Option<provenant_fabric_runtime::graph::GraphCheckpoint>);
+
+    impl provenant_fabric_runtime::graph::GraphJournal for MemoryJournal {
+        type Error = std::convert::Infallible;
+
+        fn load(
+            &mut self,
+            _graph_id: &str,
+        ) -> Result<Option<provenant_fabric_runtime::graph::GraphCheckpoint>, Self::Error> {
+            Ok(self.0.clone())
+        }
+        fn save(
+            &mut self,
+            checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+        ) -> Result<(), Self::Error> {
+            self.0 = Some(checkpoint.clone());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn graph_decide_asks_stay_fresh_across_repeated_cancel_and_resume()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::{
+            GraphDocument, GraphStatus, NodeState, advance_with_budget, resume_with_budget,
+        };
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("assets"));
+        inputs.state_dir = Some(base.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let host = provenant_core::HostId::from_bytes([1; 16]);
+        let identity = Identity {
+            project: provenant_core::ProjectId::from_bytes([2; 16]),
+            host,
+            inbox: provenant_fabric_runtime::identity::Address::new(host, "chair")?,
+            client: "test".into(),
+            cwd: provenant_records::AbsolutePath::new(&base)?,
+            common_dir: provenant_records::AbsolutePath::new(&base)?,
+            federation: None,
+        };
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let service = InboxService::open(&roots.state, &identity, &clock, &cancel)?;
+        let mut owner = InboxOwner {
+            service: &service,
+            clock: &clock,
+            cancel: &cancel,
+            actor: identity.inbox.actor.to_string(),
+        };
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": "decide-cancel", "decision_session": "chair-session",
+            "nodes": [{"id": "choose", "kind": "decide", "access": "read_only", "decide": {
+                "question": "Ship the change?",
+                "options": [{"id": "ship", "label": "Ship"}, {"id": "hold", "label": "Hold"}]}}]
+        }))?;
+        let mut journal = MemoryJournal::default();
+        let limits = Default::default();
+        let graph_budget = Default::default();
+        advance_with_budget(&document, &mut owner, &mut journal, &limits, &graph_budget)?;
+        for _ in 0..2 {
+            journal.0.as_mut().ok_or("missing checkpoint")?.cancelled = true;
+            let cancelled =
+                advance_with_budget(&document, &mut owner, &mut journal, &limits, &graph_budget)?;
+            assert_eq!(cancelled.status, GraphStatus::Cancelled);
+            resume_with_budget(
+                &document,
+                &mut owner,
+                &mut journal,
+                &limits,
+                &graph_budget,
+                &[],
+            )?;
+        }
+        let checkpoint = journal.0.as_ref().ok_or("missing checkpoint")?;
+        assert_eq!(checkpoint.asks[0].ask_id, "choose.ask-3");
+        assert_eq!(checkpoint.asks[0].inbox_error, None);
+        let InboxResult::Listed { items, .. } = service.execute(
+            InboxInput::List {
+                extra: Default::default(),
+                id: None,
+                session: Some("chair-session".into()),
+                state: InboxFilter::All,
+                limit: 50,
+                cursor: None,
+            },
+            &cancel,
+        )?
+        else {
+            return Err("missing inbox listing".into());
+        };
+        // Each resume raised a new request; the third is not a replay of the second.
+        assert_eq!(items.len(), 3);
+        let open: Vec<_> = items
+            .iter()
+            .filter(|item| item.state == RequestState::Open)
+            .collect();
+        assert_eq!(open.len(), 1);
+        service.execute(
+            InboxInput::Answer {
+                extra: Default::default(),
+                id: open[0].id,
+                action: AnswerAction::Choose,
+                option_id: Some("ship".into()),
+                text: None,
+                expect_revision: open[0].revision,
+                channel: InteractionChannel::Cli,
+                operation_id: None,
+            },
+            &cancel,
+        )?;
+        let run = advance_with_budget(&document, &mut owner, &mut journal, &limits, &graph_budget)?;
+        assert_eq!(run.status, GraphStatus::Complete);
+        assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
+        let verdict = run.checkpoint.nodes[0]
+            .outputs
+            .as_ref()
+            .and_then(|o| o.verdict.as_deref());
+        assert_eq!(verdict, Some("ship"));
+        Ok(())
+    }
+
+    #[test]
+    fn cancel_closes_a_legacy_loop_request_by_its_original_operation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::{GraphDocument, advance_with_budget};
+        use provenant_records::inbox::{RequestDraft, RequestKind, RequestOption};
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("assets"));
+        inputs.state_dir = Some(base.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let host = provenant_core::HostId::from_bytes([1; 16]);
+        let identity = Identity {
+            project: provenant_core::ProjectId::from_bytes([2; 16]),
+            host,
+            inbox: provenant_fabric_runtime::identity::Address::new(host, "chair")?,
+            client: "test".into(),
+            cwd: provenant_records::AbsolutePath::new(&base)?,
+            common_dir: provenant_records::AbsolutePath::new(&base)?,
+            federation: None,
+        };
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let service = InboxService::open(&roots.state, &identity, &clock, &cancel)?;
+        let mut owner = InboxOwner {
+            service: &service,
+            clock: &clock,
+            cancel: &cancel,
+            actor: identity.inbox.actor.to_string(),
+        };
+        // Any saved checkpoint with an instance ID stands in for the legacy one.
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": "legacy-loop", "decision_session": "chair-session",
+            "nodes": [{"id": "revise", "kind": "decide", "access": "read_only", "decide": {
+                "question": "Ship the change?",
+                "options": [{"id": "ship", "label": "Ship"}, {"id": "hold", "label": "Hold"}]}}]
+        }))?;
+        let mut journal = MemoryJournal::default();
+        advance_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &Default::default(),
+            &Default::default(),
+        )?;
+        let mut checkpoint = journal.0.take().ok_or("missing checkpoint")?;
+        let instance = checkpoint.instance_id.clone().ok_or("missing instance")?;
+        checkpoint.asks.clear();
+        checkpoint.ask_actor = None;
+        let node = &mut checkpoint.nodes[0];
+        node.extra.insert(
+            "loop_decision_actor".into(),
+            serde_json::json!(identity.inbox.actor.to_string()),
+        );
+        node.extra.insert(
+            "loop_asks".into(),
+            serde_json::json!([
+                {"rounds": 2, "session": "legacy-session", "resolved": false, "closed": false}
+            ]),
+        );
+
+        // The request as a pre-ask loop raised it, under its original operation.
+        let digest = provenant_records::CanonicalV1::record_digest(
+            "graph-loop-inbox",
+            1,
+            &(
+                "legacy-loop",
+                instance.as_str(),
+                "revise",
+                2usize,
+                "legacy-session",
+            ),
+        )?;
+        let operation = provenant_core::OperationId::parse(&format!(
+            "loop-{}",
+            provenant_core::hex(digest.as_bytes())
+        ))?;
+        let option = |id: &str| RequestOption {
+            extra: Default::default(),
+            id: id.into(),
+            label: id.into(),
+            description: id.into(),
+        };
+        service.execute(
+            InboxInput::Ask {
+                extra: Default::default(),
+                session: "legacy-session".into(),
+                request: Box::new(RequestDraft {
+                    extra: Default::default(),
+                    supersedes: None,
+                    deadline: None,
+                    work: None,
+                    kind: RequestKind::Decision,
+                    title: "Graph loop revise exhausted".into(),
+                    body: "Graph legacy-loop, loop revise exhausted after 2 rounds.".into(),
+                    blocking: true,
+                    options: vec![option("stop"), option("extend"), option("accept")],
+                    recommended_option_id: None,
+                    proceeding_with: None,
+                }),
+                operation_id: Some(operation),
+            },
+            &cancel,
+        )?;
+        let states = || -> Result<Vec<RequestState>, Box<dyn std::error::Error>> {
+            let InboxResult::Listed { items, .. } = service.execute(
+                InboxInput::List {
+                    extra: Default::default(),
+                    id: None,
+                    session: Some("legacy-session".into()),
+                    state: InboxFilter::All,
+                    limit: 50,
+                    cursor: None,
+                },
+                &cancel,
+            )?
+            else {
+                return Err("missing inbox listing".into());
+            };
+            Ok(items.into_iter().map(|item| item.state).collect())
+        };
+        assert_eq!(states()?, [RequestState::Open]);
+        for _ in 0..2 {
+            graph_legacy_loop_close(&service, &checkpoint, identity.inbox.actor, &cancel)?;
+            assert_eq!(states()?, [RequestState::Superseded]);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod result_tests {
+    #[test]
+    fn graph_status_shows_waiting_ci_checks_head_and_live_elapsed() {
+        let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1,
+                "graph_id": "delivery",
+                "plan_digest": "digest",
+                "nodes": [{
+                    "id": "ci", "state": "running", "worktree": null, "attempts": [],
+                    "ci": {
+                        "state": "pending", "summary": "2 pending checks",
+                        "head_sha": "abc123", "check_names": ["build", "tests"],
+                        "elapsed_seconds": 10,
+                        "first_observed_stamp": {
+                            "boot_identity": "boot-a", "host_monotonic_micros": 1_000_000
+                        }
+                    }
+                }]
+            }))
+            .unwrap();
+        let mut display = checkpoint.clone();
+        super::graph_status_elapsed(&mut display, "boot-a", 66_000_000);
+        let run = super::graph_snapshot(display);
+        let expected = "CI waiting elapsed=65s checks=build, tests head=abc123";
+        assert!(super::graph_human(&run).contains(expected));
+        let summary = super::graph_summary(&serde_json::to_value(&run).unwrap());
+        assert_eq!(summary.lines[1], format!("ci running: {expected}"));
+        assert_eq!(
+            summary.next.as_deref(),
+            Some("provenant fabric graph status delivery")
+        );
+        assert_eq!(checkpoint.nodes[0].ci.as_ref().unwrap().elapsed_seconds, 10);
+
+        let mut nested = run.clone();
+        let mut parent = nested.checkpoint.nodes[0].clone();
+        parent.id = "deliver".into();
+        parent.children = vec!["ci".into()];
+        parent.ci = None;
+        nested.checkpoint.nodes.push(parent);
+        assert!(super::graph_human(&nested).contains(expected));
+
+        for (boot, now) in [("boot-b", 66_000_000), ("boot-a", 0)] {
+            let mut display = checkpoint.clone();
+            super::graph_status_elapsed(&mut display, boot, now);
+            assert_eq!(display.nodes[0].ci.as_ref().unwrap().elapsed_seconds, 10);
+        }
+        assert_eq!(
+            super::graph_ci_waiting(0, std::iter::empty(), None),
+            "CI waiting elapsed=0s checks=awaiting registration"
+        );
+    }
+
+    #[test]
+    fn graph_usage_maps_attempt_telemetry_and_prices() {
+        fn usage_record(
+            model: &str,
+            usage: serde_json::Value,
+            provider_ms: Option<u64>,
+        ) -> provenant_records::run::AttemptRecord {
+            use provenant_core::{AttemptId, Digest, ProjectId, RunId, TaskId, WallTime};
+            use serde_json::json;
+            let now = WallTime::from_micros(1).unwrap();
+            serde_json::from_value(json!({
+                "schema_version": 1,
+                "attempt_id": AttemptId::from_bytes([1; 16]),
+                "run_id": RunId::from_bytes([2; 16]),
+                "project_id": ProjectId::from_bytes([3; 16]),
+                "task_id": TaskId::from_bytes([4; 16]),
+                "operation_id": "graph-usage-test",
+                "attempt_number": 1, "revision": 1, "generation": 0,
+                "requested_route": {"kind":"model", "provider":"p", "model":model},
+                "resolved_route": {"provider":"p", "model":model, "effort":null, "account_label":null},
+                "authority_digest": Digest::from_bytes([5; 32]), "queued_at": now,
+                "state": {"state":"terminal", "outcome":"lost", "exit_code":null, "finished_at":now, "reason":null},
+                "provider_ms": provider_ms, "usage": usage,
+                "prompt": {"path":{"encoding":"utf8", "path":"prompt.txt"},
+                    "digest": provenant_records::CanonicalV1::file_digest(b""), "bytes":0, "complete":true, "redacted":false}
+            })).unwrap()
+        }
+
+        fn usage_prices() -> provenant_telemetry::PriceTable {
+            let config = provenant_telemetry::ConfiguredPrices {
+                schema_version: 1,
+                id: "test".into(),
+                reviewed_at: "2026-10-22".into(),
+                units: "usd_microdollars_per_million_tokens".into(),
+                max_review_age_days: None,
+                discrepancy_threshold_bps: None,
+                models: vec![provenant_telemetry::ConfiguredModel {
+                    provider: "p".into(),
+                    model: "priced".into(),
+                    sources: vec!["test".into()],
+                    billing: provenant_telemetry::BillingKind::Api,
+                    zero_rate_verified: false,
+                    effective_from: None,
+                    effective_to: None,
+                    openrouter_id: None,
+                    litellm_id: None,
+                    rates: provenant_telemetry::Rates {
+                        uncached_input: Some(1_000_000),
+                        cache_read: Some(2_000_000),
+                        cache_write: Some(3_000_000),
+                        output_excluding_reasoning: Some(4_000_000),
+                    },
+                }],
+            };
+            provenant_telemetry::validate_prices(&config).unwrap()
+        }
+
+        use serde_json::json;
+        let prices = usage_prices();
+        let full = json!({"uncached_input":1_000_000, "cache_read":1_000_000,
+            "cache_write":1_000_000, "output_excluding_reasoning":1_000_000, "reasoning":1_000_000});
+        let result = super::graph_attempt_usage(
+            usage_record("priced", full.clone(), Some(1001)),
+            Some(&prices),
+            None,
+        );
+        assert_eq!(result.tokens, Some(5_000_000));
+        assert!(!result.tokens_partial);
+        assert_eq!(result.cost_micro_usd, Some(14_000_000));
+        assert!(!result.cost_partial);
+        assert_eq!(result.wall_time_seconds, Some(2));
+        assert_eq!(result.cost_unknown_reason, None);
+
+        // No provider reports reasoning apart from output, so its absence is
+        // not partial usage.
+        let without_reasoning = super::graph_attempt_usage(
+            usage_record(
+                "priced",
+                json!({"uncached_input":1_000_000, "cache_read":1_000_000,
+                    "cache_write":1_000_000, "output_excluding_reasoning":1_000_000}),
+                Some(1000),
+            ),
+            Some(&prices),
+            None,
+        );
+        assert!(!without_reasoning.tokens_partial);
+        assert!(!without_reasoning.cost_partial);
+        assert_eq!(without_reasoning.cost_micro_usd, Some(10_000_000));
+
+        let partial = super::graph_attempt_usage(
+            usage_record("priced", json!({"uncached_input":1_000_000}), Some(1000)),
+            Some(&prices),
+            None,
+        );
+        assert_eq!(partial.tokens, Some(1_000_000));
+        assert!(partial.tokens_partial);
+        assert_eq!(partial.cost_micro_usd, Some(1_000_000));
+        assert!(partial.cost_partial);
+        assert_eq!(partial.wall_time_seconds, Some(1));
+
+        let absent = super::graph_attempt_usage(
+            usage_record("priced", json!({}), None),
+            Some(&prices),
+            None,
+        );
+        assert_eq!(absent.tokens, None);
+        assert!(absent.tokens_partial);
+        assert_eq!(absent.cost_micro_usd, None);
+        assert!(absent.cost_partial);
+        assert_eq!(absent.wall_time_seconds, None);
+
+        let unpriced = super::graph_attempt_usage(
+            usage_record("unpriced", full.clone(), Some(0)),
+            Some(&prices),
+            None,
+        );
+        assert_eq!(unpriced.tokens, Some(5_000_000));
+        assert!(!unpriced.tokens_partial);
+        assert_eq!(unpriced.cost_micro_usd, None);
+        assert!(unpriced.cost_partial);
+        assert_eq!(unpriced.wall_time_seconds, Some(0));
+
+        let unavailable = super::graph_attempt_usage(
+            usage_record("priced", full, None),
+            None,
+            Some("price table unavailable".into()),
+        );
+        assert_eq!(unavailable.cost_micro_usd, None);
+        assert!(unavailable.cost_partial);
+        assert_eq!(
+            unavailable.cost_unknown_reason.as_deref(),
+            Some("price table unavailable")
+        );
+    }
+
+    #[test]
+    fn graph_status_handles_pause_left_after_terminal_checkpoint() {
+        use provenant_fabric_runtime::graph::{GraphCheckpoint, GraphStatus, NodeState};
+
+        // This is the durable state if the process stops immediately after saving
+        // the final terminal node, before advance clears the structural pause.
+        let mut checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "graph_id": "graph",
+            "plan_digest": "digest",
+            "pause_reason": "node limit exceeded",
+            "nodes": [{"id": "one", "state": "succeeded", "worktree": null, "attempts": []}]
+        }))
+        .unwrap();
+        let run = super::graph_snapshot(checkpoint.clone());
+        assert_eq!(run.status, GraphStatus::Complete);
+        assert!(run.checkpoint.pause_reason.is_none());
+
+        checkpoint.nodes[0].state = NodeState::Running;
+        assert_eq!(
+            super::graph_snapshot(checkpoint.clone()).status,
+            GraphStatus::Paused
+        );
+        checkpoint.nodes[0].state = NodeState::Succeeded;
+        checkpoint.nodes[0].expansion_pause = Some("fragment exceeds node bound".into());
+        assert_eq!(
+            super::graph_snapshot(checkpoint.clone()).status,
+            GraphStatus::Paused
+        );
+        checkpoint.nodes[0].expansion_pause = None;
+        checkpoint.delivery_required = true;
+        assert_eq!(
+            super::graph_snapshot(checkpoint.clone()).status,
+            GraphStatus::Paused
+        );
+        checkpoint.cancelled = true;
+        assert_eq!(
+            super::graph_snapshot(checkpoint).status,
+            GraphStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn graph_result_errors_produce_safe_specific_warnings() {
+        use provenant_run::RunError;
+        for (error, warning) in [
+            (
+                RunError::ArtifactMismatch(provenant_run::ArtifactProvenance {
+                    check: provenant_run::ArtifactCheck::RecordedDigest,
+                    artifact: "result.md".into(),
+                    expected: None,
+                    actual: None,
+                }),
+                "artifact digest or length does not match its record",
+            ),
+            (RunError::NotFound, "result artifact is missing"),
+            (
+                RunError::TooLarge { limit: 1 },
+                "result artifact exceeds the byte limit",
+            ),
+            (
+                RunError::Validation("output redaction failed"),
+                "result artifact could not be verified",
+            ),
+        ] {
+            assert_eq!(super::graph_result_warning(&error), warning);
+        }
+    }
+    #[test]
+    fn missing_graph_price_table_reports_its_path_and_failure() {
+        let assets = tempfile::tempdir().unwrap();
+        let reason = super::load_graph_prices(assets.path()).unwrap_err();
+        assert!(
+            reason.contains(
+                &assets
+                    .path()
+                    .join("config/telemetry-prices.toml")
+                    .display()
+                    .to_string()
+            )
+        );
+        assert!(reason.contains("No such file") || reason.contains("not found"));
+    }
+
+    #[test]
+    fn newer_graph_schemas_report_upgrade_required() {
+        let document_error =
+            super::decode_graph_document(br#"{"schema_version":2,"future_shape":true}"#)
+                .unwrap_err();
+        let decode_error = provenant_records::decode_v1::<serde_json::Value, _>(
+            br#"{"schema_version":2,"future_shape":true}"#.as_slice(),
+            provenant_records::Limits::default(),
+        )
+        .unwrap_err();
+        let checkpoint_error = super::graph_journal_error(
+            provenant_fabric_runtime::graph::JournalError::Decode(decode_error),
+        );
+        for (error, record_kind) in [
+            (document_error, "graph document schema"),
+            (checkpoint_error, "graph checkpoint schema"),
+        ] {
+            assert_eq!(error.code(), "upgrade_required");
+            let super::FacadeError::UpgradeRequired {
+                reader_release,
+                writer_release,
+                record,
+                version,
+            } = error
+            else {
+                unreachable!()
+            };
+            assert_eq!(reader_release, env!("CARGO_PKG_VERSION"));
+            assert_eq!(writer_release, "unknown");
+            assert_eq!(record, record_kind);
+            assert_eq!(version, 2);
+        }
+        assert_eq!(
+            super::decode_graph_document(br#"{"schema_version":0}"#).unwrap_err(),
+            super::FacadeError::InvalidInput
+        );
+    }
+
+    #[test]
+    fn oversized_graph_checkpoint_is_refused_with_size_reason() {
+        match super::graph_journal_error(provenant_fabric_runtime::graph::JournalError::TooLarge) {
+            super::FacadeError::DispatchRefused { reason } => {
+                assert!(reason.contains("byte limit"))
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+}
