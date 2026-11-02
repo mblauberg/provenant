@@ -1471,10 +1471,12 @@ authoritative run state; expiry is owned by GC rather than graph execution.
 
 Foreground preset waits prepare scratch and retain the graph document once
 before the first poll. A setup failure before graph admission fails the command
-with the step, path and cause. For an already-admitted graph, a transient
-scratch setup failure is retried on the next poll; the scratch lock wait is
-capped by the preset wait budget. If that budget expires, the error names the
-admitted graph ID.
+with the step, path and cause. For an already-admitted graph, transient scratch
+lock and Git probe timeouts are retried on the next poll; permanent path,
+permission and custody refusals fail immediately. Scratch lock acquisition is
+capped by the preset wait budget; Git probes retain their bounded utility
+timeout. If the wait budget expires during a transient failure, the error
+names the admitted graph ID.
 - Why: graph documents and lane briefs need a discoverable project-local home
   without creating tracked configuration changes.
 - Test: `crates/confinement/src/scratch.rs::scratch_is_local_excluded_idempotent_and_refuses_links`;

@@ -12,6 +12,8 @@ pub(crate) use graph_human::graph_human;
 use graph_human::graph_summary;
 use graph_status::{graph_snapshot, graph_status_elapsed};
 pub use peer::{hosts, peer};
+#[cfg(test)]
+pub(crate) use preset_graph::ScratchPreparationError;
 #[allow(unused_imports)]
 pub(crate) use preset_graph::publish_preset_graph;
 pub(crate) use preset_graph::run_preset_graph;
@@ -4672,11 +4674,13 @@ impl Factory {
             GraphInput::Run { document, .. } | GraphInput::Resume { document, .. } => {
                 let scratch = match prepared_scratch {
                     Some(scratch) => scratch.to_path_buf(),
-                    None => self.prepare_scratch(
-                        cancel,
-                        WaitBudget::cli(self.clock.mono_now(), 30)
-                            .map_err(|_| FacadeError::InvalidInput)?,
-                    )?,
+                    None => self
+                        .prepare_scratch(
+                            cancel,
+                            WaitBudget::cli(self.clock.mono_now(), 30)
+                                .map_err(|_| FacadeError::InvalidInput)?,
+                        )
+                        .map_err(scratch_prepare_error)?,
                 };
                 let document = if resume {
                     self.resolve_graph(&document.to_string_lossy())?
@@ -5027,7 +5031,7 @@ impl Factory {
         &self,
         cancel: &CancelToken,
         budget: WaitBudget,
-    ) -> Result<PathBuf, FacadeError> {
+    ) -> Result<PathBuf, preset_graph::ScratchPreparationError> {
         provenant_confinement::worktrees::with_context(
             &self.context.roots,
             &self.home,
@@ -5049,7 +5053,7 @@ impl Factory {
                 )
             },
         )
-        .map_err(scratch_prepare_error)
+        .map_err(preset_graph::ScratchPreparationError)
     }
 }
 

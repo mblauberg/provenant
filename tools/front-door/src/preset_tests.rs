@@ -654,8 +654,13 @@ fn preset_wait_retries_an_injected_scratch_failure_after_graph_admission() {
         attempts += 1;
         match scratch.get_or_prepare(|| {
             if attempts == 1 {
-                Err(super::fabric::scratch_prepare_error(
-                    "exclude lock timed out",
+                Err(super::fabric::ScratchPreparationError(
+                    provenant_confinement::worktrees::WorktreeError::Filesystem(
+                        provenant_os::fs::FsError::LockTimeout {
+                            path: ".git/info/exclude".into(),
+                            timeout: std::time::Duration::from_millis(100),
+                        },
+                    ),
                 ))
             } else {
                 Ok(".provenant/scratch".into())
@@ -670,10 +675,24 @@ fn preset_wait_retries_an_injected_scratch_failure_after_graph_admission() {
     assert_eq!(attempts, 2);
     assert_eq!(result.unwrap(), std::path::Path::new(".provenant/scratch"));
 
-    let scratch_error = super::fabric::scratch_prepare_error("exclude lock timed out");
+    let scratch_error = super::fabric::ScratchPreparationError(
+        provenant_confinement::worktrees::WorktreeError::Filesystem(
+            provenant_os::fs::FsError::LockTimeout {
+                path: ".git/info/exclude".into(),
+                timeout: std::time::Duration::from_millis(100),
+            },
+        ),
+    );
     assert!(!super::fabric::retry_scratch_poll(&scratch_error, false));
-    let other_error = provenant_fabric_runtime::coordination::facade::FacadeError::Conflict;
-    assert!(!super::fabric::retry_scratch_poll(&other_error, true));
+    let permanent_error = super::fabric::ScratchPreparationError(
+        provenant_confinement::worktrees::WorktreeError::Filesystem(
+            provenant_os::fs::FsError::Symlink {
+                path: ".provenant/scratch".into(),
+                source: std::io::Error::other("symlink"),
+            },
+        ),
+    );
+    assert!(!super::fabric::retry_scratch_poll(&permanent_error, true));
 
     let exhausted =
         super::fabric::scratch_prepare_error_message(&scratch_error, Some("admitted-graph"), true);
@@ -682,10 +701,14 @@ fn preset_wait_retries_an_injected_scratch_failure_after_graph_admission() {
             .as_deref()
             .is_some_and(|message| message.contains("admitted-graph")
                 && message.contains(".provenant/scratch")
-                && message.contains("exclude lock timed out"))
+                && message.contains("lock acquisition timed out"))
     );
     assert_eq!(
-        super::fabric::scratch_prepare_error_message(&scratch_error, Some("admitted-graph"), false,),
+        super::fabric::scratch_prepare_error_message(
+            &permanent_error,
+            Some("admitted-graph"),
+            true,
+        ),
         None
     );
 }
@@ -698,9 +721,7 @@ fn preset_wait_prepares_scratch_once_across_polls() {
         let path = scratch
             .get_or_prepare(|| {
                 calls += 1;
-                Ok::<_, provenant_fabric_runtime::coordination::facade::FacadeError>(
-                    ".provenant/scratch".into(),
-                )
+                Ok(".provenant/scratch".into())
             })
             .unwrap();
         assert_eq!(path, std::path::Path::new(".provenant/scratch"));
