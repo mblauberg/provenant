@@ -550,9 +550,18 @@ mod tests {
             let outcome = refresh_with(state.path(), "p", "aaa", |_| panic!("must not build"));
             assert_eq!(outcome.unwrap(), Refresh::Busy);
         }
-        let failed = refresh_with(state.path(), "p", "aaa", |_| {
-            Err(io::Error::other("build failed").into())
-        });
+        // A sibling test thread can fork while the lock above is released and
+        // briefly hold a copy of its descriptor, so Busy is retried for 2 s.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let failed = loop {
+            let attempt = refresh_with(state.path(), "p", "aaa", |_| {
+                Err(io::Error::other("build failed").into())
+            });
+            if !matches!(attempt, Ok(Refresh::Busy)) || std::time::Instant::now() > deadline {
+                break attempt;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
         assert!(failed.is_err(), "{failed:?}");
         assert_eq!(newest_generation_commit(state.path()), None);
         // The failed commit is backed off; a newer commit builds again.

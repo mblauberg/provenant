@@ -1,4 +1,5 @@
 //! Host-owned Cargo target seed store, shared by publication, cloning and GC.
+#[cfg(any(target_os = "macos", test))]
 use crate::cargo_seed::codes;
 use provenant_os::fs::{Directory, LockGuard, LockMode};
 use std::{

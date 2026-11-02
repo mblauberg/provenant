@@ -6,6 +6,8 @@ use std::path::Path;
 /// test can hold the set to snake_case without duplicates.
 macro_rules! detail_codes {
     ($($name:ident = $text:literal),* $(,)?) => {
+        // Toolchain verification runs only on macOS, where seeds are cloned.
+        #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
         pub(crate) mod codes {
             $(pub(crate) const $name: &str = $text;)*
             #[cfg(test)]
@@ -79,6 +81,7 @@ impl Outcome {
             detail: None,
         }
     }
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn fallback(reason: &'static str) -> Self {
         Self {
             status: "fallback",
