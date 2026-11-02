@@ -3,7 +3,7 @@
     "pattern": "scope-then-run",
     "preset": "scope-then-run"
   },
-  "graph_id": "preset-6d169e0591ab3f747d761837c91ba482",
+  "graph_id": "preset-8aa48d05a19523904ef3bf3f2074cf7e",
   "nodes": [
     {
       "access": "read_only",
@@ -66,11 +66,11 @@
                     }
                   ],
                   "role": "scout.codebase",
-                  "role_digest": "sha256:1d112884b416bd5c34c54431480fae607cf592b0936fb0ec18f161d6c219a7a7",
+                  "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
                   "route": {
                     "alias": "junior"
                   },
-                  "title": "Scout 1"
+                  "title": "scout-1"
                 },
                 {
                   "access": "read_only",
@@ -86,11 +86,11 @@
                     }
                   ],
                   "role": "scout.codebase",
-                  "role_digest": "sha256:1d112884b416bd5c34c54431480fae607cf592b0936fb0ec18f161d6c219a7a7",
+                  "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
                   "route": {
                     "alias": "junior"
                   },
-                  "title": "Scout 2"
+                  "title": "scout-2"
                 },
                 {
                   "access": "read_only",
@@ -106,11 +106,11 @@
                     }
                   ],
                   "role": "scout.codebase",
-                  "role_digest": "sha256:1d112884b416bd5c34c54431480fae607cf592b0936fb0ec18f161d6c219a7a7",
+                  "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
                   "route": {
                     "alias": "junior"
                   },
-                  "title": "Scout 3"
+                  "title": "scout-3"
                 },
                 {
                   "access": "read_only",
@@ -125,11 +125,11 @@
                     }
                   ],
                   "role": "scout.external",
-                  "role_digest": "sha256:d9dec80ff69bd9a92722961ea0774e4c2832066a23fca609218aa16f87e2fe1a",
+                  "role_digest": "sha256:b36af5ba65686417d7a356d16ea3778dfdedc9e66357e4ebdbb5a8fa1763ac96",
                   "route": {
                     "alias": "web"
                   },
-                  "title": "External scout 1"
+                  "title": "external"
                 }
               ]
             },
@@ -158,7 +158,7 @@
             "route": {
               "alias": "senior"
             },
-            "title": "plan.research"
+            "title": "synthesis"
           }
         ]
       },
@@ -203,7 +203,7 @@
       "route": {
         "alias": "senior"
       },
-      "title": "plan.scope"
+      "title": "scope"
     },
     {
       "access": "read_only",
@@ -224,7 +224,8 @@
           ]
         }
       ],
-      "kind": "gate"
+      "kind": "gate",
+      "title": "ready"
     },
     {
       "access": "read_only",
@@ -266,7 +267,7 @@
               "commit": "HEAD",
               "type": "commit"
             },
-            "title": "write.implement",
+            "title": "implement",
             "write_scope": [
               "."
             ]
@@ -314,7 +315,7 @@
                   "route": {
                     "alias": "senior"
                   },
-                  "title": "lens.correctness-spec"
+                  "title": "lens-correctness-spec"
                 },
                 {
                   "access": "read_only",
@@ -338,7 +339,7 @@
                   "route": {
                     "alias": "senior"
                   },
-                  "title": "lens.simplicity"
+                  "title": "lens-simplicity"
                 }
               ]
             },
@@ -391,7 +392,7 @@
               "node": "implement",
               "type": "node"
             },
-            "title": "review.evaluator"
+            "title": "evaluate"
           }
         ]
       },
@@ -620,7 +621,7 @@
         "references": []
       },
       "scout.codebase": {
-        "digest": "sha256:1d112884b416bd5c34c54431480fae607cf592b0936fb0ec18f161d6c219a7a7",
+        "digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
         "extends": [
           "scout.codebase",
           "scout"
@@ -635,7 +636,7 @@
         ]
       },
       "scout.external": {
-        "digest": "sha256:d9dec80ff69bd9a92722961ea0774e4c2832066a23fca609218aa16f87e2fe1a",
+        "digest": "sha256:b36af5ba65686417d7a356d16ea3778dfdedc9e66357e4ebdbb5a8fa1763ac96",
         "extends": [
           "scout.external",
           "scout"
@@ -658,7 +659,8 @@
         "references": []
       }
     },
-    "substitutions": []
+    "substitutions": [],
+    "warnings": []
   },
   "schema_version": 1
 }

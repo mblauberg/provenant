@@ -4,6 +4,46 @@
 )]
 use std::{path::PathBuf, process::Command};
 
+#[test]
+fn preset_explain_warns_about_every_omitted_lens() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let prompt = temp.path().join("prompt");
+    std::fs::write(&prompt, "Review the bounded change")?;
+    let output = fixture_cli()
+        .current_dir(&root)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .args([
+            "--json",
+            "run",
+            "--preset",
+            "review-council",
+            "--prompt-file",
+        ])
+        .arg(&prompt)
+        .args(["--explain", "--set", "parameters.risk_tier='routine'"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let warnings = result["data"]["graph"]["provenance"]["warnings"]
+        .as_array()
+        .ok_or("warnings missing")?;
+    assert!(!warnings.is_empty());
+    let stderr = String::from_utf8(output.stderr)?;
+    for warning in warnings {
+        assert!(
+            stderr.contains(warning.as_str().ok_or("warning text")?),
+            "{stderr}"
+        );
+    }
+    Ok(())
+}
+
 fn fixture_cli() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_provenant"));
     provenant_os::fixture::scrub_git_env(&mut command);
@@ -641,17 +681,56 @@ fn explain_text(preset: &str, extra: &[&str]) -> Result<String, Box<dyn std::err
 }
 
 fn golden(name: &str, actual: &str) -> Result<(), Box<dyn std::error::Error>> {
+    golden_in("assets/presets/fixtures", name, actual)
+}
+
+fn golden_in(dir: &str, name: &str, actual: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let actual = format!("{}\n", actual.trim_end());
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
+        .join(dir)
         .join(name);
     if std::env::var_os("UPDATE_GOLDEN").is_some() {
-        std::fs::write(&path, actual)?;
+        std::fs::create_dir_all(path.parent().ok_or("golden path has no parent")?)?;
+        std::fs::write(&path, &actual)?;
     }
     let expected = std::fs::read_to_string(&path).unwrap_or_default();
     assert_eq!(
         actual, expected,
         "{name}: rerun with UPDATE_GOLDEN=1 to refresh"
     );
+    Ok(())
+}
+
+#[test]
+fn preset_list_and_show_human_output_match_goldens() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
+    let run = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
+        let out = fixture_cli()
+            .current_dir(&root)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path())
+            .args(args)
+            .output()?;
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Ok(scrub(&String::from_utf8(out.stdout)?, &root))
+    };
+    golden_in(
+        "tests/golden",
+        "preset-list.txt",
+        &run(&["preset", "list"])?,
+    )?;
+    golden_in(
+        "tests/golden",
+        "preset-show-scout-swarm.txt",
+        &run(&["preset", "show", "scout-swarm"])?,
+    )?;
     Ok(())
 }
 

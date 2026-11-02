@@ -3,7 +3,7 @@
     "pattern": "scout-swarm",
     "preset": "scout-swarm"
   },
-  "graph_id": "preset-23ad544fb6e2e870c95b2f8ac9bd4c67",
+  "graph_id": "preset-567300e3bd9943e41ced7ef5b9b7b29e",
   "nodes": [
     {
       "access": "read_only",
@@ -60,11 +60,11 @@
               }
             ],
             "role": "scout.codebase",
-            "role_digest": "sha256:1d112884b416bd5c34c54431480fae607cf592b0936fb0ec18f161d6c219a7a7",
+            "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
             "route": {
               "alias": "junior"
             },
-            "title": "Scout 1"
+            "title": "scout-1"
           },
           {
             "access": "read_only",
@@ -80,11 +80,11 @@
               }
             ],
             "role": "scout.codebase",
-            "role_digest": "sha256:1d112884b416bd5c34c54431480fae607cf592b0936fb0ec18f161d6c219a7a7",
+            "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
             "route": {
               "alias": "junior"
             },
-            "title": "Scout 2"
+            "title": "scout-2"
           },
           {
             "access": "read_only",
@@ -100,11 +100,11 @@
               }
             ],
             "role": "scout.codebase",
-            "role_digest": "sha256:1d112884b416bd5c34c54431480fae607cf592b0936fb0ec18f161d6c219a7a7",
+            "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
             "route": {
               "alias": "junior"
             },
-            "title": "Scout 3"
+            "title": "scout-3"
           },
           {
             "access": "read_only",
@@ -120,11 +120,11 @@
               }
             ],
             "role": "scout.codebase",
-            "role_digest": "sha256:1d112884b416bd5c34c54431480fae607cf592b0936fb0ec18f161d6c219a7a7",
+            "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
             "route": {
               "alias": "junior"
             },
-            "title": "Scout 4"
+            "title": "scout-4"
           },
           {
             "access": "read_only",
@@ -139,11 +139,11 @@
               }
             ],
             "role": "scout.external",
-            "role_digest": "sha256:d9dec80ff69bd9a92722961ea0774e4c2832066a23fca609218aa16f87e2fe1a",
+            "role_digest": "sha256:b36af5ba65686417d7a356d16ea3778dfdedc9e66357e4ebdbb5a8fa1763ac96",
             "route": {
               "alias": "web"
             },
-            "title": "External scout 1"
+            "title": "external"
           }
         ]
       },
@@ -172,7 +172,7 @@
       "route": {
         "alias": "senior"
       },
-      "title": "plan.research"
+      "title": "synthesis"
     }
   ],
   "provenance": {
@@ -214,7 +214,7 @@
         "references": []
       },
       "scout.codebase": {
-        "digest": "sha256:1d112884b416bd5c34c54431480fae607cf592b0936fb0ec18f161d6c219a7a7",
+        "digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
         "extends": [
           "scout.codebase",
           "scout"
@@ -229,7 +229,7 @@
         ]
       },
       "scout.external": {
-        "digest": "sha256:d9dec80ff69bd9a92722961ea0774e4c2832066a23fca609218aa16f87e2fe1a",
+        "digest": "sha256:b36af5ba65686417d7a356d16ea3778dfdedc9e66357e4ebdbb5a8fa1763ac96",
         "extends": [
           "scout.external",
           "scout"
@@ -244,7 +244,8 @@
         ]
       }
     },
-    "substitutions": []
+    "substitutions": [],
+    "warnings": []
   },
   "schema_version": 1
 }

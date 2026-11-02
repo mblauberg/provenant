@@ -3,7 +3,7 @@
     "pattern": "review-council",
     "preset": "review-council"
   },
-  "graph_id": "preset-ee9b3a2ce5db9dc0e60cfae66ceae71b",
+  "graph_id": "preset-2ad8906bc940d116c93a957242da58ad",
   "nodes": [
     {
       "access": "read_only",
@@ -19,7 +19,7 @@
         "commit": "HEAD",
         "type": "commit"
       },
-      "title": "plan.review"
+      "title": "subject"
     },
     {
       "access": "read_only",
@@ -85,7 +85,7 @@
             "route": {
               "alias": "senior"
             },
-            "title": "lens.correctness-spec"
+            "title": "lens-correctness-spec"
           },
           {
             "access": "read_only",
@@ -109,7 +109,7 @@
             "route": {
               "alias": "senior"
             },
-            "title": "lens.design-fit-reuse"
+            "title": "lens-design-fit-reuse"
           },
           {
             "access": "read_only",
@@ -133,7 +133,7 @@
             "route": {
               "alias": "senior"
             },
-            "title": "lens.simplicity"
+            "title": "lens-simplicity"
           },
           {
             "access": "read_only",
@@ -157,7 +157,7 @@
             "route": {
               "alias": "senior"
             },
-            "title": "lens.conventions-readability"
+            "title": "lens-conventions-readability"
           },
           {
             "access": "read_only",
@@ -181,7 +181,7 @@
             "route": {
               "alias": "senior"
             },
-            "title": "lens.tests"
+            "title": "lens-tests"
           }
         ]
       },
@@ -229,7 +229,7 @@
         "node": "subject",
         "type": "node"
       },
-      "title": "review.verify"
+      "title": "verify"
     },
     {
       "access": "read_only",
@@ -262,7 +262,7 @@
         "node": "subject",
         "type": "node"
       },
-      "title": "review.synthesis"
+      "title": "synthesis"
     }
   ],
   "provenance": {
@@ -443,7 +443,12 @@
         "references": []
       }
     },
-    "substitutions": []
+    "substitutions": [],
+    "warnings": [
+      "preset review-council: omitted lens \"security-privacy\": requires risk tag security",
+      "preset review-council: omitted lens \"concurrency-data-errors\": requires risk tag concurrency",
+      "preset review-council: omitted lens \"adversarial\": requires risk tag terminal"
+    ]
   },
   "schema_version": 1
 }

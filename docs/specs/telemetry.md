@@ -329,6 +329,21 @@ last 14 days of outcome rows, at most once per run. Absent or unreadable spend
 is not treated as zero: an experiment with a budget or cost ratio that cannot
 read its spend is skipped for that run.
 
+## Token-per-merged-PR study
+
+`provenant_telemetry::study` reduces recorded attempts, chair sessions and
+merged-PR attribution into two cohorts split at a stated cut-over. Every token
+lands in one category (chair, worker, review, repair, failed attempt); work
+that joins no cohort PR is shown beside the totals. Fewer than 10 merged PRs in
+a cohort is `pending`; missing chair counters or a coverage gap above 10
+percentage points is `inconclusive`. Method, deferred replay and the results
+template: `docs/telemetry/token-per-pr-study.md`.
+
+- Why: #2315 asks whether the cut-over lowers tokens per merged PR, without new
+  counters or synthetic runs.
+- Test: `crates/telemetry/src/study/tests.rs`
+- Owner: `crates/telemetry/src/study.rs`
+
 ## Demand counters are lossy and private
 
 `usage.jsonl` records are appended best-effort under an existing root, never

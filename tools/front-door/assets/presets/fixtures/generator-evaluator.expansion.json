@@ -3,7 +3,7 @@
     "pattern": "generator-evaluator",
     "preset": "generator-evaluator"
   },
-  "graph_id": "preset-236012ff65b40257c568677a7378493d",
+  "graph_id": "preset-5e323afeffe915171d599c71f00c1fca",
   "nodes": [
     {
       "acceptance_checks": [
@@ -24,7 +24,7 @@
         "commit": "HEAD",
         "type": "commit"
       },
-      "title": "write.implement",
+      "title": "implement",
       "write_scope": [
         "."
       ]
@@ -72,7 +72,7 @@
             "route": {
               "alias": "senior"
             },
-            "title": "lens.correctness-spec"
+            "title": "lens-correctness-spec"
           },
           {
             "access": "read_only",
@@ -96,7 +96,7 @@
             "route": {
               "alias": "senior"
             },
-            "title": "lens.simplicity"
+            "title": "lens-simplicity"
           }
         ]
       },
@@ -149,7 +149,7 @@
         "node": "implement",
         "type": "node"
       },
-      "title": "review.evaluator"
+      "title": "evaluate"
     }
   ],
   "provenance": {
@@ -258,7 +258,8 @@
         "references": []
       }
     },
-    "substitutions": []
+    "substitutions": [],
+    "warnings": []
   },
   "schema_version": 1
 }

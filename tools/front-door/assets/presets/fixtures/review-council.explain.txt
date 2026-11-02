@@ -46,4 +46,6 @@ Roles:
   review.synthesis  origin=bundled digest=<digest>
   review.verify  origin=bundled digest=<digest>
 Substituted verify: verifier -> senior (route verifier is not defined in the routing configuration)
-
+Warning: preset review-council: omitted lens "security-privacy": requires risk tag security
+Warning: preset review-council: omitted lens "concurrency-data-errors": requires risk tag concurrency
+Warning: preset review-council: omitted lens "adversarial": requires risk tag terminal

@@ -151,4 +151,15 @@ Roles:
 Substituted external: web -> junior (route web is not defined in the routing configuration)
 Substituted verify: verifier -> senior (route verifier is not defined in the routing configuration)
 Substituted verify: verifier -> senior (route verifier is not defined in the routing configuration)
-
+Warning: preset review-council: omitted lens simplicity: review shape has 2 slots
+Warning: preset review-council: omitted lens conventions-readability: review shape has 2 slots
+Warning: preset review-council: omitted lens tests: review shape has 2 slots
+Warning: preset review-council: omitted lens "security-privacy": requires risk tag security
+Warning: preset review-council: omitted lens "concurrency-data-errors": requires risk tag concurrency
+Warning: preset review-council: omitted lens "adversarial": requires risk tag terminal
+Warning: preset review-council: omitted lens simplicity: review shape has 2 slots
+Warning: preset review-council: omitted lens conventions-readability: review shape has 2 slots
+Warning: preset review-council: omitted lens tests: review shape has 2 slots
+Warning: preset review-council: omitted lens "security-privacy": requires risk tag security
+Warning: preset review-council: omitted lens "concurrency-data-errors": requires risk tag concurrency
+Warning: preset review-council: omitted lens "adversarial": requires risk tag terminal

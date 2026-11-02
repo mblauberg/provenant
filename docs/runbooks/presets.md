@@ -8,11 +8,42 @@ bounded slice with evaluating lenses. Roles choose routing tiers, and the chair
 chooses assignments, scopes, worktrees and acceptance evidence. A junior scout
 swarm remains read-only; it can share read roots without Git writer contention.
 
-Ten presets are bundled: `single`, `chain`, `fan-out`,
+Eleven presets are bundled: `scope`, `single`, `chain`, `fan-out`,
 `fan-out-synthesise`, `scout-swarm`, `generator-evaluator`, `review-council`,
 `big-batch`, `scope-then-run` and `deliver`. All lower through the same stage path.
-`preset list` shows each one's level, summary and cost, and
+`preset list` shows a table of name, winning layer, level, cost and errors.
+`preset show NAME` groups the resolved configuration into sections with origins, and
 `preset explain NAME` shows when to use it, its cost and its typed parameters.
+
+## Scope without repository writes
+
+Use `provenant run --preset scope --prompt-file brief.md --explain` to inspect
+a single senior scoping task. It reads the repository and returns affected
+surfaces, a literal write scope, acceptance criteria, checks and open decisions.
+`parameters.read_roots` adds repository read roots under the host's read policy.
+The preset refuses expanded nodes with write access, write scope, delivery or
+control actions, including overrides passed through a parent preset. Temporary
+notes belong in attempt-private scratch.
+
+The current runtime's `read_only` access also permits provider authentication
+and state, tool, private-state and read-only exception writes. The preset
+prevents repository write grants at expansion time but does **not** yet guarantee that
+attempt-private scratch is the only writable location. Completing #2370 needs
+a narrower runtime access mode and confinement grant policy, outside the preset
+layer.
+
+## Composition rules
+
+Typed parameters without defaults are required. Missing-value errors name the
+parameter; `--set` and parameter files satisfy it and retain type validation.
+Injected `read_roots` is optional for a nested preset that does not declare it;
+other unknown parameters remain errors. `${index}` in nested role overrides
+resolves for each child count copy. Node titles default to the concrete node ID;
+stage titles and user or preset role overrides can supply a title.
+
+Only `for_each = "${lenses}"` is governed by the review shape's slot count and
+conditional risk tags. Other lists, including `big-batch` lanes, expand in full.
+Every omitted lens appears in graph provenance, `run --explain` and a warning.
 
 ## Select a preset by rules
 

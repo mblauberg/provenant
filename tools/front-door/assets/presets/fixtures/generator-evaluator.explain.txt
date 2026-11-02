@@ -26,4 +26,3 @@ Roles:
   lens.simplicity  origin=bundled digest=<digest>
   review.evaluator  origin=bundled digest=<digest>
   write.implement  origin=bundled digest=<digest>
-
