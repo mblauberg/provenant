@@ -2179,10 +2179,9 @@ fn graph_fixture_available() -> Result<bool> {
             env: &[],
         },
     ) {
-        if std::env::var_os("PROVENANT_CONFINEMENT_REQUIRED").is_some() {
-            return Err(error.into());
-        }
-        writeln!(io::stderr(), "graph fixture skipped: {error}")?;
+        provenant_test_support::skip_sandbox_dependent_test(format!(
+            "graph fixture skipped: {error}"
+        ))?;
         return Ok(false);
     }
     Ok(true)

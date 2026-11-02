@@ -3927,10 +3927,9 @@ fn peer_dispatch_launches_a_large_argv_prompt() -> Result {
             env: &[],
         },
     );
-    if std::env::var_os("PROVENANT_CONFINEMENT_REQUIRED").is_some()
-        && let Err(error) = &backend
-    {
-        return Err(error.to_string().into());
+    if let Err(error) = &backend {
+        provenant_test_support::skip_sandbox_dependent_test(error.to_string())?;
+        return Ok(());
     }
     let bin = rig.root.join("provider/bin");
     std::fs::create_dir_all(&bin)?;
@@ -4046,10 +4045,9 @@ fn read_only_dispatch_places_on_a_peer_and_forwards_by_id() -> Result {
             env: &[],
         },
     );
-    if std::env::var_os("PROVENANT_CONFINEMENT_REQUIRED").is_some()
-        && let Err(error) = &backend
-    {
-        return Err(error.to_string().into());
+    if let Err(error) = &backend {
+        provenant_test_support::skip_sandbox_dependent_test(error.to_string())?;
+        return Ok(());
     }
     // A provider the peer can launch: it answers the version probe, then
     // writes a known stderr line. The production read-only profile anchors

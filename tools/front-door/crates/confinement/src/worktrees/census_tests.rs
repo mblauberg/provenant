@@ -164,12 +164,8 @@ fn native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree()
         }
     }
     let unavailable = |reason: String| -> Result<(), Box<dyn Error>> {
-        if std::env::var("PROVENANT_CONFINEMENT_REQUIRED").as_deref() == Ok("1") {
-            Err(reason.into())
-        } else {
-            eprintln!("SKIP: {reason}");
-            Ok(())
-        }
+        provenant_test_support::skip_sandbox_dependent_test(reason)?;
+        Ok(())
     };
     let census = match SystemProcessObserver.census(65_536) {
         Ok(census) => census,

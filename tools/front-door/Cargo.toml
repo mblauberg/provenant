@@ -102,6 +102,7 @@ provenant-records = { workspace = true }
 toml_edit = { workspace = true }
 
 [dev-dependencies]
+provenant-test-support = { path = "crates/test-support" }
 provenant-os = { workspace = true, features = ["fixture"] }
 regex = { workspace = true }
 rusqlite = { workspace = true }

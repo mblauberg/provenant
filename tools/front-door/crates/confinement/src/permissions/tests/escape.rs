@@ -259,11 +259,9 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
         let diagnostic = baseline_diagnostic
             .as_deref()
             .unwrap_or("no command outcome was captured");
-        assert_ne!(
-            std::env::var("PROVENANT_CONFINEMENT_REQUIRED").as_deref(),
-            Ok("1"),
+        provenant_test_support::skip_sandbox_dependent_test(format!(
             "the required native sandbox baseline is unavailable: {baseline:?}; {diagnostic}"
-        );
+        ))?;
         return Ok(());
     }
     let backend = MacOsSandboxBackend { ready: true };
