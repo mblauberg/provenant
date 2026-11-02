@@ -694,7 +694,7 @@ pub(super) fn dispatch_inner(
         )
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string()))?;
         command.knobs.push(format!(
-            "routing.exclude={}",
+            "routing.flag_exclude={}",
             serde_json::Value::from(command.route.exclude.clone())
         ));
     }

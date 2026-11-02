@@ -137,13 +137,19 @@
       "trade_off": "A preference preserves model choice and readiness gates; it does not force every read-heavy task onto one model."
     },
     "routing.exclude": {
-      "type": "string_list", "default": [], "status": "wired",
+      "type": "string_list", "default": [], "strict": true, "status": "wired",
       "reader": "tools/front-door/crates/cli/src/route.rs",
-      "effect": "Keep each listed provider (claude), account (label, entry or adapter/key) or exact model (adapter/id) out of named-route pools for a task. Set per dispatch with `--exclude`; a pinned `--model` is never affected.",
+      "effect": "Keep each listed provider (claude), account (label, entry or adapter/key) or exact model (adapter/id) out of named-route pools for every task. A standing list; `--exclude` and a graph's list are added to it, not substituted for it. A pinned `--model` is never affected.",
       "trade_off": "Selection still weighs pacing and readiness over the remaining members, but an exclusion that empties a pool refuses the dispatch rather than widening it."
     },
+    "routing.flag_exclude": {
+      "type": "string_list", "default": [], "strict": true, "status": "wired",
+      "reader": "tools/front-door/crates/cli/src/route.rs",
+      "effect": "The exclusion list one dispatch carries, set by `--exclude` on `run` and `review`. Same selectors as `routing.exclude`; refusals and `--explain` name the flag as the source.",
+      "trade_off": "Applies to this dispatch only; the standing `routing.exclude` list and a graph's list still apply."
+    },
     "routing.graph_exclude": {
-      "type": "string_list", "default": [], "status": "wired",
+      "type": "string_list", "default": [], "strict": true, "status": "wired",
       "reader": "tools/front-door/crates/cli/src/route.rs",
       "effect": "The exclusion list a graph passes to each node it launches, set from `run --exclude` on a preset or graph. Same selectors as `routing.exclude`; refusals and `--explain` name the graph as the source.",
       "trade_off": "Applies to every node's named-route pool; a node's pinned model is never affected."

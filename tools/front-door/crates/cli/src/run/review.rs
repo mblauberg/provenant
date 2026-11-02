@@ -125,7 +125,7 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
         vec![]
     } else {
         vec![format!(
-            "routing.exclude={}",
+            "routing.flag_exclude={}",
             serde_json::Value::from(command.exclude.clone())
         )]
     };

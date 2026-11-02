@@ -311,8 +311,9 @@ pub(crate) fn exclusion_rules(
         })
         .collect()
 }
-/// The exclusions a task carries in its `routing.exclude` knob: from
-/// `--exclude` when the dispatch set it, otherwise from the configuration.
+/// The exclusions a task carries: the standing `routing.exclude` list from the
+/// configuration, the dispatch's `--exclude` flags and the graph's list, as a
+/// union. Each rule keeps the source it came from.
 pub(crate) fn task_exclusion_rules(
     profile: &provenant_records::run::HarnessProfile,
     roots: &Roots,
@@ -331,7 +332,8 @@ pub(crate) fn task_exclusion_rules(
             })
             .unwrap_or_default()
     };
-    let source = if profile
+    // A list set with `--knob routing.exclude=...` was chosen for this dispatch.
+    let standing = if profile
         .overrides
         .iter()
         .any(|entry| entry.starts_with("routing.exclude="))
@@ -340,15 +342,44 @@ pub(crate) fn task_exclusion_rules(
     } else {
         provenant_routing::ExclusionSource::Config
     };
-    let mut rules = exclusion_rules(&texts("routing.exclude"), source, roots)?;
-    // A graph's list reaches each node as its own knob, so the source reads
-    // "graph" however the graph was started.
-    rules.extend(exclusion_rules(
-        &texts("routing.graph_exclude"),
-        provenant_routing::ExclusionSource::Graph,
-        roots,
-    )?);
+    let mut rules = Vec::new();
+    for (knob, source) in [
+        ("routing.exclude", standing),
+        (
+            "routing.flag_exclude",
+            provenant_routing::ExclusionSource::Flag,
+        ),
+        (
+            "routing.graph_exclude",
+            provenant_routing::ExclusionSource::Graph,
+        ),
+    ] {
+        for rule in exclusion_rules(&texts(knob), source, roots)? {
+            if !rules.contains(&rule) {
+                rules.push(rule);
+            }
+        }
+    }
     Ok(rules)
+}
+/// The rules a dispatch with these `--exclude` flags would apply, through the
+/// same profile and reader as the dispatch itself, so `--explain` and
+/// `route resolve` show what the dispatch would do.
+pub(crate) fn effective_exclusion_rules(
+    flags: &[String],
+    roots: &Roots,
+) -> Result<Vec<provenant_routing::ExclusionRule>, EdgeError> {
+    let overrides: Vec<String> = if flags.is_empty() {
+        Vec::new()
+    } else {
+        vec![format!(
+            "routing.flag_exclude={}",
+            serde_json::Value::from(flags.to_vec())
+        )]
+    };
+    let profile = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
+        .dispatch_profile(&overrides)?;
+    task_exclusion_rules(&profile, roots)
 }
 /// Refuse a selector that is none of the valid forms, for callers that carry
 /// the list to a later dispatch.
@@ -579,6 +610,8 @@ pub enum Data {
 /// `cleared` empty when the command did neither.
 #[derive(Serialize)]
 pub struct OverrideReport {
+    /// Persisted exclusion rows that were repaired or ignored on reading.
+    pub notes: Vec<String>,
     pub recorded: Option<OverrideRow>,
     pub cleared: Vec<OverrideRow>,
     pub overrides: Vec<OverrideRow>,
@@ -785,6 +818,8 @@ fn override_value(row: &provenant_routing::PacingOverride) -> toml_edit::Value {
 }
 #[derive(Serialize)]
 pub struct RoutePreview {
+    /// Persisted exclusion rows that were repaired or ignored on reading.
+    pub exclusion_notes: Vec<String>,
     pub model_policy: provenant_routing::EffectiveModelPolicy,
     pub compaction_break_even_turns: Option<f64>,
     #[serde(flatten)]
@@ -1043,12 +1078,21 @@ fn with_context<T>(
 /// task access. Account aliases must already have been mapped to registered keys.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DispatchError {
-    #[error("no route outside model families {} and family separation is required", .0.join(", "))]
-    FamilySeparation(Vec<String>),
+    #[error("no route outside model families {} and family separation is required{}", .0.join(", "), exclusion_suffix(.1))]
+    FamilySeparation(Vec<String>, Vec<String>),
     #[error(transparent)]
     Edge(Box<EdgeError>),
     #[error(transparent)]
     Catalogue(#[from] RoutingError),
+}
+
+/// The exclusions that took part in a refusal, for its message.
+fn exclusion_suffix(rules: &[String]) -> String {
+    if rules.is_empty() {
+        String::new()
+    } else {
+        format!(" (with {})", rules.join("; "))
+    }
 }
 
 impl From<EdgeError> for DispatchError {
@@ -1112,6 +1156,7 @@ pub(crate) fn resolve_dispatch(
     if required && exhausted {
         Err(DispatchError::FamilySeparation(
             excluded_families.unwrap_or_default().to_vec(),
+            rules.iter().map(ToString::to_string).collect(),
         ))
     } else if !excluded.is_empty() && exhausted {
         let relaxed = resolve_dispatch_excluding(
@@ -1781,6 +1826,7 @@ fn set_override(roots: &Roots, request: &OverrideSet, now: WallTime) -> Result<D
         Some(&recorded),
     )?;
     Ok(Data::Overrides(Box::new(OverrideReport {
+        notes: exclusion_notes(roots)?,
         recorded: Some(OverrideRow::pacing(&recorded, now)),
         cleared: removed
             .iter()
@@ -1819,6 +1865,7 @@ fn clear_override(
         None,
     )?;
     Ok(Data::Overrides(Box::new(OverrideReport {
+        notes: exclusion_notes(roots)?,
         recorded: None,
         cleared: removed
             .iter()
@@ -1828,6 +1875,17 @@ fn clear_override(
     })))
 }
 
+/// What was repaired or ignored in the persisted model exclusions.
+fn exclusion_notes(roots: &Roots) -> Result<Vec<String>, EdgeError> {
+    Ok(
+        provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
+            .domains
+            .routing
+            .model_exclusions
+            .notes()
+            .to_vec(),
+    )
+}
 /// Every recorded pacing override, then every scheduled model policy rule.
 fn list_overrides(roots: &Roots, now: WallTime) -> Result<Vec<OverrideRow>, EdgeError> {
     let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
@@ -1875,6 +1933,7 @@ fn edit_model_exclusion(
     model: &Model,
     until: Option<WallTime>,
     add: bool,
+    now: WallTime,
 ) -> Result<(), EdgeError> {
     let id = ModelId::parse(&model.0)?;
     if add && Catalogue::bundled()?.model(&id).is_none() {
@@ -1899,7 +1958,18 @@ fn edit_model_exclusion(
         };
         let mut kept = toml_edit::Array::new();
         for row in rows {
-            if row.get("model").and_then(toml_edit::Value::as_str) != Some(id.as_str()) {
+            // Adding also drops the rows that have expired, so lapsed
+            // exclusions cannot fill the limit. A row whose expiry is not
+            // readable is kept.
+            let lapsed = add
+                && row
+                    .get("schedule")
+                    .and_then(toml_edit::Value::as_inline_table)
+                    .and_then(|schedule| schedule.get("expires"))
+                    .and_then(toml_edit::Value::as_str)
+                    .and_then(|text| WallTime::parse_rfc3339(text).ok())
+                    .is_some_and(|end| end <= now);
+            if !lapsed && row.get("model").and_then(toml_edit::Value::as_str) != Some(id.as_str()) {
                 kept.push(row);
             }
         }
@@ -1935,11 +2005,7 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
                     ..*context
                 };
                 let request = resolve_request(query, context)?;
-                let rules = exclusion_rules(
-                    &query.request.exclude,
-                    provenant_routing::ExclusionSource::Flag,
-                    roots,
-                )?;
+                let rules = effective_exclusion_rules(&query.request.exclude, roots)?;
                 let route = provenant_routing::resolve_for_account_with_seed_excluding(
                     &request,
                     context,
@@ -1981,6 +2047,7 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
                 let pacing = provenant_routing::pacing_preview(&model, context);
                 let entry = context.catalogue.model(&model);
                 Ok(Data::Resolved(Box::new(RoutePreview {
+                    exclusion_notes: context.config.model_exclusions.notes().to_vec(),
                     model_policy,
                     compaction_break_even_turns,
                     route,
@@ -2046,6 +2113,7 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
         Route::Override(request) => match &request.command {
             RouteOverrideCommand::Set(set) => set_override(roots, set, now),
             RouteOverrideCommand::List => Ok(Data::Overrides(Box::new(OverrideReport {
+                notes: exclusion_notes(roots)?,
                 recorded: None,
                 cleared: Vec::new(),
                 overrides: list_overrides(roots, now)?,
@@ -2056,14 +2124,15 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
             match &request.command {
                 RouteExcludeCommand::Add(add) => {
                     let until = add.until.as_deref().map(|value| instant(value, now).filter(|end| *end > now).ok_or(EdgeError::Pacing("--until must be a future RFC 3339 timestamp or positive duration"))).transpose()?;
-                    edit_model_exclusion(roots, &add.model, until, true)?;
+                    edit_model_exclusion(roots, &add.model, until, true, now)?;
                 }
                 RouteExcludeCommand::Remove(remove) => {
-                    edit_model_exclusion(roots, &remove.model, None, false)?
+                    edit_model_exclusion(roots, &remove.model, None, false, now)?
                 }
                 RouteExcludeCommand::List => {}
             }
             Ok(Data::Overrides(Box::new(OverrideReport {
+                notes: exclusion_notes(roots)?,
                 recorded: None,
                 cleared: Vec::new(),
                 overrides: list_overrides(roots, now)?
@@ -2143,6 +2212,9 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
         diagnostics
     );
     text.push_str(&format!("model policy sources={}\n{}\ncompaction break-even turns (15k summary, zero rework): {:?}\n", preview.model_policy.sources.join(", "), preview.model_policy.policy.guidance(), preview.compaction_break_even_turns));
+    for note in &preview.exclusion_notes {
+        text.push_str(&format!("note: {note}\n"));
+    }
     match &preview.supported_efforts {
         Some(efforts) if efforts.is_empty() => text.push_str("supported efforts: none\n"),
         Some(efforts) => text.push_str(&format!("supported efforts: {}\n", efforts.join(", "))),
@@ -2268,6 +2340,11 @@ pub fn run(
                         .iter()
                         .map(|override_| format!("pacing override {override_:?}")),
                 );
+                lines.extend(
+                    list.exclusion_notes
+                        .iter()
+                        .map(|note| format!("note: {note}")),
+                );
                 if let Some(now) = at {
                     lines.extend(
                         list.model_exclusions
@@ -2311,6 +2388,7 @@ pub fn run(
                 );
                 lines.push(format!("overrides: {}", report.overrides.len()));
                 lines.extend(report.overrides.iter().map(OverrideRow::line));
+                lines.extend(report.notes.iter().map(|note| format!("note: {note}")));
                 format!("{}\n", lines.join("\n"))
             }
             None => String::new(),
@@ -2325,6 +2403,7 @@ pub fn run(
                 ("pacing entries", list.account_pacing.len()),
                 ("overrides", list.active_overrides.len()),
                 ("model exclusions", list.model_exclusions.len()),
+                ("exclusion notes", list.exclusion_notes.len()),
             ];
             let rows = list
                 .named_routes
@@ -2389,7 +2468,12 @@ pub fn run(
             };
             Some(crate::Summary::new(
                 headline,
-                report.overrides.iter().map(OverrideRow::line).collect(),
+                report
+                    .overrides
+                    .iter()
+                    .map(OverrideRow::line)
+                    .chain(report.notes.iter().map(|note| format!("note: {note}")))
+                    .collect(),
                 Some(next.to_owned()),
             ))
         }
@@ -2526,17 +2610,75 @@ mod route_tests {
             &model,
             Some(provenant_core::WallTime::from_unix_seconds(200)?),
             true,
+            now,
         )?;
         let rows = super::list_overrides(&roots, now)?;
         assert!(rows.iter().any(|row| row.kind == "model_exclusion"
             && row.active
             && row.remaining_seconds == Some(100)));
-        super::edit_model_exclusion(&roots, &model, None, false)?;
+        super::edit_model_exclusion(&roots, &model, None, false, now)?;
         assert!(
             !super::list_overrides(&roots, now)?
                 .iter()
                 .any(|row| row.kind == "model_exclusion")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn adding_an_exclusion_prunes_expired_rows_and_notes_bad_ones() -> Result<(), Box<dyn Error>> {
+        use std::path::Path;
+        struct Resolver;
+        impl provenant_core::PathResolver for Resolver {
+            fn resolve_existing_ancestor(
+                &self,
+                path: &Path,
+            ) -> std::io::Result<std::path::PathBuf> {
+                Ok(path.into())
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let mut inputs =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&Resolver)?;
+        std::fs::create_dir_all(roots.state.as_path())?;
+        std::fs::write(
+            roots.state.as_path().join("config.toml"),
+            "schema_version=1\n[domains.routing]\nmodel_exclusions=[\
+             {model='claude/old-model',schedule={expires='1970-01-01T00:00:01Z'}},\
+             {model='claude/not-a-row',schedule={expires='garbage'}},\
+             {model='not a model'}]\n", // timebomb: allow fixed epoch fixture, not the live clock
+        )?;
+        let now = provenant_core::WallTime::from_unix_seconds(100)?;
+        let notes = super::exclusion_notes(&roots)?;
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert!(
+            notes[0].contains("stays excluded with no schedule"),
+            "{notes:?}"
+        );
+        assert!(notes[1].contains("is ignored"), "{notes:?}");
+        let report = super::execute(
+            &super::Route::Exclude(super::RouteExclude {
+                command: super::RouteExcludeCommand::List,
+            }),
+            &roots,
+            now,
+        )?;
+        let super::Data::Overrides(report) = report else {
+            return Err("overrides".into());
+        };
+        assert_eq!(report.notes.len(), 2);
+        let model = super::Model("codex/gpt-6-luna".into());
+        super::edit_model_exclusion(&roots, &model, None, true, now)?;
+        let text = std::fs::read_to_string(roots.state.as_path().join("config.toml"))?;
+        // The lapsed row is gone; the unreadable ones are kept for the owner.
+        assert!(!text.contains("old-model"), "{text}");
+        assert!(
+            text.contains("not-a-row") && text.contains("not a model"),
+            "{text}"
+        );
+        assert!(text.contains("gpt-6-luna"), "{text}");
         Ok(())
     }
 
@@ -3434,7 +3576,10 @@ mod route_tests {
         )
         .err()
         .ok_or("a required separation must not substitute")?;
-        assert!(matches!(refused, super::DispatchError::FamilySeparation(_)));
+        assert!(matches!(
+            refused,
+            super::DispatchError::FamilySeparation(..)
+        ));
         // The next family's provider is excluded: a required separation reports
         // none, and an optional one never substitutes the excluded provider.
         let rules = [provenant_routing::ExclusionRule {
@@ -3458,7 +3603,7 @@ mod route_tests {
             with_rules(true)
                 .err()
                 .ok_or("excluded family must not substitute")?,
-            super::DispatchError::FamilySeparation(_)
+            super::DispatchError::FamilySeparation(..)
         ));
         assert_ne!(with_rules(false)?.adapter, second.adapter);
         let fallback = resolve(&[family, other])?;
@@ -3641,7 +3786,7 @@ mod route_tests {
         // A required separation never relaxes.
         assert!(matches!(
             fixture.resolve(true),
-            Err(super::DispatchError::FamilySeparation(_))
+            Err(super::DispatchError::FamilySeparation(..))
         ));
         Ok(())
     }
@@ -3657,7 +3802,7 @@ mod route_tests {
         assert!(matches!(relaxed.readiness, RouteReadiness::Ready { .. }));
         assert!(matches!(
             fixture.resolve(true),
-            Err(super::DispatchError::FamilySeparation(_))
+            Err(super::DispatchError::FamilySeparation(..))
         ));
         Ok(())
     }
