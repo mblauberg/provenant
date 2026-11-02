@@ -656,6 +656,48 @@ fn executable_discovery_after_wait_observes_the_completed_update()
     })
 }
 
+/// Initialise a repository with one commit in `project` under a minimal explicit
+/// environment, and return the canonical Git executable it used.
+fn init_fixture_repository(
+    executor: &provenant_os::exec::SystemExecutor,
+    project: &std::path::Path,
+    git_home: &std::path::Path,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    use provenant_os::exec::{ExecOptions, Executor, Termination};
+    use std::time::Duration;
+    let git = provenant_os::git::git_executable()
+        .ok_or("git unavailable")?
+        .canonicalize()?;
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "Initial",
+        ],
+    ] {
+        let argv: Vec<_> = std::iter::once(git.as_os_str().to_owned())
+            .chain(args.into_iter().map(Into::into))
+            .collect();
+        let env = [
+            ("HOME".into(), git_home.as_os_str().to_owned()),
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ];
+        let mut options = ExecOptions::new(&argv, project, Duration::from_secs(5));
+        options.env = Some(&env);
+        let output = executor.execute(options)?;
+        assert_eq!(output.termination, Termination::Exit(0), "{output:?}");
+    }
+    Ok(git)
+}
+
 #[test]
 fn writer_plan_stages_scratch_in_private_temporary_directory()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -683,37 +725,8 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
     for path in [&home, &state, &project, &assets, &git_home] {
         std::fs::DirBuilder::new().mode(0o700).create(path)?;
     }
-    let git = provenant_os::git::git_executable()
-        .ok_or("git unavailable")?
-        .canonicalize()?;
     let executor = SystemExecutor::new(1)?;
-    for args in [
-        vec!["init", "-q", "-b", "main"],
-        vec![
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "Initial",
-        ],
-    ] {
-        let argv: Vec<_> = std::iter::once(git.as_os_str().to_owned())
-            .chain(args.into_iter().map(Into::into))
-            .collect();
-        let env = [
-            ("HOME".into(), git_home.as_os_str().to_owned()),
-            ("PATH".into(), "/usr/bin:/bin".into()),
-            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-        ];
-        let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(5));
-        options.env = Some(&env);
-        let output = executor.execute(options)?;
-        assert_eq!(output.termination, Termination::Exit(0), "{output:?}");
-    }
+    let git = init_fixture_repository(&executor, &project, &git_home)?;
     let roots = provenant_core::RootInputs {
         state_dir: Some(state.clone()),
         ..provenant_core::RootInputs::new(home.clone(), project.clone())

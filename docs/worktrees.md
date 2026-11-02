@@ -148,6 +148,9 @@ copies; host integration refreshes and verifies its own refs and objects.
 Host delivery preparation constrains fetches to the selected remote's tracking
 refs and redacts URL userinfo from preparation errors.
 
+Tests run Git only through `provenant_os::fixture`.
+See [Tests and Git](runbooks/lane-lifecycle.md#tests-and-git).
+
 Fabric sets `CARGO_TARGET_DIR`, `CARGO_BUILD_BUILD_DIR` and `CARGO_HOME` for
 each lane. Do not override them: confinement may deny other paths. Confined writers use
 `$HOME/Library/Caches/provenant-lane-cargo/<sha256>`, derived from canonical

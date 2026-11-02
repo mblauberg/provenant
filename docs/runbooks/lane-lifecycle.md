@@ -223,3 +223,18 @@ a launch or become write-denied; only Git control files with another name do.
 See the [writer limits](providers.md#writer-lanes).
 The hard-link fixtures remain enabled in macOS CI because lane sandboxes can
 deny their `hard_link` calls before the launch check runs.
+
+## Tests and Git
+
+Tests run Git only through `provenant_os::fixture`: `git_command()` for a
+`std::process::Command`, or `run_git(cwd, args)` through the executor. Both
+drop the lane's `GIT_*` binding, so a fixture never commits into the lane's own
+repository. An `ExecOptions` that runs Git sets `env` explicitly; `tests/workspace_policy.rs`
+fails on one that inherits the environment.
+
+A root-package `cargo` command run inside a lane has failed in `build.rs` with
+`cannot resolve source inventory git index`. The lane that hit it reported
+`GIT_CONFIG_GLOBAL=/dev/null` as a workaround. The cause is unconfirmed: it was not
+reproduced outside a lane sandbox. `build.rs` removes `GIT_*` before it runs Git, so the likely
+reason is that it then loses the lane's binding. Track it in a separate issue before
+relying on this workaround.
