@@ -61,8 +61,7 @@ denied and long or extreme content.
   creates it, using the same noun. Filtered to zero says so and offers to
   clear the filters, never to create a first item. An empty section inside a
   page stays compact.
-- **Error.** Write the message as the [engineering-writing](../../engineering-writing/references/artefacts.md#error-message)
-  guidance says, at the point of failure, and keep everything the person
+- **Error.** Write the message as the engineering-writing skill says, at the point of failure, and keep everything the person
   entered. A code never stands alone: a support reference may follow the message
   in secondary text. On a form, show each error beside its field, summarise
   long forms at the top in the same words, and move focus to the first error on
@@ -185,7 +184,7 @@ forced-colours mode because they also use borders, outlines or text.
   and exact for errors and risk, brief for confirmations, plain for newcomers
   and outside readers, precise domain terms for expert users.
 - **Word list.** Keep canonical terms as the
-  [writing guidance](../../engineering-writing/SKILL.md) says, with one verb per
+  engineering-writing skill says, with one verb per
   lifecycle step. Use them in buttons, menus, the command menu, notifications,
   history and any visible API. Buttons are verbs that name the result ("Archive
   client"), with an ellipsis when more input follows.
