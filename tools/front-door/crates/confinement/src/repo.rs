@@ -721,14 +721,16 @@ fn common_config_digest(common: &Directory, head: &[u8]) -> Result<Option<[u8; 3
     let Some(bytes) = read_common_config(common)? else {
         return Ok(None);
     };
-    // Only a valid checked-out branch keeps its own tracking keys; a detached,
-    // missing or malformed HEAD keeps none.
-    let branch = head
-        .strip_suffix(b"\n")
-        .and_then(|line| line.strip_prefix(b"ref: refs/heads/"))
-        .filter(|branch| {
-            std::str::from_utf8(branch).is_ok_and(|name| GitRefName::branch(name).is_ok())
-        });
+    // Other branches' tracking keys are ignored. A checked-out branch keeps
+    // its own; a detached HEAD keeps none. A missing or malformed HEAD keeps
+    // every branch's keys, so a HEAD race cannot hide a tracking change; the
+    // writer's own HEAD read reports the damage with its path.
+    let line = head.strip_suffix(b"\n").unwrap_or(head);
+    let detached = matches!(line.len(), 40 | 64) && line.iter().all(u8::is_ascii_hexdigit);
+    let branch = line.strip_prefix(b"ref: refs/heads/").filter(|branch| {
+        std::str::from_utf8(branch).is_ok_and(|name| GitRefName::branch(name).is_ok())
+    });
+    let keep_all = branch.is_none() && !detached;
     let git = provenant_os::git::git_executable().ok_or(RepoError::InvalidGitDirectory)?;
     let argv = [
         git.into_os_string(),
@@ -778,7 +780,7 @@ fn common_config_digest(common: &Directory, head: &[u8]) -> Result<Option<[u8; 3
                 rest.strip_suffix(b".remote")
                     .or_else(|| rest.strip_suffix(b".merge"))
             })
-            .is_some_and(|name| Some(name) != branch);
+            .is_some_and(|name| !keep_all && Some(name) != branch);
         if !ignored {
             digest.update((entry.len() as u64).to_be_bytes());
             digest.update(entry);
