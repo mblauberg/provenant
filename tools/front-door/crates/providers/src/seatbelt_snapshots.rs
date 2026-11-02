@@ -234,6 +234,20 @@ fn cases() -> Result<Vec<Case>, ProviderError> {
             plan.write_roots = vec![grant("/fixture/project/locks", PathScope::Subtree)];
         },
     )?);
+    // A graph node reads its materialised upstream results, and only those.
+    cases.push(Case::new(
+        "claude-graph-inputs-read-only",
+        "claude",
+        Access::ReadOnly,
+        None,
+        false,
+        |plan| {
+            plan.read_roots = vec![grant(
+                "/fixture/state/fabric/graph-inputs/project/graph/consumer-0",
+                PathScope::Subtree,
+            )];
+        },
+    )?);
     cases.push(Case::new(
         "claude-roots-worktree-write",
         "claude",

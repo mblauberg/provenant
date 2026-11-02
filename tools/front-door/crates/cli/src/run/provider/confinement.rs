@@ -1,5 +1,11 @@
 use super::*;
 
+/// The host directory under which every graph node's materialised upstream
+/// results live, one subdirectory per attempt key.
+pub fn graph_inputs_directory(state_root: &Path) -> PathBuf {
+    state_root.join("fabric").join("graph-inputs")
+}
+
 pub(super) struct ConfinementRoots<'a> {
     pub(super) cwd: &'a Path,
     pub(super) home: &'a Path,
@@ -148,6 +154,7 @@ pub(super) fn confinement_request(
                         .flat_map(project_scratch_reads),
                 )
                 .chain(access.read_roots.iter().map(|path| grant(path)))
+                .chain(access.inputs_root.iter().map(|path| grant(path)))
                 .chain(roots.prompt_file.map(|path| PathGrant {
                     path: path.to_owned(),
                     scope: PathScope::Exact,

@@ -263,6 +263,12 @@ pub(super) fn prepare_candidates(
     let home = canonical(registry.home.ok_or("home directory is unavailable")?)?;
     let state_root = registry.state_root.ok_or("state root is unavailable")?;
     let assets = registry.assets.ok_or("product assets are unavailable")?;
+    // The one state-root path a lane may read is its own graph inputs.
+    if let Some(inputs) = &task.access.inputs_root
+        && !inputs.starts_with(graph_inputs_directory(state_root))
+    {
+        return Err("graph inputs root is outside the host's graph inputs directory".into());
+    }
     let provenant_executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let provenant_executable = canonical(&provenant_executable)?;
     let git = canonical(&match registry.host {
