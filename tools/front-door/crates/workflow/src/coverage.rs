@@ -292,7 +292,12 @@ pub fn check(ctx: &ReviewContext<'_>, facts: &[ReviewFact]) -> ValidationReport 
     diagnostics.sort_by(|a, b| (a.code, &a.field).cmp(&(b.code, &b.field)));
     // Routine work needs no review; only a blocking review still fails it.
     if need == 0 {
-        diagnostics.retain(|d| matches!(d.code, "blocking_review" | "stale_subject"));
+        diagnostics.retain(|d| {
+            matches!(
+                d.code,
+                "blocking_review" | "stale_subject" | "inconclusive_review"
+            )
+        });
     }
     let incomplete = diagnostics.iter().any(|d| {
         matches!(
