@@ -134,6 +134,12 @@ fn bound_worktree_default_head_subject_resolves_in_that_worktree()
         worktree.display().to_string()
     );
 
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("differs from bound worktree HEAD"),
+        "unexpected warning: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
     let explicit = fixture_cli()
         .current_dir(&invoking)
         .env("PROVENANT_ROOT", &root)
@@ -157,6 +163,11 @@ fn bound_worktree_default_head_subject_resolves_in_that_worktree()
         "{}",
         String::from_utf8_lossy(&explicit.stderr)
     );
+    let stderr = String::from_utf8_lossy(&explicit.stderr);
+    assert!(
+        stderr.contains("differs from bound worktree HEAD"),
+        "stderr: {stderr}"
+    );
     let explicit: serde_json::Value = serde_json::from_slice(&explicit.stdout)?;
     assert_eq!(
         explicit["data"]["graph"]["nodes"][0]["source"]["commit"],
@@ -167,6 +178,180 @@ fn bound_worktree_default_head_subject_resolves_in_that_worktree()
             .get("resolved_subject")
             .is_none()
     );
+    Ok(())
+}
+
+#[test]
+fn review_council_bound_worktree_resolves_subject_and_warns_on_differing_head()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let invoking = temp.path().join("invoking");
+    std::fs::create_dir(&invoking)?;
+    let git = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
+        let output = provenant_os::fixture::git_command()
+            .current_dir(&invoking)
+            .args(args)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    };
+    git(&["init", "-q"])?;
+    git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "commit",
+        "--allow-empty",
+        "-qm",
+        "subject commit A",
+    ])?;
+    let worktree_head = git(&["rev-parse", "HEAD"])?;
+    git(&["branch", "subject-branch"])?;
+    git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "commit",
+        "--allow-empty",
+        "-qm",
+        "invoking head B",
+    ])?;
+    let invoking_head = git(&["rev-parse", "HEAD"])?;
+    let worktree = invoking.join(".worktrees/review");
+    std::fs::create_dir_all(worktree.parent().ok_or("worktree parent")?)?;
+    git(&[
+        "worktree",
+        "add",
+        worktree.to_str().ok_or("worktree path")?,
+        "subject-branch",
+    ])?;
+    assert_ne!(invoking_head, worktree_head);
+
+    let prompt = temp.path().join("brief");
+    std::fs::write(&prompt, "Review the approved bounded change")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+    // 1. With bound worktree, default HEAD resolves to the bound worktree's HEAD.
+    let output = fixture_cli()
+        .current_dir(&invoking)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .arg("--state-dir")
+        .arg(temp.path().join("state"))
+        .args([
+            "--json",
+            "run",
+            "--preset",
+            "review-council",
+            "--prompt-file",
+        ])
+        .arg(&prompt)
+        .args(["--explain", "--set"])
+        .arg(format!("parameters.worktree='{}'", worktree.display()))
+        .output()?;
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let graph = &result["data"]["graph"];
+    // The subject lane (node 0) source equals the bound worktree HEAD (the subject commit).
+    assert_eq!(graph["nodes"][0]["source"]["commit"], worktree_head);
+    assert_eq!(
+        graph["provenance"]["resolved_subject"]["commit"],
+        worktree_head
+    );
+    assert_eq!(
+        graph["provenance"]["resolved_subject"]["worktree"],
+        worktree.display().to_string()
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("differs from bound worktree HEAD"),
+        "unexpected warning on matching head: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // 2. When explicit source differs from bound worktree HEAD, --explain warns.
+    let explicit = fixture_cli()
+        .current_dir(&invoking)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .arg("--state-dir")
+        .arg(temp.path().join("state"))
+        .args([
+            "--json",
+            "run",
+            "--preset",
+            "review-council",
+            "--prompt-file",
+        ])
+        .arg(&prompt)
+        .args(["--explain", "--set"])
+        .arg(format!("parameters.worktree='{}'", worktree.display()))
+        .args(["--set", "parameters.subject.commit='HEAD'"])
+        .output()?;
+    assert!(
+        explicit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&explicit.stderr)
+    );
+    let explicit_json: serde_json::Value = serde_json::from_slice(&explicit.stdout)?;
+    assert_eq!(
+        explicit_json["data"]["graph"]["nodes"][0]["source"]["commit"],
+        invoking_head
+    );
+    let stderr = String::from_utf8_lossy(&explicit.stderr);
+    assert!(
+        stderr.contains("differs from bound worktree HEAD"),
+        "expected warning in stderr: {stderr}"
+    );
+    let warnings = explicit_json["data"]["graph"]["provenance"]["warnings"]
+        .as_array()
+        .ok_or("warnings array")?;
+    assert!(
+        warnings.iter().any(|w| {
+            w.as_str().is_some_and(|text| {
+                text.contains("differs from bound worktree HEAD")
+                    && text.contains(&invoking_head)
+                    && text.contains(&worktree_head)
+            })
+        }),
+        "expected warning in provenance: {warnings:?}"
+    );
+
+    // 3. Human --explain output also includes the warning.
+    let human = fixture_cli()
+        .current_dir(&invoking)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .arg("--state-dir")
+        .arg(temp.path().join("state"))
+        .args(["run", "--preset", "review-council", "--prompt-file"])
+        .arg(&prompt)
+        .args(["--explain", "--set"])
+        .arg(format!("parameters.worktree='{}'", worktree.display()))
+        .args(["--set", "parameters.subject.commit='HEAD'"])
+        .output()?;
+    assert!(
+        human.status.success(),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    let human_stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        human_stdout.contains("Warning: source commit")
+            && human_stdout.contains("differs from bound worktree HEAD"),
+        "human output missing warning: {human_stdout}"
+    );
+
     Ok(())
 }
 

@@ -2708,9 +2708,43 @@ pub(crate) fn bind_run_context(
     Ok(())
 }
 
-/// Resolve a preset's default `HEAD` subject from its bound writer worktree.
-/// An explicitly supplied subject stays under the usual project-directory
-/// resolution in `bind_run_context`.
+/// Resolve a preset's default `HEAD` subject from its bound writer or review
+/// worktree. An explicitly supplied subject stays under the usual
+/// project-directory resolution in `bind_run_context`.
+fn bound_worktree_path(nodes: &[Value]) -> Option<PathBuf> {
+    for node in nodes {
+        if node["access"] == "worktree_write"
+            && let Some(path) = node.get("worktree").and_then(Value::as_str)
+            && !path.is_empty()
+        {
+            return Some(PathBuf::from(path));
+        }
+        if (node.get("role").and_then(Value::as_str) == Some("plan.review")
+            || node.get("id").and_then(Value::as_str) == Some("subject"))
+            && let Some(roots) = node.get("read_roots").and_then(Value::as_array)
+        {
+            for root in roots {
+                if let Some(path) = root.as_str()
+                    && !path.is_empty()
+                    && !path.ends_with("/skills")
+                {
+                    return Some(PathBuf::from(path));
+                }
+            }
+        }
+        for key in ["composite", "loop"] {
+            let nested = node
+                .pointer(&format!("/{key}/nodes"))
+                .or_else(|| node.pointer(&format!("/{key}/body")))
+                .and_then(Value::as_array);
+            if let Some(path) = nested.and_then(|nested| bound_worktree_path(nested)) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
 fn bind_default_subject_to_worktree(
     expansion: &mut Expansion,
     directory: &Path,
@@ -2736,27 +2770,8 @@ fn bind_default_subject_to_worktree(
     if !has_default_head(nodes) {
         return Ok(());
     }
-    fn writer_path(nodes: &[Value]) -> Option<PathBuf> {
-        for node in nodes {
-            if node["access"] == "worktree_write"
-                && let Some(path) = node.get("worktree").and_then(Value::as_str)
-                && !path.is_empty()
-            {
-                return Some(PathBuf::from(path));
-            }
-            for key in ["composite", "loop"] {
-                let nested = node
-                    .pointer(&format!("/{key}/nodes"))
-                    .or_else(|| node.pointer(&format!("/{key}/body")))
-                    .and_then(Value::as_array);
-                if let Some(path) = nested.and_then(|nested| writer_path(nested)) {
-                    return Some(path);
-                }
-            }
-        }
-        None
-    }
-    let Some(worktree) = writer_path(nodes).or_else(|| cli_worktree.map(Path::to_path_buf)) else {
+    let Some(worktree) = bound_worktree_path(nodes).or_else(|| cli_worktree.map(Path::to_path_buf))
+    else {
         return Ok(());
     };
     let worktree = if worktree.is_absolute() {
@@ -2792,6 +2807,71 @@ fn bind_default_subject_to_worktree(
             "worktree": worktree,
             "commit": oid,
         });
+    }
+    Ok(())
+}
+
+/// Warn when a resolved node commit source differs from the bound worktree's HEAD.
+fn warn_differing_source_and_worktree(
+    expansion: &mut Expansion,
+    directory: &Path,
+    cli_worktree: Option<&Path>,
+) -> Result<(), String> {
+    let nodes = expansion.document["nodes"]
+        .as_array()
+        .ok_or("missing graph nodes")?;
+    let Some(worktree) = bound_worktree_path(nodes).or_else(|| cli_worktree.map(Path::to_path_buf))
+    else {
+        return Ok(());
+    };
+    let worktree = if worktree.is_absolute() {
+        worktree
+    } else {
+        directory.join(worktree)
+    };
+    let git = match provenant_os::git::git_executable() {
+        Some(git) => git,
+        None => return Ok(()),
+    };
+    let worktree_head = match provenant_run::resolve_git_base(&git, &worktree, "HEAD") {
+        Ok(oid) => oid,
+        Err(_) => return Ok(()),
+    };
+
+    let mut warnings = Vec::new();
+    fn check_node(node: &Value, worktree_head: &str, warnings: &mut Vec<String>) {
+        if node.pointer("/source/type").and_then(Value::as_str) == Some("commit")
+            && let Some(commit) = node.pointer("/source/commit").and_then(Value::as_str)
+            && commit != worktree_head
+        {
+            let warning =
+                format!("source commit {commit} differs from bound worktree HEAD {worktree_head}");
+            if !warnings.contains(&warning) {
+                warnings.push(warning);
+            }
+        }
+        for key in ["composite", "loop"] {
+            if let Some(nested) = node
+                .pointer(&format!("/{key}/nodes"))
+                .or_else(|| node.pointer(&format!("/{key}/body")))
+                .and_then(Value::as_array)
+            {
+                for child in nested {
+                    check_node(child, worktree_head, warnings);
+                }
+            }
+        }
+    }
+    for node in nodes {
+        check_node(node, &worktree_head, &mut warnings);
+    }
+    for warning in warnings {
+        if !expansion.warnings.contains(&warning) {
+            expansion.warnings.push(warning.clone());
+            if let Some(list) = expansion.document["provenance"]["warnings"].as_array_mut() {
+                list.push(json!(warning));
+            }
+        }
     }
     Ok(())
 }
@@ -3319,12 +3399,6 @@ pub fn run(
             explicit_subject,
             request.access.worktree.as_deref(),
         )?;
-        {
-            use std::io::Write;
-            for warning in &expansion.warnings {
-                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
-            }
-        }
         if !placement.skipped.is_empty() {
             expansion.document["provenance"]["experiments"] = json!(placement.skipped);
         }
@@ -3365,6 +3439,17 @@ pub fn run(
             selection.source.as_str(),
             placement.assignment.as_ref(),
         )?;
+        warn_differing_source_and_worktree(
+            &mut expansion,
+            &directory,
+            request.access.worktree.as_deref(),
+        )?;
+        {
+            use std::io::Write;
+            for warning in &expansion.warnings {
+                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+            }
+        }
         // Every bound worktree and read root counts as readable; the brief's
         // own paths are warned about, never refused.
         let mut effective = Vec::new();
