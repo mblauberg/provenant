@@ -551,18 +551,17 @@ mod tests {
             assert_eq!(outcome.unwrap(), Refresh::Busy);
         }
         // A sibling test thread can fork while the lock above is released and
-        // briefly hold a copy of its descriptor, so Busy is retried for 2 s.
-        let mut tries = 0;
+        // briefly hold a copy of its descriptor, so retry for at most 2 s.
+        let retry_deadline = std::time::Instant::now() + Duration::from_secs(2);
         let failed = loop {
             let attempt = refresh_with(state.path(), "p", "aaa", |_| {
                 Err(io::Error::other("build failed").into())
             });
-            tries += 1;
-            if !matches!(attempt, Ok(Refresh::Busy)) || tries >= 100 {
+            if !matches!(attempt, Ok(Refresh::Busy)) || std::time::Instant::now() >= retry_deadline
+            {
                 break attempt;
             }
-            #[allow(clippy::disallowed_methods)] // Test-only: bounded 2 s retry.
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::yield_now();
         };
         assert!(failed.is_err(), "{failed:?}");
         assert_eq!(newest_generation_commit(state.path()), None);
