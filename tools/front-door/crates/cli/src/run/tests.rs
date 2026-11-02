@@ -1,5 +1,35 @@
 use super::*;
 
+fn reexec_test_in_lane(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    if !crate::fabric::in_lane() {
+        return Ok(false);
+    }
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    use std::ffi::OsStr;
+
+    let argv = vec![
+        std::env::current_exe()?.into_os_string(),
+        "--exact".into(),
+        name.into(),
+    ];
+    let removed = [
+        OsStr::new(provenant_core::RUN_STATE_DIRECTORY_ENV),
+        OsStr::new(run::LANE_DEPTH_ENV),
+        OsStr::new(run::PARENT_ATTEMPT_ENV),
+    ];
+    let env: Vec<_> = std::env::vars_os()
+        .filter(|(key, _)| !removed.contains(&key.as_os_str()))
+        .collect();
+    let cwd = std::env::current_dir()?;
+    let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(30));
+    options.env = Some(&env);
+    options.stdout = StreamPolicy::Capture { limit: 65_536 };
+    options.stderr = StreamPolicy::Capture { limit: 65_536 };
+    let out = SystemExecutor::new(1)?.execute(options)?;
+    assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+    Ok(true)
+}
+
 #[test]
 fn cancel_wait_preserves_silence_as_non_success_without_timeout() {
     let wait = json!({
@@ -1580,8 +1610,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
         self, WorkerObserver, WorkerState, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
     };
     use provenant_core::RootInputs;
-    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
-    use std::ffi::{OsStr, OsString};
+    use std::ffi::OsString;
     struct Free;
     impl WorkerObserver for Free {
         fn observe_roots(
@@ -1595,28 +1624,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
                 .collect()
         }
     }
-    let executor = SystemExecutor::new(1)?;
-    if crate::fabric::in_lane() {
-        let argv = vec![
-            std::env::current_exe()?.into_os_string(),
-            "--exact".into(),
-            "run::tests::dispatch_reuses_only_free_lane_or_unowned_worktree".into(),
-        ];
-        let removed = [
-            OsStr::new(provenant_core::RUN_STATE_DIRECTORY_ENV),
-            OsStr::new(run::LANE_DEPTH_ENV),
-            OsStr::new(run::PARENT_ATTEMPT_ENV),
-        ];
-        let env: Vec<_> = std::env::vars_os()
-            .filter(|(key, _)| !removed.contains(&key.as_os_str()))
-            .collect();
-        let cwd = std::env::current_dir()?;
-        let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(30));
-        options.env = Some(&env);
-        options.stdout = StreamPolicy::Capture { limit: 65_536 };
-        options.stderr = StreamPolicy::Capture { limit: 65_536 };
-        let out = executor.execute(options)?;
-        assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+    if reexec_test_in_lane("run::tests::dispatch_reuses_only_free_lane_or_unowned_worktree")? {
         return Ok(());
     }
     let temp = tempfile::tempdir()?;
@@ -1908,8 +1916,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
 fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
     use provenant_core::RootInputs;
-    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
-    use std::ffi::{OsStr, OsString};
+    use std::ffi::OsString;
     // A census that cannot clear any tree: cleanup after a late failure
     // would retain whatever creation left behind.
     struct Unknown;
@@ -1925,28 +1932,7 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
                 .collect()
         }
     }
-    let executor = SystemExecutor::new(1)?;
-    if crate::fabric::in_lane() {
-        let argv = vec![
-            std::env::current_exe()?.into_os_string(),
-            "--exact".into(),
-            "run::tests::failed_preflight_creates_no_worktree".into(),
-        ];
-        let removed = [
-            OsStr::new(provenant_core::RUN_STATE_DIRECTORY_ENV),
-            OsStr::new(run::LANE_DEPTH_ENV),
-            OsStr::new(run::PARENT_ATTEMPT_ENV),
-        ];
-        let env: Vec<_> = std::env::vars_os()
-            .filter(|(key, _)| !removed.contains(&key.as_os_str()))
-            .collect();
-        let cwd = std::env::current_dir()?;
-        let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(30));
-        options.env = Some(&env);
-        options.stdout = StreamPolicy::Capture { limit: 65_536 };
-        options.stderr = StreamPolicy::Capture { limit: 65_536 };
-        let out = executor.execute(options)?;
-        assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+    if reexec_test_in_lane("run::tests::failed_preflight_creates_no_worktree")? {
         return Ok(());
     }
     let temp = tempfile::tempdir()?;

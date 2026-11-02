@@ -23,6 +23,15 @@ path falls outside a crate directory or cannot be resolved safely. These paths a
 - `tools/front-door/assets/`
 - `skills/` and `roles/` assets
 
+## Rust test time budgets
+
+The default and CI nextest profiles mark tests slow after 10 seconds and stop
+them after three intervals. Keep the CI retry count and `fail-on-flaky` policy
+unchanged. A test that needs more time belongs in a named profile override in
+`tools/front-door/.config/nextest.toml`, with a comment giving the reason.
+`scripts/nextest-slowest` appends the 20 slowest JUnit cases to the Rust test
+job summary.
+
 Keep the full-run list conservative when introducing build-time inputs or
 workspace-wide configuration. The `main` push remains the full-workspace
 backstop if a path is missed.

@@ -12,6 +12,15 @@ pub fn ensure(
     clock: &dyn Clock,
     cancel: &CancelToken,
 ) -> Result<PathBuf, WorktreeError> {
+    ensure_inner(repo, clock, cancel, || {})
+}
+
+fn ensure_inner(
+    repo: &VerifiedRepo,
+    clock: &dyn Clock,
+    cancel: &CancelToken,
+    before_lock: impl FnOnce(),
+) -> Result<PathBuf, WorktreeError> {
     fn child(parent: &Directory, name: &str) -> Result<Directory, WorktreeError> {
         match parent.mkdir(OsStr::new(name), 0o700) {
             Ok(()) => parent.sync()?,
@@ -25,6 +34,7 @@ pub fn ensure(
     let parent = child(repo.root_dir(), ".provenant")?;
     let scratch = child(&parent, "scratch")?;
     let info = child(repo.common_dir(), "info")?;
+    before_lock();
     let _lock = info.lock(
         OsStr::new("provenant-exclude.lock"),
         LockMode::Exclusive,
@@ -95,7 +105,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::disallowed_methods, reason = "real OS lock contention fixture")]
     fn concurrent_scratch_waits_for_the_exclude_lock() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = Fixture::new()?;
         ensure(&fixture.repo, &SystemClock, &CancelToken::new())?;
@@ -111,11 +120,11 @@ mod tests {
             let (sender, receiver) = std::sync::mpsc::channel();
             let repo = &fixture.repo;
             let worker = scope.spawn(move || {
-                sender.send(()).unwrap();
-                ensure(repo, &SystemClock, &CancelToken::new())
+                ensure_inner(repo, &SystemClock, &CancelToken::new(), || {
+                    sender.send(()).unwrap();
+                })
             });
             receiver.recv().unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(100));
             assert!(
                 !worker.is_finished(),
                 "scratch contender must wait for exclusion"

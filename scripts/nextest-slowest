@@ -1,0 +1,24 @@
+#!/usr/bin/env python3
+"""Append the 20 slowest nextest JUnit cases to a Markdown summary."""
+
+import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+
+def main(junit, summary):
+    if Path(junit).exists():
+        cases = ET.parse(junit).getroot().iter("testcase")
+        rows = sorted(
+            ((float(c.get("time", 0)), f"{c.get('classname', '')}::{c.get('name', '')}") for c in cases),
+            reverse=True,
+        )[:20]
+        lines = ["| Time (s) | Test |", "| ---: | --- |"] + [f"| {t:.2f} | `{name}` |" for t, name in rows]
+    else:
+        lines = ["JUnit results are unavailable."]
+    with open(summary, "a", encoding="utf-8") as out:
+        out.write("\n### 20 slowest Rust tests\n\n" + "\n".join(lines) + "\n")
+
+
+if __name__ == "__main__":
+    main(*sys.argv[1:3])
