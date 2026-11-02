@@ -86,14 +86,18 @@ App upgrades exchange the staged and installed bundles atomically with macOS
 for rollback. The old bundle stays in the staging directory until the menu agent
 has restarted successfully. If restoring the app or its LaunchAgent plist fails,
 the installer retains that directory and reports its location for recovery.
+If the old app backup cannot be removed after a successful upgrade, installation
+succeeds with a warning identifying the retained directory; remove it manually.
 
 `provenant hosts doctor` includes the tick agent's launchd state and last exit reason
 from `launchctl print gui/<uid>/dev.provenant.tick`. An idle tick with exit code
 zero is normal. Abnormal exits or terminating signals are flagged with
 `provenant upgrade` as the repair; SIGKILL can indicate a launch-constraint kill
 but does not by itself prove that cause.
-Installation bounces a loaded tick agent; after an upgrade, manually bootstrap the
-upgraded agent and confirm that it launches, since CI cannot exercise launchd.
+Installation bounces a loaded tick agent. After an upgrade, check
+`launchctl print gui/$UID/dev.provenant.tick`, then run
+`launchctl kickstart -k gui/$UID/dev.provenant.tick` and confirm it launches,
+since CI cannot exercise launchd.
 
 Tags matching `v*` trigger `.github/workflows/release.yml`. The tag commit must
 be reachable from `origin/main`. A job with read access builds and ad-hoc signs

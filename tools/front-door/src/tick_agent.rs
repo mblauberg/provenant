@@ -35,8 +35,23 @@ pub fn diagnosis(state: &Path, home: &Path) -> Diagnosis {
             ..Default::default()
         };
     }
+    diagnosis_installed(home, launchctl)
+}
+
+fn diagnosis_installed(
+    home: &Path,
+    run: impl Fn(&[&OsStr], &Path) -> Result<(bool, String), AgentError>,
+) -> Diagnosis {
+    if !plist(home).exists() {
+        return Diagnosis {
+            state: "not_installed".into(),
+            warning: Some("Tick agent is not installed".into()),
+            repair: Some("provenant upgrade".into()),
+            ..Default::default()
+        };
+    }
     let service = format!("gui/{}/{LABEL}", provenant_os::fs::effective_uid());
-    match launchctl(&["print".as_ref(), service.as_ref()], home) {
+    match run(&["print".as_ref(), service.as_ref()], home) {
         Ok((true, output)) => parse_diagnosis(&output),
         _ => Diagnosis {
             state: "unavailable".into(),
@@ -357,6 +372,18 @@ mod tests {
         assert_eq!(diagnosis.state, "not_applicable");
         assert!(diagnosis.warning.is_none());
         assert!(diagnosis.repair.is_none());
+    }
+
+    #[test]
+    fn tick_diagnosis_distinguishes_not_installed_from_not_loaded() {
+        let home = tempfile::tempdir().unwrap();
+        let missing = diagnosis_installed(home.path(), |_, _| panic!("must not inspect launchd"));
+        assert_eq!(missing.state, "not_installed");
+        assert_eq!(missing.repair.as_deref(), Some("provenant upgrade"));
+        std::fs::create_dir_all(plist(home.path()).parent().unwrap()).unwrap();
+        std::fs::write(plist(home.path()), "plist").unwrap();
+        let unloaded = diagnosis_installed(home.path(), |_, _| Ok((false, String::new())));
+        assert_eq!(unloaded.state, "unavailable");
     }
 
     #[test]

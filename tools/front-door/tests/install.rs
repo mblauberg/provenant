@@ -21,7 +21,7 @@ const MENU_EXECUTABLE: &str =
 
 // Emulate the helper protocol for installer failure injection; the native
 // RENAME_SWAP implementation is exercised by the Swift Menu tests.
-const APP_FIXTURE: &str = "#!/bin/sh\nif [ \"$1\" = --swap-path ]; then\n  mv \"$2\" \"$2.swap\" && mv \"$3\" \"$2\" && mv \"$2.swap\" \"$3\"\n  exit $?\nfi\nexit 0\n";
+const APP_FIXTURE: &str = "#!/bin/sh\nif [ \"$1\" = --swap-path ]; then\n  mv \"$2\" \"$2.swap\" && mv \"$3\" \"$2\" && mv \"$2.swap\" \"$3\" || exit $?\n  if [ -n \"${PROVENANT_TEST_SWAP_SIGNAL:-}\" ] && [ ! -f \"$PROVENANT_TEST_SWAP_SIGNAL\" ]; then\n    touch \"$PROVENANT_TEST_SWAP_SIGNAL\"; kill -TERM \"$PPID\"\n  fi\n  exit 0\nfi\nexit 0\n";
 
 struct FixtureSmoke(VersionInfo);
 
@@ -1201,7 +1201,7 @@ esac
     fs::write(
         &mv,
         format!(
-            "#!/bin/sh\ncase \"$1\" in */.provenant-upgrade.*/*) if [ ! -f '{0}' ]; then touch '{0}'; exit 1; fi ;; esac\nexec /bin/mv \"$@\"\n",
+            "#!/bin/sh\ncase \"$1\" in */.provenant-retained.*/*) if [ ! -f '{0}' ]; then touch '{0}'; exit 1; fi ;; esac\nexec /bin/mv \"$@\"\n",
             rig.root.join("direct-install-mv-failed-once").display()
         ),
     )?;
@@ -1222,11 +1222,21 @@ esac
             !entry
                 .file_name()
                 .to_string_lossy()
-                .starts_with(".provenant-upgrade.")
+                .starts_with(".provenant-retained.")
         })
     }));
     fs::remove_file(&recorded)?;
     fs::remove_file(&mv)?;
+    let signal_marker = rig.root.join("swap-signalled");
+    rig.env.push((
+        "PROVENANT_TEST_SWAP_SIGNAL".into(),
+        signal_marker.into_os_string(),
+    ));
+    let interrupted = rig.execute_os(Path::new("/bin/sh"), &args, None)?;
+    assert_eq!(code(&interrupted), 143, "{interrupted:?}");
+    assert!(installed_app.join("old-build").exists());
+    rig.env
+        .retain(|(key, _)| key != "PROVENANT_TEST_SWAP_SIGNAL");
     let agent = rig
         .home
         .join("Library/LaunchAgents/dev.provenant.quota-menubar.plist");
@@ -1253,7 +1263,7 @@ esac
             !entry
                 .file_name()
                 .to_string_lossy()
-                .starts_with(".provenant-upgrade.")
+                .starts_with(".provenant-retained.")
         })
     }));
     let cp = fake_bin.join("cp");
@@ -1281,9 +1291,9 @@ esac
         Some(b"n\ny\nn\nn\nn\nappend\nskip\n"),
     )?;
     assert_eq!(code(&failed_restore), 4, "{failed_restore:?}");
-    assert!(installed_app.join("old-build").exists());
+    assert!(!installed_app.join("old-build").exists());
     assert!(
-        String::from_utf8_lossy(&failed_restore.stderr.bytes).contains("keeping staging directory")
+        String::from_utf8_lossy(&failed_restore.stderr.bytes).contains("agent remains stopped")
     );
     let retained = fs::read_dir(rig.home.join("Applications"))?
         .collect::<io::Result<Vec<_>>>()?
@@ -1292,7 +1302,7 @@ esac
             entry
                 .file_name()
                 .to_string_lossy()
-                .starts_with(".provenant-upgrade.")
+                .starts_with(".provenant-retained.")
         })
         .ok_or("retained staging directory")?
         .path();
@@ -1300,17 +1310,31 @@ esac
         fs::read_to_string(retained.join("agent.plist"))?,
         "fake LaunchAgent"
     );
-    fs::remove_dir_all(retained)?;
+    assert!(!agent.exists());
+    fs::copy(retained.join("agent.plist"), &agent)?;
     fs::remove_file(cp)?;
+    fs::remove_dir_all(&installed_app)?;
+    fs::rename(retained.join("Provenant Console.app"), &installed_app)?;
+    fs::remove_dir_all(retained)?;
     fs::write(
         &plutil,
         "#!/bin/sh\ncase \"$1\" in -replace) printf '%s' \"$4\" > \"$5\" ;; -extract) cat \"$6\" ;; esac\n",
     )?;
     fs::write(&launchctl, "#!/bin/sh\nexit 0\n")?;
+    // A retained legacy bundle must not look like an active wrapper stage.
+    for binary in [
+        "Contents/MacOS/provenant-console",
+        "Contents/MacOS/quota-menubar",
+    ] {
+        let path = installed_app.join(binary);
+        fs::create_dir_all(path.parent().ok_or("legacy executable parent")?)?;
+        fs::write(&path, APP_FIXTURE)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+    }
     let rm = fake_bin.join("rm");
     fs::write(
         &rm,
-        "#!/bin/sh\ncase \"$2\" in */.provenant-upgrade.*/Provenant\\ Console.app) exit 1 ;; esac\nexec /bin/rm \"$@\"\n",
+        "#!/bin/sh\ncase \"$2\" in */.provenant-retained.*/Provenant\\ Console.app) exit 1 ;; esac\nexec /bin/rm \"$@\"\n",
     )?;
     fs::set_permissions(&rm, fs::Permissions::from_mode(0o755))?;
     let retained_backup = rig.execute_os(
@@ -1329,7 +1353,7 @@ esac
             entry
                 .file_name()
                 .to_string_lossy()
-                .starts_with(".provenant-upgrade.")
+                .starts_with(".provenant-retained.")
         })
         .ok_or("retained staging directory")?
         .path();
@@ -1338,8 +1362,16 @@ esac
         "fake LaunchAgent"
     );
     assert!(retained.join("Provenant Console.app/old-build").exists());
-    fs::remove_dir_all(retained)?;
     fs::remove_file(rm)?;
+    fs::write(&agent, "legacy agent")?;
+    let next_upgrade = rig.execute_os(
+        Path::new("/bin/sh"),
+        &guided_args,
+        Some(b"n\ny\nn\nn\nn\nn\nappend\nskip\n"),
+    )?;
+    assert_eq!(code(&next_upgrade), 0, "{next_upgrade:?}");
+    assert!(fs::read_to_string(&agent)?.contains("Contents/Library/LoginItems/Provenant Menu.app"));
+    fs::remove_dir_all(retained)?;
     fs::remove_file(&recorded)?;
     fs::remove_file(agent)?;
     fs::remove_file(plutil)?;
