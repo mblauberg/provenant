@@ -1794,6 +1794,16 @@ impl StageBuilder<'_> {
             }
             selected.push(item);
         }
+        if kind == "docs" && shape.is_some() && let Some(first) = selected.iter().find(|item| item["name"] == "conventions-readability").cloned() {
+            for index in 1..limit {
+                let mut item = first.clone();
+                item["_panel_slot"] = json!(index + 1);
+                if let Some(pool) = shape.and_then(|shape| shape.slots.get(index)) {
+                    item["tier"] = json!(pool);
+                }
+                selected.push(item);
+            }
+        }
         if selected.is_empty() {
             return Err("for_each selected no items".into());
         }
@@ -1861,7 +1871,11 @@ impl StageBuilder<'_> {
                     let name = item["name"].as_str().filter(|n| valid_name(n)).ok_or(
                         "for_each items need a name of lowercase letters, digits and dashes",
                     )?;
-                    format!("{base}-{name}")
+                    if let Some(slot) = item.get("_panel_slot").and_then(Value::as_u64) {
+                        format!("{base}-{name}-{slot}")
+                    } else {
+                        format!("{base}-{name}")
+                    }
                 }
                 None if count == 1 => base.to_owned(),
                 None => format!("{base}-{index}"),
