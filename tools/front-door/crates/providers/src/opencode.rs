@@ -338,36 +338,53 @@ fn failure_diagnostic(stderr: &[u8]) -> Option<String> {
 }
 
 /// Recognise OpenCode's unstructured quota errors without treating arbitrary
-/// provider output as protocol events.
+/// provider output as protocol events. Pool and retry evidence come only from
+/// the matched line and the one after it, so unrelated stderr cannot steer them.
 pub fn stderr_quota(stderr: &[u8]) -> Option<E> {
     let text = std::str::from_utf8(stderr).ok()?;
-    text.lines().find(|line| {
+    let mut lines = text.lines();
+    let matched = lines.find(|line| {
         let lower = line.to_ascii_lowercase();
         lower.contains("ai.error.quotaexceeded") || lower.contains("usage limit exceeded")
     })?;
-    let diagnostic = text.to_ascii_lowercase();
-    let pool = if diagnostic.contains("free") {
+    let scope = format!("{matched}\n{}", lines.next().unwrap_or_default()).to_ascii_lowercase();
+    let pool = if scope.contains("free tier") || scope.contains("free usage") {
         "opencode-free"
     } else {
         "opencode-go"
     };
+    // A number after `key`, with its unit word when one follows.
     let number_after = |key: &str| {
-        let at = diagnostic.find(key)?;
-        let value = diagnostic[at + key.len()..]
+        let at = scope.find(key)?;
+        let value = scope[at + key.len()..]
             .trim_start_matches(|c: char| c.is_ascii_whitespace() || matches!(c, '"' | ':' | '='));
-        value
-            .split(|c: char| !c.is_ascii_digit())
-            .next()?
-            .parse::<u64>()
-            .ok()
+        let digits = value.len() - value.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        let number = value[..digits].parse::<u64>().ok()?;
+        let unit: String = value[digits..]
+            .trim_start()
+            .chars()
+            .take_while(char::is_ascii_alphabetic)
+            .collect();
+        Some((number, unit))
+    };
+    let seconds = |number: u64, unit: &str, bare_ok: bool| -> Option<u64> {
+        let scale = match unit {
+            "" if bare_ok => 1,
+            "s" | "sec" | "secs" | "second" | "seconds" => 1,
+            "m" | "min" | "mins" | "minute" | "minutes" => 60,
+            "h" | "hr" | "hrs" | "hour" | "hours" => 3_600,
+            _ => return None,
+        };
+        (number > 0).then(|| number.saturating_mul(scale).min(86_400))
     };
     let retry = number_after("retryafterms")
-        .and_then(|n| parse_retry_after(Some(&serde_json::Value::from(n))))
+        .and_then(|(n, _)| parse_retry_after(Some(&serde_json::Value::from(n))))
         .or_else(|| {
             number_after("retry-after")
-                .or_else(|| number_after("retry after"))
-                .filter(|n| *n > 0)
-                .map(|n| n.min(86_400))
+                .and_then(|(n, unit)| seconds(n, &unit, true))
+                .or_else(|| {
+                    number_after("retry after").and_then(|(n, unit)| seconds(n, &unit, false))
+                })
         });
     Some(E::QuotaLimited {
         message: format!("OpenCode quota exhausted ({pool})"),
@@ -623,6 +640,47 @@ mod tests {
             );
         }
         assert!(stderr_quota(b"ordinary failure").is_none());
+    }
+
+    #[test]
+    fn stderr_quota_scopes_pool_and_retry_to_the_matched_line() {
+        use super::{E, stderr_quota};
+        let quota = |text: &str| match stderr_quota(text.as_bytes()) {
+            Some(E::QuotaLimited {
+                pool,
+                resets_in_seconds,
+                ..
+            }) => (pool, resets_in_seconds),
+            other => panic!("unexpected {other:?}"),
+        };
+        // Unrelated "free" and retry text elsewhere must not steer the result.
+        let (pool, reset) = quota(
+            "using free model fallback\nretry after 5 seconds\nAI.Error.QuotaExceeded: Go usage limit exceeded\nstack\nretryAfterMs=9000\nfree tier\n",
+        );
+        assert_eq!(pool.as_deref(), Some("opencode-go"));
+        assert_eq!(reset, None);
+        // Units are honoured; a bare number is seconds only in the header form.
+        assert_eq!(
+            quota("usage limit exceeded, retry after 30 minutes").1,
+            Some(1800)
+        );
+        assert_eq!(
+            quota("usage limit exceeded, retry after 30 sec").1,
+            Some(30)
+        );
+        assert_eq!(quota("usage limit exceeded, retry after 30").1, None);
+        assert_eq!(
+            quota("usage limit exceeded\nretry-after: 30 minutes").1,
+            Some(1800)
+        );
+        assert_eq!(
+            quota("usage limit exceeded\nretry-after: 30 fortnights").1,
+            None
+        );
+        assert_eq!(
+            quota("Free usage limit exceeded").0.as_deref(),
+            Some("opencode-free")
+        );
     }
 
     fn store(rows: &[(&str, &str)]) -> tempfile::TempDir {
