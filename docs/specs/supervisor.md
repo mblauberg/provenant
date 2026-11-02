@@ -818,6 +818,9 @@ any team evidence are rechecked. `CS_ADHOC` is not a reliable standalone signal;
 the platform bit controls Apple platform entries. A named team is a kernel-reported
 string, not an independent trust anchor. The exact path and explicit host-owner
 acceptance bound named-team entries.
+When a signed image fails the built-in unreadable-cwd checks, its refusal names
+`confinement.census_ignore_unreadable` and reports the canonical executable path
+and observed team ID needed for an exact entry.
 This policy does not require the built-in directory or sealed-volume
 restrictions. It may therefore list `/usr/bin/login`,
 third-party services or other signed executables the built-in rule refuses.

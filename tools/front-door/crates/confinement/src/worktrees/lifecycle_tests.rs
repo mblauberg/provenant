@@ -2302,7 +2302,7 @@ impl WorkerObserver for FlippingWorkers {
             .map(|(root, _)| {
                 (
                     root.clone(),
-                    "process 968: cwd unreadable; policy_condition=gc.census_excused_executables entry required; path=\"/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Resources/bin/simdiskimaged\"".into(),
+                    "process 968: cwd unreadable; policy_condition=approved daemon directory required; configure confinement.census_ignore_unreadable; path=\"/Library/Developer/CoreSimulator/Resources/bin/simdiskimaged\", team_id=platform".into(),
                 )
             })
             .collect();
@@ -2406,7 +2406,7 @@ fn gc_preview_and_apply_both_retain_a_managed_tree_with_an_unknown_census()
             vec![RetainedBranch {
                 branch: "gc-census-unknown".into(),
                 reason: RetainReason::UnknownWriter,
-                detail: dry_run.then(|| "process 968: cwd unreadable; policy_condition=gc.census_excused_executables entry required; path=\"/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Resources/bin/simdiskimaged\"".into()),
+                detail: dry_run.then(|| "process 968: cwd unreadable; policy_condition=approved daemon directory required; configure confinement.census_ignore_unreadable; path=\"/Library/Developer/CoreSimulator/Resources/bin/simdiskimaged\", team_id=platform".into()),
             }],
             "dry_run={dry_run}"
         );

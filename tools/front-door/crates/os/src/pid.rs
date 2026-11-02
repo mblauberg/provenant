@@ -182,7 +182,7 @@ pub struct UnreadablePolicyFailure {
     /// failed. Native acceptance must reject an unplaceable image in that case.
     pub builtin_condition: Option<&'static str>,
     /// True only when a system-uid process failed on its executable path or
-    /// volume alone, which `gc.census_excused_executables` could excuse.
+    /// volume alone, which a signed host entry could excuse.
     pub configurable: bool,
 }
 
@@ -190,10 +190,6 @@ pub struct UnreadablePolicyFailure {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnreadablePolicyExcusal {
     pub uids: ProcessUids,
-    /// The exact configured entry that matched, when host GC policy excused it.
-    pub configured_entry: Option<String>,
-    /// The kernel-reported executable path, when it decided a configured match.
-    pub executable: Option<std::path::PathBuf>,
 }
 
 impl From<&'static str> for UnreadablePolicyFailure {
@@ -272,14 +268,9 @@ pub trait CwdObserver: Send + Sync {
         &self,
         pid: i64,
         entries: &[CensusIgnoreEntry],
-        _excused_executables: &[String],
     ) -> Result<UnreadablePolicyExcusal, UnreadablePolicyFailure> {
         self.ignored_unreadable_uids(pid, entries)
-            .map(|uids| UnreadablePolicyExcusal {
-                uids,
-                configured_entry: None,
-                executable: None,
-            })
+            .map(|uids| UnreadablePolicyExcusal { uids })
             .ok_or_else(|| "image policy evidence unavailable".into())
     }
 
@@ -314,13 +305,12 @@ impl CwdObserver for SystemCwdObserver {
         &self,
         pid: i64,
         entries: &[CensusIgnoreEntry],
-        excused_executables: &[String],
     ) -> Result<UnreadablePolicyExcusal, UnreadablePolicyFailure> {
         let pid = i32::try_from(pid)
             .ok()
             .filter(|pid| *pid > 0)
             .ok_or("positive OS pid unavailable")?;
-        crate::sys::pid::unreadable_policy_uids(pid, entries, excused_executables)
+        crate::sys::pid::unreadable_policy_uids(pid, entries)
     }
 
     fn sealed_platform_uids(&self, pid: i64) -> Option<ProcessUids> {
