@@ -3756,6 +3756,33 @@ fn settle_attempt(
 }
 
 impl BoundGraphOwner<'_> {
+    fn prior_models(&self, attempts: &[String]) -> Result<Vec<String>, FacadeError> {
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: true,
+            actor: None,
+            chair: None,
+        };
+        let mut models = Vec::new();
+        for reference in attempts {
+            let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+            let target = AttemptTarget {
+                extra: Default::default(),
+                host: Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?),
+                attempt: attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+            };
+            if let Some(model) = owner
+                .snapshot(target, self.budget, self.cancel)?
+                .applied_route
+                .and_then(|route| route.model)
+                && !models.contains(&model)
+            {
+                models.push(model);
+            }
+        }
+        Ok(models)
+    }
+
     /// Model families that served the writer attempts a reviewer must differ from.
     fn writer_families(&self, attempts: &[String]) -> Result<Vec<String>, FacadeError> {
         if attempts.is_empty() {
@@ -4221,6 +4248,14 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             } else {
                 None
             };
+            let mut exclude = self.exclude.clone();
+            if !accepted && route.alias.is_some() {
+                for model in self.prior_models(node.prior_attempts)? {
+                    if !exclude.contains(&model) {
+                        exclude.push(model);
+                    }
+                }
+            }
             let input = SubmitInput::Submit {
                 extra: Default::default(),
                 operation_id,
@@ -4282,12 +4317,12 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     new_worktree: None,
                 }],
                 concurrency: Some(1),
-                knobs: if self.exclude.is_empty() {
+                knobs: if exclude.is_empty() {
                     vec![]
                 } else {
                     vec![format!(
                         "routing.graph_exclude={}",
-                        serde_json::Value::from(self.exclude.clone())
+                        serde_json::Value::from(exclude)
                     )]
                 },
                 host: None,
