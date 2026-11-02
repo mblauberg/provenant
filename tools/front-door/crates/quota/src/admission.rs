@@ -225,6 +225,13 @@ impl Admission<'_> {
                                 && windows.all(|w| {
                                     // A lapsed reset alone cannot clear a refusal.
                                     w.used_basis_points < CLEAR_HEADROOM_BASIS_POINTS
+                                        && s.details.as_ref().is_none_or(|d| {
+                                            d.coverage.as_deref() != Some("partial")
+                                                || d.calibration_active(
+                                                    &w.pool,
+                                                    self.now_unix_seconds,
+                                                )
+                                        })
                                 })
                         })
                 });
@@ -272,7 +279,10 @@ impl Admission<'_> {
             }
             if matches!(
                 snapshot.status,
-                QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
+                QuotaStatus::Available
+                    | QuotaStatus::CreditOnly
+                    | QuotaStatus::Exhausted
+                    | QuotaStatus::Unknown
             ) && snapshot.windows.iter().any(|w| {
                 (self
                     .pools
@@ -290,6 +300,21 @@ impl Admission<'_> {
                             .is_some_and(|d| d.calibration_active(&w.pool, self.now_unix_seconds)))
             }) {
                 return Err(QuotaError::Refused("allowance exhausted"));
+            }
+            if snapshot.details.as_ref().is_some_and(|d| {
+                d.coverage.as_deref() == Some("partial")
+                    && snapshot.windows.iter().any(|w| {
+                        (self
+                            .pools
+                            .iter()
+                            .any(|pool| matches_pool(&route.adapter, &w.pool, pool))
+                            || (go_model
+                                && ["five_hour", "seven_day", "thirty_day"]
+                                    .contains(&w.pool.as_str())))
+                            && !d.calibration_active(&w.pool, self.now_unix_seconds)
+                    })
+            }) {
+                return Err(QuotaError::Refused("uncalibrated partial coverage"));
             }
         }
         Ok(())
@@ -589,7 +614,33 @@ mod admission_tests {
         let mut active = raw.clone();
         settings.apply_calibration(&mut active, 1000);
         assert!(check(&active, 1000).is_ok());
-        assert!(check(&active, 1100).is_ok());
+        assert!(matches!(
+            check(&active, 1100),
+            Err(QuotaError::Refused("uncalibrated partial coverage"))
+        ));
+        let mut partial = raw.clone();
+        settings.apply_calibration(&mut partial, 1100);
+        partial[0]
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .windows
+            .push(QuotaWindow {
+                pool: "five_hour".into(),
+                window_seconds: None,
+                used_basis_points: 9999,
+                resets_unix_seconds: None,
+            });
+        assert!(matches!(
+            check(&partial, 1100),
+            Err(QuotaError::Refused("uncalibrated partial coverage"))
+        ));
+        partial[0].snapshot.as_mut().unwrap().windows[0].used_basis_points = 10000;
+        partial[0].snapshot.as_mut().unwrap().status = QuotaStatus::Unknown;
+        assert!(matches!(
+            check(&partial, 1100),
+            Err(QuotaError::Refused("allowance exhausted"))
+        ));
         settings.calibration.get_mut("go").unwrap().five_hour = Some(100);
         let mut exhausted = raw.clone();
         settings.apply_calibration(&mut exhausted, 1000);
