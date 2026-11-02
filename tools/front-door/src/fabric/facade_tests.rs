@@ -1470,6 +1470,58 @@ mod peer_tests {
     }
 
     #[test]
+    fn bare_graph_miss_names_the_scratch_root_and_searches_no_legacy_root()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test(
+            "fabric::peer_tests::bare_graph_miss_names_the_scratch_root_and_searches_no_legacy_root",
+        )? {
+            return Ok(());
+        }
+        let fixture = SettlementFixture::resumed()?;
+        // A readable document under the legacy root must not be found by a bare name.
+        let legacy = fixture.rig.project.join(".agent-run/graphs");
+        std::fs::create_dir_all(&legacy)?;
+        std::fs::write(legacy.join("legacy-plan.json"), b"not a graph")?;
+        let factory = Factory {
+            context: Context::open(
+                fixture.roots.clone(),
+                &fixture.rig.home,
+                &fixture.rig.project,
+            )?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: fixture.rig.home.clone(),
+            cwd: fixture.rig.project.clone(),
+            assets: fixture.rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &FreeWorkers,
+        };
+        let result = factory.graph(
+            GraphInput::Run {
+                extra: Default::default(),
+                document: "legacy-plan.json".into(),
+            },
+            WaitBudget::cli(factory.clock.mono_now(), 30)?,
+            &CancelToken::new(),
+        );
+        match result {
+            Err(FacadeError::Io { operation, .. }) => {
+                assert!(
+                    operation.starts_with("read project-local graph document")
+                        && operation.contains(".provenant/scratch/graphs")
+                        && operation.contains("explicit path"),
+                    "{operation}"
+                );
+            }
+            other => panic!("bare-name miss must not read a legacy document: {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
     fn graph_submission_replays_an_accepted_push_after_protection_changes()
     -> Result<(), Box<dyn std::error::Error>> {
         if host_test(

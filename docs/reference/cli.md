@@ -722,7 +722,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
-| `--document` | `{"description": "Project-local graph file; bare names default to .provenant/scratch/graphs (or .agent-run/graphs)", "name": "document", "required": true}` |
+| `--document` | `{"description": "Project-local graph file; bare names default to .provenant/scratch/graphs", "name": "document", "required": true}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 

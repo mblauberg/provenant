@@ -950,6 +950,24 @@ fn graph_publication_is_private_and_idempotent() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
+fn graph_publication_repairs_owned_loose_directory() -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir()?;
+    let graphs = temp.path().join("graphs");
+    std::fs::create_dir(&graphs)?;
+    std::fs::set_permissions(&graphs, std::fs::Permissions::from_mode(0o755))?;
+    let graph = expand(&Layers::empty(), "single", "brief", &[])?.document;
+    let published = super::fabric::publish_preset_graph(temp.path(), &graph)?;
+    assert_eq!(
+        std::fs::metadata(&graphs)?.permissions().mode() & 0o777,
+        0o700
+    );
+    assert!(published.starts_with(&graphs));
+    assert_eq!(std::fs::read(&published)?, serde_json::to_vec(&graph)?);
+    Ok(())
+}
+
+#[test]
 fn preset_limits_and_composition_wiring() {
     let mut layers = Layers::empty();
     for width in [0, 33] {
