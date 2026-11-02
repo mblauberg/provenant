@@ -359,6 +359,17 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `trade_off` | `"Lower limits delegation chains; higher permits deeper nested work."` |
 | `type` | `"int"` |
 
+## `lanes.prepare_deps`
+
+| Field | Value |
+|---|---|
+| `default` | `true` |
+| `effect` | `"Run pnpm install --frozen-lockfile on the host for a writer worktree with a pnpm lockfile and no completed install (node_modules/.modules.yaml), after head and route checks and before the provider starts."` |
+| `reader` | `"tools/front-door/crates/cli/src/run/provider/preparation.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"false skips automatic dependency installation; the writer may then lack dependencies needed to work."` |
+| `type` | `"bool"` |
+
 ## `lanes.publish`
 
 | Field | Value |

@@ -1,5 +1,95 @@
 use super::*;
 
+const DEPENDENCY_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+const DEPENDENCY_STDERR_TAIL: usize = 4096;
+
+pub(super) fn prepare_writer_dependencies(
+    worktree: &Path,
+    enabled: bool,
+    locate: &dyn Fn(&str) -> Result<PathBuf, String>,
+    cancel: &provenant_core::CancelToken,
+) -> Result<serde_json::Value, String> {
+    let command = "pnpm install --frozen-lockfile";
+    let skipped = |reason| {
+        serde_json::json!({
+            "command": command,
+            "outcome": "skipped",
+            "reason": reason,
+            "elapsed_micros": 0,
+        })
+    };
+    if !enabled {
+        return Ok(skipped("disabled"));
+    }
+    let lockfile = worktree.join("pnpm-lock.yaml");
+    if !lockfile.is_file() {
+        return Ok(skipped("no_pnpm_lockfile"));
+    }
+    // pnpm writes this marker last, so a bare or interrupted `node_modules`
+    // is repaired by the install rather than trusted.
+    if worktree.join("node_modules/.modules.yaml").is_file() {
+        return Ok(skipped("already_installed"));
+    }
+
+    let executable = locate("pnpm").map_err(|error| format!("{command} failed: {error}"))?;
+    let argv = [
+        executable.as_os_str().to_owned(),
+        "install".into(),
+        "--frozen-lockfile".into(),
+    ];
+    let executor = provenant_os::exec::SystemExecutor::new(1)
+        .map_err(|error| format!("{command} failed: {error}"))?;
+    let mut options =
+        provenant_os::exec::ExecOptions::new(&argv, worktree, DEPENDENCY_INSTALL_TIMEOUT);
+    options.process_group = true;
+    options.cleanup_process_group = true;
+    options.cancel = Some(cancel);
+    options.stdout = provenant_os::exec::StreamPolicy::Discard;
+    options.stderr = provenant_os::exec::StreamPolicy::Tail {
+        limit: DEPENDENCY_STDERR_TAIL,
+    };
+    use provenant_os::exec::Executor;
+    let outcome = executor
+        .execute(options)
+        .map_err(|error| format!("{command} failed: {error}"))?;
+    let elapsed_micros = outcome.elapsed_micros;
+    let stderr = String::from_utf8_lossy(&outcome.stderr.bytes);
+    let stderr_tail = stderr.trim();
+    if outcome.termination != provenant_os::exec::Termination::Exit(0)
+        || outcome.timed_out
+        || outcome.cancelled
+    {
+        let detail = if stderr_tail.is_empty() {
+            String::new()
+        } else {
+            format!("; stderr tail: {stderr_tail}")
+        };
+        let reason = if outcome.cancelled {
+            "cancelled".to_owned()
+        } else if outcome.timed_out {
+            format!(
+                "timed out after {} seconds",
+                DEPENDENCY_INSTALL_TIMEOUT.as_secs()
+            )
+        } else {
+            match outcome.termination {
+                provenant_os::exec::Termination::Exit(code) => {
+                    format!("exited with status {code}")
+                }
+                provenant_os::exec::Termination::Signal(signal) => {
+                    format!("terminated by signal {signal}")
+                }
+            }
+        };
+        return Err(format!("{command} failed ({reason}){detail}"));
+    }
+    Ok(serde_json::json!({
+        "command": command,
+        "outcome": "installed",
+        "elapsed_micros": elapsed_micros,
+    }))
+}
+
 pub(crate) fn prepare(
     registry: &Registry<'_>,
     task: &run::TaskRequest,
@@ -23,7 +113,7 @@ pub(crate) fn prepare(
                 let path = std::env::var_os("PATH").ok_or("PATH is unavailable")?;
                 find_command_on_path(name, &std::env::split_paths(&path).collect::<Vec<_>>())
             }
-            _ if name == "gh" => resolve_executable(name),
+            _ if name == "gh" || name == "pnpm" => resolve_executable(name),
             Some(host) => host_executable(host, name),
             None => resolve_executable(name),
         },
@@ -1023,7 +1113,26 @@ pub(super) fn prepare_candidates(
             // the caller has closed its diagnostic stream.
             let _ = writeln!(std::io::stderr().lock(), "{advisory}");
         }
-        let provider = RouteRecord {
+        // Install on the host only once the head, route and lane setup are
+        // known to be usable, and before the sandbox is entered.
+        let dependency_event = match &writer {
+            Some(writer) => {
+                let enabled = task
+                    .profile
+                    .knobs
+                    .get("lanes.prepare_deps")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(true);
+                Some(prepare_writer_dependencies(
+                    writer.worktree.path(),
+                    enabled,
+                    locate,
+                    cancel,
+                )?)
+            }
+            None => None,
+        };
+        let mut provider = RouteRecord {
             provider: Some(route.adapter.clone()),
             model: Some(format!("{}/{}", route.adapter, route.model)),
             effort: route.effort,
@@ -1032,6 +1141,11 @@ pub(super) fn prepare_candidates(
             pool_selection: route.pool_selection.clone(),
             ..Default::default()
         };
+        if let Some(event) = &dependency_event {
+            provider
+                .extra
+                .insert("dependency_preparation".into(), event.clone());
+        }
         let stdin = match spec.stdin {
             Stdin::Bytes(bytes) => bytes,
             Stdin::Null => Vec::new(),
