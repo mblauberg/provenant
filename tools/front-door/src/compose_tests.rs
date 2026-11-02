@@ -138,6 +138,10 @@ fn dispatch(rig: &TestRig, mode: &str, operation: &str) -> Result<(serde_json::V
         String::from_utf8_lossy(&output.stdout.bytes),
         String::from_utf8_lossy(&output.stderr.bytes)
     );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr.bytes).contains("ignored invalid configuration"),
+        "a domain section is not an unknown key to the census policy read"
+    );
     let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
     let lane = value["data"]["lanes"][0].clone();
     // Codex's fixture protocol carries no observed answering model. Prove the
@@ -229,6 +233,12 @@ pub(crate) fn writer_dispatch_uses_lane_cache_and_narrow_provider_state() -> Res
         return Ok(());
     }
     let rig = fixture()?;
+    // The cargo seed is on by default; this test is about the lane cache and
+    // provider state, so it pins the seed off.
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[gc]\nfree_floor='1B'\n[domains.fabric.lanes.cargo_seed]\nenabled = false\n",
+    )?;
     let (_, context) = writer_context(&rig)?;
     let cleanup = super::worktree_tests::writer_process_cleanup(&context);
     let (_, attempt) = dispatch(&rig, "writer", "compose-writer")?;

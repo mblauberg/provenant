@@ -78,6 +78,12 @@ pub fn load_with_domains<R: Read, T: DeserializeOwned + Serialize>(
 pub fn read(roots: &Roots) -> Result<ResolvedConfig, ConfigError> {
     read_with_domains(roots, &NO_DOMAINS)
 }
+/// `read` without the advisory output. For callers that need only the host
+/// knobs: they do not know the domain sections, so they would otherwise report
+/// every configured domain as an unknown key.
+pub fn read_knobs(roots: &Roots) -> Result<ResolvedConfig, ConfigError> {
+    config_show(roots, &NO_DOMAINS)
+}
 pub fn read_with_domains<T: DeserializeOwned + Serialize>(
     roots: &Roots,
     sections: &DomainSections<T>,

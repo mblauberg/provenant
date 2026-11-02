@@ -53,7 +53,9 @@ pub use domains::{
 pub use edit::{EditOptions, Edited, edit_config, revision_of, show};
 pub use history::{FieldChange, HistoryEntry, HistoryLimits, history};
 pub use knobs::{KnobEdit, KnobSource, KnobValue};
-pub use loader::{config_show, inspect_config, load, load_with_domains, read, read_with_domains};
+pub use loader::{
+    config_show, inspect_config, load, load_with_domains, read, read_knobs, read_with_domains,
+};
 pub use migrate::{MigrateReport, Migration, migrate};
 pub use presets::Profile;
 pub use project_binding::{

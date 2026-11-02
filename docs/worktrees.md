@@ -169,18 +169,19 @@ directory, so setting only the target directory still queues behind test and
 build runs. Worktree removal and `provenant gc` remove this directory with the
 cache. Read-only lanes have no lane cache and get no variable.
 
-On macOS, a host may opt writer lanes into cloning the host Cargo registry
-and Git store into a fresh private Cargo home by hand-editing its state `config.toml` (this
-setting is not supported by `provenant config set`):
+On macOS, writer lanes clone the host Cargo registry, Git store and target seed
+into a fresh private Cargo home and target by default. Other platforms skip it.
+A host turns it off, or tunes retention, by hand-editing its state `config.toml`
+(this setting is not supported by `provenant config set`):
 
 ```toml
 [domains.fabric.lanes.cargo_seed]
-enabled = true
+enabled = false
 max_generations = 3
 max_bytes = 21474836480
 ```
 
-The default is false. `~/.cargo/registry` and `~/.cargo/git` are seeded independently;
+The default is true on macOS. `~/.cargo/registry` and `~/.cargo/git` are seeded independently;
 existing lane stores are retained. Cloning
 requires filesystem support for copy-on-write clones and falls back to an
 empty registry when unavailable or a source entry cannot be cloned. A symlink
@@ -202,7 +203,27 @@ commit in a scratch checkout, using `cargo build --locked --all-targets` and
 under the state directory's `cargo-target-seeds/generations/`. The manifest
 records the commit, full `rustc -vV`, host triple, profile, features and flags.
 Refresh `origin/main` before building when a newer seed is wanted. This is a
-host operation: only build seeds from a trusted `origin/main`.
+host operation: only build seeds from a trusted `origin/main`. The host's
+`refresh` entry point rebuilds only when `origin/main` has moved past the newest
+complete generation, and does nothing while another seed build holds the build
+lock, so at most one build runs; it rechecks staleness once it holds the lock, and a
+commit whose build failed is not rebuilt for that project until `origin/main`
+moves, whatever the cause: a transient build error also backs off until the
+next commit. A project with no `tools/front-door/Cargo.lock` is skipped. The
+seed store serves one front-door project: generations are selected by
+toolchain, not by project, and only the back-off is kept per project. The host
+tick calls it for you: when the daily
+collection finishes (it has just fetched each project's default branch), its
+worker queues a detached `internal tick-seed` worker that refreshes every
+registered project's seed, one project at a time. The tick itself never builds,
+so a long build cannot stall graph wakes. A busy build is retried on the next tick, a failure is
+recorded and the other projects still run, and the tick stays green; the tick
+output shows `seed=` (`idle`, `queued`, `running`, `busy`, `backed_off`, `complete`, `disabled` or
+`last_failed`) and `<state>/tick/seed-result.json` holds the error. The worker
+is single-flight on `<state>/tick/seed-worker.lock` and does nothing when
+`[domains.fabric.lanes.cargo_seed] enabled` is false. With `gc.schedule` off there is no
+collection and so no scheduled refresh; run `provenant worktree seed-build`
+after a fetch.
 
 Fresh writer targets are cloned from the newest generation whose full rustc
 version and host triple match the lane's toolchain. Cargo fingerprints decide
@@ -212,9 +233,17 @@ or binary from the writer checkout. Verification requires an explicit fixed
 release pin in `tools/front-door/rust-toolchain.toml` or the legacy
 `rust-toolchain`, an unambiguous host installation, and no rustup overrides or
 lane environment overrides. The lane's PATH must resolve to the protected host
-rustup shim, the lane must not be able to write its toolchain, and Cargo config
-files that could select another compiler cause a fallback. If verification
-fails, the target falls back with `toolchain_unverified`. The lane writes only
+rustup shim and the lane must not be able to write its toolchain. The one
+writable PATH entry allowed is the host's own `<scratch>/bin` (the build-slot
+`cargo` shim): Cargo run through rustup resolves its compiler from the pinned
+toolchain, so an entry there cannot select another. Cargo config files are read
+as data. A checked-in `.cargo/config.toml` is fine unless it can select a
+compiler (`build.rustc*`, `include`, or `[env]` entries for `RUSTUP_*`, `RUSTC*`
+or `PATH`); any file in the lane's own Cargo home is refused. If verification
+fails, the target falls back with `toolchain_unverified` and a `detail` code in
+`cargo-target-setup.json` naming the refusal (for example `path_entry_writable`,
+`cargo_config_selects_compiler`, `toolchain_env_override`,
+`rustup_overrides_present`), never an environment value. The lane writes only
 its own target; it cannot promote output into the seed. An existing lane target
 is retained. `cargo-target-setup.json` records whether
 preparation seeded, skipped or fell back, including mismatch reasons. The lane
@@ -258,8 +287,22 @@ using `du`, plus the volume free-space change during cloning. `du` counts shared
 blocks for each clone, so it cannot determine shared bytes; the free-space
 change is only an estimate and can include concurrent volume activity. Record
 the manifest, checkout and toolchain printed with the timings. The output targets
-are retained for inspection. These measurements are still pending on both hosts;
-there is no evidence yet to enable seeding by default.
+are retained for inspection.
+
+Measured on the maintainer's Apple-silicon APFS host (2 Nov 2026), seeding is
+on by default:
+
+| Step | Time |
+| --- | --- |
+| Clone of the main checkout's `target/debug` (about 10.5 GiB) | 3.8 s idle; 23.6 s at load average 52 with other lanes building |
+| `cargo check --locked` of the workspace from the clone | 23 s idle; 124 s at load average 52, rebuilding the workspace crates this branch changed |
+| Cold lane build of the same workspace | 10 minutes or more |
+
+`scripts/measure-cargo-target-seed` itself was not run here: it needs a
+published generation, whose `cargo build --all-targets` and `cargo test --no-run`
+exceed ten minutes on this host. The idle figures are from the measurement in #2484;
+the loaded figures were taken with a direct `cp -cR` clone and `cargo check` in
+this checkout. The volume free-space delta was lost in concurrent lane activity. Re-run the script on a host with spare capacity to refresh them.
 
 `provenant worktree remove` deletes only the removed worktree's own lane cache,
 derived from its verified identity before Git removes it. Cache cleanup holds

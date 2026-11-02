@@ -56,6 +56,22 @@ mod tests {
     }
 
     #[test]
+    fn cargo_seed_section_is_a_known_key_and_turns_the_seed_off() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp);
+        std::fs::create_dir_all(temp.path().join("state")).unwrap();
+        for text in [
+            "schema_version = 1\n[domains.fabric.lanes.cargo_seed]\nenabled = false\n",
+            "schema_version = 1\n[gc]\nfree_floor = '1B'\n[domains.fabric.lanes.cargo_seed]\nenabled = false\n",
+        ] {
+            std::fs::write(temp.path().join("state/config.toml"), text).unwrap();
+            let config = provenant_config::config_show(&roots, &SECTIONS).unwrap();
+            assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+            assert!(!config.domains.fabric.lanes.cargo_seed.enabled);
+        }
+    }
+
+    #[test]
     fn schema_reports_real_domain_bounds_enums_and_keyed_shapes() {
         let temp = tempfile::tempdir().unwrap();
         let roots = roots(&temp);

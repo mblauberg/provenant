@@ -5,7 +5,7 @@ mod artifacts;
 mod board;
 mod completion;
 pub use board::{BoardLane, BoardPage};
-pub use completion::handoff_progress_guidance;
+pub use completion::{handoff_progress_guidance, lane_preamble};
 mod controls;
 mod correlation;
 pub use correlation::{WORK_INDEX_FILE, WorkCoverage, WorkIndex, WorkSelector, validate_work};

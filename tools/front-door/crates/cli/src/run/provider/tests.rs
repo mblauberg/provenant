@@ -1654,6 +1654,12 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
     assert!(continued.argv.iter().any(|arg| arg == "--resume"));
     let confinement = launch.confinement.ok_or("writer confinement missing")?;
     assert!(confinement.writer.is_some());
+    // The default config enables the cargo seed, and prepare hands that to the
+    // lane's launch confinement, where `seed_target` reads it.
+    assert!(
+        confinement.cargo_registry_seed,
+        "the default FabricConfig must reach the writer launch with the seed enabled"
+    );
     assert!(!confinement.plan.permissions().writer_publishing());
     assert!(!scratch.join("publishing.gitconfig").exists());
     assert!(

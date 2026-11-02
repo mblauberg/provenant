@@ -130,13 +130,14 @@ frontmatter and agent sidecars are checked by `scripts/check-harness`.
 
 ## Configuration
 
-### Cargo home seed opt-in
+### Cargo seed switch
 
-The per-host Cargo home seed switch must default off and must have no
+The per-host Cargo seed switch must default on and must have no
 effect outside macOS. Its scope and manual configuration are described in
 the [worktree guide](../worktrees.md).
-- Why: cloning is an optional host-specific optimisation, not a prerequisite
-  for running a lane.
+- Why: cloning is a host-specific optimisation that falls back to an empty
+  store when unavailable, and a host may turn it off; it is never a
+  prerequisite for running a lane.
 - Test: `crates/fabric-runtime/src/config.rs::tests::lane_priority_defaults_and_bounds`;
   `crates/run/src/cargo_seed.rs::tests::disabled_does_not_touch_cache`;
   `::enabled_is_a_no_op_on_other_platforms`
@@ -151,8 +152,18 @@ generation root distinguish finished publications from interrupted ones. GC
 reclaims incomplete generations and abandoned stages while protecting active
 builds. It holds the store lock and removes oldest generations until both the
 count and apparent-byte caps hold; a busy store is skipped.
-- Test: `src/target_seed_build.rs::tests`; `crates/run/src/target_seed_gc.rs::tests`
-- Owner: `src/target_seed_build.rs`, `crates/run/src/target_seed_gc.rs`
+
+The host refreshes generations itself. Each daily collection, after fetching,
+queues a detached single-flight worker that rebuilds a project's seed only when
+`origin/main` has moved past its newest complete generation. The tick never
+builds inline. A busy build is a no-op; a failure is recorded in
+`<state>/tick/seed-result.json`, reported as `last_failed`, and does not fail
+the tick.
+- Test: `src/target_seed_build.rs::tests`; `crates/run/src/target_seed_gc.rs::tests`;
+  `src/tick.rs::tests::seed_refresh_is_queued_without_running_inline_and_a_spawn_failure_is_recorded`;
+  `::seed_pass_treats_busy_as_a_noop_and_isolates_project_failures`;
+  `::seed_pass_is_single_flight_and_respects_a_disabled_seed`
+- Owner: `src/target_seed_build.rs`, `src/tick.rs`, `crates/run/src/target_seed_gc.rs`
 
 ### Strict typed config
 
