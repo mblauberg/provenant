@@ -834,6 +834,21 @@ fn refresh_auth_metadata(
     }
     Ok(())
 }
+/// Repair text for an agy account whose isolated keychain is missing. Without a registered entry the
+/// expected path is unknown, so the text names the registry check instead of the path.
+fn keychain_repair(
+    entry: Option<&provenant_providers::accounts::Registration>,
+    label: &str,
+) -> String {
+    let expected = entry.map_or_else(
+        || "the account's isolated keychain (login.keychain-db under its registered directory; no registered agy account matches this row, check `provenant accounts list`)".to_string(),
+        |entry| entry.directory.join("Library/Keychains/login.keychain-db").display().to_string(),
+    );
+    let label = entry.map_or(label, |entry| entry.label.as_str());
+    format!(
+        "expected {expected}; re-register with `provenant accounts register --adapter agy --directory ~ {label}` if this is the login-keychain account, or create the isolated keychain per docs/runbooks/providers.md"
+    )
+}
 /// Attaches menu bar choices from config; hidden and order are applied by the app.
 fn decorate(
     report: &mut QuotaReport,
@@ -852,19 +867,13 @@ fn decorate(
             None
         };
     for row in &mut report.accounts {
-        row.repair = if row.error == Some(ProbeFailure::IsolatedKeychainUnavailable) {
-            accounts
+        row.repair = (row.error == Some(ProbeFailure::IsolatedKeychainUnavailable)).then(|| {
+            let entry = accounts
                 .entries
                 .values()
-                .find(|entry| entry.adapter == "agy" && entry.key == row.account.account_key)
-                .map(|entry| format!(
-                    "expected {}; re-register with `provenant accounts register --adapter agy --directory ~ {}` if this is the login-keychain account, or create the isolated keychain per docs/runbooks/providers.md",
-                    entry.directory.join("Library/Keychains/login.keychain-db").display(),
-                    entry.label
-                ))
-        } else {
-            None
-        };
+                .find(|entry| entry.adapter == "agy" && entry.key == row.account.account_key);
+            keychain_repair(entry, &row.account.label)
+        });
         row.display = accounts
             .entries
             .iter()
@@ -1862,6 +1871,50 @@ mod tests {
         let signed_out = human(ProbeFailure::Auth);
         assert!(signed_out.contains("needs login"), "{signed_out}");
         assert!(!signed_out.contains("differs"), "{signed_out}");
+    }
+
+    #[test]
+    fn decorate_gives_generic_keychain_repair_without_a_matching_registration() {
+        let row = |label: &str| AccountRow {
+            account: AccountScope {
+                adapter: "agy".into(),
+                account_key: "agy-google-abc".into(),
+                label: label.into(),
+            },
+            snapshot: None,
+            status: QuotaStatus::KeychainUnavailable,
+            resets_at: None,
+            refusals: vec![],
+            free_pool_refusal: false,
+            age_seconds: None,
+            next_due_unix_seconds: None,
+            refreshing: false,
+            error: Some(ProbeFailure::IsolatedKeychainUnavailable),
+            repair: None,
+            capacity_cooldowns: vec![],
+            display: None,
+        };
+        let mut report = QuotaReport {
+            schema_version: 1,
+            generated_unix_seconds: 0,
+            accounts: vec![row("legacy")],
+            sources: vec![],
+            coverage: Coverage { total: 1, known: 0 },
+            refreshing_ids: vec![],
+            next_due_unix_seconds: None,
+            report_path: String::new(),
+            display: Default::default(),
+            display_icon_warning: None,
+        };
+        decorate(
+            &mut report,
+            &provenant_providers::accounts::Settings::default(),
+            &Display::default(),
+        );
+        let repair = report.accounts[0].repair.as_deref().expect("repair text");
+        assert!(repair.contains("isolated keychain"), "{repair}");
+        assert!(repair.contains("--directory ~ legacy"), "{repair}");
+        assert!(repair.contains("docs/runbooks/providers.md"), "{repair}");
     }
 
     #[test]
