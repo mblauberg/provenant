@@ -35,3 +35,11 @@ job summary.
 Keep the full-run list conservative when introducing build-time inputs or
 workspace-wide configuration. The `main` push remains the full-workspace
 backstop if a path is missed.
+
+## Flaky-test quarantine
+
+Add a flaky test to `tools/front-door/.config/quarantine.toml` only while it
+has an open issue, an owner and an expiry within 30 days. CI validates each
+entry against `cargo nextest list`, excludes quarantined tests from the
+blocking partitions, then runs them in an advisory step that reports their
+result. Remove the entry in the PR that fixes the test.
