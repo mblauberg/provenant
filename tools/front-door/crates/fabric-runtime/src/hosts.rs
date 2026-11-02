@@ -1129,6 +1129,10 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
+    fn project_key(home: &Path) -> CrossHostProjectKey {
+        CrossHostProjectKey::from_home(home, &home.join("repo/.git")).unwrap()
+    }
+
     #[test]
     fn peer_refusals_preserve_typed_errors_and_reject_unknown_codes() {
         let error = facade::FacadeError::LaunchUnknown {
@@ -1162,11 +1166,7 @@ mod tests {
             version: 1,
             protocol: PROTOCOL - 1,
             host: HostId::from_bytes([3; 16]),
-            project: CrossHostProjectKey::from_home(
-                Path::new("/home/a"),
-                Path::new("/home/a/repo/.git"),
-            )
-            .unwrap(),
+            project: project_key(Path::new("/home/a")),
             result: serde_json::json!({"result": "error", "data": {"error": {"code": "busy"}}}),
         };
         assert!(matches!(
@@ -1195,11 +1195,7 @@ mod tests {
             agent: "fixture".into(),
             project: ProjectLocator {
                 extra: Default::default(),
-                key: CrossHostProjectKey::from_home(
-                    Path::new("/home/a"),
-                    Path::new("/home/a/repo/.git"),
-                )
-                .unwrap(),
+                key: project_key(Path::new("/home/a")),
                 common_dir: "repo/.git".into(),
             },
             action: serde_json::json!({"action": "future_action", "build_heavy": true}),
@@ -1274,7 +1270,7 @@ mod tests {
             agent: "fixture".into(),
             project: ProjectLocator {
                 extra: Default::default(),
-                key: CrossHostProjectKey::from_home(home, &home.join("repo/.git")).unwrap(),
+                key: project_key(home),
                 common_dir: "repo/.git".into(),
             },
             action: PeerAction::Health {
@@ -1318,8 +1314,7 @@ mod tests {
         let (local, remote) = (HostId::from_bytes([1; 16]), HostId::from_bytes([2; 16]));
         let project = ProjectLocator {
             extra: Default::default(),
-            key: CrossHostProjectKey::from_home(Path::new("/h"), Path::new("/h/repo/.git"))
-                .unwrap(),
+            key: project_key(Path::new("/h")),
             common_dir: "repo/.git".into(),
         };
         let operation = OperationId::parse("note-once").unwrap();
@@ -1415,11 +1410,7 @@ mod tests {
         let operation = OperationId::parse("mail-once").unwrap();
         let project = ProjectLocator {
             extra: Default::default(),
-            key: CrossHostProjectKey::from_home(
-                Path::new("/home/a"),
-                Path::new("/home/a/repo/.git"),
-            )
-            .unwrap(),
+            key: project_key(Path::new("/home/a")),
             common_dir: "repo/.git".into(),
         };
         let request = PeerRequest {
@@ -1550,11 +1541,7 @@ mod tests {
             agent: "chair".into(),
             project: ProjectLocator {
                 extra: Default::default(),
-                key: CrossHostProjectKey::from_home(
-                    Path::new("/home/a"),
-                    Path::new("/home/a/repo/.git"),
-                )
-                .unwrap(),
+                key: project_key(Path::new("/home/a")),
                 common_dir: "repo/.git".into(),
             },
             action,
@@ -1649,11 +1636,7 @@ mod tests {
         let host = HostId::from_bytes([2; 16]);
         let project = ProjectLocator {
             extra: Default::default(),
-            key: CrossHostProjectKey::from_home(
-                Path::new("/home/a"),
-                Path::new("/home/a/repo/.git"),
-            )
-            .unwrap(),
+            key: project_key(Path::new("/home/a")),
             common_dir: "repo/.git".into(),
         };
         let request = PeerRequest::new(
@@ -1689,11 +1672,7 @@ mod tests {
         let host = HostId::from_bytes([2; 16]);
         let project = ProjectLocator {
             extra: Default::default(),
-            key: CrossHostProjectKey::from_home(
-                Path::new("/home/a"),
-                Path::new("/home/a/repo/.git"),
-            )
-            .unwrap(),
+            key: project_key(Path::new("/home/a")),
             common_dir: "repo/.git".into(),
         };
         let request = PeerRequest::new(
@@ -1726,11 +1705,7 @@ mod tests {
         let host = HostId::from_bytes([2; 16]);
         let project = ProjectLocator {
             extra: Default::default(),
-            key: CrossHostProjectKey::from_home(
-                Path::new("/home/a"),
-                Path::new("/home/a/repo/.git"),
-            )
-            .unwrap(),
+            key: project_key(Path::new("/home/a")),
             common_dir: "repo/.git".into(),
         };
         let request = PeerRequest::new(
@@ -1770,11 +1745,7 @@ mod tests {
         let host = HostId::from_bytes([2; 16]);
         let project = ProjectLocator {
             extra: Default::default(),
-            key: CrossHostProjectKey::from_home(
-                Path::new("/home/a"),
-                Path::new("/home/a/repo/.git"),
-            )
-            .unwrap(),
+            key: project_key(Path::new("/home/a")),
             common_dir: "repo/.git".into(),
         };
         let request = PeerRequest::new(
@@ -1953,9 +1924,7 @@ mod tests {
     fn released_v1_health_and_decode_refusal_report_protocol_one() {
         // v1 omits protocol from both the envelope and the health data.
         let host = HostId::from_bytes([2; 16]);
-        let project =
-            CrossHostProjectKey::from_home(Path::new("/home/a"), Path::new("/home/a/repo/.git"))
-                .unwrap();
+        let project = project_key(Path::new("/home/a"));
         let mut reply = outcome(0, "", false);
         reply.stdout.bytes = serde_json::to_vec(&serde_json::json!({
             "version": 1, "host": host, "project": project,
@@ -2013,11 +1982,7 @@ mod tests {
         let host = HostId::from_bytes([2; 16]);
         let project = ProjectLocator {
             extra: Default::default(),
-            key: CrossHostProjectKey::from_home(
-                Path::new("/home/a"),
-                Path::new("/home/a/repo/.git"),
-            )
-            .unwrap(),
+            key: project_key(Path::new("/home/a")),
             common_dir: "repo/.git".into(),
         };
         for (requested, action) in [
@@ -2179,11 +2144,7 @@ mod tests {
             agent: "chair".into(),
             project: ProjectLocator {
                 extra: Default::default(),
-                key: CrossHostProjectKey::from_home(
-                    Path::new("/home/a"),
-                    Path::new("/home/a/repo/.git"),
-                )
-                .unwrap(),
+                key: project_key(Path::new("/home/a")),
                 common_dir: "repo/.git".into(),
             },
             action: PeerAction::SessionHandoff {
@@ -2241,11 +2202,7 @@ mod tests {
         let host = HostId::from_bytes([2; 16]);
         let project = ProjectLocator {
             extra: Default::default(),
-            key: CrossHostProjectKey::from_home(
-                Path::new("/home/a"),
-                Path::new("/home/a/repo/.git"),
-            )
-            .unwrap(),
+            key: project_key(Path::new("/home/a")),
             common_dir: "repo/.git".into(),
         };
         let request = PeerRequest {
@@ -2299,11 +2256,7 @@ mod tests {
         let host = HostId::from_bytes([2; 16]);
         let project = ProjectLocator {
             extra: Default::default(),
-            key: CrossHostProjectKey::from_home(
-                Path::new("/home/a"),
-                Path::new("/home/a/repo/.git"),
-            )
-            .unwrap(),
+            key: project_key(Path::new("/home/a")),
             common_dir: "repo/.git".into(),
         };
         let request = PeerRequest {
@@ -2386,11 +2339,7 @@ mod tests {
         let host = HostId::from_bytes([2; 16]);
         let project = ProjectLocator {
             extra: Default::default(),
-            key: CrossHostProjectKey::from_home(
-                Path::new("/home/a"),
-                Path::new("/home/a/repo/.git"),
-            )
-            .unwrap(),
+            key: project_key(Path::new("/home/a")),
             common_dir: "repo/.git".into(),
         };
         let request = PeerRequest {
