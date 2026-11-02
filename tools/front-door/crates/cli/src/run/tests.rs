@@ -3919,8 +3919,7 @@ fn opencode_stderr_quota_settles_and_records_refusal() -> Result<(), Box<dyn std
     };
     use std::os::unix::fs::PermissionsExt;
     if crate::fabric::in_lane() {
-        // A lane suppresses host quota writes, which this test observes.
-        eprintln!("skipped: running inside a lane");
+        // A lane suppresses the host quota writes this test observes.
         return Ok(());
     }
     let temp = tempfile::tempdir()?;
