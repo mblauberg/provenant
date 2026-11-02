@@ -586,24 +586,30 @@ impl RunStore {
                     release_permitted: false,
                 });
             };
-            let mut driver =
-                match crate::settlement::Guard::claim(attempt, Self::scope(&record), call.clock) {
-                    Ok(Some(driver)) => driver,
-                    Ok(None) => {
-                        return Ok(Finished {
-                            record,
-                            release_permitted: false,
-                        });
-                    }
-                    Err(error @ RunError::ObjectImportLimit(_)) => {
-                        self.refuse_pending_import(&record, attempt, &error.to_string(), call)?;
-                        return Ok(Finished {
-                            record: self.record(record.attempt_id, call)?,
-                            release_permitted: true,
-                        });
-                    }
-                    Err(error) => return Err(error),
-                };
+            let mut driver = match crate::settlement::Guard::claim(
+                attempt,
+                Self::scope(&record),
+                call.clock,
+            ) {
+                Ok(Some(driver)) => driver,
+                Ok(None) => {
+                    return Ok(Finished {
+                        record,
+                        release_permitted: false,
+                    });
+                }
+                Err(error @ RunError::ObjectImportLimit(_)) => {
+                    let reason = format!(
+                        "settlement exhausted three attempts; private Git retained for host recovery: {error}"
+                    );
+                    self.refuse_pending_import(&record, attempt, &reason, call)?;
+                    return Ok(Finished {
+                        record: self.record(record.attempt_id, call)?,
+                        release_permitted: true,
+                    });
+                }
+                Err(error) => return Err(error),
+            };
             let request = self.request(record.run_id, call)?;
             let task = request
                 .tasks
@@ -646,7 +652,18 @@ impl RunStore {
                     )?;
                 }
                 Err(error) if driver.exhausted() => {
-                    self.refuse_pending_import(&record, attempt, &error.to_string(), call)?;
+                    let reason = format!(
+                        "settlement exhausted three attempts; private Git retained for host recovery: {error}"
+                    );
+                    self.refuse_pending_import(&record, attempt, &reason, call)?;
+                }
+                // The same precondition refusal the first attempt makes: no
+                // retry can change it without host recovery.
+                Err(error @ (RunError::Writer(_) | RunError::WriterProjectMismatch { .. })) => {
+                    let reason = format!(
+                        "writer preconditions refused; private Git retained for host recovery: {error}"
+                    );
+                    self.refuse_pending_import(&record, attempt, &reason, call)?;
                 }
                 Err(error) => {
                     self.record_effect(
@@ -678,7 +695,7 @@ impl RunStore {
         &self,
         record: &AttemptRecord,
         attempt: &Directory,
-        detail: &str,
+        reason: &str,
         call: &Request<'_>,
     ) -> Result<()> {
         let request = self.request(record.run_id, call)?;
@@ -688,10 +705,7 @@ impl RunStore {
             .find(|task| task.task_id == record.task_id)
             .and_then(|task| task.writer.as_ref())
             .ok_or(RunError::Validation("pending import lacks writer"))?;
-        let reason = format!(
-            "settlement exhausted three attempts; private Git retained for host recovery: {detail}"
-        );
-        seal_import_refusal(attempt, Self::scope(record), &writer.worktree, &reason)?;
+        seal_import_refusal(attempt, Self::scope(record), &writer.worktree, reason)?;
         self.record_effect(
             record.attempt_id,
             record.generation,

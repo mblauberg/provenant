@@ -997,19 +997,20 @@ fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> Result {
         store.record(attempt, &call)?.state,
         provenant_run::AttemptState::Terminal { .. }
     ));
-    // Incomplete quarantine must leave the attempt retryable, not seal a
-    // terminal record whose missing manifest can never be released.
+    // Incomplete quarantine cannot verify writer facts: the sealed decision is
+    // unsettled, with a retryable import and the custody fence retained.
     let snapshot_path = attempt_path.join("quarantine/snapshot.json");
     let baseline = fs::read(&snapshot_path)?;
     fs::write(&snapshot_path, b"{}")?;
-    let uncertain = store.reconcile_for_fixture(record.run_id, &provider, &call)?;
+    let settling = store.reconcile_for_fixture(record.run_id, &provider, &call)?;
     assert!(
-        matches!(uncertain.as_slice(), [(id, provenant_run::Reconciled::Uncertain { .. })] if *id == attempt)
+        matches!(settling.as_slice(), [(id, provenant_run::Reconciled::Settling { .. })] if *id == attempt),
+        "{settling:?}"
     );
-    assert!(!matches!(
-        store.record(attempt, &call)?.state,
-        provenant_run::AttemptState::Terminal { .. }
-    ));
+    assert_terminal_outcome(
+        &store.record(attempt, &call)?,
+        provenant_run::Outcome::Unsettled,
+    )?;
     assert!(!attempt_path.join("quarantine/manifest.json").exists());
     fs::write(snapshot_path, baseline)?;
     // The operation remains unfinished when the durable exit is recovered.
@@ -1028,12 +1029,21 @@ fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> Result {
     journal["retry_after_ms"] = 0.into();
     fs::write(progress, serde_json::to_vec(&journal)?)?;
     let found = store.reconcile_for_fixture(record.run_id, &provider, &call)?;
-    assert_eq!(found, vec![(attempt, provenant_run::Reconciled::Finished)]);
-    let terminal = store.record(attempt, &call)?;
-    assert_terminal_outcome(&terminal, provenant_run::Outcome::Failed)?;
-    assert!(
-        matches!(terminal.state, provenant_run::AttemptState::Terminal { reason: Some(reason), .. } if reason.contains("in-progress Git operation"))
+    // The sealed unsettled decision stays; the retry reaches explicit refusal
+    // of the unfinished operation, releases custody and removes temporary files.
+    assert_eq!(
+        found,
+        vec![(attempt, provenant_run::Reconciled::TemporaryRemoved)]
     );
+    let terminal = store.record(attempt, &call)?;
+    assert_terminal_outcome(&terminal, provenant_run::Outcome::Unsettled)?;
+    assert!(matches!(
+        terminal.settlement_receipts,
+        Some(provenant_run::SettlementReceipts {
+            git_import: provenant_run::EffectDisposition::Failed { ref reason, retryable: false },
+            ..
+        }) if reason.contains("in-progress Git operation")
+    ));
     assert!(attempt_path.join("release.json").is_file());
     assert!(store.writer_fences()?.is_empty());
     cleanup.disarm();
