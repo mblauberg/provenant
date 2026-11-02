@@ -701,6 +701,11 @@ brief leaves it open.
 
 Preset runs use the normal bounded `run` wait, 240 seconds by default.
 `--wait` accepts seconds or durations such as `30m`, up to four hours.
+After submission, `run --preset` prints the graph ID and a ready-to-run
+`provenant fabric graph status GRAPH_ID` command in both human and JSON output.
+The resume, status and cancel verbs also accept the graph ID, retained document
+path or its SHA-256 hash; the retained path and hash resolve to the document's
+declared graph ID.
 `--concurrency` accepts 1 to 16 and remains bounded by the host ceiling.
 Timeout leaves work running. Graph status retains one composite status and
 the children's attempts, findings and selected exports. Follow the printed

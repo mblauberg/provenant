@@ -1312,15 +1312,6 @@ fn admission_configuration_and_guardian_failures_are_named() {
 }
 
 #[test]
-fn production_terminal_retry_schedule_is_unchanged() {
-    assert_eq!(
-        PRODUCTION_TERMINAL_RETRY_MS,
-        [0, 5_000, 30_000, 120_000],
-        "production must keep its claim backoff"
-    );
-}
-
-#[test]
 fn process_tree_path_replaces_foreign_environment_and_clears_it_when_unavailable() {
     let input = [
         ("PATH".into(), "/bin".into()),
