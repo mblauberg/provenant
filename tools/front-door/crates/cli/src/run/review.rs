@@ -700,14 +700,6 @@ fn aggregate_verdicts(data: &Value) -> Value {
     let mut counts = json!({"approve": 0, "approve_with_nits": 0, "request_changes": 0, "inconclusive": 0, "unknown": 0, "not_submitted": 0});
     if let Some(rows) = data["reviewers"].as_array() {
         for row in rows {
-            if row["state"] == "planned" {
-                text.push_str(&format!(
-                    "  lens={} pool={}\n",
-                    row["lens"].as_str().unwrap_or("general"),
-                    row["pool"].as_str().unwrap_or("unknown")
-                ));
-                continue;
-            }
             let verdict = row["verdict"].as_str().unwrap_or("unknown");
             let key = if row["state"] == "not_submitted" {
                 "not_submitted"
@@ -733,6 +725,14 @@ fn review_text(data: &Value) -> String {
     );
     if let Some(rows) = data["reviewers"].as_array() {
         for row in rows {
+            if row["state"] == "planned" {
+                text.push_str(&format!(
+                    "  lens={} pool={}\n",
+                    row["lens"].as_str().unwrap_or("general"),
+                    row["pool"].as_str().unwrap_or("unknown")
+                ));
+                continue;
+            }
             let model = row["applied_route"]["model"]
                 .as_str()
                 .unwrap_or("unresolved");
