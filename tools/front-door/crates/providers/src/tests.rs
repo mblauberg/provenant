@@ -4969,6 +4969,38 @@ fn agy_directory_without_a_keychain_file_keeps_the_shared_login_keychain()
     Ok(())
 }
 
+#[test]
+fn unregistered_agy_launches_on_the_login_keychain_under_the_local_key() {
+    let prompt = Prompt::new("fixture prompt".into());
+    let mut route = route("agy", "gemini-3.8-flash");
+    let plan = fixture_access_plan(Access::ReadOnly, Some("keychain"), false);
+    // Preparation's synthetic entry routes on key `local` with no pinned account.
+    route.account_key = Some("local".into());
+    let input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    let spec = agy::Agy.prepare(input).expect("unregistered agy launches");
+    let login = Path::new("/fixture/home/Library/Keychains/login.keychain-db");
+    assert!(spec.setup.contains(&SetupStep::Symlink {
+        link: "/fixture/state/Library/Keychains/login.keychain-db".into(),
+        target: login.into(),
+    }));
+    // The carve-out is only the synthetic key: a registered key needs its account.
+    route.account_key = Some("agy-google-fixture".into());
+    let input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    assert!(matches!(
+        agy::Agy.prepare(input),
+        Err(ProviderError::UnknownIdentity)
+    ));
+    // The other registered-account adapters have no such carve-out.
+    route.adapter = "codex".into();
+    route.account_key = Some("local".into());
+    let plan = fixture_access_plan(Access::ReadOnly, Some("login"), false);
+    let input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    assert!(matches!(
+        codex::Codex.prepare(input),
+        Err(ProviderError::UnknownIdentity)
+    ));
+}
+
 /// A fake `agy` that signs in as one Google account per `HOME`, recording
 /// each probe's `HOME`.
 struct AgySignIns {

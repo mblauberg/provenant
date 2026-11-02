@@ -267,6 +267,115 @@ fn version_probe_reports_outcomes_without_disclosing_output()
     Ok(())
 }
 
+/// Agy has registered accounts and a local login. A user with no agy
+/// registration gets a synthetic `local` entry, which has no registered identity
+/// to probe: it must observe as available on the user's own login, while a
+/// registered agy key is still verified against a fresh identity probe.
+#[test]
+fn unregistered_agy_observes_on_its_local_login_without_an_identity_probe()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_os::exec::{
+        CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
+    };
+
+    #[derive(Default)]
+    struct Agy(std::sync::Mutex<Vec<Vec<String>>>);
+    impl Executor for Agy {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            let argv: Vec<String> = options
+                .argv
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            let version = argv.get(1).is_some_and(|arg| arg == "--version");
+            self.0.lock().unwrap().push(argv);
+            // The identity probe fails, as it does for an unsigned-in HOME.
+            let (code, bytes) = if version {
+                (0, b"agy 1.0.0\n".to_vec())
+            } else {
+                (1, Vec::new())
+            };
+            Ok(ExecOutcome {
+                termination: Termination::Exit(code),
+                timed_out: false,
+                stdout: CapturedStream {
+                    total_bytes: bytes.len() as u64,
+                    bytes,
+                    ..CapturedStream::default()
+                },
+                stderr: CapturedStream::default(),
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: false,
+                elapsed_micros: 80_000,
+            })
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let root = canonical(temp.path())?;
+    for path in ["home", "project", "state"] {
+        std::fs::create_dir_all(root.join(path))?;
+    }
+    let home = root.join("home");
+    let roots = provenant_core::RootInputs {
+        state_dir: Some(root.join("state")),
+        ..provenant_core::RootInputs::new(home.clone(), root.join("project"))
+    }
+    .resolve(&provenant_os::fs::SystemPathResolver)?;
+    let agy = Agy::default();
+    let executor = provenant_providers::host::HostProbeExecutor::new(&agy, &root.join("state"))?;
+    let probe = Probe {
+        roots: Some(&roots),
+        executor: &executor,
+        home: &home,
+        user: "fixture".as_ref(),
+        scratch: &root,
+    };
+    let entry = |key: &str| {
+        serde_json::from_value(serde_json::json!({
+            "adapter": "agy", "label": "default", "key": key, "directory": home,
+        }))
+    };
+
+    // The synthetic entry preparation adds when nothing is registered.
+    let local = observe_account(
+        &entry("local")?,
+        Path::new("/fixture/agy"),
+        &probe,
+        "r",
+        100,
+    )?;
+    assert_eq!(local.account_key.as_deref(), Some("local"));
+    assert_eq!(local.version, "agy 1.0.0");
+    assert!(
+        agy.0
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|argv| argv[1] == "--version"),
+        "no identity probe for the local login"
+    );
+
+    // A registered key is still verified: the failed probe refuses the account.
+    let error = observe_account(
+        &entry("agy-google-fixture")?,
+        Path::new("/fixture/agy"),
+        &probe,
+        "r",
+        100,
+    )
+    .err()
+    .ok_or("registered agy account skipped its identity probe")?
+    .to_string();
+    assert!(
+        agy.0.lock().unwrap().iter().any(|argv| argv[1] == "-p"),
+        "registered agy runs the /usage identity probe"
+    );
+    assert!(!error.is_empty());
+    Ok(())
+}
+
 #[test]
 fn credential_messages_suggest_signin_only_for_missing_or_expired_tokens() {
     use provenant_providers::ProviderError;
