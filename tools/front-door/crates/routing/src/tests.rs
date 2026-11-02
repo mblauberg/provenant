@@ -24,9 +24,17 @@ fn configured_read_only_route_refuses_writes() -> Result<(), Box<dyn std::error:
     let catalogue = Catalogue::bundled()?;
     let default_config = RoutingConfig::default();
     let default_context = context(&catalogue, &default_config, now()?);
+    for model in [
+        "agy/gemini-3.8-flash",
+        "opencode/opencode/glm-5.3-flash-free",
+    ] {
+        let mut writer = request(model)?;
+        writer.intent.writes = true;
+        let resolved = resolve(&writer, &default_context);
+        assert!(resolved.is_ok(), "{model}: {resolved:?}");
+    }
     let mut query = request("agy/gemini-3.8-flash")?;
     query.intent.writes = true;
-    assert!(resolve(&query, &default_context).is_ok());
 
     let config: RoutingConfig = toml_edit::de::from_str(
         "[[model_policy.rules]]\nmodel='agy/gemini-3.8-flash'\n[model_policy.rules.policy.lane]\nread_only=true\n",
