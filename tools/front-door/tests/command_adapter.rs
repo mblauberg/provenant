@@ -294,9 +294,15 @@ set -eu
 test -n "$PROVENANT_PROCESS_TREE"
 /bin/sh -c '/bin/sleep 15 & wait' &
 child=$!
-# The supervisor holds stdin open until the first sample is published.
-IFS= read -r _ || true
-"$1" process-tree --root "$$" --json > "$TMPDIR/sample.json"
+# Ready only when a published sample shows the child's own child (the sleep);
+# the sampler publishes on its own cadence, so poll that condition, not a delay.
+attempt=0
+until "$1" process-tree --root "$$" --json > "$TMPDIR/sample.json" \
+    && /usr/bin/grep -Eq "\"ppid\":$child[,}]" "$TMPDIR/sample.json"; do
+    attempt=$((attempt + 1))
+    test "$attempt" -lt 50
+    /bin/sleep 0.2
+done
 printf '%s\n' "$PROVENANT_PROCESS_TREE"
 /bin/cat "$TMPDIR/sample.json"
 "#;
