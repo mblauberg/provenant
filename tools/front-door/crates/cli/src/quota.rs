@@ -1412,6 +1412,10 @@ pub(crate) fn cache_share(cache: &provenant_telemetry::CacheSummary) -> String {
 }
 
 fn quota_human(report: &QuotaReport) -> String {
+    quota_human_at(report, jiff::tz::TimeZone::system())
+}
+
+fn quota_human_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> String {
     let mut human = format!(
         "Quota: {}/{} current readings\n",
         report.coverage.known, report.coverage.total
@@ -1428,10 +1432,32 @@ fn quota_human(report: &QuotaReport) -> String {
         let age = row
             .age_seconds
             .map_or_else(|| "unknown".into(), |age| format!("{age}s"));
+        let reset = row
+            .resets_at
+            .as_deref()
+            .and_then(|at| reset_label(at, report.generated_unix_seconds, &time_zone));
         human.push_str(&format!(
-            "{} [{}]: {status}, age {age}",
-            row.account.label, row.account.adapter
+            "{} [{}]: {status}{}, age {age}",
+            row.account.label,
+            row.account.adapter,
+            reset.map_or_else(String::new, |label| format!(" {label}"))
         ));
+        for refusal in displayed_refusals(row) {
+            let name = refusal.model.escape_debug();
+            let pool = refusal
+                .pool
+                .as_deref()
+                .map(|pool| format!(" in pool {}", pool.escape_debug()))
+                .unwrap_or_default();
+            let reset = refusal
+                .resets_at
+                .as_deref()
+                .and_then(|at| reset_label(at, report.generated_unix_seconds, &time_zone));
+            human.push_str(&format!(
+                "; recorded refusal for {name}{pool}{}",
+                reset.map_or_else(String::new, |label| format!(" {label}"))
+            ));
+        }
         if let Some(snapshot) = &row.snapshot {
             if let Some(details) = &snapshot.details {
                 if let Some(source) = &details.source {
@@ -1487,6 +1513,37 @@ fn quota_human(report: &QuotaReport) -> String {
     }
     human.push_str(&format!("Report: {}\n", report.report_path));
     human
+}
+
+/// A refusal reset in the host's local time, with a weekday when it is not today.
+fn reset_label(resets_at: &str, now: i64, time_zone: &jiff::tz::TimeZone) -> Option<String> {
+    let reset = resets_at
+        .parse::<jiff::Timestamp>()
+        .ok()?
+        .to_zoned(time_zone.clone());
+    let today = jiff::Timestamp::from_second(now)
+        .ok()?
+        .to_zoned(time_zone.clone())
+        .date();
+    let format = if reset.date() == today {
+        "%H:%M"
+    } else {
+        "%a %H:%M"
+    };
+    Some(format!("until {}", reset.strftime(format)))
+}
+
+/// Avoid repeating the account-level free-pool expiry already printed beside its status.
+fn displayed_refusals(row: &provenant_quota::AccountRow) -> Vec<&provenant_quota::RefusalRow> {
+    let free_pool = row
+        .resets_at
+        .as_ref()
+        .and_then(|_| provenant_records::AdapterSpec::get(&row.account.adapter))
+        .and_then(|spec| spec.free_pool);
+    row.refusals
+        .iter()
+        .filter(|refusal| free_pool.is_none_or(|pool| refusal.pool.as_deref() != Some(pool)))
+        .collect()
 }
 /// Per-pool peak use in first-seen order, grouping each window by the pool
 /// prefix before its `.` separator.
@@ -1545,6 +1602,10 @@ fn shared_pool_exhaustions(snapshot: &provenant_quota::QuotaSnapshot) -> Option<
 /// Counts by state, then the accounts that need attention, then the command
 /// that shows the rest.
 fn quota_summary(report: &QuotaReport) -> crate::Summary {
+    quota_summary_at(report, jiff::tz::TimeZone::system())
+}
+
+fn quota_summary_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> crate::Summary {
     let state = |row: &provenant_quota::AccountRow| {
         serde_json::to_value(row.status)
             .ok()
@@ -1576,6 +1637,7 @@ fn quota_summary(report: &QuotaReport) -> crate::Summary {
             .iter()
             .filter(|row| {
                 !matches!(row.status, QuotaStatus::Available | QuotaStatus::CreditOnly)
+                    || !row.refusals.is_empty()
                     || row
                         .snapshot
                         .as_ref()
@@ -1590,12 +1652,41 @@ fn quota_summary(report: &QuotaReport) -> crate::Summary {
                         shared_pool_exhaustions(snapshot).or_else(|| pool_states(snapshot))
                     })
                     .map_or_else(String::new, |pools| format!(" ({pools})"));
+                let reset = row
+                    .resets_at
+                    .as_deref()
+                    .and_then(|at| reset_label(at, report.generated_unix_seconds, &time_zone));
+                let refusals = displayed_refusals(row)
+                    .into_iter()
+                    .map(|refusal| {
+                        let name = refusal.model.escape_debug();
+                        let pool = refusal
+                            .pool
+                            .as_deref()
+                            .map(|pool| format!(" in pool {}", pool.escape_debug()))
+                            .unwrap_or_default();
+                        let reset = refusal.resets_at.as_deref().and_then(|at| {
+                            reset_label(at, report.generated_unix_seconds, &time_zone)
+                        });
+                        format!(
+                            "recorded refusal for {name}{pool}{}",
+                            reset.map_or_else(String::new, |label| format!(" {label}"))
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let refusals = if refusals.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", refusals.join(", "))
+                };
                 format!(
-                    "{} [{}]: {}{}",
+                    "{} [{}]: {}{}{}{}",
                     row.account.label,
                     row.account.adapter,
                     state(row),
-                    pools
+                    pools,
+                    reset.map_or_else(String::new, |label| format!(" {label}")),
+                    refusals
                 )
             }),
     );
@@ -1719,6 +1810,9 @@ mod tests {
                     },
                     snapshot: None,
                     status: QuotaStatus::AuthRequired,
+                    resets_at: None,
+                    refusals: vec![],
+                    free_pool_refusal: false,
                     age_seconds: None,
                     next_due_unix_seconds: None,
                     refreshing: false,
@@ -1762,6 +1856,9 @@ mod tests {
             },
             snapshot: None,
             status,
+            resets_at: None,
+            refusals: vec![],
+            free_pool_refusal: false,
             age_seconds: None,
             next_due_unix_seconds: None,
             refreshing: false,
@@ -1788,6 +1885,102 @@ mod tests {
         let summary = quota_summary(&report);
         assert!(summary.lines.iter().any(|line| line.contains("stale")));
         assert_eq!(summary.next.as_deref(), Some("provenant quota tick"));
+    }
+
+    #[test]
+    fn quota_reset_output_uses_local_time_and_does_not_invent_missing_expiries() {
+        let zone = jiff::tz::TimeZone::get("Australia/Brisbane").unwrap();
+        let second = |value: &str| value.parse::<jiff::Timestamp>().unwrap().as_second();
+        let row = |label: &str, resets_at: Option<&str>| AccountRow {
+            account: AccountScope {
+                adapter: "opencode".into(),
+                account_key: label.into(),
+                label: label.into(),
+            },
+            snapshot: None,
+            status: QuotaStatus::Exhausted,
+            resets_at: resets_at.map(str::to_owned),
+            refusals: vec![],
+            free_pool_refusal: label == "unknown" || resets_at.is_some(),
+            age_seconds: Some(0),
+            next_due_unix_seconds: None,
+            refreshing: false,
+            error: None,
+            capacity_cooldowns: vec![],
+            display: None,
+        };
+        let report = |now, resets_at| QuotaReport {
+            schema_version: 1,
+            generated_unix_seconds: second(now),
+            accounts: vec![row("zen", resets_at), row("unknown", None)],
+            sources: vec![],
+            coverage: Coverage { total: 2, known: 2 },
+            refreshing_ids: vec![],
+            next_due_unix_seconds: None,
+            report_path: String::new(),
+            display: Default::default(),
+            display_icon_warning: None,
+        };
+
+        let today = report("2026-11-02T00:00:00Z", Some("2026-11-02T00:11:00Z"));
+        let human = quota_human_at(&today, zone.clone());
+        assert!(
+            human.contains("zen [opencode]: EXHAUSTED until 10:11"),
+            "{human}"
+        );
+        assert!(
+            human.contains("unknown [opencode]: EXHAUSTED, age"),
+            "{human}"
+        );
+        assert!(
+            !human.contains("unknown [opencode]: EXHAUSTED until"),
+            "{human}"
+        );
+        let compact = quota_summary_at(&today, zone.clone());
+        assert!(
+            compact
+                .lines
+                .iter()
+                .any(|line| line == "zen [opencode]: exhausted until 10:11")
+        );
+        assert!(
+            compact
+                .lines
+                .iter()
+                .any(|line| line == "unknown [opencode]: exhausted")
+        );
+        assert_eq!(
+            serde_json::to_value(&today).unwrap()["accounts"][0]["resets_at"],
+            "2026-11-02T00:11:00Z"
+        );
+
+        let mut scoped = today.clone();
+        scoped.accounts[1].status = QuotaStatus::Available;
+        scoped.accounts[1].free_pool_refusal = false;
+        scoped.accounts[1].refusals = vec![provenant_quota::RefusalRow {
+            model: "opencode/beam-pro".into(),
+            pool: Some("opencode-go".into()),
+            resets_at: Some("2026-11-02T00:11:00Z".into()),
+        }];
+        let human = quota_human_at(&scoped, zone.clone());
+        assert!(
+            human
+                .contains("recorded refusal for opencode/beam-pro in pool opencode-go until 10:11"),
+            "{human}"
+        );
+        let compact = quota_summary_at(&scoped, zone.clone());
+        assert!(compact.lines.iter().any(|line| {
+            line == "unknown [opencode]: available (recorded refusal for opencode/beam-pro in pool opencode-go until 10:11)"
+        }));
+        assert_eq!(
+            serde_json::to_value(&scoped).unwrap()["accounts"][1]["refusals"][0]["resets_at"],
+            "2026-11-02T00:11:00Z"
+        );
+
+        let tomorrow = report("2026-11-02T10:00:00Z", Some("2026-11-03T00:11:00Z"));
+        assert!(
+            quota_human_at(&tomorrow, zone).contains("zen [opencode]: EXHAUSTED until Tue 10:11")
+        );
     }
 
     #[test]
@@ -1888,6 +2081,9 @@ mod tests {
             },
             snapshot,
             status,
+            resets_at: None,
+            refusals: vec![],
+            free_pool_refusal: false,
             age_seconds: Some(7),
             next_due_unix_seconds: None,
             refreshing: false,

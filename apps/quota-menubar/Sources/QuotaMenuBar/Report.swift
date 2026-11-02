@@ -47,6 +47,7 @@ struct QuotaReport {
     struct Source {
         let adapter: String
         let status: Status
+        let freePoolRefusal: Bool
         let error: String?
         let nextDueAt: Date?
         var title: String { QuotaReport.providerName(adapter) }
@@ -63,6 +64,7 @@ struct QuotaReport {
         let providerName, displayName, planLabel: String?
         let backAt, observedAt: Date?
         let windows: [Window]
+        let refusals: [Refusal]
         let unreported: [String]?
         let drawingCredits: Bool?
         let creditBurnPerHour: Double?
@@ -89,6 +91,7 @@ struct QuotaReport {
                 throw QuotaReport.invalid("unknown account status")
             }
             self.status = status
+            freePoolRefusal = row.freePoolRefusal ?? false
             error = row.error
             entry = row.display.map {
                 Entry(id: $0.id, name: $0.name?.trimmingCharacters(in: .whitespaces).nilIfEmpty, hidden: $0.hidden ?? false,
@@ -125,13 +128,21 @@ struct QuotaReport {
                               pace: Pace(state: paceState, runsOutAt: nil, summary: nil))
             }
             windows = mappedWindows
+            refusals = (row.refusals ?? []).map { refusal in
+                Refusal(model: refusal.model, pool: refusal.pool,
+                        resetsAt: refusal.resetsAt.flatMap { try? Date($0, strategy: .iso8601) })
+            }
             let binding = QuotaReport.Account.binding(in: mappedWindows, now: generatedAt)
-            backAt = status == .exhausted && binding?.pace.state == "exhausted" ? binding?.resetAt : nil
+            let refusalReset = row.resetsAt.flatMap { try? Date($0, strategy: .iso8601) }
+            backAt = status == .exhausted
+                ? refusalReset ?? (row.freePoolRefusal == true ? nil : (binding?.pace.state == "exhausted" ? binding?.resetAt : nil))
+                : nil
             schedule = row.nextDueUnixSeconds.map { Schedule(nextDueAt: QuotaReport.date($0), reason: nil) }
         }
     }
 
     struct Schedule { let nextDueAt: Date; let reason: String? }
+    struct Refusal { let model: String; let pool: String?; let resetsAt: Date? }
     struct Credit {
         let balance: Double?
         let unlimited: Bool
@@ -357,11 +368,19 @@ struct QuotaWireAccount: Decodable, Sendable {
     let account: QuotaWireScope
     let snapshot: QuotaWireSnapshot?
     let status: String
+    let resetsAt: String?
+    let freePoolRefusal: Bool?
+    let refusals: [QuotaWireRefusal]?
     let ageSeconds: UInt64?
     let nextDueUnixSeconds: Int64?
     let refreshing: Bool
     let error: String?
     let display: QuotaWireRowDisplay?
+}
+struct QuotaWireRefusal: Decodable, Sendable {
+    let model: String
+    let pool: String?
+    let resetsAt: String?
 }
 struct QuotaWireScope: Decodable, Sendable { let adapter, accountKey, label: String }
 struct QuotaWireSnapshot: Decodable, Sendable {
@@ -453,7 +472,7 @@ extension QuotaReport.Account {
             .filter { $0.pace.state == "exhausted" }
     }
     func back(now: Date) -> Date? {
-        backAt ?? (binding(now: now).flatMap { $0.pace.state == "exhausted" ? $0.resetAt : nil })
+        backAt
     }
     func isDrawing(now _: Date) -> Bool { drawingCredits == true }
     func rank(_ now: Date) -> Int {

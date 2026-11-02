@@ -277,6 +277,9 @@ final class ScreenModelTests: XCTestCase {
         let full = quota.reader.value
         XCTAssertFalse(full?.rows.isEmpty ?? true)
         XCTAssertEqual(full?.historyAvailable, true)
+        XCTAssertEqual(full?.rows.first { $0.provider == "agy" }?.refusals.first?.pool, "claude")
+        XCTAssertEqual(full?.rows.first { $0.provider == "agy" }?.refusals.first?.resetsAt,
+                       Stamp.parse("2026-11-02T03:00:00Z"))
         replay.set(consoleReplies.filter { $0.prefix != ["quota", "history"] })
         await quota.refresh()
         XCTAssertEqual(quota.reader.value?.historyAvailable, false)
