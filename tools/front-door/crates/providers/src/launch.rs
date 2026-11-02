@@ -381,11 +381,10 @@ fn rust_toolchain(
     let target = cache.join("target");
     // The host prepares the writer cache itself under custody. Cargo
     // creates target/ after launch, so anchor the cache.
-    tool_exec_roots.push(subtree(if access == Access::ReadOnly {
-        &target
-    } else {
-        cache
-    }));
+    // A read-only lane's cache is its scratch, which rustdoc also uses (via
+    // TMPDIR) for the doc-test binaries it compiles and runs. The lane can
+    // already execute everything it builds and its read-only worktree.
+    tool_exec_roots.push(subtree(cache));
     runtime_reads.extend([subtree(&cargo), subtree(&rustup)]);
     tool_exec_roots.extend([
         subtree(cargo.join("bin")),
