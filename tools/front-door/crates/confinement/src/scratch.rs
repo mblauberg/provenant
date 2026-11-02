@@ -53,8 +53,7 @@ pub fn ensure(
             &bytes,
             PublishMode::Replace,
         )?
-        .require_durable()
-        .map_err(|_| WorktreeError::RegistrationUnconfirmed)?;
+        .require_durable()?;
     }
     child(&scratch, "graphs")?;
     repo.revalidate()?;
@@ -66,6 +65,34 @@ mod tests {
     use super::*;
     use crate::test_support::Fixture;
     use provenant_os::clock::SystemClock;
+
+    #[test]
+    fn concurrent_scratch_ensure_succeeds_for_both_callers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        std::thread::scope(|scope| {
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+            let repo = &fixture.repo;
+            let workers: Vec<_> = (0..2)
+                .map(|_| {
+                    let barrier = barrier.clone();
+                    scope.spawn(move || {
+                        barrier.wait();
+                        ensure(repo, &SystemClock, &CancelToken::new())
+                    })
+                })
+                .collect();
+            barrier.wait();
+            for worker in workers {
+                assert_eq!(
+                    worker.join().unwrap()?,
+                    fixture.root.join(".provenant/scratch")
+                );
+            }
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })?;
+        Ok(())
+    }
 
     #[test]
     #[allow(clippy::disallowed_methods, reason = "real OS lock contention fixture")]
