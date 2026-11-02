@@ -1445,20 +1445,13 @@ impl HostDeliveryContext {
         {
             return Ok(());
         }
-        if !remote {
-            let trees = self.command(
-                &writer.worktree,
-                "git",
-                &["worktree", "list", "--porcelain"],
-                stage,
-            )?;
-            if trees
-                .lines()
-                .any(|line| line == format!("branch {destination}"))
-            {
-                return Err(RunError::Delivery(stage));
-            }
-        }
+        // A linked worktree holding the target (a batch worktree) advances
+        // with it, so its index and files never trail the branch.
+        let checked_out = if remote {
+            None
+        } else {
+            self.checked_out_tree(writer, &destination, &expected, stage)?
+        };
         let candidate = if self
             .command(
                 &writer.worktree,
@@ -1563,6 +1556,32 @@ impl HostDeliveryContext {
             if verified != candidate.to_string() {
                 return Err(RunError::Delivery(Stage::Verify));
             }
+        } else if let Some(tree) = checked_out {
+            let tree = tree.to_str().ok_or(RunError::Delivery(stage))?;
+            let git_dir = format!("--git-dir={tree}/.git");
+            let work_tree = format!("--work-tree={tree}");
+            self.command(
+                &writer.worktree,
+                "git",
+                &[
+                    &git_dir,
+                    &work_tree,
+                    "merge",
+                    "--ff-only",
+                    "--quiet",
+                    &candidate.to_string(),
+                ],
+                stage,
+            )?;
+            let advanced = self.command(
+                &writer.worktree,
+                "git",
+                &["rev-parse", "--verify", &destination],
+                Stage::Verify,
+            )?;
+            if advanced != candidate.to_string() {
+                return Err(RunError::Delivery(Stage::Verify));
+            }
         } else {
             self.command(
                 &writer.worktree,
@@ -1581,6 +1600,65 @@ impl HostDeliveryContext {
             return Err(RunError::Delivery(Stage::Head));
         }
         Ok(())
+    }
+
+    /// The linked worktree that has `destination` checked out, if any. It must
+    /// be clean and still at `expected`, so a fast-forward there cannot drop
+    /// edits or skip a concurrent integration.
+    fn checked_out_tree(
+        &self,
+        writer: &WriterRequest,
+        destination: &str,
+        expected: &str,
+        stage: Stage,
+    ) -> Result<Option<PathBuf>> {
+        let trees = self.command(
+            &writer.worktree,
+            "git",
+            &["worktree", "list", "--porcelain"],
+            stage,
+        )?;
+        let mut path = None;
+        let mut found = None;
+        for line in trees.lines() {
+            if let Some(tree) = line.strip_prefix("worktree ") {
+                path = Some(PathBuf::from(tree));
+            } else if line == format!("branch {destination}") {
+                found = path.clone();
+                break;
+            }
+        }
+        let Some(tree) = found else {
+            return Ok(None);
+        };
+        if tree == writer.worktree || !tree.join(".git").is_file() {
+            return Err(RunError::Delivery(stage));
+        }
+        let text = tree.to_str().ok_or(RunError::Delivery(stage))?;
+        let git_dir = format!("--git-dir={text}/.git");
+        let work_tree = format!("--work-tree={text}");
+        let status = self.command(
+            &writer.worktree,
+            "git",
+            &[
+                &git_dir,
+                &work_tree,
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=no",
+            ],
+            stage,
+        )?;
+        let at = self.command(
+            &writer.worktree,
+            "git",
+            &[&git_dir, &work_tree, "rev-parse", "--verify", "HEAD"],
+            stage,
+        )?;
+        if !status.is_empty() || at != expected {
+            return Err(RunError::Delivery(stage));
+        }
+        Ok(Some(tree))
     }
     fn existing_pr(
         &self,

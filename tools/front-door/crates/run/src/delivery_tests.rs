@@ -1413,12 +1413,11 @@ fn delivery_records_dirty_and_checked_out_failures_after_start()
         if dirty {
             std::fs::write(fixture.writer.worktree.join("dirty"), "keep")?;
         } else {
-            fixture.git(&[
-                "worktree",
-                "add",
-                fixture.root.join("checked-out").to_str().ok_or("tree")?,
-                "integration",
-            ])?;
+            let tree = fixture.root.join("checked-out");
+            let tree = tree.to_str().ok_or("tree")?;
+            fixture.git(&["worktree", "add", tree, "integration"])?;
+            std::fs::write(fixture.root.join("checked-out/staged"), "keep")?;
+            fixture.git(&["-C", tree, "add", "staged"])?;
         }
         let path = fixture.root.join("attempt");
         std::fs::create_dir(&path)?;
@@ -1436,6 +1435,50 @@ fn delivery_records_dirty_and_checked_out_failures_after_start()
         assert_eq!(db::decode::<WriterDeliveryReceipt>(&raw)?, receipt);
         assert!(artifacts::read_sealed(&attempt, "delivery-started.json", RECORD_LIMIT)?.is_some());
     }
+    Ok(())
+}
+
+#[test]
+fn integration_fast_forwards_a_clean_worktree_that_holds_the_branch()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    fixture.git(&["branch", "integration"])?;
+    let batch = fixture.root.join("batch");
+    fixture.git(&[
+        "worktree",
+        "add",
+        batch.to_str().ok_or("batch")?,
+        "integration",
+    ])?;
+    fixture.request =
+        HostDeliveryContext::destination(DeliveryMode::Integrate("integration".into()), "lane")?
+            .ok_or("destination")?;
+    let host = fixture.prepare()?;
+    std::fs::write(fixture.writer.worktree.join("landed"), "lane")?;
+    fixture.lane_git(&["add", "landed"])?;
+    fixture.commit(&fixture.writer.worktree, "lane change")?;
+    let head = host.head(&fixture.writer)?;
+    host.integrate(&fixture.writer, &fixture.request, head)?;
+    let tip = host.command(
+        &fixture.writer.project,
+        "git",
+        &["rev-parse", "integration"],
+        WriterDeliveryStage::Verify,
+    )?;
+    assert_eq!(tip, head.to_string());
+    assert_eq!(std::fs::read_to_string(batch.join("landed"))?, "lane");
+    let status = host.command(
+        &fixture.writer.project,
+        "git",
+        &[
+            &format!("--git-dir={}/.git", batch.display()),
+            &format!("--work-tree={}", batch.display()),
+            "status",
+            "--porcelain",
+        ],
+        WriterDeliveryStage::Verify,
+    )?;
+    assert_eq!(status, "");
     Ok(())
 }
 
