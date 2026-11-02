@@ -44,7 +44,17 @@ def main() -> int:
     # nextest keys each suite's test cases by test name.
     suites = json.loads(listed.stdout)["rust-suites"].values()
     test_names = {name for suite in suites for name in suite["testcases"]}
-    missing = sorted(name for name in selectors if name not in test_names)
+    unlisted = sorted(name for name in selectors if name not in test_names)
+    # A platform-gated test is absent from this runner's list but still defined.
+    sources = "\n".join(
+        path.read_text(errors="replace") for path in (ROOT / "tools/front-door").rglob("*.rs") if "target" not in path.parts
+    )
+    missing = []
+    for name in unlisted:
+        if re.search(rf"\bfn {re.escape(name.rsplit('::', 1)[-1])}\b", sources):
+            print(f"test(={name}) is not built on this platform; its definition exists.")
+        else:
+            missing.append(name)
     if missing:
         for name in missing:
             sources = ", ".join(path.relative_to(ROOT).as_posix() for path in selectors[name])
