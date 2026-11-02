@@ -9,6 +9,9 @@ use provenant_supervisor::custody::{
 use rusqlite::{OptionalExtension, params};
 use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
 
+/// Production discovery window for queued child runs.
+pub const QUEUED_RUNS_PAGE_SIZE: usize = 256;
+
 /// Host-validated identity and the network policy inherited at launch.
 #[derive(Clone, Debug)]
 pub struct ValidatedChild {
@@ -949,13 +952,18 @@ impl RunStore {
     }
     /// Bounded ingress for the parent host's child launcher. No provider or
     /// custody action occurs in the submitting lane.
-    pub fn queued_runs(&self, call: &Request<'_>) -> Result<Vec<RunId>> {
+    pub fn queued_runs(&self, call: &Request<'_>, page_size: usize) -> Result<Vec<RunId>> {
         call.check()?;
+        let page_size =
+            i64::try_from(page_size).map_err(|_| RunError::Validation("queued runs page size"))?;
         let records: Vec<Vec<u8>> = {
             let mut query = self.db.prepare(
-                "SELECT record FROM attempts WHERE project=?1 AND terminal=0 ORDER BY sequence LIMIT 256",
+                "SELECT record FROM attempts WHERE project=?1 AND terminal=0 ORDER BY sequence LIMIT ?2",
             )?;
-            let rows = query.query_map([self.context.project_id.to_string()], |row| row.get(0))?;
+            let rows = query.query_map(
+                rusqlite::params![self.context.project_id.to_string(), page_size],
+                |row| row.get(0),
+            )?;
             rows.collect::<std::result::Result<_, _>>()?
         };
         let mut runs = std::collections::BTreeSet::new();

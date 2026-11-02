@@ -166,6 +166,12 @@ Read-only lanes gain no workspace or shared-cache writes. Credential and
 keychain restrictions, including the existing networked read-only `gh` policy,
 still apply.
 
+Shell-capable lanes expose the host's `~/.cargo/bin` on `PATH` and grant it
+read and execute access, but never write access. This makes an installed
+`cargo-nextest` available through `cargo nextest`; install it on the host with
+`cargo install cargo-nextest --locked`. `provenant hosts doctor` reports
+whether `~/.cargo/bin/cargo-nextest` is executable for lanes.
+
 ## Agy accounts
 
 Agy has no account switch, so a second Google account gets its own `HOME`

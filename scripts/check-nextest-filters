@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""Check that every literal nextest test selector names a listed test."""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent.parent
+FILTER_FILES = (ROOT / "tools/front-door/.config/nextest.toml", ROOT / ".github/workflows/ci.yml")
+TEST_SELECTOR = re.compile(r"test\(=([^)]*)\)")
+
+
+def main() -> int:
+    selectors: dict[str, list[Path]] = {}
+    for path in FILTER_FILES:
+        for name in TEST_SELECTOR.findall(path.read_text()):
+            selectors.setdefault(name, []).append(path)
+    if not selectors:
+        print("No literal test(=...) selectors found.")
+        return 0
+
+    command = [
+        "cargo",
+        "nextest",
+        "list",
+        "--profile",
+        "ci",
+        "--workspace",
+        "--locked",
+        "--features",
+        "provenant-providers/recording",
+        "--message-format",
+        "json",
+    ]
+    listed = subprocess.run(command, cwd=ROOT / "tools/front-door", capture_output=True, text=True)
+    if listed.returncode:
+        print(listed.stderr, file=sys.stderr, end="")
+        return listed.returncode
+    # nextest keys each suite's test cases by test name.
+    suites = json.loads(listed.stdout)["rust-suites"].values()
+    test_names = {name for suite in suites for name in suite["testcases"]}
+    unlisted = sorted(name for name in selectors if name not in test_names)
+    # A platform-gated test is absent from this runner's list but still defined.
+    sources = "\n".join(
+        path.read_text(errors="replace") for path in (ROOT / "tools/front-door").rglob("*.rs") if "target" not in path.parts
+    )
+    missing = []
+    for name in unlisted:
+        if re.search(rf"\bfn {re.escape(name.rsplit('::', 1)[-1])}\b", sources):
+            print(f"test(={name}) is not built on this platform; its definition exists.")
+        else:
+            missing.append(name)
+    if missing:
+        for name in missing:
+            sources = ", ".join(path.relative_to(ROOT).as_posix() for path in selectors[name])
+            print(f"No listed test matches test(={name}) in {sources}.", file=sys.stderr)
+        return 1
+    print(f"Validated {len(selectors)} literal test selector(s) against nextest's CI test list.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
