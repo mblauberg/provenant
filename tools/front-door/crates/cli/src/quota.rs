@@ -720,6 +720,11 @@ fn credential_metadata(
     };
     let mut paths = vec![directory.clone()];
     paths.extend(names.iter().map(|name| directory.join(name)));
+    if registration.adapter == "agy" {
+        // An isolated account keeps its sign-in in its own keychain, so a
+        // re-login replaces that file rather than the state database.
+        paths.push(directory.join("Library/Keychains/login.keychain-db"));
+    }
     if registration.adapter == "claude" {
         paths.push(directory.with_extension("json"));
         if cfg!(target_os = "macos")
@@ -1956,6 +1961,26 @@ mod tests {
             &mut Vec::new(),
         )?;
         assert_eq!(provenant_os::changes::read(temp.path())?.quota, Some(1));
+        Ok(())
+    }
+
+    #[test]
+    fn agy_credential_metadata_watches_the_isolated_keychain() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let directory = temp.path().join("agy-second");
+        let registration = serde_json::from_value(serde_json::json!({
+            "adapter": "agy", "label": "second", "key": "agy-fixture", "directory": directory,
+        }))?;
+        let keychain = directory.join("Library/Keychains/login.keychain-db");
+        let watched = credential_metadata(&registration, None).unwrap();
+        assert!(watched.iter().any(|m| m.path == keychain && m.stat.is_none()));
+        std::fs::create_dir_all(keychain.parent().unwrap())?;
+        std::fs::write(&keychain, b"first")?;
+        let created = credential_metadata(&registration, None).unwrap();
+        assert_ne!(watched, created);
+        std::fs::write(&keychain, b"second login")?;
+        assert_ne!(created, credential_metadata(&registration, None).unwrap());
         Ok(())
     }
 
