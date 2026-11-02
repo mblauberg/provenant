@@ -8,6 +8,33 @@ use std::collections::BTreeMap;
 pub struct ReviewConfig {
     pub shapes: BTreeMap<String, ReviewShape>,
     pub select: ReviewSelect,
+    pub size: ReviewSize,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ReviewSize {
+    pub small_lines: usize,
+    pub small_files: usize,
+    pub small_crates: usize,
+    pub medium_lines: usize,
+    pub medium_files: usize,
+    pub medium_crates: usize,
+}
+impl Default for ReviewSize {
+    fn default() -> Self {
+        Self { small_lines: 150, small_files: 3, small_crates: 1, medium_lines: 1000, medium_files: 15, medium_crates: 3 }
+    }
+}
+impl ReviewSize {
+    pub fn classify(&self, lines: usize, files: usize, crates: usize) -> &'static str {
+        if lines <= self.small_lines && files <= self.small_files && crates <= self.small_crates {
+            "small"
+        } else if lines <= self.medium_lines && files <= self.medium_files && crates <= self.medium_crates {
+            "medium"
+        } else {
+            "large"
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -63,6 +90,7 @@ fn bundled() -> ReviewConfig {
     struct ReviewAsset {
         shapes: BTreeMap<String, ReviewShape>,
         select: SelectAsset,
+        size: ReviewSize,
     }
     #[derive(Deserialize)]
     struct SelectAsset {
@@ -77,6 +105,7 @@ fn bundled() -> ReviewConfig {
     let select = asset.review.select;
     ReviewConfig {
         shapes: asset.review.shapes,
+        size: asset.review.size,
         select: ReviewSelect {
             default: select.default,
             by_risk: select.by_risk,
@@ -159,7 +188,7 @@ impl ReviewConfig {
         paths: &[String],
         size: Option<&str>,
     ) -> Result<ReviewSelection<'a>, String> {
-        let selected = self.select.select(
+        let mut selected = self.select.select(
             override_name.map(str::to_owned).as_ref(),
             risk,
             kind,
@@ -167,6 +196,18 @@ impl ReviewConfig {
             size,
             Some(true),
         );
+        // Risk establishes a floor; size and integration can demand more coverage.
+        if override_name.is_none() {
+            for candidate in [
+                self.select.select(None, None, kind, &[], size, Some(true)),
+                self.select.select(None, risk, None, &[], None, Some(true)),
+            ] {
+                let slots = |name: &str| self.shapes.get(name).map_or(0, |shape| shape.reviewers.iter().map(|r| r.count).sum::<usize>());
+                if slots(&candidate.value) > slots(&selected.value) {
+                    selected = candidate;
+                }
+            }
+        }
         let shape = self
             .shapes
             .get(&selected.value)
@@ -299,6 +340,19 @@ fn path_matches(pattern: &str, path: &str) -> bool {
 mod tests {
     use super::*;
     use provenant_config::DomainConfig;
+
+    #[test]
+    fn size_and_kind_choose_shapes_with_risk_floor() {
+        let review = ReviewConfig::default();
+        for (lines, files, crates, expected) in [(150, 3, 1, "quick"), (151, 3, 1, "standard"), (1001, 3, 1, "deep"), (1, 16, 1, "deep"), (1, 1, 4, "deep")] {
+            let size = review.size.classify(lines, files, crates);
+            assert_eq!(review.select_shape(None, None, None, &[], Some(size)).unwrap().name, expected);
+        }
+        assert_eq!(review.select_shape(None, Some("routine"), Some("integration"), &[], Some("small")).unwrap().name, "deep");
+        assert_eq!(review.select_shape(None, None, Some("docs"), &[], Some("large")).unwrap().name, "quick");
+        assert_eq!(review.select_shape(None, None, Some("refactor"), &[], Some("medium")).unwrap().name, "standard");
+        assert_eq!(review.select_shape(None, Some("crucial"), None, &[], Some("small")).unwrap().name, "deep");
+    }
 
     #[test]
     fn bundled_review_shapes_cover_all_risk_tiers() {

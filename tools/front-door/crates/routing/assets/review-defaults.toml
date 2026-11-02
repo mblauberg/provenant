@@ -5,6 +5,13 @@ capacity_retry_seconds = 30
 capacity_retry_max_seconds = 600
 retry_delay_ceiling_seconds = 3600
 pacing_overrides = []
+[review.size]
+small_lines = 150
+small_files = 3
+small_crates = 1
+medium_lines = 1000
+medium_files = 15
+medium_crates = 3
 [opencode_go]
 min_monthly_allowance_usd = 60
 [routes]
