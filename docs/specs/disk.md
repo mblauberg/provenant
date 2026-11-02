@@ -132,27 +132,12 @@ The sealed-system exemption covers a descriptor listing that is denied outright
 (a whole-listing EPERM), without enumerating descriptors: Apple sealed-system
 daemons are not workers, and treating them strictly left collection unusable
 on a normal host.
-Host GC configuration may list exact canonical executable paths or canonical
-directory prefixes ending in `/` in `gc.census_excused_executables`. A match
-excuses an unreadable cwd only when the process's real, effective and saved
-uids are all system uids (below 500), the process remains outside every
-candidate root owner, its executable lies outside every candidate worktree
-root, and the executable passes the same root-owned, non-writable ancestor
-chain check as a built-in daemon. Entries must be canonical absolute paths
-with no `.`, `..`, empty or control-character segments (`/private/var`, not
-`/var`); config validation refuses others. The census detail records every
-excused process with its matching entry. A refusal that this key could excuse
-(a system-uid process refused only on its executable path or volume) names
-`config_key=gc.census_excused_executables`. This does not excuse user-uid
-processes or change sealed-system policy. The CoreSimulator
-`Resources/bin/` prefix under `/Library/Developer/PrivateFrameworks/CoreSimulator.framework/`
-is an example configuration; it is not a bundled default unless its binaries'
-Apple signature is verified.
-
-```toml
-[gc]
-census_excused_executables = ["/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Resources/bin/"]
-```
+When a signed executable fails the built-in unreadable-cwd checks, the refusal
+names `confinement.census_ignore_unreadable` and includes the canonical
+executable path and team ID needed for an exact host entry. See
+[supervisor host-owner exceptions](supervisor.md#host-owner-exceptions) for
+the signing checks and entry format. Unsigned path-only exceptions are not
+supported.
 Queued and pending submitted dispatches naming a worktree retain it with
 `unknown_writer`, including managed trees without a terminal lane record.
 Tasks not yet submitted into a run store are not visible to this census;

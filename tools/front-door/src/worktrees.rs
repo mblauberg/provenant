@@ -1526,7 +1526,7 @@ mod gc_preview_tests {
         project.worktrees.retained.push(worktrees::RetainedBranch {
             branch: "census-blocked".into(),
             reason: RetainReason::UnknownWriter,
-            detail: Some("process 968: cwd unreadable; config_key=gc.census_excused_executables; path=/Library/Developer/simdiskimaged".into()),
+            detail: Some("process 968: cwd unreadable; configure confinement.census_ignore_unreadable; path=/Library/Developer/simdiskimaged, team_id=TEAM123".into()),
         });
         data.worktree_cleanup.push(project);
         let human = gc_data_summary(&data);
@@ -1547,8 +1547,9 @@ mod gc_preview_tests {
         assert!(human.contains("/state/broken: permission denied"));
         assert!(human.contains("kept worktree broken (GitFailure)"));
         assert!(human.contains("kept worktree census-blocked (UnknownWriter): process 968"));
-        assert!(human.contains("config_key=gc.census_excused_executables"));
+        assert!(human.contains("confinement.census_ignore_unreadable"));
         assert!(human.contains("/Library/Developer/simdiskimaged"));
+        assert!(human.contains("team_id=TEAM123"));
         assert!(!human.contains("/home/Library/Caches"));
         assert!(serde_json::to_value(&data).unwrap_or_default()["removed"].is_array());
     }

@@ -811,7 +811,7 @@ pub(crate) fn ignored_unreadable_uids(
     pid: i32,
     entries: &[crate::pid::CensusIgnoreEntry],
 ) -> Option<crate::pid::ProcessUids> {
-    unreadable_policy_uids(pid, entries, &[])
+    unreadable_policy_uids(pid, entries)
         .ok()
         .map(|result| result.uids)
 }
@@ -819,7 +819,6 @@ pub(crate) fn ignored_unreadable_uids(
 pub(crate) fn unreadable_policy_uids(
     pid: i32,
     entries: &[crate::pid::CensusIgnoreEntry],
-    excused_executables: &[String],
 ) -> Result<crate::pid::UnreadablePolicyExcusal, crate::pid::UnreadablePolicyFailure> {
     #[cfg(target_os = "macos")]
     {
@@ -829,28 +828,6 @@ pub(crate) fn unreadable_policy_uids(
             return Err("real/effective/saved system uids below 500 required".into());
         }
         let path = darwin_executable_path(pid).ok_or("kernel executable path unavailable")?;
-        let configured = darwin_configured_excusal(before, &path, excused_executables, || {
-            std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(&path)
-                .is_ok_and(|executable| root_owned_executable_chain(&path, &executable))
-        });
-        if let Some(entry) = configured {
-            if darwin_executable_path(pid)
-                .ok_or("executable path recheck unavailable")?
-                .as_os_str()
-                != path.as_os_str()
-                || darwin_uids(pid) != Some(before)
-            {
-                return Err("stable executable path and system uids required".into());
-            }
-            return Ok(crate::pid::UnreadablePolicyExcusal {
-                uids: before,
-                configured_entry: Some(entry),
-                executable: Some(path),
-            });
-        }
         let flags = darwin_signing_status(pid).ok_or("live signing state unavailable")?;
         if !darwin_valid_signature(flags) {
             return Err("valid signed image without untrusted flags required".into());
@@ -903,15 +880,11 @@ pub(crate) fn unreadable_policy_uids(
                 configurable: false,
             });
         }
-        Ok(crate::pid::UnreadablePolicyExcusal {
-            uids: before,
-            configured_entry: None,
-            executable: None,
-        })
+        Ok(crate::pid::UnreadablePolicyExcusal { uids: before })
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (pid, entries, excused_executables);
+        let _ = (pid, entries);
         Err("macOS signing evidence unavailable".into())
     }
 }
@@ -930,31 +903,6 @@ fn builtin_failure(condition: &'static str) -> crate::pid::UnreadablePolicyFailu
                 | "sealed read-only root volume evidence unavailable"
         ),
     }
-}
-
-/// The configured entry that excuses a system-uid process, if any. `chain`
-/// runs only after a match and must confirm the same root-owned, non-writable
-/// executable chain the built-in path needs, so a prefix over a user-writable
-/// directory cannot excuse an arbitrary root process.
-#[cfg(any(target_os = "macos", test))]
-fn darwin_configured_excusal(
-    uids: crate::pid::ProcessUids,
-    path: &std::path::Path,
-    entries: &[String],
-    chain: impl FnOnce() -> bool,
-) -> Option<String> {
-    if !uids.all_system() {
-        return None;
-    }
-    let path = path.to_str()?;
-    let entry = entries.iter().find(|entry| {
-        if entry.ends_with('/') {
-            path.starts_with(entry.as_str())
-        } else {
-            path == entry.as_str()
-        }
-    })?;
-    chain().then(|| entry.clone())
 }
 
 /// Directories of the sealed system volume. An executable here is still only
@@ -1122,87 +1070,6 @@ fn builtin_condition_names_each_failed_gate_and_accepts_complete_evidence() {
     assert_eq!(
         darwin_builtin_condition(test_uids(0), flags, daemon, || None),
         Err("sealed read-only root volume evidence unavailable")
-    );
-}
-
-#[cfg(test)]
-#[test]
-fn configured_census_executable_requires_system_uids_and_exact_or_directory_match() {
-    use std::path::Path;
-    let entries = [
-        "/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Resources/bin/".into(),
-        "/usr/libexec/exact-daemon".into(),
-    ];
-    let prefix_match = Path::new(
-        "/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Resources/bin/simdiskimaged",
-    );
-    assert_eq!(
-        darwin_configured_excusal(test_uids(0), prefix_match, &entries, || true),
-        Some(entries[0].clone())
-    );
-    assert_eq!(
-        darwin_configured_excusal(
-            test_uids(0),
-            Path::new("/usr/libexec/exact-daemon"),
-            &entries,
-            || true
-        ),
-        Some(entries[1].clone())
-    );
-    assert_eq!(
-        darwin_configured_excusal(
-            test_uids(0),
-            Path::new("/usr/libexec/exact-daemon-child"),
-            &entries,
-            || true
-        ),
-        None
-    );
-    assert_eq!(
-        darwin_configured_excusal(test_uids(501), prefix_match, &entries, || true),
-        None,
-        "user-owned processes cannot be excused by a matching path"
-    );
-    assert_eq!(
-        darwin_configured_excusal(test_uids(0), Path::new("/Library/Daemon"), &entries, || {
-            true
-        }),
-        None,
-        "an unconfigured path remains unknown"
-    );
-}
-
-#[cfg(test)]
-#[test]
-fn configured_census_executable_also_needs_the_root_owned_executable_chain() {
-    use std::path::Path;
-    let entries = ["/Users/".to_owned()];
-    let path = Path::new("/Users/dev/bin/daemon");
-    assert_eq!(
-        darwin_configured_excusal(test_uids(0), path, &entries, || false),
-        None,
-        "a prefix over a user-writable directory must not excuse a root process"
-    );
-    let called = std::cell::Cell::new(false);
-    assert_eq!(
-        darwin_configured_excusal(test_uids(0), Path::new("/opt/other"), &entries, || {
-            called.set(true);
-            true
-        }),
-        None
-    );
-    assert!(!called.get(), "the chain is only walked after a path match");
-    // The real walk refuses an executable under a user-owned directory.
-    let temp = tempfile::tempdir().expect("tempdir");
-    let image = temp.path().join("daemon");
-    std::fs::write(&image, b"image").expect("write");
-    let entries = [format!("{}/", temp.path().display())];
-    assert_eq!(
-        darwin_configured_excusal(test_uids(0), &image, &entries, || {
-            crate::sys::fs::open_source(&image)
-                .is_ok_and(|file| root_owned_executable_chain(&image, &file))
-        }),
-        None
     );
 }
 

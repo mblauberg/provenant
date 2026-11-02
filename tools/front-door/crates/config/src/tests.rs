@@ -1636,6 +1636,11 @@ fn unknown_key_in_a_serde_decoded_section_reports_unknown_key_at_the_key() {
         ),
         ("schema_version=1\n[gc]\nunknown=true", "gc.unknown", 3),
         (
+            "schema_version=1\n[gc]\ncensus_excused_executables=['/usr/libexec/daemon']",
+            "gc.census_excused_executables",
+            3,
+        ),
+        (
             "schema_version=1\n[retention]\nunknown=true",
             "retention.unknown",
             3,
