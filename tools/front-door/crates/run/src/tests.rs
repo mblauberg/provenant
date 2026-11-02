@@ -485,6 +485,48 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
 }
 
 #[test]
+fn record_read_is_one_snapshot_across_a_concurrent_terminal_publication() -> TestResult {
+    let (new_clock, new_call, new_input) = (clock, call, input);
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let reader = RunStore::open(&context, &call)?;
+    let prepared = input();
+    reader.create(&prepared, &call)?;
+    let id = prepared.attempts[0].attempt_id;
+    // Another connection settles the attempt after the reader has taken the
+    // pre-terminal attempt row but before it looks for the settlement receipt.
+    let publisher = context.clone();
+    crate::reader::AFTER_ATTEMPT_ROW.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let clock = new_clock();
+            let cancel = CancelToken::new();
+            let publish_call = new_call(&clock, &cancel);
+            let store = RunStore::open(&publisher, &publish_call).expect("publisher store");
+            seal_exit_fixture(&store, &new_input()).expect("exit fixture");
+            store
+                .publish_terminal(id, 1, &publication(), &exit(), &publish_call)
+                .expect("terminal publication");
+        }));
+    });
+    let torn = reader.record(id, &call);
+    crate::reader::AFTER_ATTEMPT_ROW.with(|hook| hook.borrow_mut().take());
+    let seen = torn?;
+    assert!(
+        !matches!(seen.state, AttemptState::Terminal { .. }),
+        "the snapshot predates the publication: {:?}",
+        seen.state
+    );
+    assert!(seen.settlement_receipts.is_none());
+    let settled = reader.record(id, &call)?;
+    assert!(matches!(settled.state, AttemptState::Terminal { .. }));
+    assert!(settled.settlement_receipts.is_some());
+    Ok(())
+}
+
+#[test]
 fn requested_delivery_that_never_ran_is_recorded_not_attempted() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;

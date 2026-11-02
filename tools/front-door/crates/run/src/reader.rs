@@ -9,6 +9,14 @@ use provenant_records::{AttemptFact, AttemptFile, OutputRef, ReviewerFact, Revie
 use rusqlite::{OptionalExtension, params};
 use std::collections::VecDeque;
 
+#[cfg(test)]
+thread_local! {
+    /// Runs once on the next `record_with_run`, after the attempt row is read
+    /// and before the rest of the record: a commit landing mid-read.
+    pub(crate) static AFTER_ATTEMPT_ROW: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 const PROCESS_OBSERVATION_MAX_AGE_MICROS: i64 = 5_000_000;
 const PROCESS_OBSERVATION_MAX_FUTURE_SKEW_MICROS: i64 = 1_000_000;
 
@@ -524,7 +532,24 @@ impl RunStore {
         read: RecordRead,
     ) -> Result<(RunRecord, AttemptRecord)> {
         call.check()?;
+        // One read snapshot for every row below. Terminal publication writes
+        // the attempt and its settlement receipt in one transaction, so reading
+        // them in separate statements can pair a pre-terminal attempt with its
+        // terminal receipt and misreport that as a revision conflict.
+        // A caller already inside a transaction has its own snapshot.
+        let snapshot = if self.db.is_autocommit() {
+            Some(rusqlite::Transaction::new_unchecked(
+                &self.db,
+                rusqlite::TransactionBehavior::Deferred,
+            )?)
+        } else {
+            None
+        };
         let (raw, run_id, task_id, number, revision, terminal): (Vec<u8>, String, String, i64, i64, bool) = self.db.query_row("SELECT record,run,task,number,revision,terminal FROM attempts WHERE id=?1 AND project=?2", params![id.to_string(), self.context.project_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))).optional()?.ok_or(RunError::NotFound)?;
+        #[cfg(test)]
+        if let Some(hook) = AFTER_ATTEMPT_ROW.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
         let mut record: AttemptRecord = crate::db::decode_attempt(&raw)?;
         if record.attempt_id != id
             || record.project_id != self.context.project_id
@@ -555,6 +580,7 @@ impl RunStore {
         } else {
             None
         };
+        drop(snapshot);
         if let Some((generation, raw)) = receipt {
             if generation != sql_int(record.generation)?
                 || !matches!(record.state, AttemptState::Terminal { .. })
