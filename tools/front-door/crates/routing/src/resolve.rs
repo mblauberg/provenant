@@ -1445,6 +1445,10 @@ pub fn resolve_for_account_with_seed_excluding(
 ) -> Result<ResolvedRoute, RoutingError> {
     let account = AccountSelection::parse(account)?;
     let context = ValidatedContext::new(context)?;
+    // Exclusions shape named-route pools only: a pinned model keeps its own
+    // account and fallback whatever is excluded.
+    let named = matches!(request.choice, RouteChoice::NamedRoute(_));
+    let rules = if named { rules } else { &[] };
     // Withhold excluded accounts, so an adapter's other accounts still serve.
     let availability: Vec<_> = context
         .availability
@@ -1465,7 +1469,7 @@ pub fn resolve_for_account_with_seed_excluding(
     });
     let context = &kept;
     let excluded_members = Excluded {
-        rejected: excluded_members,
+        rejected: if named { excluded_members } else { &[] },
         rules,
     };
     if let AccountSelection::Known(account) = account {
@@ -1540,6 +1544,40 @@ struct Excluded<'a> {
     rejected: &'a [ModelId],
     rules: &'a [ExclusionRule],
 }
+impl Excluded<'_> {
+    /// The reason a named-route member is excluded, if any. Rules come first,
+    /// then persistent model exclusions, then admission rejections. An account
+    /// rule removes a model once no remaining account serves it.
+    fn reason(&self, model: &ModelId, context: &ValidatedContext<'_>) -> Option<String> {
+        let serving_accounts_remain = context.availability.iter().any(|record| {
+            record.adapter == model.adapter()
+                && provenant_records::AdapterSpec::get(model.adapter()).is_none_or(|spec| {
+                    record
+                        .account_key
+                        .as_deref()
+                        .is_none_or(|key| spec.account_serves_model(key, model.model()))
+                })
+        });
+        if let Some(rule) = self
+            .rules
+            .iter()
+            .find(|rule| rule.removes(model, serving_accounts_remain))
+        {
+            return Some(rule.to_string());
+        }
+        if context
+            .config
+            .model_exclusions
+            .iter()
+            .any(|exclusion| exclusion.model == *model && exclusion.schedule.active(context.now))
+        {
+            return Some(format!("excluded by config: model {}", model.as_str()));
+        }
+        self.rejected
+            .contains(model)
+            .then(|| "admission rejected".to_owned())
+    }
+}
 
 struct PoolPick {
     route: RouteAlternative,
@@ -1586,6 +1624,17 @@ fn resolve_inner(
                 if !privacy_allowed(&named.model, request.confidential, context.catalogue) {
                     return Err(RoutingError::ConfidentialModel);
                 }
+                // A single-model route is a route, not a pin: provider, account
+                // and model exclusions apply and the refusal names them.
+                let single = Excluded {
+                    rejected: &[],
+                    rules: excluded_members.rules,
+                };
+                if let Some(detail) = single.reason(&named.model, context) {
+                    return Err(RoutingError::NoEligiblePoolMember {
+                        exclusions: vec![format!("{}: {detail}", named.model.as_str())],
+                    });
+                }
                 (
                     candidate(
                         &named.model,
@@ -1622,9 +1671,13 @@ fn resolve_inner(
     if models.contains(&primary_model) {
         return Err(RoutingError::Alternatives);
     }
+    let named_route = matches!(request.choice, RouteChoice::NamedRoute(_));
     let alternatives = models
         .iter()
         .filter(|model| privacy_allowed(model, request.confidential, context.catalogue))
+        // A named route's fallback keeps to the same exclusions as its pool; a
+        // pinned model's own fallback is never filtered.
+        .filter(|model| !named_route || excluded_members.reason(model, context).is_none())
         .map(|model| {
             refuse_unlisted_opencode(model, context.catalogue)?;
             candidate(
@@ -1728,28 +1781,7 @@ fn classify_pool(
     for member in members {
         let effort = request.effort.clone().or(member.effort.clone());
         let mut factor_basis_points = NEUTRAL_FACTOR_BASIS_POINTS;
-        let configured_exclusion = context.config.model_exclusions.iter().any(|exclusion| {
-            exclusion.model == member.model && exclusion.schedule.active(context.now)
-        });
-        let serving_accounts_remain = context
-            .availability
-            .iter()
-            .any(|record| record.adapter == member.model.adapter());
-        let rule = excluded_members
-            .rules
-            .iter()
-            .find(|rule| rule.removes(&member.model, serving_accounts_remain));
-        if excluded_members.rejected.contains(&member.model)
-            || configured_exclusion
-            || rule.is_some()
-        {
-            let detail = if let Some(rule) = rule {
-                rule.to_string()
-            } else if configured_exclusion {
-                "config exclusion".to_owned()
-            } else {
-                "admission rejected".to_owned()
-            };
+        if let Some(detail) = excluded_members.reason(&member.model, context) {
             classified
                 .exclusions
                 .push(format!("{}: {detail}", member.model.as_str()));
