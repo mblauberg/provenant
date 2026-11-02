@@ -2023,38 +2023,53 @@ mod narrowing {
         }
     }
 
-    struct ExitsDuringOccupancy<'a> {
-        inner: &'a InjectedCensus,
-        observations: std::cell::Cell<usize>,
+    /// Wraps a scripted observer; the process exits (as `exit`) once its
+    /// occupancy has been queried, however often it is observed.
+    struct ExitsOnOccupancy<'a> {
+        processes: &'a InjectedCensus,
+        scripted: &'a Scripted,
+        exit: ProcessObservation,
+        exited: std::sync::atomic::AtomicBool,
     }
-    impl ProcessObserver for ExitsDuringOccupancy<'_> {
+    impl ProcessObserver for ExitsOnOccupancy<'_> {
         fn boot_identity(&self) -> Result<String, provenant_supervisor::census::CensusError> {
-            self.inner.boot_identity()
+            self.processes.boot_identity()
         }
-        fn observe(&self, pid: i64) -> provenant_supervisor::census::ProcessObservation {
-            if pid == 200 {
-                let count = self.observations.get() + 1;
-                self.observations.set(count);
-                // The fourth check follows occupancy inspection; the listed
-                // process has exited by then.
-                if count == 4 {
-                    return provenant_supervisor::census::ProcessObservation::Absent;
-                }
+        fn observe(&self, pid: i64) -> ProcessObservation {
+            if pid == 200 && self.exited.load(std::sync::atomic::Ordering::SeqCst) {
+                return self.exit.clone();
             }
-            self.inner.observe(pid)
+            self.processes.observe(pid)
         }
         fn census(
             &self,
             max: usize,
         ) -> Result<provenant_supervisor::census::Census, provenant_supervisor::census::CensusError>
         {
-            self.inner.census(max)
+            self.processes.census(max)
+        }
+    }
+    impl CwdObserver for ExitsOnOccupancy<'_> {
+        fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            self.scripted.cwd(pid)
+        }
+        fn occupancy(&self, pid: i64) -> OccupancyObservation {
+            self.exited.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.scripted.occupancy(pid)
+        }
+        fn sealed_system_image(&self, pid: i64) -> Option<SealedSystemImage> {
+            self.scripted.sealed_system_image(pid)
+        }
+        fn kernel_thread(&self, pid: i64) -> bool {
+            self.scripted.kernel_thread(pid)
         }
     }
 
-    #[test]
-    fn an_esrch_occupancy_gap_for_a_process_that_exits_leaves_roots_free()
-    -> Result<(), Box<dyn Error>> {
+    /// Root state when pid 200, with its cwd and an open file inside the root,
+    /// becomes `exit` during its occupancy query.
+    fn exits_during_occupancy(
+        exit: impl Fn(ProcessFact) -> ProcessObservation,
+    ) -> Result<WorkerState, Box<dyn Error>> {
         let fixture = Fixture::new()?;
         let root = canonicalize(fixture._temp.path())?.join("root");
         fs::create_dir(&root)?;
@@ -2085,26 +2100,58 @@ mod narrowing {
             current: current.clone(),
             platform_uids: BTreeMap::new(),
         };
-        let observer = ExitsDuringOccupancy {
-            inner: &processes,
-            observations: std::cell::Cell::new(0),
-        };
-        let cwd = Scripted {
-            // The old process was inside the candidate root before it exited.
+        let scripted = Scripted {
             cwd: CwdObservation::Path(root.clone()),
-            occupancy: gap(OccupancyGap::Gone),
+            occupancy: OccupancyObservation {
+                paths: vec![root.join("open-file")],
+                complete: false,
+                gap: Some(OccupancyGap::DescriptorsUnavailable),
+            },
             sealed: None,
             kernel_thread: false,
+        };
+        let observer = ExitsOnOccupancy {
+            processes: &processes,
+            scripted: &scripted,
+            exit: exit(fact(200)),
+            exited: std::sync::atomic::AtomicBool::new(false),
         };
         let (states, _, _) = observe_worker_holders_with_audit(
             std::slice::from_ref(&root),
             &observer,
-            &cwd,
+            &observer,
             &current,
             false,
             &mut |_, _| {},
         );
-        assert_eq!(states[&root], WorkerState::Free);
+        Ok(states[&root])
+    }
+
+    #[test]
+    fn a_process_that_exits_during_occupancy_inspection_frees_its_root()
+    -> Result<(), Box<dyn Error>> {
+        assert_eq!(
+            exits_during_occupancy(|_| ProcessObservation::Absent)?,
+            WorkerState::Free
+        );
+        assert_eq!(
+            exits_during_occupancy(|fact| ProcessObservation::Present(ProcessFact {
+                zombie: true,
+                ..fact
+            }))?,
+            WorkerState::Free
+        );
+        // A different process that reused the PID proves nothing.
+        assert_ne!(
+            exits_during_occupancy(|fact| ProcessObservation::Present(ProcessFact {
+                identity: ProcessIdentity {
+                    native_start: 999,
+                    ..fact.identity
+                },
+                ..fact
+            }))?,
+            WorkerState::Free
+        );
         Ok(())
     }
 
@@ -2141,7 +2188,6 @@ mod narrowing {
         for gap_kind in [
             OccupancyGap::ExecutableUnavailable,
             OccupancyGap::DescriptorsUnavailable,
-            OccupancyGap::Gone,
             OccupancyGap::LimitExceeded,
             OccupancyGap::Unobserved,
         ] {

@@ -422,9 +422,17 @@ pub(super) fn observe_worker_holders_with_audit(
             let before = observer.observe(pid);
             let occupancy = cwd_observer.occupancy(pid);
             let after = observer.observe(pid);
-            // An absent PID after the occupancy query has no cwd or open
-            // files, even if its earlier cwd observation named a root.
-            if matches!(&after, ProcessObservation::Absent) {
+            // A process that exited during the occupancy query (absent, or a
+            // zombie of the same identity) now holds no cwd or open file, even
+            // if an earlier observation named a root.
+            let exited = match &after {
+                ProcessObservation::Absent => true,
+                ProcessObservation::Present(process) => {
+                    process.identity == fact.identity && process.zombie
+                }
+                ProcessObservation::Unknown(_) => false,
+            };
+            if exited {
                 continue;
             }
             let pid_reused = matches!(
