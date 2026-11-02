@@ -2,6 +2,7 @@
 
 Released versions, newest first:
 
+- [1.5.2](v1.5.2.md)
 - [1.5.1](v1.5.1.md)
 - [1.5.0](v1.5.0.md)
 - [1.4.2](v1.4.2.md)
