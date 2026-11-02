@@ -2887,16 +2887,24 @@ fn cursor_launches_fresh_and_resume_with_edits_only_for_writers() -> Result<(), 
     Ok(())
 }
 
+/// A registration made before agy accounts had their own keychain: its
+/// directory holds none, so lanes share the login keychain.
+pub(super) fn legacy_agy_account() -> identity::RegisteredAccount {
+    identity::RegisteredAccount::new("agy", "opaque-account", "/fixture/identities/legacy".into())
+        .expect("fixture account")
+}
+
 #[test]
 fn agy_includes_attempt_scratch_in_the_workspace() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
-    let mut route = route("agy", "fixture-model");
-    route.account_key = None;
+    let route = route("agy", "fixture-model");
+    let account = legacy_agy_account();
     for access in [Access::ReadOnly, Access::WorktreeWrite] {
         let plan = fixture_access_plan(access, Some("keychain"), false);
         for git_context in [false, true] {
             let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
             input.git_context = git_context;
+            input.account = Some(&account);
             let spec = agy::Agy.prepare(input)?;
             assert_eq!(
                 spec.argv.windows(2).any(|pair| {
@@ -2912,16 +2920,12 @@ fn agy_includes_attempt_scratch_in_the_workspace() -> Result<(), ProviderError> 
 #[test]
 fn agy_turns_are_bounded_only_by_the_supervisor_deadline() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
-    let mut route = route("agy", "fixture-model");
-    route.account_key = None;
+    let route = route("agy", "fixture-model");
+    let account = legacy_agy_account();
     let plan = fixture_access_plan(Access::ReadOnly, Some("keychain"), false);
-    let spec = agy::Agy.prepare(fixture_input(
-        &route,
-        &plan,
-        &prompt,
-        Path::new("/fixture/repo"),
-        None,
-    ))?;
+    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.account = Some(&account);
+    let spec = agy::Agy.prepare(input)?;
     // Zero switches off agy's own print timeout, which would end a turn early.
     assert!(
         spec.argv
@@ -2935,13 +2939,15 @@ fn agy_turns_are_bounded_only_by_the_supervisor_deadline() -> Result<(), Provide
 fn agy_writers_exec_what_codex_writers_exec() -> Result<(), ProviderError> {
     let prompt = Prompt::new("fixture prompt".into());
     let repo = Path::new("/fixture/repo");
-    let mut agy_route = route("agy", "fixture-model");
-    agy_route.account_key = None;
+    let agy_route = route("agy", "fixture-model");
+    let account = legacy_agy_account();
     let mut codex_route = route("codex", "fixture-model");
     codex_route.account_key = None;
     for access in [Access::ReadOnly, Access::WorktreeWrite] {
         let plan = fixture_access_plan(access, Some("keychain"), false);
-        let spec = agy::Agy.prepare(fixture_input(&agy_route, &plan, &prompt, repo, None))?;
+        let mut input = fixture_input(&agy_route, &plan, &prompt, repo, None);
+        input.account = Some(&account);
+        let spec = agy::Agy.prepare(input)?;
         assert!(
             spec.env
                 .iter()
@@ -2995,8 +3001,8 @@ fn agy_read_only_adds_read_roots_outside_the_working_directory() -> Result<(), P
     use provenant_confinement::permissions::{PathGrant, PathScope};
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
     let prompt = Prompt::new("fixture prompt".into());
-    let mut route = route("agy", "fixture-model");
-    route.account_key = None;
+    let route = route("agy", "fixture-model");
+    let account = legacy_agy_account();
     let reader = fixture_access_plan(Access::ReadOnly, Some("keychain"), false);
     let mut permissions = reader.permissions().clone();
     permissions.read_roots.push(PathGrant {
@@ -3011,13 +3017,15 @@ fn agy_read_only_adds_read_roots_outside_the_working_directory() -> Result<(), P
         agy_state: None,
     })
     .expect("fixture read-only plan");
-    let spec = agy::Agy.prepare(fixture_input(
+    let mut input = fixture_input(
         &route,
         &plan,
         &prompt,
         Path::new("/fixture/repo/crates"),
         None,
-    ))?;
+    );
+    input.account = Some(&account);
+    let spec = agy::Agy.prepare(input)?;
     let added: Vec<_> = spec
         .argv
         .windows(2)

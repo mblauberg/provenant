@@ -475,12 +475,13 @@ fn agy_read_only_compiled_profile_denies_read_root_write() -> Result<(), Box<dyn
     let repo = root.join("repo");
     std::fs::write(repo.join("input"), "readable")?;
     let plan = super::tests::read_only_plan(root.to_str().unwrap(), Some("keychain"));
-    let mut route = route("agy", "fixture-model");
-    route.account_key = None;
+    let route = route("agy", "fixture-model");
+    let account = super::tests::legacy_agy_account();
     let prompt = Prompt::new("fixture".into());
     let input = PrepareInput {
         executable: &executable,
         home: &root,
+        account: Some(&account),
         ..fixture_input(&route, &plan, &prompt, &repo, None)
     };
     let adapter = REGISTRY
@@ -644,12 +645,13 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
         extensions: ExtensionPolicy::Deny,
         agy_state: None,
     })?;
-    let mut route = route("agy", "fixture-model");
-    route.account_key = None;
+    let route = route("agy", "fixture-model");
+    let account = super::tests::legacy_agy_account();
     let prompt = Prompt::new("fixture".into());
     let mut input = PrepareInput {
         executable: &executable,
         home: &root,
+        account: Some(&account),
         git_context: true,
         ..fixture_input(&route, &plan, &prompt, &worktree, None)
     };
