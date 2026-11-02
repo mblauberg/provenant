@@ -605,7 +605,6 @@ fn a_second_agy_account_is_a_separate_quota_row() -> Result {
         &agy,
         format!(
             r#"#!/bin/sh
-pwd -P >/dev/null
 echo "$HOME" >> "{}"
 while [ "$#" -gt 0 ]; do
     if [ "$1" = "--log-file" ]; then shift; log=$1; fi

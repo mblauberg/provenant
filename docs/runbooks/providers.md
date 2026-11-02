@@ -174,8 +174,17 @@ it contains `Library/Keychains/login.keychain-db`, the lane's private home links
 that file instead of the user's login keychain, the grant covers exactly that
 path, and registration and the quota probe run `agy -p /usage` with
 `HOME=<directory>`. A directory without the file keeps the shared login
-keychain, so an existing registration is unchanged. Agy accounts are pinned: a
-launch verifies the signed-in Google account against the registered key.
+keychain, so an existing registration is unchanged. A keychain that is a
+symlink does not count as the account's own.
+
+Unregistered and registered agy behave differently at launch:
+
+- With no agy registration, agy runs on the user's login keychain as before.
+  Routes use the synthetic `local` account: nothing is probed or pinned, so a
+  user who never registers an account sees no change.
+- With a registration, agy accounts are pinned: a launch verifies the signed-in
+  Google account against the registered key and skips the route if it differs
+  (`changed identity; re-register it`). Register every account you route to.
 
 Add an account (macOS; the empty keychain password and no lock timeout are
 deliberate, so a headless lane never prompts):
