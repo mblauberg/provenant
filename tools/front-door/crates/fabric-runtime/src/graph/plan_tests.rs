@@ -104,6 +104,44 @@ fn failed_planner_runs_static_fallback_and_records_reason() {
     );
 }
 
+#[test]
+fn invalid_successful_planner_fragment_runs_static_fallback_and_records_reason() {
+    let document = two_step_fallback_document();
+    let mut owner = fixture_owner(&[
+        "```fragment\n{not json}\n```",
+        "first static result",
+        "second static result",
+        "done",
+    ]);
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    assert!(run.checkpoint.successful());
+    assert_eq!(owner.calls.len(), 4);
+    assert!(owner.calls[1].0.node_id.contains("plan--fallback--first"));
+    let plan = run.checkpoint.nodes.iter().find(|node| node.id == "plan").unwrap();
+    let reason = &plan.outputs.as_ref().unwrap().plan.as_ref().unwrap().fallback_reason;
+    assert!(reason.contains("planner fragment invalid: invalid fragment"), "{reason}");
+    assert!(plan.deterministic_summary().unwrap().contains(reason));
+}
+
+#[test]
+fn planner_fragment_accepts_string_shorthand_inputs_as_result_inputs() {
+    let mut second = slice("second", &["src"]);
+    second["depends_on"] = json!(["first"]);
+    second["inputs"] = json!(["first"]);
+    let output = result(vec![slice("first", &["src"]), second]);
+    let mut owner = fixture_owner(&[&output, "first result", "second result", "done"]);
+    let run = advance(&planner(2), &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    let second = run.checkpoint.expansions[0]
+        .nodes
+        .iter()
+        .find(|node| node.id == "plan--second")
+        .unwrap();
+    assert_eq!(second.inputs[0].node, "plan--first");
+    assert_eq!(second.inputs[0].outputs, vec![OutputKind::Result]);
+}
+
 fn two_step_fallback_document() -> GraphDocument {
     serde_json::from_value(json!({
         "schema_version":1, "graph_id":"planned-fallback-restart", "nodes":[
@@ -166,6 +204,41 @@ fn restart_after_fallback_expansion_does_not_duplicate_work_or_admit_dependants_
     assert_eq!(ids[2], "after");
     assert!(second_owner.prompts[1].contains("first result"));
     assert!(second_owner.prompts[2].contains("second result"));
+}
+
+#[test]
+fn restart_after_invalid_fragment_fallback_reuses_the_persisted_expansion() {
+    let document = two_step_fallback_document();
+    let mut journal = MemoryJournal::default();
+    let mut first_owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, "```fragment\n{not json}\n```"),
+            AttemptObservation::Pending { attempt_ref: None },
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let interrupted = advance(&document, &mut first_owner, &mut journal).unwrap();
+    assert_eq!(interrupted.status, GraphStatus::Pending);
+    assert_eq!(interrupted.checkpoint.expansions.len(), 1);
+    assert!(interrupted.checkpoint.nodes.iter().find(|node| node.id == "plan").unwrap()
+        .outputs.as_ref().unwrap().plan.as_ref().unwrap().fallback_reason.contains("invalid fragment"));
+
+    let mut second_owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, "first result"),
+            terminal_with_result(AttemptOutcome::Succeeded, "second result"),
+            terminal_with_result(AttemptOutcome::Succeeded, "done"),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut second_owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    assert!(run.checkpoint.successful());
+    assert_eq!(run.checkpoint.expansions.len(), 1);
+    let ids: Vec<_> = second_owner.calls.iter().map(|call| call.0.node_id.as_str()).collect();
+    assert_eq!(ids, ["plan--fallback--first", "plan--fallback--second", "after"]);
 }
 
 #[test]
@@ -410,6 +483,8 @@ fn planner_prompt_uses_wire_kinds_and_required_field_names() {
     assert!(prompt.contains("`worktree`"));
     assert!(prompt.contains("`inputs`"));
     assert!(prompt.contains("`acceptance_checks`"));
+    assert!(prompt.contains(r#"{"node":"id","outputs":["result"]}"#));
+    assert!(prompt.contains(r#""id"` (which selects `result`)"#));
     assert!(prompt.contains("Do not emit presets or review shapes"));
 }
 

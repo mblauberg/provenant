@@ -633,6 +633,33 @@ mod result_tests {
     }
 
     #[test]
+    fn paused_graph_status_and_resume_show_the_pause_reason() {
+        let mut run = graph_status_fixture();
+        run.checkpoint.pause_reason = Some("invalid planner fragment: missing nodes".into());
+        run.status = provenant_fabric_runtime::graph::GraphStatus::Paused;
+        let globals = provenant_cli::Globals::default();
+        for command in ["fabric graph status", "fabric graph resume"] {
+            let human = super::graph_display(&run, command, &globals);
+            assert!(
+                human.contains("Pause reason: invalid planner fragment: missing nodes"),
+                "{command}: {human}"
+            );
+        }
+        let summary = super::graph_human::graph_summary(&serde_json::to_value(&run).unwrap());
+        assert!(summary.lines.iter().any(|row| {
+            row == "paused: invalid planner fragment: missing nodes"
+        }));
+
+        run.checkpoint.pause_reason = Some("x".repeat(2048));
+        let human = super::graph_display(&run, "fabric graph status", &globals);
+        let reason_line = human
+            .lines()
+            .find(|line| line.starts_with("Pause reason: "))
+            .unwrap_or_default();
+        assert!(reason_line.chars().count() <= 1024 + "Pause reason: ".chars().count() + 1);
+    }
+
+    #[test]
     fn graph_status_reads_without_advancing_checkpoint() -> Result<(), Box<dyn std::error::Error>> {
         use super::*;
         use provenant_fabric_runtime::graph::{

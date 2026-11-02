@@ -945,7 +945,7 @@ mod tests {
             "schema_version":1,"graph_id":"graph","plan_digest":"digest","nodes":[
                 {"id":"planner", "state":"succeeded", "attempts":[],
                  "outputs":{"schema_version":2,"result":null,"verdict":null,"findings":[],"branch":null,"commit":null,"warnings":[],
-                    "plan":{"fallback_reason":"planner route failed"}}},
+                    "plan":{"fallback_reason":"planner fragment invalid: invalid fragment"}}},
                 {"id":"planner--fallback--static", "state":"succeeded", "attempts":[]},
                 {"id":"synthesis", "state":"succeeded", "attempts":[]}
             ],
@@ -956,7 +956,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             fallback_reason_for_graph(&checkpoint).as_deref(),
-            Some("planner route failed")
+            Some("planner fragment invalid: invalid fragment")
         );
     }
 
