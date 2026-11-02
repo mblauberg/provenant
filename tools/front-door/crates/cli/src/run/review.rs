@@ -6,7 +6,11 @@ pub fn review(command: crate::Review, edge: &Edge<'_>) -> Reply {
     let mut data = json!({"reviewers": []});
     let explain = command.explain;
     let outcome = review_inner(command, edge, &mut data);
-    let collected = if explain { Ok(()) } else { review_collect(edge, &mut data) };
+    let collected = if explain {
+        Ok(())
+    } else {
+        review_collect(edge, &mut data)
+    };
     let verdicts = aggregate_verdicts(&data);
     data["verdicts"] = verdicts;
     let human = review_text(&data);
@@ -87,10 +91,13 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
     let domains = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
         .map_err(|e| invalid(e.to_string()))?
         .domains;
-    let size = if let Some(range) = selection_range(command.shape.as_deref(), command.range.as_deref())? {
-        let numstat = git(&["diff", "--numstat", "--no-renames", range, "--"])?;
-        Some(domains.routing.review.size.classify_numstat(&numstat))
-    } else { None };
+    let size =
+        if let Some(range) = selection_range(command.shape.as_deref(), command.range.as_deref())? {
+            let numstat = git(&["diff", "--numstat", "--no-renames", range, "--"])?;
+            Some(domains.routing.review.size.classify_numstat(&numstat))
+        } else {
+            None
+        };
     let selected = domains
         .routing
         .review
@@ -106,11 +113,17 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
     let priority = provenant_routing::lens_priority(command.kind.as_deref());
     let mut lens_index = 0;
     for group in &mut panel_shape.reviewers {
-        group.lenses = (0..group.count).map(|_| {
-            let lens = priority.get(lens_index).or_else(|| priority.last()).copied().unwrap_or("correctness-spec");
-            lens_index += 1;
-            lens.to_owned()
-        }).collect();
+        group.lenses = (0..group.count)
+            .map(|_| {
+                let lens = priority
+                    .get(lens_index)
+                    .or_else(|| priority.last())
+                    .copied()
+                    .unwrap_or("correctness-spec");
+                lens_index += 1;
+                lens.to_owned()
+            })
+            .collect();
     }
     if selected
         .shape
@@ -132,7 +145,10 @@ fn review_inner(command: crate::Review, edge: &Edge<'_>, data: &mut Value) -> Re
     if command.explain {
         for group in &panel_shape.reviewers {
             for lens in &group.lenses {
-                data["reviewers"].as_array_mut().ok_or_else(|| invalid("invalid review result".into()))?.push(json!({"lens": lens, "pool": group.pool, "state": "planned"}));
+                data["reviewers"]
+                    .as_array_mut()
+                    .ok_or_else(|| invalid("invalid review result".into()))?
+                    .push(json!({"lens": lens, "pool": group.pool, "state": "planned"}));
             }
         }
         return Ok(false);
@@ -681,7 +697,11 @@ fn aggregate_verdicts(data: &Value) -> Value {
     if let Some(rows) = data["reviewers"].as_array() {
         for row in rows {
             if row["state"] == "planned" {
-                text.push_str(&format!("  lens={} pool={}\n", row["lens"].as_str().unwrap_or("general"), row["pool"].as_str().unwrap_or("unknown")));
+                text.push_str(&format!(
+                    "  lens={} pool={}\n",
+                    row["lens"].as_str().unwrap_or("general"),
+                    row["pool"].as_str().unwrap_or("unknown")
+                ));
                 continue;
             }
             let verdict = row["verdict"].as_str().unwrap_or("unknown");
@@ -1075,6 +1095,9 @@ mod review_shape_tests {
     #[test]
     fn text_snapshots_panel_and_reason() {
         let data = json!({"shape":"quick","selection_source":"by_size","size":"small","kind":"code","risk":"routine","reviewers":[{"lens":"correctness-spec","pool":"junior","state":"planned"}]});
-        assert_eq!(review_text(&data), "review quick (by_size; size=small; kind=code; risk=routine)\n  lens=correctness-spec pool=junior\n");
+        assert_eq!(
+            review_text(&data),
+            "review quick (by_size; size=small; kind=code; risk=routine)\n  lens=correctness-spec pool=junior\n"
+        );
     }
 }

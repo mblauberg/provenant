@@ -15,7 +15,16 @@ mod presentation;
 /// for who reviews; presets compose them, so lens counts and tiers default from here.
 /// Picks a review shape from a stage's `review_shape` and `risk_tier`. The host
 /// owns routing, so it supplies this from its review configuration.
-pub type ShapeSelector = Box<dyn Fn(Option<&str>, Option<&str>, Option<&str>, Option<&str>, Option<&str>, Option<&str>) -> Result<ShapeHint, String>>;
+pub type ShapeSelector = Box<
+    dyn Fn(
+        Option<&str>,
+        Option<&str>,
+        Option<&str>,
+        Option<&str>,
+        Option<&str>,
+        Option<&str>,
+    ) -> Result<ShapeHint, String>,
+>;
 
 #[derive(Clone, Debug, Default)]
 pub struct ShapeHint {
@@ -1680,9 +1689,26 @@ impl StageBuilder<'_> {
                 .filter(|value| !value.is_empty())
         };
         let subject = self.parameters.get("subject");
-        let commit = subject.and_then(|subject| subject.get("commit")).and_then(Value::as_str);
-        let kind = if subject.and_then(|subject| subject.get("type")).and_then(Value::as_str) == Some("integration") { Some("integration") } else { text("kind") };
-        let hint = select(text("review_shape"), text("risk_tier"), kind, text("size"), text("base"), commit)?;
+        let commit = subject
+            .and_then(|subject| subject.get("commit"))
+            .and_then(Value::as_str);
+        let kind = if subject
+            .and_then(|subject| subject.get("type"))
+            .and_then(Value::as_str)
+            == Some("integration")
+        {
+            Some("integration")
+        } else {
+            text("kind")
+        };
+        let hint = select(
+            text("review_shape"),
+            text("risk_tier"),
+            kind,
+            text("size"),
+            text("base"),
+            commit,
+        )?;
         self.layers
             .used_shapes
             .borrow_mut()
@@ -1694,12 +1720,26 @@ impl StageBuilder<'_> {
     /// An item without a tier takes it from the shape, and only such items count
     /// against the shape's reviewer total; a tier set in the preset is an override.
     fn select_items(&self, mut list: Vec<Value>) -> Result<Vec<Value>, String> {
-        let kind = self.parameters.get("kind").and_then(Value::as_str).unwrap_or_default();
+        let kind = self
+            .parameters
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let priority = provenant_routing::lens_priority(Some(kind));
         if kind == "docs" {
-            list.retain(|item| item.get("when").and_then(Value::as_str).is_some_and(|when| !when.is_empty()) || item["name"] == "conventions-readability");
+            list.retain(|item| {
+                item.get("when")
+                    .and_then(Value::as_str)
+                    .is_some_and(|when| !when.is_empty())
+                    || item["name"] == "conventions-readability"
+            });
         }
-        list.sort_by_key(|item| priority.iter().position(|name| item["name"] == *name).unwrap_or(priority.len()));
+        list.sort_by_key(|item| {
+            priority
+                .iter()
+                .position(|name| item["name"] == *name)
+                .unwrap_or(priority.len())
+        });
         let mut tags: Vec<&str> = self
             .parameters
             .get("risk_tags")
@@ -2880,21 +2920,62 @@ pub fn run(
         layers.review = Some(Box::new(move |named, risk, kind, size, base, subject| {
             let measured = if size.is_none() {
                 if let (Some(base), Some(subject)) = (base, subject) {
-                    if base.starts_with('-') || subject.starts_with('-') { return Err("review refs must not begin with -".into()); }
+                    if base.starts_with('-') || subject.starts_with('-') {
+                        return Err("review refs must not begin with -".into());
+                    }
                     use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
-                    let git = provenant_os::git::git_executable().ok_or("Git executable unavailable")?;
-                    let argv = vec![git.into_os_string(), "diff".into(), "--numstat".into(), "--no-renames".into(), base.into(), subject.into(), "--".into()];
-                    let output = SystemExecutor::new(1).map_err(|e| e.to_string())?.execute(ExecOptions::new(&argv, &review_directory, std::time::Duration::from_secs(30))).map_err(|e| e.to_string())?;
-                    if output.termination != Termination::Exit(0) || output.timed_out || output.stdout.truncated { return Err("cannot measure review diff".into()); }
-                    Some(review.size.classify_numstat(std::str::from_utf8(&output.stdout.bytes).map_err(|e| e.to_string())?).to_owned())
-                } else { None }
-            } else { None };
+                    let git =
+                        provenant_os::git::git_executable().ok_or("Git executable unavailable")?;
+                    let argv = vec![
+                        git.into_os_string(),
+                        "diff".into(),
+                        "--numstat".into(),
+                        "--no-renames".into(),
+                        base.into(),
+                        subject.into(),
+                        "--".into(),
+                    ];
+                    let output = SystemExecutor::new(1)
+                        .map_err(|e| e.to_string())?
+                        .execute(ExecOptions::new(
+                            &argv,
+                            &review_directory,
+                            std::time::Duration::from_secs(30),
+                        ))
+                        .map_err(|e| e.to_string())?;
+                    if output.termination != Termination::Exit(0)
+                        || output.timed_out
+                        || output.stdout.truncated
+                    {
+                        return Err("cannot measure review diff".into());
+                    }
+                    Some(
+                        review
+                            .size
+                            .classify_numstat(
+                                std::str::from_utf8(&output.stdout.bytes)
+                                    .map_err(|e| e.to_string())?,
+                            )
+                            .to_owned(),
+                    )
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             let kind = kind.or(task_kind.as_deref());
             let size = size.or(measured.as_deref());
             let selected = review.select_shape(named, risk, kind, &[], size)?;
             let mut hint = ShapeHint {
                 name: selected.name.to_owned(),
-                source: format!("{}; size={}; kind={}; risk={}", selected.source, size.unwrap_or("unknown"), kind.unwrap_or("unknown"), risk.unwrap_or("unknown")),
+                source: format!(
+                    "{}; size={}; kind={}; risk={}",
+                    selected.source,
+                    size.unwrap_or("unknown"),
+                    kind.unwrap_or("unknown"),
+                    risk.unwrap_or("unknown")
+                ),
                 ..Default::default()
             };
             for group in &selected.shape.reviewers {
@@ -2989,7 +3070,9 @@ pub fn run(
         }
         let name = selection.choice.preset.as_str();
         let mut params = selection.choice.parameters.into_iter().collect::<Vec<_>>();
-        if name == "review-council" && let Some(kind) = &request.task_kind {
+        if name == "review-council"
+            && let Some(kind) = &request.task_kind
+        {
             params.push(("kind".into(), json!(kind)));
         }
         file_params.into_iter().for_each(|(key, value)| {

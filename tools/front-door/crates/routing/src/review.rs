@@ -22,14 +22,24 @@ pub struct ReviewSize {
 }
 impl Default for ReviewSize {
     fn default() -> Self {
-        Self { small_lines: 150, small_files: 3, small_crates: 1, medium_lines: 1000, medium_files: 15, medium_crates: 3 }
+        Self {
+            small_lines: 150,
+            small_files: 3,
+            small_crates: 1,
+            medium_lines: 1000,
+            medium_files: 15,
+            medium_crates: 3,
+        }
     }
 }
 impl ReviewSize {
     pub fn classify(&self, lines: usize, files: usize, crates: usize) -> &'static str {
         if lines <= self.small_lines && files <= self.small_files && crates <= self.small_crates {
             "small"
-        } else if lines <= self.medium_lines && files <= self.medium_files && crates <= self.medium_crates {
+        } else if lines <= self.medium_lines
+            && files <= self.medium_files
+            && crates <= self.medium_crates
+        {
             "medium"
         } else {
             "large"
@@ -44,12 +54,23 @@ impl ReviewSize {
         let mut crates = std::collections::BTreeSet::new();
         for row in numstat.lines() {
             let mut fields = row.splitn(3, '\t');
-            let (Some(added), Some(removed), Some(path)) = (fields.next(), fields.next(), fields.next()) else { return "large"; };
-            let (Ok(added), Ok(removed)) = (added.parse::<usize>(), removed.parse::<usize>()) else { return "large"; };
+            let (Some(added), Some(removed), Some(path)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                return "large";
+            };
+            let (Ok(added), Ok(removed)) = (added.parse::<usize>(), removed.parse::<usize>())
+            else {
+                return "large";
+            };
             lines = lines.saturating_add(added).saturating_add(removed);
             files += 1;
             let parts: Vec<_> = path.split('/').collect();
-            let root = parts.iter().position(|p| *p == "crates").and_then(|i| parts.get(i + 1).map(|_| parts[..=i + 1].join("/"))).unwrap_or_default();
+            let root = parts
+                .iter()
+                .position(|p| *p == "crates")
+                .and_then(|i| parts.get(i + 1).map(|_| parts[..=i + 1].join("/")))
+                .unwrap_or_default();
             crates.insert(root);
         }
         self.classify(lines, files, crates.len())
@@ -98,8 +119,26 @@ pub type ReviewSelect = Select<String>;
 pub fn lens_priority(kind: Option<&str>) -> &'static [&'static str] {
     match kind {
         Some("docs") => &["conventions-readability"],
-        Some("refactor") => &["correctness-spec", "refactor-cleanup", "design-fit-reuse", "tests", "simplicity", "conventions-readability", "reliability", "flexibility"],
-        _ => &["correctness-spec", "tests", "design-fit-reuse", "simplicity", "conventions-readability", "refactor-cleanup", "reliability", "flexibility"],
+        Some("refactor") => &[
+            "correctness-spec",
+            "refactor-cleanup",
+            "design-fit-reuse",
+            "tests",
+            "simplicity",
+            "conventions-readability",
+            "reliability",
+            "flexibility",
+        ],
+        _ => &[
+            "correctness-spec",
+            "tests",
+            "design-fit-reuse",
+            "simplicity",
+            "conventions-readability",
+            "refactor-cleanup",
+            "reliability",
+            "flexibility",
+        ],
     }
 }
 impl Default for ReviewConfig {
@@ -215,7 +254,9 @@ impl ReviewConfig {
         paths: &[String],
         size: Option<&str>,
     ) -> Result<ReviewSelection<'a>, String> {
-        let integration = (kind == Some("integration")).then(|| self.select.by_kind.get("integration")).flatten();
+        let integration = (kind == Some("integration"))
+            .then(|| self.select.by_kind.get("integration"))
+            .flatten();
         let mut selected = self.select.select(
             integration.or(override_name.map(str::to_owned).as_ref()),
             risk,
@@ -224,15 +265,27 @@ impl ReviewConfig {
             size,
             Some(true),
         );
-        if integration.is_some() { selected.source = "by_kind"; }
+        if integration.is_some() {
+            selected.source = "by_kind";
+        }
         // Risk establishes a floor; size and integration can demand more coverage.
         if override_name.is_none() {
             let candidates = [
-                (kind.is_some_and(|k| self.select.by_kind.contains_key(k)) || size.is_some_and(|s| self.select.by_size.contains_key(s))).then(|| self.select.select(None, None, kind, &[], size, Some(true))),
-                risk.filter(|r| self.select.by_risk.contains_key(*r)).map(|r| self.select.select(None, Some(r), None, &[], None, Some(true))),
+                (kind.is_some_and(|k| self.select.by_kind.contains_key(k))
+                    || size.is_some_and(|s| self.select.by_size.contains_key(s)))
+                .then(|| self.select.select(None, None, kind, &[], size, Some(true))),
+                risk.filter(|r| self.select.by_risk.contains_key(*r))
+                    .map(|r| {
+                        self.select
+                            .select(None, Some(r), None, &[], None, Some(true))
+                    }),
             ];
             for candidate in candidates.into_iter().flatten() {
-                let slots = |name: &str| self.shapes.get(name).map_or(0, |shape| shape.reviewers.iter().map(|r| r.count).sum::<usize>());
+                let slots = |name: &str| {
+                    self.shapes.get(name).map_or(0, |shape| {
+                        shape.reviewers.iter().map(|r| r.count).sum::<usize>()
+                    })
+                };
                 if slots(&candidate.value) > slots(&selected.value) {
                     selected = candidate;
                 }
@@ -374,14 +427,56 @@ mod tests {
     #[test]
     fn size_and_kind_choose_shapes_with_risk_floor() {
         let review = ReviewConfig::default();
-        for (lines, files, crates, expected) in [(150, 3, 1, "quick"), (151, 3, 1, "standard"), (1001, 3, 1, "deep"), (1, 16, 1, "deep"), (1, 1, 4, "deep")] {
+        for (lines, files, crates, expected) in [
+            (150, 3, 1, "quick"),
+            (151, 3, 1, "standard"),
+            (1001, 3, 1, "deep"),
+            (1, 16, 1, "deep"),
+            (1, 1, 4, "deep"),
+        ] {
             let size = review.size.classify(lines, files, crates);
-            assert_eq!(review.select_shape(None, None, None, &[], Some(size)).unwrap().name, expected);
+            assert_eq!(
+                review
+                    .select_shape(None, None, None, &[], Some(size))
+                    .unwrap()
+                    .name,
+                expected
+            );
         }
-        assert_eq!(review.select_shape(None, Some("routine"), Some("integration"), &[], Some("small")).unwrap().name, "deep");
-        assert_eq!(review.select_shape(None, None, Some("docs"), &[], Some("large")).unwrap().name, "quick");
-        assert_eq!(review.select_shape(None, None, Some("refactor"), &[], Some("medium")).unwrap().name, "standard");
-        assert_eq!(review.select_shape(None, Some("crucial"), None, &[], Some("small")).unwrap().name, "deep");
+        assert_eq!(
+            review
+                .select_shape(
+                    None,
+                    Some("routine"),
+                    Some("integration"),
+                    &[],
+                    Some("small")
+                )
+                .unwrap()
+                .name,
+            "deep"
+        );
+        assert_eq!(
+            review
+                .select_shape(None, None, Some("docs"), &[], Some("large"))
+                .unwrap()
+                .name,
+            "quick"
+        );
+        assert_eq!(
+            review
+                .select_shape(None, None, Some("refactor"), &[], Some("medium"))
+                .unwrap()
+                .name,
+            "standard"
+        );
+        assert_eq!(
+            review
+                .select_shape(None, Some("crucial"), None, &[], Some("small"))
+                .unwrap()
+                .name,
+            "deep"
+        );
     }
 
     #[test]
@@ -393,7 +488,9 @@ mod tests {
             ("crucial", "deep"),
             ("terminal", "deep"),
         ] {
-            let selected = review.select_shape(None, Some(tier), None, &[], None).unwrap();
+            let selected = review
+                .select_shape(None, Some(tier), None, &[], None)
+                .unwrap();
             assert_eq!(selected.name, expected, "risk tier {tier}");
             assert_eq!(selected.source, "by_risk", "risk tier {tier}");
         }
@@ -443,7 +540,10 @@ mod tests {
             .insert("src/auth/**".into(), "deep".into());
         let paths = vec!["src/auth/login.rs".into()];
         assert_eq!(
-            review.select_shape(None, None, None, &paths, None).unwrap().name,
+            review
+                .select_shape(None, None, None, &paths, None)
+                .unwrap()
+                .name,
             "deep"
         );
     }

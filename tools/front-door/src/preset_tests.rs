@@ -1241,13 +1241,35 @@ fn review_council_fans_out_one_lens_role_over_the_lens_list() {
 
 #[test]
 fn integration_review_expands_all_base_lenses_and_resolves_roles() {
-    let document = council(&["parameters.worktree='/repo/lane'", "parameters.subject={type='integration'}"], true).unwrap();
-    let nodes = document["nodes"][1]["composite"]["nodes"].as_array().unwrap();
+    let document = council(
+        &[
+            "parameters.worktree='/repo/lane'",
+            "parameters.subject={type='integration'}",
+        ],
+        true,
+    )
+    .unwrap();
+    let nodes = document["nodes"][1]["composite"]["nodes"]
+        .as_array()
+        .unwrap();
     assert_eq!(nodes.len(), 8);
     for lens in ["refactor-cleanup", "reliability", "flexibility"] {
-        let node = nodes.iter().find(|node| node["id"] == format!("lens-{lens}")).unwrap();
-        assert!(node["prompt"].as_str().unwrap().contains(&format!("Lens: {lens}")));
-        assert!(node["prompt"].as_str().unwrap().contains("Canonical questions"));
+        let node = nodes
+            .iter()
+            .find(|node| node["id"] == format!("lens-{lens}"))
+            .unwrap();
+        assert!(
+            node["prompt"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("Lens: {lens}"))
+        );
+        assert!(
+            node["prompt"]
+                .as_str()
+                .unwrap()
+                .contains("Canonical questions")
+        );
     }
 }
 
