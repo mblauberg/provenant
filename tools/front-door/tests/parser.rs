@@ -84,10 +84,41 @@ fn status_shows_the_review_exempt_paths_in_force() -> Result {
 
 #[test]
 fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
-    let rig = TestRig::new()?;
+    let mut rig = TestRig::new()?;
     let binary = std::path::Path::new(env!("CARGO_BIN_EXE_provenant"));
+    let mut attempts = Vec::new();
+    // The oldest lane is its own run, so run selectors below match one
+    // lane. The other 20 share one manifest submission, because each submit
+    // blocks for the minimum one-second wait.
+    let out = rig.execute(
+        binary,
+        &[
+            "run",
+            "--prompt-stdin",
+            "--model",
+            "codex/gpt-6-luna",
+            "--wait",
+            "1s",
+            "--json",
+        ],
+        Some(b"fixture"),
+    )?;
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+    assert_eq!(code(&out), 1, "{value}");
+    assert_eq!(value["command"], "run");
+    assert!(
+        value["data"]["operation_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("cli-"))
+    );
+    attempts.push(
+        value["data"]["lanes"][0]["attempt_id"]
+            .as_str()
+            .ok_or("attempt")?
+            .to_owned(),
+    );
     let manifest = rig.root.join("lanes.json");
-    let tasks = (0..21)
+    let tasks = (0..20)
         .map(|_| {
             serde_json::json!({
                 "prompt": "fixture",
@@ -107,19 +138,14 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
             manifest.to_str().ok_or("manifest path")?,
             "--concurrency",
             "1",
+            "--wait",
+            "1s",
             "--json",
         ],
         None,
     )?;
     let submitted: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
     assert_eq!(code(&out), 1, "{submitted}");
-    assert_eq!(submitted["command"], "run");
-    assert!(
-        submitted["data"]["operation_id"]
-            .as_str()
-            .is_some_and(|id| id.starts_with("cli-"))
-    );
-    let mut attempts = Vec::new();
     for lane in submitted["data"]["lanes"]
         .as_array()
         .ok_or("submitted lanes")?
@@ -144,15 +170,196 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
             ".tracker-input"
         ])
     );
+    let human = rig.command(&["status"])?;
+    let text = String::from_utf8(human.stdout.bytes)?;
+    assert!(text.len() <= 2048, "{text}");
+    assert!(text.starts_with("20 lanes"), "{text}");
+    assert!(text.contains(&attempts[20][..8]), "{text}");
+    assert!(
+        text.contains("review-exempt paths: docs/release-notes/next.d/, docs/specs/, Cargo.lock, .tracker-input"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("next: provenant output {}", attempts[20])),
+        "{text}"
+    );
+    let full = rig.command(&["status", "--full"])?;
+    let full = String::from_utf8(full.stdout.bytes)?;
+    // --full is complete detail, not --all: the older lanes stay out.
+    assert!(
+        full.contains(&attempts[20]) && !full.contains(&attempts[0]),
+        "{full}"
+    );
+    let everything = rig.command(&["status", "--all", "--full"])?;
+    let everything = String::from_utf8(everything.stdout.bytes)?;
+    assert!(
+        everything.contains(&attempts[0]) && everything.contains(&attempts[20]),
+        "{everything}"
+    );
     let all = rig.command(&["status", "--all", "--json"])?;
-    assert_eq!(code(&all), 0);
     let all: serde_json::Value = serde_json::from_slice(&all.stdout.bytes)?;
-    let all_lanes = all["data"]["lanes"].as_array().ok_or("all lanes")?;
-    assert_eq!(all_lanes.len(), 21);
-    for (lane, attempt) in all_lanes.iter().zip(attempts.iter().rev()) {
-        assert_eq!(lane["attempt_id"], *attempt);
+    assert_eq!(all["data"]["lanes"].as_array().ok_or("all")?.len(), 21);
+    let page = rig.command(&["status", "--all", "--json", "--limit", "1"])?;
+    let page: serde_json::Value = serde_json::from_slice(&page.stdout.bytes)?;
+    assert_eq!(page["data"]["lanes"].as_array().ok_or("page")?.len(), 1);
+    let cursor = page["data"]["next_cursor"]
+        .as_u64()
+        .ok_or("next cursor")?
+        .to_string();
+    let next = rig.command(&[
+        "status", "--all", "--json", "--limit", "1", "--cursor", &cursor,
+    ])?;
+    let next: serde_json::Value = serde_json::from_slice(&next.stdout.bytes)?;
+    assert_eq!(next["data"]["lanes"][0]["attempt_id"], attempts[19]);
+    std::fs::create_dir_all(rig.project.join("config"))?;
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/telemetry-prices.toml"
+        ),
+        rig.project.join("config/telemetry-prices.toml"),
+    )?;
+    let stats = rig.command(&["telemetry", "stats", "--json"])?;
+    assert_eq!(code(&stats), 0);
+    let stats: serde_json::Value = serde_json::from_slice(&stats.stdout.bytes)?;
+    assert!(stats["data"]["totals"]["cost"]["complete"].is_null());
+    assert!(stats["data"]["totals"]["cost"]["known_lower_bound"].is_null());
+    assert_eq!(stats["data"]["totals"]["cost"]["priced_attempts"], 0);
+    assert_eq!(stats["data"]["totals"]["cost"]["missing_attempts"], 21);
+    let stats = rig.command(&["telemetry", "stats", "--full"])?;
+    assert_eq!(code(&stats), 0);
+    let text = String::from_utf8(stats.stdout.bytes)?;
+    let (scope, totals) = text.split_once('\n').ok_or("scope line")?;
+    assert!(scope.starts_with("scope: project "), "{scope}");
+    assert!(scope.ends_with(", finished attempts only (0 queued or running not counted); other projects are excluded, so run stats from their checkout"), "{scope}");
+    assert_eq!(
+        totals,
+        "21 attempts, cost unknown (21 attempts missing cost data)\ncache-read share: unknown (incomplete input categories)\n"
+    );
+    // Named status includes old terminal lanes by run, task or attempt ID.
+    let oldest = &all["data"]["lanes"][20];
+    for key in ["run_id", "attempt_id"] {
+        let id = oldest[key].as_str().ok_or("target ID")?;
+        for target in [id, &id[..8]] {
+            let selected = rig.command(&["status", target, "--json"])?;
+            assert_eq!(code(&selected), 0);
+            let selected: serde_json::Value = serde_json::from_slice(&selected.stdout.bytes)?;
+            assert_eq!(
+                selected["data"]["lanes"]
+                    .as_array()
+                    .ok_or("selected")?
+                    .len(),
+                1
+            );
+            assert_eq!(selected["data"]["lanes"][0]["attempt_id"], attempts[0]);
+        }
     }
-    Ok(())
+    let task_target = format!(
+        "{}/{}",
+        oldest["run_id"].as_str().ok_or("run")?,
+        oldest["task_id"].as_str().ok_or("task")?
+    );
+    let task_status = rig.command(&["status", &task_target, "--all", "--json"])?;
+    assert_eq!(code(&task_status), 0);
+    let oldest_run = oldest["run_id"].as_str().ok_or("run ID")?;
+    let selected = rig.command(&["lanes", "--all", "--id", oldest_run, "--json"])?;
+    assert_eq!(code(&selected), 0);
+    let selected: serde_json::Value = serde_json::from_slice(&selected.stdout.bytes)?;
+    assert_eq!(selected["data"]["lanes"][0]["attempt_id"], attempts[0]);
+    for condition in ["any", "all"] {
+        let waited = rig.command(&[
+            "lanes",
+            "--id",
+            oldest_run,
+            "--wait",
+            "1s",
+            "--condition",
+            condition,
+            "--json",
+        ])?;
+        assert_eq!(code(&waited), 0);
+        let waited: serde_json::Value = serde_json::from_slice(&waited.stdout.bytes)?;
+        assert_eq!(waited["data"]["condition_met"], true);
+        assert_eq!(waited["data"]["lanes"][0]["attempt_id"], attempts[0]);
+    }
+    // Recovery works from another registered project without --project.
+    rig.project = rig.root.join("elsewhere");
+    std::fs::create_dir(&rig.project)?;
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    assert_eq!(code(&rig.execute(&git, &["init", "-q"], None)?), 0);
+    let other = rig.execute(
+        binary,
+        &[
+            "run",
+            "--prompt-stdin",
+            "--model",
+            "codex/gpt-6-luna",
+            "--wait",
+            "1s",
+            "--json",
+        ],
+        Some(b"other project"),
+    )?;
+    assert_eq!(code(&other), 1);
+    let other: serde_json::Value = serde_json::from_slice(&other.stdout.bytes)?;
+    let prompt = rig.command(&["output", &attempts[0][..8], "--part", "prompt", "--json"])?;
+    let prompt: serde_json::Value = serde_json::from_slice(&prompt.stdout.bytes)?;
+    assert_eq!(prompt["data"]["attempt_id"], attempts[0], "{prompt}");
+    let waited = rig.command(&["lanes", "--id", &attempts[0][..8], "--wait", "1s", "--json"])?;
+    let waited: serde_json::Value = serde_json::from_slice(&waited.stdout.bytes)?;
+    assert_eq!(
+        waited["data"]["lanes"][0]["attempt_id"], attempts[0],
+        "{waited}"
+    );
+    let cancelled = rig.command(&["cancel", &attempts[0][..8], "--json"])?;
+    assert_eq!(
+        code(&cancelled),
+        0,
+        "{}",
+        String::from_utf8_lossy(&cancelled.stdout.bytes)
+    );
+    let run = lanes[0]["run_id"].as_str().ok_or("run")?;
+    let reconciled = rig.command(&["reconcile", "--id", &run[..8], "--json"])?;
+    assert_eq!(
+        code(&reconciled),
+        0,
+        "{}",
+        String::from_utf8_lossy(&reconciled.stdout.bytes)
+    );
+    // Full IDs bypass unrelated history, both in this project and others.
+    let other_lane = &other["data"]["lanes"][0];
+    let checkpoint = rig
+        .state
+        .join("runs")
+        .join(other_lane["run_id"].as_str().ok_or("other run")?)
+        .join("attempts")
+        .join(other_lane["attempt_id"].as_str().ok_or("other attempt")?)
+        .join("process.json");
+    std::fs::write(&checkpoint, b"invalid observation")?;
+    rig.project = rig.root.join("project");
+    let full = rig.command(&["output", &attempts[0], "--part", "prompt", "--json"])?;
+    assert_eq!(
+        code(&full),
+        0,
+        "{}",
+        String::from_utf8_lossy(&full.stdout.bytes)
+    );
+    let local_checkpoint = rig
+        .state
+        .join("runs")
+        .join(lanes[1]["run_id"].as_str().ok_or("local run")?)
+        .join("attempts")
+        .join(&attempts[19])
+        .join("process.json");
+    std::fs::write(&local_checkpoint, b"invalid observation")?;
+    let full = rig.command(&["output", &attempts[0], "--part", "prompt", "--json"])?;
+    assert_eq!(
+        code(&full),
+        0,
+        "{}",
+        String::from_utf8_lossy(&full.stdout.bytes)
+    );
+    rig.assert_legacy_unchanged()
 }
 
 #[test]
