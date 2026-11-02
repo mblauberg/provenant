@@ -1750,19 +1750,15 @@ mod narrowing {
         setuid_transition: true,
     });
 
+    type Observed = (
+        WorkerState,
+        String,
+        Vec<(Option<i64>, Option<&'static str>)>,
+    );
+
     /// Observe one process (pid 200) beside the root; returns state, detail
     /// and the audited (pid, condition) pairs.
-    fn observe(
-        scripted: Scripted,
-        zombie: bool,
-    ) -> Result<
-        (
-            WorkerState,
-            String,
-            Vec<(Option<i64>, Option<&'static str>)>,
-        ),
-        Box<dyn Error>,
-    > {
+    fn observe(scripted: Scripted, zombie: bool) -> Result<Observed, Box<dyn Error>> {
         let fixture = Fixture::new()?;
         let base = canonicalize(fixture._temp.path())?;
         let root = base.join("root");

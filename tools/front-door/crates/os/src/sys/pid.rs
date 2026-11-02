@@ -256,9 +256,11 @@ fn darwin_image_gap(metadata: &io::Result<(u64, u64)>) -> Option<crate::pid::Occ
 
 #[cfg(target_os = "macos")]
 fn darwin_clear_errno() {
-    // SAFETY: __error returns this thread's live errno slot; writing zero
-    // ensures a failed call cannot be blamed on a stale error.
-    unsafe { *libc::__error() = 0 };
+    // SAFETY: __error returns this thread's live errno slot.
+    let errno_slot = unsafe { libc::__error() };
+    // SAFETY: the slot is thread-local and live; writing zero ensures a failed
+    // call cannot be blamed on a stale error.
+    unsafe { *errno_slot = 0 };
 }
 
 #[cfg(target_os = "macos")]
