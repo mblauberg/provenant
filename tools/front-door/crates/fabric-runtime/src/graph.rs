@@ -1512,7 +1512,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 branch,
                                 commit,
                             );
-                            if outcome == AttemptOutcome::QuotaLimited {
+                            if outcome == AttemptOutcome::UsageLimited {
                                 outputs
                                     .warnings
                                     .retain(|warning| warning != FINDINGS_INVALID);
@@ -1552,15 +1552,14 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 }
                                 AttemptOutcome::AuthRequired
                                 | AttemptOutcome::UsageLimited
-                                | AttemptOutcome::QuotaLimited
                                 | AttemptOutcome::AdapterUnavailable => {
                                     if !outcome.allows_route_fallback(node.access, launched)
                                         || route_index + 1 == node.routes.len()
                                     {
-                                        if outcome == AttemptOutcome::QuotaLimited {
+                                        if outcome == AttemptOutcome::UsageLimited {
                                             progress.advance_error_code =
-                                                Some("quota_limited".into());
-                                            progress.advance_error = Some("Provider quota exhausted; wait for the allowance to reset or choose an eligible route.".into());
+                                                Some("usage_limited".into());
+                                            progress.advance_error = Some("Provider quota or rate limit reached; wait for the allowance to reset or choose an eligible route.".into());
                                         }
                                         progress.state = NodeState::Failed;
                                         false

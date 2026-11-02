@@ -17,7 +17,6 @@ pub enum AttemptOutcome {
     OtherFailure,
     AuthRequired,
     UsageLimited,
-    QuotaLimited,
     AdapterUnavailable,
 }
 
@@ -26,7 +25,7 @@ impl AttemptOutcome {
     pub(super) fn allows_route_fallback(self, access: AccessMode, launched: bool) -> bool {
         matches!(
             self,
-            Self::AuthRequired | Self::UsageLimited | Self::QuotaLimited | Self::AdapterUnavailable
+            Self::AuthRequired | Self::UsageLimited | Self::AdapterUnavailable
         ) && (!launched || access == AccessMode::ReadOnly)
     }
 }

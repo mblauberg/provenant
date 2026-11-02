@@ -2767,21 +2767,21 @@ fn writer_limit_after_launch_never_tries_a_second_route() {
 }
 
 #[test]
-fn quota_failure_reports_cause_instead_of_missing_findings() {
+fn usage_limit_failure_reports_cause_instead_of_missing_findings() {
     let document = graph(vec![node("task", route("senior"))]);
     let mut owner = FakeOwner {
-        observations: VecDeque::from([terminal_with_result(AttemptOutcome::QuotaLimited, "")]),
+        observations: VecDeque::from([terminal_with_result(AttemptOutcome::UsageLimited, "")]),
         ..FakeOwner::default()
     };
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
     let node = &run.checkpoint.nodes[0];
     assert_eq!(node.state, NodeState::Failed);
-    assert_eq!(node.advance_error_code.as_deref(), Some("quota_limited"));
+    assert_eq!(node.advance_error_code.as_deref(), Some("usage_limited"));
     assert!(
         node.advance_error
             .as_deref()
             .unwrap()
-            .contains("quota exhausted")
+            .contains("quota or rate limit")
     );
     assert!(
         !node
