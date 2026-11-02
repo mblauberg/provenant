@@ -188,7 +188,7 @@ jobs:
           add-job-id-key: false
           save-if: ${{ matrix.partition == 1 && (github.ref == 'refs/heads/main' || github.event_name == 'pull_request') }}
       - name: Install nextest
-        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         with:
           tool: cargo-nextest@0.9.149
       # Hash partitioning is stable per test, and each runner keeps its own
@@ -228,7 +228,7 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.99.1 --profile minimal
       - name: Install dependency tools
-        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         with:
           tool: cargo-deny@0.20.2,cargo-shear@1.14.0
       - name: Check advisories, licences and dependency allowlist
@@ -267,7 +267,7 @@ jobs:
           add-job-id-key: false
           save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'pull_request' }}
       - name: Install nextest
-        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         with:
           tool: cargo-nextest@0.9.149
       - name: Lint Rust workspace
@@ -414,11 +414,11 @@ jobs:
         with:
           persist-credentials: false
       - name: Install spelling checker
-        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         with:
           tool: typos-cli@1.51.1
       - name: Install ShellCheck
-        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         with:
           tool: shellcheck@0.11.0
           fallback: none
