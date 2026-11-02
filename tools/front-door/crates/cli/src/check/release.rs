@@ -583,7 +583,9 @@ fn home_path(bytes: &[u8]) -> bool {
         .iter()
         .any(|prefix| {
             bytes.windows(prefix.len()).enumerate().any(|(at, part)| {
-                if part != *prefix {
+                // A home directory starts a path; `/fixture/home/` is a
+                // directory named `home` inside another path.
+                if part != *prefix || at > 0 && path_byte(bytes[at - 1]) {
                     return false;
                 }
                 let tail = &bytes[at + prefix.len()..];
@@ -594,6 +596,9 @@ fn home_path(bytes: &[u8]) -> bool {
                 count > 0 && tail.get(count) == Some(&b'/')
             })
         })
+}
+fn path_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"._-".contains(&byte)
 }
 fn private_key(bytes: &[u8]) -> bool {
     ["", "RSA ", "EC ", "OPENSSH ", "DSA ", "ENCRYPTED "]
@@ -802,6 +807,9 @@ mod tests {
         );
         assert!(!github_token(b"ghp_too_short"));
         assert!(!home_path(b"/home/"));
+        assert!(!home_path(b"(subpath \"/fixture/home/.claude/projects\")"));
+        assert!(home_path(b"(subpath \"/home/person/.claude\")"));
+        assert!(home_path(b"/Users/person/x"));
         assert!(byte_matches(&[0xff]).unwrap().is_empty());
         let binary = [
             &[0x89, b'P', b'N', b'G', 0xff, b'\n'][..],
