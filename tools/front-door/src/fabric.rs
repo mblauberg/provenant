@@ -3077,7 +3077,7 @@ fn advance_graphs_after_settlement(
                 integration_base: execution.integration_base,
                 integration_branch: execution.document.integration_branch.clone(),
                 network: graph_network(&execution.document)?,
-                    exclude: graph_exclude(&execution.document)?,
+                exclude: graph_exclude(&execution.document)?,
                 budget,
                 cancel: &cancel,
                 prices: None,
