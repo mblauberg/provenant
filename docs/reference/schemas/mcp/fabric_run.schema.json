@@ -1,0 +1,287 @@
+{
+  "$id": "https://provenant.dev/schemas/v2/mcp/fabric_run.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "properties": {
+        "page": {
+          "properties": {
+            "items": {
+              "items": {
+                "properties": {
+                  "attempt_id": {
+                    "type": "string"
+                  },
+                  "run_id": {
+                    "type": "string"
+                  },
+                  "task_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "attempt_id",
+                  "run_id",
+                  "task_id"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "next_after": {
+              "anyOf": [
+                {
+                  "properties": {
+                    "attempt": {
+                      "type": "string"
+                    },
+                    "host": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "attempt"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "items",
+            "next_after",
+            "truncated"
+          ],
+          "type": "object"
+        },
+        "result": {
+          "const": "list"
+        }
+      },
+      "required": [
+        "result",
+        "page"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "attempt": {
+          "properties": {
+            "attempt_id": {
+              "type": "string"
+            },
+            "provider_seconds": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "provider_silent_for_ms": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "state": {},
+            "task_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "attempt_id",
+            "run_id",
+            "task_id",
+            "state",
+            "provider_seconds"
+          ],
+          "type": "object"
+        },
+        "result": {
+          "const": "status"
+        }
+      },
+      "required": [
+        "result",
+        "attempt"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "attempts": {
+          "items": {
+            "properties": {
+              "attempt_id": {
+                "type": "string"
+              },
+              "provider_seconds": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "provider_silent_for_ms": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "run_id": {
+                "type": "string"
+              },
+              "state": {},
+              "task_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "attempt_id",
+              "run_id",
+              "task_id",
+              "state",
+              "provider_seconds"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "condition": {},
+        "result": {
+          "const": "wait"
+        },
+        "satisfied": {
+          "type": "boolean"
+        },
+        "timed_out": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "result",
+        "condition",
+        "attempts",
+        "satisfied",
+        "timed_out"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "attempt": {
+          "properties": {
+            "attempt_id": {
+              "type": "string"
+            },
+            "provider_seconds": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "provider_silent_for_ms": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "state": {},
+            "task_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "attempt_id",
+            "run_id",
+            "task_id",
+            "state",
+            "provider_seconds"
+          ],
+          "type": "object"
+        },
+        "result": {
+          "const": "cancel"
+        }
+      },
+      "required": [
+        "result",
+        "attempt"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "attempt": {
+          "properties": {
+            "attempt_id": {
+              "type": "string"
+            },
+            "provider_seconds": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "provider_silent_for_ms": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "state": {},
+            "task_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "attempt_id",
+            "run_id",
+            "task_id",
+            "state",
+            "provider_seconds"
+          ],
+          "type": "object"
+        },
+        "result": {
+          "const": "resume"
+        }
+      },
+      "required": [
+        "result",
+        "attempt"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "fabric_run structuredContent"
+}
