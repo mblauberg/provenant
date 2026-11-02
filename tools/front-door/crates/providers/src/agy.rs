@@ -35,9 +35,18 @@ const KEYCHAIN: &str = "Library/Keychains/login.keychain-db";
 /// The keychain file an isolated account keeps in its registered directory,
 /// which is that account's own `HOME`. A directory without it is a legacy
 /// registration that shares the user's login keychain.
+///
+/// This only selects which keychain a lane links. It is not the guard against
+/// a wrong sign-in: registration pins the identity `agy -p /usage` reports under
+/// that `HOME`, and every launch re-verifies it, so a swapped keychain file
+/// changes the identity and is refused. A symlink is not treated as an isolated
+/// keychain, so the account falls back to the shared login keychain rather than
+/// following a link to a file elsewhere.
 pub(crate) fn account_keychain(directory: &std::path::Path) -> Option<std::path::PathBuf> {
     let keychain = directory.join(KEYCHAIN);
-    keychain.is_file().then_some(keychain)
+    std::fs::symlink_metadata(&keychain)
+        .is_ok_and(|metadata| metadata.file_type().is_file())
+        .then_some(keychain)
 }
 
 /// Agy runs with the attempt's private state as `HOME`, so it sees none of the
@@ -45,10 +54,10 @@ pub(crate) fn account_keychain(directory: &std::path::Path) -> Option<std::path:
 /// sidecars or knowledge: its state lives and dies in the private home. Its
 /// sign-in is in a keychain, so the private home links only that one file,
 /// read-only: the selected account's own keychain when its directory holds
-/// one, otherwise the user's login keychain. Headless mode auto-denies every tool permission it cannot
-/// prompt for, so lanes auto-approve tools: our confinement profile, not
-/// agy's prompts, bounds what a lane can do. Its own sandbox cannot nest
-/// inside ours.
+/// one, otherwise the user's login keychain. Headless mode auto-denies every
+/// tool permission it cannot prompt for, so lanes auto-approve tools: our
+/// confinement profile, not agy's prompts, bounds what a lane can do. Its own
+/// sandbox cannot nest inside ours.
 fn prepare(
     input: &PrepareInput<'_>,
     access: Access,

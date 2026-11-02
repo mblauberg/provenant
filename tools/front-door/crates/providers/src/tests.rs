@@ -4970,6 +4970,23 @@ fn agy_directory_without_a_keychain_file_keeps_the_shared_login_keychain()
 }
 
 #[test]
+fn agy_keychain_symlink_is_not_an_isolated_account_keychain()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let directory = root.path().join("home/.agy-second");
+    std::fs::create_dir_all(directory.join("Library/Keychains"))?;
+    let elsewhere = root.path().join("elsewhere.keychain-db");
+    std::fs::write(&elsewhere, "")?;
+    let keychain = directory.join("Library/Keychains/login.keychain-db");
+    std::os::unix::fs::symlink(&elsewhere, &keychain)?;
+    assert_eq!(agy::account_keychain(&directory), None);
+    std::fs::remove_file(&keychain)?;
+    std::fs::write(&keychain, "")?;
+    assert_eq!(agy::account_keychain(&directory), Some(keychain));
+    Ok(())
+}
+
+#[test]
 fn unregistered_agy_launches_on_the_login_keychain_under_the_local_key() {
     let prompt = Prompt::new("fixture prompt".into());
     let mut route = route("agy", "gemini-3.8-flash");
