@@ -326,8 +326,8 @@ fn occupancy_snapshot(pid: i32) -> OccupancySnapshot {
         Ok(values)
     };
     let mut snapshot = OccupancySnapshot::default();
-    match darwin_executable_path(pid) {
-        Some(path) => {
+    match darwin_executable_lookup(pid) {
+        Ok(path) => {
             let metadata = std::fs::metadata(&path).map(|meta| (meta.dev(), meta.ino()));
             if let Some(gap) = darwin_image_gap(&metadata) {
                 snapshot.note(gap);
@@ -349,7 +349,13 @@ fn occupancy_snapshot(pid: i32) -> OccupancySnapshot {
                 Err(_) => snapshot.paths.push(path),
             }
         }
-        None => snapshot.note(crate::pid::OccupancyGap::ExecutableUnavailable),
+        Err(errno) => {
+            if let Some(gap) = darwin_pidpath_gap(errno) {
+                snapshot.note(gap);
+            }
+            // Deleted: the next snapshot must agree that it is still gone.
+            snapshot.identities.push((-1, 0, 0, Vec::new()));
+        }
     }
     let before = match list() {
         Ok(before) => before,
@@ -458,6 +464,18 @@ fn only_a_refused_descriptor_query_is_the_excusable_gap() {
         DescriptorsDenied.worse(DescriptorsDenied),
         DescriptorsDenied
     );
+}
+
+#[cfg(test)]
+#[test]
+fn a_pidpath_enoent_is_a_deleted_executable_but_other_failures_are_gaps() {
+    assert_eq!(darwin_pidpath_gap(Some(libc::ENOENT)), None);
+    for errno in [Some(libc::EPERM), Some(libc::ESRCH), None] {
+        assert_eq!(
+            darwin_pidpath_gap(errno),
+            Some(crate::pid::OccupancyGap::ExecutableUnavailable)
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1122,17 +1140,35 @@ fn darwin_daemon_path(path: &std::path::Path) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn darwin_executable_path(pid: i32) -> Option<std::path::PathBuf> {
+fn darwin_executable_lookup(pid: i32) -> Result<std::path::PathBuf, Option<i32>> {
     use std::os::unix::ffi::OsStrExt;
     let mut path = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    darwin_clear_errno();
     // SAFETY: path supplies writable storage of the supplied size, not retained.
     let size = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
     if size <= 0 || size as usize >= path.len() {
-        return None;
+        return Err(io::Error::last_os_error().raw_os_error());
     }
-    let end = path.iter().position(|byte| *byte == 0)?;
+    let end = path.iter().position(|byte| *byte == 0).ok_or(None)?;
     let path = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&path[..end]));
-    path.is_absolute().then_some(path)
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Err(None)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_executable_path(pid: i32) -> Option<std::path::PathBuf> {
+    darwin_executable_lookup(pid).ok()
+}
+
+/// proc_pidpath reports ENOENT for a process whose executable file has been
+/// deleted (macOS has no "(deleted)" marker). Like a deleted Linux image it
+/// belongs to no existing root and is judged by cwd and descriptors.
+#[cfg(any(target_os = "macos", test))]
+fn darwin_pidpath_gap(errno: Option<i32>) -> Option<crate::pid::OccupancyGap> {
+    (errno != Some(libc::ENOENT)).then_some(crate::pid::OccupancyGap::ExecutableUnavailable)
 }
 
 #[cfg(any(target_os = "macos", test))]
