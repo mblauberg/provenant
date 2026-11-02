@@ -3683,10 +3683,12 @@ fn verify_lane_profile(
         assert!(
             String::from_utf8_lossy(&output.stdout.bytes).contains("lane-cargo-read-only: PASS")
         );
-        assert!(String::from_utf8_lossy(&output.stdout.bytes).contains("1 passed"));
-        // The doc-test is compiled and executed by rustdoc as well.
+        let stdout = String::from_utf8_lossy(&output.stdout.bytes);
+        assert!(stdout.contains("scratch_build_is_private ... ok"));
+        // rustdoc compiles and executes the doc-test from scratch as well.
         assert!(
-            String::from_utf8_lossy(&output.stdout.bytes).contains("test result: ok. 1 passed")
+            stdout.contains("src/lib.rs - doc (line 1) ... ok"),
+            "{stdout}"
         );
     }
     if cfg!(target_os = "macos") && probe == Some(Probe::Shell) {
