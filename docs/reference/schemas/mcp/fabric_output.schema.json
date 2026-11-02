@@ -1,0 +1,231 @@
+{
+  "$id": "https://provenant.dev/schemas/v1/mcp/fabric_output.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "properties": {
+        "bytes": {
+          "oneOf": [
+            {
+              "properties": {
+                "data": {
+                  "type": "string"
+                },
+                "encoding": {
+                  "const": "utf8"
+                }
+              },
+              "required": [
+                "encoding",
+                "data"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "data": {
+                  "pattern": "^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$",
+                  "type": "string"
+                },
+                "encoding": {
+                  "const": "base64"
+                }
+              },
+              "required": [
+                "encoding",
+                "data"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "digest": {
+          "type": "string"
+        },
+        "eof": {
+          "type": "boolean"
+        },
+        "kind": {
+          "const": "chunk"
+        },
+        "next_offset": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "offset": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "part": {
+          "enum": [
+            "prompt",
+            "result",
+            "stderr",
+            "events"
+          ],
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "type": "string"
+        },
+        "target": {
+          "properties": {
+            "attempt": {
+              "type": "string"
+            },
+            "host": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "attempt"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "target",
+        "part",
+        "state",
+        "reason",
+        "offset",
+        "next_offset",
+        "eof",
+        "digest",
+        "bytes"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "artifact": {
+          "properties": {
+            "digest": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "path": {
+              "properties": {
+                "encoding": {
+                  "enum": [
+                    "utf8",
+                    "native_bytes"
+                  ],
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "encoding",
+                "path"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "path",
+            "digest"
+          ],
+          "type": "object"
+        },
+        "bytes": {
+          "oneOf": [
+            {
+              "properties": {
+                "data": {
+                  "type": "string"
+                },
+                "encoding": {
+                  "const": "utf8"
+                }
+              },
+              "required": [
+                "encoding",
+                "data"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "data": {
+                  "pattern": "^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$",
+                  "type": "string"
+                },
+                "encoding": {
+                  "const": "base64"
+                }
+              },
+              "required": [
+                "encoding",
+                "data"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "digest": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "artifact"
+        },
+        "target": {
+          "properties": {
+            "attempt": {
+              "type": "string"
+            },
+            "host": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "attempt"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "target",
+        "artifact",
+        "digest",
+        "bytes"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "fabric_output structuredContent"
+}

@@ -3,6 +3,7 @@
 
 from contextlib import redirect_stdout
 import io
+import json
 from pathlib import Path
 import runpy
 import subprocess
@@ -132,6 +133,55 @@ class ReferenceTests(unittest.TestCase):
             self.assertTrue(GEN['differences'](expected, actual))
             GEN['write_files'](actual, {'cli.md': 'expected\n', 'extra.md': ''})
             self.assertTrue(GEN['differences'](expected, actual))
+
+
+    def test_published_schemas_are_generated_files_and_drift_fails_the_check(self):
+        schema = {'$schema': 'https://json-schema.org/draft/2020-12/schema', 'title': 'fixture',
+                  'type': 'object'}
+        data = {'lanes.schema.json': schema, 'mcp/fabric_run.schema.json': schema,
+                'error-codes': [{'code': 'PR', 'kind': 'umbrella', 'summary': 'A | b.'}]}
+        files = GEN['schema_files'](data)
+        self.assertEqual(sorted(files), ['schemas.md', 'schemas/lanes.schema.json',
+                                         'schemas/mcp/fabric_run.schema.json'])
+        self.assertIn('scripts/generate-reference', files['schemas.md'].splitlines()[0])
+        self.assertIn('| `PR` | umbrella | A &#124; b. |', files['schemas.md'])
+        self.assertEqual(json.loads(files['schemas/lanes.schema.json']), schema)
+        actual, expected = self.root / 'actual', self.root / 'expected'
+        GEN['write_files'](expected, files)
+        GEN['write_files'](actual, files)
+        with redirect_stdout(io.StringIO()):
+            self.assertFalse(GEN['differences'](expected, actual))
+            (actual / 'schemas/lanes.schema.json').write_text('{}\n')
+            self.assertTrue(GEN['differences'](expected, actual))
+            GEN['write_files'](actual, files)
+            (actual / 'schemas/mcp/fabric_run.schema.json').unlink()
+            self.assertTrue(GEN['differences'](expected, actual))
+
+    def test_generate_includes_schemas_and_names_an_unavailable_generator(self):
+        workspace = self.root / GEN['WORKSPACE']
+        workspace.mkdir(parents=True)
+        (workspace / 'Cargo.toml').touch()
+        document = {'lanes.schema.json': {'title': 'fixture'}, 'error-codes': []}
+        with patch.dict(GLOBALS, catalogue=lambda *_: {'commands': []},
+                        wire_schemas=lambda _: document):
+            files, gaps = GEN['generate'](self.root)
+        self.assertIn('schemas/lanes.schema.json', files)
+        self.assertIn('schemas.md', files)
+        self.assertFalse(any('print-wire-schemas' in gap for gap in gaps))
+        with patch.dict(GLOBALS, catalogue=lambda *_: {'commands': []},
+                        wire_schemas=lambda _: {'unsupported': True}):
+            files, gaps = GEN['generate'](self.root)
+        self.assertTrue(any('print-wire-schemas' in gap for gap in gaps))
+        self.assertIn('Source gap', files['schemas.md'])
+        destination = self.root / 'reference'
+        GEN['write_files'](destination, {'schemas/lanes.schema.json': 'existing\n',
+                                         'schemas/mcp/fabric_run.schema.json': 'existing mcp\n'})
+        GEN['update_files'](destination, files, gaps)
+        self.assertEqual((destination / 'schemas/lanes.schema.json').read_text(), 'existing\n')
+        self.assertEqual((destination / 'schemas/mcp/fabric_run.schema.json').read_text(), 'existing mcp\n')
+        with self.assertRaises(ValueError):
+            with patch.dict(GLOBALS, cargo=lambda *_: '{"error-codes": 1}'):
+                GEN['wire_schemas'](self.root)
 
 
 if __name__ == '__main__':

@@ -118,7 +118,7 @@ pub enum RunResult {
 
 fn encode_attempt(record: &AttemptRecord) -> Result<serde_json::Value, serde_json::Error> {
     let mut value = serde_json::to_value(record)?;
-    let seconds = record.provider_ms.map(|millis| millis as f64 / 1000.0);
+    let seconds = provenant_records::wire::provider_seconds(record.provider_ms);
     let object = value.as_object_mut().ok_or_else(|| {
         <serde_json::Error as serde::ser::Error>::custom("attempt record must be an object")
     })?;

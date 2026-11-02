@@ -128,6 +128,52 @@ def cli_reference(data):
     return text.rstrip() + "\n"
 
 
+def wire_schemas(root):
+    """Published wire schemas, printed by the records crate that defines them."""
+    output = cargo(root, "run", "--locked", "--quiet", "-p", "provenant-records", "--bin", "print-wire-schemas")
+    data = json.loads(output)
+    if not isinstance(data, dict) or not isinstance(data.get("error-codes"), list):
+        raise ValueError("print-wire-schemas returned an unsupported document")
+    return data
+
+
+def schema_files(data):
+    """docs/reference files for the published schemas: one JSON file each plus an index."""
+    files = {}
+    names = sorted(name for name in data if name.endswith(".schema.json"))
+    for name in names:
+        files[f"schemas/{name}"] = json.dumps(data[name], ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    text = header("Published JSON Schemas", "provenant-records print-wire-schemas")
+    text += (
+        "These JSON Schemas (draft 2020-12) describe the `--json` envelope the CLI emits\n"
+        "today (`schema_version` 1) for `lanes`, `cancel` and `output`. `status` is the exception:\n"
+        "its envelope matches, but its `data` is the planned typed shape (lane rows and a\n"
+        "string cursor), while the CLI still emits raw attempt records and a numeric\n"
+        "next_cursor. MCP schemas describe planned structuredContent. Version 2 is the\n"
+        "planned typed generation and is not emitted yet; `schema_version` is bumped for any\n"
+        "change an existing consumer could misread, with no dual-emit period.\n\n"
+        "A non-ok status may carry `error: null` (for example a `lanes --wait` timeout or an\n"
+        "unobservable cancel) and partial `data`, so the command schemas check `data` only\n"
+        "for `ok`, `pending` and `waiting`. A failed cancel carries `data: {operation_id}`\n"
+        "with no `receipts`. Validate failures that carry an `error` object against\n"
+        "[`error.schema.json`](schemas/error.schema.json).\n\n"
+        "| Schema | Describes |\n|---|---|\n"
+    )
+    for name in names:
+        text += f"| [`{name}`](schemas/{name}) | {data[name].get('title', '')} |\n"
+    text += (
+        "\n## Edge error codes\n\n"
+        "Stable `error.code` values emitted outside the run owner (those are listed in the\n"
+        "[CLI reference](cli.md#error-codes)). `legacy_spelling` codes keep the spelling\n"
+        "consumers already match on; `umbrella` codes cover a command family until an\n"
+        "owner splits them.\n\n| Code | Kind | Meaning |\n|---|---|---|\n"
+    )
+    for entry in data["error-codes"]:
+        text += f"| `{entry['code']}` | {entry['kind']} | {entry['summary'].replace('|', '&#124;')} |\n"
+    files["schemas.md"] = text
+    return files
+
+
 def mcp_reference(data, all_tools):
     text = header("MCP tool reference", ALL_SCHEMAS.as_posix())
     for tool in data:
@@ -199,6 +245,10 @@ def generate(root, binary=None):
             files["cli.md"] = cli_reference(catalogue(root, binary))
         except (ValueError, KeyError, TypeError, AttributeError):
             gap("cli.md", "provenant help --all --json has no machine-readable catalogue")
+        try:
+            files.update(schema_files(wire_schemas(root)))
+        except (ValueError, KeyError, TypeError, AttributeError, subprocess.CalledProcessError):
+            gap("schemas.md", "provenant-records print-wire-schemas is unavailable")
     else:
         gap("cli.md", f"{WORKSPACE}/Cargo.toml is missing; CLI catalogue unavailable")
     for source, name, render in [
@@ -255,6 +305,16 @@ def differences(expected, actual):
     return changed
 
 
+def update_files(destination, files, gaps):
+    if destination.exists():
+        for path in destination.rglob("*"):
+            relative = path.relative_to(destination)
+            preserve_schema = any("print-wire-schemas" in gap for gap in gaps) and relative.parts[0] == "schemas"
+            if path.is_file() and relative.as_posix() not in files and not preserve_schema:
+                path.unlink()
+    write_files(destination, files)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="regenerate in a temporary directory and diff")
@@ -273,12 +333,7 @@ def main():
                 print(f"Generated reference differs; run {COMMAND}.", file=sys.stderr)
                 return 1
     else:
-        # This directory is wholly generated; remove stale generated files too.
-        if destination.exists():
-            for path in destination.rglob("*"):
-                if path.is_file() and path.relative_to(destination).as_posix() not in files:
-                    path.unlink()
-        write_files(destination, files)
+        update_files(destination, files, gaps)
     return 0
 
 
