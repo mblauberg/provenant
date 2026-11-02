@@ -285,17 +285,26 @@ impl RunStore {
                             )?
                             .is_some()
                         {
-                            let raw: Vec<u8> = self.db.query_row(
-                                "SELECT record FROM settlement_receipts WHERE attempt=?1 AND generation=?2",
-                                rusqlite::params![id, crate::db::sql_int(record.generation)?],
-                                |row| row.get(0),
+                            let raw: Option<Vec<u8>> = rusqlite::OptionalExtension::optional(
+                                self.db.query_row(
+                                    "SELECT record FROM settlement_receipts WHERE attempt=?1 AND generation=?2",
+                                    rusqlite::params![id, crate::db::sql_int(record.generation)?],
+                                    |row| row.get(0),
+                                ),
                             )?;
-                            let receipts: provenant_records::run::SettlementReceipts =
-                                crate::db::decode_unversioned(&raw)?;
-                            !matches!(
-                                receipts.cleanup_custody_release,
-                                provenant_records::run::EffectDisposition::Done
-                            )
+                            // Without a receipt the cleanup state is unknown: keep the
+                            // attempt for reconciliation rather than failing collection.
+                            match raw {
+                                Some(raw) => {
+                                    let receipts: provenant_records::run::SettlementReceipts =
+                                        crate::db::decode_unversioned(&raw)?;
+                                    !matches!(
+                                        receipts.cleanup_custody_release,
+                                        provenant_records::run::EffectDisposition::Done
+                                    )
+                                }
+                                None => true,
+                            }
                         } else {
                             false
                         };
