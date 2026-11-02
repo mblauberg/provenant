@@ -1535,22 +1535,6 @@ fn writer_publishing_knob_defaults_off_and_can_be_enabled_per_dispatch() {
 }
 
 #[test]
-fn dependency_preparation_knob_defaults_on_and_can_be_disabled_per_run() {
-    let config = load::<&[u8]>(&roots(), None).unwrap();
-    assert_eq!(
-        config.dispatch_profile(&[]).unwrap().knobs["lanes.prepare_deps"],
-        true
-    );
-    assert_eq!(
-        config
-            .dispatch_profile(&["lanes.prepare_deps=false".into()])
-            .unwrap()
-            .knobs["lanes.prepare_deps"],
-        false
-    );
-}
-
-#[test]
 fn read_only_batch_concurrency_has_its_own_knob() {
     let dir = tempfile::tempdir().unwrap();
     let roots = state_roots(dir.path());

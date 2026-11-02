@@ -19,7 +19,6 @@ pub const DEFAULT_REVIEW_EXEMPT: [&str; 4] = [
 const DEFAULTS: &str = r#"writer_writes = []
 review_exempt = ["docs/release-notes/next.d/", "docs/specs/", "Cargo.lock", ".tracker-input"]
 push_conflict_markers = true
-prepare_deps = true
 
 [projects]
 "#;
@@ -45,9 +44,6 @@ pub struct RunConfig {
     /// Refuse pushes whose added lines start with a literal conflict marker.
     #[serde(default = "default_true")]
     pub push_conflict_markers: bool,
-    /// Install lockfile-driven dependencies on the host before starting a writer lane.
-    #[serde(default = "default_true")]
-    pub prepare_deps: bool,
     #[serde(default)]
     pub projects: BTreeMap<String, ProjectRunConfig>,
 }
@@ -73,7 +69,6 @@ impl Default for RunConfig {
             writer_writes: Vec::new(),
             review_exempt: default_review_exempt(),
             push_conflict_markers: true,
-            prepare_deps: true,
             projects: BTreeMap::new(),
         }
     }
@@ -196,7 +191,6 @@ fn project_key(key: &str) -> bool {
 }
 pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("push_conflict_markers", "bool"),
-    FieldMetadata::new("prepare_deps", "bool"),
     FieldMetadata::new("writer_writes", "array"),
     FieldMetadata::new("review_exempt", "array"),
     FieldMetadata::new("projects.{project}.review_exempt", "array"),
@@ -264,13 +258,6 @@ mod tests {
             toml_edit::de::from_str("push_conflict_markers = false\n").expect("parse");
         assert!(!config.push_conflict_markers);
         assert!(config.validate().is_empty());
-    }
-
-    #[test]
-    fn dependency_preparation_defaults_on_and_can_be_turned_off() {
-        assert!(RunConfig::default().prepare_deps);
-        let config: RunConfig = toml_edit::de::from_str("prepare_deps = false\n").expect("parse");
-        assert!(!config.prepare_deps);
     }
 
     #[test]

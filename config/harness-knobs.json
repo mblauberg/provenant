@@ -285,7 +285,7 @@
     "lanes.prepare_deps": {
       "type": "bool", "default": true, "status": "wired",
       "reader": "tools/front-door/crates/cli/src/run/provider/preparation.rs",
-      "effect": "Run bounded host-native lockfile dependency preparation for fresh writer worktrees before the provider starts.",
+      "effect": "Run pnpm install --frozen-lockfile on the host for a writer worktree with a pnpm lockfile and no completed install (node_modules/.modules.yaml), after head and route checks and before the provider starts.",
       "trade_off": "false skips automatic dependency installation; the writer may then lack dependencies needed to work."
     },
     "lanes.max_depth": {

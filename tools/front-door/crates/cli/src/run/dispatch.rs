@@ -652,9 +652,6 @@ pub(super) fn dispatch_inner(
                 )
             });
     }
-    if command.no_prepare_deps {
-        command.knobs.push("lanes.prepare_deps=false".into());
-    }
     // Check explicit placement before local aliases are normalised away and
     // before writer validation or peer discovery can act on the request.
     if command.host.is_some() && crate::fabric::in_lane() {

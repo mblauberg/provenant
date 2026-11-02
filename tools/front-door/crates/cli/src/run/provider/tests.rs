@@ -25,50 +25,53 @@ fn writer_dependency_preparation_installs_skips_and_reports_failure()
 -> Result<(), Box<dyn std::error::Error>> {
     use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir()?;
-    let worktree = temp.path().join("worktree");
     let bin = temp.path().join("bin");
-    std::fs::create_dir_all(&worktree)?;
     std::fs::create_dir_all(&bin)?;
-    std::fs::write(worktree.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n")?;
     let pnpm = bin.join("pnpm");
     std::fs::write(
         &pnpm,
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PWD/pnpm.log\"\nif [ \"$(basename \"$PWD\")\" = fresh ]; then echo 'fixture stderr tail' >&2; exit 7; fi\nmkdir -p node_modules\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PWD/pnpm.log\"\nif [ \"$(basename \"$PWD\")\" = failing ]; then echo 'fixture stderr tail' >&2; exit 7; fi\nmkdir -p node_modules\ntouch node_modules/.modules.yaml\n",
     )?;
     std::fs::set_permissions(&pnpm, std::fs::Permissions::from_mode(0o700))?;
     let locate = |name: &str| {
         super::find_command_on_path(name, std::slice::from_ref(&bin))
             .map_err(|error| error.to_string())
     };
+    let cancel = provenant_core::CancelToken::new();
+    let worktree = |name: &str| -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let path = temp.path().join(name);
+        std::fs::create_dir_all(&path)?;
+        std::fs::write(path.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n")?;
+        Ok(path)
+    };
+    let log = |path: &Path| std::fs::read_to_string(path.join("pnpm.log")).unwrap_or_default();
 
-    let disabled = super::prepare_writer_dependencies(&worktree, false, &locate)?;
-    assert_eq!(disabled["outcome"], "skipped");
+    let fresh = worktree("fresh")?;
+    let disabled = super::prepare_writer_dependencies(&fresh, false, &locate, &cancel)?;
     assert_eq!(disabled["reason"], "disabled");
-    assert!(!worktree.join("pnpm.log").exists());
-    let installed = super::prepare_writer_dependencies(&worktree, true, &locate)?;
+    assert_eq!(log(&fresh), "");
+    let installed = super::prepare_writer_dependencies(&fresh, true, &locate, &cancel)?;
     assert_eq!(installed["outcome"], "installed");
     assert_eq!(installed["command"], "pnpm install --frozen-lockfile");
-    assert!(worktree.join("node_modules").is_dir());
-    assert_eq!(
-        std::fs::read_to_string(worktree.join("pnpm.log"))?,
-        "install --frozen-lockfile\n"
-    );
+    assert_eq!(log(&fresh), "install --frozen-lockfile\n");
 
-    // An existing install is left alone even when the fake installer would fail.
-    let skipped = super::prepare_writer_dependencies(&worktree, true, &locate)?;
-    assert_eq!(skipped["outcome"], "skipped");
-    assert_eq!(skipped["reason"], "node_modules_exists");
-    assert_eq!(
-        std::fs::read_to_string(worktree.join("pnpm.log"))?,
-        "install --frozen-lockfile\n"
-    );
+    // The completion marker marks an installed tree, so a second call skips.
+    let skipped = super::prepare_writer_dependencies(&fresh, true, &locate, &cancel)?;
+    assert_eq!(skipped["reason"], "already_installed");
+    assert_eq!(log(&fresh), "install --frozen-lockfile\n");
 
-    let fresh = temp.path().join("fresh");
-    std::fs::create_dir_all(&fresh)?;
-    std::fs::write(fresh.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n")?;
-    let failure = super::prepare_writer_dependencies(&fresh, true, &locate);
-    let error = failure.expect_err("fake pnpm failure is refused");
+    // A `node_modules` without the marker is a partial install and is repaired.
+    let partial = worktree("partial")?;
+    std::fs::create_dir_all(partial.join("node_modules"))?;
+    let repaired = super::prepare_writer_dependencies(&partial, true, &locate, &cancel)?;
+    assert_eq!(repaired["outcome"], "installed");
+    assert!(partial.join("node_modules/.modules.yaml").is_file());
+
+    let failing = worktree("failing")?;
+    let error = super::prepare_writer_dependencies(&failing, true, &locate, &cancel)
+        .expect_err("fake pnpm failure is refused");
     assert!(error.contains("pnpm install --frozen-lockfile"));
+    assert!(error.contains("exited with status 7"));
     assert!(error.contains("fixture stderr tail"));
     Ok(())
 }

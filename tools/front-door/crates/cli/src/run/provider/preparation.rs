@@ -6,7 +6,8 @@ const DEPENDENCY_STDERR_TAIL: usize = 4096;
 pub(super) fn prepare_writer_dependencies(
     worktree: &Path,
     enabled: bool,
-    locate: &impl Fn(&str) -> Result<PathBuf, String>,
+    locate: &dyn Fn(&str) -> Result<PathBuf, String>,
+    cancel: &provenant_core::CancelToken,
 ) -> Result<serde_json::Value, String> {
     let command = "pnpm install --frozen-lockfile";
     let skipped = |reason| {
@@ -24,8 +25,10 @@ pub(super) fn prepare_writer_dependencies(
     if !lockfile.is_file() {
         return Ok(skipped("no_pnpm_lockfile"));
     }
-    if worktree.join("node_modules").exists() {
-        return Ok(skipped("node_modules_exists"));
+    // pnpm writes this marker last, so a bare or interrupted `node_modules`
+    // is repaired by the install rather than trusted.
+    if worktree.join("node_modules/.modules.yaml").is_file() {
+        return Ok(skipped("already_installed"));
     }
 
     let executable = locate("pnpm").map_err(|error| format!("{command} failed: {error}"))?;
@@ -39,6 +42,8 @@ pub(super) fn prepare_writer_dependencies(
     let mut options =
         provenant_os::exec::ExecOptions::new(&argv, worktree, DEPENDENCY_INSTALL_TIMEOUT);
     options.process_group = true;
+    options.cleanup_process_group = true;
+    options.cancel = Some(cancel);
     options.stdout = provenant_os::exec::StreamPolicy::Discard;
     options.stderr = provenant_os::exec::StreamPolicy::Tail {
         limit: DEPENDENCY_STDERR_TAIL,
@@ -50,19 +55,31 @@ pub(super) fn prepare_writer_dependencies(
     let elapsed_micros = outcome.elapsed_micros;
     let stderr = String::from_utf8_lossy(&outcome.stderr.bytes);
     let stderr_tail = stderr.trim();
-    if outcome.termination != provenant_os::exec::Termination::Exit(0) || outcome.timed_out {
+    if outcome.termination != provenant_os::exec::Termination::Exit(0)
+        || outcome.timed_out
+        || outcome.cancelled
+    {
         let detail = if stderr_tail.is_empty() {
             String::new()
         } else {
             format!("; stderr tail: {stderr_tail}")
         };
-        let reason = if outcome.timed_out {
+        let reason = if outcome.cancelled {
+            "cancelled".to_owned()
+        } else if outcome.timed_out {
             format!(
                 "timed out after {} seconds",
                 DEPENDENCY_INSTALL_TIMEOUT.as_secs()
             )
         } else {
-            format!("exited with {:?}", outcome.termination)
+            match outcome.termination {
+                provenant_os::exec::Termination::Exit(code) => {
+                    format!("exited with status {code}")
+                }
+                provenant_os::exec::Termination::Signal(signal) => {
+                    format!("terminated by signal {signal}")
+                }
+            }
         };
         return Err(format!("{command} failed ({reason}){detail}"));
     }
@@ -96,7 +113,7 @@ pub(crate) fn prepare(
                 let path = std::env::var_os("PATH").ok_or("PATH is unavailable")?;
                 find_command_on_path(name, &std::env::split_paths(&path).collect::<Vec<_>>())
             }
-            _ if name == "gh" => resolve_executable(name),
+            _ if name == "gh" || name == "pnpm" => resolve_executable(name),
             Some(host) => host_executable(host, name),
             None => resolve_executable(name),
         },
@@ -357,27 +374,6 @@ pub(super) fn prepare_candidates(
                 .map_err(|error| error.to_string())?,
         ),
         None => None,
-    };
-    let dependency_event = if let Some(writer) = &writer {
-        let run_config = provenant_confinement::run_config::RunConfig::read(roots.state.as_path())
-            .map_err(|error| format!("read host run configuration: {error}"))?;
-        let enabled = run_config.prepare_deps
-            && task
-                .profile
-                .knobs
-                .get("lanes.prepare_deps")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(true);
-        Some(prepare_writer_dependencies(
-            writer.worktree.path(),
-            enabled,
-            &|name| match registry.host {
-                Some(host) => host_executable(host, name),
-                None => resolve_executable(name),
-            },
-        )?)
-    } else {
-        None
     };
     let cwd = match writer.as_ref() {
         Some(writer) => writer.worktree.path().to_owned(),
@@ -1110,6 +1106,25 @@ pub(super) fn prepare_candidates(
             // the caller has closed its diagnostic stream.
             let _ = writeln!(std::io::stderr().lock(), "{advisory}");
         }
+        // Install on the host only once the head, route and lane setup are
+        // known to be usable, and before the sandbox is entered.
+        let dependency_event = match &writer {
+            Some(writer) => {
+                let enabled = task
+                    .profile
+                    .knobs
+                    .get("lanes.prepare_deps")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(true);
+                Some(prepare_writer_dependencies(
+                    writer.worktree.path(),
+                    enabled,
+                    locate,
+                    cancel,
+                )?)
+            }
+            None => None,
+        };
         let mut provider = RouteRecord {
             provider: Some(route.adapter.clone()),
             model: Some(format!("{}/{}", route.adapter, route.model)),
