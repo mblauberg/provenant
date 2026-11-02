@@ -1774,6 +1774,16 @@ impl Recovery {
     pub fn scope(&self) -> Scope {
         self.reservation.scope
     }
+    /// Whether this recovery holds exclusion for the given writer directory.
+    pub fn holds_writer_lock(&self, directory: &Directory) -> Result<bool> {
+        let held = self.lock_directory.metadata()?;
+        let requested = directory.metadata()?;
+        Ok(
+            self.lease.is_some()
+                && held.device == requested.device
+                && held.inode == requested.inode,
+        )
+    }
     /// Durable NeverSpawned evidence plus native absence permits Run to reject
     /// an interrupted launch without inventing an exit or removing private Git.
     pub fn never_spawned(&self, attempt: &Directory) -> Result<bool> {

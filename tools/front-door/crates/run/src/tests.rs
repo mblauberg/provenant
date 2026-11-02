@@ -2880,3 +2880,82 @@ fn receipt_lost_recovery_converges_on_a_sealed_non_lost_decision() -> TestResult
         Ok(())
     })
 }
+
+#[test]
+fn receipt_busy_then_replay_converges_and_retains_conflict() -> TestResult {
+    provenant_sqlite::with_busy_timeout(std::time::Duration::from_millis(30), || -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let context = context(temp.path())?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context, &call)?;
+        let input = input();
+        let id = input.attempts[0].attempt_id;
+        store.create(&input, &call)?;
+        let blocker = rusqlite::Connection::open(context.state_root.as_path().join("run.sqlite3"))?;
+        blocker.execute_batch("BEGIN IMMEDIATE")?;
+        crate::dispatch_tests::seal_exit(&store, &exit())?;
+        assert!(
+            store
+                .publish_terminal(id, 1, &publication(), &exit(), &call)
+                .is_err()
+        );
+        let path = context
+            .state_root
+            .as_path()
+            .join("runs")
+            .join(input.run_id.to_string())
+            .join("attempts")
+            .join(id.to_string());
+        let original = std::fs::read(path.join("terminal-pending.json"))?;
+        blocker.execute_batch("ROLLBACK")?;
+        let conflicting = TerminalPublication {
+            result: "conflicting result",
+            ..publication()
+        };
+        assert!(
+            store
+                .publish_terminal(id, 1, &conflicting, &exit(), &call)
+                .is_err()
+        );
+        assert_eq!(std::fs::read(path.join("terminal-pending.json"))?, original);
+        let conflicts: Vec<_> = std::fs::read_dir(&path)?
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("terminal-pending.conflict-")
+            })
+            .collect();
+        assert_eq!(conflicts.len(), 1);
+        let conflict = std::fs::read(conflicts[0].path())?;
+        let digest = provenant_core::hex(CanonicalV1::file_digest(&conflict).bytes());
+        assert_eq!(
+            conflicts[0].file_name().to_string_lossy(),
+            format!("terminal-pending.conflict-{digest}.json")
+        );
+        let first = store.replay_terminal(id, &call)?;
+        let second = store.replay_terminal(id, &call)?;
+        assert_eq!(first.state, second.state);
+        assert!(matches!(
+            first.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Succeeded,
+                ..
+            }
+        ));
+        assert_eq!(
+            first.result.unwrap().digest,
+            CanonicalV1::file_digest(publication().result.as_bytes())
+        );
+        let rows: i64 = blocker.query_row(
+            "SELECT count(*) FROM events WHERE attempt=?1 AND revision=2",
+            [id.to_string()],
+            |row| row.get(0),
+        )?;
+        assert_eq!(rows, 1);
+        Ok(())
+    })
+}

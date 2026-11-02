@@ -3024,7 +3024,7 @@ impl PrepareFixture {
         ])?;
         Ok(fixture)
     }
-    fn git(&self, args: &[&str]) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    pub(super) fn git(&self, args: &[&str]) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let git = provenant_os::git::git_executable().ok_or("git executable")?;
         let argv: Vec<OsString> = std::iter::once(git.into_os_string())
             .chain(args.iter().map(OsString::from))

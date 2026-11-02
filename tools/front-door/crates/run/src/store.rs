@@ -252,7 +252,7 @@ impl RunStore {
         let (record, committed) = self.replay_terminal_locked(id, call)?;
         drop(guard);
         if committed {
-            self.settle_cleanup(&record, call);
+            self.settle_cleanup(&record, None, call);
         }
         self.record(id, call)
     }
@@ -716,7 +716,7 @@ impl RunStore {
         );
         match result {
             Ok(record) => {
-                self.settle_cleanup(&record, call);
+                self.settle_cleanup(&record, None, call);
                 self.record(id, call)
             }
             Err(error) => Err(error),
@@ -848,13 +848,18 @@ impl RunStore {
                 {
                     return self.record(id, call).map(Some);
                 }
-                self.settle_cleanup(&record, call);
+                self.settle_cleanup(&record, None, call);
                 self.record(id, call).map(Some)
             }
             other => other,
         }
     }
-    pub(crate) fn settle_cleanup(&self, record: &AttemptRecord, call: &Request<'_>) {
+    pub(crate) fn settle_cleanup(
+        &self,
+        record: &AttemptRecord,
+        recovery: Option<&provenant_supervisor::custody::Recovery>,
+        call: &Request<'_>,
+    ) {
         if !self.import_release_permitted(record, call).unwrap_or(false) {
             let _ = self.set_temporary_retained(record.attempt_id, true, call);
             return;
@@ -864,9 +869,12 @@ impl RunStore {
                 .tasks
                 .iter()
                 .any(|task| task.task_id == record.task_id && task.writer.is_some())
-        }) && !self.retry_git_cleanup(record, call).is_ok_and(|receipts| {
-            matches!(receipts.cleanup_custody_release, EffectDisposition::Done)
-        }) {
+        }) && !self
+            .retry_git_cleanup_with_custody(record, recovery, call)
+            .is_ok_and(|receipts| {
+                matches!(receipts.cleanup_custody_release, EffectDisposition::Done)
+            })
+        {
             let _ = self.set_temporary_retained(record.attempt_id, true, call);
             return;
         }
@@ -1204,7 +1212,7 @@ impl RunStore {
                 ) {
                     let (record, committed) = self.replay_terminal_locked(old.attempt_id, call)?;
                     if committed {
-                        self.settle_cleanup(&record, call);
+                        self.settle_cleanup(&record, None, call);
                     }
                     return Ok(());
                 }
@@ -1252,6 +1260,15 @@ impl RunStore {
         record: &AttemptRecord,
         call: &Request<'_>,
     ) -> Result<SettlementReceipts> {
+        self.retry_git_cleanup_with_custody(record, None, call)
+    }
+
+    fn retry_git_cleanup_with_custody(
+        &self,
+        record: &AttemptRecord,
+        recovery: Option<&provenant_supervisor::custody::Recovery>,
+        call: &Request<'_>,
+    ) -> Result<SettlementReceipts> {
         if !self.import_release_permitted(record, call)? {
             return Err(RunError::Conflict);
         }
@@ -1263,7 +1280,17 @@ impl RunStore {
             .and_then(|task| task.writer.as_ref())
             .ok_or(RunError::Validation("attempt has no writer to clean up"))?;
         let slot = self.writer_custody_directory(record, writer)?;
-        let _lock = slot.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?;
+        let held = match recovery {
+            Some(recovery) if recovery.scope() == Self::scope(record) => recovery
+                .holds_writer_lock(&slot)
+                .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?,
+            _ => false,
+        };
+        let _lock = if held {
+            None
+        } else {
+            Some(slot.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?)
+        };
         let cleanup = (|| -> Result<()> {
             let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
             let head = crate::settlement::pinned_head(&attempt, Self::scope(record))?;
