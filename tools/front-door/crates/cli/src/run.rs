@@ -422,16 +422,6 @@ impl run::Providers for Registry<'_> {
             .adapter
             .failure_diagnostic(stderr)
     }
-    fn decode_with_context(
-        &self,
-        route: &run::RouteRecord,
-        stdout: &[u8],
-        exit: &ExitObservation,
-        provider_state: &Path,
-        context: &run::HolderContext,
-    ) -> Result<run::Decoded, String> {
-        self.decode_captures(route, stdout, &[], exit, provider_state, Some(context))
-    }
     fn decode_captures(
         &self,
         route: &run::RouteRecord,
@@ -557,11 +547,6 @@ impl Registry<'_> {
             return Ok(failed("provider stream is unavailable"));
         };
         let mut events = adapter.observe(&mut state, stdout).unwrap_or_default();
-        if adapter.id() == "opencode"
-            && let Some(event) = provenant_providers::opencode::stderr_quota(stderr)
-        {
-            events.push(event);
-        }
         let code = match exit.termination {
             Some(provenant_os::exec::Termination::Exit(code)) => Some(code),
             _ => None,
@@ -575,6 +560,14 @@ impl Registry<'_> {
             return Ok(failed("provider outcome is malformed"));
         };
         events.extend(outcome.final_events().iter().cloned());
+        // Stderr quota text is evidence only for a run the adapter did not
+        // accept; a successful run may print incidental quota wording.
+        if adapter.id() == "opencode"
+            && !matches!(outcome.status(), OutcomeStatus::Success)
+            && let Some(event) = provenant_providers::opencode::stderr_quota(stderr)
+        {
+            events.push(event);
+        }
         let rollout = (adapter.id() == "codex").then(|| {
             outcome
                 .session()

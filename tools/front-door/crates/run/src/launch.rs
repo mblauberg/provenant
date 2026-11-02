@@ -374,18 +374,9 @@ pub trait Providers {
         exit: &ExitObservation,
         provider_state: &std::path::Path,
     ) -> std::result::Result<Decoded, String>;
-    /// Decode with the host-sealed roots used by the guardian.
-    fn decode_with_context(
-        &self,
-        route: &RouteRecord,
-        stdout: &[u8],
-        exit: &ExitObservation,
-        provider_state: &std::path::Path,
-        _context: &crate::HolderContext,
-    ) -> std::result::Result<Decoded, String> {
-        self.decode(route, stdout, exit, provider_state)
-    }
-    /// Decode sealed captures together when a provider has stderr evidence.
+    /// Decode the sealed captures: the single production entry point. `stderr`
+    /// is extra evidence for providers that report limits there, and `context`
+    /// carries the host-sealed roots used by the guardian.
     fn decode_captures(
         &self,
         route: &RouteRecord,
@@ -393,12 +384,9 @@ pub trait Providers {
         _stderr: &[u8],
         exit: &ExitObservation,
         provider_state: &std::path::Path,
-        context: Option<&crate::HolderContext>,
+        _context: Option<&crate::HolderContext>,
     ) -> std::result::Result<Decoded, String> {
-        match context {
-            Some(context) => self.decode_with_context(route, stdout, exit, provider_state, context),
-            None => self.decode(route, stdout, exit, provider_state),
-        }
+        self.decode(route, stdout, exit, provider_state)
     }
 }
 enum HandOff {

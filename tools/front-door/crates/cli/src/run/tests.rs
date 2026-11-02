@@ -4114,12 +4114,13 @@ fn capacity_store_failure_does_not_change_settlement() -> Result<(), Box<dyn std
     // The malformed on-disk record makes the store update fail after the
     // settlement path creates the lock. The lock proves it attempted the write.
     assert!(!state.join("quota/quota.lock").exists());
-    let decoded = Registry::default().decode_with_context(
+    let decoded = Registry::default().decode_captures(
         &route,
         stream,
+        &[],
         &exit,
         Path::new("/nonexistent"),
-        &context,
+        Some(&context),
     )?;
     assert!(state.join("quota/quota.lock").is_file());
     assert_eq!(std::fs::read(&bad_record)?, b"invalid quota record");
@@ -4252,8 +4253,14 @@ fn invalid_sealed_root_never_writes_to_registry_root() -> Result<(), Box<dyn std
     let stream = br#"{"type":"turn.failed","error":{"message":"at capacity","codex_error_info":"server_overloaded"}}"#;
     let mut exit = clean_exit();
     exit.termination = Some(Termination::Exit(1));
-    let decoded =
-        registry.decode_with_context(&route, stream, &exit, Path::new("/nonexistent"), &context)?;
+    let decoded = registry.decode_captures(
+        &route,
+        stream,
+        &[],
+        &exit,
+        Path::new("/nonexistent"),
+        Some(&context),
+    )?;
     assert_eq!(decoded.outcome, run::Outcome::ModelUnavailable);
     assert!(
         decoded
@@ -4375,13 +4382,14 @@ fn opencode_decode_with_context_reads_home_data_when_xdg_is_unset()
         "glm-5.3-flash-free",
     )?;
     // The success fixture's stream reports no model; the session record
-    // beside the holder home supplies it through `decode_with_context`.
-    let decoded = Registry::default().decode_with_context(
+    // beside the holder home supplies it through `decode_captures`.
+    let decoded = Registry::default().decode_captures(
         &opencode_decode_route(),
         include_bytes!("../../../../tests/fixtures/providers/opencode/v2.2.0-success.jsonl"),
+        &[],
         &clean_exit(),
         Path::new("/nonexistent"),
-        &context,
+        Some(&context),
     )?;
     assert_eq!(decoded.outcome, run::Outcome::Succeeded);
     assert_eq!(decoded.session.as_deref(), Some("ses_x"));
@@ -4421,12 +4429,13 @@ fn absolute_xdg_data_home_wins_over_home_for_decode_with_context()
         "opencode",
         "home-decoy",
     )?;
-    let decoded = Registry::default().decode_with_context(
+    let decoded = Registry::default().decode_captures(
         &opencode_decode_route(),
         include_bytes!("../../../../tests/fixtures/providers/opencode/v2.2.0-success.jsonl"),
+        &[],
         &clean_exit(),
         Path::new("/nonexistent"),
-        &context,
+        Some(&context),
     )?;
     assert_eq!(decoded.outcome, run::Outcome::Succeeded);
     assert_eq!(
@@ -4472,8 +4481,16 @@ fn capacity_guardian_context_records_and_reports_config_failure()
     let mut exit = clean_exit();
     exit.termination = Some(provenant_os::exec::Termination::Exit(1));
     let registry = Registry::default();
-    let decode =
-        || registry.decode_with_context(&route, stream, &exit, Path::new("/nonexistent"), &context);
+    let decode = || {
+        registry.decode_captures(
+            &route,
+            stream,
+            &[],
+            &exit,
+            Path::new("/nonexistent"),
+            Some(&context),
+        )
+    };
     std::fs::write(state.join("config.toml"), "invalid = [")?;
     let failed = decode()?;
     assert_eq!(failed.outcome, run::Outcome::ModelUnavailable);
@@ -4513,8 +4530,14 @@ fn capacity_guardian_context_records_and_reports_config_failure()
         #[cfg(feature = "fixture")]
         fixture_state_write: false,
     });
-    let nested_result =
-        registry.decode_with_context(&route, stream, &exit, Path::new("/nonexistent"), &nested)?;
+    let nested_result = registry.decode_captures(
+        &route,
+        stream,
+        &[],
+        &exit,
+        Path::new("/nonexistent"),
+        Some(&nested),
+    )?;
     assert_eq!(nested_result.outcome, run::Outcome::ModelUnavailable);
     assert_eq!(std::fs::read(state.join("quota/key/codex.json"))?, before);
     assert!(!nested.roots.state_root.join("quota").exists());
