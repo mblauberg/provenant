@@ -32,7 +32,7 @@ each a disposition. For a quick fan-out without a graph:
 
 For a native panel, launch one independent read-only sub-agent per selected
 lens in parallel. Include the cross-family leg required by the review ladder,
-then have the chair synthesize findings and dispositions across the panel.
+then have the chair synthesise findings and dispositions across the panel.
 
 ## Independence
 

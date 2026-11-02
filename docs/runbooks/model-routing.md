@@ -145,7 +145,7 @@ crate roots in the subject-versus-base diff. Small is at most 150 lines,
 3 files and 1 crate; medium is at most 1,000 lines, 15 files and 3 crates;
 larger or binary changes are large. Configure these limits under
 `domains.routing.review.size`. The risk tier sets a floor. Integration heads
-select deep; docs select the readability lens; refactors prioritize correctness,
+select deep; docs select the readability lens; refactors prioritise correctness,
 tests and refactor-cleanup. The standard shape has three slots: correctness-spec,
 tests, then one kind lens (refactor-cleanup for refactors, otherwise
 design-fit-reuse). Risk tags add their conditional lenses.
