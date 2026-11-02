@@ -144,11 +144,15 @@ pub(crate) fn spawn(
     for fd in &descriptors {
         command.arg(fd.as_raw_fd().to_string());
     }
-    let guardian_environment: Vec<_> = environment
+    let mut guardian_environment: Vec<_> = environment
         .iter()
         .filter(|(name, _)| config_environment.contains(name))
         .cloned()
         .collect();
+    // The guardian settles lanes, so it keeps this process's durability setting.
+    if provenant_os::fs::durability_relaxed() {
+        guardian_environment.push((provenant_os::fs::DURABILITY_ENV.into(), "relaxed".into()));
+    }
     command
         .env_clear()
         .envs(guardian_environment.iter().cloned())
