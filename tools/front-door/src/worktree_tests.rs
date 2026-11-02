@@ -2997,6 +2997,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             scratch: attempt.join("scratch"),
             provider_state: attempt.join("provider-state"),
             temporary: attempt.join("tmp"),
+            temporary_alias: None,
         };
         // The active release root is its own directory, never the project.
         let release = rig.state.with_file_name("release");
