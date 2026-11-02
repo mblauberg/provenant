@@ -651,6 +651,7 @@ mod peer_tests {
                     title: "inspect",
                     prompt: "Review the slice",
                     required_verdict: None,
+                    deadline_seconds: None,
                 },
                 &route,
                 graph::AccessMode::ReadOnly,

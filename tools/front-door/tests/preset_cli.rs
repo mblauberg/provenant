@@ -1758,6 +1758,10 @@ fn plan_flag_decides_and_explains_the_planner_front_end() -> Result<(), Box<dyn 
     let on = run("on")?;
     assert!(on.contains("plan: on -> on (planning requested)"), "{on}");
     assert!(on.contains("Planner route: principal"), "{on}");
+    assert!(
+        on.contains("deadline_seconds: \"${budget_seconds}\""),
+        "{on}"
+    );
     golden("big-batch.plan-on.explain.txt", &on)?;
     let off = run("off")?;
     assert!(

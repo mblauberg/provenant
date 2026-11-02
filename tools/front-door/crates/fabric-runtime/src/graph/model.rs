@@ -189,6 +189,9 @@ pub struct GraphNode {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Wall-clock limit for this node's lane, in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_seconds: Option<u64>,
     #[serde(default, alias = "goal", alias = "brief")]
     pub prompt: String,
     #[serde(default)]
@@ -860,6 +863,7 @@ pub struct NodeInput<'a> {
     pub title: &'a str,
     pub prompt: &'a str,
     pub required_verdict: Option<&'a str>,
+    pub deadline_seconds: Option<u64>,
 }
 
 /// Host polling policy. Defaults observe pending gates once per tick; hosts

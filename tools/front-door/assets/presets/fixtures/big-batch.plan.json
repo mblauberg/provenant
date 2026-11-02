@@ -3,7 +3,7 @@
     "pattern": "big-batch",
     "preset": "big-batch"
   },
-  "graph_id": "preset-9d85f50d3cb2a933d3e2d4c894ef385f",
+  "graph_id": "preset-47c08bfe02331ac8696b0284a6526f37",
   "integration_branch": "batch/graph",
   "nodes": [
     {
@@ -240,6 +240,7 @@
               {
                 "acceptance_checks": "${acceptance}",
                 "access": "worktree_write",
+                "deadline_seconds": "${budget_seconds}",
                 "delivery": "integrate:batch/graph",
                 "id": "implement",
                 "prompt": "You implement one bounded slice inside the write scope, within the authority envelope below.\n\nImplement one bounded slice: brief\n\nLane ${lane}. Time budget: ${budget_seconds} seconds; commit your work and stop with a handoff before it passes.\nSpec (acceptance criteria): \nKeep changes within the supplied write scope. Run targeted checks and commit.\n\nAuthority envelope. The objective above and the acceptance criteria are\napproved. You hold authority to make any engineering decision that serves them\nand is reversible: names, structure, tests, helper code and the order of work.\nDo not stop to ask about those. Make the call, state it as an assumption and\nrecord it in your final report under DECISIONS (decision, reason, how to\nreverse). Ask only when the decision belongs to the owner (product direction,\nscope, cost, irreversible or externally visible effects) or when the work needs\nauthority beyond the write scope and this envelope; then report NEEDS-USER\nwith the specific question and the option you would take.\n",
@@ -403,7 +404,7 @@
               },
               "budget_seconds": {
                 "default": 3600,
-                "doc": "Advisory wall-clock budget told to the writer, at most the graph timeout. Graph nodes have no per-node timer, so it is not enforced.",
+                "doc": "Wall-clock deadline for the lane, at most the graph timeout.",
                 "max": 3600,
                 "min": 60,
                 "type": "integer"
