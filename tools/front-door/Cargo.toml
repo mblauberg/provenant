@@ -116,6 +116,9 @@ provenant-supervisor = { workspace = true, features = ["fixture"] }
 [profile.dev]
 debug = "line-tables-only"
 
+[profile.dev.package."*"]
+opt-level = 1
+
 [profile.release]
 opt-level = "z"
 lto = true
