@@ -347,7 +347,10 @@ shared store.
 
 A writer's `TMPDIR` lives in the attempt's `tmp/candidate-N`, which terminal
 commit and unreserved reconciliation collect. Account probes still use `scratch/`.
-Writer profiles permit reading and executing fixtures only in that candidate's
+On macOS the lane sees that directory as `/private/tmp/pv-<hex>/candidate-N`,
+a symlink to the attempt's `tmp` whose short path keeps Unix-domain socket names
+under the 104-byte `sun_path` limit (see Lane lifecycle). Writer profiles permit
+reading and executing fixtures only in that candidate's
 temp subtree, signalling their own children and reading `/dev/fd/N`. Read-only
 profiles keep their existing limits. Private check homes honour `TMPDIR`.
 
