@@ -89,7 +89,13 @@ fn review_explain_snapshots_integration_panel() -> Result<(), Box<dyn std::error
         String::from_utf8_lossy(&output.stderr)
     );
     let text = String::from_utf8(output.stdout)?;
-    let snapshot = "review deep (by_kind; size=unknown; kind=integration; risk=routine)\n  risk tags: security\n  lens=correctness-spec pool=junior\n  lens=tests pool=junior\n  lens=design-fit-reuse pool=junior\n  lens=simplicity pool=junior\n  lens=conventions-readability pool=senior\n  lens=refactor-cleanup pool=senior\n  lens=reliability pool=senior\n  lens=flexibility pool=senior\n  lens=security-privacy pool=senior\n";
+    // CI's shallow checkout may add a "no default branch" warning after the
+    // header, so the header and the lens block are matched separately.
+    assert!(
+        text.starts_with("review deep (by_kind; size=unknown; kind=integration; risk=routine)\n"),
+        "{text}"
+    );
+    let snapshot = "  risk tags: security\n  lens=correctness-spec pool=junior\n  lens=tests pool=junior\n  lens=design-fit-reuse pool=junior\n  lens=simplicity pool=junior\n  lens=conventions-readability pool=senior\n  lens=refactor-cleanup pool=senior\n  lens=reliability pool=senior\n  lens=flexibility pool=senior\n  lens=security-privacy pool=senior\n";
     assert!(text.contains(snapshot), "{text}");
     Ok(())
 }
