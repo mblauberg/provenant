@@ -1,6 +1,63 @@
 //! Best-effort, private Cargo registry seed for writer lanes.
 use std::path::Path;
 
+/// Every `detail` a toolchain-verification refusal can report in
+/// `cargo-target-setup.json`. One list, so a typo cannot invent a code and a
+/// test can hold the set to snake_case without duplicates.
+macro_rules! detail_codes {
+    ($($name:ident = $text:literal),* $(,)?) => {
+        pub(crate) mod codes {
+            $(pub(crate) const $name: &str = $text;)*
+            #[cfg(test)]
+            pub(crate) const ALL: &[&str] = &[$($name),*];
+        }
+    };
+}
+detail_codes! {
+    WORKTREE_LAYOUT_UNEXPECTED = "worktree_layout_unexpected",
+    CARGO_HOME_ENV_MISSING = "cargo_home_env_missing",
+    CARGO_HOME_ENV_UNEXPECTED = "cargo_home_env_unexpected",
+    CARGO_HOME_CONFIG_PRESENT = "cargo_home_config_present",
+    CARGO_CONFIG_UNREADABLE = "cargo_config_unreadable",
+    CARGO_CONFIG_TOO_LARGE = "cargo_config_too_large",
+    CARGO_CONFIG_INVALID = "cargo_config_invalid",
+    CARGO_CONFIG_SELECTS_COMPILER = "cargo_config_selects_compiler",
+    WORKTREE_UNRESOLVABLE = "worktree_unresolvable",
+    RUSTUP_HOME_WRITABLE = "rustup_home_writable",
+    CARGO_BIN_WRITABLE = "cargo_bin_writable",
+    PATH_MISSING = "path_missing",
+    PATH_DUPLICATED = "path_duplicated",
+    RUSTUP_SHIM_UNRESOLVABLE = "rustup_shim_unresolvable",
+    RUSTUP_SHIM_WRITABLE = "rustup_shim_writable",
+    PATH_ENTRY_RELATIVE = "path_entry_relative",
+    PATH_ENTRY_WRITABLE = "path_entry_writable",
+    RUSTC_NOT_RUSTUP_SHIM = "rustc_not_rustup_shim",
+    RUSTC_PATH_UNRESOLVABLE = "rustc_path_unresolvable",
+    RUSTC_NOT_ON_PATH = "rustc_not_on_path",
+    RUSTUP_HOME_UNEXPECTED = "rustup_home_unexpected",
+    RUSTUP_AUTO_INSTALL_UNEXPECTED = "rustup_auto_install_unexpected",
+    TOOLCHAIN_ENV_OVERRIDE = "toolchain_env_override",
+    RUSTUP_HOME_MISSING = "rustup_home_missing",
+    TOOLCHAIN_DIR_UNREADABLE = "toolchain_dir_unreadable",
+    RELEASE_TOOLCHAIN_AMBIGUOUS_OR_MISSING = "release_toolchain_ambiguous_or_missing",
+    TOOLCHAIN_NOT_DIRECTORY = "toolchain_not_directory",
+    COMPILER_UNRESOLVABLE = "compiler_unresolvable",
+    TOOLCHAIN_UNRESOLVABLE = "toolchain_unresolvable",
+    COMPILER_ESCAPES_HOST_TOOLCHAIN = "compiler_escapes_host_toolchain",
+    COMPILER_PROBE_FAILED = "compiler_probe_failed",
+    COMPILER_PROBE_INVALID = "compiler_probe_invalid",
+    COMPILER_PIN_MISMATCH = "compiler_pin_mismatch",
+    COMPILER_HOST_MISMATCH = "compiler_host_mismatch",
+    TOOLCHAIN_CONFIG_TOO_LARGE = "toolchain_config_too_large",
+    TOOLCHAIN_CONFIG_INVALID = "toolchain_config_invalid",
+    RUSTUP_OVERRIDES_PRESENT = "rustup_overrides_present",
+    TOOLCHAIN_PIN_NON_REGULAR = "toolchain_pin_non_regular",
+    TOOLCHAIN_PIN_UNREADABLE = "toolchain_pin_unreadable",
+    TOOLCHAIN_PIN_CUSTOM = "toolchain_pin_custom",
+    TOOLCHAIN_PIN_ABSENT_OR_AMBIGUOUS = "toolchain_pin_absent_or_ambiguous",
+    TOOLCHAIN_NOT_FIXED_RELEASE = "toolchain_not_fixed_release",
+}
+
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct Outcome {
     status: &'static str,
@@ -593,7 +650,7 @@ mod tests {
         let outcome = seed_target(true, &state, &cache, &worktree, &home, &refused);
         assert_eq!(
             outcome,
-            Outcome::fallback_detail("toolchain_unverified", "toolchain_env_override")
+            Outcome::fallback_detail("toolchain_unverified", codes::TOOLCHAIN_ENV_OVERRIDE)
         );
     }
 

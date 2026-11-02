@@ -1,4 +1,5 @@
 //! Writer identity and confinement composition. Supervisor owns the lease.
+use crate::cargo_seed::codes;
 use crate::{PathCheck, Result, RunError, WriterRequest};
 use provenant_confinement::{
     ConfinedPlan, UtilityBudget, UtilityRuntime, VerifiedWorktree,
@@ -725,15 +726,15 @@ fn verified_cargo_config(
 ) -> std::result::Result<(), &'static str> {
     for path in [worktree.join("tools"), worktree.join("tools/front-door")] {
         if !std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
-            return Err("worktree_layout_unexpected");
+            return Err(codes::WORKTREE_LAYOUT_UNEXPECTED);
         }
     }
     let cargo_home = cache.join("cargo-home");
     let mut values = environment.iter().filter(|(key, _)| key == "CARGO_HOME");
     match (values.next(), values.next()) {
         (Some((_, value)), None) if Path::new(value) == cargo_home => {}
-        (None, _) => return Err("cargo_home_env_missing"),
-        _ => return Err("cargo_home_env_unexpected"),
+        (None, _) => return Err(codes::CARGO_HOME_ENV_MISSING),
+        _ => return Err(codes::CARGO_HOME_ENV_UNEXPECTED),
     }
     let present = |directory: &Path| {
         ["config", "config.toml"]
@@ -747,7 +748,7 @@ fn verified_cargo_config(
     };
     // The lane's own Cargo home is lane-writable state: any file there is refused.
     if !present(&cargo_home).is_empty() {
-        return Err("cargo_home_config_present");
+        return Err(codes::CARGO_HOME_CONFIG_PRESENT);
     }
     // A checked-in `.cargo/config.toml` is ordinary (this repository has one).
     // It is read as data and refused only if it can select the compiler.
@@ -766,19 +767,19 @@ fn verified_cargo_config(
 fn cargo_config_cannot_select_compiler(path: &Path) -> std::result::Result<(), &'static str> {
     use std::io::Read;
     if !std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file()) {
-        return Err("cargo_config_unreadable");
+        return Err(codes::CARGO_CONFIG_UNREADABLE);
     }
     let mut bytes = Vec::new();
     std::fs::File::open(path)
         .and_then(|file| file.take(65537).read_to_end(&mut bytes))
-        .map_err(|_| "cargo_config_unreadable")?;
+        .map_err(|_| codes::CARGO_CONFIG_UNREADABLE)?;
     if bytes.len() > 65536 {
-        return Err("cargo_config_too_large");
+        return Err(codes::CARGO_CONFIG_TOO_LARGE);
     }
     let document: toml_edit::DocumentMut = String::from_utf8(bytes)
-        .map_err(|_| "cargo_config_invalid")?
+        .map_err(|_| codes::CARGO_CONFIG_INVALID)?
         .parse()
-        .map_err(|_| "cargo_config_invalid")?;
+        .map_err(|_| codes::CARGO_CONFIG_INVALID)?;
     let compiler_key = |key: &str| {
         key.starts_with("RUSTUP_")
             || key.starts_with("RUSTC")
@@ -793,7 +794,7 @@ fn cargo_config_cannot_select_compiler(path: &Path) -> std::result::Result<(), &
         || (document.contains_key("build") && build.is_none())
         || (document.contains_key("env") && env.is_none())
     {
-        return Err("cargo_config_selects_compiler");
+        return Err(codes::CARGO_CONFIG_SELECTS_COMPILER);
     }
     Ok(())
 }
@@ -814,7 +815,7 @@ fn trusted_lane_toolchain(
             .ok()
     };
     let Some(worktree) = resolve(worktree) else {
-        return Err("worktree_unresolvable");
+        return Err(codes::WORKTREE_UNRESOLVABLE);
     };
     let protected = |path: &Path| {
         let Some(path) = resolve(path) else {
@@ -832,23 +833,23 @@ fn trusted_lane_toolchain(
         })
     };
     if !protected(&home.join(".rustup")) {
-        return Err("rustup_home_writable");
+        return Err(codes::RUSTUP_HOME_WRITABLE);
     }
     if !protected(&home.join(".cargo/bin")) {
-        return Err("cargo_bin_writable");
+        return Err(codes::CARGO_BIN_WRITABLE);
     }
     let mut paths = environment.iter().filter(|(key, _)| key == "PATH");
     let Some((_, path)) = paths.next() else {
-        return Err("path_missing");
+        return Err(codes::PATH_MISSING);
     };
     if paths.next().is_some() {
-        return Err("path_duplicated");
+        return Err(codes::PATH_DUPLICATED);
     }
     let Ok(shim) = home.join(".cargo/bin/rustup").canonicalize() else {
-        return Err("rustup_shim_unresolvable");
+        return Err(codes::RUSTUP_SHIM_UNRESOLVABLE);
     };
     if !protected(&shim) {
-        return Err("rustup_shim_writable");
+        return Err(codes::RUSTUP_SHIM_WRITABLE);
     }
     // The host puts the lane's `cargo` build-slot shim and shell hook in
     // `<scratch>/bin`, first on PATH. Scratch is writable, so the lane could add
@@ -863,20 +864,20 @@ fn trusted_lane_toolchain(
         .collect();
     for directory in std::env::split_paths(path) {
         if !directory.is_absolute() {
-            return Err("path_entry_relative");
+            return Err(codes::PATH_ENTRY_RELATIVE);
         }
         if !lane_shims.contains(&directory) && !protected(&directory) {
-            return Err("path_entry_writable");
+            return Err(codes::PATH_ENTRY_WRITABLE);
         }
         let executable = directory.join("rustc");
         match executable.canonicalize() {
             Ok(found) if found == shim => return Ok(()),
-            Ok(_) => return Err("rustc_not_rustup_shim"),
+            Ok(_) => return Err(codes::RUSTC_NOT_RUSTUP_SHIM),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err("rustc_path_unresolvable"),
+            Err(_) => return Err(codes::RUSTC_PATH_UNRESOLVABLE),
         }
     }
-    Err("rustc_not_on_path")
+    Err(codes::RUSTC_NOT_ON_PATH)
 }
 
 fn record_cargo_setup(
@@ -1114,18 +1115,18 @@ mod cargo_setup_tests {
         };
         assert_eq!(
             trusted_lane_toolchain(&home, &worktree, &env, &[grant]),
-            Err("rustup_home_writable")
+            Err(codes::RUSTUP_HOME_WRITABLE)
         );
         let path = std::env::join_paths([&worktree, &bin]).unwrap();
         let unsafe_env = vec![(OsString::from("PATH"), path)];
         assert_eq!(
             trusted_lane_toolchain(&home, &worktree, &unsafe_env, &[]),
-            Err("path_entry_writable")
+            Err(codes::PATH_ENTRY_WRITABLE)
         );
         std::fs::write(worktree.join("rustc"), b"untrusted").unwrap();
         assert_eq!(
             trusted_lane_toolchain(&home, &worktree, &unsafe_env, &[]),
-            Err("path_entry_writable")
+            Err(codes::PATH_ENTRY_WRITABLE)
         );
     }
 
@@ -1166,13 +1167,13 @@ mod cargo_setup_tests {
                 &[(OsString::from("PATH"), other)],
                 &grants
             ),
-            Err("path_entry_writable")
+            Err(codes::PATH_ENTRY_WRITABLE)
         );
         // A compiler already present in the shim directory must be the rustup shim.
         std::fs::write(scratch.join("bin/rustc"), b"untrusted").unwrap();
         assert_eq!(
             trusted_lane_toolchain(&home, &worktree, &env, &grants),
-            Err("rustc_not_rustup_shim")
+            Err(codes::RUSTC_NOT_RUSTUP_SHIM)
         );
     }
 
@@ -1190,7 +1191,7 @@ mod cargo_setup_tests {
         assert!(verified_cargo_config(&worktree, &cache, &env).is_ok());
         assert_eq!(
             verified_cargo_config(&worktree, &cache, &[]),
-            Err("cargo_home_env_missing")
+            Err(codes::CARGO_HOME_ENV_MISSING)
         );
         std::fs::write(
             cache.join("cargo-home/config.toml"),
@@ -1199,7 +1200,7 @@ mod cargo_setup_tests {
         .unwrap();
         assert_eq!(
             verified_cargo_config(&worktree, &cache, &env),
-            Err("cargo_home_config_present")
+            Err(codes::CARGO_HOME_CONFIG_PRESENT)
         );
         std::fs::remove_file(cache.join("cargo-home/config.toml")).unwrap();
         std::fs::create_dir_all(worktree.join(".cargo")).unwrap();
@@ -1219,7 +1220,7 @@ mod cargo_setup_tests {
             assert!(
                 matches!(
                     verified_cargo_config(&worktree, &cache, &env),
-                    Err("cargo_config_selects_compiler" | "cargo_config_invalid")
+                    Err(codes::CARGO_CONFIG_SELECTS_COMPILER | codes::CARGO_CONFIG_INVALID)
                 ),
                 "{text}"
             );
@@ -1228,7 +1229,7 @@ mod cargo_setup_tests {
         std::fs::remove_file(&config).unwrap();
         assert_eq!(
             verified_cargo_config(&worktree, &cache, &env),
-            Err("cargo_config_selects_compiler")
+            Err(codes::CARGO_CONFIG_SELECTS_COMPILER)
         );
     }
 
@@ -1261,7 +1262,7 @@ mod cargo_setup_tests {
         .unwrap();
         assert_eq!(
             verified_cargo_config(&worktree, &cache, &env),
-            Err("cargo_config_unreadable")
+            Err(codes::CARGO_CONFIG_UNREADABLE)
         );
     }
 
@@ -1288,7 +1289,7 @@ mod cargo_setup_tests {
         // A fallback names the specific refusal; other outcomes carry no detail.
         let refusal = crate::cargo_seed::Outcome::fallback_detail(
             "toolchain_unverified",
-            "path_entry_writable",
+            codes::PATH_ENTRY_WRITABLE,
         );
         record_cargo_setup_file(&directory, "cargo-target-setup.json", &refusal).unwrap();
         let record: serde_json::Value = serde_json::from_slice(
@@ -1297,7 +1298,7 @@ mod cargo_setup_tests {
         .unwrap();
         assert_eq!(
             record,
-            serde_json::json!({"status":"fallback","reason":"toolchain_unverified","detail":"path_entry_writable"})
+            serde_json::json!({"status":"fallback","reason":"toolchain_unverified","detail":codes::PATH_ENTRY_WRITABLE})
         );
         std::fs::remove_file(tmp.path().join("cargo-setup.json")).unwrap();
         std::fs::create_dir(tmp.path().join("cargo-setup.json")).unwrap();
