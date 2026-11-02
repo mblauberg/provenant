@@ -155,16 +155,17 @@ provenant review HEAD --brief-file review-brief.md --risk crucial --kind code --
 provenant --json review HEAD --brief-file review-brief.md --shape quick
 ```
 
-The target must resolve to a commit. `--range` supplies changed paths for
-selection; without it no path rules match. Renames are treated as a deletion
+The target must resolve to a commit. `--range` supplies changed paths and size for
+selection; without it no path or size rules match. Renames are treated as a deletion
 and an addition, so rules can match either path. `--shape` overrides selection
-and skips the range lookup. A changed path that is not UTF-8 is rejected; use
+and skips the range lookup, except that integration always selects deep. A changed path that is not UTF-8 is rejected; use
 an explicit shape when path selection cannot represent it.
 `--wait` sets the overall wait limit, defaulting to one hour, and accepts
 seconds or durations such as `30m`, from one second to four hours.
 
 Selection uses an explicit shape first, then the most specific matching `by_paths`
-pattern, then `by_risk`, `by_kind` and finally `default`. Specificity is the
+pattern, then `by_risk`, `by_kind`, `by_size` and finally `default`. Size and
+kind can raise the selected count above the risk floor. Specificity is the
 number of literal bytes, followed by fewer wildcards; lexical order breaks ties.
 In path patterns, `*` and `?` do not cross directory separators; `**` does.
 The selected shape and its source appear in the review summary. Family

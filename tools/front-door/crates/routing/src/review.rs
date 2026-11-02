@@ -227,10 +227,11 @@ impl ReviewConfig {
         if integration.is_some() { selected.source = "by_kind"; }
         // Risk establishes a floor; size and integration can demand more coverage.
         if override_name.is_none() {
-            for candidate in [
-                self.select.select(None, None, kind, &[], size, Some(true)),
-                self.select.select(None, risk, None, &[], None, Some(true)),
-            ] {
+            let candidates = [
+                (kind.is_some_and(|k| self.select.by_kind.contains_key(k)) || size.is_some_and(|s| self.select.by_size.contains_key(s))).then(|| self.select.select(None, None, kind, &[], size, Some(true))),
+                risk.filter(|r| self.select.by_risk.contains_key(*r)).map(|r| self.select.select(None, Some(r), None, &[], None, Some(true))),
+            ];
+            for candidate in candidates.into_iter().flatten() {
                 let slots = |name: &str| self.shapes.get(name).map_or(0, |shape| shape.reviewers.iter().map(|r| r.count).sum::<usize>());
                 if slots(&candidate.value) > slots(&selected.value) {
                     selected = candidate;

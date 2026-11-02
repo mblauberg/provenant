@@ -1045,7 +1045,7 @@ mod review_shape_tests {
         let data = json!({"shape":"deep","selection_source":"by_risk","reviewers":[{"run_id":"abc","operation_id":"op","applied_route":{"model":"codex/test","effort":"high"},"state":"failed","verdict":"unknown","result_path":"/output","substitution":true}]});
         let text = review_text(&data);
         for expected in [
-            "deep (by_risk)",
+            "deep (by_risk; size=unknown; kind=unknown; risk=unknown)",
             "run=abc",
             "codex/test@high",
             "state=failed",
@@ -1056,5 +1056,10 @@ mod review_shape_tests {
         ] {
             assert!(text.contains(expected), "{text}");
         }
+    }
+    #[test]
+    fn text_snapshots_panel_and_reason() {
+        let data = json!({"shape":"quick","selection_source":"by_size","size":"small","kind":"code","risk":"routine","reviewers":[{"lens":"correctness-spec","run_id":"a","operation_id":"op","state":"succeeded","verdict":"approve"}]});
+        assert_eq!(review_text(&data), "review quick (by_size; size=small; kind=code; risk=routine)\n  lens=correctness-spec run=a operation=op unresolved state=succeeded verdict=approve output=none\n");
     }
 }

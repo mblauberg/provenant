@@ -1178,11 +1178,12 @@ fn read_roots_are_confined_to_the_project_or_the_host_allow_list()
 /// Stand-in for the routing review configuration: low risk is one junior,
 /// high risk is six, otherwise two.
 fn shapes() -> super::preset::ShapeSelector {
-    Box::new(|named, risk, _, _, _, _| {
-        let (name, source, count) = match (named, risk) {
-            (Some("standard"), _) => ("standard", "override", 2),
-            (_, Some("crucial")) => ("deep", "by_risk", 6),
-            (_, Some("routine")) => ("quick", "by_risk", 1),
+    Box::new(|named, risk, kind, _, _, _| {
+        let (name, source, count) = match (named, risk, kind) {
+            (_, _, Some("integration")) => ("deep", "by_kind", 8),
+            (Some("standard"), _, _) => ("standard", "override", 2),
+            (_, Some("crucial"), _) => ("deep", "by_risk", 8),
+            (_, Some("routine"), _) => ("quick", "by_risk", 1),
             _ => ("standard", "default", 2),
         };
         Ok(super::preset::ShapeHint {
@@ -1217,10 +1218,13 @@ fn review_council_fans_out_one_lens_role_over_the_lens_list() {
         lens_ids(&document),
         [
             "lens-correctness-spec",
+            "lens-tests",
             "lens-design-fit-reuse",
             "lens-simplicity",
             "lens-conventions-readability",
-            "lens-tests",
+            "lens-refactor-cleanup",
+            "lens-reliability",
+            "lens-flexibility",
         ]
     );
     let lens = &document["nodes"][1]["composite"]["nodes"][0];
@@ -1233,6 +1237,18 @@ fn review_council_fans_out_one_lens_role_over_the_lens_list() {
             .get("distinct_from")
             .is_none()
     );
+}
+
+#[test]
+fn integration_review_expands_all_base_lenses_and_resolves_roles() {
+    let document = council(&["parameters.worktree='/repo/lane'", "parameters.subject={type='integration'}"], true).unwrap();
+    let nodes = document["nodes"][1]["composite"]["nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 8);
+    for lens in ["refactor-cleanup", "reliability", "flexibility"] {
+        let node = nodes.iter().find(|node| node["id"] == format!("lens-{lens}")).unwrap();
+        assert!(node["prompt"].as_str().unwrap().contains(&format!("Lens: {lens}")));
+        assert!(node["prompt"].as_str().unwrap().contains("Canonical questions"));
+    }
 }
 
 #[test]
