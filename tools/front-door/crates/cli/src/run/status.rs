@@ -1,7 +1,5 @@
 use super::*;
 
-const STATUS_GRAPH_PAGE_SIZE: usize = 20;
-
 /// Active attempts plus the twenty most recent settled lanes.
 pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Reply {
     let mut summary = None;
@@ -11,8 +9,20 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             let clock = SystemClock::new();
             let cancel = CancelToken::new();
             let call = request(&clock, &cancel)?;
-            let resolved = command
+            if let Some(graph_id) = command.id.as_deref().filter(|id| graph_identifier(id))
+                && let Some((data, human)) = paused_graph_status(edge, &call, graph_id)?
+            {
+                return Ok((data, human));
+            }
+            let id_target = command
                 .id
+                .as_deref()
+                .map(|id| {
+                    id.parse::<Target>()
+                        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Invalid, error))
+                })
+                .transpose()?;
+            let resolved = id_target
                 .as_ref()
                 .map(|target| targets::resolve(edge, target, true))
                 .transpose()?;
@@ -27,29 +37,10 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                 open_read_only(edge, &call)?
             };
             let (exempt, exempt_line) = review_exempt_view(&context);
-            let (paused_graphs, next_graph_cursor) = paused_graphs(&context, command.graph_cursor);
-            let graph_continuation = next_graph_cursor.map(|cursor| {
-                status_continuation(
-                    &targets,
-                    edge.cwd,
-                    context.state_root.as_path(),
-                    command.all,
-                    command.cursor,
-                    Some(cursor),
-                )
-            });
             let Some(store) = store else {
                 return Ok((
-                    json!({
-                        "lanes": [],
-                        "review_exempt": exempt,
-                        "paused_graphs": paused_graph_json(&paused_graphs),
-                        "next_graph_cursor": next_graph_cursor,
-                    }),
-                    format!(
-                        "no lanes\n{}{exempt_line}",
-                        paused_graph_text(&paused_graphs, graph_continuation.as_deref())
-                    ),
+                    json!({"lanes": [], "review_exempt": exempt}),
+                    format!("no lanes\n{exempt_line}"),
                 ));
             };
             let session = Session { store, context };
@@ -107,7 +98,7 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             }
             let waits = session.store.lane_waits(&rows, &call);
             let now = now(&clock)?;
-            let mut human = if command.all {
+            let human = if command.all {
                 let cooldowns = read_lane_cooldowns(session.context.state_root.as_path());
                 render_lanes(
                     &rows,
@@ -120,34 +111,23 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             } else {
                 compact_status(&rows, &waits, now)
             };
-            human.push_str(&paused_graph_text(
-                &paused_graphs,
-                graph_continuation.as_deref(),
-            ));
-            let lane_continuation = next.map(|cursor| {
-                status_continuation(
-                    &targets,
-                    edge.cwd,
-                    session.context.state_root.as_path(),
-                    true,
-                    Some(cursor),
-                    Some(command.graph_cursor.unwrap_or(0)),
-                )
+            let continuation = next.map(|cursor| {
+                let target = targets
+                    .first()
+                    .map(|target| {
+                        [
+                            target.run.map(|id| id.to_string()),
+                            target.task.map(|id| id.to_string()),
+                            target.attempt.map(|id| id.to_string()),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join("/")
+                    })
+                    .unwrap_or_default();
+                format!("provenant status {target} --all --cursor {cursor}")
             });
-            if let Some(command) = &lane_continuation {
-                human.push_str(&format!("next lane page: {command}\n"));
-            }
-            let summary_continuation =
-                (lane_continuation.is_some() || graph_continuation.is_some()).then(|| {
-                    status_continuation(
-                        &targets,
-                        edge.cwd,
-                        session.context.state_root.as_path(),
-                        command.all,
-                        next.or(command.cursor),
-                        next_graph_cursor.or(command.graph_cursor).or(Some(0)),
-                    )
-                });
             let lines: Vec<LaneLine> = rows
                 .iter()
                 .map(|lane| {
@@ -172,20 +152,13 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                     }
                 })
                 .collect();
-            let mut compact = lane_summary(&lines, summary_continuation);
-            compact = add_paused_graphs_to_summary(compact, &paused_graphs);
+            let mut compact = lane_summary(&lines, continuation);
             // The compact view keeps the paths a writer may change unreviewed.
             compact.lines.push(exempt_line.trim_end().to_owned());
             summary = Some(compact);
             let human = format!("{human}{exempt_line}");
             Ok((
-                json!({
-                    "lanes": rows,
-                    "next_cursor": next,
-                    "review_exempt": exempt,
-                    "paused_graphs": paused_graph_json(&paused_graphs),
-                    "next_graph_cursor": next_graph_cursor,
-                }),
+                json!({"lanes": rows, "next_cursor": next, "review_exempt": exempt}),
                 human,
             ))
         })(),
@@ -195,203 +168,97 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
     out
 }
 
-fn paused_graphs(
-    context: &run::ExecutionContext,
-    cursor: Option<u64>,
-) -> (Vec<(String, String)>, Option<u64>) {
-    use provenant_fabric_runtime::graph::{FileJournal, NodeState};
-    let Ok(graph_ids) = FileJournal::graph_ids(&context.state_root, context.project_id) else {
-        return (Vec::new(), None);
-    };
-    let (graph_ids, next_cursor) = graph_scan_page(graph_ids, cursor.unwrap_or(0));
-    let paused = graph_ids
-        .into_iter()
-        .filter_map(|id| {
-            let checkpoint =
-                FileJournal::read_checkpoint(&context.state_root, context.project_id, &id)
-                    .ok()
-                    .flatten()?;
-            let unfinished = checkpoint.nodes.iter().any(|node| {
-                node.expansion_pause.is_some()
-                    || matches!(node.state, NodeState::Pending | NodeState::Running)
-            }) || (checkpoint.delivery_required
-                && !checkpoint.delivered
-                && checkpoint.successful());
-            if checkpoint.cancelled || !unfinished {
-                return None;
+fn paused_graph_status(
+    edge: &Edge<'_>,
+    call: &run::Request<'_>,
+    graph_id: &str,
+) -> Result<Option<(serde_json::Value, String)>, Fail> {
+    use provenant_fabric_runtime::graph::FileJournal;
+    let (context, _) = open_read_only(edge, call)?;
+    let checkpoint =
+        match FileJournal::read_checkpoint(&context.state_root, context.project_id, graph_id) {
+            Ok(Some(checkpoint)) => checkpoint,
+            Ok(None) => return Ok(None),
+            Err(error) => {
+                return Err(Fail::new(Status::Error, ErrorKind::Io, error.to_string()));
             }
-            Some((id, checkpoint.pause_reason?))
-        })
-        .collect();
-    (paused, next_cursor)
+        };
+    Ok(paused_graph_reply(graph_id, checkpoint))
 }
 
-fn graph_scan_page(graph_ids: Vec<String>, cursor: u64) -> (Vec<String>, Option<u64>) {
-    let offset = usize::try_from(cursor).unwrap_or(usize::MAX);
-    if offset >= graph_ids.len() {
-        return (Vec::new(), None);
-    }
-    let end = offset
-        .saturating_add(STATUS_GRAPH_PAGE_SIZE)
-        .min(graph_ids.len());
-    let page = graph_ids[offset..end].to_vec();
-    let next = (end < graph_ids.len()).then_some(end as u64);
-    (page, next)
+fn graph_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        && (value.len() == 32 || value.bytes().any(|byte| !byte.is_ascii_hexdigit()))
 }
 
-fn status_continuation(
-    targets: &[Target],
-    project: &Path,
-    state_dir: &Path,
-    all: bool,
-    lane_cursor: Option<u64>,
-    graph_cursor: Option<u64>,
-) -> String {
-    let target = targets
-        .first()
-        .map(|target| {
-            [
-                target.run.map(|id| id.to_string()),
-                target.task.map(|id| id.to_string()),
-                target.attempt.map(|id| id.to_string()),
-            ]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join("/")
-        })
-        .unwrap_or_default();
-    let mut args = vec!["provenant status".to_owned()];
-    if !target.is_empty() {
-        args.push(target);
-    }
-    args.push(format!(
-        "--project {}",
-        shell_arg(&project.display().to_string())
-    ));
-    args.push(format!(
-        "--state-dir {}",
-        shell_arg(&state_dir.display().to_string())
-    ));
-    if all {
-        args.push("--all".into());
-    }
-    if let Some(cursor) = lane_cursor {
-        args.push(format!("--cursor {cursor}"));
-    }
-    if let Some(cursor) = graph_cursor {
-        args.push(format!("--graph-cursor {cursor}"));
-    }
-    args.join(" ")
-}
-
-fn shell_arg(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-fn paused_graph_json(graphs: &[(String, String)]) -> Vec<serde_json::Value> {
-    graphs
-        .iter()
-        .map(|(id, reason)| json!({"graph_id":id,"pause_reason":reason}))
-        .collect()
-}
-
-fn paused_graph_lines(graphs: &[(String, String)]) -> Vec<String> {
-    graphs
-        .iter()
-        .map(|(id, reason)| {
-            format!(
-                "paused graph {id}: {}",
-                provenant_fabric_runtime::hosts::plain_text(reason, 1024)
-            )
-        })
-        .collect()
-}
-
-fn paused_graph_text(graphs: &[(String, String)], next_command: Option<&str>) -> String {
-    let mut text = String::new();
-    for line in paused_graph_lines(graphs) {
-        text.push_str(&line);
-        text.push('\n');
-    }
-    if let Some(command) = next_command {
-        text.push_str(&format!("next graph page: {command}\n"));
-    }
-    text
-}
-
-fn add_paused_graphs_to_summary(
-    summary: crate::Summary,
-    graphs: &[(String, String)],
-) -> crate::Summary {
-    let mut lines = summary.lines;
-    let headline = lines.first().cloned().unwrap_or_default();
-    let mut rows = if lines.len() > 1 {
-        lines.drain(1..).collect::<Vec<_>>()
+fn paused_graph_reply(
+    graph_id: &str,
+    checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint,
+) -> Option<(serde_json::Value, String)> {
+    use provenant_fabric_runtime::graph::NodeState;
+    let unfinished =
+        checkpoint.nodes.iter().any(|node| {
+            node.expansion_pause.is_some()
+                || matches!(node.state, NodeState::Pending | NodeState::Running)
+        }) || (checkpoint.delivery_required && !checkpoint.delivered && checkpoint.successful());
+    let status = if checkpoint.cancelled {
+        "cancelled"
+    } else if !unfinished {
+        "complete"
+    } else if checkpoint.pause_reason.is_some() {
+        "paused"
     } else {
-        Vec::new()
+        "pending"
     };
-    rows.extend(paused_graph_lines(graphs));
-    let mut bounded = crate::Summary::new(headline, rows, summary.next);
-    bounded.omitted = bounded.omitted.saturating_add(summary.omitted);
-    bounded
+    let label = match status {
+        "cancelled" => "Cancelled",
+        "complete" => "Complete",
+        "paused" => "Paused",
+        _ => "Pending",
+    };
+    let mut human = format!("Graph {graph_id}: {label}\n");
+    let reason = (status == "paused")
+        .then_some(checkpoint.pause_reason.as_deref())
+        .flatten()
+        .map(|reason| provenant_fabric_runtime::hosts::plain_text(reason, 1024));
+    if let Some(reason) = &reason {
+        human.push_str(&format!("Pause reason: {reason}\n"));
+    }
+    Some((
+        json!({"graph_id": graph_id, "status": status, "pause_reason": reason, "checkpoint": checkpoint}),
+        human,
+    ))
 }
 
 #[cfg(test)]
-mod paused_graph_tests {
+mod graph_status_tests {
     #[test]
-    fn human_status_bounds_and_sanitizes_paused_graph_reasons() {
+    fn graph_target_status_shows_a_bounded_sanitised_pause_reason() {
         let reason = format!("invalid planner fragment \u{1b}[31m{}", "x".repeat(2048));
-        let lines = super::paused_graph_lines(&[("graph-123".into(), reason)]);
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].starts_with("paused graph graph-123: invalid planner fragment [31m"));
-        assert!(!lines[0].contains('\u{1b}'));
-        assert!(lines[0].chars().count() <= "paused graph graph-123: ".chars().count() + 1024);
-    }
-
-    #[test]
-    fn paused_graph_status_rows_use_summary_limits() {
-        let graphs = (0..100)
-            .map(|index| (format!("graph-{index}"), "x".repeat(1024)))
-            .collect::<Vec<_>>();
-        let summary = super::add_paused_graphs_to_summary(
-            crate::Summary::new("status", Vec::new(), None),
-            &graphs,
+        let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1,
+                "graph_id": "graph-123",
+                "plan_digest": "digest",
+                "delivery_required": true,
+                "nodes": [],
+                "pause_reason": reason,
+            }))
+            .unwrap();
+        let (data, human) = super::paused_graph_reply("graph-123", checkpoint).unwrap();
+        assert!(
+            human.starts_with(
+                "Graph graph-123: Paused\nPause reason: invalid planner fragment [31m"
+            )
         );
-        assert!(summary.lines.len() <= 13);
-        assert!(summary.omitted > 0);
-        assert!(summary.lines.iter().all(|line| line.len() <= 200));
-    }
-
-    #[test]
-    fn paused_graph_status_pages_are_bounded_and_reachable() {
-        let ids: Vec<_> = (0..45).map(|index| format!("graph-{index:03}")).collect();
-        let (first, next) = super::graph_scan_page(ids.clone(), 0);
-        assert_eq!(first.len(), super::STATUS_GRAPH_PAGE_SIZE);
-        assert_eq!(next, Some(20));
-        let (second, next) = super::graph_scan_page(ids.clone(), next.unwrap());
-        assert_eq!(second.len(), super::STATUS_GRAPH_PAGE_SIZE);
-        assert_eq!(next, Some(40));
-        let (third, next) = super::graph_scan_page(ids, next.unwrap());
-        assert_eq!(third.len(), 5);
-        assert_eq!(next, None);
-        assert_ne!(first[0], third[0]);
-    }
-
-    #[test]
-    fn status_page_continuations_preserve_roots_and_both_cursors() {
-        let command = super::status_continuation(
-            &[],
-            std::path::Path::new("/project root"),
-            std::path::Path::new("/state root"),
-            true,
-            Some(50),
-            Some(20),
-        );
-        assert_eq!(
-            command,
-            "provenant status --project '/project root' --state-dir '/state root' --all --cursor 50 --graph-cursor 20"
-        );
+        assert!(!human.contains('\u{1b}'));
+        assert!(human.lines().nth(1).unwrap().chars().count() <= 1024 + "Pause reason: ".len());
+        assert_eq!(data["status"], "paused");
+        assert_eq!(data["pause_reason"].as_str().unwrap().len(), 1024);
     }
 }
 

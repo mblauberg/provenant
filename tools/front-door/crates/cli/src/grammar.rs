@@ -1464,17 +1464,14 @@ fn duration_seconds(value: &str) -> Result<u64, &'static str> {
 }
 #[derive(Debug, Args)]
 pub struct Status {
-    /// Show this run, task or attempt ID, including settled lanes
-    pub id: Option<Target>,
+    /// Show this run, task, attempt or graph ID, including settled records
+    pub id: Option<String>,
     /// Maximum full records per page
     #[arg(long, hide = true, default_value = "50", value_parser = clap::value_parser!(u64).range(1..=100))]
     pub limit: u64,
     /// Continue a full-record page from its cursor
     #[arg(long, hide = true)]
     pub cursor: Option<u64>,
-    /// Continue a paused graph page from its cursor
-    #[arg(long)]
-    pub graph_cursor: Option<u64>,
     /// Include full records and older lanes
     #[arg(long)]
     pub all: bool,

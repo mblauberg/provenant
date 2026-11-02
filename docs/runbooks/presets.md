@@ -682,10 +682,9 @@ parsed, validated or admitted, the graph runs the preset's deterministic static
 stage when one is configured and records `plan.fallback_reason` in the run
 output. Without a fallback, an invalid fragment pauses the graph with its
 reason. The static stage must settle successfully for the graph to succeed;
-`provenant output` shows the fallback and its reason. Human `provenant status`,
-graph status and resume output include the bounded pause reason when a graph is
-paused. Status reads up to 20 graph journals per page; follow its
-`--graph-cursor` command to inspect later journals.
+`provenant output` shows the fallback and its reason. Human
+`provenant status <graph-id>`, `fabric graph status` and `fabric graph resume`
+output include the bounded pause reason when a graph is paused.
 
 A preset opts in with a `[plan]` table: `replaces` (the stage to swap),
 `explicit` (parameters that, when set, keep the static graph), `guidance` and
