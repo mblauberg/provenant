@@ -1,6 +1,6 @@
 Graph <id>
 Preset selection: scope-then-run (override)
-Review shape: standard (default)
+Review shape: standard (default; size=unknown; kind=unknown; risk=unknown)
 scout  role=- tier=- family=any kind=composite access=read_only worktree=-
   scouts  role=- tier=- family=any kind=composite access=read_only worktree=-
     scout-1  role=scout.codebase tier=junior family=any kind=- access=read_only worktree=-

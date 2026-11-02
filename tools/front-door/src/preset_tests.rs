@@ -1208,20 +1208,22 @@ fn read_roots_are_confined_to_the_project_or_the_host_allow_list()
 }
 
 /// Stand-in for the routing review configuration: low risk is one junior,
-/// high risk is six, otherwise two.
+/// high risk is eight, otherwise three.
 fn shapes() -> super::preset::ShapeSelector {
-    Box::new(|named, risk| {
-        let (name, source, count) = match (named, risk) {
-            (Some("standard"), _) => ("standard", "override", 2),
-            (_, Some("crucial")) => ("deep", "by_risk", 6),
-            (_, Some("routine")) => ("quick", "by_risk", 1),
-            _ => ("standard", "default", 2),
+    Box::new(|query| {
+        let (name, source, count) = match (query.shape, query.risk, query.kind) {
+            (_, _, Some("integration")) => ("deep", "by_kind", 8),
+            (Some("standard"), _, _) => ("standard", "override", 3),
+            (_, Some("crucial"), _) => ("deep", "by_risk", 8),
+            (_, Some("routine"), _) => ("quick", "by_risk", 1),
+            _ => ("standard", "default", 3),
         };
         Ok(super::preset::ShapeHint {
             name: name.into(),
             source: source.into(),
             slots: vec!["junior".into(); count],
-            named: Vec::new(),
+            plan: provenant_routing::ReviewConfig::default().lens_plan(query.kind),
+            ..Default::default()
         })
     })
 }
@@ -1249,10 +1251,13 @@ fn review_council_fans_out_one_lens_role_over_the_lens_list() {
         lens_ids(&document),
         [
             "lens-correctness-spec",
+            "lens-tests",
             "lens-design-fit-reuse",
             "lens-simplicity",
             "lens-conventions-readability",
-            "lens-tests",
+            "lens-refactor-cleanup",
+            "lens-reliability",
+            "lens-flexibility",
         ]
     );
     let lens = &document["nodes"][1]["composite"]["nodes"][0];
@@ -1265,6 +1270,105 @@ fn review_council_fans_out_one_lens_role_over_the_lens_list() {
             .get("distinct_from")
             .is_none()
     );
+}
+
+#[test]
+fn integration_review_expands_all_base_lenses_and_resolves_roles() {
+    let document = council(
+        &[
+            "parameters.worktree='/repo/lane'",
+            "parameters.kind='integration'",
+        ],
+        true,
+    )
+    .unwrap();
+    let nodes = document["nodes"][1]["composite"]["nodes"]
+        .as_array()
+        .unwrap();
+    assert_eq!(nodes.len(), 8);
+    for lens in ["refactor-cleanup", "reliability", "flexibility"] {
+        let node = nodes
+            .iter()
+            .find(|node| node["id"] == format!("lens-{lens}"))
+            .unwrap();
+        assert!(
+            node["prompt"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("Lens: {lens}"))
+        );
+        assert!(
+            node["prompt"]
+                .as_str()
+                .unwrap()
+                .contains("Canonical questions")
+        );
+    }
+}
+
+#[test]
+fn docs_panel_keeps_risk_floor_with_readability_lens() {
+    let document = council(
+        &[
+            "parameters.worktree='/repo/lane'",
+            "parameters.kind='docs'",
+            "parameters.risk_tier='crucial'",
+        ],
+        true,
+    )
+    .unwrap();
+    assert_eq!(lens_ids(&document), ["lens-conventions-readability"]);
+}
+
+#[test]
+fn refactor_panel_adds_kind_lenses_outside_the_slot_cap() {
+    let document = council(
+        &[
+            "parameters.worktree='/repo/lane'",
+            "parameters.kind='refactor'",
+        ],
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        lens_ids(&document),
+        [
+            "lens-correctness-spec",
+            "lens-tests",
+            "lens-design-fit-reuse",
+            "lens-refactor-cleanup"
+        ]
+    );
+}
+
+#[test]
+fn a_caller_supplied_lens_list_keeps_its_order() {
+    let document = council(
+        &[
+            "parameters.worktree='/repo/lane'",
+            "parameters.kind='refactor'",
+            "parameters.lenses=[{name='simplicity',tier='',when=''},{name='tests',tier='',when=''},{name='correctness-spec',tier='',when=''}]",
+        ],
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        lens_ids(&document),
+        ["lens-simplicity", "lens-tests", "lens-correctness-spec"]
+    );
+}
+
+#[test]
+fn the_council_lens_triggers_match_the_shared_risk_tag_table() {
+    let text = include_str!("../assets/presets/review-council.toml");
+    for (tag, lens) in provenant_routing::RISK_TAG_LENSES {
+        assert!(
+            text.contains(&format!(
+                "{{ name = \"{lens}\", tier = \"\", when = \"{tag}\" }}"
+            )),
+            "{lens} must trigger on {tag}"
+        );
+    }
 }
 
 #[test]
@@ -1320,7 +1424,7 @@ fn lens_tiers_come_from_the_review_shape_unless_overridden() {
     let nodes = document["nodes"][1]["composite"]["nodes"]
         .as_array()
         .unwrap();
-    assert_eq!(nodes.len(), 2);
+    assert_eq!(nodes.len(), 3);
     assert!(nodes.iter().all(|node| node["route"]["alias"] == "junior"));
     let document = council(
         &[
@@ -1364,8 +1468,9 @@ fn each_review_stage_selects_its_shape_from_its_own_parameters() {
     let mut high = batch.to_vec();
     high.push("council.risk_tier='crucial'".into());
     let high = expand(&layers, "big-batch", "brief", &high).unwrap();
-    assert_ne!(lens_count(&high.document, "council"), standard);
-    assert!(high.review_shape.unwrap().contains("deep (by_risk)"));
+    assert_eq!(standard, 8);
+    assert_eq!(lens_count(&high.document, "council"), standard);
+    assert!(high.review_shape.unwrap().contains("deep (by_kind)"));
     // A parent's ambient risk tier reaches a child that declares it.
     let mut layers = Layers::empty();
     layers.review = Some(shapes());
@@ -2424,4 +2529,95 @@ fn previous_round_selections_resolve_against_the_loop_body() {
     .err()
     .unwrap();
     assert!(error.contains("commit from look"), "{error}");
+}
+
+fn real_selector(directory: &str) -> Layers {
+    let mut layers = Layers::empty();
+    layers.review = Some(super::preset::review_selector(
+        provenant_routing::ReviewConfig::default(),
+        std::path::PathBuf::from(directory),
+        None,
+    ));
+    layers
+}
+
+fn review_lens_count(document: &serde_json::Value) -> usize {
+    let review = document["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == "review")
+        .unwrap();
+    review["composite"]["nodes"][1]["composite"]["nodes"]
+        .as_array()
+        .unwrap()
+        .len()
+}
+
+#[test]
+fn deliver_forwards_size_and_kind_into_the_review_panel() {
+    let layers = real_selector("/nonexistent");
+    let panel = |extra: &[&str]| {
+        let mut overrides = vec!["parameters.worktree='/repo/w'".to_owned()];
+        overrides.extend(extra.iter().map(|s| (*s).to_owned()));
+        expand(&layers, "deliver", "brief", &overrides).unwrap()
+    };
+    assert_eq!(
+        review_lens_count(&panel(&["parameters.size='small'"]).document),
+        1
+    );
+    assert_eq!(
+        review_lens_count(&panel(&["parameters.size='medium'"]).document),
+        3
+    );
+    assert_eq!(
+        review_lens_count(
+            &panel(&["parameters.size='medium'", "parameters.kind='refactor'"]).document
+        ),
+        4
+    );
+    assert_eq!(
+        review_lens_count(&panel(&["parameters.size='large'"]).document),
+        8
+    );
+}
+
+#[test]
+fn an_unmeasurable_review_degrades_to_a_warning_and_expansion_succeeds() {
+    let layers = real_selector("/nonexistent");
+    let expanded = expand(
+        &layers,
+        "deliver",
+        "brief",
+        &[
+            "parameters.worktree='/repo/w'".into(),
+            "parameters.base='main'".into(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(review_lens_count(&expanded.document), 3);
+    assert!(
+        expanded
+            .warnings
+            .iter()
+            .any(|w| w.contains("cannot measure review size") && w.contains("size unknown")),
+        "{:?}",
+        expanded.warnings
+    );
+}
+
+#[test]
+fn an_unknown_size_override_is_refused() {
+    let layers = real_selector("/nonexistent");
+    let error = expand(
+        &layers,
+        "deliver",
+        "brief",
+        &[
+            "parameters.worktree='/repo/w'".into(),
+            "parameters.size='huge'".into(),
+        ],
+    )
+    .unwrap_err();
+    assert!(error.contains("unknown review size"), "{error}");
 }

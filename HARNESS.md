@@ -134,6 +134,10 @@ found.
 
 ## Review ladder
 
+The tier sets the minimum review count; change size and kind set lens
+coverage. Use a scaled panel by default, and give integration-branch heads
+the full mixed panel, including refactor and cleanup, reliability and flexibility.
+
 | Tier | Minimum review |
 |---|---|
 | `routine` | The chair plus objective checks. |

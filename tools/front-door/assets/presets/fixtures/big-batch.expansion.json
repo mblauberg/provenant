@@ -3,7 +3,7 @@
     "pattern": "big-batch",
     "preset": "big-batch"
   },
-  "graph_id": "preset-4e1dfcebaa3ec018566fc52daeffccb4",
+  "graph_id": "preset-139ae32ef4e11714765e8f7030aa0d8c",
   "integration_branch": "batch/graph",
   "nodes": [
     {
@@ -284,7 +284,7 @@
                         "depends_on": [],
                         "distinct_from": "writer",
                         "id": "lens-correctness-spec",
-                        "prompt": "Lens correctness-spec. Check the change against the spec and for logic errors.\n\nLens: correctness-spec. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with one exact `VERDICT: PASS` or `VERDICT: FAIL` line.\n\n\n# Lens: correctness against the spec\n\nCanonical questions: [review-lenses.md](../review-lenses.md), sections\n\"Correctness and failure\" and \"Verification\".\n\nCheck the change against the spec (the issue or file you were given), not\nagainst the author's account of it.\n\n- Map each acceptance criterion to code and to evidence. Name any criterion with\n  no implementation or no test.\n- State the invariants that must hold before and after each operation, then try\n  to break them with empty, duplicate, stale, malformed, partial and retried input.\n- Follow failure paths: ordering, cancellation, timeouts, re-entry, partial\n  writes and errors that are converted to success.\n- Check public API, schema and protocol compatibility against the base.\n",
+                        "prompt": "Lens correctness-spec. Check the change against the spec and for logic errors.\n\nLens: correctness-spec. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with one exact `VERDICT: PASS` or `VERDICT: FAIL` line.\n\n\n# Lens: correctness against the spec\n\nCanonical questions: [review-lenses.md](../review-lenses.md), sections\n\"Correctness and failure\" and \"Verification\".\n\nCheck the change against the spec (the issue or file you were given), not\nagainst the author's account of it.\n\n- Map each acceptance criterion to code and to evidence. Name any criterion with\n  no implementation or no test.\n- State the invariants that must hold before and after each operation, then try\n  to break them with empty, duplicate, stale, malformed, partial and retried input.\n- Follow failure paths: ordering, cancellation, timeouts, re-entry, partial\n  writes and errors that are converted to success.\n- Check public API, schema and protocol compatibility against the base.\n- For refactors, check that intended behaviour and failure handling are preserved.\n",
                         "references": [
                           {
                             "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
@@ -292,13 +292,13 @@
                             "when": "always"
                           },
                           {
-                            "digest": "sha256:eed92bd4b886f327c37d1ede6084ad87266bc3e25b8a40f576ae7c59fdedcd5b",
+                            "digest": "sha256:47cb46c7f819127bb60fc8d1ef3928cc848509b0cdfa358181968510ad73323a",
                             "ref": "skill:code-review/references/lenses/correctness-spec.md",
                             "when": "always"
                           }
                         ],
                         "role": "lens.correctness-spec",
-                        "role_digest": "sha256:0389100b682b6cca0df2a4896784fc41c1af37e9043ab7eadcab2923ad9814fb",
+                        "role_digest": "sha256:66edc8ef69eeb5004626f5ae107398279933ba08680bff9345b58af6817aa99f",
                         "route": {
                           "alias": "senior"
                         },
@@ -457,7 +457,7 @@
                         "depends_on": [],
                         "distinct_from": "writer",
                         "id": "lens-correctness-spec",
-                        "prompt": "Lens correctness-spec. Check the change against the spec and for logic errors.\n\nLens: correctness-spec. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with one exact `VERDICT: PASS` or `VERDICT: FAIL` line.\n\n\n# Lens: correctness against the spec\n\nCanonical questions: [review-lenses.md](../review-lenses.md), sections\n\"Correctness and failure\" and \"Verification\".\n\nCheck the change against the spec (the issue or file you were given), not\nagainst the author's account of it.\n\n- Map each acceptance criterion to code and to evidence. Name any criterion with\n  no implementation or no test.\n- State the invariants that must hold before and after each operation, then try\n  to break them with empty, duplicate, stale, malformed, partial and retried input.\n- Follow failure paths: ordering, cancellation, timeouts, re-entry, partial\n  writes and errors that are converted to success.\n- Check public API, schema and protocol compatibility against the base.\n",
+                        "prompt": "Lens correctness-spec. Check the change against the spec and for logic errors.\n\nLens: correctness-spec. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with one exact `VERDICT: PASS` or `VERDICT: FAIL` line.\n\n\n# Lens: correctness against the spec\n\nCanonical questions: [review-lenses.md](../review-lenses.md), sections\n\"Correctness and failure\" and \"Verification\".\n\nCheck the change against the spec (the issue or file you were given), not\nagainst the author's account of it.\n\n- Map each acceptance criterion to code and to evidence. Name any criterion with\n  no implementation or no test.\n- State the invariants that must hold before and after each operation, then try\n  to break them with empty, duplicate, stale, malformed, partial and retried input.\n- Follow failure paths: ordering, cancellation, timeouts, re-entry, partial\n  writes and errors that are converted to success.\n- Check public API, schema and protocol compatibility against the base.\n- For refactors, check that intended behaviour and failure handling are preserved.\n",
                         "references": [
                           {
                             "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
@@ -465,13 +465,13 @@
                             "when": "always"
                           },
                           {
-                            "digest": "sha256:eed92bd4b886f327c37d1ede6084ad87266bc3e25b8a40f576ae7c59fdedcd5b",
+                            "digest": "sha256:47cb46c7f819127bb60fc8d1ef3928cc848509b0cdfa358181968510ad73323a",
                             "ref": "skill:code-review/references/lenses/correctness-spec.md",
                             "when": "always"
                           }
                         ],
                         "role": "lens.correctness-spec",
-                        "role_digest": "sha256:0389100b682b6cca0df2a4896784fc41c1af37e9043ab7eadcab2923ad9814fb",
+                        "role_digest": "sha256:66edc8ef69eeb5004626f5ae107398279933ba08680bff9345b58af6817aa99f",
                         "route": {
                           "alias": "senior"
                         },
@@ -618,6 +618,13 @@
                   ]
                 },
                 {
+                  "node": "lens-tests",
+                  "outputs": [
+                    "result",
+                    "findings"
+                  ]
+                },
+                {
                   "node": "lens-design-fit-reuse",
                   "outputs": [
                     "result",
@@ -639,7 +646,21 @@
                   ]
                 },
                 {
-                  "node": "lens-tests",
+                  "node": "lens-refactor-cleanup",
+                  "outputs": [
+                    "result",
+                    "findings"
+                  ]
+                },
+                {
+                  "node": "lens-reliability",
+                  "outputs": [
+                    "result",
+                    "findings"
+                  ]
+                },
+                {
+                  "node": "lens-flexibility",
                   "outputs": [
                     "result",
                     "findings"
@@ -652,7 +673,7 @@
                   "depends_on": [],
                   "distinct_from": "writer",
                   "id": "lens-correctness-spec",
-                  "prompt": "Lens correctness-spec. Check the change against the spec and for logic errors.\n\nLens: correctness-spec. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with one exact `VERDICT: PASS` or `VERDICT: FAIL` line.\n\n\n# Lens: correctness against the spec\n\nCanonical questions: [review-lenses.md](../review-lenses.md), sections\n\"Correctness and failure\" and \"Verification\".\n\nCheck the change against the spec (the issue or file you were given), not\nagainst the author's account of it.\n\n- Map each acceptance criterion to code and to evidence. Name any criterion with\n  no implementation or no test.\n- State the invariants that must hold before and after each operation, then try\n  to break them with empty, duplicate, stale, malformed, partial and retried input.\n- Follow failure paths: ordering, cancellation, timeouts, re-entry, partial\n  writes and errors that are converted to success.\n- Check public API, schema and protocol compatibility against the base.\n",
+                  "prompt": "Lens correctness-spec. Check the change against the spec and for logic errors.\n\nLens: correctness-spec. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with one exact `VERDICT: PASS` or `VERDICT: FAIL` line.\n\n\n# Lens: correctness against the spec\n\nCanonical questions: [review-lenses.md](../review-lenses.md), sections\n\"Correctness and failure\" and \"Verification\".\n\nCheck the change against the spec (the issue or file you were given), not\nagainst the author's account of it.\n\n- Map each acceptance criterion to code and to evidence. Name any criterion with\n  no implementation or no test.\n- State the invariants that must hold before and after each operation, then try\n  to break them with empty, duplicate, stale, malformed, partial and retried input.\n- Follow failure paths: ordering, cancellation, timeouts, re-entry, partial\n  writes and errors that are converted to success.\n- Check public API, schema and protocol compatibility against the base.\n- For refactors, check that intended behaviour and failure handling are preserved.\n",
                   "references": [
                     {
                       "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
@@ -660,17 +681,41 @@
                       "when": "always"
                     },
                     {
-                      "digest": "sha256:eed92bd4b886f327c37d1ede6084ad87266bc3e25b8a40f576ae7c59fdedcd5b",
+                      "digest": "sha256:47cb46c7f819127bb60fc8d1ef3928cc848509b0cdfa358181968510ad73323a",
                       "ref": "skill:code-review/references/lenses/correctness-spec.md",
                       "when": "always"
                     }
                   ],
                   "role": "lens.correctness-spec",
-                  "role_digest": "sha256:0389100b682b6cca0df2a4896784fc41c1af37e9043ab7eadcab2923ad9814fb",
+                  "role_digest": "sha256:66edc8ef69eeb5004626f5ae107398279933ba08680bff9345b58af6817aa99f",
                   "route": {
                     "alias": "senior"
                   },
                   "title": "lens-correctness-spec"
+                },
+                {
+                  "access": "read_only",
+                  "depends_on": [],
+                  "id": "lens-tests",
+                  "prompt": "Lens tests. Check that tests prove the behaviour and would fail without it.\n\nLens: tests. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with one exact `VERDICT: PASS` or `VERDICT: FAIL` line.\n\n\n# Lens: tests and verification\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Verification\" (the five test questions).\n\n- For each changed test, ask what plausible defect it catches, whether it\n  survives a behaviour-preserving refactor, and whether its oracle is independent\n  of the code under test.\n- Flag loosened assertions, skipped or deleted tests, and happy-path-only cover.\n- Map acceptance criteria to tests. Record the exact command and result for any\n  check you rely on; a claimed check without evidence is unknown.\n",
+                  "references": [
+                    {
+                      "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
+                      "ref": "skill:code-review/references/reviewer-context.md",
+                      "when": "always"
+                    },
+                    {
+                      "digest": "sha256:81c825f78ecfe32e1959749f7f2a8036b3e944a58fa9e148c23346e4a2eb3358",
+                      "ref": "skill:code-review/references/lenses/tests.md",
+                      "when": "always"
+                    }
+                  ],
+                  "role": "lens.tests",
+                  "role_digest": "sha256:53a823763146c3f5ed466da0a676f4fe19c8a7b6b66ef2ceb63d9a6e2247e4a0",
+                  "route": {
+                    "alias": "senior"
+                  },
+                  "title": "lens-tests"
                 },
                 {
                   "access": "read_only",
@@ -747,8 +792,8 @@
                 {
                   "access": "read_only",
                   "depends_on": [],
-                  "id": "lens-tests",
-                  "prompt": "Lens tests. Check that tests prove the behaviour and would fail without it.\n\nLens: tests. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with one exact `VERDICT: PASS` or `VERDICT: FAIL` line.\n\n\n# Lens: tests and verification\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Verification\" (the five test questions).\n\n- For each changed test, ask what plausible defect it catches, whether it\n  survives a behaviour-preserving refactor, and whether its oracle is independent\n  of the code under test.\n- Flag loosened assertions, skipped or deleted tests, and happy-path-only cover.\n- Map acceptance criteria to tests. Record the exact command and result for any\n  check you rely on; a claimed check without evidence is unknown.\n",
+                  "id": "lens-refactor-cleanup",
+                  "prompt": "Lens refactor-cleanup. Check root-cause refactors and removable code.\n\nLens: refactor-cleanup. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with one exact `VERDICT: PASS` or `VERDICT: FAIL` line.\n\n\n# Lens: refactor-cleanup\n\nCanonical questions: [review-lenses.md](../review-lenses.md), sections\n\"Dependency cone\" and \"Ownership and structure\".\n\n- Does the change address the root cause within its dependency cone?\n- Identify duplicated logic the change should consolidate.\n- Identify dead or obsolete paths made removable by the change.\n- Check that refactoring preserves observable behaviour.\n",
                   "references": [
                     {
                       "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
@@ -756,17 +801,65 @@
                       "when": "always"
                     },
                     {
-                      "digest": "sha256:81c825f78ecfe32e1959749f7f2a8036b3e944a58fa9e148c23346e4a2eb3358",
-                      "ref": "skill:code-review/references/lenses/tests.md",
+                      "digest": "sha256:f942c71419f241ed6adb9435c076f010372a97adaba1b698b8ffd3ddf8c3dbd1",
+                      "ref": "skill:code-review/references/lenses/refactor-cleanup.md",
                       "when": "always"
                     }
                   ],
-                  "role": "lens.tests",
-                  "role_digest": "sha256:53a823763146c3f5ed466da0a676f4fe19c8a7b6b66ef2ceb63d9a6e2247e4a0",
+                  "role": "lens.refactor-cleanup",
+                  "role_digest": "sha256:2f642c437dc75cfe9f100ab834588d05830ec6e554c1b6dcddbe5d9e978a352a",
                   "route": {
                     "alias": "senior"
                   },
-                  "title": "lens-tests"
+                  "title": "lens-refactor-cleanup"
+                },
+                {
+                  "access": "read_only",
+                  "depends_on": [],
+                  "id": "lens-reliability",
+                  "prompt": "Lens reliability. Check failure and recovery paths.\n\nLens: reliability. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with one exact `VERDICT: PASS` or `VERDICT: FAIL` line.\n\n\n# Lens: reliability\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Correctness and failure\".\n\n- Trace failure and partial failure paths, including visibility to operators.\n- Check retries, timeouts and idempotency for duplicate or lost work.\n- Check crash and restart safety and recovery from interrupted operations.\n",
+                  "references": [
+                    {
+                      "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
+                      "ref": "skill:code-review/references/reviewer-context.md",
+                      "when": "always"
+                    },
+                    {
+                      "digest": "sha256:14ab90fa193f9227d5c40f6d1f85d7e4aed996ecd34b6f7889f6ed746d63fe55",
+                      "ref": "skill:code-review/references/lenses/reliability.md",
+                      "when": "always"
+                    }
+                  ],
+                  "role": "lens.reliability",
+                  "role_digest": "sha256:be9d48658308d9e7062af6d335ff10b38a028dbe02062aac67a2f264fcc492e3",
+                  "route": {
+                    "alias": "senior"
+                  },
+                  "title": "lens-reliability"
+                },
+                {
+                  "access": "read_only",
+                  "depends_on": [],
+                  "id": "lens-flexibility",
+                  "prompt": "Lens flexibility. Check configuration and coupling.\n\nLens: flexibility. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with one exact `VERDICT: PASS` or `VERDICT: FAIL` line.\n\n\n# Lens: flexibility\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Ownership and structure\".\n\n- Identify hard-coded names and values that should be configuration.\n- Check coupling to a single provider, platform or account.\n- Can supported extensions fit without speculative abstraction?\n",
+                  "references": [
+                    {
+                      "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
+                      "ref": "skill:code-review/references/reviewer-context.md",
+                      "when": "always"
+                    },
+                    {
+                      "digest": "sha256:7d4ca44bdf4fdc5ef57255df02fb391c7351722e82bd7f1fd8c60c2c5e97d3d2",
+                      "ref": "skill:code-review/references/lenses/flexibility.md",
+                      "when": "always"
+                    }
+                  ],
+                  "role": "lens.flexibility",
+                  "role_digest": "sha256:88b3d4256f70839dc882f5b0c4b21f45f82c5c7cb01561fc44ee2606cf9330db",
+                  "route": {
+                    "alias": "senior"
+                  },
+                  "title": "lens-flexibility"
                 }
               ]
             },
@@ -992,6 +1085,13 @@
                         ]
                       },
                       {
+                        "node": "lens-tests",
+                        "outputs": [
+                          "result",
+                          "findings"
+                        ]
+                      },
+                      {
                         "node": "lens-design-fit-reuse",
                         "outputs": [
                           "result",
@@ -1013,7 +1113,21 @@
                         ]
                       },
                       {
-                        "node": "lens-tests",
+                        "node": "lens-refactor-cleanup",
+                        "outputs": [
+                          "result",
+                          "findings"
+                        ]
+                      },
+                      {
+                        "node": "lens-reliability",
+                        "outputs": [
+                          "result",
+                          "findings"
+                        ]
+                      },
+                      {
+                        "node": "lens-flexibility",
                         "outputs": [
                           "result",
                           "findings"
@@ -1026,7 +1140,7 @@
                         "depends_on": [],
                         "distinct_from": "writer",
                         "id": "lens-correctness-spec",
-                        "prompt": "Lens correctness-spec. Check the change against the spec and for logic errors.\n\nLens: correctness-spec. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with one exact `VERDICT: PASS` or `VERDICT: FAIL` line.\n\n\n# Lens: correctness against the spec\n\nCanonical questions: [review-lenses.md](../review-lenses.md), sections\n\"Correctness and failure\" and \"Verification\".\n\nCheck the change against the spec (the issue or file you were given), not\nagainst the author's account of it.\n\n- Map each acceptance criterion to code and to evidence. Name any criterion with\n  no implementation or no test.\n- State the invariants that must hold before and after each operation, then try\n  to break them with empty, duplicate, stale, malformed, partial and retried input.\n- Follow failure paths: ordering, cancellation, timeouts, re-entry, partial\n  writes and errors that are converted to success.\n- Check public API, schema and protocol compatibility against the base.\n",
+                        "prompt": "Lens correctness-spec. Check the change against the spec and for logic errors.\n\nLens: correctness-spec. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with one exact `VERDICT: PASS` or `VERDICT: FAIL` line.\n\n\n# Lens: correctness against the spec\n\nCanonical questions: [review-lenses.md](../review-lenses.md), sections\n\"Correctness and failure\" and \"Verification\".\n\nCheck the change against the spec (the issue or file you were given), not\nagainst the author's account of it.\n\n- Map each acceptance criterion to code and to evidence. Name any criterion with\n  no implementation or no test.\n- State the invariants that must hold before and after each operation, then try\n  to break them with empty, duplicate, stale, malformed, partial and retried input.\n- Follow failure paths: ordering, cancellation, timeouts, re-entry, partial\n  writes and errors that are converted to success.\n- Check public API, schema and protocol compatibility against the base.\n- For refactors, check that intended behaviour and failure handling are preserved.\n",
                         "references": [
                           {
                             "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
@@ -1034,17 +1148,41 @@
                             "when": "always"
                           },
                           {
-                            "digest": "sha256:eed92bd4b886f327c37d1ede6084ad87266bc3e25b8a40f576ae7c59fdedcd5b",
+                            "digest": "sha256:47cb46c7f819127bb60fc8d1ef3928cc848509b0cdfa358181968510ad73323a",
                             "ref": "skill:code-review/references/lenses/correctness-spec.md",
                             "when": "always"
                           }
                         ],
                         "role": "lens.correctness-spec",
-                        "role_digest": "sha256:0389100b682b6cca0df2a4896784fc41c1af37e9043ab7eadcab2923ad9814fb",
+                        "role_digest": "sha256:66edc8ef69eeb5004626f5ae107398279933ba08680bff9345b58af6817aa99f",
                         "route": {
                           "alias": "senior"
                         },
                         "title": "lens-correctness-spec"
+                      },
+                      {
+                        "access": "read_only",
+                        "depends_on": [],
+                        "id": "lens-tests",
+                        "prompt": "Lens tests. Check that tests prove the behaviour and would fail without it.\n\nLens: tests. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with one exact `VERDICT: PASS` or `VERDICT: FAIL` line.\n\n\n# Lens: tests and verification\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Verification\" (the five test questions).\n\n- For each changed test, ask what plausible defect it catches, whether it\n  survives a behaviour-preserving refactor, and whether its oracle is independent\n  of the code under test.\n- Flag loosened assertions, skipped or deleted tests, and happy-path-only cover.\n- Map acceptance criteria to tests. Record the exact command and result for any\n  check you rely on; a claimed check without evidence is unknown.\n",
+                        "references": [
+                          {
+                            "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
+                            "ref": "skill:code-review/references/reviewer-context.md",
+                            "when": "always"
+                          },
+                          {
+                            "digest": "sha256:81c825f78ecfe32e1959749f7f2a8036b3e944a58fa9e148c23346e4a2eb3358",
+                            "ref": "skill:code-review/references/lenses/tests.md",
+                            "when": "always"
+                          }
+                        ],
+                        "role": "lens.tests",
+                        "role_digest": "sha256:53a823763146c3f5ed466da0a676f4fe19c8a7b6b66ef2ceb63d9a6e2247e4a0",
+                        "route": {
+                          "alias": "senior"
+                        },
+                        "title": "lens-tests"
                       },
                       {
                         "access": "read_only",
@@ -1121,8 +1259,8 @@
                       {
                         "access": "read_only",
                         "depends_on": [],
-                        "id": "lens-tests",
-                        "prompt": "Lens tests. Check that tests prove the behaviour and would fail without it.\n\nLens: tests. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with one exact `VERDICT: PASS` or `VERDICT: FAIL` line.\n\n\n# Lens: tests and verification\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Verification\" (the five test questions).\n\n- For each changed test, ask what plausible defect it catches, whether it\n  survives a behaviour-preserving refactor, and whether its oracle is independent\n  of the code under test.\n- Flag loosened assertions, skipped or deleted tests, and happy-path-only cover.\n- Map acceptance criteria to tests. Record the exact command and result for any\n  check you rely on; a claimed check without evidence is unknown.\n",
+                        "id": "lens-refactor-cleanup",
+                        "prompt": "Lens refactor-cleanup. Check root-cause refactors and removable code.\n\nLens: refactor-cleanup. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with one exact `VERDICT: PASS` or `VERDICT: FAIL` line.\n\n\n# Lens: refactor-cleanup\n\nCanonical questions: [review-lenses.md](../review-lenses.md), sections\n\"Dependency cone\" and \"Ownership and structure\".\n\n- Does the change address the root cause within its dependency cone?\n- Identify duplicated logic the change should consolidate.\n- Identify dead or obsolete paths made removable by the change.\n- Check that refactoring preserves observable behaviour.\n",
                         "references": [
                           {
                             "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
@@ -1130,17 +1268,65 @@
                             "when": "always"
                           },
                           {
-                            "digest": "sha256:81c825f78ecfe32e1959749f7f2a8036b3e944a58fa9e148c23346e4a2eb3358",
-                            "ref": "skill:code-review/references/lenses/tests.md",
+                            "digest": "sha256:f942c71419f241ed6adb9435c076f010372a97adaba1b698b8ffd3ddf8c3dbd1",
+                            "ref": "skill:code-review/references/lenses/refactor-cleanup.md",
                             "when": "always"
                           }
                         ],
-                        "role": "lens.tests",
-                        "role_digest": "sha256:53a823763146c3f5ed466da0a676f4fe19c8a7b6b66ef2ceb63d9a6e2247e4a0",
+                        "role": "lens.refactor-cleanup",
+                        "role_digest": "sha256:2f642c437dc75cfe9f100ab834588d05830ec6e554c1b6dcddbe5d9e978a352a",
                         "route": {
                           "alias": "senior"
                         },
-                        "title": "lens-tests"
+                        "title": "lens-refactor-cleanup"
+                      },
+                      {
+                        "access": "read_only",
+                        "depends_on": [],
+                        "id": "lens-reliability",
+                        "prompt": "Lens reliability. Check failure and recovery paths.\n\nLens: reliability. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with one exact `VERDICT: PASS` or `VERDICT: FAIL` line.\n\n\n# Lens: reliability\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Correctness and failure\".\n\n- Trace failure and partial failure paths, including visibility to operators.\n- Check retries, timeouts and idempotency for duplicate or lost work.\n- Check crash and restart safety and recovery from interrupted operations.\n",
+                        "references": [
+                          {
+                            "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
+                            "ref": "skill:code-review/references/reviewer-context.md",
+                            "when": "always"
+                          },
+                          {
+                            "digest": "sha256:14ab90fa193f9227d5c40f6d1f85d7e4aed996ecd34b6f7889f6ed746d63fe55",
+                            "ref": "skill:code-review/references/lenses/reliability.md",
+                            "when": "always"
+                          }
+                        ],
+                        "role": "lens.reliability",
+                        "role_digest": "sha256:be9d48658308d9e7062af6d335ff10b38a028dbe02062aac67a2f264fcc492e3",
+                        "route": {
+                          "alias": "senior"
+                        },
+                        "title": "lens-reliability"
+                      },
+                      {
+                        "access": "read_only",
+                        "depends_on": [],
+                        "id": "lens-flexibility",
+                        "prompt": "Lens flexibility. Check configuration and coupling.\n\nLens: flexibility. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with one exact `VERDICT: PASS` or `VERDICT: FAIL` line.\n\n\n# Lens: flexibility\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Ownership and structure\".\n\n- Identify hard-coded names and values that should be configuration.\n- Check coupling to a single provider, platform or account.\n- Can supported extensions fit without speculative abstraction?\n",
+                        "references": [
+                          {
+                            "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
+                            "ref": "skill:code-review/references/reviewer-context.md",
+                            "when": "always"
+                          },
+                          {
+                            "digest": "sha256:7d4ca44bdf4fdc5ef57255df02fb391c7351722e82bd7f1fd8c60c2c5e97d3d2",
+                            "ref": "skill:code-review/references/lenses/flexibility.md",
+                            "when": "always"
+                          }
+                        ],
+                        "role": "lens.flexibility",
+                        "role_digest": "sha256:88b3d4256f70839dc882f5b0c4b21f45f82c5c7cb01561fc44ee2606cf9330db",
+                        "route": {
+                          "alias": "senior"
+                        },
+                        "title": "lens-flexibility"
                       }
                     ]
                   },
@@ -1274,6 +1460,10 @@
       "expanded.council.parameters.base.default": "bundled",
       "expanded.council.parameters.base.doc": "bundled",
       "expanded.council.parameters.base.type": "bundled",
+      "expanded.council.parameters.kind": "entry",
+      "expanded.council.parameters.kind.default": "bundled",
+      "expanded.council.parameters.kind.doc": "bundled",
+      "expanded.council.parameters.kind.type": "bundled",
       "expanded.council.parameters.lenses": "bundled",
       "expanded.council.parameters.review_shape": "entry",
       "expanded.council.parameters.review_shape.default": "bundled",
@@ -1287,6 +1477,10 @@
       "expanded.council.parameters.risk_tier.default": "bundled",
       "expanded.council.parameters.risk_tier.doc": "bundled",
       "expanded.council.parameters.risk_tier.type": "bundled",
+      "expanded.council.parameters.size": "entry",
+      "expanded.council.parameters.size.default": "bundled",
+      "expanded.council.parameters.size.doc": "bundled",
+      "expanded.council.parameters.size.type": "bundled",
       "expanded.council.parameters.spec": "entry",
       "expanded.council.parameters.spec.default": "bundled",
       "expanded.council.parameters.spec.doc": "bundled",
@@ -1327,6 +1521,9 @@
       "expanded.lane-one.parameters.evaluator.default": "bundled",
       "expanded.lane-one.parameters.evaluator.doc": "bundled",
       "expanded.lane-one.parameters.evaluator.type": "bundled",
+      "expanded.lane-one.parameters.kind.default": "bundled",
+      "expanded.lane-one.parameters.kind.doc": "bundled",
+      "expanded.lane-one.parameters.kind.type": "bundled",
       "expanded.lane-one.parameters.lenses": "bundled",
       "expanded.lane-one.parameters.review_shape.default": "bundled",
       "expanded.lane-one.parameters.review_shape.doc": "bundled",
@@ -1342,6 +1539,9 @@
       "expanded.lane-one.parameters.scope.default": "bundled",
       "expanded.lane-one.parameters.scope.doc": "bundled",
       "expanded.lane-one.parameters.scope.type": "bundled",
+      "expanded.lane-one.parameters.size.default": "bundled",
+      "expanded.lane-one.parameters.size.doc": "bundled",
+      "expanded.lane-one.parameters.size.type": "bundled",
       "expanded.lane-one.parameters.spec": "entry",
       "expanded.lane-one.parameters.spec.default": "bundled",
       "expanded.lane-one.parameters.spec.doc": "bundled",
@@ -1373,6 +1573,9 @@
       "expanded.lane-two.parameters.evaluator.default": "bundled",
       "expanded.lane-two.parameters.evaluator.doc": "bundled",
       "expanded.lane-two.parameters.evaluator.type": "bundled",
+      "expanded.lane-two.parameters.kind.default": "bundled",
+      "expanded.lane-two.parameters.kind.doc": "bundled",
+      "expanded.lane-two.parameters.kind.type": "bundled",
       "expanded.lane-two.parameters.lenses": "bundled",
       "expanded.lane-two.parameters.review_shape.default": "bundled",
       "expanded.lane-two.parameters.review_shape.doc": "bundled",
@@ -1388,6 +1591,9 @@
       "expanded.lane-two.parameters.scope.default": "bundled",
       "expanded.lane-two.parameters.scope.doc": "bundled",
       "expanded.lane-two.parameters.scope.type": "bundled",
+      "expanded.lane-two.parameters.size.default": "bundled",
+      "expanded.lane-two.parameters.size.doc": "bundled",
+      "expanded.lane-two.parameters.size.type": "bundled",
       "expanded.lane-two.parameters.spec": "entry",
       "expanded.lane-two.parameters.spec.default": "bundled",
       "expanded.lane-two.parameters.spec.doc": "bundled",
@@ -1412,6 +1618,10 @@
       "expanded.review.parameters.base.default": "bundled",
       "expanded.review.parameters.base.doc": "bundled",
       "expanded.review.parameters.base.type": "bundled",
+      "expanded.review.parameters.kind": "entry",
+      "expanded.review.parameters.kind.default": "bundled",
+      "expanded.review.parameters.kind.doc": "bundled",
+      "expanded.review.parameters.kind.type": "bundled",
       "expanded.review.parameters.lenses": "bundled",
       "expanded.review.parameters.review_shape": "entry",
       "expanded.review.parameters.review_shape.default": "bundled",
@@ -1425,6 +1635,10 @@
       "expanded.review.parameters.risk_tier.default": "bundled",
       "expanded.review.parameters.risk_tier.doc": "bundled",
       "expanded.review.parameters.risk_tier.type": "bundled",
+      "expanded.review.parameters.size": "entry",
+      "expanded.review.parameters.size.default": "bundled",
+      "expanded.review.parameters.size.doc": "bundled",
+      "expanded.review.parameters.size.type": "bundled",
       "expanded.review.parameters.spec": "entry",
       "expanded.review.parameters.spec.default": "bundled",
       "expanded.review.parameters.spec.doc": "bundled",
@@ -1492,6 +1706,9 @@
       "parameters.integration_branch.default": "bundled",
       "parameters.integration_branch.doc": "bundled",
       "parameters.integration_branch.type": "bundled",
+      "parameters.kind.default": "bundled",
+      "parameters.kind.doc": "bundled",
+      "parameters.kind.type": "bundled",
       "parameters.lanes": "bundled",
       "parameters.read_roots.default": "bundled",
       "parameters.read_roots.doc": "bundled",
@@ -1505,6 +1722,9 @@
       "parameters.risk_tier.default": "bundled",
       "parameters.risk_tier.doc": "bundled",
       "parameters.risk_tier.type": "bundled",
+      "parameters.size.default": "bundled",
+      "parameters.size.doc": "bundled",
+      "parameters.size.type": "bundled",
       "parameters.spec.default": "bundled",
       "parameters.spec.doc": "bundled",
       "parameters.spec.type": "bundled",
@@ -1522,6 +1742,9 @@
       "roles.lens.conventions-readability": "bundled",
       "roles.lens.correctness-spec": "bundled",
       "roles.lens.design-fit-reuse": "bundled",
+      "roles.lens.flexibility": "bundled",
+      "roles.lens.refactor-cleanup": "bundled",
+      "roles.lens.reliability": "bundled",
       "roles.lens.simplicity": "bundled",
       "roles.lens.tests": "bundled",
       "roles.plan.research": "bundled",
@@ -1577,7 +1800,7 @@
         ]
       },
       "lens.correctness-spec": {
-        "digest": "sha256:0389100b682b6cca0df2a4896784fc41c1af37e9043ab7eadcab2923ad9814fb",
+        "digest": "sha256:66edc8ef69eeb5004626f5ae107398279933ba08680bff9345b58af6817aa99f",
         "extends": [
           "lens.correctness-spec",
           "lens"
@@ -1590,7 +1813,7 @@
             "when": "always"
           },
           {
-            "digest": "sha256:eed92bd4b886f327c37d1ede6084ad87266bc3e25b8a40f576ae7c59fdedcd5b",
+            "digest": "sha256:47cb46c7f819127bb60fc8d1ef3928cc848509b0cdfa358181968510ad73323a",
             "ref": "skill:code-review/references/lenses/correctness-spec.md",
             "when": "always"
           }
@@ -1612,6 +1835,66 @@
           {
             "digest": "sha256:cdc1ef703b729564597d135d650e554df1013f62113133032e4191016a25ef92",
             "ref": "skill:code-review/references/lenses/design-fit-reuse.md",
+            "when": "always"
+          }
+        ]
+      },
+      "lens.flexibility": {
+        "digest": "sha256:88b3d4256f70839dc882f5b0c4b21f45f82c5c7cb01561fc44ee2606cf9330db",
+        "extends": [
+          "lens.flexibility",
+          "lens"
+        ],
+        "origin": "bundled",
+        "references": [
+          {
+            "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
+            "ref": "skill:code-review/references/reviewer-context.md",
+            "when": "always"
+          },
+          {
+            "digest": "sha256:7d4ca44bdf4fdc5ef57255df02fb391c7351722e82bd7f1fd8c60c2c5e97d3d2",
+            "ref": "skill:code-review/references/lenses/flexibility.md",
+            "when": "always"
+          }
+        ]
+      },
+      "lens.refactor-cleanup": {
+        "digest": "sha256:2f642c437dc75cfe9f100ab834588d05830ec6e554c1b6dcddbe5d9e978a352a",
+        "extends": [
+          "lens.refactor-cleanup",
+          "lens"
+        ],
+        "origin": "bundled",
+        "references": [
+          {
+            "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
+            "ref": "skill:code-review/references/reviewer-context.md",
+            "when": "always"
+          },
+          {
+            "digest": "sha256:f942c71419f241ed6adb9435c076f010372a97adaba1b698b8ffd3ddf8c3dbd1",
+            "ref": "skill:code-review/references/lenses/refactor-cleanup.md",
+            "when": "always"
+          }
+        ]
+      },
+      "lens.reliability": {
+        "digest": "sha256:be9d48658308d9e7062af6d335ff10b38a028dbe02062aac67a2f264fcc492e3",
+        "extends": [
+          "lens.reliability",
+          "lens"
+        ],
+        "origin": "bundled",
+        "references": [
+          {
+            "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
+            "ref": "skill:code-review/references/reviewer-context.md",
+            "when": "always"
+          },
+          {
+            "digest": "sha256:14ab90fa193f9227d5c40f6d1f85d7e4aed996ecd34b6f7889f6ed746d63fe55",
+            "ref": "skill:code-review/references/lenses/reliability.md",
             "when": "always"
           }
         ]

@@ -13,3 +13,4 @@ against the author's account of it.
 - Follow failure paths: ordering, cancellation, timeouts, re-entry, partial
   writes and errors that are converted to success.
 - Check public API, schema and protocol compatibility against the base.
+- For refactors, check that intended behaviour and failure handling are preserved.

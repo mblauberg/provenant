@@ -8,6 +8,203 @@ use std::collections::BTreeMap;
 pub struct ReviewConfig {
     pub shapes: BTreeMap<String, ReviewShape>,
     pub select: ReviewSelect,
+    pub size: ReviewSize,
+    pub lenses: ReviewLenses,
+}
+/// Which lenses fill a panel. `order` ranks the base lenses that fill the
+/// shape's slots; a kind may replace that order (`docs`) or add lenses outside
+/// the slot cap (`refactor`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ReviewLenses {
+    pub order: Vec<String>,
+    pub by_kind: BTreeMap<String, KindLenses>,
+}
+impl Default for ReviewLenses {
+    fn default() -> Self {
+        bundled().lenses
+    }
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct KindLenses {
+    /// Replaces the base order for this kind when nonempty.
+    pub order: Vec<String>,
+    /// Lenses added outside the shape's slot cap.
+    pub add: Vec<String>,
+}
+/// The lens order, exclusivity and additions that apply to one change kind.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LensPlan {
+    pub order: Vec<String>,
+    /// The kind names its own base order, so other lenses are not base lenses.
+    pub exclusive: bool,
+    pub add: Vec<String>,
+}
+/// Conditional risk tags and the lens each one adds. The single source for the
+/// CLI flag values, the native panel and the council's `when` triggers.
+pub const RISK_TAG_LENSES: [(&str, &str); 3] = [
+    ("security", "security-privacy"),
+    ("concurrency", "concurrency-data-errors"),
+    ("terminal", "adversarial"),
+];
+pub fn risk_tag_names() -> [&'static str; 3] {
+    RISK_TAG_LENSES.map(|(tag, _)| tag)
+}
+/// Lenses triggered by risk tags. A terminal risk tier implies the terminal tag.
+pub fn risk_lenses<S: AsRef<str>>(tags: &[S], risk: Option<&str>) -> Vec<&'static str> {
+    RISK_TAG_LENSES
+        .iter()
+        .filter(|(tag, _)| {
+            tags.iter().any(|value| value.as_ref() == *tag)
+                || (*tag == "terminal" && risk == Some("terminal"))
+        })
+        .map(|(_, lens)| *lens)
+        .collect()
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ReviewSize {
+    pub small_lines: usize,
+    pub small_files: usize,
+    pub small_crates: usize,
+    pub medium_lines: usize,
+    pub medium_files: usize,
+    pub medium_crates: usize,
+}
+impl Default for ReviewSize {
+    fn default() -> Self {
+        Self {
+            small_lines: 150,
+            small_files: 3,
+            small_crates: 1,
+            medium_lines: 1000,
+            medium_files: 15,
+            medium_crates: 3,
+        }
+    }
+}
+/// Outcome of measuring a diff: a size, or unknown with the reason.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Measured {
+    pub size: Option<&'static str>,
+    pub warning: Option<String>,
+}
+impl ReviewSize {
+    /// Measure the change from the merge base of `base` and `head` to `head`.
+    /// `git` runs one Git command and returns its stdout, or an error that
+    /// carries Git's stderr. A failure degrades to an unknown size with a
+    /// warning and never an error, so review selection always proceeds.
+    /// Integration heads are always reviewed in full and are not measured, and
+    /// an empty diff leaves the size unknown because the subject may not exist yet.
+    pub fn measure(
+        &self,
+        kind: Option<&str>,
+        base: &str,
+        head: &str,
+        git: &mut dyn FnMut(&[&str]) -> Result<String, String>,
+    ) -> Measured {
+        if kind == Some("integration") {
+            return Measured::default();
+        }
+        let unknown = |reason: String| Measured {
+            size: None,
+            warning: Some(format!(
+                "cannot measure review size {base}..{head}: {reason}; size unknown"
+            )),
+        };
+        if base.starts_with('-') || head.starts_with('-') {
+            return unknown("refs must not begin with -".into());
+        }
+        let merge_base = match git(&["merge-base", base, head]) {
+            Ok(out) => out.trim().to_owned(),
+            Err(error) => return unknown(error),
+        };
+        let numstat = match git(&[
+            "diff",
+            "--numstat",
+            "--no-renames",
+            "-z",
+            &merge_base,
+            head,
+            "--",
+        ]) {
+            Ok(out) => out,
+            Err(error) => return unknown(error),
+        };
+        if numstat.is_empty() {
+            return Measured::default();
+        }
+        let mut tree = String::new();
+        for rev in [merge_base.as_str(), head] {
+            match git(&["ls-tree", "-r", "-z", "--name-only", rev]) {
+                Ok(out) => tree.push_str(&out),
+                Err(error) => return unknown(error),
+            }
+        }
+        Measured {
+            size: Some(self.classify_numstat(&numstat, &tree)),
+            warning: None,
+        }
+    }
+
+    pub fn classify(&self, lines: usize, files: usize, crates: usize) -> &'static str {
+        if lines <= self.small_lines && files <= self.small_files && crates <= self.small_crates {
+            "small"
+        } else if lines <= self.medium_lines
+            && files <= self.medium_files
+            && crates <= self.medium_crates
+        {
+            "medium"
+        } else {
+            "large"
+        }
+    }
+
+    /// Classify NUL-delimited Git numstat and tree paths. Binary changes have
+    /// no line count, so conservatively classify them as large.
+    pub fn classify_numstat(&self, numstat: &str, tree: &str) -> &'static str {
+        let mut lines = 0usize;
+        let mut files = 0usize;
+        let mut crates = std::collections::BTreeSet::new();
+        let roots: Vec<&str> = tree
+            .split('\0')
+            .filter_map(|path| {
+                if path == "Cargo.toml" {
+                    Some("")
+                } else {
+                    path.strip_suffix("/Cargo.toml")
+                }
+            })
+            .collect();
+        for row in numstat.split('\0').filter(|row| !row.is_empty()) {
+            let mut fields = row.splitn(3, '\t');
+            let (Some(added), Some(removed), Some(path)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                return "large";
+            };
+            let (Ok(added), Ok(removed)) = (added.parse::<usize>(), removed.parse::<usize>())
+            else {
+                return "large";
+            };
+            lines = lines.saturating_add(added).saturating_add(removed);
+            files += 1;
+            if let Some(root) = roots
+                .iter()
+                .filter(|root| {
+                    root.is_empty()
+                        || path
+                            .strip_prefix(**root)
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                })
+                .max_by_key(|root| root.len())
+            {
+                crates.insert(*root);
+            }
+        }
+        self.classify(lines, files, crates.len())
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -63,6 +260,13 @@ fn bundled() -> ReviewConfig {
     struct ReviewAsset {
         shapes: BTreeMap<String, ReviewShape>,
         select: SelectAsset,
+        size: ReviewSize,
+        lenses: LensesAsset,
+    }
+    #[derive(Deserialize)]
+    struct LensesAsset {
+        order: Vec<String>,
+        by_kind: BTreeMap<String, KindLenses>,
     }
     #[derive(Deserialize)]
     struct SelectAsset {
@@ -70,18 +274,24 @@ fn bundled() -> ReviewConfig {
         by_risk: BTreeMap<String, String>,
         by_kind: BTreeMap<String, String>,
         by_paths: BTreeMap<String, String>,
+        by_size: BTreeMap<String, String>,
     }
     let asset: Asset = toml_edit::de::from_str(include_str!("../assets/review-defaults.toml"))
         .unwrap_or_else(|error| panic!("invalid bundled review defaults: {error}"));
     let select = asset.review.select;
     ReviewConfig {
         shapes: asset.review.shapes,
+        size: asset.review.size,
+        lenses: ReviewLenses {
+            order: asset.review.lenses.order,
+            by_kind: asset.review.lenses.by_kind,
+        },
         select: ReviewSelect {
             default: select.default,
             by_risk: select.by_risk,
             by_kind: select.by_kind,
             by_paths: select.by_paths,
-            by_size: BTreeMap::new(),
+            by_size: select.by_size,
             by_readiness: BTreeMap::new(),
         },
     }
@@ -150,21 +360,137 @@ impl<T: Clone> Select<T> {
     }
 }
 impl ReviewConfig {
+    /// The lens order and additions for one change kind.
+    pub fn lens_plan(&self, kind: Option<&str>) -> LensPlan {
+        let entry = kind.and_then(|kind| self.lenses.by_kind.get(kind));
+        let own = entry.filter(|entry| !entry.order.is_empty());
+        LensPlan {
+            order: own.map_or(&self.lenses.order, |entry| &entry.order).clone(),
+            exclusive: own.is_some(),
+            add: entry.map(|entry| entry.add.clone()).unwrap_or_default(),
+        }
+    }
+
+    /// Assign lenses to a shape's slots. Lenses the shape names are kept. The
+    /// other slots take the kind's order without repeats, and a slot with no
+    /// lens left is dropped. Kind additions and risk-tag lenses follow outside
+    /// the slot cap, in the pool of the last group.
+    pub fn panel(&self, shape: &ReviewShape, kind: Option<&str>, extra: &[&str]) -> ReviewShape {
+        let plan = self.lens_plan(kind);
+        let mut used: Vec<String> = shape
+            .reviewers
+            .iter()
+            .flat_map(|group| group.lenses.iter().cloned())
+            .collect();
+        let mut reviewers = Vec::new();
+        for group in &shape.reviewers {
+            if !group.lenses.is_empty() {
+                reviewers.push(group.clone());
+                continue;
+            }
+            let mut lenses = Vec::new();
+            for lens in &plan.order {
+                if lenses.len() == group.count {
+                    break;
+                }
+                if !used.contains(lens) {
+                    used.push(lens.clone());
+                    lenses.push(lens.clone());
+                }
+            }
+            if !lenses.is_empty() {
+                reviewers.push(ReviewReviewer {
+                    pool: group.pool.clone(),
+                    count: lenses.len(),
+                    lenses,
+                    distinct_families: group.distinct_families,
+                });
+            }
+        }
+        let mut added = Vec::new();
+        for lens in plan
+            .add
+            .iter()
+            .map(String::as_str)
+            .chain(extra.iter().copied())
+        {
+            if !used.iter().any(|existing| existing == lens) {
+                used.push(lens.to_owned());
+                added.push(lens.to_owned());
+            }
+        }
+        if !added.is_empty()
+            && let Some(last) = shape.reviewers.last()
+        {
+            reviewers.push(ReviewReviewer {
+                pool: last.pool.clone(),
+                count: added.len(),
+                lenses: added,
+                distinct_families: false,
+            });
+        }
+        ReviewShape { reviewers }
+    }
+
     pub fn select_shape<'a>(
         &'a self,
         override_name: Option<&'a str>,
         risk: Option<&str>,
         kind: Option<&str>,
         paths: &[String],
+        size: Option<&str>,
     ) -> Result<ReviewSelection<'a>, String> {
-        let selected = self.select.select(
-            override_name.map(str::to_owned).as_ref(),
+        if let Some(name) = override_name
+            && !self.shapes.contains_key(name)
+        {
+            return Err(format!("unknown review shape '{name}'"));
+        }
+        let integration = (kind == Some("integration"))
+            .then(|| self.select.by_kind.get("integration"))
+            .flatten();
+        let mut selected = self.select.select(
+            integration.or(override_name.map(str::to_owned).as_ref()),
             risk,
             kind,
             paths,
-            None,
+            size,
             Some(true),
         );
+        if integration.is_some() {
+            selected.source = "by_kind";
+        }
+        // Risk establishes a floor; size and integration can demand more coverage.
+        // A matched path rule is a deliberate choice, so kind and size leave it be.
+        {
+            let by_paths = selected.source == "by_paths";
+            let candidates = [
+                (override_name.is_none()
+                    && !by_paths
+                    && (kind.is_some_and(|k| self.select.by_kind.contains_key(k))
+                        || size.is_some_and(|s| self.select.by_size.contains_key(s))))
+                .then(|| self.select.select(None, None, kind, &[], size, Some(true))),
+                (override_name.is_none()
+                    && !by_paths
+                    && kind != Some("docs")
+                    && size.is_some_and(|s| self.select.by_size.contains_key(s)))
+                .then(|| self.select.select(None, None, None, &[], size, Some(true))),
+                risk.filter(|r| self.select.by_risk.contains_key(*r))
+                    .map(|r| {
+                        self.select
+                            .select(None, Some(r), None, &[], None, Some(true))
+                    }),
+            ];
+            for candidate in candidates.into_iter().flatten() {
+                let slots = |name: &str| {
+                    self.shapes.get(name).map_or(0, |shape| {
+                        shape.reviewers.iter().map(|r| r.count).sum::<usize>()
+                    })
+                };
+                if slots(&candidate.value) > slots(&selected.value) {
+                    selected = candidate;
+                }
+            }
+        }
         let shape = self
             .shapes
             .get(&selected.value)
@@ -221,6 +547,40 @@ impl ReviewConfig {
                 }
             }
         }
+        let size = &self.size;
+        for (field, small, medium) in [
+            ("lines", size.small_lines, size.medium_lines),
+            ("files", size.small_files, size.medium_files),
+            ("crates", size.small_crates, size.medium_crates),
+        ] {
+            if small > medium {
+                error(format!("review.size.small_{field}"), "range");
+            }
+        }
+        if self.lenses.order.is_empty() || self.lenses.order.len() > 64 {
+            error("review.lenses.order".into(), "limit");
+        }
+        for (kind, entry) in &self.lenses.by_kind {
+            let prefix = format!("review.lenses.by_kind.{kind}");
+            if !identifier(kind) {
+                error(prefix.clone(), "selector");
+            }
+            if entry.order.len() > 64 || entry.add.len() > 64 {
+                error(prefix.clone(), "limit");
+            }
+        }
+        for (field, lens) in std::iter::once(("review.lenses.order".to_owned(), &self.lenses.order))
+            .chain(self.lenses.by_kind.iter().flat_map(|(kind, entry)| {
+                [
+                    (format!("review.lenses.by_kind.{kind}.order"), &entry.order),
+                    (format!("review.lenses.by_kind.{kind}.add"), &entry.add),
+                ]
+            }))
+        {
+            if lens.iter().any(|name| !identifier(name)) {
+                error(field, "invalid_lenses");
+            }
+        }
         if !self.shapes.contains_key(&self.select.default) {
             error("review.select.default".into(), "unknown_shape");
         }
@@ -228,6 +588,7 @@ impl ReviewConfig {
             ("by_risk", &self.select.by_risk),
             ("by_kind", &self.select.by_kind),
             ("by_paths", &self.select.by_paths),
+            ("by_size", &self.select.by_size),
         ] {
             for (key, shape) in map {
                 if (field != "by_paths" && !identifier(key))
@@ -298,6 +659,279 @@ mod tests {
     use provenant_config::DomainConfig;
 
     #[test]
+    fn size_and_kind_choose_shapes_with_risk_floor() {
+        let review = ReviewConfig::default();
+        for (lines, files, crates, expected) in [
+            (150, 3, 1, "quick"),
+            (151, 3, 1, "standard"),
+            (1001, 3, 1, "deep"),
+            (1, 16, 1, "deep"),
+            (1, 1, 4, "deep"),
+        ] {
+            let size = review.size.classify(lines, files, crates);
+            assert_eq!(
+                review
+                    .select_shape(None, None, None, &[], Some(size))
+                    .unwrap()
+                    .name,
+                expected
+            );
+        }
+        assert_eq!(
+            review
+                .select_shape(
+                    None,
+                    Some("routine"),
+                    Some("integration"),
+                    &[],
+                    Some("small")
+                )
+                .unwrap()
+                .name,
+            "deep"
+        );
+        assert_eq!(
+            review
+                .select_shape(None, None, Some("docs"), &[], Some("large"))
+                .unwrap()
+                .name,
+            "quick"
+        );
+        assert_eq!(
+            review
+                .select_shape(None, None, Some("refactor"), &[], Some("medium"))
+                .unwrap()
+                .name,
+            "standard"
+        );
+        assert_eq!(
+            review
+                .select_shape(None, None, Some("refactor"), &[], Some("small"))
+                .unwrap()
+                .name,
+            "standard"
+        );
+        assert_eq!(
+            review
+                .select_shape(None, None, Some("refactor"), &[], Some("large"))
+                .unwrap()
+                .name,
+            "deep"
+        );
+        assert_eq!(
+            review
+                .select_shape(None, Some("crucial"), None, &[], Some("small"))
+                .unwrap()
+                .name,
+            "deep"
+        );
+        assert_eq!(
+            review
+                .select_shape(Some("quick"), Some("crucial"), None, &[], None)
+                .unwrap()
+                .name,
+            "deep"
+        );
+    }
+
+    fn lens_names(shape: &ReviewShape) -> Vec<&str> {
+        shape
+            .reviewers
+            .iter()
+            .flat_map(|group| group.lenses.iter().map(String::as_str))
+            .collect()
+    }
+
+    #[test]
+    fn standard_panel_is_two_base_lenses_and_one_kind_slot() {
+        let review = ReviewConfig::default();
+        let shape = &review.shapes["standard"];
+        assert_eq!(
+            lens_names(&review.panel(shape, None, &[])),
+            ["correctness-spec", "tests", "design-fit-reuse"]
+        );
+    }
+
+    #[test]
+    fn kind_lenses_are_additive_outside_the_slot_cap() {
+        let review = ReviewConfig::default();
+        let standard = &review.shapes["standard"];
+        let refactor = review.panel(standard, Some("refactor"), &[]);
+        assert_eq!(
+            lens_names(&refactor),
+            [
+                "correctness-spec",
+                "tests",
+                "design-fit-reuse",
+                "refactor-cleanup"
+            ]
+        );
+        // The quick slot is filled first; the kind lenses still follow it.
+        let quick = review.panel(&review.shapes["quick"], Some("refactor"), &[]);
+        assert_eq!(
+            lens_names(&quick),
+            ["correctness-spec", "refactor-cleanup", "design-fit-reuse"]
+        );
+        // At deep every lens is already a base lens, so nothing is added twice.
+        let deep = review.panel(&review.shapes["deep"], Some("refactor"), &[]);
+        assert_eq!(lens_names(&deep).len(), 8);
+    }
+
+    #[test]
+    fn docs_panels_use_one_base_lens_and_only_risk_extras() {
+        let review = ReviewConfig::default();
+        let deep = &review.shapes["deep"];
+        assert_eq!(
+            lens_names(&review.panel(deep, Some("docs"), &[])),
+            ["conventions-readability"]
+        );
+        assert_eq!(
+            lens_names(&review.panel(deep, Some("docs"), &["security-privacy"])),
+            ["conventions-readability", "security-privacy"]
+        );
+    }
+
+    #[test]
+    fn risk_lenses_follow_the_shared_table() {
+        assert_eq!(risk_lenses(&["security"], None), ["security-privacy"]);
+        assert_eq!(risk_lenses::<&str>(&[], Some("terminal")), ["adversarial"]);
+        assert_eq!(
+            risk_lenses(&["concurrency", "security"], None),
+            ["security-privacy", "concurrency-data-errors"]
+        );
+        assert!(risk_lenses::<&str>(&[], Some("crucial")).is_empty());
+        assert_eq!(risk_tag_names(), ["security", "concurrency", "terminal"]);
+    }
+
+    #[test]
+    fn explicit_shape_lenses_survive_and_are_not_repeated() {
+        let review = ReviewConfig::default();
+        let shape = ReviewShape {
+            reviewers: vec![
+                ReviewReviewer {
+                    pool: "junior".into(),
+                    count: 1,
+                    lenses: vec!["tests".into()],
+                    distinct_families: false,
+                },
+                ReviewReviewer {
+                    pool: "senior".into(),
+                    count: 2,
+                    lenses: vec![],
+                    distinct_families: false,
+                },
+            ],
+        };
+        assert_eq!(
+            lens_names(&review.panel(&shape, None, &[])),
+            ["tests", "correctness-spec", "design-fit-reuse"]
+        );
+    }
+
+    #[test]
+    fn path_rules_are_not_overridden_by_size_or_kind() {
+        let mut review = ReviewConfig::default();
+        review
+            .select
+            .by_paths
+            .insert("docs/**".into(), "quick".into());
+        let paths = vec!["docs/a.md".to_owned()];
+        let selected = review
+            .select_shape(None, None, Some("refactor"), &paths, Some("large"))
+            .unwrap();
+        assert_eq!((selected.name, selected.source), ("quick", "by_paths"));
+        // The risk floor still applies over a path rule.
+        let selected = review
+            .select_shape(None, Some("crucial"), None, &paths, Some("large"))
+            .unwrap();
+        assert_eq!(selected.name, "deep");
+    }
+
+    #[test]
+    fn measure_degrades_to_unknown_and_skips_integration() {
+        let size = ReviewSize::default();
+        let mut fail = |_: &[&str]| -> Result<String, String> { Err("fatal: bad object".into()) };
+        let measured = size.measure(None, "main", "HEAD", &mut fail);
+        assert_eq!(measured.size, None);
+        assert!(measured.warning.unwrap().contains("fatal: bad object"));
+        let mut never = |_: &[&str]| -> Result<String, String> { panic!("must not run git") };
+        assert_eq!(
+            size.measure(Some("integration"), "main", "HEAD", &mut never),
+            Measured::default()
+        );
+        assert!(
+            size.measure(None, "-x", "HEAD", &mut never)
+                .warning
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn measure_classifies_the_merge_base_diff() {
+        let size = ReviewSize::default();
+        let mut git = |args: &[&str]| -> Result<String, String> {
+            Ok(match args[0] {
+                "merge-base" => "abc\n".into(),
+                "diff" => {
+                    assert!(args.contains(&"abc"));
+                    "400\t0\ta.rs\0".into()
+                }
+                _ => String::new(),
+            })
+        };
+        assert_eq!(
+            size.measure(None, "main", "HEAD", &mut git),
+            Measured {
+                size: Some("medium"),
+                warning: None
+            }
+        );
+        let mut empty = |args: &[&str]| -> Result<String, String> {
+            Ok(if args[0] == "merge-base" {
+                "abc".into()
+            } else {
+                String::new()
+            })
+        };
+        assert_eq!(
+            size.measure(None, "main", "HEAD", &mut empty),
+            Measured::default()
+        );
+    }
+
+    #[test]
+    fn size_thresholds_must_be_ordered() {
+        let mut config: RoutingConfig =
+            toml_edit::de::from_str(include_str!("../assets/review-defaults.toml")).unwrap();
+        assert!(config.validate().is_empty());
+        config.review.size.small_files = 99;
+        assert!(
+            config
+                .validate()
+                .iter()
+                .any(|e| e.field == "review.size.small_files" && e.code == "range")
+        );
+    }
+
+    #[test]
+    fn numstat_counts_manifest_roots_and_binary_changes() {
+        let size = ReviewSize::default();
+        let trees = "Cargo.toml\0apps/a/Cargo.toml\0apps/b/Cargo.toml\0";
+        assert_eq!(
+            size.classify_numstat("20\t3\tapps/a/src/main.rs\0", trees),
+            "small"
+        );
+        assert_eq!(
+            size.classify_numstat(
+                "20\t3\tapps/a/src/main.rs\x001\t1\tapps/b/src/lib.rs\0",
+                trees
+            ),
+            "medium"
+        );
+        assert_eq!(size.classify_numstat("-\t-\timage.png\0", trees), "large");
+    }
+
+    #[test]
     fn bundled_review_shapes_cover_all_risk_tiers() {
         let review = ReviewConfig::default();
         for (tier, expected) in [
@@ -306,7 +940,9 @@ mod tests {
             ("crucial", "deep"),
             ("terminal", "deep"),
         ] {
-            let selected = review.select_shape(None, Some(tier), None, &[]).unwrap();
+            let selected = review
+                .select_shape(None, Some(tier), None, &[], None)
+                .unwrap();
             assert_eq!(selected.name, expected, "risk tier {tier}");
             assert_eq!(selected.source, "by_risk", "risk tier {tier}");
         }
@@ -323,7 +959,7 @@ mod tests {
         let paths = vec![".github/workflows/nested/test.yml".into()];
         let select = |shape, risk, kind, paths: &[String]| {
             review
-                .select_shape(shape, risk, kind, paths)
+                .select_shape(shape, risk, kind, paths, None)
                 .unwrap()
                 .source
         };
@@ -340,7 +976,7 @@ mod tests {
         assert_eq!(select(None, None, None, &[]), "default");
         assert!(
             review
-                .select_shape(Some("missing"), None, None, &[])
+                .select_shape(Some("missing"), None, None, &[], None)
                 .is_err()
         );
         assert!(path_matches("src/**/test?.rs", "src/test1.rs"));
@@ -356,7 +992,10 @@ mod tests {
             .insert("src/auth/**".into(), "deep".into());
         let paths = vec!["src/auth/login.rs".into()];
         assert_eq!(
-            review.select_shape(None, None, None, &paths).unwrap().name,
+            review
+                .select_shape(None, None, None, &paths, None)
+                .unwrap()
+                .name,
             "deep"
         );
     }
@@ -435,7 +1074,7 @@ mod tests {
     fn parsing_defaults_and_validation() {
         let config: RoutingConfig =
             toml_edit::de::from_str(include_str!("../assets/review-defaults.toml")).unwrap();
-        assert_eq!(config.review.shapes["deep"].reviewers[0].lenses.len(), 4);
+        assert!(config.review.shapes["deep"].reviewers[0].lenses.is_empty());
         assert!(config.validate().is_empty());
         let mut invalid = config;
         invalid.review.shapes.get_mut("quick").unwrap().reviewers[0].pool = "missing".into();
