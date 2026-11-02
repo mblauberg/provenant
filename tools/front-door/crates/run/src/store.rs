@@ -869,14 +869,8 @@ impl RunStore {
                 .tasks
                 .iter()
                 .any(|task| task.task_id == record.task_id && task.writer.is_some())
-        }) && !self
-            .retry_git_cleanup_with_custody(record, recovery, call)
-            .is_ok_and(|receipts| {
-                matches!(receipts.cleanup_custody_release, EffectDisposition::Done)
-            })
-        {
-            let _ = self.set_temporary_retained(record.attempt_id, true, call);
-            return;
+        }) {
+            let _ = self.retry_git_cleanup_with_custody(record, recovery, call);
         }
         // The terminal record retains tmp before cleanup; clear that hint only
         // after removal succeeds.
@@ -1279,23 +1273,26 @@ impl RunStore {
             .find(|task| task.task_id == record.task_id)
             .and_then(|task| task.writer.as_ref())
             .ok_or(RunError::Validation("attempt has no writer to clean up"))?;
-        let slot = self.writer_custody_directory(record, writer)?;
-        let held = match recovery {
-            Some(recovery) if recovery.scope() == Self::scope(record) => recovery
-                .holds_writer_lock(&slot)
-                .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?,
-            _ => false,
-        };
-        let _lock = if held {
-            None
-        } else {
-            Some(slot.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?)
-        };
+        // A missing custody directory has no lock holder; keep the import pin.
+        let slot = self.writer_custody_directory(record, writer).ok();
         let cleanup = (|| -> Result<()> {
+            let held = match (recovery, &slot) {
+                (Some(recovery), Some(slot)) if recovery.scope() == Self::scope(record) => recovery
+                    .holds_writer_lock(slot)
+                    .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?,
+                _ => false,
+            };
+            // Refuse while another holder owns the writer lock.
+            let _lock = match &slot {
+                Some(slot) if !held => {
+                    Some(slot.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?)
+                }
+                _ => None,
+            };
             let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
             let head = crate::settlement::pinned_head(&attempt, Self::scope(record))?;
-            let mut remove_import_pin = true;
-            {
+            let mut remove_import_pin = slot.is_some();
+            if let Some(slot) = &slot {
                 let own = slot.metadata()?;
                 match self.writer_fence_listing() {
                     Ok(listing) => {
