@@ -838,7 +838,7 @@ mod tests {
         use provenant_os::exec::SystemExecutor;
         let temp = tempfile::tempdir()?;
         let executable = temp.path().join("provider");
-        std::fs::write(&executable, b"#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.0; exit; fi\n(trap '' TERM; echo ready > descendant.ready; /bin/sleep 2; echo survived > descendant.survived) &\nwait\n")?;
+        std::fs::write(&executable, b"#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.0; exit; fi\n(trap '' TERM; echo ready > descendant.ready; while [ ! -e descendant.continue ]; do :; done; echo survived > descendant.survived) &\necho $! > descendant.pid\nwait\n")?;
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
         let settings = ProviderSettings {
             update: ProviderUpdate::Command {
@@ -877,12 +877,15 @@ mod tests {
             temp.path().join("descendant.ready").exists(),
             "descendant never started"
         );
-        // The descendant would write after its sleep if only the leader died.
-        // Wait past that point without ps, which some contributor sandboxes deny.
-        let argv = ["/bin/sleep".into(), "2".into()];
-        let outcome =
-            executor.execute(ExecOptions::new(&argv, temp.path(), Duration::from_secs(3)))?;
-        assert_eq!(outcome.termination, Termination::Exit(0));
+        // The descendant would write after this file if only the leader died.
+        std::fs::write(temp.path().join("descendant.continue"), b"continue")?;
+        let pid = std::fs::read_to_string(temp.path().join("descendant.pid"))?;
+        #[allow(clippy::disallowed_methods)] // Probe liveness outside the executor under test.
+        let alive = std::process::Command::new("/bin/kill")
+            .args(["-0", pid.trim()])
+            .status()?
+            .success();
+        assert!(!alive, "background updater descendant survived the timeout");
         assert!(
             !temp.path().join("descendant.survived").exists(),
             "background updater survived"

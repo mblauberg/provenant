@@ -246,7 +246,11 @@ fn a_killed_build_releases_its_slot_and_the_wait_is_reported() -> Result {
     let mut waiter = rig.shim(1, &["build"])?;
     let slots = BuildSlots::open(&rig.state)?;
     assert!(until(Duration::from_secs(20), || slots.held(1) == 1));
-    std::thread::sleep(Duration::from_millis(500));
+    assert!(until(Duration::from_secs(20), || {
+        rig.markers()
+            .iter()
+            .any(|path| fs::read_to_string(path).is_ok_and(|text| text.starts_with("slot ")))
+    }));
     assert!(
         !rig.started("start"),
         "the second build waits while the first holds the slot"
@@ -445,9 +449,18 @@ fn the_cargo_lock_wait_and_the_slot_wait_share_one_deadline() -> Result {
         .command(1, 5, &["build"])
         .env("CARGO_TARGET_DIR", rig.state.join("target"))
         .spawn()?;
-    // The Cargo lock goes after 2 s; the slot never frees. Waiting a full
-    // budget for each would take about 7 s.
-    std::thread::sleep(Duration::from_secs(2));
+    // Wait for the lock marker before consuming part of the shared deadline.
+    // The slot never frees, so resetting its full budget would exceed the
+    // one-budget bound after the Cargo lock is released.
+    assert!(until(Duration::from_secs(20), || {
+        rig.markers()
+            .iter()
+            .any(|path| fs::read_to_string(path).is_ok_and(|text| text.starts_with("lock ")))
+    }));
+    let lock_wait_started = Instant::now();
+    while lock_wait_started.elapsed() < Duration::from_secs(2) {
+        std::thread::yield_now();
+    }
     drop(lock);
     assert!(!finish(&mut waiter, Duration::from_secs(30))?);
     let total = began.elapsed();
