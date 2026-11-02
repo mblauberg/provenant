@@ -88,25 +88,31 @@ pub(super) fn own_worktree(
                 workers,
                 ..*context
             };
+            let requested_base_oid = if let Some(base) = requested_base {
+                let git = provenant_os::git::git_executable()
+                    .ok_or(worktrees::WorktreeError::InvalidRequest)?;
+                let resolved = run::resolve_git_base(&git, context.repo.root_path(), base)
+                    .map_err(|_| worktrees::WorktreeError::BaseNotFound {
+                        base: base.to_owned(),
+                    })?;
+                Some(
+                    provenant_core::GitOid::parse(&resolved)
+                        .map_err(|_| worktrees::WorktreeError::InvalidOutput)?,
+                )
+            } else {
+                None
+            };
             let existing = worktrees::list(context, cancel)?.into_iter().find(|tree| {
                 tree.branch.as_deref() == Some(format!("refs/heads/{branch}").as_str())
             });
             let (info, pinned) = match existing {
                 Some(info) => {
-                    if let Some(base) = requested_base {
-                        let git = provenant_os::git::git_executable()
-                            .ok_or(worktrees::WorktreeError::InvalidRequest)?;
-                        let resolved = run::resolve_git_base(&git, context.repo.root_path(), base)
-                            .map_err(|_| worktrees::WorktreeError::BaseNotFound {
-                                base: base.to_owned(),
-                            })?;
-                        let base = provenant_core::GitOid::parse(&resolved)
-                            .map_err(|_| worktrees::WorktreeError::InvalidOutput)?;
-                        if !worktrees::is_ancestor(context, base, info.head, cancel)? {
-                            return Err(worktrees::WorktreeError::BranchExistsWithBase {
-                                branch: branch.clone(),
-                            });
-                        }
+                    if let Some(base) = requested_base_oid
+                        && !worktrees::is_ancestor(context, base, info.head, cancel)?
+                    {
+                        return Err(worktrees::WorktreeError::BranchExistsWithBase {
+                            branch: branch.clone(),
+                        });
                     }
                     let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
                     let owner = worktrees::load_owner(&tree)?;
@@ -171,18 +177,20 @@ pub(super) fn own_worktree(
                 .as_ref()
                 .and_then(|prior| prior.attempt_id)
                 .is_some_and(&terminal_attempt);
+            let expected_prior = prior.clone();
             let owner = match prior {
                 Some(owner) if owner.operation_id.as_ref() == Some(operation_id) => owner,
                 prior => WorktreeOwner {
                     attempt_id: None,
                     operation_id: Some(operation_id.clone()),
                     branch: branch.clone(),
-                    base: match (pinned, prior) {
-                        (Some(pinned), _) => pinned,
-                        (None, Some(prior)) => prior.base,
+                    base: match (pinned, requested_base_oid, prior) {
+                        (Some(pinned), _, _) => pinned,
+                        (_, Some(base), _) => base.to_string(),
+                        (None, None, Some(prior)) => prior.base,
                         // An unowned existing tree: nothing was created, so
                         // a base that does not resolve leaves no side effect.
-                        (None, None) => {
+                        (None, None, None) => {
                             let git = provenant_os::git::git_executable()
                                 .ok_or(worktrees::WorktreeError::InvalidRequest)?;
                             run::resolve_git_base(
@@ -206,6 +214,7 @@ pub(super) fn own_worktree(
                     context,
                     &verified,
                     &owner,
+                    expected_prior.as_ref(),
                     terminal_prior,
                     cancel,
                 )?;

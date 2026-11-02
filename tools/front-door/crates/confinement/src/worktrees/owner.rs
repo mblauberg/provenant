@@ -75,11 +75,13 @@ fn validate(owner: &WorktreeOwner) -> Result<(), WorktreeError> {
 }
 
 /// Publish lane ownership only while both repository and writer custody are
-/// excluded. A caller's earlier free observation cannot grant reassignment.
+/// excluded. Reassignment requires the caller's owner snapshot to remain
+/// current; only a verified terminal prior may permit an unknown census.
 pub fn save_lane_owner_when_free(
     context: &WorktreeContext<'_>,
     worktree: &VerifiedWorktree,
     owner: &WorktreeOwner,
+    expected_prior: Option<&WorktreeOwner>,
     terminal_prior: bool,
     cancel: &CancelToken,
 ) -> Result<(), WorktreeError> {
@@ -120,7 +122,18 @@ pub fn save_lane_owner_when_free(
     {
         return Err(live_refusal(context.workers, tree.path()));
     }
-    if load_owner(&tree)?.is_some_and(|prior| prior.origin != WorktreeOrigin::Lane) {
+    let current_prior = load_owner(&tree)?;
+    if current_prior.as_ref() != expected_prior {
+        return Err(WorktreeError::IdentityChanged);
+    }
+    if current_prior
+        .as_ref()
+        .is_some_and(|prior| prior.origin != WorktreeOrigin::Lane)
+        || terminal_prior
+            && !current_prior
+                .as_ref()
+                .is_some_and(|prior| prior.attempt_id.is_some())
+    {
         return Err(WorktreeError::UnknownWriter);
     }
     if worktree_dirty_at(context, tree.repo(), cancel)? != WorktreeCondition::Clean {
