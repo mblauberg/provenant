@@ -3498,6 +3498,32 @@ fn output_parsing_is_lenient_and_rendering_fails_instead_of_omitting() {
 }
 
 #[test]
+fn findings_blocks_normalise_array_and_id_keyed_object_shapes() {
+    let array = make_outputs(
+        Some(&capture(
+            "```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"a.rs\",\"line\":7,\"summary\":\"issue\",\"status\":\"open\"}]}\n```",
+        )),
+        None,
+        None,
+        None,
+        None,
+    );
+    let keyed = make_outputs(
+        Some(&capture(
+            "```findings\n{\"schema_version\":1,\"findings\":{\"F1\":{\"severity\":\"high\",\"file\":\"a.rs\",\"line\":7,\"summary\":\"issue\",\"status\":\"open\"}}}\n```",
+        )),
+        None,
+        None,
+        None,
+        None,
+    );
+
+    assert_eq!(keyed.findings, array.findings);
+    assert_eq!(keyed.findings[0].id, "F1");
+    assert!(keyed.warnings.is_empty());
+}
+
+#[test]
 fn findings_and_verdict_at_the_end_of_a_large_result_are_parsed() {
     let text = format!(
         "{}\n```findings\n{{\"schema_version\":1,\"findings\":[{{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"a\",\"line\":1,\"summary\":\"issue\",\"status\":\"open\"}}]}}\n```\nVERDICT: PASS\n",

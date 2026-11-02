@@ -3,7 +3,7 @@
     "pattern": "big-batch",
     "preset": "big-batch"
   },
-  "graph_id": "preset-e7ba2d79ee7cd82ba4a83b49ad28641d",
+  "graph_id": "preset-f044e8fd4b94201be600b9a56022ca8e",
   "integration_branch": "batch/graph",
   "nodes": [
     {
@@ -1284,12 +1284,12 @@
               }
             ],
             "kind": "synthesise",
-            "prompt": "You reconcile review findings into one verdict with a disposition for each.\n\nReconcile independent review findings against evidence for: brief\nDo not take a majority vote. Weigh each finding by its evidence and, where a\nverifier ran, by its UPHELD or FALSIFIED mark. Give every finding exactly one\ndisposition with a one-line reason: accepted (must be fixed), rejected\n(evidence refutes it) or deferred (valid, not for this change). End with a\nfenced findings block (schema_version 1) with one entry per finding id; each\nentry carries \"disposition\" (accepted, rejected or deferred) and \"reason\".\nA finding without a disposition is incomplete. Emit one exact\nVERDICT: PASS only when no accepted finding remains and acceptance evidence is\nsatisfied, otherwise VERDICT: FAIL.\nIf the input lists unavailable lenses, state that the review is degraded and name\nthem with their reasons.\n",
+            "prompt": "You reconcile review findings into one verdict with a disposition for each.\n\nReconcile independent review findings against evidence for: brief\nDo not take a majority vote. Weigh each finding by its evidence and, where a\nverifier ran, by its UPHELD or FALSIFIED mark. Give every finding exactly one\ndisposition with a one-line reason: accepted (must be fixed), rejected\n(evidence refutes it) or deferred (valid, not for this change). End with a\nfenced findings block (schema_version 1) with one entry per finding id; each\nentry carries \"disposition\" (accepted, rejected or deferred) and \"reason\".\nA finding without a disposition is incomplete. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\",\"disposition\":\"accepted\",\"reason\":\"Evidence supports it\"}]}\n```\nEmit one exact\nVERDICT: PASS only when no accepted finding remains and acceptance evidence is\nsatisfied, otherwise VERDICT: FAIL.\nIf the input lists unavailable lenses, state that the review is degraded and name\nthem with their reasons.\n",
             "read_roots": [
               "/repo/batch"
             ],
             "role": "review.synthesis",
-            "role_digest": "sha256:c79f106f44d1647c769954cd53de2a7b2ea5c244ca0a65fab5bc21964271e2e2",
+            "role_digest": "sha256:c7c19b23c364c2c4fe8ab7696a8c10ad808dfa505b7cdac299d99f195e761b8d",
             "route": {
               "alias": "senior"
             },
@@ -1630,12 +1630,12 @@
                     }
                   ],
                   "kind": "synthesise",
-                  "prompt": "You reconcile review findings into one verdict with a disposition for each.\n\nReconcile independent review findings against evidence for: brief\nDo not take a majority vote. Weigh each finding by its evidence and, where a\nverifier ran, by its UPHELD or FALSIFIED mark. Give every finding exactly one\ndisposition with a one-line reason: accepted (must be fixed), rejected\n(evidence refutes it) or deferred (valid, not for this change). End with a\nfenced findings block (schema_version 1) with one entry per finding id; each\nentry carries \"disposition\" (accepted, rejected or deferred) and \"reason\".\nA finding without a disposition is incomplete. Emit one exact\nVERDICT: PASS only when no accepted finding remains and acceptance evidence is\nsatisfied, otherwise VERDICT: FAIL.\nIf the input lists unavailable lenses, state that the review is degraded and name\nthem with their reasons.\n",
+                  "prompt": "You reconcile review findings into one verdict with a disposition for each.\n\nReconcile independent review findings against evidence for: brief\nDo not take a majority vote. Weigh each finding by its evidence and, where a\nverifier ran, by its UPHELD or FALSIFIED mark. Give every finding exactly one\ndisposition with a one-line reason: accepted (must be fixed), rejected\n(evidence refutes it) or deferred (valid, not for this change). End with a\nfenced findings block (schema_version 1) with one entry per finding id; each\nentry carries \"disposition\" (accepted, rejected or deferred) and \"reason\".\nA finding without a disposition is incomplete. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\",\"disposition\":\"accepted\",\"reason\":\"Evidence supports it\"}]}\n```\nEmit one exact\nVERDICT: PASS only when no accepted finding remains and acceptance evidence is\nsatisfied, otherwise VERDICT: FAIL.\nIf the input lists unavailable lenses, state that the review is degraded and name\nthem with their reasons.\n",
                   "read_roots": [
                     "/repo/batch"
                   ],
                   "role": "review.synthesis",
-                  "role_digest": "sha256:c79f106f44d1647c769954cd53de2a7b2ea5c244ca0a65fab5bc21964271e2e2",
+                  "role_digest": "sha256:c7c19b23c364c2c4fe8ab7696a8c10ad808dfa505b7cdac299d99f195e761b8d",
                   "route": {
                     "alias": "senior"
                   },
@@ -2290,7 +2290,7 @@
         "references": []
       },
       "review.synthesis": {
-        "digest": "sha256:c79f106f44d1647c769954cd53de2a7b2ea5c244ca0a65fab5bc21964271e2e2",
+        "digest": "sha256:c7c19b23c364c2c4fe8ab7696a8c10ad808dfa505b7cdac299d99f195e761b8d",
         "extends": [
           "review.synthesis"
         ],

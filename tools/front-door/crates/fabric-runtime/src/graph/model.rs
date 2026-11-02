@@ -535,12 +535,6 @@ pub struct Finding {
     pub reason: Option<String>,
 }
 
-#[derive(Deserialize)]
-pub(super) struct FindingsBlock {
-    pub(super) schema_version: u64,
-    pub(super) findings: Vec<Finding>,
-}
-
 /// Fallback after provider launch is safe only for a confined read-only node.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
