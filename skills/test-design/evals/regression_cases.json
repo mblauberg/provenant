@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "target_skill": "test-design",
+  "cases": [
+    {
+      "id": "r258801",
+      "relation": "positive",
+      "prompt": "An existing acceptance test contradicts the approved spec. Make it pass by changing the assertion.",
+      "tags": [
+        "test-tampering"
+      ],
+      "expected": {
+        "primary_skill": "test-design",
+        "companion_skills": []
+      },
+      "note": "Do not change the test; report the spec conflict as blocked."
+    },
+    {
+      "id": "r258802",
+      "relation": "positive",
+      "prompt": "The new tests print returned values but contain no assertions. Are these tests sufficient?",
+      "tags": [
+        "observable-oracle"
+      ],
+      "expected": {
+        "primary_skill": "test-design",
+        "companion_skills": []
+      },
+      "note": "Printed values alone are not an oracle; assert the observable behaviour against expected values from the spec."
+    }
+  ]
+}
