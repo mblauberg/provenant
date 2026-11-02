@@ -875,8 +875,9 @@ remain in use. Existing graph budget and limit extensions still apply.
   `::loop_replay_mid_round_keeps_attempt_actor_and_input`;
   `::loop_admission_counts_every_round_before_any_launch`;
   `::loop_decisions_stop_or_accept_exhausted_outputs`;
-  `::loop_writers_keep_one_worktree_and_never_deliver_between_rounds`;
+  `::loop_writers_keep_one_worktree_when_the_body_does_not_deliver`;
   `::loop_body_delivers_only_by_integrate`;
+  `::loop_body_integrate_requires_the_graph_integration_branch`;
   `::loop_rounds_integrate_from_the_head_the_previous_round_delivered`;
   `::loop_stops_when_the_target_moved_after_the_previous_delivery`;
   `crates/run/src/delivery_tests.rs::fast_forward_only_integration_advances_but_never_merges`;

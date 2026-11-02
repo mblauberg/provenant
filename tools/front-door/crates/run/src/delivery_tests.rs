@@ -1799,10 +1799,12 @@ fn fast_forward_only_integration_advances_but_never_merges()
     let moved = rev(&fixture, "integration")?;
     fixture.commit(&fixture.writer.worktree, "round two")?;
     let second = host.head(&fixture.writer)?;
-    assert!(matches!(
-        host.integrate(&fixture.writer, &fixture.request, second),
-        Err(RunError::Delivery(WriterDeliveryStage::Integrate))
-    ));
+    let refused = host
+        .integrate(&fixture.writer, &fixture.request, second)
+        .unwrap_err();
+    assert!(matches!(refused, RunError::IntegrationHeadMoved));
+    assert!(refused.to_string().contains("integration_head_moved"));
+    assert!(refused.to_string().contains("rerun"));
     assert_eq!(rev(&fixture, "integration")?, moved);
     Ok(())
 }

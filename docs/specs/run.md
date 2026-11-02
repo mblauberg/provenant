@@ -1163,7 +1163,9 @@ remote branch and refuses delivery if the refresh fails. Final graph PR
 delivery follows the same refresh rule.
 
 `lane deliver ATTEMPT [--deliver MODE]` uses the recorded destination, or
-origin push when the settled lane recorded none. It requires a succeeded
+origin push when the settled lane recorded none. An explicit `integrate:`
+override naming the recorded target keeps a recorded fast-forward-only guard,
+so pickup cannot merge a refused loop round. It requires a succeeded
 writer, released custody, no new reservation, a clean tree and the exact
 receipt head. After reviewing a `review_required` writer, the chair can use
 `lane deliver --accept-review ATTEMPT` to accept its protected changes and
