@@ -1684,7 +1684,11 @@ fn classify_pool(
             exclusion.model == member.model && exclusion.schedule.active(context.now)
         });
         if excluded_members.contains(&member.model) || configured_exclusion {
-            let detail = if configured_exclusion { "config exclusion" } else { "admission rejected" };
+            let detail = if configured_exclusion {
+                "config exclusion"
+            } else {
+                "admission rejected"
+            };
             classified
                 .exclusions
                 .push(format!("{}: {detail}", member.model.as_str()));

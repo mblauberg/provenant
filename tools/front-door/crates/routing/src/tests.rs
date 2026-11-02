@@ -4417,18 +4417,37 @@ fn live_scoped_refusal_excludes_only_the_matching_account_and_model()
 }
 
 #[test]
-fn configured_model_exclusion_applies_to_pools_until_expiry() -> Result<(), Box<dyn std::error::Error>> {
+fn configured_model_exclusion_applies_to_pools_until_expiry()
+-> Result<(), Box<dyn std::error::Error>> {
     let mut catalogue = Catalogue::bundled()?;
-    let member = catalogue.pools["junior"].iter().find(|m| m.model.as_str() == "codex/gpt-6-luna").ok_or("missing member")?.clone();
+    let member = catalogue.pools["junior"]
+        .iter()
+        .find(|m| m.model.as_str() == "codex/gpt-6-luna")
+        .ok_or("missing member")?
+        .clone();
     catalogue.pools.insert("trial".into(), vec![member.clone()]);
     let mut config = RoutingConfig::default();
-    config.model_exclusions.push(ModelExclusion { model: member.model.clone(), schedule: Schedule { expires: Some(provenant_core::WallTime::from_micros(101_000_000)?), ..Schedule::default() } });
+    config.model_exclusions.push(ModelExclusion {
+        model: member.model.clone(),
+        schedule: Schedule {
+            expires: Some(provenant_core::WallTime::from_micros(101_000_000)?),
+            ..Schedule::default()
+        },
+    });
     let mut query = request(member.model.as_str())?;
     query.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
     let active = context(&catalogue, &config, now()?);
     let error = resolve(&query, &active).unwrap_err();
-    assert!(error.to_string().contains("codex/gpt-6-luna: config exclusion"));
-    let expired = context(&catalogue, &config, provenant_core::WallTime::from_micros(102_000_000)?);
+    assert!(
+        error
+            .to_string()
+            .contains("codex/gpt-6-luna: config exclusion")
+    );
+    let expired = context(
+        &catalogue,
+        &config,
+        provenant_core::WallTime::from_micros(102_000_000)?,
+    );
     assert!(resolve(&query, &expired).is_ok());
     query.choice = RouteChoice::Model(member.model);
     assert!(resolve(&query, &active).is_ok());

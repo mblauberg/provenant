@@ -445,11 +445,17 @@ impl DomainConfig for RoutingConfig {
         let mut errors = Vec::new();
         self.model_policy.validate(&mut errors);
         if self.model_exclusions.len() > 256 {
-            errors.push(SectionError { field: "model_exclusions".into(), code: "limit" });
+            errors.push(SectionError {
+                field: "model_exclusions".into(),
+                code: "limit",
+            });
         }
         for (index, exclusion) in self.model_exclusions.iter().enumerate() {
             if !exclusion.schedule.valid() {
-                errors.push(SectionError { field: format!("model_exclusions.{index}"), code: "schedule" });
+                errors.push(SectionError {
+                    field: format!("model_exclusions.{index}"),
+                    code: "schedule",
+                });
             }
         }
         if let Some(advice) = &self.writer_advisory {
