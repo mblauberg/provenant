@@ -880,6 +880,7 @@ mod tests {
         // The descendant would write after this file if only the leader died.
         std::fs::write(temp.path().join("descendant.continue"), b"continue")?;
         let pid = std::fs::read_to_string(temp.path().join("descendant.pid"))?;
+        #[allow(clippy::disallowed_methods)] // Probe liveness outside the executor under test.
         let alive = std::process::Command::new("/bin/kill")
             .args(["-0", pid.trim()])
             .status()?
