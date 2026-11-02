@@ -1962,7 +1962,10 @@ impl BinaryRunOwner<'_> {
                     {
                         Ok(info)
                     }
-                    Some(_) => Err(WorktreeError::InvalidRequest.into()),
+                    Some(_) => Err(WorktreeError::BranchExistsWithBase {
+                        branch: spec.branch.clone(),
+                    }
+                    .into()),
                     None => {
                         let request = WorktreeCreate {
                             branch: spec.branch.clone(),
@@ -1974,10 +1977,10 @@ impl BinaryRunOwner<'_> {
             },
         )
         .map_err(|error| match error {
-            // The branch name is valid, so an invalid create means it exists.
-            crate::worktrees::Error::Worktree(WorktreeError::InvalidRequest) if !replay => {
-                FacadeError::BranchExists
-            }
+            // The branch name is valid, so either refusal means it already exists.
+            crate::worktrees::Error::Worktree(
+                WorktreeError::InvalidRequest | WorktreeError::BranchExistsWithBase { .. },
+            ) if !replay => FacadeError::BranchExists,
             crate::worktrees::Error::Worktree(WorktreeError::NotFound) if replay => {
                 FacadeError::WorktreeMissing
             }

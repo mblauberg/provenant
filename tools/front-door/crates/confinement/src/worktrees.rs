@@ -82,6 +82,8 @@ pub enum WorktreeError {
     WriterBusy { holder: Option<AttemptId> },
     #[error("branch name collides with existing ref {existing}")]
     BranchCollision { existing: String },
+    #[error("branch {branch} already exists; omit --base to reuse it")]
+    BranchExistsWithBase { branch: String },
     #[error("worktree or branch was not found")]
     NotFound,
     #[error("base {base} did not resolve to a commit")]
@@ -181,7 +183,10 @@ impl WorktreeError {
             Self::GitOperationInProgress => {
                 "run `git -C PATH status` and complete or abort the Git operation before retrying"
             }
-            Self::UnknownWriter | Self::IncompleteCensus { .. } => {
+            Self::UnknownWriter => {
+                "run `provenant worktree list` and inspect the registration and writer state before retrying"
+            }
+            Self::IncompleteCensus { .. } => {
                 "run `provenant worktree list` and retry when writer observation is available"
             }
             Self::Primary => {

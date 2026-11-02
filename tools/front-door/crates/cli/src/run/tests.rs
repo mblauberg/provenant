@@ -1629,6 +1629,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
         self, WorkerObserver, WorkerState, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
     };
     use provenant_core::RootInputs;
+    use provenant_os::fixture::run_git;
     use std::ffi::OsString;
     struct Free;
     impl WorkerObserver for Free {
@@ -1640,6 +1641,19 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
                 .iter()
                 .cloned()
                 .map(|root| (root, WorkerState::Free))
+                .collect()
+        }
+    }
+    struct Unknown;
+    impl WorkerObserver for Unknown {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, WorkerState::Unknown))
                 .collect()
         }
     }
@@ -1908,6 +1922,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
             &OperationId::parse("replacement-lane")?,
             &edge,
             &Free,
+            |_| false,
             &mut None,
             &clock,
             &cancel,
@@ -1928,6 +1943,102 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
             );
         }
     }
+
+    let base_a = String::from_utf8(run_git(&project, &["rev-parse", "HEAD"])?)?
+        .trim()
+        .to_owned();
+    run_git(
+        &project,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "middle",
+        ],
+    )?;
+    let base_b = String::from_utf8(run_git(&project, &["rev-parse", "HEAD"])?)?
+        .trim()
+        .to_owned();
+    let prior_attempt = AttemptId::from_bytes([222; 16]);
+    let (path, head) =
+        worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+            let context = &worktrees::WorktreeContext {
+                workers: &Free,
+                ..*context
+            };
+            let info = worktrees::create(
+                context,
+                WorktreeCreate {
+                    branch: "terminal-unknown".into(),
+                    base: Some(base_b.clone()),
+                },
+                &cancel,
+            )?;
+            run_git(
+                &info.path,
+                &[
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "commit",
+                    "--allow-empty",
+                    "-qm",
+                    "tip",
+                ],
+            )
+            .map_err(|_| worktrees::WorktreeError::InvalidOutput)?;
+            let head = String::from_utf8(
+                run_git(&info.path, &["rev-parse", "HEAD"])
+                    .map_err(|_| worktrees::WorktreeError::InvalidOutput)?,
+            )
+            .map_err(|_| worktrees::WorktreeError::InvalidOutput)?
+            .trim()
+            .parse()
+            .map_err(|_| worktrees::WorktreeError::InvalidOutput)?;
+            let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
+            worktrees::save_owner(
+                &tree,
+                &WorktreeOwner {
+                    attempt_id: Some(prior_attempt),
+                    operation_id: Some(
+                        "terminal-prior"
+                            .parse()
+                            .map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
+                    ),
+                    branch: "terminal-unknown".into(),
+                    base: base_a.clone(),
+                    host,
+                    created_at: WallTime::from_micros(1)
+                        .map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
+                    origin: WorktreeOrigin::Lane,
+                    label: None,
+                },
+            )?;
+            Ok((info.path, head))
+        })?;
+    let reused = super::own_worktree(
+        &super::OwnedWorktree {
+            branch: "terminal-unknown".into(),
+            host,
+            created_at: WallTime::from_micros(2)?,
+        },
+        Some(&base_b),
+        &OperationId::parse("terminal-replacement")?,
+        &edge,
+        &Unknown,
+        |attempt| attempt == prior_attempt,
+        &mut None,
+        &clock,
+        &cancel,
+    )?;
+    assert_eq!(reused.0.path, path);
+    assert_eq!(reused.0.head, head);
+    assert_eq!(reused.1.to_string(), base_b);
     Ok(())
 }
 
@@ -2074,6 +2185,7 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
         &operation,
         &edge,
         &Unknown,
+        |_| false,
         &mut None,
         &clock,
         &cancel,

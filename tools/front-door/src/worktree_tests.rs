@@ -196,6 +196,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "writer_production_plan_denies_outside_writes",
             "writer_reconcile_refuses_unfinished_cherry_pick_and_releases",
             "recreated_worktree_accepts_writer_after_settlement",
+            "existing_branch_with_base_names_the_repair_in_json_and_human_output",
             "create_list_and_remove_a_managed_worktree",
             "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache",
             "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_locks",
@@ -288,6 +289,9 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "recreated_worktree_accepts_writer_after_settlement" => {
                     recreated_worktree_accepts_writer_after_settlement()
+                }
+                "existing_branch_with_base_names_the_repair_in_json_and_human_output" => {
+                    existing_branch_with_base_names_the_repair_in_json_and_human_output()
                 }
                 "create_list_and_remove_a_managed_worktree" => {
                     create_list_and_remove_a_managed_worktree()
@@ -2287,6 +2291,31 @@ fn recreated_worktree_accepts_writer_after_settlement() -> Result {
         .is_err_and(|error| is_fenced(error.as_ref()))
     );
     drop(old_tree);
+    Ok(())
+}
+
+fn existing_branch_with_base_names_the_repair_in_json_and_human_output() -> Result {
+    let rig = repository()?;
+    git(&rig, &["branch", "existing"])?;
+    let json_output = command(
+        &rig,
+        &["worktree", "create", "existing", "--base", "HEAD", "--json"],
+    )?;
+    assert_ne!(code(&json_output), 0);
+    let value = json(&json_output)?;
+    let message = value["error"]["message"].as_str().ok_or("error message")?;
+    assert!(
+        message.contains("branch existing already exists; omit --base"),
+        "{value}"
+    );
+
+    let human_output = command(&rig, &["worktree", "create", "existing", "--base", "HEAD"])?;
+    assert_ne!(code(&human_output), 0);
+    let message = String::from_utf8_lossy(&human_output.stderr.bytes);
+    assert!(
+        message.contains("branch existing already exists; omit --base"),
+        "{message}"
+    );
     Ok(())
 }
 

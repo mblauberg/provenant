@@ -97,6 +97,7 @@ impl Error {
                 | WorktreeError::AmbiguousName { .. }
                 | WorktreeError::NotFound
                 | WorktreeError::CheckedOut
+                | WorktreeError::BranchExistsWithBase { .. }
                 | WorktreeError::BranchCollision { .. },
             ) => Outcome::Invalid,
             Self::Worktree(
