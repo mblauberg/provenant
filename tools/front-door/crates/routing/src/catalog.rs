@@ -223,6 +223,8 @@ impl From<FixedDeadline> for String {
 /// registry-free callers and can match accounts across adapters, including
 /// profile, reset reference and override selectors.
 pub struct RoutingConfig {
+    /// Exact models excluded from every pool while their schedule is active.
+    pub model_exclusions: Vec<ModelExclusion>,
     pub model_policy: crate::ModelPolicies,
     /// Override the bundled writer advice; omitted fields keep the bundled values.
     pub writer_advisory: Option<WriterAdvisoryOverride>,
@@ -257,6 +259,7 @@ pub const MAX_RETRY_WAIT_SECONDS: u64 = 7 * 24 * 3_600;
 impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
+            model_exclusions: Vec::new(),
             model_policy: crate::ModelPolicies::default(),
             writer_advisory: None,
             suppress_opus_writer_warning: false,
@@ -274,6 +277,14 @@ impl Default for RoutingConfig {
             opencode_go: OpenCodeGoSettings::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelExclusion {
+    pub model: ModelId,
+    #[serde(default)]
+    pub schedule: crate::Schedule,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -433,6 +444,14 @@ impl DomainConfig for RoutingConfig {
     fn validate(&self) -> Vec<SectionError> {
         let mut errors = Vec::new();
         self.model_policy.validate(&mut errors);
+        if self.model_exclusions.len() > 256 {
+            errors.push(SectionError { field: "model_exclusions".into(), code: "limit" });
+        }
+        for (index, exclusion) in self.model_exclusions.iter().enumerate() {
+            if !exclusion.schedule.valid() {
+                errors.push(SectionError { field: format!("model_exclusions.{index}"), code: "schedule" });
+            }
+        }
         if let Some(advice) = &self.writer_advisory {
             advice.validate("writer_advisory", &mut errors);
         }

@@ -1680,10 +1680,14 @@ fn classify_pool(
     for member in members {
         let effort = request.effort.clone().or(member.effort.clone());
         let mut factor_basis_points = NEUTRAL_FACTOR_BASIS_POINTS;
-        if excluded_members.contains(&member.model) {
+        let configured_exclusion = context.config.model_exclusions.iter().any(|exclusion| {
+            exclusion.model == member.model && exclusion.schedule.active(context.now)
+        });
+        if excluded_members.contains(&member.model) || configured_exclusion {
+            let detail = if configured_exclusion { "config exclusion" } else { "admission rejected" };
             classified
                 .exclusions
-                .push(format!("{}: admission rejected", member.model.as_str()));
+                .push(format!("{}: {detail}", member.model.as_str()));
             classified.candidates.push(RouteSelectionCandidate {
                 extra: Default::default(),
                 model: member.model.as_str().into(),
@@ -1692,7 +1696,7 @@ fn classify_pool(
                 pacing_detail: None,
                 effort,
                 readiness: None,
-                exclusion: Some("admission rejected".into()),
+                exclusion: Some(detail.into()),
             });
             classified.routes.push(None);
             continue;
