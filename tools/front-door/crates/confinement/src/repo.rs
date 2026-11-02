@@ -725,7 +725,7 @@ fn common_config_digest(common: &Directory, head: &[u8]) -> Result<Option<[u8; 3
     // its own; a detached HEAD keeps none. A missing or malformed HEAD keeps
     // every branch's keys, so a HEAD race cannot hide a tracking change; the
     // writer's own HEAD read reports the damage with its path.
-    let line = head.strip_suffix(b"\n").unwrap_or(head);
+    let line = head.strip_suffix(b"\n").unwrap_or_default();
     let detached = matches!(line.len(), 40 | 64) && line.iter().all(u8::is_ascii_hexdigit);
     let branch = line.strip_prefix(b"ref: refs/heads/").filter(|branch| {
         std::str::from_utf8(branch).is_ok_and(|name| GitRefName::branch(name).is_ok())
