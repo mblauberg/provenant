@@ -2918,10 +2918,7 @@ fn cancel_wait_settles_stalled_import_with_durable_exit() -> Result {
     let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
     let lane = &lanes["data"]["lanes"][0];
     assert_eq!(lane["state"], "cancelled", "{lanes}");
-    assert_eq!(
-        lane["reason"], "cancelled: explicit_cancellation",
-        "{lanes}"
-    );
+    assert_eq!(lane["reason"], "cancelled during Git import", "{lanes}");
     Ok(())
 }
 

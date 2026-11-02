@@ -1236,6 +1236,14 @@ impl RunStore {
             let manifest_conflicted = deferred
                 .iter()
                 .any(|(effect, _)| *effect == SettlementEffect::ManifestConflict);
+            let import_stop_requested = read_sealed(attempt, "cancel.json", RECORD_LIMIT)?
+                .and_then(|raw| crate::db::decode::<crate::store::CancellationEvidence>(&raw).ok())
+                .is_some_and(|request| {
+                    request.requests_stop(
+                        exit.scope,
+                        record.verified_owner.unwrap_or(self.context.actor_id),
+                    )
+                });
             let check = match check {
                 Err(error) if crate::writer::worktree_removed(writer) || manifest_conflicted => {
                     Err(error)
@@ -1245,18 +1253,13 @@ impl RunStore {
                         "writer preconditions refused; private Git retained for host recovery",
                     ))
                 }
-                Err(error) if !matches!(error, RunError::ObjectImportLimit(_)) => {
-                    let requested = read_sealed(attempt, "cancel.json", RECORD_LIMIT)?
-                        .and_then(|raw| {
-                            crate::db::decode::<crate::store::CancellationEvidence>(&raw).ok()
-                        })
-                        .is_some_and(|request| {
-                            request.requests_stop(
-                                exit.scope,
-                                record.verified_owner.unwrap_or(self.context.actor_id),
-                            )
-                        });
-                    if cancelled || requested {
+                // An exhausted import cannot progress, so a request to stop is
+                // the only way to settle it other than a refusal.
+                Err(error)
+                    if import_stop_requested
+                        || !matches!(error, RunError::ObjectImportLimit(_)) =>
+                {
+                    if cancelled || import_stop_requested {
                         cancelled = true;
                         crate::artifacts::seal(
                             attempt,
