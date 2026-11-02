@@ -1144,6 +1144,7 @@ impl HostDeliveryContext {
         if output.stdout.truncated && !commit_log {
             return Err(RunError::DeliveryLimit {
                 stage,
+                tool: if tool == "gh" { "gh" } else { "git" },
                 command: git_subcommand(args),
                 limit,
             });
@@ -1806,7 +1807,7 @@ pub(super) fn prepare_error(step: &'static str, detail: impl std::fmt::Display) 
 /// The stdout limit for one host Git or forge call, chosen from its argv. A
 /// worktree listing grows with the linked worktrees, so it gets the crate's
 /// capture default; every other call keeps its bound.
-fn stdout_limit(commit_log: bool, args: &[&str]) -> usize {
+pub(super) fn stdout_limit(commit_log: bool, args: &[&str]) -> usize {
     if commit_log {
         56_000
     } else if args.contains(&"--show-origin") {
@@ -1837,13 +1838,22 @@ pub(crate) fn failed_state(error: &RunError) -> WriterDeliveryState {
     WriterDeliveryState::Failed { extra, stage }
 }
 
-/// The subcommand words of a host call, for diagnostics. Options and absolute
-/// paths, such as a `--git-dir` value, are skipped.
-fn git_subcommand(args: &[&str]) -> String {
-    let mut words = args
-        .iter()
-        .copied()
-        .filter(|word| !word.starts_with('-') && !word.starts_with('/'));
+/// The subcommand words of a host call, for diagnostics. Global options and
+/// their values (`-c <name=value>`, `-C <path>`, `--git-dir <path>`,
+/// `--work-tree <path>`) are skipped, as are `--option=value` forms.
+pub(super) fn git_subcommand(args: &[&str]) -> String {
+    let mut words = Vec::new();
+    let mut iter = args.iter().copied();
+    while let Some(word) = iter.next() {
+        match word {
+            "-c" | "-C" | "--git-dir" | "--work-tree" | "--namespace" | "--exec-path" => {
+                iter.next();
+            }
+            _ if word.starts_with('-') => {}
+            _ => words.push(word),
+        }
+    }
+    let mut words = words.into_iter();
     let verb = words.next().unwrap_or("git");
     match (verb, words.next()) {
         ("worktree", Some(sub)) => format!("worktree {sub}"),

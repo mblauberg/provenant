@@ -3136,6 +3136,82 @@ fn non_listing_host_output_over_its_bound_names_the_command()
 }
 
 #[test]
+fn host_forge_output_over_its_bound_names_gh_not_git()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    fixture.request.open_pr = true;
+    let bin = fixture.root.join("gh-bin");
+    std::fs::create_dir(&bin)?;
+    let payload = fixture.root.join("gh-output");
+    std::fs::write(&payload, vec![b'a'; 16 * 1024 + 1])?;
+    fixture.executable(
+        &bin.join("gh"),
+        &format!("#!/bin/sh\ncat '{}'\n", payload.display()),
+    )?;
+    fixture.environment.retain(|(key, _)| key != "PATH");
+    fixture.environment.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    let host = fixture.prepare()?;
+    let error = host
+        .command(
+            &fixture.writer.project,
+            "gh",
+            &["pr", "view", "1"],
+            WriterDeliveryStage::PullRequest,
+        )
+        .expect_err("oversized forge output must be refused");
+    assert!(
+        matches!(error, RunError::DeliveryLimit { tool: "gh", .. }),
+        "{error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "host writer delivery failed at PullRequest: gh pr output exceeded the 16384-byte host limit"
+    );
+    Ok(())
+}
+
+#[test]
+fn worktree_listing_keeps_the_raised_limit_and_others_keep_theirs() {
+    assert_eq!(
+        stdout_limit(false, &["worktree", "list", "--porcelain"]),
+        provenant_os::exec::DEFAULT_CAPTURE_LIMIT
+    );
+    assert_eq!(stdout_limit(false, &["remote"]), 16 * 1024);
+    assert_eq!(stdout_limit(true, &["log"]), 56_000);
+}
+
+#[test]
+fn git_subcommand_skips_global_option_values() {
+    for (args, expected) in [
+        (&["worktree", "list", "--porcelain"][..], "worktree list"),
+        (&["-c", "core.hooksPath=/dev/null", "remote"], "remote"),
+        (
+            &["-C", "relative/dir", "symbolic-ref", "--quiet"],
+            "symbolic-ref",
+        ),
+        (
+            &["--git-dir", "rel", "--work-tree", "tree", "status"],
+            "status",
+        ),
+        (
+            &["--git-dir=rel", "--work-tree=tree", "worktree", "list"],
+            "worktree list",
+        ),
+        (
+            &["-c", "a=b", "-C", "x", "worktree", "list"],
+            "worktree list",
+        ),
+        (&["pr", "view", "1"], "pr"),
+        (&[], "git"),
+    ] {
+        assert_eq!(git_subcommand(args), expected, "{args:?}");
+    }
+}
+
+#[test]
 fn prepare_refuses_unavailable_and_unsafe_credential_helpers()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;
