@@ -21,9 +21,14 @@ fn parent() -> Option<PathBuf> {
 // Unit tests create no alias unless a test opts in, so that fixture launches
 // never leave links in the shared system directory.
 #[cfg(test)]
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 thread_local! {
     static TEST_PARENT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Opt this thread's tests in to aliases under `parent`.
+#[cfg(test)]
+pub(crate) fn use_parent_in_tests(parent: &Path) {
+    TEST_PARENT.with(|slot| *slot.borrow_mut() = Some(parent.to_owned()));
 }
 
 #[cfg(test)]
@@ -167,7 +172,7 @@ mod tests {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
         }
         let attempt = Directory::open_anchor(&attempts)?;
-        TEST_PARENT.with(|parent| *parent.borrow_mut() = Some(PathBuf::from("/private/tmp")));
+        use_parent_in_tests(Path::new("/private/tmp"));
 
         let alias = ensure(&attempt).ok_or("alias created")?;
         // Cleanup runs on every exit, so a failed assertion leaks nothing.

@@ -8693,3 +8693,54 @@ fn a_policy_retry_launches_for_no_launcher_before_its_sealed_time() -> TestResul
     assert_eq!(fake.prepared.get(), 1);
     Ok(())
 }
+
+/// Refuses preparation, after recording whether the launch had a short alias.
+struct RefusesAfterAlias(std::cell::Cell<Option<bool>>);
+
+impl Providers for RefusesAfterAlias {
+    fn prepare(
+        &self,
+        _: &TaskRequest,
+        _: &str,
+        paths: &LaunchPaths,
+        _: Option<&AttemptRecord>,
+    ) -> std::result::Result<PreparedLaunch, String> {
+        self.0.set(Some(paths.temporary_alias.is_some()));
+        Err("provider unavailable".into())
+    }
+    fn decode(
+        &self,
+        _: &RouteRecord,
+        _: &[u8],
+        _: &ExitObservation,
+        _: &std::path::Path,
+    ) -> std::result::Result<Decoded, String> {
+        unreachable!("no provider runs")
+    }
+}
+
+#[test]
+fn failed_fresh_preparation_leaves_no_short_alias()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let short = std::fs::canonicalize(temp.path())?.join("short");
+    std::fs::create_dir(&short)?;
+    crate::short_temporary::use_parent_in_tests(&short);
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let providers = RefusesAfterAlias(std::cell::Cell::new(None));
+
+    let refused = store.prepare_fresh_start(&input(), &providers, &call);
+
+    assert!(refused.is_err());
+    assert_eq!(providers.0.get(), Some(true), "the launch had an alias");
+    assert_eq!(
+        std::fs::read_dir(&short)?.count(),
+        0,
+        "the alias was unlinked"
+    );
+    Ok(())
+}

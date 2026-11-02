@@ -197,6 +197,24 @@ pub struct PreparedStart {
 impl Drop for PreparedStart {
     fn drop(&mut self) {
         if !self.retained {
+            // No attempt record survives for retention to find the alias by,
+            // so unlink it before its attempt directory is deleted.
+            let attempt = crate::artifacts::subdir(
+                &self.runs,
+                std::ffi::OsStr::new(&self.run.to_string()),
+                false,
+            )
+            .and_then(|run| crate::artifacts::subdir(&run, std::ffi::OsStr::new("attempts"), false))
+            .and_then(|attempts| {
+                crate::artifacts::subdir(
+                    &attempts,
+                    std::ffi::OsStr::new(&self.attempt.to_string()),
+                    false,
+                )
+            });
+            if let Ok(attempt) = attempt {
+                crate::short_temporary::remove(&attempt);
+            }
             let _ = crate::artifacts::remove_entry_tree(
                 &self.runs,
                 std::ffi::OsStr::new(&self.run.to_string()),
