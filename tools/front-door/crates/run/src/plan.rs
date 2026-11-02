@@ -12,58 +12,6 @@ impl RunStore {
         let record = self.record(id, call)?;
         let directory = self.attempt_dir(record.run_id, id, false)?;
         subdir(&directory, OsStr::new("tmp"), true)?;
-        #[cfg(target_os = "macos")]
-        {
-            // Keep Unix-domain socket names within Darwin's short sun_path
-            // limit while still granting only this attempt's private root.
-            let path = PathBuf::from(format!("/private/tmp/pv-{id}"));
-            use std::os::unix::fs::{DirBuilderExt, MetadataExt};
-            match std::fs::DirBuilder::new().mode(0o700).create(&path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let metadata = std::fs::symlink_metadata(&path).map_err(|source| {
-                        RunError::Filesystem(provenant_os::fs::FsError::Io {
-                            operation: "inspect short temporary root",
-                            path: path.clone(),
-                            source,
-                        })
-                    })?;
-                    if !metadata.is_dir()
-                        || metadata.file_type().is_symlink()
-                        || metadata.uid() != provenant_os::fs::effective_uid()
-                        || metadata.mode() & 0o077 != 0
-                    {
-                        return Err(RunError::Filesystem(provenant_os::fs::FsError::Io {
-                            operation: "validate short temporary root",
-                            path,
-                            source: std::io::Error::other("root is not private to this user"),
-                        }));
-                    }
-                }
-                Err(error)
-                    if cfg!(test) && error.kind() == std::io::ErrorKind::PermissionDenied =>
-                {
-                    return Ok(self
-                        .context
-                        .state_root
-                        .as_path()
-                        .join("runs")
-                        .join(record.run_id.to_string())
-                        .join("attempts")
-                        .join(id.to_string())
-                        .join("tmp"));
-                }
-                Err(error) => {
-                    return Err(RunError::Filesystem(provenant_os::fs::FsError::Io {
-                        operation: "create short temporary root",
-                        path,
-                        source: error,
-                    }));
-                }
-            }
-            Ok(path)
-        }
-        #[cfg(not(target_os = "macos"))]
         Ok(self
             .context
             .state_root
@@ -259,20 +207,6 @@ mod tests {
                 .read_only_plan(id, &repo, &binding, request(), &call)
                 .is_err()
         );
-        #[cfg(target_os = "macos")]
-        {
-            let short_root = store.temporary_path(id, &call)?;
-            if short_root.starts_with("/private/tmp") {
-                assert_eq!(short_root, PathBuf::from(format!("/private/tmp/pv-{id}")));
-                assert!(short_root.join("socket.sock").as_os_str().len() < 104);
-            }
-            let attempt = store.attempt_dir(run.run_id, id, false)?;
-            crate::artifacts::remove_unreserved_terminal_temporary(&attempt)?;
-            assert!(
-                !short_root.exists(),
-                "attempt cleanup removes its short root"
-            );
-        }
         Ok(())
     }
 }
