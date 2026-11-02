@@ -43,6 +43,12 @@ use std::{
     time::Instant,
 };
 
+fn scratch_prepare_error(error: impl std::fmt::Display) -> FacadeError {
+    FacadeError::io(format!(
+        "prepare project scratch .provenant/scratch/graphs: {error}"
+    ))
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum EdgeError {
     #[error(transparent)]
@@ -4495,9 +4501,7 @@ impl Factory {
                         provenant_confinement::scratch::ensure(&repo, &self.clock, cancel)
                     },
                 )
-                .map_err(|_| {
-                    FacadeError::io("prepare project scratch .provenant/scratch/graphs")
-                })?;
+                .map_err(scratch_prepare_error)?;
                 let path = if document.is_absolute() {
                     document.clone()
                 } else if document.components().count() == 1 && !self.cwd.join(document).exists() {

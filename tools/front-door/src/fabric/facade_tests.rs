@@ -5,6 +5,14 @@ fn cli_failure_uses_stderr_without_structured_json() {
     assert!(matches!(error, ServiceError::Cli { code, message, data }
         if code == "cli_failed" && message == "specific failure" && data.is_null()));
 }
+
+#[cfg(test)]
+#[test]
+fn scratch_prepare_io_error_retains_its_cause() {
+    let error = scratch_prepare_error("exclude lock timed out");
+    assert!(error.to_string().contains("exclude lock timed out"));
+}
+
 #[cfg(test)]
 #[allow(dead_code)] // The worktree driver includes these helpers without libtest.
 mod peer_tests {
