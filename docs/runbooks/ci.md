@@ -10,14 +10,14 @@ dependency graph. Both nextest hash partitions keep their existing partition
 and serial-process behaviour. The provider recording example test runs when
 the provider crate is affected.
 
-The Rust front-door job runs the full workspace on pushes to `main` and when
-the changed paths span multiple crates, fall outside a crate directory, or
-cannot be resolved safely. These paths also force the full workspace:
+A change to several crates selects each crate and its dependents. The Rust
+front-door job runs the full workspace on pushes to `main` and when a changed
+path falls outside a crate directory or cannot be resolved safely. These paths also force the full workspace:
 
 - `tools/front-door/Cargo.lock`
 - `tools/front-door/Cargo.toml`
 - `tools/front-door/rust-toolchain.toml`
-- `.config/nextest.toml`
+- `tools/front-door/.config/nextest.toml`
 - `.github/workflows/ci.yml`
 - any `build.rs`
 - `tools/front-door/assets/`

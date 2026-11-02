@@ -64,7 +64,29 @@ if ! grep -q 'selecting app, leaf, provenant' "$tmp/reason"; then
   exit 1
 fi
 
-mkdir -p tools/front-door
+printf 'pub fn changed() {}\n' >> tools/front-door/crates/app/src/lib.rs
+git commit -qam app-change
+HEAD_SHA=$(git rev-parse HEAD)
+export HEAD_SHA
+filter=$("$script" 2>"$tmp/reason")
+if [ "$filter" != 'rdeps(=app) | rdeps(=leaf)' ]; then
+  echo "two-crate change: expected 'rdeps(=app) | rdeps(=leaf)', got '$filter'" >&2
+  exit 1
+fi
+
+mkdir -p tools/front-door/.config
+printf '[profile.ci]\n' > tools/front-door/.config/nextest.toml
+git add tools/front-door/.config/nextest.toml
+git commit -qm nextest-config
+HEAD_SHA=$(git rev-parse HEAD)
+export HEAD_SHA
+filter=$("$script" 2>"$tmp/reason")
+if [ -n "$filter" ] || ! grep -q 'full-run trigger' "$tmp/reason"; then
+  echo "nextest config change did not select the full workspace" >&2
+  exit 1
+fi
+git reset -q --hard HEAD~1
+
 printf 'lock' > tools/front-door/Cargo.lock
 git add tools/front-door/Cargo.lock
 git commit -qm lockfile

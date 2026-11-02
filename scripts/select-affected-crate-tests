@@ -10,7 +10,7 @@ import sys
 FULL_RUN_PATHS = (
     "tools/front-door/Cargo.toml",
     "tools/front-door/rust-toolchain.toml",
-    ".config/nextest.toml",
+    "tools/front-door/.config/nextest.toml",
     ".github/workflows/ci.yml",
 )
 
@@ -79,9 +79,6 @@ def select(root, base, head, is_main):
             return full(f"{path} is outside a workspace crate")
         if not directory or directory == ".":
             return full(f"{path} is outside a workspace crate")
-
-    if len(selected) != 1:
-        return full("changes span more than one workspace crate")
 
     workspace_packages = {package["name"]: package for package in metadata["packages"]}
     graph = {name: set() for name in workspace_packages}
