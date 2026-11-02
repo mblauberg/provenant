@@ -5026,6 +5026,8 @@ fn agy_own_login_keeps_the_shared_keychain_and_an_isolated_directory_never_does(
     Ok(())
 }
 
+const KEYCHAIN_FILE: &str = "Library/Keychains/login.keychain-db";
+
 #[test]
 fn agy_keychain_symlink_is_not_an_isolated_account_keychain()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -5050,6 +5052,47 @@ fn agy_keychain_symlink_is_not_an_isolated_account_keychain()
     assert_eq!(
         agy::account_keychain(&root.path().join("alias"), &home)?,
         None
+    );
+    Ok(())
+}
+
+#[test]
+fn agy_keychain_behind_a_symlinked_parent_is_not_an_isolated_account_keychain()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let home = root.path().join("home");
+    // The user's real keychain directory, holding a regular file.
+    std::fs::create_dir_all(home.join("Library/Keychains"))?;
+    std::fs::write(home.join(KEYCHAIN_FILE), "")?;
+    let refused = |directory: &std::path::Path| {
+        matches!(
+            agy::account_keychain(directory, &home),
+            Err(ProviderError::IsolatedKeychainUnavailable(path))
+                if path == directory.join(KEYCHAIN_FILE).display().to_string()
+        )
+    };
+    // `Library/Keychains` is a link to the real one.
+    let keychains = root.path().join("keychains-link");
+    std::fs::create_dir_all(keychains.join("Library"))?;
+    std::os::unix::fs::symlink(
+        home.join("Library/Keychains"),
+        keychains.join("Library/Keychains"),
+    )?;
+    assert!(std::fs::symlink_metadata(keychains.join(KEYCHAIN_FILE)).is_ok());
+    assert!(refused(&keychains));
+    // `Library` itself is a link to the real one.
+    let library = root.path().join("library-link");
+    std::fs::create_dir_all(&library)?;
+    std::os::unix::fs::symlink(home.join("Library"), library.join("Library"))?;
+    assert!(std::fs::symlink_metadata(library.join(KEYCHAIN_FILE)).is_ok());
+    assert!(refused(&library));
+    // A real directory tree is still accepted.
+    let own = root.path().join("own");
+    std::fs::create_dir_all(own.join("Library/Keychains"))?;
+    std::fs::write(own.join(KEYCHAIN_FILE), "")?;
+    assert_eq!(
+        agy::account_keychain(&own, &home)?,
+        Some(own.join(KEYCHAIN_FILE))
     );
     Ok(())
 }

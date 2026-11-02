@@ -56,13 +56,28 @@ pub fn account_keychain(
     {
         return Ok(None);
     }
+    isolated_keychain(directory).map(|(keychain, _)| Some(keychain))
+}
+
+/// The one check that an account directory holds its own keychain, shared by
+/// registration, both probes and launch preparation: the keychain path, with
+/// its identity, or the error naming it. The file must be a regular file and
+/// its fully resolved path must be exactly `<resolved directory>/Library/
+/// Keychains/login.keychain-db`, so a symlink anywhere along it (the file, or
+/// `Library` or `Library/Keychains` pointing at another home's) is refused.
+fn isolated_keychain(
+    directory: &std::path::Path,
+) -> Result<(std::path::PathBuf, std::fs::Metadata), crate::ProviderError> {
     let keychain = directory.join(KEYCHAIN);
-    if std::fs::symlink_metadata(&keychain).is_ok_and(|metadata| metadata.file_type().is_file()) {
-        Ok(Some(keychain))
-    } else {
-        Err(crate::ProviderError::IsolatedKeychainUnavailable(
+    let own = std::fs::canonicalize(directory)
+        .ok()
+        .zip(std::fs::canonicalize(&keychain).ok())
+        .is_some_and(|(directory, resolved)| resolved == directory.join(KEYCHAIN));
+    match std::fs::symlink_metadata(&keychain) {
+        Ok(metadata) if own && metadata.file_type().is_file() => Ok((keychain, metadata)),
+        _ => Err(crate::ProviderError::IsolatedKeychainUnavailable(
             keychain.display().to_string(),
-        ))
+        )),
     }
 }
 
