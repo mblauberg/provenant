@@ -153,8 +153,11 @@ pub(crate) fn admit(
 }
 
 /// Minimal environment: the user's identity, a fixed search path and TMPDIR
-/// under the attempt's private tmp directory. Repository-specific Git object
-/// configuration belongs to the private directory.
+/// under the attempt's private tmp directory. zsh ignores TMPDIR for the
+/// temporary files behind here-documents and here-strings and defaults
+/// TMPPREFIX to `/tmp/zsh`, which a lane cannot write, so TMPPREFIX points
+/// into the same directory. Repository-specific Git object configuration
+/// belongs to the private directory.
 /// Callers append provider keys.
 pub(crate) fn base_env(
     input: &PrepareInput<'_>,
@@ -166,6 +169,7 @@ pub(crate) fn base_env(
         ("USER".into(), input.user.into()),
         ("PATH".into(), path.into()),
         ("TMPDIR".into(), scratch.into()),
+        ("TMPPREFIX".into(), scratch.join("zsh").into()),
         ("LANG".into(), "en_US.UTF-8".into()),
     ];
     env.extend(provenant_os::sys::git_identity(
