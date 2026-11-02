@@ -175,13 +175,16 @@ home links its `Library/Keychains/login.keychain-db` instead of the user's login
 keychain, the grant covers exactly that path, and registration and the quota
 probe run `agy -p /usage` with `HOME=<directory>`. If that file is missing or is
 not a regular file (a symlink does not count, nor does a symlinked `Library`
-or `Library/Keychains` along the way), registration, launch and the quota probe
-fail with an error naming the path; they never fall back to the login keychain.
-Both probes re-check the keychain (same device and inode) immediately before
-spawning agy and again when it returns, and discard the result if it changed.
-The probe is not sandboxed, so a keychain swapped for another regular file and
-back while agy runs is the one residual window. Registering your own home directory keeps the shared login
-keychain.
+or `Library/Keychains` along the way, a hard-linked file, or a file that is the
+same inode as your own login keychain, which is only stat'ed), registration,
+launch and the quota probe fail with an error naming the path rather than fall
+back to the login keychain. Both probes re-check the keychain (same device and
+inode) immediately before spawning agy and again when it returns, and discard
+the result if it changed. The probe is not sandboxed, so that guarantee covers
+a keychain that is missing or changed when checked. The residual window is any
+temporary replacement, absence or symlink swap while agy runs that is undone,
+with the original inode restored, before the second check. Registering your own home directory keeps the shared
+login keychain.
 
 Unregistered and registered agy behave differently at launch:
 
