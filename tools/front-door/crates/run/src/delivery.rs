@@ -1816,6 +1816,24 @@ fn stdout_limit(commit_log: bool, args: &[&str]) -> usize {
     }
 }
 
+/// The failed receipt state for a delivery error. A staged error keeps its
+/// stage; a host limit or prepare refusal also keeps its redacted reason under
+/// `reason`, which older readers retain as an extra field. Any other error is
+/// a failed push.
+pub(crate) fn failed_state(error: &RunError) -> WriterDeliveryState {
+    let (stage, reason) = match error {
+        RunError::Delivery(stage) => (*stage, None),
+        RunError::DeliveryLimit { stage, .. } => (*stage, Some(prepare_reason(error))),
+        RunError::DeliveryPrepare { .. } => (Stage::Prepare, Some(prepare_reason(error))),
+        _ => (Stage::Push, None),
+    };
+    let mut extra = provenant_records::ExtraFields::default();
+    if let Some(reason) = reason {
+        extra.insert("reason".into(), reason.into());
+    }
+    WriterDeliveryState::Failed { extra, stage }
+}
+
 /// The subcommand words of a host call, for diagnostics. Options and absolute
 /// paths, such as a `--git-dir` value, are skipped.
 fn git_subcommand(args: &[&str]) -> String {
@@ -2178,14 +2196,7 @@ impl crate::RunStore {
                 extra: Default::default(),
                 pull_request,
             },
-            Err(RunError::Delivery(stage)) => WriterDeliveryState::Failed {
-                extra: Default::default(),
-                stage,
-            },
-            Err(_) => WriterDeliveryState::Failed {
-                extra: Default::default(),
-                stage: Stage::Push,
-            },
+            Err(error) => failed_state(&error),
         };
         let receipt = WriterDeliveryReceipt {
             extra: Default::default(),
@@ -2282,14 +2293,7 @@ pub(crate) fn deliver_once(
                     extra: Default::default(),
                     pull_request,
                 },
-                Err(RunError::Delivery(stage)) => WriterDeliveryState::Failed {
-                    extra: Default::default(),
-                    stage,
-                },
-                Err(_) => WriterDeliveryState::Failed {
-                    extra: Default::default(),
-                    stage: Stage::Push,
-                },
+                Err(error) => failed_state(&error),
             }
         };
     }
