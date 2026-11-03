@@ -4891,6 +4891,7 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
     journal.bind(GraphExecution {
         extra: Default::default(),
         integration_base: None,
+        review_base: None,
         directory: rig.project.clone(),
         document,
     })?;

@@ -29,7 +29,11 @@ pub(crate) fn read_only_branch(
     };
     match crate::prepare_writer(&writer, host, project) {
         Ok(writer) => Ok(Some(writer.branch)),
-        Err(crate::RunError::WorktreeUnregistered(_)) => Ok(None),
+        // A detached read-only worktree has no contribution branch; only
+        // writers need one, and they are refused before launch.
+        Err(crate::RunError::WorktreeUnregistered(_)) | Err(crate::RunError::Validation(_)) => {
+            Ok(None)
+        }
         Err(error) => Err(error),
     }
 }

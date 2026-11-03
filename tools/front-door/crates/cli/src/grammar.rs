@@ -618,6 +618,9 @@ pub struct Dispatch {
     /// Planner front-end: auto, on or off; the default is [domains.fabric.plan] mode
     #[arg(long = "plan", requires = "preset", value_parser = ["auto", "on", "off"])]
     pub preset_plan: Option<String>,
+    /// Give this preset run a new graph identity, for example to rerun after a cancel
+    #[arg(long, requires = "preset")]
+    pub fresh: bool,
     /// Explain roles, limits and the expanded graph without running it
     #[arg(long)]
     pub explain: bool,

@@ -563,6 +563,7 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
                 "preset_set",
                 "preset_params_file",
                 "preset_plan",
+                "fresh",
                 "explain",
                 "route",
                 "model",
@@ -705,9 +706,10 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
             if dispatch.preset.is_none()
                 && (!dispatch.preset_set.is_empty()
                     || dispatch.preset_params_file.is_some()
-                    || dispatch.preset_plan.is_some())
+                    || dispatch.preset_plan.is_some()
+                    || dispatch.fresh)
             {
-                return invalid("--set, --params-file and --plan require --preset");
+                return invalid("--set, --params-file, --plan and --fresh require --preset");
             }
             if matches!(inv.command, Command::Dispatch(_))
                 && dispatch.input.manifest.is_none()
@@ -1025,7 +1027,7 @@ fn requirements(path: &str, name: &str) -> Vec<String> {
         ("provenant run" | "provenant dispatch", "preset") => &["prompt_file"],
         (
             "provenant run" | "provenant dispatch",
-            "preset_set" | "preset_params_file" | "preset_plan",
+            "preset_set" | "preset_params_file" | "preset_plan" | "fresh",
         ) => &["preset"],
         ("provenant run" | "provenant dispatch", "deliver_remote") => {
             &["deliver_branch", "writer_target"]
@@ -1159,6 +1161,7 @@ mod tests {
                 ("preset_set", vec!["preset"]),
                 ("preset_params_file", vec!["preset"]),
                 ("preset_plan", vec!["preset"]),
+                ("fresh", vec!["preset"]),
                 ("preset", vec!["prompt_file"]),
                 ("deliver_remote", vec!["deliver_branch", "writer_target"]),
                 ("deliver_branch", vec!["deliver_remote"]),
