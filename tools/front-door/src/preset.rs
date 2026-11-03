@@ -2376,7 +2376,7 @@ fn configured(globals: &provenant_cli::Globals) -> Result<Layers, String> {
 fn report(command: &str, result: Result<Value, String>, globals: &provenant_cli::Globals) -> u8 {
     match result {
         Ok(data) => {
-            let human = presentation::human(&data);
+            let human = presentation::human(&data, globals.full);
             let summary = provenant_cli::Summary::verbatim(&human, None);
             crate::emit_summarised(
                 &provenant_records::CommandResult::new(

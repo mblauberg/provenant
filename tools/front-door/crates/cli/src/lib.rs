@@ -94,7 +94,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
                 clap::error::ErrorKind::DisplayHelp => match help_scope(&model, &argv) {
                     Some(scope) => ParseOutcome::Help {
                         text: if scope == "provenant" {
-                            CORE_HELP.into()
+                            core_help(&model)
                         } else {
                             error.to_string()
                         },
@@ -129,6 +129,27 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
         Ok(value) => Invocation {
             globals,
             command: value.command,
+            preset_incompatible_flags: matches
+                .subcommand()
+                .filter(|(name, _)| matches!(*name, "run" | "dispatch"))
+                .map_or_else(Vec::new, |(_, sub)| {
+                    PRESET_INCOMPATIBLE
+                        .iter()
+                        .filter(|id| {
+                            sub.value_source(id) == Some(clap::parser::ValueSource::CommandLine)
+                        })
+                        .map(|id| {
+                            format!(
+                                "--{}",
+                                if *id == "knobs" {
+                                    "knob".to_owned()
+                                } else {
+                                    id.replace('_', "-")
+                                }
+                            )
+                        })
+                        .collect()
+                }),
             leaf: std::iter::successors(matches.subcommand(), |(_, sub)| sub.subcommand())
                 .map(|(name, _)| name)
                 .collect::<Vec<_>>()
@@ -161,7 +182,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
         }
         return ParseOutcome::Help {
             text: if command.is_empty() && !all {
-                CORE_HELP.into()
+                core_help(&model)
             } else {
                 if command.is_empty() && *all {
                     format!(
@@ -339,15 +360,16 @@ fn walk_subcommands<'a>(
     Some((selected, path))
 }
 fn edit_distance(left: &str, right: &str) -> usize {
+    let right: Vec<char> = right.chars().collect();
     let mut row: Vec<_> = (0..=right.len()).collect();
-    for (i, a) in left.bytes().enumerate() {
+    for (i, a) in left.chars().enumerate() {
         let mut diagonal = row[0];
         row[0] = i + 1;
-        for (j, b) in right.bytes().enumerate() {
+        for (j, b) in right.iter().enumerate() {
             let above = row[j + 1];
             row[j + 1] = (row[j] + 1)
                 .min(above + 1)
-                .min(diagonal + usize::from(a != b));
+                .min(diagonal + usize::from(a != *b));
             diagonal = above;
         }
     }
@@ -448,31 +470,67 @@ fn parsed_globals(matches: &clap::ArgMatches, json: bool) -> (Globals, Option<Cl
     )
 }
 
+const PRESET_INCOMPATIBLE: &[&str] = &[
+    "manifest",
+    "prompt_stdin",
+    "model",
+    "route",
+    "effort",
+    "account",
+    "fallback",
+    "mode",
+    "branch",
+    "worktree_branch",
+    "host",
+    "deliver",
+    "deliver_remote",
+    "deliver_branch",
+    "open_pr",
+    "write_root",
+    "capability",
+    "knobs",
+    "task_id",
+    "delivery_id",
+    "head",
+    "base",
+    "title",
+    "build_heavy",
+    "read_heavy",
+    "confidential",
+    "provider_timeout",
+    "operation_id",
+];
 pub fn command_model() -> clap::Command {
     build_model(false, false)
 }
-const CORE_HELP: &str = "Provenant: run work, inspect progress and land changes.
-
-  run       Dispatch, wait and read the result
-            provenant run --prompt-file brief.md --route senior
-  status    Active and recent lanes, newest first
-            provenant status
-  land      Wait for CI, merge and prune the merged worktree
-            provenant land 1947 --wait
-  quota     Show provider quota
-            provenant quota
-  ask       Record a decision, assumption or question
-            provenant ask --file request.json --session SESSION --json
-  inbox     List requests or inspect an item
-            provenant inbox --json
-  answer    Resolve a request at the revision you saw
-            provenant help answer
-  install   Install harness integrations
-            provenant install
-  --full    Complete human detail; --json keeps machine output
-  help --all  All commands and advanced options
-              provenant help --all
-";
+// The examples mark the commands included in the compact landing page; their
+// descriptions come from the same command model as the parser and catalogue.
+fn core_help(model: &clap::Command) -> String {
+    let mut text = String::from("Provenant: run work, inspect progress and land changes.\n\n");
+    for (name, example) in [
+        ("run", "provenant run --prompt-file brief.md --route senior"),
+        ("status", "provenant status"),
+        ("land", "provenant land 1947 --wait"),
+        ("quota", "provenant quota"),
+        (
+            "ask",
+            "provenant ask --file request.json --session SESSION --json",
+        ),
+        ("inbox", "provenant inbox --json"),
+        ("answer", "provenant help answer"),
+        ("install", "provenant install"),
+    ] {
+        if let Some(command) = model.find_subcommand(name) {
+            let about = command
+                .get_about()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            text.push_str(&format!("  {name:<8}  {about}\n            {example}\n"));
+        }
+    }
+    text.push_str("  --full    Complete human detail; --json keeps machine output\n  help --all  All commands and advanced options\n              provenant help --all\n");
+    text
+}
 fn expanded_model() -> clap::Command {
     build_model(false, true)
 }
@@ -510,6 +568,9 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
             );
         }
         if matches!(path.as_str(), "provenant dispatch" | "provenant run") {
+            command = command.mut_arg("preset", |arg| {
+                arg.conflicts_with_all(PRESET_INCOMPATIBLE.iter().copied())
+            });
             command = command
                 .mut_arg("model", |arg| {
                     if path == "provenant dispatch" {
@@ -1044,6 +1105,68 @@ fn requirements(path: &str, name: &str) -> Vec<String> {
 mod tests {
     use super::*;
     #[test]
+    fn preset_compatibility_table_matches_clap_conflicts() {
+        let model = expanded_model();
+        for command in ["run", "dispatch"] {
+            let command = model.find_subcommand(command).unwrap();
+            let preset = command
+                .get_arguments()
+                .find(|arg| arg.get_id() == "preset")
+                .unwrap();
+            let conflicts = command.get_arg_conflicts_with(preset);
+            for id in PRESET_INCOMPATIBLE {
+                assert!(conflicts.iter().any(|arg| arg.get_id() == *id), "{id}");
+            }
+            assert_eq!(conflicts.len(), PRESET_INCOMPATIBLE.len());
+        }
+    }
+    #[test]
+    fn automatic_preset_tracks_explicit_incompatible_flags() {
+        for (flag, value) in [
+            ("--provider-timeout", "3600"),
+            ("--mode", "read-only"),
+            ("--task-id", "11111111111111111111111111111111"),
+            ("--operation-id", "chosen"),
+        ] {
+            let invocation = valid(&["run", "--prompt-file", "brief.md", flag, value]);
+            assert!(
+                invocation
+                    .preset_incompatible_flags
+                    .iter()
+                    .any(|item| item == flag),
+                "{flag}"
+            );
+            invalid(&[
+                "run",
+                "--prompt-file",
+                "brief.md",
+                "--preset",
+                "single",
+                flag,
+                value,
+            ]);
+        }
+        assert!(
+            valid(&["run", "--prompt-file", "brief.md"])
+                .preset_incompatible_flags
+                .is_empty()
+        );
+    }
+    #[test]
+    fn catalogue_paths_exist_in_command_model() {
+        let model = expanded_model();
+        for entry in catalog(&model).commands {
+            let mut words = entry.command.split_whitespace();
+            assert_eq!(words.next(), Some(model.get_name()));
+            let mut current = &model;
+            for word in words {
+                current = current
+                    .find_subcommand(word)
+                    .unwrap_or_else(|| panic!("missing {}", entry.command));
+            }
+        }
+    }
+    #[test]
     fn config_check_reuses_the_check_config_page_arguments() {
         let config = valid(&["config", "check", "--limit", "75", "--cursor", "cursor"]);
         let check = valid(&["check", "config", "--limit", "75", "--cursor", "cursor"]);
@@ -1298,6 +1421,12 @@ mod tests {
     }
     #[test]
     fn common_usage_errors_name_the_correct_invocation() {
+        for flag in ["--wait", "--watch"] {
+            let ParseOutcome::Invalid { error, .. } = parsed(&["lanes", flag, "5h"]) else {
+                panic!("expected duration error");
+            };
+            assert!(error.to_string().contains(flag), "{error}");
+        }
         for (words, example) in [
             (
                 vec!["route", "resolve", "one", "two"],
@@ -1479,7 +1608,7 @@ mod tests {
         valid(&["lanes", "--since", "2026-10-25T00:00:00.000000Z"]);
         invalid(&["lanes", "--since"]);
         invalid(&["lanes", "--state", "unknown"]);
-        invalid(&["lanes", "--since", "24h"]);
+        valid(&["lanes", "--since", "1d"]);
         valid(&["lanes", "--wait", "10", "--since", "86400"]);
         invalid(&["lanes", "--wait", "10", "--state", "running"]);
     }
@@ -1507,6 +1636,7 @@ mod tests {
         ]);
         valid(&["lanes", "--watch"]);
         valid(&["lanes", "--watch", "600", "--session", "chair"]);
+        valid(&["lanes", "--watch", "30m"]);
         invalid(&["lanes", "--session", "has space"]);
         invalid(&["lanes", "--session", ""]);
         invalid(&["lanes", "--session", "chair", "--all"]);
