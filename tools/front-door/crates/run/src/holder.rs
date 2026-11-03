@@ -1853,9 +1853,9 @@ pub(crate) fn seal_manifest(
     crate::artifacts::seal(archive, name, bytes, limit)
 }
 
-/// Stored instead of the provider's answer when settlement cannot filter it.
 /// The cause shown for a lane that ended without a final handoff.
 pub const NO_HANDOFF_REASON: &str = "no handoff: the lane ended without reporting results";
+/// Stored instead of the provider's answer when settlement cannot filter it.
 const UNREDACTABLE_RESULT: &str = "[result withheld: redaction failed]";
 const REDACTION_FAILED_REASON: &str = "redaction failed; result withheld";
 

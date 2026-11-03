@@ -2105,11 +2105,16 @@ pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> 
     {
         return Ok(());
     }
+    // Pacing holds a route back through candidate preparation, so a
+    // `Preparation` refusal is a refusal too, never a successful run.
     if let Some((attempt, reason)) = started.iter().find_map(|started| match started {
         run::Started::Refused {
             attempt,
             reason,
-            kind: run::RefusalKind::Policy | run::RefusalKind::PriorityUnavailable,
+            kind:
+                run::RefusalKind::Policy
+                | run::RefusalKind::Preparation
+                | run::RefusalKind::PriorityUnavailable,
         } => Some((attempt, reason)),
         _ => None,
     }) {

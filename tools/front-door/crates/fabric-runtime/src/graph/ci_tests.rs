@@ -895,6 +895,49 @@ fn ci_failure_without_findings_does_not_launch_repair() {
     assert!(owner.prompts.is_empty());
 }
 
+fn recovery_after_findingless_failure(recovery: serde_json::Value) -> (Vec<NodeState>, usize) {
+    let mut doc = document();
+    doc.nodes[0].on_fail = Some("recovery".into());
+    doc.nodes.push(serde_json::from_value(recovery).unwrap());
+    let mut owner = Owner {
+        observations: VecDeque::from([observation(CiState::Failed, "failed")]),
+        ..Default::default()
+    };
+    let run = advance(&doc, &mut owner, &mut Journal::default()).unwrap();
+    (
+        run.checkpoint.nodes.iter().map(|n| n.state).collect(),
+        owner.prompts.len(),
+    )
+}
+
+#[test]
+fn findingless_ci_failure_still_runs_a_recovery_node_that_ignores_findings() {
+    let node = |extra: serde_json::Value| {
+        let mut node = serde_json::json!({
+            "id":"recovery","access":"read_only","prompt":"notify","depends_on":["ci"],
+            "route":{"adapter":"fixture","model":"fixture/model"}
+        });
+        node.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        node
+    };
+    let (states, prompts) = recovery_after_findingless_failure(node(serde_json::json!({})));
+    assert_eq!(states[1], NodeState::Succeeded);
+    assert_eq!(prompts, 1);
+    // The node can opt in to skipping, or a findings consumer can opt out.
+    let (states, _) = recovery_after_findingless_failure(node(
+        serde_json::json!({"skip_without_findings": true}),
+    ));
+    assert_eq!(states[1], NodeState::Skipped);
+    let (states, prompts) = recovery_after_findingless_failure(node(serde_json::json!({
+        "skip_without_findings": false,
+        "inputs":[{"node":"ci","outputs":["findings"]}]
+    })));
+    assert_eq!(states[1], NodeState::Succeeded);
+    assert_eq!(prompts, 1);
+}
+
 #[test]
 fn ci_failed_checks_obey_count_and_canonical_byte_caps_with_unicode_and_escapes() {
     let mut check = failed_check();

@@ -34,6 +34,20 @@ fn policy_refusal_preserves_uncertain_sibling_handoff() -> Result<(), String> {
     .err()
     .ok_or("priority refusal was ignored")?;
     assert!(error.message.contains("PacingReserve"));
+    // Production classifies a pacing-held route as a preparation refusal whose
+    // reason is the routing exclusion detail.
+    let held = provenant_routing::exclusion_detail(
+        &provenant_records::RouteExclusionReason::PacingReserve,
+    );
+    let error = check_launch_policy(&[run::Started::Refused {
+        attempt: AttemptId::from_bytes([4; 16]),
+        kind: run::RefusalKind::Preparation,
+        reason: held,
+    }])
+    .err()
+    .ok_or("pacing-held preparation refusal was ignored")?;
+    assert_eq!(error.status, Status::Refused);
+    assert!(error.message.contains("PacingReserve"));
     // Let the existing unknown-handoff handling retain the full receipt.
     check_launch_policy(&[
         refused(),
