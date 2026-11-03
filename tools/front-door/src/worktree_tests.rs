@@ -879,7 +879,7 @@ fn writer_terminal_refuses_sequencer_state() -> Result {
     let terminal = await_terminal(&store, attempt, &call)?;
     assert_terminal_outcome(&terminal, provenant_run::Outcome::ReviewRequired)?;
     assert!(
-        matches!(terminal.state, provenant_run::AttemptState::Terminal { reason: Some(reason), .. } if reason == "protected changes require review; partial finish (handoff_missing)")
+        matches!(terminal.state, provenant_run::AttemptState::Terminal { reason: Some(reason), .. } if reason == "protected changes require review; handoff declared done but settlement was not successful")
     );
     assert_eq!(
         git(&rig, &["-C", path_text, "rev-parse", "HEAD"])?,
