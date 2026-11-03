@@ -5839,6 +5839,15 @@ fn foreign_writer_and_dirty_tree_refusals_remain_fail_closed()
                 "foreign_res was: {:?}",
                 foreign_res.result
             );
+            assert_eq!(
+                foreign_res
+                    .result
+                    .error
+                    .as_ref()
+                    .ok_or("foreign refusal")?
+                    .code,
+                "REFUSED"
+            );
 
             Ok(())
         },
