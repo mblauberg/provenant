@@ -297,7 +297,7 @@ impl Layers {
                     entry["origin"] = json!(policy_origin.clone());
                     if entry
                         .get("default")
-                        .map_or(true, |v| v.as_str().map_or(false, |s| s.is_empty()))
+                        .is_none_or(|v| v.as_str().is_some_and(|s| s.is_empty()))
                     {
                         entry["default"] = json!(policy_text.clone());
                     }
@@ -902,24 +902,23 @@ pub fn expand_with(
     layers.warnings.borrow_mut().clear();
     let mut repo_files = Vec::new();
     let (mut config, mut origins) = layers.resolve_inner(name, &mut Vec::new(), &mut repo_files)?;
-    if let Some((policy_origin, policy_text)) = layers.roles.policy(layers.exclude_repo.get()) {
-        if let Some(params_map) = config.get_mut("parameters").and_then(Value::as_object_mut) {
-            if let Some(local_policy) = params_map.get_mut("local_check_policy") {
-                let is_custom_override = origins
-                    .get("parameters.local_check_policy")
-                    .map_or(false, |o| o.starts_with(".provenant/presets"));
-                if !is_custom_override {
-                    if is_spec(local_policy) {
-                        local_policy["default"] = json!(policy_text);
-                    } else {
-                        *local_policy = json!(policy_text);
-                    }
-                    origins.insert(
-                        "parameters.local_check_policy".into(),
-                        policy_origin.to_owned(),
-                    );
-                }
+    if let Some((policy_origin, policy_text)) = layers.roles.policy(layers.exclude_repo.get())
+        && let Some(params_map) = config.get_mut("parameters").and_then(Value::as_object_mut)
+        && let Some(local_policy) = params_map.get_mut("local_check_policy")
+    {
+        let is_custom_override = origins
+            .get("parameters.local_check_policy")
+            .is_some_and(|o| o.starts_with(".provenant/presets"));
+        if !is_custom_override {
+            if is_spec(local_policy) {
+                local_policy["default"] = json!(policy_text);
+            } else {
+                *local_policy = json!(policy_text);
             }
+            origins.insert(
+                "parameters.local_check_policy".into(),
+                policy_origin.to_owned(),
+            );
         }
     }
     for (key, value) in params {
@@ -1213,19 +1212,18 @@ pub(crate) fn find_prompt(nodes: &Value, role: &str) -> Option<String> {
             }
         }
     } else if let Some(map) = nodes.as_object() {
-        if map.get("role").and_then(Value::as_str) == Some(role) {
-            if let Some(prompt) = map.get("prompt").and_then(Value::as_str) {
-                return Some(prompt.to_string());
-            }
+        if map.get("role").and_then(Value::as_str) == Some(role)
+            && let Some(prompt) = map.get("prompt").and_then(Value::as_str)
+        {
+            return Some(prompt.to_string());
         }
         for (key, val) in map {
             if matches!(
                 key.as_str(),
                 "composite" | "loop" | "plan" | "patterns" | "nodes" | "body"
-            ) {
-                if let Some(found) = find_prompt(val, role) {
-                    return Some(found);
-                }
+            ) && let Some(found) = find_prompt(val, role)
+            {
+                return Some(found);
             }
         }
     }
