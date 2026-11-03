@@ -1097,6 +1097,31 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
     assert_eq!(writer.route, fallback.route);
     assert!(writer.instruction.contains("git status"));
     assert!(writer.instruction.contains("already pushed"));
+    // The settlement assessor cannot establish the extra graph writer safety
+    // evidence. It must not redraw an alias until the graph has checked it.
+    fallback.context = Some(provenant_records::run::WorkContext {
+        graph_id: Some("graph".into()),
+        node_id: Some("writer".into()),
+        ..Default::default()
+    });
+    let graph_writer = assess(&fallback, &sessionless, 1, false);
+    assert_eq!(graph_writer.cause, Some(run::PolicyCause::Capacity));
+    assert!(graph_writer.retry.is_none());
+    let mut separated = fallback.clone();
+    separated.route = run::RequestedRoute::Review {
+        extra: Default::default(),
+        name: "implement".into(),
+        effort: None,
+        excluded_families: vec!["other".into()],
+        distinct_families: true,
+        require_distinct: true,
+    };
+    assert!(assess(&separated, &sessionless, 1, false).retry.is_none());
+    separated.access.write_roots.clear();
+    assert!(assess(&separated, &sessionless, 1, false).retry.is_none());
+    assert!(assess(&fallback, &capacity, 1, false).retry.unwrap().resume);
+    fallback.access.write_roots.clear();
+    assert!(assess(&fallback, &sessionless, 1, false).retry.is_some());
     // Other model failures are not capacity.
     let unavailable = decoded(
         run::Outcome::ModelUnavailable,
@@ -1111,6 +1136,10 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
         None,
         "You've hit your weekly limit",
     );
+    fallback.access.write_roots.push(temp.path().to_owned());
+    let graph_writer_quota = assess(&fallback, &quota, 1, true);
+    assert_eq!(graph_writer_quota.cause, Some(run::PolicyCause::Quota));
+    assert!(graph_writer_quota.retry.is_none());
     // A named route on its only account, or every other account spent,
     // has nowhere to go: a redraw could reach the spent account again
     // through another model.

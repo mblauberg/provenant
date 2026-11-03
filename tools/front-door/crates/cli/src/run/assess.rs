@@ -215,6 +215,27 @@ pub(super) fn assess_settlement_retry(
             .as_deref()
             .and_then(provenant_records::AdapterSpec::get)
             .is_some_and(|spec| spec.launch.resume);
+    // A graph writer may only redraw after the graph has verified released
+    // custody, its pinned source, a clean checkout and no publication. The
+    // settlement assessor has none of that evidence, so it must not redraw an
+    // alias or switch accounts on its own. Family-constrained routes must not
+    // be redrawn either.
+    // Session continuation stays on the applied model.
+    if task
+        .context
+        .as_ref()
+        .is_some_and(|context| context.graph_id.is_some())
+        && ((quota && writes)
+            || (capacity
+                && !session
+                && (matches!(task.route, run::RequestedRoute::Review { .. })
+                    || (writes && matches!(task.route, run::RequestedRoute::Named { .. })))))
+    {
+        return run::ResultAssessment {
+            cause: Some(typed_cause),
+            ..Default::default()
+        };
+    }
     let (route_choice, resume) = if capacity && session {
         (applied(), true)
     } else if quota {
