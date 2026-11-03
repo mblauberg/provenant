@@ -296,8 +296,15 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     assert_eq!(json(&refused)?["data"]["cleanup_pending"], true);
     assert!(retained.exists());
     let after = fs::read_to_string(landing.rig.project.join("gh-calls"))?;
-    assert!(!after[before.len()..].contains("pr merge"));
-    assert!(!after[before.len()..].contains("/commits/"));
+    let land_calls = &after[before.len()..];
+    assert!(
+        !land_calls.lines().any(|line| line.starts_with("pr view ")
+            || line.starts_with("pr checks ")
+            || line.starts_with("pr merge ")
+            || line.starts_with("repo view ")),
+        "{land_calls}"
+    );
+    assert!(!land_calls.contains("/commits/"));
     assert_eq!(
         db.query_row(
             "SELECT min(closed) FROM branch_prs WHERE number=1668",
@@ -594,12 +601,11 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     );
     assert!(String::from_utf8_lossy(&landed.stderr.bytes).contains("no open contribution binding"));
     let calls = fs::read_to_string(unbound_landing.rig.project.join("gh-calls"))?;
-    assert_eq!(
-        calls
+    assert!(
+        !calls
             .lines()
-            .filter(|line| *line == "repo view --json nameWithOwner")
-            .count(),
-        1
+            .any(|line| line.starts_with("pr view ") || line.starts_with("repo view ")),
+        "{calls}"
     );
     Ok(())
 }
@@ -776,7 +782,51 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
             .open(dir.join("gh-calls"))?,
         "{call}"
     )?;
-    match call.as_str() {
+    let normalised = call.replace("api --include ", "api ");
+    match normalised.as_str() {
+        value if (value.starts_with("api repos/{owner}/{repo}/pulls/") || value.starts_with("api repos/owner/repo/pulls/")) && !value.ends_with("/merge") => {
+            let head: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("head.json"))?)?;
+            let mut view: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("view.json"))?)?;
+            if let Some(number) = value.rsplit('/').next().filter(|number| *number != "1668") {
+                view["state"] = fs::read_to_string(dir.join(format!("state-{number}"))).unwrap_or_else(|_| "OPEN".into()).into();
+            }
+            let merged = view["state"] == "MERGED";
+            if merged && dir.join("rate-after-merge").exists() {
+                writeln!(io::stdout(), "HTTP/2 403\r\nretry-after: 30\r\nx-ratelimit-reset: 4102444800\r\n\r\n{{}}")?;
+                writeln!(io::stderr(), "API rate limit exceeded")?;
+                return Ok(1);
+            }
+            let base = view["baseRefName"].as_str().unwrap_or("main");
+            let branch = view["headRefName"].as_str().unwrap_or("feat");
+            let head_repo = if view["isCrossRepository"] == true { "other/repo" } else { "owner/repo" };
+            let mergeable = match head["mergeable"].as_str() {
+                Some("CONFLICTING") => Some(false),
+                Some("UNKNOWN") => None,
+                _ => Some(true),
+            };
+            let state = if merged { "closed".to_owned() } else { view["state"].as_str().unwrap_or("OPEN").to_ascii_lowercase() };
+            let response = serde_json::json!({
+                "state": state,
+                "head": {"sha": head["headRefOid"], "ref": branch, "repo": {"full_name": head_repo}},
+                "base": {"sha": head["headRefOid"], "ref": base, "repo": {"full_name": "owner/repo"}},
+                "mergeable": mergeable, "mergeable_state": "clean", "title": view["title"].as_str().unwrap_or("fixture"),
+                "merged_at": if merged { Some("2099-01-01T00:00:00Z") } else { None },
+                "closed_at": if view["state"] == "CLOSED" { Some("2020-01-01T00:00:00Z") } else { None },
+                "merge_commit_sha": view["mergeCommit"]["oid"]
+            });
+            io::stdout().write_all(&serde_json::to_vec(&response)?)?;
+        }
+        value if value.starts_with("api --method PUT repos/{owner}/{repo}/pulls/") && value.contains("/merge ") => {
+            fs::write(dir.join("merge-args"), args.join("\n") + "\n")?;
+            if dir.join("merge-completes").exists() {
+                let mut view: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("view.json"))?)?;
+                view["state"] = "MERGED".into();
+                fs::write(dir.join("view.json"), serde_json::to_vec(&view)?)?;
+                io::stdout().write_all(br#"{"merged":true}"#)?;
+            } else {
+                io::stdout().write_all(br#"{"merged":false}"#)?;
+            }
+        }
         value if value.starts_with("pr create ") => {
             std::io::copy(&mut io::stdin(), &mut io::sink())?;
             let number = fs::read_to_string(dir.join("create-number")).unwrap_or("1668".into());
@@ -1020,10 +1070,17 @@ pub(crate) fn pr_land_merges_then_fetches_fast_forwards_and_prunes() -> Result {
     // The merge went through the existing repository workflow at this head.
     let merge = fs::read_to_string(rig.project.join("merge-args"))?;
     assert!(
-        merge.contains(&format!("--match-head-commit\n{}", landing.head)),
+        merge.contains(&format!("sha={}", landing.head)) && merge.contains("merge_method=merge"),
         "{merge}"
     );
     assert!(!rig.project.join("watched").exists());
+    let calls = fs::read_to_string(rig.project.join("gh-calls"))?;
+    assert!(
+        !calls.lines().any(|line| line.starts_with("pr view ")
+            || line.starts_with("pr checks ")
+            || line.starts_with("pr merge ")),
+        "{calls}"
+    );
     assert_eq!(
         git(rig, &["rev-parse", "main"])?,
         git(rig, &["rev-parse", "origin/main"])?
@@ -2177,5 +2234,42 @@ pub(crate) fn pr_land_changes_nothing_when_the_merge_does_not_happen() -> Result
     let value = land(&landing)?;
     assert_eq!(value["data"]["merged"], false);
     assert!(landing.worktree.exists());
+
+    // An unconfirmed merge must preserve real local worktrees and refs.
+    let landing = self::landing()?;
+    let rig = &landing.rig;
+    fs::write(
+        rig.project.join("view.json"),
+        r#"{"state":"OPEN","baseRefName":"main","headRefName":"feat","isCrossRepository":false}"#,
+    )?;
+    fs::write(rig.project.join("merge-completes"), "")?;
+    fs::write(rig.project.join("rate-after-merge"), "")?;
+    let output = command(
+        rig,
+        &[
+            "land",
+            NUMBER,
+            "--head",
+            &landing.head,
+            "--wait=5s",
+            "--json",
+        ],
+    )?;
+    let value = json(&output)?;
+    assert_eq!(value["error"]["code"], "RATE_LIMITED", "{value}");
+    let message = value["error"]["message"].as_str().ok_or("error message")?;
+    assert!(message.contains("merge may have completed"), "{value}");
+    assert!(message.contains("2100-01-01"), "{value}");
+    let retry = format!(
+        "provenant land {NUMBER} --head {} --wait=5s --state-dir '{}' --json",
+        landing.head,
+        rig.state.display()
+    );
+    assert!(message.contains(&format!("next: {retry}")), "{value}");
+    assert_eq!(value["error"]["repair"], retry, "{value}");
+    assert!(landing.worktree.exists());
+    assert!(branch_exists(rig, "feat")?);
+    assert_eq!(git(rig, &["rev-parse", "main"])?, landing.stale);
+
     Ok(())
 }

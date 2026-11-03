@@ -152,6 +152,93 @@ fn land_reports_landed_when_the_merge_call_errors_after_taking_effect() -> Resul
     Ok(())
 }
 
+fn land_reports_unknown_when_the_merge_exhausts_the_wait_budget() -> Result {
+    let rig = self::rig()?;
+    fs::write(rig.project.join("merge-delay"), "")?;
+    let output = rig.command(&["land", "1668", "--head", HEAD, "--wait=5s", "--json"])?;
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert!(
+        rig.project.join("merge-args").exists(),
+        "merge was attempted"
+    );
+    assert!(rig.project.join("merged").exists(), "merge took effect");
+    assert_eq!(report["error"]["code"], "MERGE_STATE_UNKNOWN", "{report}");
+    assert!(
+        report["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("merge may have completed"),
+        "{report}"
+    );
+    Ok(())
+}
+
+fn merge_calls(rig: &TestRig) -> Result<usize> {
+    Ok(fs::read_to_string(rig.project.join("gh-calls"))?
+        .lines()
+        .filter(|line| line.contains("--method PUT"))
+        .count())
+}
+
+fn land_retries_a_rate_limited_merge() -> Result {
+    let rig = self::rig()?;
+    fs::write(rig.project.join("rate-once"), "")?;
+    let output = rig.command(&["land", "1668", "--head", HEAD, "--wait=30s", "--json"])?;
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(code(&output), 0, "{report}");
+    assert_eq!(report["data"]["merged"], true, "{report}");
+    assert_eq!(merge_calls(&rig)?, 2);
+    Ok(())
+}
+
+fn land_reports_reset_and_exact_retry_when_merge_rate_limit_exhausts_budget() -> Result {
+    let rig = self::rig()?;
+    fs::write(rig.project.join("rate-always"), "")?;
+    let output = rig.command(&["land", "1668", "--head", HEAD, "--wait=5s", "--json"])?;
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(report["error"]["code"], "RATE_LIMITED", "{report}");
+    let retry = format!(
+        "provenant land 1668 --head {HEAD} --wait=5s --state-dir '{}' --json",
+        rig.state.display()
+    );
+    assert_eq!(report["error"]["repair"], retry, "{report}");
+    let message = report["error"]["message"].as_str().ok_or("error message")?;
+    assert!(message.contains("2100-01-01"), "{report}");
+    assert!(message.contains(&format!("next: {retry}")), "{report}");
+    assert_eq!(report["data"]["merged"], false, "{report}");
+    assert_eq!(report["data"]["steps"], serde_json::json!([]));
+    assert!(!rig.project.join("merged").exists());
+    Ok(())
+}
+
+fn rest_merge_refusal(flag: &str, expected: &str) -> Result {
+    let rig = self::rig()?;
+    fs::write(rig.project.join(flag), "")?;
+    let output = merge(&rig)?;
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(report["error"]["code"], expected, "{report}");
+    assert_eq!(report["status"], "refused", "{report}");
+    assert_eq!(report["data"]["merged"], false, "{report}");
+    assert_eq!(report["data"]["steps"], serde_json::json!([]));
+    assert!(
+        report["error"]["repair"]
+            .as_str()
+            .is_some_and(|repair| !repair.is_empty()),
+        "{report}"
+    );
+    assert_eq!(merge_calls(&rig)?, 1);
+    assert!(!rig.project.join("merged").exists());
+    Ok(())
+}
+
+fn land_refuses_a_rest_merge_409_as_head_moved() -> Result {
+    rest_merge_refusal("merge-conflict", "HEAD_MOVED")
+}
+
+fn land_refuses_a_rest_merge_405_with_a_next_step() -> Result {
+    rest_merge_refusal("merge-not-allowed", "MERGE_NOT_ALLOWED")
+}
+
 fn land_refuses_when_the_head_moves_after_checks_were_pending() -> Result {
     // Second wait read sees B; the A-B-A script returns to A afterwards and
     // must not be treated as a head that never moved.
@@ -278,6 +365,23 @@ fn land_matches_a_required_check_on_its_integration() -> Result {
     Ok(())
 }
 
+fn land_retries_a_rate_limited_policy_read() -> Result {
+    let rig = self::rig()?;
+    fs::write(rig.project.join("rate-read-once"), "")?;
+    let output = rig.command(&["land", "1668", "--head", HEAD, "--wait=30s", "--json"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let calls = fs::read_to_string(rig.project.join("gh-calls"))?;
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| line.ends_with("repos/owner/repo/branches/main"))
+            .count(),
+        2
+    );
+    assert!(rig.project.join("merge-args").exists());
+    Ok(())
+}
+
 fn land_retries_transient_gh_reads_inside_the_wait() -> Result {
     let rig = self::rig()?;
     fs::write(rig.project.join("flaky"), "")?;
@@ -311,7 +415,41 @@ fn land_waits_for_new_checks_to_stop_registering_when_no_check_is_required() -> 
     Ok(())
 }
 
-fn land_guards_head_and_uses_optional_git_email() -> Result {
+fn land_explains_poll_and_budget_sources() -> Result {
+    let rig = self::rig()?;
+    let show = |args: &[&str]| -> Result<serde_json::Value> {
+        let output = rig.command(args)?;
+        assert_eq!(code(&output), 0);
+        Ok(serde_json::from_slice(&output.stdout.bytes)?)
+    };
+    let default = show(&["land", "1668", "--explain", "--json"])?;
+    assert_eq!(default["data"]["poll_seconds"], 30);
+    assert_eq!(default["data"]["poll_source"], "compiled default");
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[domains.pr.land]\npoll_seconds = 45\n",
+    )?;
+    let config = show(&["land", "1668", "--explain", "--json"])?;
+    assert_eq!(config["data"]["poll_seconds"], 45);
+    assert_eq!(config["data"]["poll_source"], "host config");
+    let cli = show(&[
+        "land",
+        "1668",
+        "--explain",
+        "--poll",
+        "7",
+        "--wait=90s",
+        "--json",
+    ])?;
+    assert_eq!(cli["data"]["poll_seconds"], 7);
+    assert_eq!(cli["data"]["poll_source"], "--poll");
+    assert_eq!(cli["data"]["retry_budget_seconds"], 90);
+    assert_eq!(cli["data"]["retry_budget_source"], "--wait");
+    assert!(!rig.project.join("gh-calls").exists());
+    Ok(())
+}
+
+fn land_guards_head_and_uses_rest_merge() -> Result {
     for email in [None, Some("123+fixture@users.noreply.github.com")] {
         let rig = self::rig()?;
         if let Some(email) = email {
@@ -328,14 +466,10 @@ fn land_guards_head_and_uses_optional_git_email() -> Result {
         assert_eq!(report["data"]["result"], "pass");
         assert_eq!(report["data"]["merged"], true);
         assert_eq!(report["data"]["state"], "MERGED");
-        let mut expected = format!("pr\nmerge\n1668\n--merge\n--match-head-commit\n{HEAD}\n");
-        if let Some(email) = email {
-            expected.push_str(&format!("--author-email\n{email}\n"));
-        }
-        assert_eq!(
-            fs::read_to_string(rig.project.join("merge-args"))?,
-            expected
-        );
+        let args = fs::read_to_string(rig.project.join("merge-args"))?;
+        assert!(args.contains(&format!("sha={HEAD}")), "{args}");
+        assert!(args.contains("merge_method=merge"), "{args}");
+        assert!(!args.contains("author-email"), "{args}");
         assert!(!rig.project.join("watched").exists());
     }
     Ok(())
@@ -507,7 +641,7 @@ fn land_wait_handles_pending_checks_then_passes() -> Result {
         rig.project.join("checks-next.json"),
         r#"[{"name":"build","bucket":"pass"}]"#,
     )?;
-    let output = rig.command(&["land", "1668", "--head", HEAD, "--wait=10s"])?;
+    let output = rig.command(&["land", "1668", "--head", HEAD, "--wait=10s", "--poll", "1"])?;
     assert_eq!(code(&output), 0, "{output:?}");
     assert!(rig.project.join("merge-args").exists());
     assert!(output.stdout.bytes.len() <= 2048);
@@ -603,7 +737,26 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             .open("gh-calls")?,
         "{call}"
     )?;
-    match call.as_str() {
+    let normalised = call.replace("api --include ", "api ");
+    match normalised.as_str() {
+        "api repos/{owner}/{repo}/pulls/1668" => {
+            let head_value: serde_json::Value = serde_json::from_slice(&fs::read("head.json")?)?;
+            let next = if Path::new("head-seq").exists() {
+                let seq = fs::read_to_string("head-seq")?;
+                let mut lines = seq.lines();
+                let next = lines.next().unwrap_or(HEAD).to_owned();
+                let rest: Vec<&str> = lines.collect();
+                if !rest.is_empty() { fs::write("head-seq", rest.join("\n"))?; }
+                next
+            } else if Path::new("head-read").exists() && Path::new("move-head").exists() {
+                OTHER.to_owned()
+            } else { head_value["headRefOid"].as_str().unwrap_or(HEAD).to_owned() };
+            fs::write("head-read", "")?;
+            let merged = Path::new("merged").exists();
+            let mergeable = match head_value["mergeable"].as_str() { Some("CONFLICTING") => Some(false), Some("UNKNOWN") => None, _ => Some(true) };
+            let body = serde_json::json!({"state":if merged {"closed"} else {"open"}, "head":{"sha":next,"ref":"feature","repo":{"full_name":"owner/repo"}}, "base":{"sha":HEAD,"ref":"main","repo":{"full_name":"owner/repo"}}, "mergeable":mergeable,"mergeable_state":"clean","merged_at":if merged {Some("2020-01-01T00:00:00Z")} else {None},"merge_commit_sha":null,"title":"fixture"});
+            io::stdout().write_all(&serde_json::to_vec(&body)?)?;
+        }
         "pr view 1668 --json headRefOid" | "pr view 1668 --json headRefOid,mergeable" => {
             if Path::new("head-seq").exists() {
                 // One head per read, the last one repeating: scripted head movement.
@@ -636,6 +789,12 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             io::stdout().write_all(br#"{"baseRefName":"main","url":"https://github.com/owner/repo/pull/1668"}"#)?;
         }
         "api repos/owner/repo/branches/main" => {
+            if Path::new("rate-read-once").exists() {
+                fs::remove_file("rate-read-once")?;
+                writeln!(io::stdout(), "HTTP/2 429\r\nretry-after: 0\r\n\r\n{{}}")?;
+                writeln!(io::stderr(), "HTTP 429")?;
+                return Ok(1);
+            }
             if Path::new("ruleset-only").exists() { io::stdout().write_all(br#"{"protected":true}"#)?; }
             else { io::stdout().write_all(br#"{"protected":false}"#)?; }
         }
@@ -737,9 +896,27 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             if Path::new(&next).exists() { fs::rename(next, path)?; }
         }
         value
-            if value.starts_with(&format!("pr merge 1668 --merge --match-head-commit {HEAD}")) =>
+            if value.starts_with("api --method PUT repos/{owner}/{repo}/pulls/1668/merge ") =>
         {
             fs::write("merge-args", args.join("\n") + "\n")?;
+            for (flag, status) in [("merge-conflict", 409), ("merge-not-allowed", 405)] {
+                if Path::new(flag).exists() {
+                    writeln!(io::stdout(), "HTTP/2 {status}\r\nX-RateLimit-Remaining: 0\r\n\r\n{{}}")?;
+                    writeln!(io::stderr(), "HTTP {status}")?;
+                    return Ok(1);
+                }
+            }
+            if Path::new("rate-once").exists() || Path::new("rate-always").exists() {
+                let (status, delay) = if Path::new("rate-once").exists() {
+                    fs::remove_file("rate-once")?;
+                    (429, 0)
+                } else {
+                    (403, 30)
+                };
+                writeln!(io::stdout(), "HTTP/2 {status}\r\nRetry-After: {delay}\r\nX-RateLimit-Reset: 4102444800\r\n\r\n{{}}")?;
+                writeln!(io::stderr(), "API rate limit exceeded")?;
+                return Ok(1);
+            }
             if Path::new("merge-fail").exists() {
                 return Ok(1);
             }
@@ -747,11 +924,17 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             if !Path::new("merge-queue").exists() {
                 fs::write("merged", "")?;
             }
+            if Path::new("merge-delay").exists() {
+                // GitHub merged, but the response consumes the remaining budget.
+                #[allow(clippy::disallowed_methods)]
+                std::thread::sleep(std::time::Duration::from_secs(6));
+            }
             if Path::new("merge-timeout").exists() {
                 // The merge took effect, but the reply was lost.
                 writeln!(io::stderr(), "gh: HTTP 502: Bad Gateway")?;
                 return Ok(1);
             }
+            write!(io::stdout(), "{{\"merged\":{}}}", !Path::new("merge-queue").exists())?;
         }
         _ => return Err(format!("unexpected gh arguments: {call}").into()),
     }
@@ -825,6 +1008,10 @@ fn main() -> ExitCode {
                 land_matches_a_required_check_on_its_integration,
             ),
             (
+                "land_retries_a_rate_limited_policy_read",
+                land_retries_a_rate_limited_policy_read,
+            ),
+            (
                 "land_retries_transient_gh_reads_inside_the_wait",
                 land_retries_transient_gh_reads_inside_the_wait,
             ),
@@ -833,8 +1020,32 @@ fn main() -> ExitCode {
                 land_waits_for_new_checks_to_stop_registering_when_no_check_is_required,
             ),
             (
-                "land_guards_head_and_uses_optional_git_email",
-                land_guards_head_and_uses_optional_git_email,
+                "land_explains_poll_and_budget_sources",
+                land_explains_poll_and_budget_sources,
+            ),
+            (
+                "land_retries_a_rate_limited_merge",
+                land_retries_a_rate_limited_merge,
+            ),
+            (
+                "land_reports_reset_and_exact_retry_when_merge_rate_limit_exhausts_budget",
+                land_reports_reset_and_exact_retry_when_merge_rate_limit_exhausts_budget,
+            ),
+            (
+                "land_refuses_a_rest_merge_409_as_head_moved",
+                land_refuses_a_rest_merge_409_as_head_moved,
+            ),
+            (
+                "land_refuses_a_rest_merge_405_with_a_next_step",
+                land_refuses_a_rest_merge_405_with_a_next_step,
+            ),
+            (
+                "land_reports_unknown_when_the_merge_exhausts_the_wait_budget",
+                land_reports_unknown_when_the_merge_exhausts_the_wait_budget,
+            ),
+            (
+                "land_guards_head_and_uses_rest_merge",
+                land_guards_head_and_uses_rest_merge,
             ),
             (
                 "pr_external_failures_and_invalid_arguments_fail_closed",

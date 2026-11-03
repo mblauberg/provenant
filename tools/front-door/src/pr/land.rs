@@ -1,8 +1,8 @@
 //! `land`: the existing CI watch and head-pinned merge, then local
 //! follow-up. No step forces: each one refuses and says why.
 use super::git::{Git, plain_ref};
-use super::{Result, head, merge, successful};
-use crate::{emit_summarised, roots, worktrees};
+use super::{Result, merge, successful};
+use crate::{emit, emit_summarised, roots, worktrees};
 use provenant_confinement::worktrees::{ObservedProcess, WorkerObserver};
 use provenant_core::GitOid;
 use provenant_records::{CommandError, CommandResult, Outcome};
@@ -68,39 +68,193 @@ pub(super) struct Pull {
     merge_commit: Option<MergeCommit>,
     #[serde(rename = "mergedAt", default)]
     merged_at: Option<String>,
+    #[serde(default)]
+    closed_at: Option<String>,
 }
-/// The pull request's state after a merge attempt, retrying transient reads.
-// This CLI edge owns the real deadline.
-#[allow(clippy::disallowed_methods)]
-fn reread(project: &Path, number: &str) -> Result<Pull> {
-    let reader = super::wait::Reader {
-        project,
-        deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
+fn from_rest(rest: super::RestPull) -> Pull {
+    let cross_repository = match (&rest.head.repo, &rest.base.repo) {
+        (Some(head), Some(base)) => head.full_name != base.full_name,
+        _ => true,
     };
-    let bytes = successful(reader.read(&[
-        "gh",
-        "pr",
-        "view",
+    Pull {
+        state: if rest.merged_at.is_some() {
+            "MERGED".into()
+        } else {
+            rest.state.to_ascii_uppercase()
+        },
+        base: rest.base.branch,
+        branch: rest.head.branch,
+        cross_repository,
+        title: rest.title,
+        merge_commit: rest.merge_commit_sha.map(|oid| MergeCommit { oid }),
+        merged_at: rest.merged_at,
+        closed_at: rest.closed_at,
+    }
+}
+fn read_pull(reader: &super::wait::Reader<'_>, number: &str) -> Result<Pull> {
+    Ok(from_rest(super::rest_pull(
+        &|argv| reader.read(argv),
         number,
-        "--json",
-        "state,baseRefName,headRefName,isCrossRepository,title,mergeCommit,mergedAt",
-    ])?)?;
-    Ok(serde_json::from_slice(&bytes)?)
+    )?))
 }
 pub(super) fn pull(project: &Path, number: &str) -> Result<Pull> {
-    let bytes = successful(super::execute(
-        project,
-        &[
-            "gh",
-            "pr",
-            "view",
+    Ok(from_rest(super::rest_pull(
+        &|argv| super::execute(project, argv, false),
+        number,
+    )?))
+}
+
+// Landing already has the base repository and PR snapshot. Keep contribution
+// bookkeeping local and use its bounded reader for stale bindings so this path
+// does not make separate GraphQL requests.
+struct LandTracker {
+    resolved: roots::Resolved,
+    project: Option<provenant_core::ProjectId>,
+    repository: String,
+}
+impl LandTracker {
+    fn resolve(globals: &provenant_cli::Globals, repository: &str) -> Result<Self> {
+        let resolved = roots::resolve(
+            globals,
+            roots::Workspace::Checkout,
+            roots::Product::Optional,
+        )?;
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
+        let location = runtime
+            .project_location(
+                &provenant_os::exec::SystemExecutor::new(1)?,
+                &resolved.project,
+                provenant_confinement::UtilityBudget::bounded(std::time::Duration::from_secs(5))?,
+                &provenant_core::CancelToken::new(),
+            )?
+            .location;
+        let project = provenant_config::lookup_project(&resolved.roots, &location)?
+            .map(|binding| binding.project_id());
+        Ok(Self {
+            resolved,
+            project,
+            repository: repository.to_ascii_lowercase(),
+        })
+    }
+    fn pr(&self, number: u64) -> provenant_run::PullRequest {
+        provenant_run::PullRequest {
+            repository: self.repository.clone(),
             number,
-            "--json",
-            "state,baseRefName,headRefName,isCrossRepository,title,mergeCommit,mergedAt",
-        ],
-        false,
-    )?)?;
-    Ok(serde_json::from_slice(&bytes)?)
+        }
+    }
+    fn project(&self) -> Result<provenant_core::ProjectId> {
+        self.project.ok_or_else(|| {
+            "project is unbound; register the project before binding contributions".into()
+        })
+    }
+    fn observed_end(
+        &self,
+        reader: &super::wait::Reader<'_>,
+        pr: &provenant_run::PullRequest,
+    ) -> Result<(String, Option<provenant_core::WallTime>)> {
+        let endpoint = format!("repos/{}/pulls/{}", pr.repository, pr.number);
+        let bytes = successful(reader.read(&["gh", "api", &endpoint])?)?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let merged = value.get("merged_at").and_then(serde_json::Value::as_str);
+        let closed = value.get("closed_at").and_then(serde_json::Value::as_str);
+        let state = if merged.is_some() {
+            "MERGED".to_owned()
+        } else {
+            value
+                .get("state")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("missing pull request state")?
+                .to_ascii_uppercase()
+        };
+        Ok((state, end_time(merged.or(closed))?))
+    }
+    fn bind(
+        &self,
+        branch: &str,
+        number: u64,
+        head: GitOid,
+        reader: &super::wait::Reader<'_>,
+    ) -> Result<()> {
+        let project = self.project()?;
+        let clock = provenant_os::clock::SystemClock::new();
+        let cancel = provenant_core::CancelToken::new();
+        let call = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let db = provenant_run::Contributions::open(self.resolved.roots.state.as_path(), &call)?;
+        let pr = self.pr(number);
+        for candidate in db.open_bindings(project, branch, &call)? {
+            if candidate == pr {
+                continue;
+            }
+            let swept = (|| -> Result<()> {
+                let (state, ended_at) = self.observed_end(reader, &candidate)?;
+                if matches!(state.as_str(), "CLOSED" | "MERGED") {
+                    db.close_at(project, &candidate, ended_at, &call)?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = swept {
+                if error
+                    .downcast_ref::<super::wait::Failure>()
+                    .is_some_and(|failure| failure.code == "RATE_LIMITED")
+                {
+                    return Err(error);
+                }
+                super::contributions::warn(
+                    Some(candidate.number),
+                    &format!("stale binding sweep failed: {error}"),
+                );
+            }
+        }
+        db.bind(project, branch, &pr, head, &call)?;
+        Ok(())
+    }
+    fn close(&self, number: u64, pull: &Pull) -> Result<()> {
+        let project = self.project()?;
+        let clock = provenant_os::clock::SystemClock::new();
+        let cancel = provenant_core::CancelToken::new();
+        let call = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let closed = if provenant_run::Contributions::open_read_only(
+            self.resolved.roots.state.as_path(),
+            &call,
+        )?
+        .is_some()
+        {
+            let ended_at = end_time(pull.merged_at.as_deref().or(pull.closed_at.as_deref()))
+                .unwrap_or_else(|error| {
+                    super::contributions::warn(
+                        Some(number),
+                        &format!("PR end time unavailable: {error}"),
+                    );
+                    None
+                });
+            provenant_run::Contributions::open(self.resolved.roots.state.as_path(), &call)?
+                .close_at(project, &self.pr(number), ended_at, &call)?
+        } else {
+            false
+        };
+        if !closed {
+            super::contributions::warn(
+                Some(number),
+                &"no open contribution binding to close; the binding is missing or was already closed",
+            );
+        }
+        Ok(())
+    }
+}
+fn end_time(value: Option<&str>) -> Result<Option<provenant_core::WallTime>> {
+    value
+        .map(|text| -> Result<provenant_core::WallTime> {
+            let stamp: jiff::Timestamp = text.parse()?;
+            provenant_core::WallTime::from_micros(stamp.as_microsecond()).map_err(Into::into)
+        })
+        .transpose()
 }
 
 struct Checkout {
@@ -743,14 +897,99 @@ pub(crate) struct Landing {
     globals: provenant_cli::Globals,
 }
 
+fn poll_setting(globals: &provenant_cli::Globals, poll: Option<u64>) -> (u64, &'static str) {
+    if let Some(poll) = poll {
+        return (poll, "--poll");
+    }
+    let config = roots::resolve(globals, roots::Workspace::Project, roots::Product::Required)
+        .ok()
+        .and_then(|resolved| {
+            provenant_config::read_with_domains(&resolved.roots, &provenant_cli::domains::SECTIONS)
+                .ok()
+        });
+    match config {
+        Some(config) if config.domains.pr.land.poll_seconds > 0 => {
+            let source = if matches!(
+                config.origins.get("domains.pr.land.poll_seconds"),
+                Some(provenant_config::Origin::User { .. })
+            ) {
+                "host config"
+            } else {
+                "compiled default"
+            };
+            (config.domains.pr.land.poll_seconds, source)
+        }
+        _ => (
+            provenant_cli::domains::DEFAULT_LAND_POLL_SECONDS,
+            "compiled default (configuration unavailable)",
+        ),
+    }
+}
+fn retry_command(
+    number: u64,
+    head: Option<GitOid>,
+    wait: Option<u64>,
+    poll: Option<u64>,
+    globals: &provenant_cli::Globals,
+) -> String {
+    let mut command = format!("provenant land {number}");
+    if let Some(head) = head {
+        command.push_str(&format!(" --head {head}"));
+    }
+    if let Some(wait) = wait {
+        command.push_str(&format!(" --wait={wait}s"));
+    }
+    if let Some(poll) = poll {
+        command.push_str(&format!(" --poll {poll}"));
+    }
+    for (flag, path) in [
+        ("--project", &globals.project),
+        ("--state-dir", &globals.state_dir),
+    ] {
+        if let Some(path) = path {
+            let value = path.to_string_lossy().replace('\'', "'\\''");
+            command.push_str(&format!(" {flag} '{value}'"));
+        }
+    }
+    if globals.json {
+        command.push_str(" --json");
+    }
+    if globals.full {
+        command.push_str(" --full");
+    }
+    command
+}
+
 pub(crate) fn run(
     number: u64,
     expected: Option<GitOid>,
     wait: Option<u64>,
+    poll: Option<u64>,
+    explain: bool,
     globals: &provenant_cli::Globals,
     workers: &dyn WorkerObserver,
 ) -> u8 {
-    let landing = execute(number, expected, wait, globals, workers);
+    if explain {
+        let (interval, source) = poll_setting(globals, poll);
+        let budget = wait.unwrap_or(60);
+        let budget_source = if wait.is_some() {
+            "--wait"
+        } else {
+            "compiled default"
+        };
+        let report = CommandResult::new(
+            "land",
+            Outcome::Ok,
+            json!({"poll_seconds": interval, "poll_source": source, "retry_budget_seconds": budget, "retry_budget_source": budget_source}),
+        );
+        return emit(
+            &report,
+            globals,
+            &format!("poll: {interval}s ({source}); retry budget: {budget}s ({budget_source})\n"),
+            true,
+        );
+    }
+    let landing = execute(number, expected, wait, poll, globals, workers);
     emit_summarised(
         &landing.report,
         &landing.globals,
@@ -818,7 +1057,7 @@ pub(crate) fn graph_land(
         state_dir: Some(state.to_owned()),
         project: Some(project.to_owned()),
     };
-    observation(&execute(number, Some(head), None, &globals, workers).report)
+    observation(&execute(number, Some(head), None, None, &globals, workers).report)
 }
 
 /// What a graph land node makes of a land report. Only a merged PR succeeds;
@@ -855,17 +1094,21 @@ pub(crate) fn observation(
         None => format!("{}: {}", error.code, error.message),
     };
     match error.code.as_str() {
-        "CI_PENDING" | "CI_UNAVAILABLE" | "MERGE_STATE_UNKNOWN" | "PR_UNAVAILABLE" => {
-            LandObservation::Pending { reason }
-        }
+        "CI_PENDING"
+        | "CI_UNAVAILABLE"
+        | "MERGE_STATE_UNKNOWN"
+        | "PR_UNAVAILABLE"
+        | "RATE_LIMITED" => LandObservation::Pending { reason },
         _ => LandObservation::Refused { reason },
     }
 }
 
+#[allow(clippy::disallowed_methods)]
 pub(crate) fn execute(
     number: u64,
     expected: Option<GitOid>,
     wait: Option<u64>,
+    poll: Option<u64>,
     globals: &provenant_cli::Globals,
     workers: &dyn WorkerObserver,
 ) -> Landing {
@@ -885,30 +1128,60 @@ pub(crate) fn execute(
     let mut landed: Option<(String, String, i64)> = None;
     let result = (|| -> Result<()> {
         let project = roots::selected_project(globals.project.as_deref(), true)?;
+        let effective_poll = poll_setting(globals, poll).0;
         let text = number.to_string();
-        let current = head(&project, &text)?;
+        let initial_retry = retry_command(number, expected, wait, poll, globals);
+        let mut reader = super::wait::Reader {
+            project: &project,
+            deadline: std::time::Instant::now()
+                + std::time::Duration::from_secs(wait.unwrap_or(60)),
+            retry_command: initial_retry,
+        };
+        let rest = super::rest_pull(&|argv| reader.read(argv), &text)?;
+        let current = rest.head.sha;
+        let repository = format!(
+            "repos/{}",
+            rest.base
+                .repo
+                .as_ref()
+                .ok_or("pull request has no base repository")?
+                .full_name
+        );
+        let base = rest.base.branch.clone();
         captured = Some(current);
+        reader.retry_command = retry_command(number, Some(current), wait, poll, globals);
         if expected.is_some_and(|expected| current != expected) {
             failure_code = "HEAD_MOVED";
             return Err(format!("pull request head moved to {current}").into());
         }
-        let view = pull(&project, &text)?;
+        let view = from_rest(rest);
         let attribution = std::cell::OnceCell::new();
         if !view.cross_repository {
             let binding = (|| -> Result<()> {
                 let tracker = attribution
-                    .get_or_init(|| super::contributions::Tracker::resolve(globals))
+                    .get_or_init(|| {
+                        LandTracker::resolve(
+                            globals,
+                            repository.strip_prefix("repos/").unwrap_or(&repository),
+                        )
+                    })
                     .as_ref()
                     .map_err(|error| error.to_string())?;
-                let bound = tracker.bind(&view.branch, number, current);
+                let bound = tracker.bind(&view.branch, number, current, &reader);
                 let closed = if matches!(view.state.as_str(), "CLOSED" | "MERGED") {
-                    tracker.close(number)
+                    tracker.close(number, &view)
                 } else {
                     Ok(())
                 };
                 bound.and(closed)
             })();
             if let Err(error) = binding {
+                if error
+                    .downcast_ref::<super::wait::Failure>()
+                    .is_some_and(|failure| failure.code == "RATE_LIMITED")
+                {
+                    return Err(error);
+                }
                 super::contributions::warn(Some(number), &error);
             }
         }
@@ -920,12 +1193,21 @@ pub(crate) fn execute(
                 return Err("pull request is closed without merging".into());
             }
             failure_code = "CI_UNAVAILABLE";
-            super::wait::checks(&project, number, current, wait, globals.json)?;
+            super::wait::checks(
+                &reader,
+                number,
+                current,
+                &repository,
+                &base,
+                wait,
+                effective_poll,
+                globals.json,
+            )?;
             failure_code = "MERGE_FAILED";
             // A merge that errors or times out may still have taken effect, so
             // the PR's own state decides the outcome, never the command's.
-            let merge_error = merge(&project, &text, current).err();
-            match reread(&project, &text) {
+            let merge_error = merge(&reader, &text, current).err();
+            match read_pull(&reader, &text) {
                 Ok(view) if view.state == "MERGED" => {
                     merge_note = merge_error.map(|error| error.to_string());
                     view
@@ -937,13 +1219,26 @@ pub(crate) fn execute(
                 Err(error) => {
                     // The merge may or may not have happened; rerunning land
                     // is safe because a merged PR only retries cleanup.
-                    if merge_error.is_none() {
-                        failure_code = "MERGE_STATE_UNKNOWN";
+                    if let Some(failure) = error
+                        .downcast_ref::<super::wait::Failure>()
+                        .filter(|failure| failure.code == "RATE_LIMITED")
+                    {
+                        return Err(super::wait::failure(
+                            "RATE_LIMITED",
+                            format!("merge may have completed; {}", failure.message),
+                        ));
                     }
-                    return Err(format!(
-                        "cannot confirm the pull request state after merging: {error}"
-                    )
-                    .into());
+                    if let Some(merge_error) = merge_error
+                        && !merge_error.is::<super::TimedOut>()
+                    {
+                        return Err(merge_error);
+                    }
+                    return Err(super::wait::failure(
+                        "MERGE_STATE_UNKNOWN",
+                        format!(
+                            "merge may have completed; cannot confirm the pull request state: {error}"
+                        ),
+                    ));
                 }
             }
         } else {
@@ -966,10 +1261,15 @@ pub(crate) fn execute(
         if matches!(view.state.as_str(), "CLOSED" | "MERGED") && !view.cross_repository {
             let closed = (|| -> Result<()> {
                 let tracker = attribution
-                    .get_or_init(|| super::contributions::Tracker::resolve(globals))
+                    .get_or_init(|| {
+                        LandTracker::resolve(
+                            globals,
+                            repository.strip_prefix("repos/").unwrap_or(&repository),
+                        )
+                    })
                     .as_ref()
                     .map_err(|error| error.to_string())?;
-                tracker.close(number)
+                tracker.close(number, &view)
             })();
             if let Err(error) = closed {
                 super::contributions::warn(Some(number), &error);
@@ -1015,6 +1315,7 @@ pub(crate) fn execute(
             | "CI_CONFLICT"
             | "CI_NOT_SCHEDULED"
             | "HEAD_MOVED"
+            | "MERGE_NOT_ALLOWED"
             | "PR_CLOSED"
     ) {
         Outcome::Refused
@@ -1046,6 +1347,7 @@ pub(crate) fn execute(
             message: format!("fail #{number} {expected}: {error}"),
             cause: None,
             repair: Some(match failure_code {
+                "RATE_LIMITED" => retry_command(number, captured, wait, poll, globals),
                 "CI_PENDING" | "CI_TIMEOUT" => {
                     format!("provenant land {number} --head {expected} --wait")
                 }
@@ -1058,6 +1360,7 @@ pub(crate) fn execute(
                     "git rebase origin/<base> && git push --force-with-lease (PR #{number})"
                 ),
                 "HEAD_MOVED" => format!("provenant pr status {number} --full"),
+                "MERGE_NOT_ALLOWED" => format!("provenant pr status {number} --full"),
                 _ => "provenant help land".into(),
             }),
         });
@@ -1344,6 +1647,7 @@ mod graph_land_tests {
             "CI_UNAVAILABLE",
             "MERGE_STATE_UNKNOWN",
             "PR_UNAVAILABLE",
+            "RATE_LIMITED",
         ] {
             assert!(matches!(
                 observation(&report(json!({"number":7, "merged":false}), Some(code))),
