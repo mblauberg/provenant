@@ -853,14 +853,18 @@ fn stats_reports_partial_signals_outside_graph_groups() -> Result {
         rig.project.join("config/telemetry-prices.toml"),
         include_str!("../../../config/telemetry-prices.toml"),
     )?;
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[domains.routing.routes.receipt-fixture]\nmodel='codex/gpt-6-luna'\neffort='low'"
+    )?;
     let prompt = rig.root.join("prompt.txt");
     fs::write(&prompt, "fixture partial stop")?;
     let output = rig.command(&[
         "run",
-        "--model",
-        "codex/gpt-6-luna",
-        "--effort",
-        "low",
+        "--route",
+        "receipt-fixture",
         "--operation-id",
         "partial-stop",
         "--prompt-file",
@@ -870,10 +874,33 @@ fn stats_reports_partial_signals_outside_graph_groups() -> Result {
         "--json",
     ])?;
     let lanes = settled_policy_lanes(&rig, output, 0)?;
+    assert_eq!(lanes["data"]["lanes"][0]["applied_route"]["effort"], "low");
+    assert_eq!(
+        lanes["data"]["lanes"][0]["resolved_route"]["source"],
+        "named_route"
+    );
     assert_eq!(
         lanes["data"]["lanes"][0]["partial_signals"],
         json!(["declared_stop"]),
         "{lanes}"
+    );
+    let route_stats = rig.command(&["telemetry", "stats", "--by", "route", "--json"])?;
+    assert_eq!(code(&route_stats), 0, "{route_stats:?}");
+    let route_stats: Value = serde_json::from_slice(&route_stats.stdout.bytes)?;
+    assert_eq!(
+        route_stats["data"]["context_groups"][0]["value"],
+        "codex/gpt-6-luna@low"
+    );
+    assert_eq!(
+        route_stats["data"]["context_groups"][0]["totals"]["attempts"],
+        1
+    );
+    let human = rig.command(&["telemetry", "stats", "--by", "route"])?;
+    assert_eq!(code(&human), 0, "{human:?}");
+    let human = String::from_utf8(human.stdout.bytes)?;
+    assert!(
+        human.contains("by route: 1 groups\ncodex/gpt-6-luna@low  "),
+        "{human}"
     );
     for args in [
         &["telemetry", "stats", "--json"][..],
@@ -927,6 +954,7 @@ fn policy_incomplete_result_continues_the_retained_session() -> Result {
     assert_eq!(first["state"], "failed", "{lanes}");
     assert_eq!(second["state"], "succeeded", "{lanes}");
     assert_eq!(second["continuation"], "policy_continuation");
+    assert_eq!(second["resolved_route"]["account_source"], "continuation");
     assert_eq!(second["applied_route"]["model"], "codex/gpt-6.1-terra");
     assert_eq!(
         first["transcript"]["session"]
@@ -2120,6 +2148,44 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
         "host-native absent is not configured in domains.fabric.host_native"
     );
     assert_eq!(fs::read_dir(&paths.temporary)?.count(), 0);
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[domains.routing.routes.receipt-fixture]\nmodel='claude/claude-sonnet-5-5'\neffort='medium'"
+    )?;
+    let mut named = task.clone();
+    named.route = provenant_run::RequestedRoute::Named {
+        extra: Default::default(),
+        name: "receipt-fixture".into(),
+        effort: None,
+    };
+    let named_launch = provenant_run::Providers::prepare(
+        &registry,
+        &named,
+        "synthetic-prompt-secret-2719",
+        &paths,
+        None,
+    )?;
+    assert_eq!(
+        named_launch.route.model.as_deref(),
+        Some("claude/claude-sonnet-5-5")
+    );
+    assert_eq!(named_launch.route.effort.as_deref(), Some("medium"));
+    assert_eq!(named_launch.route.source.as_deref(), Some("named_route"));
+    assert_eq!(named_launch.route.extra["account_source"], "pin");
+    let receipt = serde_json::to_string(&named_launch.route)?;
+    assert!(!receipt.contains("synthetic-prompt-secret-2719"));
+    assert!(!receipt.contains("fixture-refreshed-token"));
+    named.account = None;
+    let automatic = provenant_run::Providers::prepare(
+        &registry,
+        &named,
+        "synthetic-prompt-secret-2719",
+        &paths,
+        None,
+    )?;
+    assert_eq!(automatic.route.extra["account_source"], "automatic");
     let launch =
         provenant_run::Providers::prepare(&registry, &task, "fixture host-native", &paths, None)?;
     assert_eq!(launch.route.provider.as_deref(), Some("claude"));
@@ -2168,6 +2234,15 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
     for path in [&nested.temporary, &nested.provider_state, &nested.scratch] {
         fs::create_dir_all(path)?;
     }
+    let fallback = provenant_run::Providers::prepare(
+        &registry,
+        &named,
+        "synthetic-prompt-secret-2719",
+        &nested,
+        None,
+    )?;
+    assert_eq!(fallback.route.source.as_deref(), Some("fallback"));
+    assert_eq!(fallback.route.effort.as_deref(), Some("high"));
     let error =
         provenant_run::Providers::prepare(&registry, &task, "fixture host-native", &nested, None)
             .err()

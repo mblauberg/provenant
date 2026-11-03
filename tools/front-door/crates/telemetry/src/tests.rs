@@ -938,7 +938,7 @@ fn groups_by_resolved_model_and_effort() {
     let mut no_effort = fact(4, Some(40));
     no_effort.resolved_route.as_mut().unwrap().effort = None;
     let mut unknown = fact(5, Some(50));
-    unknown.resolved_route = None;
+    unknown.requested_route = unknown.resolved_route.take();
     let groups = stats_by_context(
         [high, low, other_account, no_effort, unknown],
         &prices(Some(1)),
@@ -965,6 +965,31 @@ fn groups_by_resolved_model_and_effort() {
             {"route": "m@high", "attempts": 2},
             {"route": "m@low", "attempts": 1}
         ])
+    );
+}
+
+#[test]
+fn route_group_key_length_boundaries() {
+    let mut long = fact(1, Some(10));
+    long.resolved_route.as_mut().unwrap().model = Some("m".repeat(257));
+    assert!(
+        stats_by_context(
+            [long.clone()],
+            &prices(Some(1)),
+            Window::default(),
+            ContextKey::Route
+        )
+        .is_ok()
+    );
+    long.resolved_route.as_mut().unwrap().model = Some("m".repeat(crate::MAX_KEY_BYTES + 1));
+    assert!(
+        stats_by_context(
+            [long],
+            &prices(Some(1)),
+            Window::default(),
+            ContextKey::Route
+        )
+        .is_err()
     );
 }
 

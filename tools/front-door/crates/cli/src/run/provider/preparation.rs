@@ -1137,18 +1137,11 @@ pub(super) fn prepare_candidates(
             entry.map(|e| e.label.as_str()),
             &task.route,
             resume.is_some(),
-            candidate > 0,
+            redirected || candidate > 0,
         );
         provider.extra.insert(
             "account_source".into(),
-            if resume.is_some() {
-                "continuation"
-            } else if task.account.is_some() {
-                "pin"
-            } else {
-                "automatic"
-            }
-            .into(),
+            account_source(resume.is_some(), task.account.is_some()).into(),
         );
         if let Some(event) = &dependency_event {
             provider
@@ -1227,6 +1220,16 @@ pub(super) fn check_graph_inputs_root(
     Ok(())
 }
 
+fn account_source(continuation: bool, pinned: bool) -> &'static str {
+    if continuation {
+        "continuation"
+    } else if pinned {
+        "pin"
+    } else {
+        "automatic"
+    }
+}
+
 /// Preserve the resolver's decision at the launch boundary.
 fn launch_route_record(
     route: &ResolvedRoute,
@@ -1241,8 +1244,6 @@ fn launch_route_record(
         "continuation"
     } else if matches!(requested, run::RequestedRoute::Model { .. }) {
         "pin"
-    } else if matches!(requested, run::RequestedRoute::Adapter { .. }) {
-        "adapter"
     } else if route.pool_selection.is_some() {
         "pool"
     } else {
@@ -1261,6 +1262,9 @@ mod receipt_tests {
 
     #[test]
     fn alias_effort_reaches_launch_record() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(account_source(true, true), "continuation");
+        assert_eq!(account_source(false, true), "pin");
+        assert_eq!(account_source(false, false), "automatic");
         let catalogue = Catalogue::bundled()?;
         let mut config = RoutingConfig::default();
         config.routes.insert(

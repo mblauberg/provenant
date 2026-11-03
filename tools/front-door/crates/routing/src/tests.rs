@@ -1119,7 +1119,16 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
         let receipt = serde_json::to_value(&route)?["pool_selection"].clone();
         assert_eq!(receipt["pool"], "trial", "{}", case.name);
         assert_eq!(receipt["weight_source"], "config");
-        assert!(receipt["selection_rule"].is_string());
+        assert_eq!(
+            receipt["selection_rule"],
+            if case.name == "weight zero fallback" {
+                "first_zero_weight_ready"
+            } else {
+                "weighted_draw"
+            },
+            "{}",
+            case.name
+        );
         let candidate_rows = receipt["candidates"].as_array().ok_or("candidates")?;
         assert_eq!(candidate_rows.len(), 3);
         assert!(
