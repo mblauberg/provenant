@@ -541,12 +541,25 @@ pub enum EdgeError {
     Time(#[from] provenant_core::TimeError),
     #[error(transparent)]
     Encode(#[from] serde_json::Error),
+    #[error("Fabric state directory {} has mode {mode:04o}; other users can read or access it; {}", path.display(), self.repair().unwrap_or_default())]
+    StateDirectoryPermissions { path: PathBuf, mode: u32 },
     #[error("invalid Fabric input")]
     Invalid,
     #[error("invalid Fabric input: {0}")]
     InvalidField(&'static str),
     #[error("Git executable is unavailable")]
     GitUnavailable,
+}
+impl EdgeError {
+    pub fn repair(&self) -> Option<String> {
+        match self {
+            Self::StateDirectoryPermissions { path, .. } => Some(format!(
+                "run chmod 700 '{}' and retry",
+                path.to_string_lossy().replace('\'', "'\"'\"'")
+            )),
+            _ => None,
+        }
+    }
 }
 fn json(value: impl Serialize) -> Result<Value, EdgeError> {
     Ok(serde_json::to_value(value)?)
@@ -1054,6 +1067,7 @@ pub fn run(
                 EdgeError::Identity(_)
                 | EdgeError::Invalid
                 | EdgeError::InvalidField(_)
+                | EdgeError::StateDirectoryPermissions { .. }
                 | EdgeError::Root(_) => (Outcome::Invalid, "invalid_input"),
                 EdgeError::Relay(error) => (Outcome::Error, error.code()),
                 EdgeError::Config(_) => (Outcome::Invalid, "config"),
@@ -1064,7 +1078,7 @@ pub fn run(
                 code: code.into(),
                 message: error.to_string(),
                 cause: None,
-                repair: None,
+                repair: error.repair(),
             });
             result
         }

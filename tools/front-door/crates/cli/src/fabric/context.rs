@@ -52,15 +52,21 @@ pub(crate) fn private_dir(root: &Path, path: &Path) -> Result<Directory, EdgeErr
         }
         Err(error) => return Err(error.into()),
     };
-    if dir.metadata()?.mode & 0o077 != 0 {
-        return Err(EdgeError::Invalid);
+    let mode = dir.metadata()?.mode & 0o7777;
+    if mode & 0o077 != 0 {
+        return Err(EdgeError::StateDirectoryPermissions {
+            path: root.to_owned(),
+            mode,
+        });
     }
+    let mut current_path = root.to_owned();
     for part in path
         .strip_prefix(root)
         .map_err(|_| EdgeError::Invalid)?
         .components()
     {
         if let Component::Normal(name) = part {
+            current_path.push(name);
             dir = match dir.open_verified_directory(name) {
                 Ok(child) => child,
                 Err(error) if error.is_not_found() => {
@@ -73,8 +79,12 @@ pub(crate) fn private_dir(root: &Path, path: &Path) -> Result<Directory, EdgeErr
                 }
                 Err(error) => return Err(error.into()),
             };
-            if dir.metadata()?.mode & 0o077 != 0 {
-                return Err(EdgeError::Invalid);
+            let mode = dir.metadata()?.mode & 0o7777;
+            if mode & 0o077 != 0 {
+                return Err(EdgeError::StateDirectoryPermissions {
+                    path: current_path,
+                    mode,
+                });
             }
         } else {
             return Err(EdgeError::Invalid);

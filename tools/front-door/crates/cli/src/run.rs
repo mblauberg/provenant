@@ -108,11 +108,11 @@ impl From<run::RunError> for Fail {
     fn from(error: run::RunError) -> Self {
         use provenant_fabric_runtime::coordination::facade::FacadeError;
         let detail = match &error {
-            run::RunError::DeliveryPrepare { .. } | run::RunError::DeliveryLimit { .. } => {
-                Some(FacadeError::HostDeliveryIo {
-                    reason: error.to_string(),
-                })
-            }
+            run::RunError::Delivery(_)
+            | run::RunError::DeliveryPrepare { .. }
+            | run::RunError::DeliveryLimit { .. } => Some(FacadeError::HostDeliveryIo {
+                reason: error.to_string(),
+            }),
             run::RunError::GenerationConflict { current_generation } => {
                 Some(FacadeError::GenerationConflict {
                     current_generation: *current_generation,

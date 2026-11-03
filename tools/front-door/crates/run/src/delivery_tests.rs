@@ -3686,8 +3686,8 @@ fn oversize_host(
 fn many_linked_worktrees_do_not_block_protection_checks()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;
-    // Each entry is about 155 bytes, so 200 linked worktrees exceed 16 KiB.
-    for index in 0..200 {
+    // Each entry is about 155 bytes, so 201 linked worktrees exceed 16 KiB.
+    for index in 0..201 {
         let path = fixture.root.join(format!("tree-{index}"));
         fixture.git(&[
             "worktree",
@@ -3797,6 +3797,31 @@ fn worktree_listing_keeps_the_raised_limit_and_others_keep_theirs() {
         stdout_limit(false, &["worktree", "list", "--porcelain"]),
         provenant_os::exec::DEFAULT_CAPTURE_LIMIT
     );
+    assert_eq!(
+        stdout_limit(false, &["for-each-ref", "--format=%(refname)"]),
+        provenant_os::exec::DEFAULT_CAPTURE_LIMIT
+    );
+    for args in [
+        &[
+            "--git-dir",
+            "repo.git",
+            "--work-tree",
+            "tree",
+            "for-each-ref",
+        ][..],
+        &[
+            "-c",
+            "remote.origin.uploadpack=git-upload-pack",
+            "ls-remote",
+            "origin",
+        ],
+        &["--git-dir=repo.git", "worktree", "list", "--porcelain"],
+    ] {
+        assert_eq!(
+            stdout_limit(false, args),
+            provenant_os::exec::DEFAULT_CAPTURE_LIMIT
+        );
+    }
     assert_eq!(stdout_limit(false, &["remote"]), 16 * 1024);
     assert_eq!(stdout_limit(true, &["log"]), 56_000);
 }
