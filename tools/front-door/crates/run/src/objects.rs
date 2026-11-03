@@ -228,6 +228,22 @@ pub(crate) fn verify_graph(git: &Path, common: &Path, cwd: &Path, head: GitOid) 
     require_commit(git, common, cwd, head, None, None)
 }
 
+pub(crate) fn is_ancestor(git: &Path, repo: &VerifiedRepo, ancestor: GitOid, head: GitOid) -> bool {
+    execute(
+        git,
+        repo.common_git_dir(),
+        repo.root_path(),
+        &args(&[
+            "merge-base",
+            "--is-ancestor",
+            &ancestor.to_string(),
+            &head.to_string(),
+        ]),
+        None,
+    )
+    .is_ok()
+}
+
 pub(crate) fn publish_branch(
     git: &Path,
     repo: &VerifiedRepo,
@@ -236,24 +252,10 @@ pub(crate) fn publish_branch(
     head: GitOid,
 ) -> Result<()> {
     let current = resolve_ref(git, repo, branch)?;
-    if current != base && current != head {
+    if current != base && current != head && !is_ancestor(git, repo, head, current) {
         return Err(invalid());
     }
-    let descends = |ancestor: GitOid| {
-        execute(
-            git,
-            repo.common_git_dir(),
-            repo.root_path(),
-            &args(&[
-                "merge-base",
-                "--is-ancestor",
-                &ancestor.to_string(),
-                &head.to_string(),
-            ]),
-            None,
-        )
-        .is_ok()
-    };
+    let descends = |ancestor| is_ancestor(git, repo, ancestor, head);
     if !descends(base) && !resolve_ref(git, repo, "refs/remotes/origin/HEAD").is_ok_and(descends) {
         return Err(RunError::Validation(
             "lane tip must descend from its launch base or origin default branch",
@@ -261,21 +263,23 @@ pub(crate) fn publish_branch(
     }
     // receive-pack has checked the graph. Git's CAS protects concurrent host
     // updates, including when a lane rebases or merges its private branch.
-    command(
-        git,
-        repo.common_git_dir(),
-        repo.root_path(),
-        &args(&[
-            "update-ref",
-            "--no-deref",
-            "-m",
-            "provenant: verified lane objects",
-            branch,
-            &head.to_string(),
-            &current.to_string(),
-        ]),
-        None,
-    )?;
+    if current == base {
+        command(
+            git,
+            repo.common_git_dir(),
+            repo.root_path(),
+            &args(&[
+                "update-ref",
+                "--no-deref",
+                "-m",
+                "provenant: verified lane objects",
+                branch,
+                &head.to_string(),
+                &current.to_string(),
+            ]),
+            None,
+        )?;
+    }
     command(
         git,
         repo.common_git_dir(),

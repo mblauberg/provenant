@@ -875,6 +875,12 @@ impl RunStore {
         // The terminal record retains tmp before cleanup; clear that hint only
         // after removal succeeds.
         if let Ok(attempt_dir) = self.attempt_dir(record.run_id, record.attempt_id, false) {
+            if !matches!(
+                crate::settlement::abandoned(&attempt_dir, Self::scope(record)),
+                Ok(None)
+            ) {
+                return;
+            }
             // A resource refusal has no graph certificate. Keep all private
             // evidence until its retained writer reservation is recovered.
             match crate::holder::object_import_refused(&attempt_dir, Self::scope(record)) {

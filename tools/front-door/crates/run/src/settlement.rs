@@ -60,6 +60,16 @@ struct Journal {
     recovery_failures: u32,
     #[serde(default)]
     blocking_reason: Option<String>,
+    #[serde(default)]
+    abandonment: Option<Abandonment>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Abandonment {
+    reason: String,
+    actor: provenant_core::ActorId,
+    at: provenant_core::WallTime,
+    phase: Phase,
 }
 
 fn read(attempt: &Directory, scope: Scope) -> Result<Journal> {
@@ -77,6 +87,7 @@ fn read(attempt: &Directory, scope: Scope) -> Result<Journal> {
             retry_after_ms: 0,
             recovery_failures: 0,
             blocking_reason: None,
+            abandonment: None,
         },
     };
     if journal.schema_version != 1 || journal.scope != scope || journal.attempts > LIMIT {
@@ -460,6 +471,15 @@ impl Driver<'_> {
     pub(crate) fn advance(&mut self, phase: Phase) -> Result<()> {
         self.update(|journal| {
             journal.phase = journal.phase.max(phase);
+            journal.blocking_reason = None;
+            journal.recovery_failures = 0;
+            Ok(())
+        })
+    }
+    pub(crate) fn record_failure(&mut self, reason: &str) -> Result<()> {
+        self.update(|journal| {
+            journal.blocking_reason =
+                Some(provenant_confinement::redact::bounded_line(reason, 4096));
             Ok(())
         })
     }
@@ -1789,6 +1809,120 @@ pub(crate) fn complete(attempt: &Directory, scope: Scope) -> Result<()> {
     write(attempt, &journal)
 }
 
+pub(crate) fn settling(attempt: &Directory, scope: Scope) -> Result<crate::Reconciled> {
+    let journal = read(attempt, scope)?;
+    Ok(crate::Reconciled::Settling {
+        phase: format!("{:?}", journal.phase).to_ascii_lowercase(),
+        blocking_reason: journal.blocking_reason,
+    })
+}
+
+pub(crate) fn abandoned(attempt: &Directory, scope: Scope) -> Result<Option<crate::Reconciled>> {
+    Ok(read(attempt, scope)?
+        .abandonment
+        .map(|a| crate::Reconciled::Abandoned { reason: a.reason }))
+}
+
+impl crate::RunStore {
+    /// Explicit chair recovery. Native writer exclusion and proven absence are
+    /// mandatory; abandonment never removes attempt evidence or private Git.
+    pub fn abandon_settlement(
+        &self,
+        id: provenant_core::AttemptId,
+        reason: &str,
+        call: &crate::Request<'_>,
+    ) -> Result<crate::Reconciled> {
+        call.check()?;
+        if reason.trim().is_empty() || reason.len() > 4096 {
+            return Err(RunError::Validation(
+                "abandonment reason must contain 1..4096 bytes",
+            ));
+        }
+        let reason = provenant_confinement::redact::bounded_line(reason, 4096);
+        let record = self.record(id, call)?;
+        if !matches!(record.state, crate::AttemptState::Terminal { .. }) {
+            return Err(RunError::Nonterminal);
+        }
+        let scope = Self::scope(&record);
+        let attempt = self.attempt_dir(record.run_id, id, false)?;
+        let _driver = try_progress_lock(&attempt, "settlement-driver.lock")?;
+        let mut journal = read(&attempt, scope)?;
+        let now = now_ms(call.clock)?;
+        if journal.owner.as_ref().is_some_and(|owner| {
+            owner.pid != i64::from(std::process::id()) && alive(owner, journal.owner_since_ms, now)
+        }) {
+            return Err(RunError::Contention);
+        }
+        let fence = self.writer_fences()?.into_iter().find(|f| f.scope == scope);
+        let recovery = if let Some(fence) = fence {
+            let slot = fence
+                .custody_directory()
+                .ok_or(RunError::Validation("writer fence slot missing"))?;
+            let recovery = provenant_supervisor::custody::acquire_recovery(
+                Directory::open_anchor(slot)?,
+                scope,
+                provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                call.cancel,
+                call.clock,
+            )
+            .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
+            if recovery.scope() != scope
+                || recovery.observe() != provenant_supervisor::custody::RecoveryState::Absent
+            {
+                return Err(RunError::Validation(
+                    "abandonment requires absent writer custody",
+                ));
+            }
+            Some(recovery)
+        } else if journal.abandonment.is_some() {
+            None
+        } else {
+            return Err(RunError::Validation("retained writer fence missing"));
+        };
+        {
+            let _lock = journal_lock(&attempt)?;
+            journal = read(&attempt, scope)?;
+            if let Some(previous) = &journal.abandonment {
+                if previous.reason != reason {
+                    return Err(RunError::Conflict);
+                }
+            } else {
+                if journal.phase == Phase::Complete {
+                    return Err(RunError::Validation("settlement already complete"));
+                }
+                journal.abandonment = Some(Abandonment {
+                    reason: reason.clone(),
+                    actor: self.context.actor_id,
+                    at: call
+                        .clock
+                        .wall_now()
+                        .map_err(|_| RunError::Admission(AdmissionError::Clock))?,
+                    phase: journal.phase,
+                });
+                journal.phase = Phase::Complete;
+                journal.owner = None;
+                write(&attempt, &journal)?;
+            }
+        }
+        self.record_effect(
+            id,
+            record.generation,
+            crate::SettlementEffect::GitImport,
+            crate::EffectDisposition::Failed {
+                reason: format!("settlement abandoned: {reason}"),
+                retryable: false,
+            },
+            call,
+        )?;
+        if let Some(recovery) = recovery {
+            recovery
+                .release_lost()
+                .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
+        }
+        abandoned(&attempt, scope)?.ok_or(RunError::Conflict)
+    }
+}
+
 /// Resume via a detached instance of the same supervisor binary. The CLI call
 /// only queues this bounded request; the worker owns import and publication.
 #[derive(Serialize, Deserialize)]
@@ -1971,6 +2105,16 @@ impl crate::RunStore {
                 let directory = self.attempt_dir(run, id, false)?;
                 let scope = Self::scope(&attempt);
                 let journal = read(&directory, scope)?;
+                if let Some(abandonment) = &journal.abandonment {
+                    return Ok((
+                        directory,
+                        scope,
+                        crate::Reconciled::Abandoned {
+                            reason: abandonment.reason.clone(),
+                        },
+                        false,
+                    ));
+                }
                 let queued = matches!(attempt.state, crate::AttemptState::Queued { .. });
                 // A supervisor in uninterruptible sleep is never respawned.
                 if !queued
@@ -2010,13 +2154,21 @@ impl crate::RunStore {
                 let state = if queued {
                     crate::Reconciled::Queued
                 } else if let Some(error) = journal.blocking_reason {
-                    failed(error)
+                    if journal.phase == Phase::Publish {
+                        crate::Reconciled::Settling {
+                            phase: "publish".into(),
+                            blocking_reason: Some(error),
+                        }
+                    } else {
+                        failed(error)
+                    }
                 } else if let Some(error) = &listing_error {
                     failed(format!("writer fence listing failed: {error}"))
                 } else {
                     crate::Reconciled::Settling {
                         phase: refusal(&directory, scope, call.clock)?
                             .unwrap_or_else(|| format!("{:?}", journal.phase).to_ascii_lowercase()),
+                        blocking_reason: None,
                     }
                 };
                 Ok((directory, scope, state, eligible))

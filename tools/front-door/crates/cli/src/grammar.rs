@@ -995,6 +995,12 @@ pub struct Reconcile {
     /// Reconcile only this run (repeatable)
     #[arg(long)]
     pub id: Vec<Target>,
+    /// Abandon settlement of this writer attempt, preserving its evidence
+    #[arg(long, requires = "reason", conflicts_with = "id")]
+    pub abandon: Option<Attempt>,
+    /// Why the chair is abandoning settlement
+    #[arg(long, requires = "abandon")]
+    pub reason: Option<String>,
 }
 #[derive(Debug, Subcommand)]
 pub enum Lane {

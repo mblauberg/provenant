@@ -1727,7 +1727,13 @@ impl WriterLaunch {
             )?;
             // The private index may contain staged edits which the host's
             // quarantine must observe. Restore it only after receive succeeds.
-            if let Some(source) = &source {
+            if let Some(source) = &source
+                && crate::objects::resolve_ref(
+                    &git_executable,
+                    self.worktree.repo(),
+                    self.branch.as_str(),
+                )? == verified_tip
+            {
                 crate::objects::restore_index(source, self.worktree.repo())?;
             }
             settlement.advance(crate::settlement::Phase::Record)?;
@@ -1775,7 +1781,14 @@ impl WriterLaunch {
             self.worktree.repo(),
             provenant_confinement::GitRead::RevParseHead,
         )?;
-        if tip != verified_tip {
+        if tip != verified_tip
+            && !crate::objects::is_ancestor(
+                &git_executable,
+                self.worktree.repo(),
+                verified_tip,
+                tip,
+            )
+        {
             return Err(RunError::Validation(
                 "writer head changed during object verification",
             ));

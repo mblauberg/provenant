@@ -3048,12 +3048,15 @@ impl PrepareFixture {
     fn prepare(&self) -> Result<HostDeliveryContext> {
         HostDeliveryContext::new(self.environment.clone()).prepare(&self.writer, &self.request)
     }
-    fn lane_git(&self, args: &[&str]) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    pub(crate) fn lane_git(
+        &self,
+        args: &[&str],
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut command = vec!["-C", self.writer.worktree.to_str().ok_or("lane")?];
         command.extend_from_slice(args);
         self.git(&command)
     }
-    fn commit(
+    pub(crate) fn commit(
         &self,
         path: &Path,
         message: &str,
