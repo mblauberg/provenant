@@ -3255,7 +3255,7 @@ fn settlement_scrubs_provider_session_history() -> TestResult {
     seal_exit(&store, &observed)?;
     let fake = Fake {
         observed: Some(route()),
-        answer: Some("answer".into()),
+        answer: Some(DONE_ANSWER.into()),
         ..Fake::default()
     };
 
@@ -3550,6 +3550,8 @@ fn orphan_result_with_plaintext_settles_once_and_preserves_its_bytes() -> TestRe
     Ok(())
 }
 
+/// A final answer that closes with a done handoff, as a finished lane's does.
+const DONE_ANSWER: &str = "answer\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"finished\"}\n```";
 const STOPPED_EARLY: &str = "```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"Parser done; renderer and tests remain.\"}\n```";
 
 #[test]
@@ -3596,13 +3598,22 @@ fn a_complete_finish_and_prose_about_remaining_work_are_not_flagged() -> TestRes
             [PartialSignal::HandoffMissing],
             "{answer}"
         );
-        assert!(matches!(
-            record.state,
-            AttemptState::Terminal {
-                outcome: Outcome::Succeeded,
-                ..
-            }
-        ));
+        let AttemptState::Terminal {
+            outcome: Outcome::ReviewRequired,
+            reason: Some(reason),
+            ..
+        } = &record.state
+        else {
+            return Err(format!("no handoff must need review: {:?}", record.state).into());
+        };
+        assert!(
+            reason.starts_with(crate::holder::NO_HANDOFF_REASON),
+            "{reason}"
+        );
+        assert_eq!(
+            record.settlement_reason,
+            Some(provenant_records::run::SettlementReason::HandoffMissing)
+        );
     }
     Ok(())
 }
@@ -5224,7 +5235,7 @@ fn publication_holder_commits_decoded_success_only_with_exit_zero_and_observed_i
         )?;
         store.claim(id, &now, &call)?.ok_or("not admitted")?;
         let dir = store.attempt_dir(batch.run_id, id, false)?;
-        artifacts::seal(&dir, "stdout.log", b"answer", CAPTURE_LIMIT)?;
+        artifacts::seal(&dir, "stdout.log", DONE_ANSWER.as_bytes(), CAPTURE_LIMIT)?;
         let mut observed = exit();
         observed.scope.attempt = id;
         observed.scope.generation = 1;
@@ -5270,7 +5281,7 @@ fn publication_holder_commits_decoded_success_only_with_exit_zero_and_observed_i
     let fact = store.attempt(batch.attempts[0].attempt_id, &call)?;
     assert_eq!(
         fact.output_refs[0].digest,
-        CanonicalV1::file_digest(b"answer")
+        CanonicalV1::file_digest(DONE_ANSWER.as_bytes())
     );
     assert_eq!(store.run(batch.run_id, &call)?.closure, Closure::Closed);
     Ok(())
@@ -7622,7 +7633,7 @@ fn reconcile_finishes_a_durable_exit_and_withdraws_a_launch_that_never_spawned()
         .claim(exited, &at_micros(100), &call)?
         .ok_or("not admitted")?;
     let dir = store.attempt_dir(batch.run_id, exited, false)?;
-    artifacts::seal(&dir, "stdout.log", b"answer", CAPTURE_LIMIT)?;
+    artifacts::seal(&dir, "stdout.log", DONE_ANSWER.as_bytes(), CAPTURE_LIMIT)?;
     let mut observed = exit();
     observed.scope.attempt = exited;
     observed.scope.generation = 1;
@@ -8755,5 +8766,52 @@ fn failed_fresh_preparation_leaves_no_short_alias()
         0,
         "the alias was unlinked"
     );
+    Ok(())
+}
+
+/// Persist a named route's resolved effort at launch admission.
+#[test]
+fn resolved_named_route_survives_launch_admission() -> TestResult {
+    let resolved = provenant_records::ResolvedRoute {
+        extra: Default::default(),
+        adapter: "codex".into(),
+        model: "gpt-6.1-sol".into(),
+        effort: Some("high".into()),
+        catalogue_revision: "fixture".into(),
+        account_key: None,
+        host: "fixture".into(),
+        alternatives: Default::default(),
+        exclusions: vec![],
+        eligibility: provenant_records::RouteEligibility::Eligible,
+        readiness: provenant_records::RouteReadiness::unknown(),
+        confidentiality: provenant_records::RouteConfidentiality {
+            extra: Default::default(),
+            evidence_ref: "fixture".into(),
+        },
+        pool_selection: None,
+    };
+    let route = RouteRecord::from_resolved(&resolved, Some("fixture"), "named_route");
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut prepared = input();
+    prepared.request.tasks[0].route = RequestedRoute::Named {
+        extra: Default::default(),
+        name: "fixture".into(),
+        effort: None,
+    };
+    store.create(&prepared, &call)?;
+    let pending = store.record(prepared.attempts[0].attempt_id, &call)?;
+    store.mark_starting(&pending, &route, &[], &Default::default(), None, &call)?;
+    let record = store.record(prepared.attempts[0].attempt_id, &call)?;
+    assert_eq!(
+        record
+            .applied_route
+            .as_ref()
+            .and_then(|route| route.effort.as_deref()),
+        Some("high")
+    );
+    assert_eq!(record.resolved_route, record.applied_route);
     Ok(())
 }

@@ -183,6 +183,7 @@
       "parameters.external.max": "bundled",
       "parameters.external.min": "bundled",
       "parameters.external.type": "bundled",
+      "parameters.local_check_policy": "bundled",
       "parameters.read_roots.default": "bundled",
       "parameters.read_roots.doc": "bundled",
       "parameters.read_roots.type": "bundled",

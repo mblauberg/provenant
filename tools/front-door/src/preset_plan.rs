@@ -469,12 +469,15 @@ pub fn apply(
     ] {
         parameters.insert(key.into(), value);
     }
-    let plan_values = flatten_parameters(
+    let mut plan_values = flatten_parameters(
         name,
         config.get("parameters").unwrap_or(&json!({})),
         "",
         origins,
     )?;
+    // Catalogue leaves bypass build_stages, so bind the same policy fallback
+    // before lowering their role prompts.
+    plan_values["local_check_policy"] = json!(layers.local_check_policy(&plan_values, origins)?.1);
     let extra_roots = plan_values
         .get("read_roots")
         .filter(|roots| roots.as_array().is_some_and(|roots| !roots.is_empty()))

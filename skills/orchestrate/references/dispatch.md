@@ -69,7 +69,7 @@ the input only when a new run is intended. A wait timeout leaves work running.
 Keep the returned graph ID and document, then follow its continuation command.
 
 ```sh
-provenant status
+provenant status --wait --target lane:ATTEMPT_ID --target graph:GRAPH_ID --target pr:2721
 provenant output TARGET
 provenant fabric graph status GRAPH_ID
 provenant fabric graph resume --document PATH
