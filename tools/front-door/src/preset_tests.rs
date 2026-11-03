@@ -3914,3 +3914,9 @@ fn compact_preset_show_lists_review_council_parameter_docs() {
     assert!(!shown.contains("Origins\n"));
     assert!(super::preset::human_for_test(&data, true).contains("Origins\n"));
 }
+
+#[test]
+fn compact_preset_explain_lists_parameter_names() {
+    let data = json!({"name": "example", "parameters": [{"name": "base"}, {"name": "risk"}]});
+    assert!(super::preset::human_for_test(&data, false).contains("Parameters: base, risk"));
+}

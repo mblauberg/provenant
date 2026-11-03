@@ -12,6 +12,10 @@ const DEPTH: usize = 8;
 mod presentation;
 
 #[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "integration fixtures include the preset module without unit tests"
+)]
 pub(super) fn human_for_test(data: &Value, full: bool) -> String {
     presentation::human(data, full)
 }
