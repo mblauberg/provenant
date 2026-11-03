@@ -1646,6 +1646,7 @@ impl RunStore {
                 .ok()
                 .flatten()
                 .is_none()
+            && !reports_verdict(&decoded.result)
         {
             partial.push(PartialSignal::HandoffMissing);
             // A lane that reports nothing has not passed. It needs review,
@@ -1855,6 +1856,15 @@ pub(crate) fn seal_manifest(
 
 /// The cause shown for a lane that ended without a final handoff.
 pub const NO_HANDOFF_REASON: &str = "no handoff: the lane ended without reporting results";
+
+/// A lane that declares exactly one verdict has reported its result even
+/// without a handoff, so a reviewer's verdict alone still passes (#2707).
+fn reports_verdict(result: &str) -> bool {
+    let mut capture = provenant_records::result_capture::ResultCapture::new(None);
+    capture.push(result.as_bytes());
+    let captured = capture.finish();
+    captured.verdict.is_some() || captured.declarations == 1
+}
 /// Stored instead of the provider's answer when settlement cannot filter it.
 const UNREDACTABLE_RESULT: &str = "[result withheld: redaction failed]";
 const REDACTION_FAILED_REASON: &str = "redaction failed; result withheld";

@@ -206,6 +206,14 @@ fn handoff_recovery_provider(prompt: &str, args: &[String], auth: &Value) -> Res
     Ok(())
 }
 
+/// Fake answers close with a done handoff, as every lane brief asks (#2707).
+const DONE_FENCE: &str = "\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"finished\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```";
+
+/// An upstream answer without the fake's closing handoff.
+fn without_done(text: &str) -> &str {
+    text.strip_suffix(DONE_FENCE).unwrap_or(text)
+}
+
 fn fixture() -> Result {
     let args: Vec<_> = std::env::args().collect();
     if args.get(1).is_some_and(|v| v == "--version") {
@@ -244,7 +252,7 @@ fn fixture() -> Result {
         // Restricted routes must supply the sections requested at launch.
         let frames = frames.replace(
             r#""text":"OK""#,
-            r###""text":"## Findings\nOK\n## Evidence\nFixture checked.""###,
+            r###""text":"## Findings\nOK\n## Evidence\nFixture checked.\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"finished\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```""###,
         );
         io::stdout().write_all(frames.as_bytes())?;
         return Ok(());
@@ -315,6 +323,7 @@ fn fixture() -> Result {
                 .map(|(path, _)| PathBuf::from(path))
                 .ok_or("upstream file entry")?;
             let text = fs::read_to_string(&path)?;
+            let text = without_done(&text);
             let sibling = path.with_file_name("other.md");
             // Upstreams whose ids differ only by case each keep their own file.
             let mut cases = String::new();
@@ -327,7 +336,10 @@ fn fixture() -> Result {
                     .and_then(|line| line.split_once(" ("))
                     .map(|(path, _)| PathBuf::from(path))
                     .ok_or("case upstream file entry")?;
-                cases.push_str(&format!("; {label}={}", fs::read_to_string(path)?));
+                cases.push_str(&format!(
+                    "; {label}={}",
+                    without_done(&fs::read_to_string(path)?)
+                ));
             }
             format!(
                 "read {} bytes; tail {}; sibling write denied {}; parent listing denied {}{cases}",
@@ -339,6 +351,7 @@ fn fixture() -> Result {
         } else {
             "OK".to_owned()
         };
+        let answer = format!("{answer}{DONE_FENCE}");
         for frame in [
             json!({"type":"system","subtype":"init","session_id":"fixture-session"}),
             json!({"type":"assistant","session_id":"fixture-session","parent_tool_use_id":null,"message":{"model":"claude-sonnet-5-5","role":"assistant","content":[{"type":"text","text":answer}],"usage":{"input_tokens":1,"output_tokens":1}}}),
@@ -409,7 +422,7 @@ fn fixture() -> Result {
         write!(io::stderr(), "diagnostic {token}")?;
         for frame in [
             json!({"type":"thread.started","thread_id":session}),
-            json!({"type":"item.completed","item":{"type":"agent_message","text":format!("credential {token}")}}),
+            json!({"type":"item.completed","item":{"type":"agent_message","text":format!("credential {token}{DONE_FENCE}")}}),
             json!({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}),
         ] {
             let frame = frame.to_string();
@@ -453,7 +466,7 @@ fn fixture() -> Result {
             format!("Verdict: approve\n{lens}\nwrite denied: {denied}")
         }
     } else {
-        "OK".into()
+        format!("OK{DONE_FENCE}")
     };
     for frame in [
         json!({"type":"thread.started","thread_id":session}),
@@ -1384,8 +1397,8 @@ fn printed_credentials_leave_no_plaintext_in_run_files() -> Result {
         let run_dir = rig.state.join("runs").join(run);
         let attempt = run_dir.join("attempts").join(id);
         assert_eq!(
-            fs::read(attempt.join("result.md"))?,
-            b"credential [REDACTED]"
+            fs::read_to_string(attempt.join("result.md"))?,
+            format!("credential [REDACTED]{DONE_FENCE}")
         );
         assert_eq!(
             fs::read(attempt.join("stderr.log"))?,
@@ -1500,7 +1513,10 @@ fn codex_dispatch_observes_rollout() -> Result {
             assert!(lane["applied_route"]["account_label"].as_str().is_some());
             let result: Value = serde_json::from_slice(&out.stdout.bytes)?;
             let id = lane["attempt_id"].as_str().ok_or("attempt")?;
-            assert_eq!(result["data"]["result_tails"][id]["bytes"]["data"], "OK");
+            assert_eq!(
+                result["data"]["result_tails"][id]["bytes"]["data"],
+                format!("OK{DONE_FENCE}")
+            );
             fs::write(&prompt_file, "fixture slow result")?;
             let slow = rig.command(&[
                 "run",
@@ -2470,7 +2486,7 @@ fn graph_node_reads_full_upstream_result_from_its_inputs_directory() -> Result {
         .collect::<String>()
         + "END-OF-LARGE-RESULT";
     assert_eq!(
-        excerpt,
+        without_done(excerpt),
         format!(
             "read {} bytes; tail END-OF-LARGE-RESULT; sibling write denied true; parent listing denied true; Review=case-result-Review; review=case-result-review",
             full.len()
