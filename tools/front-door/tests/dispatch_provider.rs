@@ -526,7 +526,9 @@ fn run_refuses_pacing_reserve() -> Result {
     fs::create_dir_all(&quota)?;
     fs::set_permissions(rig.state.join("quota"), fs::Permissions::from_mode(0o700))?;
     fs::set_permissions(&quota, fs::Permissions::from_mode(0o700))?;
-    fs::write(quota.join("codex.json"), serde_json::to_vec(&record)?)?;
+    let snapshot = quota.join("codex.json");
+    fs::write(&snapshot, serde_json::to_vec(&record)?)?;
+    fs::set_permissions(snapshot, fs::Permissions::from_mode(0o600))?;
     let prompt = rig.root.join("prompt.txt");
     fs::write(&prompt, "Reply OK.")?;
     let output = rig.command(&[
