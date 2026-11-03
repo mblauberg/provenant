@@ -33,8 +33,8 @@ fn writer_dependency_preparation_installs_skips_and_reports_failure()
         "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PWD/pnpm.log\"\nif [ \"$(basename \"$PWD\")\" = failing ]; then echo 'fixture stderr tail' >&2; exit 7; fi\nmkdir -p node_modules\ntouch node_modules/.modules.yaml\n",
     )?;
     std::fs::set_permissions(&pnpm, std::fs::Permissions::from_mode(0o700))?;
-    let locate = |name: &str| {
-        super::find_command_on_path(name, std::slice::from_ref(&bin))
+    let locate = || {
+        std::env::join_paths([bin.as_path(), Path::new("/usr/bin"), Path::new("/bin")])
             .map_err(|error| error.to_string())
     };
     let cancel = provenant_core::CancelToken::new();
@@ -75,6 +75,74 @@ fn writer_dependency_preparation_installs_skips_and_reports_failure()
     assert!(error.contains("fixture stderr tail"));
     Ok(())
 }
+#[test]
+fn writer_preparation_uses_login_path_for_pnpm_and_node() -> Result<(), Box<dyn std::error::Error>>
+{
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir()?;
+    let root = super::canonical(temp.path())?;
+    // Neither directory is on the test process PATH. Keep node separate from
+    // pnpm to catch fixes that only prepend pnpm's parent directory.
+    let bin = root.join("pnpm bin");
+    let node_bin = root.join("node bin");
+    std::fs::create_dir_all(&bin)?;
+    std::fs::create_dir_all(&node_bin)?;
+    let path = std::env::join_paths([&bin, &node_bin])?;
+    let shell = root.join("login-shell");
+    let pnpm = bin.join("pnpm");
+    let node = node_bin.join("node");
+    // Model a login startup file which prints a banner, then configures PATH.
+    std::fs::write(
+        &shell,
+        format!(
+            "#!/bin/sh\n[ \"$1\" = -lc ] || exit 2\nprintf 'login banner\\n'\nexport PATH='{}'\neval \"$2\"\n",
+            path.to_string_lossy()
+        ),
+    )?;
+    std::fs::write(&pnpm, "#!/usr/bin/env node\n")?;
+    std::fs::write(&node, "#!/bin/sh\nprintf '%s\\n' \"$*\" > node.log\n")?;
+    for executable in [&shell, &pnpm, &node] {
+        std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let cancel = provenant_core::CancelToken::new();
+    let search_path = || super::login_dependency_path(&shell, &root, &cancel);
+    assert_eq!(search_path()?, path);
+    std::fs::write(root.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n")?;
+    let installed = super::prepare_writer_dependencies(&root, true, &search_path, &cancel)?;
+    assert_eq!(installed["outcome"], "installed");
+    assert_eq!(
+        std::fs::read_to_string(root.join("node.log"))?,
+        format!("{} install --frozen-lockfile\n", pnpm.display())
+    );
+
+    // A failed or cancelled shell must not fall back to the daemon PATH.
+    cancel.cancel();
+    assert!(
+        search_path()
+            .expect_err("cancelled probe")
+            .starts_with("dependency_path_unavailable:")
+    );
+    Ok(())
+}
+
+#[test]
+fn writer_preparation_missing_pnpm_names_searched_path() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    std::fs::write(
+        temp.path().join("pnpm-lock.yaml"),
+        "lockfileVersion: '9.0'\n",
+    )?;
+    let path = std::env::join_paths([temp.path()])?;
+    let cancel = provenant_core::CancelToken::new();
+    let error =
+        super::prepare_writer_dependencies(temp.path(), true, &|| Ok(path.clone()), &cancel)
+            .expect_err("missing pnpm is refused");
+    assert!(error.starts_with("dependency_tool_not_found:"));
+    assert!(error.contains(&format!("searched PATH={}", path.to_string_lossy())));
+    assert!(error.contains("pnpm --version"));
+    Ok(())
+}
+
 #[test]
 fn nested_result_policy_uses_a_reliable_route_without_broadening_authority()
 -> Result<(), Box<dyn std::error::Error>> {

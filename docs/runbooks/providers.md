@@ -324,7 +324,14 @@ without reinstalling. Once a writer's head and route are verified, and before
 its provider starts, Provenant runs `pnpm install --frozen-lockfile` on the
 host when the worktree has `pnpm-lock.yaml` and no `node_modules/.modules.yaml`
 (pnpm's completion marker), so a partial `node_modules` is repaired. The
-install is bounded, runs outside the sandbox, and is cancelled with the
+install resolves pnpm using the host account's login-shell PATH, and passes
+that PATH to pnpm so it can also find node when the peer daemon has a narrower
+PATH. The login-shell probe runs from the account home, is bounded to ten
+seconds, and is cancelled with the dispatch. If pnpm is missing,
+`dependency_tool_not_found` names the searched PATH; install pnpm on that host
+and check `pnpm --version` in its login shell before retrying. A failed PATH
+probe reports `dependency_path_unavailable` with a command to check the shell.
+The install is bounded, runs outside the sandbox, and is cancelled with the
 dispatch, with its process group cleaned up. Disable it with
 `--knob lanes.prepare_deps=false` or the `lanes.prepare_deps` config key. An
 install failure refuses the lane and includes the command, the exit status or
