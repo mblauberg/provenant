@@ -217,6 +217,15 @@ Unregistered and registered agy behave differently at launch:
   Google account against the registered key and skips the route if it differs
   (`changed identity; re-register it`). Register every account you route to.
 
+Quota probes also verify the signed-in fingerprint. When it changes, the old
+key is marked `account_mismatch` and excluded from routing. Provenant updates
+that directory's registration to the new key under the config lock, preserving
+its label and settings; the new account appears on the next quota pass. A
+concurrent manual registration takes precedence. Dispatch can reuse a verified
+fingerprint for 30 seconds, and a keychain metadata change or a new quota probe
+invalidates the cached observation earlier. No credentials or email addresses
+are stored in this cache.
+
 Register the first account, the one signed in on your own login keychain,
 with the home directory itself:
 
