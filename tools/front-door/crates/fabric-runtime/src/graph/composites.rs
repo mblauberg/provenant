@@ -323,7 +323,7 @@ fn outputs(
     spec: &CompositeSpec,
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,
-) -> NodeOutputs {
+) -> Result<NodeOutputs, String> {
     let mut selected = NodeOutputs {
         extra: Default::default(),
         schema_version: 2,
@@ -429,20 +429,16 @@ fn outputs(
             path: None,
         });
     }
-    let total = selected.findings.len();
-    selected
+    if selected
         .findings
-        .retain(|finding| finding.id.len() <= OUTPUT_FIELD_BYTES);
-    selected.findings.truncate(MAX_FINDINGS);
-    while canonical_len(&selected.findings) > FINDINGS_BYTES {
-        selected.findings.pop();
+        .iter()
+        .any(|finding| finding.id.len() > OUTPUT_FIELD_BYTES)
+        || selected.findings.len() > MAX_FINDINGS
+        || canonical_len(&selected.findings) > FINDINGS_BYTES
+    {
+        return Err("composite exported findings exceed cap".into());
     }
-    if selected.findings.len() < total {
-        selected
-            .warnings
-            .push("composite exported findings exceed cap".into());
-    }
-    selected
+    Ok(selected)
 }
 
 /// Distinct exporting members, in export order.
@@ -522,12 +518,25 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
     if shortfall.is_some() {
         state = NodeState::Failed;
     }
-    let exported = (state == NodeState::Succeeded).then(|| outputs(spec, checkpoint, positions));
+    let mut exported = None;
+    let mut export_error = None;
+    if state == NodeState::Succeeded {
+        match outputs(spec, checkpoint, positions) {
+            Ok(value) => exported = Some(value),
+            Err(reason) => {
+                state = NodeState::Failed;
+                export_error = Some(reason);
+            }
+        }
+    }
     let progress = &mut checkpoint.nodes[index];
     if progress.state != state || progress.outputs != exported {
         progress.state = state;
         progress.outputs = exported;
-        if let Some(reason) = shortfall {
+        if let Some(reason) = export_error {
+            progress.advance_error_code = Some("composite_findings_exceed_cap".into());
+            progress.advance_error = Some(reason);
+        } else if let Some(reason) = shortfall {
             progress.advance_error_code = Some("coverage_below_minimum".into());
             progress.advance_error = Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
         }
@@ -619,23 +628,30 @@ pub(super) fn validate_progress(
         && state == NodeState::Succeeded
         && progress.advance_error_code.as_deref() == Some("coverage_below_minimum")
         && progress.advance_error == shortfall;
+    let export = node
+        .composite
+        .as_ref()
+        .map(|spec| outputs(spec, checkpoint, positions));
+    let failed_for_export = progress.state == NodeState::Failed
+        && state == NodeState::Succeeded
+        && shortfall.is_none()
+        && progress.advance_error_code.as_deref() == Some("composite_findings_exceed_cap")
+        && matches!(&export, Some(Err(reason)) if progress.advance_error.as_ref() == Some(reason));
     let valid = progress.attempts.is_empty()
         && progress.gate.is_none()
         && progress.ci.is_none()
-        && (progress.advance_error.is_none() || failed_for_coverage)
+        && (progress.advance_error.is_none() || failed_for_coverage || failed_for_export)
         && progress.source_commit.is_none()
         && match progress.state {
-            NodeState::Failed => failed_for_coverage && progress.outputs.is_none(),
+            NodeState::Failed => {
+                (failed_for_coverage || failed_for_export) && progress.outputs.is_none()
+            }
             NodeState::Pending => progress.outputs.is_none(),
             NodeState::Running => state == NodeState::Running && progress.outputs.is_none(),
             NodeState::Succeeded => {
                 state == NodeState::Succeeded
                     && shortfall.is_none()
-                    && progress.outputs
-                        == node
-                            .composite
-                            .as_ref()
-                            .map(|spec| outputs(spec, checkpoint, positions))
+                    && progress.outputs == export.and_then(Result::ok)
             }
             NodeState::Blocked | NodeState::Skipped => {
                 state == progress.state && progress.outputs.is_none()

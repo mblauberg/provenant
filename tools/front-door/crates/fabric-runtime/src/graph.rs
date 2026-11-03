@@ -79,6 +79,9 @@ const COMPOSITE_EXCERPT_BYTES: usize = 65_536;
 /// The raw findings block is at most 8 KiB of JSON; canonical form adds at
 /// most a null `line` per finding.
 const FINDINGS_BYTES: usize = 9_216;
+// Each disposition can inherit an entire bounded upstream entry and supply
+// independently bounded, JSON-escaped fields of its own.
+const DISPOSITION_FINDINGS_BYTES: usize = 32 * (FINDINGS_BYTES + 7 * (6 * 1024 + 2) + 512);
 const WARNING_BYTES: usize = 512;
 /// `make_outputs` records at most three warnings and a writer handoff one more.
 const MAX_WARNINGS: usize = 4;
@@ -1688,12 +1691,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 let upstream_findings: Vec<Finding> = if node.dispositions.is_empty() {
                     Default::default()
                 } else {
-                    node.inputs
-                        .iter()
-                        .filter(|input| input.outputs.contains(&OutputKind::Findings))
-                        .filter_map(|input| positions.get(&input.node))
-                        .filter_map(|index| checkpoint.nodes[*index].outputs.as_ref())
-                        .flat_map(|outputs| outputs.findings.iter().cloned())
+                    selected_findings(node, &checkpoint, &positions)
+                        .into_iter()
+                        .map(|(_, finding)| finding)
                         .collect()
                 };
                 let mut settled_result = None;

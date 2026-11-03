@@ -1189,14 +1189,19 @@ A disposing node may instead emit `{ "id": "member:F1", "disposition": "rejected
 "reason": "Evidence refutes it" }`: omitted finding fields are inherited from the
 selected upstream finding. Explicit fields still undergo normal validation.
 Composite exports qualify ids as `<member-node-id>:<id>`, using the expanded
-member node id at each composite boundary.
+member node id at each composite boundary. If qualification or the combined
+export exceeds the findings limits, the composite fails instead of dropping
+findings. When directly selected sources share an id, their ids are qualified
+with the source node id in the synthesis input.
 Use the exported qualified id. A bare id is also accepted when it matches exactly
 one selected upstream identity; ambiguous or unknown identity-only references fail
 and name the id. New findings still require all descriptive fields.
 A different schema version makes the block invalid. Additional fields are retained. Parsing
 of findings only uses complete lines and blocks within a window, so content
 in the middle of a large result may not be captured. A block may contain at most 32 findings
-and 8 KiB of JSON, and text fields are
+and a bounded canonical representation. Dispositions have a larger checkpoint
+budget to accommodate inherited fields, and each finding’s additional fields have
+a 9,216-byte canonical limit; text fields are
 limited to 1024 bytes each; a block with an overlong field is invalid. Missing
 or invalid findings produce an empty list and, when a result exists, a warning,
 not a node failure. The final findings block in the tail window takes

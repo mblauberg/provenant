@@ -4914,3 +4914,173 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
     impl Error for Untyped {}
     assert!(!launch_retry_kind(&Untyped));
 }
+
+// Small: a qualified ID that cannot fit must fail the composite, including on replay.
+#[test]
+fn composite_rejects_overlong_qualified_finding_id() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":1,"graph_id":"long-id","nodes":[
+            {"id":"reviews","kind":"composite","access":"read_only","composite":{
+                "nodes":[{"id":"a","access":"read_only","prompt":"review","route":{"alias":"senior"}}],
+                "exports":[{"node":"a","outputs":["findings"]}]
+            }},
+            {"id":"synthesis","kind":"synthesise","access":"read_only","prompt":"dispose","route":{"alias":"senior"},
+             "depends_on":["reviews"],"inputs":[{"node":"reviews","outputs":["findings"]}],"dispositions":["rejected"]}
+        ]
+    })).unwrap();
+    let text = findings_text(&entry("").replace("F1", &"x".repeat(1024)));
+    let mut owner = FakeOwner {
+        observations: [terminal_with_result(AttemptOutcome::Succeeded, &text)].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let composite = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id == "reviews")
+        .unwrap();
+    assert_eq!(composite.state, NodeState::Failed);
+    assert_eq!(
+        composite.advance_error_code.as_deref(),
+        Some("composite_findings_exceed_cap")
+    );
+    assert_ne!(
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == "synthesis")
+            .unwrap()
+            .state,
+        NodeState::Succeeded
+    );
+    assert_eq!(
+        advance(&document, &mut FakeOwner::default(), &mut journal)
+            .unwrap()
+            .checkpoint,
+        run.checkpoint
+    );
+}
+
+// Small: inherited descriptions can exceed the ordinary findings budget.
+#[test]
+fn identity_dispositions_preserve_large_inherited_fields() {
+    let mut synthesis = node("synthesis", route("first"));
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.depends_on = vec!["review".into()];
+    synthesis.inputs = vec![GraphInput {
+        extra: Default::default(),
+        node: "review".into(),
+        outputs: vec![OutputKind::Findings],
+    }];
+    let long = "x".repeat(1024);
+    let entries: Vec<_> = (0..2).map(|i| serde_json::json!({"id":format!("F{i}"),"severity":long,"file":long,"summary":long,"status":long})).collect();
+    let review = format!(
+        "```findings\n{}\n```\nVERDICT: PASS",
+        serde_json::json!({"schema_version":1,"findings":entries})
+    );
+    let decisions = (0..2)
+        .map(|i| {
+            format!(
+                r#"{{"id":"F{i}","disposition":"rejected","reason":"{}"}}"#,
+                "r".repeat(700)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, &review),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&decisions)),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![node("review", route("first")), synthesis]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    let result = &run.checkpoint.nodes[1];
+    assert_eq!(
+        result.state,
+        NodeState::Succeeded,
+        "{:?}",
+        result.advance_error
+    );
+    let findings = &result.outputs.as_ref().unwrap().findings;
+    assert!(canonical_len(findings) > FINDINGS_BYTES);
+    assert_eq!(findings[0].summary, long);
+}
+
+// Small: directly selected sources with the same ID remain distinct.
+#[test]
+fn direct_reviewers_with_duplicate_ids_require_distinct_dispositions() {
+    let mut synthesis = node("synthesis", route("first"));
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.depends_on = vec!["a".into(), "b".into()];
+    synthesis.inputs = ["a", "b"]
+        .into_iter()
+        .map(|id| GraphInput {
+            extra: Default::default(),
+            node: id.into(),
+            outputs: vec![OutputKind::Findings],
+        })
+        .collect();
+    for (decisions, expected) in [
+        (
+            r#"{"id":"F1","disposition":"rejected","reason":"no"}"#,
+            NodeState::Failed,
+        ),
+        (
+            r#"{"id":"a:F1","disposition":"rejected","reason":"no"},{"id":"b:F1","disposition":"rejected","reason":"no"}"#,
+            NodeState::Succeeded,
+        ),
+    ] {
+        let mut owner = FakeOwner {
+            observations: [
+                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+                terminal_with_result(
+                    AttemptOutcome::Succeeded,
+                    &findings_text(
+                        &entry("").replace("\"summary\":\"s\"", "\"summary\":\"other\""),
+                    ),
+                ),
+                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(decisions)),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let run = advance(
+            &graph(vec![
+                node("a", route("first")),
+                node("b", route("first")),
+                synthesis.clone(),
+            ]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
+        let result = &run.checkpoint.nodes[2];
+        assert!(owner.prompts[2].contains("a:F1"));
+        assert!(owner.prompts[2].contains("b:F1"));
+        assert_eq!(result.state, expected, "{:?}", result.advance_error);
+        if expected == NodeState::Succeeded {
+            let findings = &result.outputs.as_ref().unwrap().findings;
+            assert_eq!(
+                (&findings[0].summary, &findings[1].summary),
+                (&"s".to_owned(), &"other".to_owned())
+            );
+        } else {
+            assert!(
+                result
+                    .advance_error
+                    .as_deref()
+                    .unwrap()
+                    .contains("ambiguous")
+            );
+        }
+    }
+}
