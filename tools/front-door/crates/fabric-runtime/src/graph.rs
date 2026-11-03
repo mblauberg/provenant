@@ -2426,7 +2426,7 @@ impl PlannedNode {
     }
 }
 
-/// Explain an unexplained Blocked node by naming its first failed or blocked parent.
+/// Explain an unexplained Blocked non-gate node by naming its first failed or blocked parent.
 /// Returns whether the checkpoint changed.
 fn attribute_blocker(
     node_index: usize,
@@ -2434,7 +2434,8 @@ fn attribute_blocker(
     checkpoint: &mut GraphCheckpoint,
     positions: &std::collections::BTreeMap<String, usize>,
 ) -> bool {
-    if checkpoint.nodes[node_index].advance_error.is_some() {
+    // Gates record their outcome as gate evidence and never carry an advance error.
+    if node.condition.is_some() || checkpoint.nodes[node_index].advance_error.is_some() {
         return false;
     }
     let blocker = node
