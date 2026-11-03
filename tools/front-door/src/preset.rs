@@ -1333,6 +1333,10 @@ fn read_spec_context(layers: &Layers, parameters: &Value) -> Option<String> {
         .project_dir
         .clone()
         .or_else(|| std::env::current_dir().ok())?;
+    // Default project selection may be a subdirectory of a checkout.
+    let project =
+        provenant_os::git::repository_path(&project, provenant_os::git::RepositoryPath::Toplevel)
+            .unwrap_or(project);
     let worktree = parameters
         .get("worktree")
         .and_then(Value::as_str)

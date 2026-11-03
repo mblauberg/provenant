@@ -2248,3 +2248,47 @@ fn preset_missing_spec_warns_in_explain_and_launch() -> Result<(), Box<dyn std::
     }
     Ok(())
 }
+
+#[test]
+fn preset_file_spec_resolves_from_checkout_subdirectory() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    let subdir = project.join("nested");
+    std::fs::create_dir_all(&subdir)?;
+    assert!(
+        provenant_os::fixture::git_command()
+            .current_dir(&project)
+            .args(["init", "-q"])
+            .status()?
+            .success()
+    );
+    std::fs::write(project.join("spec.md"), "root acceptance criteria")?;
+    let prompt = temp.path().join("brief");
+    std::fs::write(&prompt, "review")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = fixture_cli()
+        .current_dir(&subdir)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .arg("--state-dir")
+        .arg(temp.path().join("state"))
+        .args([
+            "--json",
+            "run",
+            "--preset",
+            "review-council",
+            "--prompt-file",
+        ])
+        .arg(&prompt)
+        .args(["--explain", "--set", "parameters.spec='spec.md'"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let output = String::from_utf8(output.stdout)?;
+    assert!(output.contains("root acceptance criteria"), "{output}");
+    Ok(())
+}
