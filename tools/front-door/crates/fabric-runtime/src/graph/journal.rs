@@ -90,12 +90,14 @@ impl FileJournal {
                 || !snapshot.nodes.iter().any(|node| {
                     node.state == NodeState::Failed
                         && node.attempts.last().is_some_and(|last| {
-                            last.outcome == Some(AttemptOutcome::OtherFailure)
-                                && last
-                                    .attempt_ref
-                                    .as_deref()
-                                    .and_then(|reference| reference.rsplit('/').next())
-                                    == Some(attempt.as_str())
+                            matches!(
+                                last.outcome,
+                                Some(AttemptOutcome::OtherFailure | AttemptOutcome::ReviewRequired)
+                            ) && last
+                                .attempt_ref
+                                .as_deref()
+                                .and_then(|reference| reference.rsplit('/').next())
+                                == Some(attempt.as_str())
                         })
                 })
             {
@@ -115,7 +117,10 @@ impl FileJournal {
                     continue;
                 }
                 if let Some(last) = node.attempts.last_mut()
-                    && last.outcome == Some(AttemptOutcome::OtherFailure)
+                    && matches!(
+                        last.outcome,
+                        Some(AttemptOutcome::OtherFailure | AttemptOutcome::ReviewRequired)
+                    )
                     && last
                         .attempt_ref
                         .as_deref()

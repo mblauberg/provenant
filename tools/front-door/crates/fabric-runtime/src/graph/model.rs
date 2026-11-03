@@ -210,6 +210,9 @@ pub struct GraphNode {
     pub prompt: String,
     #[serde(default)]
     pub depends_on: Vec<String>,
+    /// Allow dependants to proceed after this node fails or is blocked.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub advisory: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<GraphInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

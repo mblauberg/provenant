@@ -234,6 +234,7 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
         deadline_seconds: None,
         prompt: format!("work for {id}"),
         depends_on: Vec::new(),
+        advisory: false,
         inputs: Vec::new(),
         route: Some(route),
         routes: None,
@@ -2860,6 +2861,7 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
         deadline_seconds: None,
         prompt: "do the work".to_owned(),
         depends_on: Vec::new(),
+        advisory: false,
         inputs: Vec::new(),
         route: None,
         routes: Some(routes.clone()),
@@ -3099,6 +3101,7 @@ fn pending_and_unknown_keep_observing_the_same_route_without_fallback() {
             deadline_seconds: None,
             prompt: "do the work".to_owned(),
             depends_on: Vec::new(),
+            advisory: false,
             inputs: Vec::new(),
             route: None,
             routes: Some(routes.clone()),
@@ -3438,6 +3441,7 @@ fn terminal_task_failure_does_not_try_a_fallback_route() {
         deadline_seconds: None,
         prompt: "do the work".to_owned(),
         depends_on: Vec::new(),
+        advisory: false,
         inputs: Vec::new(),
         route: None,
         routes: Some(vec![route("first"), route("second")]),
@@ -4726,4 +4730,41 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
     }
     impl Error for Untyped {}
     assert!(!launch_retry_kind(&Untyped));
+}
+
+#[test]
+fn advisory_composite_failure_preserves_cause_and_launches_dependant() {
+    for outcome in [AttemptOutcome::ReviewRequired, AttemptOutcome::TaskFailed] {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1, "graph_id":"advisory", "nodes":[
+                {"id":"scout", "kind":"composite", "access":"read_only", "advisory":true,
+                 "composite":{"nodes":[{"id":"synthesis","access":"read_only","prompt":"research","route":{"alias":"fixture"}}],
+                              "exports":[{"node":"synthesis","outputs":["result"]}]}},
+                {"id":"lane", "access":"read_only", "prompt":"write", "route":{"alias":"fixture"},
+                 "depends_on":["scout"], "inputs":[{"node":"scout","outputs":["result"]}]}
+            ]
+        })).unwrap();
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([terminal(outcome), terminal(AttemptOutcome::Succeeded)]),
+            ..Default::default()
+        };
+        let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+        let scout = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == "scout--synthesis")
+            .unwrap();
+        assert_eq!(scout.attempts[0].outcome, Some(outcome));
+        assert_eq!(
+            run.checkpoint
+                .nodes
+                .iter()
+                .find(|n| n.id == "lane")
+                .unwrap()
+                .state,
+            NodeState::Succeeded
+        );
+        assert!(owner.prompts.last().unwrap().contains("scout: unavailable"));
+    }
 }

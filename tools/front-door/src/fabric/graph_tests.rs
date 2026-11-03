@@ -558,9 +558,13 @@ mod result_tests {
         }
         assert!(
             rows[0]
-                .contains("adapter=codex model=latest effort=high attempt=new error=repair this")
+                .contains("adapter=codex model=latest effort=high attempt=new outcome=TaskFailed error=repair this")
         );
         assert!(!rows[0].contains("first"));
+        let mut review = run.clone();
+        review.checkpoint.nodes[0].attempts.last_mut().unwrap().outcome =
+            Some(provenant_fabric_runtime::graph::AttemptOutcome::ReviewRequired);
+        assert!(super::graph_human::graph_human_full(&review).contains("outcome=ReviewRequired"));
         assert!(rows[1].contains("route=none attempt=none"));
         assert!(rows[2].contains("CI waiting elapsed=12s checks=build head=abc"));
         assert!(full.contains("Advance error: repair this"));
@@ -608,7 +612,7 @@ mod result_tests {
             super::graph_display(&run, "fabric graph run", &globals),
             ordinary
         );
-        assert!(ordinary.contains("  ordinary: Failed\n"));
+        assert!(ordinary.contains("  ordinary: Failed outcome=TaskFailed\n"));
         assert!(ordinary.contains("  composite: Running (1 members)\n"));
         assert!(ordinary.contains("  member: Running CI waiting"));
         assert!(!ordinary.contains("loop-member"));
