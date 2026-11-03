@@ -253,6 +253,8 @@ pub struct RoutingConfig {
 /// Settlement retries a lane may take; the run store seals at most this many
 /// policy successors in one run.
 pub const MAX_SETTLEMENT_RETRIES: u8 = 32;
+/// Shipped infrastructure-successor allowance.
+pub const DEFAULT_SETTLEMENT_RETRIES: u8 = 2;
 /// Longest configurable settlement retry wait: one week.
 pub const MAX_RETRY_WAIT_SECONDS: u64 = 7 * 24 * 3_600;
 
@@ -264,7 +266,7 @@ impl Default for RoutingConfig {
             writer_advisory: None,
             suppress_opus_writer_warning: false,
             capacity_cooldown_seconds: 600,
-            settlement_retries: 2,
+            settlement_retries: DEFAULT_SETTLEMENT_RETRIES,
             capacity_retry_seconds: 30,
             capacity_retry_max_seconds: 600,
             retry_delay_ceiling_seconds: 3_600,
