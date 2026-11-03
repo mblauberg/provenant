@@ -46,7 +46,10 @@ pub(super) fn initialised_gitlink(root: &Path, path: &[u8]) -> Result<bool, Work
 const DIRTY_PATHS_LISTED: usize = 12;
 
 pub(super) fn dirty_paths_summary(paths: &[StatusPath]) -> String {
-    let raw: Vec<&[u8]> = paths.iter().map(|path| path.path.as_slice()).collect();
+    let raw: Vec<&[u8]> = paths
+        .iter()
+        .flat_map(|path| std::iter::once(path.path.as_slice()).chain(path.original_path.as_deref()))
+        .collect();
     dirty_paths_summary_bytes(&raw)
 }
 
@@ -359,6 +362,16 @@ pub fn cache_writer_guard(
 #[cfg(test)]
 mod dirty_tests {
     use super::*;
+
+    #[test]
+    fn summary_includes_both_rename_paths() {
+        let paths = [StatusPath {
+            kind: StatusKind::RenameOrCopy,
+            path: b"new name".to_vec(),
+            original_path: Some(b"old name".to_vec()),
+        }];
+        assert_eq!(dirty_paths_summary(&paths), "new name, old name");
+    }
 
     #[test]
     fn summary_lists_dirty_paths_and_counts_the_rest() {

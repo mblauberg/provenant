@@ -1975,8 +1975,6 @@ fn preset_run_followed_by_provenant_run_on_same_bound_worktree_succeeds()
     let project = temp.path().join("project");
     let state = temp.path().join("state");
     std::fs::create_dir(&project)?;
-    // Provenant creates the state root itself: Fabric refuses a root that
-    // other users can read, which a default-mode `create_dir` would be.
     let git = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
         let output = provenant_os::fixture::git_command()
             .current_dir(&project)
@@ -2004,15 +2002,7 @@ fn preset_run_followed_by_provenant_run_on_same_bound_worktree_succeeds()
         "-qm",
         "initial",
     ])?;
-    git(&["branch", "bound-lane"])?;
     let worktree = project.join(".worktrees/bound-lane");
-    std::fs::create_dir_all(worktree.parent().ok_or("worktree parent")?)?;
-    git(&[
-        "worktree",
-        "add",
-        worktree.to_str().ok_or("worktree path")?,
-        "bound-lane",
-    ])?;
 
     let presets = project.join(".provenant/presets");
     std::fs::create_dir_all(&presets)?;
@@ -2024,9 +2014,21 @@ fn preset_run_followed_by_provenant_run_on_same_bound_worktree_succeeds()
     std::fs::write(&prompt, "accept the bounded graph")?;
 
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let home = temp.path().join("home");
+    std::fs::create_dir(&home)?;
+    std::fs::create_dir(&state)?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::write(
+        state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='1B'\n",
+    )?;
     let run_cli = |args: &[&str]| -> std::io::Result<std::process::Output> {
         fixture_cli()
             .current_dir(&project)
+            .env("HOME", &home)
+            .env("CODEX_HOME", home.join(".codex"))
+            .env("PATH", "/usr/bin:/bin")
             .env("PROVENANT_ROOT", &root)
             .env("XDG_CONFIG_HOME", temp.path().join("config"))
             .args(["--json", "--state-dir"])
@@ -2034,6 +2036,34 @@ fn preset_run_followed_by_provenant_run_on_same_bound_worktree_succeeds()
             .args(args)
             .output()
     };
+
+    // Create a lane-owned worktree and let its initial attempt settle. This
+    // also makes the fixture robust on hosts with an incomplete process census.
+    let initial = run_cli(&[
+        "run",
+        "--model",
+        "codex/gpt-6-luna",
+        "--mode",
+        "worktree-write",
+        "--worktree-branch",
+        "bound-lane",
+        "--deliver",
+        "none",
+        "--prompt-file",
+        prompt.to_str().unwrap(),
+        "--wait",
+        "10s",
+    ])?;
+    let initial_json: serde_json::Value = serde_json::from_slice(&initial.stdout)?;
+    let run_id = initial_json["data"]["run_id"]
+        .as_str()
+        .ok_or_else(|| format!("initial writer not admitted: {initial_json}"))?;
+    let settled = run_cli(&["lanes", "--id", run_id, "--all", "--wait", "10s"])?;
+    assert!(
+        settled.status.success(),
+        "initial writer did not settle: {}",
+        String::from_utf8_lossy(&settled.stdout)
+    );
 
     // First: run a preset bound to the worktree.
     let preset_run = run_cli(&[
@@ -2060,6 +2090,51 @@ fn preset_run_followed_by_provenant_run_on_same_bound_worktree_succeeds()
     std::fs::write(worktree.join("target/debug/output.bin"), "bin")?;
     std::fs::create_dir_all(worktree.join(".provenant/scratch/graphs"))?;
     std::fs::write(worktree.join(".provenant/scratch/graphs/graph.json"), "{}")?;
+
+    let status = provenant_os::fixture::git_command()
+        .current_dir(&worktree)
+        .args(["status", "--porcelain"])
+        .output()?;
+    assert!(status.status.success());
+    assert!(
+        status.stdout.is_empty(),
+        "worktree has non-ignored changes: {}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+
+    // Claim the existing branch as a writer after the preset, exercising ownership
+    // admission with ignored files present rather than just a gate-only graph.
+    let writer = run_cli(&[
+        "dispatch",
+        "--model",
+        "codex/gpt-6-luna",
+        "--effort",
+        "low",
+        "--mode",
+        "worktree-write",
+        "--worktree-branch",
+        "bound-lane",
+        "--deliver",
+        "none",
+        "--prompt-file",
+        prompt.to_str().unwrap(),
+    ])?;
+    assert!(
+        writer.status.success(),
+        "writer admission failed: stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&writer.stdout),
+        String::from_utf8_lossy(&writer.stderr)
+    );
+    let writer_json: serde_json::Value = serde_json::from_slice(&writer.stdout)?;
+    assert!(writer_json["data"]["run_id"].is_string(), "{writer_json}");
+    assert_eq!(
+        writer_json["data"]["worktree"]["owned"], true,
+        "{writer_json}"
+    );
+    assert_eq!(
+        writer_json["data"]["worktree"]["branch"], "bound-lane",
+        "{writer_json}"
+    );
 
     // Second: provenant run on the same bound worktree succeeds despite ignored files.
     let run_again = run_cli(&[
