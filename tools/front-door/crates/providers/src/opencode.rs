@@ -1263,20 +1263,23 @@ mod tests {
                 link: bin.join("git"),
                 target: input.provenant.git.to_owned(),
             }));
-            // Read-only discovery enables only OpenCode's search binary; a
+            // Read-only discovery enables OpenCode's cached search binary and system grep; a
             // writer's toolchain roots follow the system and package roots.
             let roots = &spec.profile.spec.tool_exec_roots;
             if access == Access::ReadOnly {
                 assert_eq!(
                     roots,
-                    &[exact(
-                        plan.permissions()
-                            .private_state
-                            .as_ref()
-                            .unwrap()
-                            .path
-                            .join("cache/opencode/bin/rg")
-                    )]
+                    &[
+                        exact(
+                            plan.permissions()
+                                .private_state
+                                .as_ref()
+                                .unwrap()
+                                .path
+                                .join("cache/opencode/bin/rg")
+                        ),
+                        exact("/usr/bin/grep"),
+                    ]
                 );
             } else {
                 assert_eq!(
