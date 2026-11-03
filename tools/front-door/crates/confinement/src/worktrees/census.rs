@@ -82,11 +82,27 @@ impl<'a> CensusPolicyWorkers<'a> {
         inner: &'a dyn WorkerObserver,
         roots: &provenant_core::Roots,
     ) -> Result<Self, WorktreeError> {
+        Self::configured(inner, roots, false)
+    }
+
+    /// Apply the host ancestor-exclusion setting only for run admission.
+    pub fn for_run(
+        inner: &'a dyn WorkerObserver,
+        roots: &provenant_core::Roots,
+    ) -> Result<Self, WorktreeError> {
+        Self::configured(inner, roots, true)
+    }
+
+    fn configured(
+        inner: &'a dyn WorkerObserver,
+        roots: &provenant_core::Roots,
+        for_run: bool,
+    ) -> Result<Self, WorktreeError> {
         let config = provenant_config::read_knobs(roots)?;
         Ok(Self {
             inner,
             entries: config.census_ignore_unreadable()?,
-            exclude_ancestors: config.census_exclude_ancestors()?,
+            exclude_ancestors: for_run && config.census_exclude_ancestors()?,
         })
     }
 }
@@ -98,7 +114,7 @@ impl WorkerObserver for CensusPolicyWorkers<'_> {
         for_land: bool,
     ) -> WorkerObservations {
         self.inner
-            .observe_roots_with_policy(roots, entries, for_land || self.exclude_ancestors)
+            .observe_roots_with_policy(roots, entries, for_land)
     }
     fn live_process_with_policy(
         &self,
@@ -106,8 +122,7 @@ impl WorkerObserver for CensusPolicyWorkers<'_> {
         entries: &[CensusIgnoreEntry],
         for_land: bool,
     ) -> Option<ObservedProcess> {
-        self.inner
-            .live_process_with_policy(root, entries, for_land || self.exclude_ancestors)
+        self.inner.live_process_with_policy(root, entries, for_land)
     }
     fn requires_complete_census(&self) -> bool {
         self.inner.requires_complete_census()

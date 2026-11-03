@@ -1343,6 +1343,77 @@ fn unplaceable_path_failures_retain_process_image_diagnostics() -> Result<(), Bo
 }
 
 #[test]
+fn ancestor_exclusion_is_limited_to_run_admission() -> Result<(), Box<dyn Error>> {
+    struct Probe;
+    impl WorkerObserver for Probe {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, WorkerState::Live))
+                .collect()
+        }
+        fn observe_roots_with_policy(
+            &self,
+            roots: &[PathBuf],
+            _: &[CensusIgnoreEntry],
+            exclude: bool,
+        ) -> WorkerObservations {
+            (
+                roots
+                    .iter()
+                    .cloned()
+                    .map(|root| {
+                        (
+                            root,
+                            if exclude {
+                                WorkerState::Free
+                            } else {
+                                WorkerState::Live
+                            },
+                        )
+                    })
+                    .collect(),
+                BTreeMap::new(),
+            )
+        }
+        fn live_process_with_policy(
+            &self,
+            root: &Path,
+            _: &[CensusIgnoreEntry],
+            exclude: bool,
+        ) -> Option<ObservedProcess> {
+            (!exclude).then(|| ObservedProcess {
+                pid: 90,
+                command: Some("shell".into()),
+                cwd: Some(root.to_path_buf()),
+            })
+        }
+    }
+    let fixture = Fixture::new()?;
+    let root = canonicalize(&fixture.root)?;
+    let inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let ordinary = CensusPolicyWorkers::from_roots(&Probe, &roots)?;
+    let run = CensusPolicyWorkers::for_run(&Probe, &roots)?;
+    assert_eq!(
+        ordinary.observe_roots(std::slice::from_ref(&root))[&root],
+        WorkerState::Live
+    );
+    assert_eq!(ordinary.live_process(&root).unwrap().pid, 90);
+    assert_eq!(
+        run.observe_roots(std::slice::from_ref(&root))[&root],
+        WorkerState::Free
+    );
+    assert!(run.live_process(&root).is_none());
+    assert_eq!(
+        ordinary.observe_roots_for_land(std::slice::from_ref(&root))[&root],
+        WorkerState::Free
+    );
+    Ok(())
+}
+
+#[test]
 fn host_policy_is_scoped_to_config_roots_and_preserves_injected_refusal()
 -> Result<(), Box<dyn Error>> {
     struct Probe(std::sync::Mutex<Vec<Vec<CensusIgnoreEntry>>>);

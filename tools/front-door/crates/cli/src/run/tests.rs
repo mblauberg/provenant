@@ -2562,6 +2562,59 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
         "-qm",
         "second",
     ])?;
+    // Move the named base between early resolution and creation.
+    struct MoveBase {
+        project: PathBuf,
+        moved: std::sync::atomic::AtomicBool,
+    }
+    impl provenant_confinement::worktrees::WorkerObserver for MoveBase {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::WorkerState>
+        {
+            if !self.moved.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                provenant_os::fixture::run_git(
+                    &self.project,
+                    &["update-ref", "refs/heads/moving-base", "HEAD"],
+                )
+                .unwrap();
+            }
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, provenant_confinement::worktrees::WorkerState::Free))
+                .collect()
+        }
+    }
+    run_git(&["branch", "moving-base", "HEAD^"])?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let moving = MoveBase {
+        project: project.clone(),
+        moved: std::sync::atomic::AtomicBool::new(false),
+    };
+    let (created_info, created_base) = own_worktree(
+        &OwnedWorktree {
+            branch: "moving-base-lane".into(),
+            host: provenant_config::bind_host(&roots)?,
+            created_at: clock.wall_now()?,
+        },
+        Some("moving-base"),
+        &OperationId::parse("moving-base-lane")?,
+        &edge,
+        &moving,
+        |_| false,
+        &mut None,
+        &clock,
+        &cancel,
+    )
+    .map_err(|fail| fail.to_string())?;
+    assert_eq!(created_info.head, created_base);
+    assert_eq!(
+        created_base.to_string(),
+        String::from_utf8(run_git(&["rev-parse", "HEAD"])?)?.trim()
+    );
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel).map_err(|fail| fail.message)?;

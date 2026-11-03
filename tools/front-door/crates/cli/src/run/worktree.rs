@@ -162,9 +162,7 @@ pub(super) fn own_worktree(
                         cancel,
                     )?;
                     *created = Some((info.path.clone(), branch.clone()));
-                    let pinned = requested_base_oid
-                        .map(|oid| oid.to_string())
-                        .unwrap_or_else(|| info.head.to_string());
+                    let pinned = info.head.to_string();
                     (info, Some(pinned))
                 }
             };
