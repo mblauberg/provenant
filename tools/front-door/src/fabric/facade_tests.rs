@@ -1836,6 +1836,8 @@ mod peer_tests {
                 )?
                 .head
         );
+        let output = fixture.rig.execute(&git, &["branch", "old-review", &base.to_string()], None)?;
+        assert_eq!(crate::worktree_tests::support::code(&output), 0);
         for args in [
             vec![
                 "commit",
@@ -1869,6 +1871,23 @@ mod peer_tests {
         assert_eq!(journal.integration_base(), Some(base));
         let execution = FileJournal::execution(&fixture.roots.state, fixture.settled.project_id, "pinned-base")?.ok_or("execution missing")?;
         assert_eq!(execution.review_base, Some(base));
+        drop(journal);
+        let head_output = fixture.rig.execute(&git, &["rev-parse", "HEAD"], None)?;
+        let head = String::from_utf8(head_output.stdout.bytes)?.trim().to_owned();
+        let base_text = base.to_string();
+        for (id, reference, expected) in [("review-base", "old-review", base_text.as_str()), ("empty-review-base", "", head.as_str())] {
+            let path = fixture.rig.project.join(format!("{id}.json"));
+            std::fs::write(&path, serde_json::to_vec(&serde_json::json!({
+                "schema_version":2, "graph_id":id, "review_base":reference,
+                "nodes":[{"id":"lens","prompt":"review","access":"read_only", "source":{"type":"commit","commit":head}, "route":{"adapter":"fixture","model":"fixture/model"}}]
+            }))?)?;
+            let result = factory.graph(GraphInput::Run { extra: Default::default(), document: path }, budget, &cancel)?;
+            let operation = graph_operation("graph-attempt-operation", &result.checkpoint.nodes[0].attempts[0].key)?;
+            let operation = store.operation(&operation, &owner.call(&cancel))?.ok_or("operation missing")?;
+            let request = store.request(operation.run_id, &owner.call(&cancel))?;
+            assert_eq!(request.tasks[0].base.as_deref(), Some(expected));
+            assert_eq!(request.tasks[0].head.as_deref(), Some(head.as_str()));
+        }
         Ok(())
     }
 

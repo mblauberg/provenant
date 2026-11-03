@@ -2917,19 +2917,22 @@ fn graph_attempt_usage(
 fn decode_graph_document(
     bytes: &[u8],
 ) -> Result<provenant_fabric_runtime::graph::GraphDocument, FacadeError> {
-    provenant_records::decode_v1(bytes, provenant_records::Limits::default()).map_err(|error| {
-        match error {
-            provenant_records::DecodeError::UnsupportedVersion { found, .. } if found > 1 => {
-                FacadeError::UpgradeRequired {
-                    reader_release: env!("CARGO_PKG_VERSION").into(),
-                    writer_release: "unknown".into(),
-                    record: "graph document schema".into(),
-                    version: found,
-                }
-            }
-            _ => FacadeError::InvalidInput,
-        }
-    })
+    let value: serde_json::Value =
+        provenant_records::decode(bytes, provenant_records::Limits::default())
+            .map_err(|_| FacadeError::InvalidInput)?;
+    match value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+    {
+        Some(1 | 2) => serde_json::from_value(value).map_err(|_| FacadeError::InvalidInput),
+        Some(version) if version > 2 => Err(FacadeError::UpgradeRequired {
+            reader_release: env!("CARGO_PKG_VERSION").into(),
+            writer_release: "unknown".into(),
+            record: "graph document schema".into(),
+            version,
+        }),
+        _ => Err(FacadeError::InvalidInput),
+    }
 }
 
 fn graph_journal_error(error: provenant_fabric_runtime::graph::JournalError) -> FacadeError {
@@ -4238,7 +4241,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 None
             };
             let review_base = if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly {
-                FileJournal::execution(
+                provenant_fabric_runtime::graph::FileJournal::execution(
                     &self.factory.context.roots.state,
                     self.factory.context.identity.project,
                     &key.graph_id,
