@@ -229,17 +229,16 @@ fn parse_findings(block: &str, upstream: &[Finding]) -> Result<Vec<Finding>, Str
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| fail("id", "expected string"))?
             .to_owned();
-        // Selection removes repeated inputs from the same source. A bare alias
-        // must be unique across both bare and qualified identities.
+        // Selection removes repeated inputs from the same source. An alias
+        // must be unique across exact identities and colon-delimited suffixes.
         let matches: Vec<_> = upstream
             .iter()
             .filter(|finding| {
                 finding.id == id
-                    || (!id.contains(':')
-                        && finding
-                            .id
-                            .rsplit_once(':')
-                            .is_some_and(|(_, bare)| bare == id))
+                    || finding
+                        .id
+                        .strip_suffix(&id)
+                        .is_some_and(|prefix| prefix.ends_with(':'))
             })
             .collect();
         if matches.len() > 1 {
@@ -545,4 +544,32 @@ pub(super) fn render_files(entries: &[MaterialisedInput]) -> String {
     }
     text.push_str(FILES_CLOSE);
     text
+}
+
+#[cfg(test)]
+mod alias_tests {
+    use super::*;
+
+    #[test]
+    fn qualified_alias_requires_a_unique_colon_delimited_suffix() {
+        let finding = |id: &str| {
+            serde_json::from_value::<Finding>(serde_json::json!({
+                "id": id, "severity": "high", "file": "a.rs", "summary": "s", "status": "open"
+            }))
+            .unwrap()
+        };
+        let block = r#"{"schema_version":1,"findings":[{"id":"inner:F2","disposition":"rejected","reason":"no"}]}"#;
+        let ambiguous = parse_findings(block, &[finding("a:inner:F2"), finding("b:inner:F2")]);
+        assert!(
+            ambiguous
+                .unwrap_err()
+                .contains("ambiguous upstream identity")
+        );
+        let non_boundary = parse_findings(block, &[finding("a:xinner:F2")]);
+        assert!(
+            non_boundary
+                .unwrap_err()
+                .contains("unknown upstream identity")
+        );
+    }
 }

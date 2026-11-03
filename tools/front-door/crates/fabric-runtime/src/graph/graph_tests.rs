@@ -619,6 +619,7 @@ fn composite_findings_have_qualified_ids_and_unambiguous_bare_aliases() {
             NodeState::Succeeded,
         ),
         ("F2", vec!["F1", "F2"], NodeState::Succeeded),
+        ("inner:F2", vec!["F1", "inner:F2"], NodeState::Succeeded),
         (
             "inner:F2",
             vec!["reviews--a:F1", "reviews--b:inner:F2"],
