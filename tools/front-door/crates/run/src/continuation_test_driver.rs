@@ -71,6 +71,7 @@ pub(super) fn main() -> TestResult {
     )?;
     Ok(())
 }
+const HANDOFF: &str = "```handoff\n{\"schema_version\":2,\"status\":\"done\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"pinned writer fixture\"}\n```";
 struct NoChildren;
 impl provenant_supervisor::NestedChildStore for NoChildren {
     fn has_no_nested_runs(&self, _: &[u8]) -> bool {
@@ -100,7 +101,8 @@ impl Providers for PinnedWriter {
         }
         Ok(Decoded {
             outcome: Outcome::Succeeded,
-            result: String::from_utf8_lossy(stdout).into_owned(),
+            // A finished lane reports a handoff; without one it settles review_required.
+            result: format!("{}\n{HANDOFF}", String::from_utf8_lossy(stdout).trim_end()),
             complete: true,
             observed_route: Some(route.clone()),
             usage: Default::default(),
@@ -146,7 +148,11 @@ fn prepare(task: &TaskRequest, paths: &LaunchPaths) -> TestResult<PreparedLaunch
     };
     let authority = WorktreeWriteAuthority::for_worktree(&writer.worktree, &writer.branch, &home)?;
     let scratch = paths.temporary.join("candidate-0");
-    std::fs::create_dir(&scratch)?;
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        // Confinement refuses scratch that other users can read.
+        std::fs::DirBuilder::new().mode(0o700).create(&scratch)?;
+    }
     let plan = ConfinedPlan::new(PlanRequest {
         scope: WorkScope::Project(binding.project_id()),
         permissions: PlanPermissions {
@@ -432,7 +438,7 @@ fn launches() -> TestResult {
             let result = record.result.as_ref().ok_or("provider result")?;
             assert_eq!(
                 store.artifact_bytes(record.run_id, result, RECORD_LIMIT)?,
-                head.to_string().as_bytes()
+                format!("{head}\n{HANDOFF}").as_bytes()
             );
             break;
         }
