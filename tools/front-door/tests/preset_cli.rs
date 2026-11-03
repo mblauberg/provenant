@@ -2217,10 +2217,29 @@ fn preset_missing_spec_warns_in_explain_and_launch() -> Result<(), Box<dyn std::
                 .success()
         );
     }
+    let writer = temp.path().join("writer");
+    let batch = temp.path().join("batch");
+    for (branch, worktree) in [("writer", &writer), ("batch", &batch)] {
+        assert!(
+            provenant_os::fixture::git_command()
+                .current_dir(&project)
+                .args(["worktree", "add", "-q", "-b", branch])
+                .arg(worktree)
+                .status()?
+                .success()
+        );
+    }
+    std::fs::create_dir_all(writer.join(".agent-run"))?;
+    std::fs::write(writer.join(".agent-run/missing.md"), "lane-only criteria")?;
     let prompt = temp.path().join("brief");
     std::fs::write(&prompt, "review")?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for explain in [true, false] {
+    for (preset, explain) in [
+        ("review-council", true),
+        ("review-council", false),
+        ("big-batch", true),
+        ("big-batch", false),
+    ] {
         let mut command = fixture_cli();
         command
             .current_dir(&project)
@@ -2230,9 +2249,19 @@ fn preset_missing_spec_warns_in_explain_and_launch() -> Result<(), Box<dyn std::
             .env("XDG_CONFIG_HOME", temp.path().join("config"))
             .arg("--state-dir")
             .arg(temp.path().join("state"))
-            .args(["run", "--preset", "review-council", "--prompt-file"])
+            .args(["run", "--preset", preset, "--prompt-file"])
             .arg(&prompt)
             .args(["--set", "parameters.spec='.agent-run/missing.md'"]);
+        if preset == "big-batch" {
+            command.args([
+                "--plan",
+                "on",
+                "--set",
+                &format!("parameters.batch_worktree='{}'", batch.display()),
+                "--set",
+                &format!("parameters.worktrees=['{}']", writer.display()),
+            ]);
+        }
         if explain {
             command.arg("--explain");
         } else {
@@ -2242,8 +2271,12 @@ fn preset_missing_spec_warns_in_explain_and_launch() -> Result<(), Box<dyn std::
         let stderr = String::from_utf8(output.stderr)?;
         assert!(
             stderr.contains("spec file '.agent-run/missing.md' could not be read"),
-            "explain={explain}: {stderr} / {}",
+            "{preset}, explain={explain}: {stderr} / {}",
             String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            stderr.contains("pass an issue-number spec instead"),
+            "{stderr}"
         );
     }
     Ok(())

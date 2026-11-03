@@ -4065,68 +4065,144 @@ mod planner_front_end {
         }
     }
 
+    fn review_prompts(value: &Value) -> Vec<String> {
+        let mut prompts = Vec::new();
+        match value {
+            Value::Object(map) => {
+                if map.get("role").and_then(Value::as_str).is_some_and(|role| {
+                    role.starts_with("lens.")
+                        || role.starts_with("review.")
+                        || role == "plan.review"
+                }) {
+                    prompts.push(map["prompt"].as_str().unwrap().to_owned());
+                }
+                // Static fallback lanes retain their own explicit lane specs.
+                for (key, child) in map {
+                    if key != "fallback" {
+                        prompts.extend(review_prompts(child));
+                    }
+                }
+            }
+            Value::Array(items) => {
+                for child in items {
+                    prompts.extend(review_prompts(child));
+                }
+            }
+            _ => {}
+        }
+        prompts
+    }
+
     #[test]
-    fn planned_big_batch_review_receives_lane_file_spec_and_warns_when_missing() {
+    fn planned_big_batch_reviews_share_one_bounded_batch_spec() {
+        let temp = tempfile::tempdir().unwrap();
+        let batch = temp.path().join("batch");
+        let writer = temp.path().join("writer");
+        for root in [temp.path(), &batch, &writer] {
+            std::fs::create_dir_all(root.join(".agent-run")).unwrap();
+        }
+        std::fs::write(writer.join(".agent-run/spec.md"), "lane-only criteria").unwrap();
+        std::fs::write(temp.path().join(".agent-run/spec.md"), "project criteria").unwrap();
+        let path = batch.join(".agent-run/spec.md");
+        let content = format!("batch criteria {}", "x".repeat(20_000));
+        std::fs::write(&path, &content).unwrap();
+        let digest = "d5ee5caf2a1e61a61df03de27472700e6d3944682ee99c8112243eb36972e54d";
+        let mut layers = layers(PlanMode::On, None);
+        layers.project_dir = Some(temp.path().to_owned());
+        let mut baseline = None;
+        // An open choice and many choices carry exactly the same review text.
+        for count in [0, 1, 64] {
+            let expansion = run(
+                &layers,
+                "big-batch",
+                "brief",
+                vec![
+                    ("worktrees".into(), json!(vec![&writer; count])),
+                    ("batch_worktree".into(), json!(batch)),
+                    ("spec".into(), json!(".agent-run/spec.md")),
+                ],
+            );
+            assert!(!expansion.warnings.iter().any(|w| w.contains("spec file")));
+            let prompts = review_prompts(&expansion.document["nodes"]);
+            assert!(
+                prompts.len() > 3,
+                "include lane, council and repair reviews"
+            );
+            for prompt in &prompts {
+                let (_, context) = prompt
+                    .split_once("\n\nSpec file: ")
+                    .unwrap_or_else(|| panic!("missing spec: {prompt}"));
+                assert!(context.starts_with(&format!(
+                    "{} (sha256:{digest}; excerpt up to 16384 bytes)\n",
+                    path.display()
+                )));
+                let (_, excerpt) = context.split_once('\n').unwrap();
+                assert_eq!(excerpt, &content[..16_384]);
+                assert!(!prompt.contains("lane-only criteria"));
+                assert!(!prompt.contains("project criteria"));
+            }
+            if let Some(baseline) = &baseline {
+                assert_eq!(&prompts, baseline, "review text must not grow with lanes");
+            } else {
+                baseline = Some(prompts);
+            }
+            let document: provenant_fabric_runtime::graph::GraphDocument =
+                serde_json::from_value(expansion.document).unwrap();
+            // An open worktree list is not runtime-admissible until confined.
+            if count > 0 {
+                document.inspect(&Default::default()).unwrap();
+            }
+        }
+        std::fs::remove_file(&path).unwrap();
+        let fallback = run(
+            &layers,
+            "big-batch",
+            "brief",
+            vec![
+                ("batch_worktree".into(), json!(batch)),
+                ("spec".into(), json!(".agent-run/spec.md")),
+            ],
+        );
+        for prompt in review_prompts(&fallback.document["nodes"]) {
+            assert!(prompt.contains("project criteria"));
+            assert!(prompt.contains(&temp.path().join(".agent-run/spec.md").display().to_string()));
+        }
+    }
+
+    #[test]
+    fn planned_big_batch_lane_only_spec_warns_even_with_open_worktree_choices() {
         let temp = tempfile::tempdir().unwrap();
         let writer = temp.path().join("writer");
         std::fs::create_dir_all(writer.join(".agent-run")).unwrap();
-        let second = temp.path().join("second");
-        std::fs::create_dir_all(second.join(".agent-run")).unwrap();
-        std::fs::write(second.join(".agent-run/spec.md"), "second lane criteria").unwrap();
-        let path = writer.join(".agent-run/spec.md");
-        std::fs::write(&path, "writer acceptance criteria").unwrap();
+        std::fs::write(writer.join(".agent-run/spec.md"), "lane-only criteria").unwrap();
         let mut layers = layers(PlanMode::On, None);
         layers.project_dir = Some(temp.path().to_owned());
-        let params = vec![
-            ("worktrees".into(), json!([writer, second])),
-            ("batch_worktree".into(), json!(temp.path().join("batch"))),
-            ("spec".into(), json!(".agent-run/spec.md")),
-        ];
-        let expansion = run(&layers, "big-batch", "brief", params.clone());
-        let nodes = &expansion.document["nodes"][1]["plan"]["patterns"][0]["nodes"];
-        for role in [
-            "lens.correctness-spec",
-            "lens.simplicity",
-            "review.evaluator",
-        ] {
-            let prompt = find_prompt(nodes, role).unwrap();
-            assert!(prompt.contains("writer acceptance criteria"), "{role}");
-            assert!(prompt.contains("second lane criteria"), "{role}");
-            assert!(
-                prompt.contains(&second.join(".agent-run/spec.md").display().to_string()),
-                "{role}"
+        for choices in [json!([]), json!([writer])] {
+            let expansion = run(
+                &layers,
+                "big-batch",
+                "brief",
+                vec![
+                    ("worktrees".into(), choices),
+                    ("batch_worktree".into(), json!(temp.path().join("batch"))),
+                    ("spec".into(), json!(".agent-run/spec.md")),
+                ],
             );
-            assert!(
-                prompt.contains("assigned writer worktree ${worktree}"),
-                "{role}"
+            assert!(expansion.warnings.iter().any(|w| {
+                w.contains("spec file '.agent-run/spec.md'")
+                    && w.contains("pass an issue-number spec instead")
+            }));
+            assert_eq!(
+                expansion.document["provenance"]["warnings"],
+                json!(expansion.warnings)
             );
-            assert!(prompt.contains(&path.display().to_string()), "{role}");
-            assert!(
-                prompt.contains("2e4b7d401613f23b5002dfe69d8e2b02606c5982fc2a53941d2ea8b0aa05e4d0"),
-                "{role}"
-            );
+            let prompts = review_prompts(&expansion.document["nodes"]);
+            assert!(prompts.len() > 3);
+            for prompt in prompts {
+                assert!(!prompt.contains("Spec file:"));
+                assert!(!prompt.contains("lane-only criteria"));
+            }
         }
-        std::fs::write(&path, "literal ${not_a_pattern_parameter}").unwrap();
-        let literal = run(&layers, "big-batch", "brief", params.clone());
-        let pattern = &literal.document["nodes"][1]["plan"]["patterns"][0];
-        assert_eq!(pattern["parameters"]["spec_literal_dollar"]["default"], "$");
-        assert!(
-            find_prompt(&pattern["nodes"], "lens.correctness-spec")
-                .unwrap()
-                .contains("${spec_literal_dollar}{not_a_pattern_parameter}")
-        );
-        let document: provenant_fabric_runtime::graph::GraphDocument =
-            serde_json::from_value(literal.document).unwrap();
-        document.inspect(&Default::default()).unwrap();
-        std::fs::remove_file(path).unwrap();
-        let missing = run(&layers, "big-batch", "brief", params);
-        assert!(
-            missing
-                .warnings
-                .iter()
-                .any(|w| w.contains("spec file '.agent-run/spec.md'")
-                    && w.contains(&writer.display().to_string()))
-        );
     }
 
     #[test]

@@ -1399,7 +1399,7 @@ fn read_spec_context(layers: &Layers, parameters: &Value) -> Option<String> {
         errors.push(format!("{}: {error}", candidate.display()));
     }
     let warning = format!(
-        "spec file '{spec}' could not be read: {}",
+        "spec file '{spec}' could not be read: {}; pass an issue-number spec instead",
         errors.join("; ")
     );
     let mut warnings = layers.warnings.borrow_mut();
