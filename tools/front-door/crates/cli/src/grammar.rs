@@ -107,6 +107,12 @@ pub enum Command {
         /// Wait for this head's CI (default 1 hour; maximum 4 hours)
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "1h", value_parser = duration_seconds)]
         wait: Option<u64>,
+        /// Initial CI poll interval in seconds (overrides domains.pr.land.poll_seconds, default 30)
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        poll: Option<u64>,
+        /// Show the effective polling interval and retry budget without landing
+        #[arg(long)]
+        explain: bool,
     },
     /// Start a provider lane or manifest of lanes
     Dispatch(Box<Dispatch>),

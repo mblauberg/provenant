@@ -1,9 +1,8 @@
 //! Bounded CI polling for a pinned PR head. No progress goes to JSON stdout.
-use super::{Result, execute_for, status::Required, successful};
+use super::{Result, execute_for, status::Required};
 use provenant_core::GitOid;
 use provenant_core::retry::{Backoff, RetryCause, is_transient};
 use provenant_os::exec::Termination;
-use serde::Deserialize;
 use std::{
     io::{self, Write},
     path::Path,
@@ -16,7 +15,10 @@ pub(super) struct Failure {
     pub code: &'static str,
     pub message: String,
 }
-fn failure(code: &'static str, message: impl Into<String>) -> Box<dyn std::error::Error> {
+pub(super) fn failure(
+    code: &'static str,
+    message: impl Into<String>,
+) -> Box<dyn std::error::Error> {
     Box::new(Failure {
         code,
         message: message.into(),
@@ -148,44 +150,212 @@ fn settle_remaining(checks: &[Check], now: jiff::Timestamp) -> Option<Duration> 
 pub(super) struct Reader<'a> {
     pub project: &'a Path,
     pub deadline: Instant,
+    pub retry_command: String,
 }
 impl Reader<'_> {
-    // This CLI edge owns the real clock and retry pause.
     #[allow(clippy::disallowed_methods)]
     pub fn read(&self, argv: &[&str]) -> Result<provenant_os::exec::ExecOutcome> {
+        self.request(argv, false)
+    }
+
+    #[allow(clippy::disallowed_methods)]
+    pub fn request(
+        &self,
+        argv: &[&str],
+        mutation: bool,
+    ) -> Result<provenant_os::exec::ExecOutcome> {
         let backoff = Backoff::new(RETRY_FIRST, 2, RETRY_LAST);
+        let rate_backoff = Backoff::new(Duration::from_secs(60), 2, Duration::from_secs(900));
         let mut retries = 0_u64;
+        let mut rate_reset = None;
         loop {
             let left = self.deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                return Err(failure(
-                    "CI_TIMEOUT",
-                    "CI wait expired; no merge was attempted",
-                ));
+                return Err(if let Some(reset) = rate_reset {
+                    failure(
+                        "RATE_LIMITED",
+                        format!(
+                            "GitHub rate limit; reset {reset}; next: {}",
+                            self.retry_command
+                        ),
+                    )
+                } else {
+                    failure("CI_TIMEOUT", "GitHub wait budget expired")
+                });
             }
-            let fatal =
-                match execute_for(self.project, argv, left.min(Duration::from_secs(60)), false) {
-                    Ok(output) if output.termination == Termination::Exit(0) => return Ok(output),
-                    Ok(output) => {
-                        if !is_transient(RetryCause::CommandOutput {
-                            stderr: &String::from_utf8_lossy(&output.stderr.bytes),
-                            stdout: &String::from_utf8_lossy(&output.stdout.bytes),
-                        }) {
-                            return Ok(output);
-                        }
-                        None
-                    }
-                    Err(error) if error.is::<super::TimedOut>() => None,
-                    Err(error) => Some(error),
-                };
-            if let Some(error) = fatal {
-                return Err(failure("CI_UNAVAILABLE", error.to_string()));
+            let mut args = argv.to_vec();
+            if args.starts_with(&["gh", "api"]) {
+                args.insert(2, "--include");
             }
+            let mut output = match execute_for(
+                self.project,
+                &args,
+                left.min(Duration::from_secs(60)),
+                false,
+            ) {
+                Ok(output) => output,
+                Err(error) if !mutation && error.is::<super::TimedOut>() => {
+                    let left = self.deadline.saturating_duration_since(Instant::now());
+                    std::thread::sleep(backoff.delay(retries).min(left));
+                    retries = retries.saturating_add(1);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let (headers, body) = strip_headers(&output.stdout.bytes);
+            output.stdout.bytes = body;
+            if output.termination == Termination::Exit(0) {
+                return Ok(output);
+            }
+            if let Some(status) = http_status(&headers) {
+                output
+                    .stderr
+                    .bytes
+                    .extend_from_slice(format!("\nHTTP {status}\n").as_bytes());
+            }
+            let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+            let stdout = String::from_utf8_lossy(&output.stdout.bytes);
+            let limited = is_rate_limit(&headers, &stderr, &stdout);
+            if !limited
+                && (mutation
+                    || !is_transient(RetryCause::CommandOutput {
+                        stderr: &stderr,
+                        stdout: &stdout,
+                    }))
+            {
+                return Ok(output);
+            }
+            let delay = if limited {
+                let (delay, reset) = rate_delay(&headers, rate_backoff.delay(retries));
+                rate_reset = Some(reset);
+                delay
+            } else {
+                backoff.delay(retries)
+            };
             let left = self.deadline.saturating_duration_since(Instant::now());
-            std::thread::sleep(backoff.delay(retries).min(left));
+            std::thread::sleep(delay.max(Duration::from_secs(1)).min(left));
             retries = retries.saturating_add(1);
         }
     }
+}
+
+// `gh api --include --paginate --slurp` interleaves headers with the
+// slurped JSON array. Remove each response header while retaining the pages.
+fn strip_headers(bytes: &[u8]) -> (String, Vec<u8>) {
+    let mut headers = String::new();
+    let mut body = Vec::new();
+    let mut position = 0;
+    let mut quoted = false;
+    let mut escaped = false;
+    while position < bytes.len() {
+        if !quoted
+            && bytes[position..].starts_with(b"HTTP/")
+            && (position == 0 || matches!(bytes[position - 1], b'\n' | b'[' | b','))
+        {
+            let rest = &bytes[position..];
+            let end = rest
+                .windows(4)
+                .position(|part| part == b"\r\n\r\n")
+                .map(|i| (i, 4))
+                .or_else(|| {
+                    rest.windows(2)
+                        .position(|part| part == b"\n\n")
+                        .map(|i| (i, 2))
+                });
+            if let Some((end, separator)) = end {
+                headers.push_str(&String::from_utf8_lossy(&rest[..end]));
+                headers.push('\n');
+                position += end + separator;
+                continue;
+            }
+        }
+        let byte = bytes[position];
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+        } else if byte == b'"' {
+            quoted = true;
+        }
+        body.push(byte);
+        position += 1;
+    }
+    (headers, body)
+}
+fn http_status(headers: &str) -> Option<u16> {
+    headers
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            parts
+                .next()?
+                .starts_with("HTTP/")
+                .then(|| parts.next()?.parse().ok())
+                .flatten()
+        })
+        .next_back()
+}
+fn is_rate_limit(headers: &str, stderr: &str, stdout: &str) -> bool {
+    let text = format!("{headers} {stderr} {stdout}").to_ascii_lowercase();
+    text.lines()
+        .any(|line| line.starts_with("http/") && line.split_whitespace().nth(1) == Some("429"))
+        || text.contains("http 429")
+        || text.contains("rate limit")
+        || text.contains("abuse detection")
+        || (http_status(headers) == Some(403)
+            && (text.contains("x-ratelimit-remaining: 0") || text.contains("retry-after:")))
+}
+#[allow(clippy::disallowed_methods)]
+fn rate_delay(headers: &str, fallback: Duration) -> (Duration, String) {
+    rate_delay_at(headers, fallback, jiff::Timestamp::now().as_second())
+}
+
+/// The retry delay and the time it ends, for a response received at `now`
+/// (Unix seconds).
+fn rate_delay_at(headers: &str, fallback: Duration, now: i64) -> (Duration, String) {
+    let mut retry = None;
+    let mut reset = None;
+    let mut remaining = None;
+    for line in headers.lines() {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("retry-after") {
+            retry = value.trim().parse::<u64>().ok().or_else(|| {
+                let date = value.trim().strip_suffix(" GMT")?;
+                let timestamp =
+                    jiff::Timestamp::strptime("%a, %d %b %Y %H:%M:%S %z", format!("{date} +0000"))
+                        .ok()?;
+                Some(timestamp.as_second().saturating_sub(now).max(0) as u64)
+            });
+        } else if name.eq_ignore_ascii_case("x-ratelimit-reset") {
+            reset = value.trim().parse::<i64>().ok();
+        } else if name.eq_ignore_ascii_case("x-ratelimit-remaining") {
+            remaining = value.trim().parse::<u64>().ok();
+        }
+    }
+    // A secondary limit can include the unrelated primary window's headers.
+    // Only an exhausted primary window (remaining exactly 0) makes its reset
+    // the retry time; otherwise retry after a minute rather than waiting for
+    // that window to reset.
+    let reset = reset.filter(|_| remaining == Some(0));
+    let fallback = fallback.max(Duration::from_secs(60));
+    let delay = retry
+        .map(Duration::from_secs)
+        .or_else(|| reset.map(|at| Duration::from_secs(at.saturating_sub(now).max(0) as u64)))
+        .unwrap_or(fallback);
+    // Report the time the chosen delay ends, whichever header chose it.
+    let at = now.saturating_add(i64::try_from(delay.as_secs()).unwrap_or(i64::MAX));
+    let label = if reset.is_none() && retry.is_none() {
+        "unknown".to_owned()
+    } else {
+        jiff::Timestamp::from_second(at).map_or_else(|_| at.to_string(), |time| time.to_string())
+    };
+    (delay, label)
 }
 /// Both check runs and legacy status contexts are addressed by immutable SHA.
 /// GitHub lists statuses newest first; older states of a context cannot veto a
@@ -297,65 +467,101 @@ fn parse_commit_checks(
 }
 
 // This CLI edge owns the real wait deadline and polling interval.
-#[allow(clippy::disallowed_methods)]
+#[allow(clippy::disallowed_methods, clippy::too_many_arguments)]
 pub(super) fn checks(
-    project: &Path,
+    reader: &Reader<'_>,
     number: u64,
     expected: GitOid,
+    repository: &str,
+    base: &str,
     wait: Option<u64>,
+    poll: u64,
+    json: bool,
+) -> Result<()> {
+    checks_with(
+        &|argv| reader.read(argv),
+        reader.deadline,
+        &Instant::now,
+        &std::thread::sleep,
+        number,
+        expected,
+        repository,
+        base,
+        wait,
+        poll,
+        json,
+    )
+}
+
+#[allow(clippy::disallowed_methods, clippy::too_many_arguments)]
+fn checks_with(
+    read: &impl Fn(&[&str]) -> Result<provenant_os::exec::ExecOutcome>,
+    deadline: Instant,
+    now: &impl Fn() -> Instant,
+    sleep: &impl Fn(Duration),
+    number: u64,
+    expected: GitOid,
+    repository: &str,
+    base: &str,
+    wait: Option<u64>,
+    poll: u64,
     json: bool,
 ) -> Result<()> {
     let target = number.to_string();
-    let deadline = Instant::now() + Duration::from_secs(wait.unwrap_or(60));
-    let reader = Reader { project, deadline };
-    let read = |argv: &[&str]| reader.read(argv);
-    let policy =
-        super::status::required_policy(&target, &|argv| read(argv).ok()).ok_or_else(|| {
-            if Instant::now() >= deadline {
-                failure(
-                    "CI_TIMEOUT",
-                    "CI wait expired while reading required checks",
-                )
-            } else {
-                failure(
-                    "CI_POLICY_UNAVAILABLE",
-                    "cannot establish required CI checks",
-                )
-            }
-        })?;
-    let check_head = || -> Result<Option<String>> {
-        #[derive(Deserialize)]
-        struct Head {
-            #[serde(rename = "headRefOid")]
-            head: GitOid,
-            #[serde(default)]
-            mergeable: Option<String>,
+    let read_error = std::cell::RefCell::new(None);
+    let policy = super::status::required_policy_for(repository, base, &|argv| match read(argv) {
+        Ok(output) => Some(output),
+        Err(error) => {
+            *read_error.borrow_mut() = Some(error);
+            None
         }
-        let bytes = successful(read(&[
-            "gh",
-            "pr",
-            "view",
-            &target,
-            "--json",
-            "headRefOid,mergeable",
-        ])?)?;
-        let head: Head = serde_json::from_slice(&bytes)?;
-        if head.head != expected {
+    })
+    .ok_or_else(|| {
+        if let Some(error) = read_error.borrow_mut().take() {
+            return error;
+        }
+        if now() >= deadline {
+            failure(
+                "CI_TIMEOUT",
+                "CI wait expired while reading required checks",
+            )
+        } else {
+            failure(
+                "CI_POLICY_UNAVAILABLE",
+                "cannot establish required CI checks",
+            )
+        }
+    })?;
+    let check_head = || -> Result<Option<String>> {
+        let pull = super::rest_pull(read, &target)?;
+        if pull.head.sha != expected {
             return Err(failure(
                 "HEAD_MOVED",
                 format!("pull request head moved from {expected}"),
             ));
         }
-        Ok(head.mergeable)
+        Ok(pull.mergeable.map(|value| {
+            if value {
+                "MERGEABLE".to_owned()
+            } else {
+                "CONFLICTING".to_owned()
+            }
+        }))
     };
     let mut progress = 0;
+    let mut pending = 0_u64;
+    let pacing = Backoff::new(
+        Duration::from_secs(poll),
+        2,
+        Duration::from_secs(poll.saturating_mul(4)),
+    );
     loop {
         let _ = check_head()?;
         // Read the pinned commit, not whichever head the PR has while gh runs.
         // Before/after head reads alone cannot protect against an A-B-A update.
-        let checks = commit_checks(&policy.repository, expected, &read)?;
+        let checks = commit_checks(&policy.repository, expected, read)?;
         let mergeable = check_head()?;
-        let expired = Instant::now() >= deadline;
+        let expired = now() >= deadline;
         match observe(
             &checks,
             &policy.checks,
@@ -391,7 +597,7 @@ pub(super) fn checks(
             }
             State::Pending | State::Settling => {}
         }
-        let left = deadline.saturating_duration_since(Instant::now());
+        let left = deadline.saturating_duration_since(now());
         if left.is_zero() {
             return Err(expired_failure(checks.is_empty()));
         }
@@ -404,8 +610,9 @@ pub(super) fn checks(
             );
             progress += 1;
         }
-        std::thread::sleep(left.min(Duration::from_secs(2)));
-        if Instant::now() >= deadline {
+        sleep(left.min(pacing.delay(pending)));
+        pending = pending.saturating_add(1);
+        if now() >= deadline {
             return Err(expired_failure(checks.is_empty()));
         }
     }
@@ -438,6 +645,140 @@ mod tests {
         }
     }
     const NOW: &str = "2026-01-01T00:00:00Z";
+
+    #[test]
+    fn rate_limit_headers_include_429_and_retry_after_dates() {
+        assert!(is_rate_limit("HTTP/2 429 Too Many Requests", "", ""));
+        assert!(!is_rate_limit(
+            "HTTP/2 409 Conflict\r\nX-RateLimit-Remaining: 0",
+            "",
+            ""
+        ));
+        assert!(!is_rate_limit(
+            "HTTP/2 405 Method Not Allowed",
+            "not mergeable",
+            ""
+        ));
+        assert!(!is_rate_limit(
+            "",
+            "unexpected gh arguments: api --include repos/owner/repo/pulls/7",
+            ""
+        ));
+        let (delay, reset) = rate_delay(
+            "X-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 4102444800\r\n",
+            Duration::from_secs(1),
+        );
+        assert!(delay > Duration::from_secs(60));
+        assert!(reset.starts_with("2100-01-01"), "{reset}");
+        // Without an explicit zero remaining count the reset belongs to an
+        // unrelated primary window and must not set the wait.
+        let (delay, reset) =
+            rate_delay("X-RateLimit-Reset: 4102444800\r\n", Duration::from_secs(1));
+        assert_eq!(delay, Duration::from_secs(60));
+        assert_eq!(reset, "unknown");
+        // Retry-After chooses the delay, so the reported time follows it, not
+        // the later primary reset.
+        // 2026-11-03T00:00:00Z; the retry ends 17 s later, not at the reset.
+        let (delay, reset) = rate_delay_at(
+            "Retry-After: 17\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 4102444800\r\n",
+            Duration::from_secs(1),
+            1_793_664_000,
+        );
+        assert_eq!(delay, Duration::from_secs(17));
+        assert_eq!(reset, "2026-11-03T00:00:17Z");
+        let (delay, _) = rate_delay("Retry-After: 17\r\n", Duration::from_secs(1));
+        assert_eq!(delay, Duration::from_secs(17));
+        let (delay, reset) = rate_delay(
+            "X-RateLimit-Remaining: 100\r\nX-RateLimit-Reset: 4102444800\r\n",
+            Duration::from_secs(1),
+        );
+        assert_eq!(delay, Duration::from_secs(60));
+        assert_eq!(reset, "unknown");
+        let (delay, reset) = rate_delay("", Duration::from_secs(1));
+        assert_eq!(delay, Duration::from_secs(60));
+        assert_eq!(reset, "unknown");
+        let (delay, reset) = rate_delay(
+            "Retry-After: Fri, 01 Jan 2100 00:00:00 GMT\r\n",
+            Duration::from_secs(1),
+        );
+        assert!(delay > Duration::from_secs(60));
+        assert!(reset.starts_with("2100-01-01"), "{reset}");
+    }
+
+    #[test]
+    fn paginated_headers_are_removed_without_losing_pages() {
+        let response = b"[HTTP/2 200 OK\r\nX-RateLimit-Remaining: 10\r\n\r\n{\"page\":1},\nHTTP/2 200 OK\r\nX-RateLimit-Remaining: 9\r\n\r\n{\"page\":2}]";
+        let (headers, body) = strip_headers(response);
+        assert!(headers.contains("X-RateLimit-Remaining: 9"));
+        let pages: serde_json::Value = serde_json::from_slice(&body).expect("pages");
+        assert_eq!(pages, json!([{"page":1},{"page":2}]));
+        // Header-looking text and escaped quotes in JSON must not consume
+        // the rest of a page or the next page's real headers.
+        let response = b"[HTTP/2 200 OK\r\n\r\n{\"summary\":\"[HTTP/2,HTTP/ \\\"quoted\\\" \\\\ tail\"},HTTP/2 200 OK\r\n\r\n{\"page\":2}]";
+        let (_, body) = strip_headers(response);
+        let pages: serde_json::Value = serde_json::from_slice(&body).expect("pages");
+        assert_eq!(
+            pages,
+            json!([{"summary":"[HTTP/2,HTTP/ \"quoted\" \\ tail"},{"page":2}])
+        );
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn default_pacing_limits_calls_over_ninety_minutes() {
+        use provenant_os::exec::{CapturedStream, ExecOutcome, Termination};
+        use std::cell::Cell;
+        let clock = Cell::new(Instant::now());
+        let deadline = clock.get() + Duration::from_secs(90 * 60);
+        let calls = Cell::new(0);
+        let oid = head();
+        let read = |args: &[&str]| -> Result<ExecOutcome> {
+            calls.set(calls.get() + 1);
+            let endpoint = args.last().unwrap_or(&"");
+            let body = if endpoint.contains("/pulls/") {
+                json!({"state":"open", "head":{"sha":oid,"ref":"feat","repo":{"full_name":"owner/repo"}}, "base":{"sha":oid,"ref":"main","repo":{"full_name":"owner/repo"}}, "mergeable":true,"mergeable_state":"clean","merged_at":null,"merge_commit_sha":null,"title":"test"})
+            } else if endpoint.contains("/rules/") || endpoint.contains("/statuses?") {
+                json!([[]])
+            } else if endpoint.contains("/branches/") {
+                json!({"protected":false})
+            } else {
+                json!([{"check_runs":[{"name":"build","head_sha":oid,"status":"in_progress","conclusion":null}]}])
+            };
+            Ok(ExecOutcome {
+                termination: Termination::Exit(0),
+                stdout: CapturedStream {
+                    bytes: serde_json::to_vec(&body)?,
+                    ..Default::default()
+                },
+                stderr: CapturedStream::default(),
+                timed_out: false,
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: false,
+                elapsed_micros: 0,
+            })
+        };
+        let result = checks_with(
+            &read,
+            deadline,
+            &|| clock.get(),
+            &|delay| clock.set(clock.get() + delay),
+            7,
+            oid,
+            "repos/owner/repo",
+            "main",
+            Some(90 * 60),
+            provenant_cli::domains::DEFAULT_LAND_POLL_SECONDS,
+            true,
+        );
+        let error = result.expect_err("pending CI must exhaust the wait");
+        assert_eq!(
+            error.downcast_ref::<Failure>().expect("typed failure").code,
+            "CI_TIMEOUT"
+        );
+        assert_eq!(clock.get(), deadline);
+        assert!(calls.get() <= 200, "{} calls", calls.get());
+    }
 
     #[test]
     fn conflict_and_unscheduled_heads_are_named() {

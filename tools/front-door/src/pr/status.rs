@@ -215,7 +215,15 @@ pub(super) fn required_policy(
         return None;
     }
     let repo = format!("repos/{}/{}", encode(owner), encode(name));
-    let branch = encode(&base.branch);
+    required_policy_for(&repo, &base.branch, read)
+}
+
+pub(super) fn required_policy_for(
+    repo: &str,
+    base: &str,
+    read: &dyn Fn(&[&str]) -> Option<provenant_os::exec::ExecOutcome>,
+) -> Option<Policy> {
+    let branch = encode(base);
     let get = |path: &str, paginate: bool| -> Option<Vec<u8>> {
         let args = if paginate {
             vec!["gh", "api", "--paginate", "--slurp", path]
@@ -242,7 +250,7 @@ pub(super) fn required_policy(
     )?)
     .ok()?;
     Some(Policy {
-        repository: repo,
+        repository: repo.to_owned(),
         checks: parse_required_checks(protection.as_ref(), &pages)?,
     })
 }

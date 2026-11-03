@@ -130,18 +130,43 @@ fn successful(output: ExecOutcome) -> Result<Vec<u8>> {
     }
     Ok(output.stdout.bytes)
 }
+#[derive(Deserialize)]
+struct RestBranch {
+    sha: GitOid,
+    #[serde(rename = "ref")]
+    branch: String,
+    repo: Option<RestRepository>,
+}
+#[derive(Deserialize)]
+struct RestRepository {
+    full_name: String,
+}
+#[derive(Deserialize)]
+struct RestPull {
+    state: String,
+    head: RestBranch,
+    base: RestBranch,
+    mergeable: Option<bool>,
+    #[allow(dead_code)]
+    mergeable_state: Option<String>,
+    merged_at: Option<String>,
+    #[serde(default)]
+    closed_at: Option<String>,
+    merge_commit_sha: Option<String>,
+    title: String,
+}
+fn pull_endpoint(number: &str) -> String {
+    format!("repos/{{owner}}/{{repo}}/pulls/{number}")
+}
+fn rest_pull(read: &impl Fn(&[&str]) -> Result<ExecOutcome>, number: &str) -> Result<RestPull> {
+    let endpoint = pull_endpoint(number);
+    let bytes = successful(read(&["gh", "api", &endpoint])?)?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
 fn head(project: &Path, number: &str) -> Result<GitOid> {
-    #[derive(Deserialize)]
-    struct PullRequest {
-        #[serde(rename = "headRefOid")]
-        head: GitOid,
-    }
-    let bytes = successful(execute(
-        project,
-        &["gh", "pr", "view", number, "--json", "headRefOid"],
-        false,
-    )?)?;
-    Ok(serde_json::from_slice::<PullRequest>(&bytes)?.head)
+    Ok(rest_pull(&|argv| execute(project, argv, false), number)?
+        .head
+        .sha)
 }
 /// The pull request a graph lands: found by head branch, never by `gh pr
 /// view BRANCH`, which reads a numeric branch as a pull request number.
@@ -234,33 +259,65 @@ fn checks(project: &Path, number: &str, head: GitOid, watch: bool) -> Result<()>
     }
     Ok(())
 }
-fn merge(project: &Path, number: &str, head: GitOid) -> Result<()> {
-    let git = provenant_os::git::git_executable().ok_or("Git executable is unavailable")?;
-    let git = git.to_str().ok_or("Git executable path is not UTF-8")?;
-    let configured = execute(project, &[git, "config", "--get", "user.email"], false)?;
-    let email = match configured.termination {
-        Termination::Exit(0) => Some(
-            String::from_utf8(configured.stdout.bytes)?
-                .trim()
-                .to_owned(),
-        ),
-        Termination::Exit(1) => None,
-        _ => return Err("cannot read Git user.email".into()),
-    };
-    let head = head.to_string();
-    let mut argv = vec![
-        "gh",
-        "pr",
-        "merge",
-        number,
-        "--merge",
-        "--match-head-commit",
-        &head,
-    ];
-    if let Some(email) = email.as_deref().filter(|email| !email.is_empty()) {
-        argv.extend(["--author-email", email]);
+fn merge(reader: &wait::Reader<'_>, number: &str, head: GitOid) -> Result<()> {
+    let endpoint = format!("{}/merge", pull_endpoint(number));
+    let sha = format!("sha={head}");
+    let output = reader.request(
+        &[
+            "gh",
+            "api",
+            "--method",
+            "PUT",
+            &endpoint,
+            "-f",
+            &sha,
+            "-f",
+            "merge_method=merge",
+        ],
+        true,
+    )?;
+    if output.termination != Termination::Exit(0) {
+        let error = format!(
+            "{} {}",
+            String::from_utf8_lossy(&output.stderr.bytes),
+            String::from_utf8_lossy(&output.stdout.bytes)
+        );
+        let status = error
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .find_map(|words| {
+                (words[0] == "HTTP")
+                    .then(|| {
+                        words[1]
+                            .trim_end_matches(|ch: char| !ch.is_ascii_digit())
+                            .parse::<u16>()
+                            .ok()
+                    })
+                    .flatten()
+            });
+        if status == Some(409) {
+            return Err(wait::failure(
+                "HEAD_MOVED",
+                format!("pull request head moved from {head}"),
+            ));
+        }
+        if status == Some(405) {
+            return Err(wait::failure(
+                "MERGE_NOT_ALLOWED",
+                "pull request is not mergeable; next: resolve the mergeability problem and retry",
+            ));
+        }
+        return Err(format!("merge request failed: {error}").into());
     }
-    successful(execute(project, &argv, false)?)?;
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    if response
+        .get("merged")
+        .and_then(serde_json::Value::as_bool)
+        .is_none()
+    {
+        return Err("GitHub did not return a merge result".into());
+    }
     Ok(())
 }
 pub fn run(command: Pr, globals: &Globals, _workers: &dyn WorkerObserver) -> u8 {
