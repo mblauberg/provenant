@@ -25,6 +25,15 @@ fn policy_refusal_preserves_uncertain_sibling_handoff() -> Result<(), String> {
         .ok_or("policy refusal was ignored")?;
     assert_eq!(error.status, Status::Refused);
     assert_eq!(error.kind, ErrorKind::Refused);
+    // A route held back by pacing is refused the same way, never printed as a run.
+    let error = check_launch_policy(&[run::Started::Refused {
+        attempt: AttemptId::from_bytes([3; 16]),
+        kind: run::RefusalKind::PriorityUnavailable,
+        reason: "PacingReserve".into(),
+    }])
+    .err()
+    .ok_or("priority refusal was ignored")?;
+    assert!(error.message.contains("PacingReserve"));
     // Let the existing unknown-handoff handling retain the full receipt.
     check_launch_policy(&[
         refused(),

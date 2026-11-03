@@ -1865,6 +1865,18 @@ fn dependency_state(
                     .is_some_and(|round| &round.loop_id == target)
         });
         match checkpoint.nodes[index].state {
+            // A failed CI gate that reported no failing check leaves a repair
+            // node nothing to act on, so the repair is skipped, not launched.
+            NodeState::Failed
+                if recovery
+                    && matches!(plan.nodes[index].condition, Some(GateCondition::Ci { .. }))
+                    && checkpoint.nodes[index]
+                        .outputs
+                        .as_ref()
+                        .is_some_and(|outputs| outputs.findings.is_empty()) =>
+            {
+                skipped = true
+            }
             NodeState::Failed if recovery => {}
             NodeState::Failed if plan.nodes[index].on_fail.is_some() => skipped = true,
             NodeState::Failed | NodeState::Blocked => return Some(NodeState::Blocked),

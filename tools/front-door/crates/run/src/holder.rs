@@ -1648,6 +1648,12 @@ impl RunStore {
                 .is_none()
         {
             partial.push(PartialSignal::HandoffMissing);
+            // A lane that reports nothing has not passed. It needs review,
+            // and the reason names the cause.
+            if decoded.outcome == Outcome::Succeeded {
+                decoded.outcome = Outcome::ReviewRequired;
+                decoded.reason = Some(NO_HANDOFF_REASON.into());
+            }
         }
         if matches!(
             decoded.outcome,
@@ -1848,6 +1854,8 @@ pub(crate) fn seal_manifest(
 }
 
 /// Stored instead of the provider's answer when settlement cannot filter it.
+/// The cause shown for a lane that ended without a final handoff.
+pub const NO_HANDOFF_REASON: &str = "no handoff: the lane ended without reporting results";
 const UNREDACTABLE_RESULT: &str = "[result withheld: redaction failed]";
 const REDACTION_FAILED_REASON: &str = "redaction failed; result withheld";
 

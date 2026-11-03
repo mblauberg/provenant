@@ -258,7 +258,7 @@ mod tests {
                 Some("fixture-two") => {
                     result.outcome = Outcome::Succeeded;
                     result.complete = true;
-                    result.result = "Recovered progress and completed the renderer".into();
+                    result.result = "Recovered progress and completed the renderer\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"finished\"}\n```".into();
                     result.observed_route = Some(route.clone());
                 }
                 _ => return Err("unexpected fixture account".into()),

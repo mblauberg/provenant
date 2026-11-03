@@ -2109,7 +2109,7 @@ pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> 
         run::Started::Refused {
             attempt,
             reason,
-            kind: run::RefusalKind::Policy,
+            kind: run::RefusalKind::Policy | run::RefusalKind::PriorityUnavailable,
         } => Some((attempt, reason)),
         _ => None,
     }) {

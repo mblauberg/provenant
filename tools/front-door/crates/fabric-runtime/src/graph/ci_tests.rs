@@ -631,8 +631,10 @@ fn ci_failure_activates_recovery_path() {
     let recovery: GraphNode = serde_json::from_value(serde_json::json!({ "id": "recovery", "prompt": "recover", "access": "read_only", "depends_on": ["ci"], "route": {"adapter": "fixture", "model": "fixture/model"} })).unwrap();
     let success: GraphNode = serde_json::from_value(serde_json::json!({ "id": "success", "prompt": "continue", "access": "read_only", "depends_on": ["ci"], "route": {"adapter": "fixture", "model": "fixture/model"} })).unwrap();
     doc.nodes.extend([recovery, success]);
+    let mut failure = observation(CiState::Failed, "failed check");
+    failure.failed_checks.push(failed_check());
     let mut owner = Owner {
-        observations: VecDeque::from([observation(CiState::Failed, "failed check")]),
+        observations: VecDeque::from([failure]),
         ..Default::default()
     };
     let result = advance(&doc, &mut owner, &mut Journal::default()).unwrap();
@@ -861,6 +863,36 @@ fn ci_failure_findings_reach_repair_input_and_survive_resume() {
         advance(&doc, &mut owner, &mut journal).unwrap().checkpoint,
         run.checkpoint
     );
+}
+
+#[test]
+fn ci_failure_without_findings_does_not_launch_repair() {
+    let mut doc = document();
+    doc.nodes[0].on_fail = Some("repair".into());
+    doc.nodes.push(
+        serde_json::from_value(serde_json::json!({
+            "id":"repair","access":"read_only","prompt":"repair","depends_on":["ci"],
+            "inputs":[{"node":"ci","outputs":["findings"]}],
+            "route":{"adapter":"fixture","model":"fixture/model"}
+        }))
+        .unwrap(),
+    );
+    let mut owner = Owner {
+        observations: VecDeque::from([observation(CiState::Failed, "failed")]),
+        ..Default::default()
+    };
+    let mut journal = Journal::default();
+    let run = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert!(
+        run.checkpoint.nodes[0]
+            .outputs
+            .as_ref()
+            .unwrap()
+            .findings
+            .is_empty()
+    );
+    assert_eq!(run.checkpoint.nodes[1].state, NodeState::Skipped);
+    assert!(owner.prompts.is_empty());
 }
 
 #[test]
