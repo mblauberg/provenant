@@ -2426,8 +2426,8 @@ impl PlannedNode {
     }
 }
 
-/// A failure target must declare its gate as a dependency. Other dependants
-/// follow the success edge; inactive paths propagate a skipped state.
+/// Explain an unexplained Blocked node by naming its first failed or blocked parent.
+/// Returns whether the checkpoint changed.
 fn attribute_blocker(
     node_index: usize,
     node: &PlannedNode,
@@ -2454,6 +2454,8 @@ fn attribute_blocker(
     }
 }
 
+/// A failure target must declare its gate as a dependency. Other dependants
+/// follow the success edge; inactive paths propagate a skipped state.
 fn dependency_state(
     node: &PlannedNode,
     plan: &PlannedGraph,
