@@ -718,7 +718,9 @@ record, including a refusal before launch, carries a `settlement_reason`
 (`completed`, `handoff_missing`, `declared_stop`, `provider_stop`,
 `uncommitted_work`, `pre_launch_refusal`, `cancelled`, `lost`, `unsettled`,
 `failed`), derived once where the terminal decision is committed
-(`RunStore::commit_terminal`). A failed, cancelled or lost
+(`RunStore::commit_terminal`, or `commit_lost` for an attempt whose record was
+lost). A lost or unsettled outcome names its reason whatever evidence it
+carries; the process may have run even though custody was not proven. A failed, cancelled or lost
 lane whose final answer declares a stop records `declared_stop` (with any
 provider stop it already reported) and no other partial signal. The settled outcome is
 what the graph reads: `tools/front-door/src/fabric.rs` maps any outcome other

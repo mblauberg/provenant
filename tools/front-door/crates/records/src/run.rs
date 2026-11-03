@@ -774,6 +774,11 @@ impl SettlementReason {
         partial: &[PartialSignal],
     ) -> Self {
         match (evidence, outcome) {
+            // A lost or unsettled outcome may still carry a process exit: the
+            // process ran, but custody or reporting was not proven. The
+            // outcome names the reason, whatever evidence accompanied it.
+            (_, Outcome::Lost) => Self::Lost,
+            (_, Outcome::Unsettled) => Self::Unsettled,
             (Some(TerminalEvidence::Lost { .. }), _) => Self::Lost,
             (Some(TerminalEvidence::Unsettled { .. }), _) => Self::Unsettled,
             (_, Outcome::Cancelled) => Self::Cancelled,
@@ -1180,6 +1185,27 @@ mod tests {
         let parsed: HarnessProfile = serde_json::from_value(sealed.clone())?;
         assert_eq!(serde_json::to_value(parsed)?, sealed);
         Ok(())
+    }
+
+    #[test]
+    fn a_lost_or_unsettled_outcome_names_its_reason_with_any_evidence() {
+        // The process ran, but custody or reporting was not proven.
+        for evidence in [
+            TerminalEvidence::ProcessExit,
+            TerminalEvidence::PreLaunchRefusal,
+            TerminalEvidence::Lost {
+                reason: "gone".into(),
+            },
+        ] {
+            assert_eq!(
+                SettlementReason::derive(Outcome::Lost, Some(&evidence), &[]),
+                SettlementReason::Lost
+            );
+            assert_eq!(
+                SettlementReason::derive(Outcome::Unsettled, Some(&evidence), &[]),
+                SettlementReason::Unsettled
+            );
+        }
     }
 
     #[test]
