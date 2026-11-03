@@ -143,11 +143,12 @@ pub(super) fn project_scratch_reads(project: &Path) -> Vec<PathGrant> {
         .collect()
 }
 
-/// Dispatch write roots, plus host-configured shared run state for writers only.
+/// Dispatch write roots, plus project-resolved shared run state for writers only.
 pub(super) fn write_roots(
     access: &run::LaneAccess,
     host_writes: &provenant_confinement::run_config::RunConfig,
     writer: bool,
+    project: &str,
 ) -> Vec<PathGrant> {
     access
         .write_roots
@@ -155,7 +156,7 @@ pub(super) fn write_roots(
         .map(PathBuf::as_path)
         .chain(
             writer
-                .then(|| host_writes.writer_write_roots())
+                .then(|| host_writes.writer_write_roots_for(project))
                 .into_iter()
                 .flatten(),
         )
@@ -220,7 +221,12 @@ pub(super) fn confinement_request(
                 .and_then(|spec| spec.authentication)
                 .map(Into::into),
             include_continuation: false,
-            write_roots: write_roots(access, host_writes, writer.is_some()),
+            write_roots: write_roots(
+                access,
+                host_writes,
+                writer.is_some(),
+                &project_id.to_string(),
+            ),
             network: access.network(writer.is_some()),
             nested_confinement: false,
         },
