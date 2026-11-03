@@ -2412,7 +2412,9 @@ mod peer_tests {
         // steers routes: every lens is still a member of the panel.
         let mut standard = deferred(None, serde_json::json!([]))?;
         standard.review.as_mut().ok_or("review spec missing")?.shape = Some("standard".into());
+        standard.review.as_mut().ok_or("review spec missing")?.min_successful = Some(0);
         let standard = bound.resolve_review(&standard, &head)?;
+        assert_eq!(standard.nodes[0].composite.as_ref().ok_or("composite missing")?.min_successful, Some(2));
         let members = &standard.nodes[1..];
         assert_eq!(members.len(), 3);
         let group = members[0].family_group.clone().ok_or("family group missing")?;

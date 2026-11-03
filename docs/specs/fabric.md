@@ -607,6 +607,14 @@ record on the node (`strength`, `excluded`, `applied`, `outcome` of
 `separated`, `unavailable` or `unconstrained`). With no known upstream family
 the constraint is a no-op.
 
+A read-only node with role `lens.*` or `review.*` that returns a valid
+findings block and verdict settles succeeded regardless of verdict. A lane's
+`declared_stop` also settles as a result under those conditions; writer stops
+retain their usual failure semantics. Disposition validation still applies.
+A partial composite waits for its members to settle, exports the successful
+members and names unavailable members in its result. A blocked node reports
+its blocking upstream node and state in status.
+
 A node may declare `dispositions`, a list of allowed values. At settlement its
 findings block must parse and every finding must carry a `disposition` from
 the list and a non-empty `reason`, and every finding ID selected from an input's

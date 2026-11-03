@@ -3,7 +3,7 @@
     "pattern": "big-batch",
     "preset": "big-batch"
   },
-  "graph_id": "preset-9e41d4182da3d272483e5f4baa53cb3a",
+  "graph_id": "preset-bc44c27d6513324c32da5f1632f1be30",
   "integration_branch": "batch/graph",
   "nodes": [
     {
@@ -308,6 +308,7 @@
                         ]
                       }
                     ],
+                    "min_successful": 1,
                     "nodes": [
                       {
                         "access": "read_only",
@@ -327,6 +328,7 @@
                             "when": "always"
                           }
                         ],
+                        "require_findings": true,
                         "role": "lens.correctness-spec",
                         "role_digest": "sha256:bf578197d0881e91746f43b0888c298a0bc6ce3a4f97293690e3b495a9138ea2",
                         "routes": [
@@ -356,6 +358,7 @@
                             "when": "always"
                           }
                         ],
+                        "require_findings": true,
                         "role": "lens.simplicity",
                         "role_digest": "sha256:46d20a75ff5d5cb89b53165b558efb8205a2801263593b4365e23d20150c41b4",
                         "routes": [
@@ -496,6 +499,7 @@
                         ]
                       }
                     ],
+                    "min_successful": 1,
                     "nodes": [
                       {
                         "access": "read_only",
@@ -515,6 +519,7 @@
                             "when": "always"
                           }
                         ],
+                        "require_findings": true,
                         "role": "lens.correctness-spec",
                         "role_digest": "sha256:bf578197d0881e91746f43b0888c298a0bc6ce3a4f97293690e3b495a9138ea2",
                         "routes": [
@@ -544,6 +549,7 @@
                             "when": "always"
                           }
                         ],
+                        "require_findings": true,
                         "role": "lens.simplicity",
                         "role_digest": "sha256:46d20a75ff5d5cb89b53165b558efb8205a2801263593b4365e23d20150c41b4",
                         "routes": [
@@ -1752,6 +1758,11 @@
       "expanded.lane-one.parameters.local_check_policy.default": "bundled",
       "expanded.lane-one.parameters.local_check_policy.doc": "bundled",
       "expanded.lane-one.parameters.local_check_policy.type": "bundled",
+      "expanded.lane-one.parameters.min_lenses.default": "bundled",
+      "expanded.lane-one.parameters.min_lenses.doc": "bundled",
+      "expanded.lane-one.parameters.min_lenses.max": "bundled",
+      "expanded.lane-one.parameters.min_lenses.min": "bundled",
+      "expanded.lane-one.parameters.min_lenses.type": "bundled",
       "expanded.lane-one.parameters.review_shape.default": "bundled",
       "expanded.lane-one.parameters.review_shape.doc": "bundled",
       "expanded.lane-one.parameters.review_shape.type": "bundled",
@@ -1808,6 +1819,11 @@
       "expanded.lane-two.parameters.local_check_policy.default": "bundled",
       "expanded.lane-two.parameters.local_check_policy.doc": "bundled",
       "expanded.lane-two.parameters.local_check_policy.type": "bundled",
+      "expanded.lane-two.parameters.min_lenses.default": "bundled",
+      "expanded.lane-two.parameters.min_lenses.doc": "bundled",
+      "expanded.lane-two.parameters.min_lenses.max": "bundled",
+      "expanded.lane-two.parameters.min_lenses.min": "bundled",
+      "expanded.lane-two.parameters.min_lenses.type": "bundled",
       "expanded.lane-two.parameters.review_shape.default": "bundled",
       "expanded.lane-two.parameters.review_shape.doc": "bundled",
       "expanded.lane-two.parameters.review_shape.type": "bundled",

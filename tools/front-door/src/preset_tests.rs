@@ -2370,6 +2370,24 @@ fn generator_evaluator_ends_with_an_evaluator_over_the_lens_list() {
         ],
     )
     .unwrap();
+    assert_eq!(
+        node(&expanded.document, "lens")["composite"]["min_successful"],
+        1
+    );
+    let override_expanded = expand(
+        &Layers::empty(),
+        "generator-evaluator",
+        "the slice",
+        &[
+            "parameters.worktree='/repo/lane'".into(),
+            "parameters.min_lenses=2".into(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        node(&override_expanded.document, "lens")["composite"]["min_successful"],
+        2
+    );
     let evaluate = node(&expanded.document, "evaluate");
     assert_eq!(evaluate["kind"], "synthesise");
     assert_eq!(route(evaluate)["alias"], "principal");

@@ -1235,6 +1235,28 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             let dependency = dependency_state(node, &plan, &checkpoint, &positions);
             if let Some(state) = dependency {
                 if checkpoint.nodes[node_index].state != state {
+                    if state == NodeState::Blocked {
+                        let blocker = node
+                            .after_expansion
+                            .iter()
+                            .chain(&node.depends_on)
+                            .map(|id| &checkpoint.nodes[positions[id]])
+                            .find(|parent| {
+                                matches!(parent.state, NodeState::Failed | NodeState::Blocked)
+                            });
+                        if let Some(parent) = blocker {
+                            let reason = format!("blocked by {} ({:?})", parent.id, parent.state);
+                            checkpoint.nodes[node_index].advance_error =
+                                Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
+                            checkpoint.nodes[node_index].advance_error_code =
+                                Some("upstream_blocked".into());
+                        }
+                    } else if checkpoint.nodes[node_index].advance_error_code.as_deref()
+                        == Some("upstream_blocked")
+                    {
+                        checkpoint.nodes[node_index].advance_error = None;
+                        checkpoint.nodes[node_index].advance_error_code = None;
+                    }
                     checkpoint.nodes[node_index].state = state;
                     journal.save(&checkpoint).map_err(GraphError::Journal)?;
                 }
@@ -2156,10 +2178,28 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             } else {
                                 disposition_error(&node.dispositions, &upstream_findings, &outputs)
                             };
-                            let outcome = if warned {
+                            let review_result = node.access == AccessMode::ReadOnly
+                                && node.role.as_deref().is_some_and(|role| {
+                                    role.starts_with("lens.") || role.starts_with("review.")
+                                })
+                                && outputs.verdict.is_some()
+                                && outputs.verdict_error.is_none()
+                                && outputs.result.is_some()
+                                && !outputs
+                                    .warnings
+                                    .iter()
+                                    .any(|warning| warning == FINDINGS_INVALID)
+                                && disposition_error.is_none();
+                            let outcome = if outcome == AttemptOutcome::DeclaredStop
+                                && review_result
+                                && !warned
+                            {
+                                AttemptOutcome::Succeeded
+                            } else if warned || outcome == AttemptOutcome::DeclaredStop {
                                 AttemptOutcome::OtherFailure
                             } else if outcome == AttemptOutcome::Succeeded
-                                && (node.required_verdict.is_some()
+                                && (!review_result
+                                    && node.required_verdict.is_some()
                                     && !(plans::writer(node)
                                         && result.as_ref().is_some_and(|capture| {
                                             plans::handoff(capture).ok().flatten().is_some()
@@ -2223,7 +2263,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     progress.state = NodeState::Failed;
                                     false
                                 }
-                                AttemptOutcome::TaskFailed | AttemptOutcome::OtherFailure => {
+                                AttemptOutcome::TaskFailed
+                                | AttemptOutcome::OtherFailure
+                                | AttemptOutcome::DeclaredStop => {
                                     progress.state = NodeState::Failed;
                                     false
                                 }

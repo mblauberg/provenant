@@ -390,7 +390,11 @@ subject node states both. Prompts live in
 `skills/code-review/references/lenses/`. After the lenses a verifier tries to
 falsify every finding (`verifiers = 0` skips it), and the synthesis gives each
 finding one disposition: accepted, rejected or deferred, with a reason. The
-`generator-evaluator` evaluator does the same over its lens findings.
+`generator-evaluator` evaluator does the same over its lens findings. Its
+`min_lenses` parameter defaults to 0 (all selected lenses but one, at least
+one); set a positive number to require that many, including the full panel.
+Preset explain shows the parameter and its origin. Unavailable lenses are
+named in the evaluator input.
 
 A review of a `head` or `node` subject with no `size` or `review_shape`
 (`deliver`, `generator-evaluator`, `big-batch`) cannot be measured when the

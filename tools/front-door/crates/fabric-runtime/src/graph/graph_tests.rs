@@ -1597,6 +1597,131 @@ fn partial_review(minimum: usize) -> (GraphDocument, FakeOwner) {
 }
 
 #[test]
+fn review_fail_and_one_unavailable_reach_evaluator() {
+    let (mut document, mut owner) = partial_review(2);
+    let spec = document.nodes[0].composite.as_mut().unwrap();
+    for (i, node) in spec.nodes.iter_mut().enumerate() {
+        node.role = Some(format!("lens.test{i}"));
+    }
+    let fail = findings_text(&entry("")).replace("VERDICT: PASS", "VERDICT: FAIL");
+    owner.observations = VecDeque::from([
+        terminal_with_result(AttemptOutcome::DeclaredStop, &fail),
+        terminal_with_result(AttemptOutcome::Succeeded, &findings_text("")),
+        terminal(AttemptOutcome::AdapterUnavailable),
+        terminal_with_result(AttemptOutcome::Succeeded, "evaluated"),
+    ]);
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let lens = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id.ends_with("--lens-a"))
+        .unwrap();
+    assert_eq!(lens.state, NodeState::Succeeded);
+    assert_eq!(
+        lens.outputs.as_ref().unwrap().verdict.as_deref(),
+        Some("VERDICT: FAIL")
+    );
+    assert_eq!(
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == "verify")
+            .unwrap()
+            .state,
+        NodeState::Succeeded
+    );
+    assert!(owner.prompts[3].contains("F1"));
+    assert!(owner.prompts[3].contains("lens-c"));
+}
+
+#[test]
+fn successful_review_with_fail_verdict_is_a_result() {
+    let mut review = node("review", route("fixture"));
+    review.role = Some("review.evaluator".into());
+    review.required_verdict = Some("VERDICT: PASS".into());
+    let result = findings_text("").replace("VERDICT: PASS", "VERDICT: FAIL");
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([terminal_with_result(AttemptOutcome::Succeeded, &result)]),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![review]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(
+        run.checkpoint.nodes[0]
+            .outputs
+            .as_ref()
+            .unwrap()
+            .verdict
+            .as_deref(),
+        Some("VERDICT: FAIL")
+    );
+}
+
+#[test]
+fn declared_stop_requires_a_valid_review_result_and_never_accepts_a_writer() {
+    for (role, text) in [
+        ("lens.test", "VERDICT: FAIL".to_owned()),
+        (
+            "lens.test",
+            "```findings\n{\"schema_version\":1,\"findings\":[]}\n```".to_owned(),
+        ),
+        ("write.implement", findings_text("")),
+    ] {
+        let mut subject = node("subject", route("fixture"));
+        subject.role = Some(role.into());
+        if role.starts_with("write.") {
+            subject.access = AccessMode::WorktreeWrite;
+            subject.worktree = Some(".worktrees/write".into());
+        }
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([terminal_with_result(
+                AttemptOutcome::DeclaredStop,
+                &text,
+            )]),
+            ..Default::default()
+        };
+        let run = advance(
+            &graph(vec![subject]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            run.checkpoint.nodes[0].state,
+            NodeState::Failed,
+            "{role}: {text}"
+        );
+    }
+}
+
+#[test]
+fn review_all_members_quorum_blocks_evaluator_and_names_upstream() {
+    let (document, mut owner) = partial_review(3);
+    owner.observations[1] = terminal_with_result(AttemptOutcome::Succeeded, &findings_text(""));
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let verify = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id == "verify")
+        .unwrap();
+    assert_eq!(verify.state, NodeState::Blocked);
+    assert!(
+        verify
+            .advance_error
+            .as_deref()
+            .unwrap()
+            .contains("lenses (Failed)")
+    );
+}
+
+#[test]
 fn partial_composite_exports_only_successful_members_and_lists_the_unavailable() {
     let (document, mut owner) = partial_review(1);
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
