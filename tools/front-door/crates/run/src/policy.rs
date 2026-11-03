@@ -948,13 +948,26 @@ mod tests {
     #[test]
     fn writer_continuation_launches_pinned_to_predecessor_head()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
+        writer_continuation_task(true)
+    }
+
+    #[test]
+    fn writer_continuation_marks_unchanged_predecessor_head()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        writer_continuation_task(false)
+    }
+
+    fn writer_continuation_task(
+        committed: bool,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let mut clock = clock();
         let cancel = provenant_core::CancelToken::new();
         let store = RunStore::open(&context(temp.path())?, &call(&clock, &cancel))?;
         let mut input = input();
         let source_head = "1".repeat(40);
-        let committed_head = provenant_core::GitOid::parse(&"2".repeat(40))?;
+        let committed_head =
+            provenant_core::GitOid::parse(&if committed { "2" } else { "1" }.repeat(40))?;
         input.request.tasks[0].writer = Some(WriterRequest {
             extra: Default::default(),
             project: temp.path().join("project"),

@@ -1785,6 +1785,16 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
 #[test]
 fn writer_continuation_preserves_uncommitted_edits_and_reports_them_in_brief()
 -> Result<(), Box<dyn std::error::Error>> {
+    writer_continuation_dirty_brief(true)
+}
+
+#[test]
+fn writer_continuation_with_unchanged_head_reports_dirty_paths()
+-> Result<(), Box<dyn std::error::Error>> {
+    writer_continuation_dirty_brief(false)
+}
+
+fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::{UtilityBudget, UtilityRuntime, worktrees};
     use provenant_core::{
         AttemptId, CancelToken, Clock, Digest, OperationId, RunId, TaskId, WaitBudget,
@@ -1871,23 +1881,25 @@ fn writer_continuation_preserves_uncommitted_edits_and_reports_them_in_brief()
         options.env = Some(&env);
         executor.execute(options)
     };
-    std::fs::write(worktree.join("committed.txt"), "predecessor work")?;
-    run_git(&["add", "committed.txt"], &worktree)?;
-    let commit_res = run_git(
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "-m",
-            "predecessor commit",
-        ],
-        &worktree,
-    )?;
-    assert_eq!(commit_res.termination, Termination::Exit(0));
+    if committed {
+        std::fs::write(worktree.join("committed.txt"), "predecessor work")?;
+        run_git(&["add", "committed.txt"], &worktree)?;
+        let commit_res = run_git(
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-m",
+                "predecessor commit",
+            ],
+            &worktree,
+        )?;
+        assert_eq!(commit_res.termination, Termination::Exit(0));
+    }
     let predecessor_head = run::resolve_git_base(&git, &worktree, "HEAD")?;
-    assert_ne!(source_head, predecessor_head);
+    assert_eq!(source_head != predecessor_head, committed);
 
     std::fs::write(
         worktree.join("uncommitted_leftover.txt"),

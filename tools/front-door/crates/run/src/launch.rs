@@ -1382,12 +1382,13 @@ impl RunStore {
                     && let Some(h) = prior.head
                 {
                     let h_str = h.to_string();
-                    if effective_task.head.as_deref() != Some(&h_str) {
-                        effective_task.source_head = effective_task
-                            .source_head
-                            .or_else(|| effective_task.head.clone());
-                        effective_task.head = Some(h_str);
-                    }
+                    // Even an unchanged HEAD can carry uncommitted predecessor
+                    // edits. Mark every settled writer continuation so preparation
+                    // verifies its lineage and reports those paths.
+                    effective_task.source_head = effective_task
+                        .source_head
+                        .or_else(|| effective_task.head.clone());
+                    effective_task.head = Some(h_str);
                 }
             }
             let policy_resume = if record.continuation.as_deref() == Some("policy_continuation") {
