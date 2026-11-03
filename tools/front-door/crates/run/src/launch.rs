@@ -1378,6 +1378,10 @@ impl RunStore {
                 // Carry only sealed host decisions into fresh pool draws. These
                 // node-local members supplement quota's account-scoped evidence.
                 if let RequestedRoute::Named { name, .. } = &record.requested_route
+                    && task
+                        .context
+                        .as_ref()
+                        .is_some_and(|context| context.graph_id.is_some())
                     && task.writer.is_none()
                     && task.access.write_roots.is_empty()
                 {

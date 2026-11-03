@@ -4003,6 +4003,36 @@ fn graph_review_node(document: &provenant_fabric_runtime::graph::GraphDocument, 
 
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     type Error = FacadeError;
+    fn retry_allowance(
+        &self,
+        node: &provenant_records::ExtraFields,
+        graph: &provenant_records::ExtraFields,
+    ) -> Result<Option<(u8, String)>, Self::Error> {
+        graph_retry_allowance(node, graph, &self.factory.context.roots).map(Some)
+    }
+
+    fn retry_successors(&mut self, reference: &str) -> Result<u64, FacadeError> {
+        let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+        if host != self.factory.context.identity.host.to_string() {
+            // Unknown remote lineage must never grant fresh retry allowance.
+            return Ok(u64::from(provenant_routing::MAX_SETTLEMENT_RETRIES));
+        }
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: true,
+            actor: None,
+            chair: None,
+        };
+        let store = owner.store(self.cancel)?;
+        let attempt = attempt.parse().map_err(|_| FacadeError::StateCorrupt)?;
+        let call = owner.call(self.cancel);
+        let record = store.record(attempt, &call).map_err(run_error)?;
+        Ok(store
+            .policy_attempt_number(&record, &call)
+            .map_err(run_error)?
+            .saturating_sub(1))
+    }
+
     fn respect_ci_wake(&self) -> bool {
         self.tick
     }
@@ -4501,7 +4531,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                                 effort: route.effort.clone(),
                             }
                         }
-                        None if !excluded_families.is_empty() => {
+                        None if node.family_separation || !excluded_families.is_empty() => {
                             provenant_records::run::RequestedRoute::Review {
                                 extra: Default::default(),
                                 name: route.alias.clone().ok_or(FacadeError::InvalidInput)?,
@@ -4526,13 +4556,18 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     new_worktree: None,
                 }],
                 concurrency: Some(1),
-                knobs: if self.exclude.is_empty() {
-                    vec![]
-                } else {
-                    vec![format!(
-                        "routing.graph_exclude={}",
-                        serde_json::Value::from(self.exclude.clone())
-                    )]
+                knobs: {
+                    let mut knobs = Vec::new();
+                    if !self.exclude.is_empty() {
+                        knobs.push(format!(
+                            "routing.graph_exclude={}",
+                            serde_json::Value::from(self.exclude.clone())
+                        ));
+                    }
+                    if let Some(retries) = node.settlement_retries {
+                        knobs.push(format!("domains.routing.settlement_retries={retries}"));
+                    }
+                    knobs
                 },
                 host: None,
             };
@@ -4726,6 +4761,51 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         }
     }
 }
+/// Resolve the existing routing allowance, retaining explicit zero overrides.
+fn graph_retry_allowance(
+    node: &provenant_records::ExtraFields,
+    graph: &provenant_records::ExtraFields,
+    roots: &provenant_core::Roots,
+) -> Result<(u8, String), FacadeError> {
+    let read =
+        |extra: &provenant_records::ExtraFields, key: &str| -> Result<Option<u8>, FacadeError> {
+            extra
+                .get(key)
+                .map(|retry| {
+                    let retries = retry
+                        .get("retries")
+                        .and_then(serde_json::Value::as_u64)
+                        .ok_or(FacadeError::InvalidInput)?;
+                    u8::try_from(retries)
+                        .ok()
+                        .filter(|value| *value <= provenant_routing::MAX_SETTLEMENT_RETRIES)
+                        .ok_or(FacadeError::InvalidInput)
+                })
+                .transpose()
+        };
+    let config = provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)
+        .map_err(|error| FacadeError::DispatchRefused {
+            reason: error.to_string(),
+        })?;
+    let host = matches!(
+        config.origins.get("domains.routing.settlement_retries"),
+        Some(provenant_config::Origin::User { .. })
+    )
+    .then_some(config.domains.routing.settlement_retries);
+    let allowance = provenant_routing::resolve_retry_allowance(
+        read(node, "retry")?,
+        read(node, "preset_retry")?.or(read(graph, "retry")?),
+        host,
+    );
+    let origin = match allowance.origin {
+        provenant_routing::RetryAllowanceOrigin::Node => "node",
+        provenant_routing::RetryAllowanceOrigin::Preset => "preset",
+        provenant_routing::RetryAllowanceOrigin::HostConfig => "host_config",
+        provenant_routing::RetryAllowanceOrigin::ShippedDefault => "shipped_default",
+    };
+    Ok((allowance.retries, origin.into()))
+}
+
 /// A graph document's optional top-level `exclude` list of route-exclusion
 /// selectors, inherited by every node it launches.
 fn graph_exclude(

@@ -688,6 +688,8 @@ mod peer_tests {
             let observation = graph_owner.observe_or_start(
                 &key,
                 graph::NodeInput {
+                    settlement_retries: None,
+                    family_separation: false,
                     context: provenant_records::run::WorkContext {
                         graph_id: Some(key.graph_id.clone()),
                         node_id: Some(key.node_id.clone()),

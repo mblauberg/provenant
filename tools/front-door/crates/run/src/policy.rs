@@ -94,11 +94,9 @@ fn handoff_brief(handoff: &provenant_records::handoff::Handoff) -> String {
 }
 
 impl RunStore {
-    pub(crate) fn policy_attempt_number(
-        &self,
-        record: &AttemptRecord,
-        call: &Request<'_>,
-    ) -> Result<u64> {
+    /// Ordinal in this task's run, including legacy successors whose cause is
+    /// unknown. Readers must not grant a fresh budget for an unknown cause.
+    pub fn policy_attempt_number(&self, record: &AttemptRecord, call: &Request<'_>) -> Result<u64> {
         call.check()?;
         let first: Option<i64> = {
             self.db.query_row(
@@ -783,7 +781,7 @@ mod tests {
         let store = RunStore::open(&context(temp.path())?, &call(&clock, &cancel))?;
         let input = input();
         store.create(&input, &call(&clock, &cancel))?;
-        let retry = PolicyRetry {
+        let mut retry = PolicyRetry {
             schema_version: 1,
             cause: Some(PolicyCause::Capacity),
             action: Some(PolicyAction::Retry),
@@ -801,6 +799,11 @@ mod tests {
         // Each settled attempt seals a retry and queues its successor; the
         // second successor must not collide with the first in the same run.
         for number in 2..=3 {
+            // A retained legacy successor spends allowance without becoming
+            // typed exclusion evidence.
+            if number == 3 {
+                retry.cause = None;
+            }
             let at = i64::try_from(number)? * 100;
             publication.started_at = Some(provenant_core::WallTime::from_micros(at + 50)?);
             publication.finished_at = provenant_core::WallTime::from_micros(at + 90)?;
@@ -827,9 +830,12 @@ mod tests {
                 store
                     .policy_refusals(queued[0].attempt_id, &call(&clock, &cancel))?
                     .len(),
-                usize::try_from(number - 1)?
+                1
             );
-
+            assert_eq!(
+                store.policy_attempt_number(&queued[0], &call(&clock, &cancel))?,
+                number
+            );
             assert_eq!(queued[0].attempt_number, number);
             assert_eq!(queued[0].retry_of, Some(id));
             id = queued[0].attempt_id;

@@ -2570,8 +2570,15 @@ fn graph_read_only_alias_redraws_after_quota_and_preserves_both_receipts() -> Re
         second["applied_route"]["model"]
     );
     assert_eq!(second["attempt_id"], attempt);
-    let db = rusqlite::Connection::open_with_flags(rig.state.join("run.sqlite3"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let raw: Vec<u8> = db.query_row("SELECT record FROM attempts WHERE id=?1", [attempt], |row| row.get(0))?;
+    let db = rusqlite::Connection::open_with_flags(
+        rig.state.join("run.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let raw: Vec<u8> = db.query_row(
+        "SELECT record FROM attempts WHERE id=?1",
+        [attempt],
+        |row| row.get(0),
+    )?;
     let record: Value = serde_json::from_slice(&raw)?;
     assert_eq!(record["retry_of"], first["attempt_id"]);
     let full = rig.command(&["fabric", "graph", "status", "quota-redraw", "--full"])?;

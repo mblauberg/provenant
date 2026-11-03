@@ -35,6 +35,9 @@ impl GraphJournal for MemoryJournal {
 
 #[derive(Default)]
 struct FakeOwner {
+    retry_limit: Option<u8>,
+    retry_used: u64,
+    retry_budgets: Vec<Option<u8>>,
     deliveries: usize,
     cancelled_attempt_settled: bool,
     cancellation_stops: usize,
@@ -80,6 +83,17 @@ fn reply(option: Option<&str>, text: Option<&str>) -> AskReply {
 
 impl AttemptOwner for FakeOwner {
     type Error = NoObservation;
+
+    fn retry_allowance(
+        &self,
+        _: &provenant_records::ExtraFields,
+        _: &provenant_records::ExtraFields,
+    ) -> Result<Option<(u8, String)>, Self::Error> {
+        Ok(self.retry_limit.map(|limit| (limit, "host_config".into())))
+    }
+    fn retry_successors(&mut self, _: &str) -> Result<u64, Self::Error> {
+        Ok(self.retry_used)
+    }
 
     fn stop_cancelled_attempt(&mut self, _attempt: &GraphAttempt) -> Result<(), Self::Error> {
         self.cancellation_stops += 1;
@@ -182,6 +196,7 @@ impl AttemptOwner for FakeOwner {
         self.delivery_modes.push(replay.delivery.cloned());
         self.fast_forward_only.push(replay.fast_forward_only);
         self.stored_refs.push(replay.stored_ref.map(str::to_owned));
+        self.retry_budgets.push(node.settlement_retries);
         self.launch_actors.push(replay.launch_actor.to_owned());
         self.calls.push((key.clone(), route.clone()));
         self.permissions.push((access, worktree.map(str::to_owned)));
@@ -4767,4 +4782,63 @@ fn advisory_composite_failure_preserves_cause_and_launches_dependant() {
         );
         assert!(owner.prompts.last().unwrap().contains("scout: unavailable"));
     }
+}
+
+#[test]
+fn cumulative_allowance_counts_run_successors_and_survives_observation_replay() {
+    let mut lane = node("lane", route("first"));
+    lane.route = None;
+    lane.routes = Some(vec![route("first"), route("second"), route("third")]);
+    let document = graph(vec![lane]);
+    let mut owner = FakeOwner {
+        retry_limit: Some(2),
+        observations: [AttemptObservation::Pending {
+            attempt_ref: Some("first".into()),
+        }]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.retry_budgets, vec![Some(2)]);
+    owner.retry_limit = Some(9); // Host changes cannot renew an admitted node.
+    owner.retry_used = 2;
+    let mut refused = terminal(AttemptOutcome::UsageLimited);
+    if let AttemptObservation::Terminal { attempt_ref, .. } = &mut refused {
+        *attempt_ref = Some("first".into());
+    }
+    owner.observations.push_back(refused);
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
+    assert_eq!(run.checkpoint.nodes[0].attempts.len(), 1);
+    assert_eq!(run.checkpoint.nodes[0].extra["retry"]["retries"], 2);
+    assert_eq!(owner.calls.len(), 2); // Same-key observation, no second route.
+    assert_eq!(owner.calls[0].0, owner.calls[1].0);
+    advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.calls.len(), 2);
+}
+
+#[test]
+fn configured_route_and_run_retries_share_the_remaining_allowance() {
+    let mut lane = node("lane", route("first"));
+    lane.route = None;
+    lane.routes = Some(vec![route("first"), route("second"), route("third")]);
+    let mut owner = FakeOwner {
+        retry_limit: Some(2),
+        observations: [
+            terminal(AttemptOutcome::UsageLimited),
+            terminal(AttemptOutcome::UsageLimited),
+            terminal(AttemptOutcome::Succeeded),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![lane]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert!(run.checkpoint.successful());
+    assert_eq!(owner.retry_budgets, vec![Some(2), Some(1), Some(0)]);
 }
