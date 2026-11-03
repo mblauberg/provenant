@@ -1975,7 +1975,8 @@ fn preset_run_followed_by_provenant_run_on_same_bound_worktree_succeeds()
     let project = temp.path().join("project");
     let state = temp.path().join("state");
     std::fs::create_dir(&project)?;
-    std::fs::create_dir(&state)?;
+    // Provenant creates the state root itself: Fabric refuses a root that
+    // other users can read, which a default-mode `create_dir` would be.
     let git = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
         let output = provenant_os::fixture::git_command()
             .current_dir(&project)
