@@ -2093,6 +2093,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
             &mut None,
             &clock,
             &cancel,
+            None,
         );
         let owner = load()?.ok_or("owner")?;
         assert_eq!(owner.base, base);
@@ -2202,6 +2203,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
         &mut None,
         &clock,
         &cancel,
+        None,
     )?;
     assert_eq!(reused.0.path, path);
     assert_eq!(reused.0.head, head);
@@ -2356,6 +2358,7 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
         &mut None,
         &clock,
         &cancel,
+        None,
     )
     .map_err(|fail| fail.to_string())?;
     assert_eq!(info.head, pinned);
@@ -5967,6 +5970,123 @@ fn worktrees_lock_held_past_five_seconds_retries_and_admits()
                 window.wake_at.is_some(),
                 "wake_at must be recorded on lock retry"
             );
+
+            Ok(())
+        },
+    )??;
+    Ok(())
+}
+
+#[test]
+fn admission_lock_wait_respects_deadline() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
+    use provenant_os::fs::{Directory, LockMode};
+
+    struct Free;
+    impl WorkerObserver for Free {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, WorkerState::Free))
+                .collect()
+        }
+    }
+
+    if reexec_test_in_lane("run::tests::admission_lock_wait_respects_deadline")? {
+        return Ok(());
+    }
+    let fixture = linked_fixture()?;
+    let prompt = fixture.root.join("prompt.md");
+    std::fs::write(&prompt, "reply OK")?;
+
+    with_edge(
+        &fixture.root,
+        &fixture.tree,
+        |edge| -> Result<(), Box<dyn std::error::Error>> {
+            std::fs::create_dir_all(edge.roots.state.as_path())?;
+            provenant_config::bind_host(edge.roots)?;
+
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+            let _session = open(edge, &call).map_err(|fail| fail.message)?;
+
+            let target_project_id = provenant_confinement::worktrees::with_context(
+                edge.roots,
+                edge.home,
+                &fixture.project,
+                &clock,
+                &cancel,
+                |ctx| Ok(ctx.binding.project_id()),
+            )?;
+            let reg_dir = edge
+                .roots
+                .state
+                .as_path()
+                .join("worktrees")
+                .join(target_project_id.to_string());
+            std::fs::create_dir_all(&reg_dir)?;
+
+            // Background thread acquires worktrees.lock and holds it for 5.3s
+            let (tx, rx) = std::sync::mpsc::channel();
+            let lock_dir_path = reg_dir.clone();
+            let holder = std::thread::spawn(move || {
+                let dir = Directory::open_anchor(&lock_dir_path).unwrap();
+                let clk = SystemClock::new();
+                let cnl = CancelToken::new();
+                let guard = dir
+                    .lock(
+                        std::ffi::OsStr::new("worktrees.lock"),
+                        LockMode::Exclusive,
+                        provenant_core::WaitBudget::cli(clk.mono_now(), 10).unwrap(),
+                        &cnl,
+                        &clk,
+                    )
+                    .unwrap();
+                tx.send(()).unwrap();
+                let wake = clk
+                    .mono_now()
+                    .checked_add(DurationMicros::from_micros(3_000_000))
+                    .unwrap();
+                clk.wait_until(wake).unwrap();
+                drop(guard);
+            });
+
+            rx.recv().unwrap(); // Wait until lock is held!
+
+            let mut cmd = parsed_run(&[
+                "--operation-id",
+                "lock-retry-test",
+                "--model",
+                "codex/gpt-6-luna",
+                "--mode",
+                "worktree-write",
+                "--worktree",
+                fixture.tree.to_str().unwrap(),
+                "--prompt-file",
+                prompt.to_str().unwrap(),
+                "--admission-timeout",
+                "1s",
+            ])?;
+            cmd.wait = None;
+
+            let started = std::time::Instant::now();
+            let reply = dispatch_with_workers(cmd, edge, &Free);
+            assert_eq!(
+                reply.result.status,
+                Status::Refused,
+                "{:?}",
+                reply.result.error
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "lock wait exceeded admission deadline"
+            );
+            holder.join().unwrap();
 
             Ok(())
         },

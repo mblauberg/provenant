@@ -1136,6 +1136,22 @@ pub(super) fn dispatch_inner(
                     "cancelled",
                 ));
             }
+            let now = clock
+                .wall_now()
+                .map_err(|_| Fail::new(Status::Error, ErrorKind::Time, "wall clock"))?;
+            if now >= admission_window.deadline {
+                return Err(Fail::new(
+                    Status::Refused,
+                    ErrorKind::Refused,
+                    "admission deadline exceeded",
+                ));
+            }
+            let remaining =
+                u64::try_from(admission_window.deadline.as_micros() - now.as_micros()).unwrap_or(0);
+            let lock_budget = provenant_core::WaitBudget::up_to(
+                clock.mono_now(),
+                DurationMicros::from_micros(remaining.min(5_000_000)),
+            );
             let res: Result<(Value, Option<provenant_core::GitOid>), WorktreeAdmissionError> =
                 if let Some(owned) = &owned {
                     match own_worktree(
@@ -1152,6 +1168,7 @@ pub(super) fn dispatch_inner(
                         created,
                         &clock,
                         &cancel,
+                        Some(lock_budget),
                     ) {
                         Ok((info, base)) => {
                             command.access.worktree = Some(info.path.clone());
@@ -1188,6 +1205,10 @@ pub(super) fn dispatch_inner(
                         &cancel,
                         |context| {
                             use provenant_confinement::worktrees;
+                            let context = &worktrees::WorktreeContext {
+                                lock_budget,
+                                ..*context
+                            };
                             let info = worktrees::list(context, &cancel)?
                                 .into_iter()
                                 .find(|tree| tree.path == writer.worktree)
