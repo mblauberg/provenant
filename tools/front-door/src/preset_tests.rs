@@ -4281,6 +4281,56 @@ fn preset_file_spec_reaches_review_nodes_and_warns_when_missing() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn preset_file_spec_falls_back_after_read_error_and_names_all_candidates() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let writer = temp.path().join("writer");
+    std::fs::create_dir_all(project.join(".agent-run")).unwrap();
+    // Opening a directory succeeds on Unix, but reading it as a file fails.
+    std::fs::create_dir_all(writer.join(".agent-run/spec.md")).unwrap();
+    let project_spec = project.join(".agent-run/spec.md");
+    std::fs::write(&project_spec, "project acceptance criteria").unwrap();
+    let mut layers = Layers::empty();
+    layers.project_dir = Some(project.clone());
+    let expand_spec = || {
+        super::preset::expand_with(
+            &layers,
+            "generator-evaluator",
+            "brief",
+            &[
+                ("worktree".into(), json!(writer)),
+                ("spec".into(), json!(".agent-run/spec.md")),
+            ],
+            &[],
+        )
+        .unwrap()
+    };
+    let expanded = expand_spec();
+    assert!(
+        find_prompt(&expanded.document["nodes"], "lens.correctness-spec")
+            .unwrap()
+            .contains("project acceptance criteria")
+    );
+    assert!(!expanded.warnings.iter().any(|w| w.contains("spec file")));
+    std::fs::remove_file(&project_spec).unwrap();
+    let missing = expand_spec();
+    let warning = missing
+        .warnings
+        .iter()
+        .find(|w| w.contains("spec file"))
+        .unwrap();
+    assert!(
+        warning.contains(&writer.join(".agent-run/spec.md").display().to_string()),
+        "{warning}"
+    );
+    assert!(
+        warning.contains(&project_spec.display().to_string()),
+        "{warning}"
+    );
+}
+
 #[test]
 fn file_spec_expansion_golden() {
     let mut layers = Layers::empty();

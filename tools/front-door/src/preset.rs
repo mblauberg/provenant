@@ -1344,29 +1344,27 @@ fn read_spec_context(layers: &Layers, parameters: &Value) -> Option<String> {
         .into_iter()
         .map(|w| project.join(w).join(path))
         .chain(std::iter::once(project.join(path)));
-    let mut error = String::new();
+    let mut errors = Vec::new();
     for candidate in candidates {
-        match std::fs::File::open(&candidate) {
+        let error = match std::fs::File::open(&candidate) {
             Ok(mut file) => {
-                error.clear();
                 let mut hash = Sha256::new();
                 let mut excerpt = Vec::new();
                 let mut buffer = [0u8; 8192];
-                loop {
+                let result = loop {
                     match file.read(&mut buffer) {
-                        Ok(0) => break,
+                        Ok(0) => break Ok(()),
                         Ok(n) => {
                             hash.update(&buffer[..n]);
                             let take = n.min(cap.saturating_sub(excerpt.len()));
                             excerpt.extend_from_slice(&buffer[..take]);
                         }
-                        Err(e) => {
-                            error = e.to_string();
-                            break;
-                        }
+                        Err(e) => break Err(e),
                     }
-                }
-                if error.is_empty() {
+                };
+                if let Err(error) = result {
+                    error
+                } else {
                     let digest: String = hash
                         .finalize()
                         .iter()
@@ -1384,12 +1382,15 @@ fn read_spec_context(layers: &Layers, parameters: &Value) -> Option<String> {
                         "\n\nSpec file: {spec} (sha256:{digest}; excerpt up to {cap} bytes)\n{text}"
                     ));
                 }
-                break;
             }
-            Err(e) => error = e.to_string(),
-        }
+            Err(e) => e,
+        };
+        errors.push(format!("{}: {error}", candidate.display()));
     }
-    let warning = format!("spec file '{spec}' could not be read: {error}");
+    let warning = format!(
+        "spec file '{spec}' could not be read: {}",
+        errors.join("; ")
+    );
     let mut warnings = layers.warnings.borrow_mut();
     if !warnings.contains(&warning) {
         warnings.push(warning);
