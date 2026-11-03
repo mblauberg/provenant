@@ -206,6 +206,14 @@ fn handoff_recovery_provider(prompt: &str, args: &[String], auth: &Value) -> Res
     Ok(())
 }
 
+/// Fake answers close with a done handoff, as every lane brief asks (#2707).
+const DONE_FENCE: &str = "\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"finished\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```";
+
+/// An upstream answer without the fake's closing handoff.
+fn without_done(text: &str) -> &str {
+    text.strip_suffix(DONE_FENCE).unwrap_or(text)
+}
+
 fn fixture() -> Result {
     let args: Vec<_> = std::env::args().collect();
     if args.get(1).is_some_and(|v| v == "--version") {
@@ -244,7 +252,7 @@ fn fixture() -> Result {
         // Restricted routes must supply the sections requested at launch.
         let frames = frames.replace(
             r#""text":"OK""#,
-            r###""text":"## Findings\nOK\n## Evidence\nFixture checked.""###,
+            r###""text":"## Findings\nOK\n## Evidence\nFixture checked.\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"finished\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```""###,
         );
         io::stdout().write_all(frames.as_bytes())?;
         return Ok(());
@@ -315,6 +323,7 @@ fn fixture() -> Result {
                 .map(|(path, _)| PathBuf::from(path))
                 .ok_or("upstream file entry")?;
             let text = fs::read_to_string(&path)?;
+            let text = without_done(&text);
             let sibling = path.with_file_name("other.md");
             // Upstreams whose ids differ only by case each keep their own file.
             let mut cases = String::new();
@@ -327,7 +336,10 @@ fn fixture() -> Result {
                     .and_then(|line| line.split_once(" ("))
                     .map(|(path, _)| PathBuf::from(path))
                     .ok_or("case upstream file entry")?;
-                cases.push_str(&format!("; {label}={}", fs::read_to_string(path)?));
+                cases.push_str(&format!(
+                    "; {label}={}",
+                    without_done(&fs::read_to_string(path)?)
+                ));
             }
             format!(
                 "read {} bytes; tail {}; sibling write denied {}; parent listing denied {}{cases}",
@@ -339,6 +351,7 @@ fn fixture() -> Result {
         } else {
             "OK".to_owned()
         };
+        let answer = format!("{answer}{DONE_FENCE}");
         for frame in [
             json!({"type":"system","subtype":"init","session_id":"fixture-session"}),
             json!({"type":"assistant","session_id":"fixture-session","parent_tool_use_id":null,"message":{"model":"claude-sonnet-5-5","role":"assistant","content":[{"type":"text","text":answer}],"usage":{"input_tokens":1,"output_tokens":1}}}),
@@ -409,7 +422,7 @@ fn fixture() -> Result {
         write!(io::stderr(), "diagnostic {token}")?;
         for frame in [
             json!({"type":"thread.started","thread_id":session}),
-            json!({"type":"item.completed","item":{"type":"agent_message","text":format!("credential {token}")}}),
+            json!({"type":"item.completed","item":{"type":"agent_message","text":format!("credential {token}{DONE_FENCE}")}}),
             json!({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}),
         ] {
             let frame = frame.to_string();
@@ -453,7 +466,7 @@ fn fixture() -> Result {
             format!("Verdict: approve\n{lens}\nwrite denied: {denied}")
         }
     } else {
-        "OK".into()
+        format!("OK{DONE_FENCE}")
     };
     for frame in [
         json!({"type":"thread.started","thread_id":session}),
@@ -484,6 +497,75 @@ fn policy_codex_fixture() -> Result<TestRig> {
     ));
     Ok(rig)
 }
+fn run_refuses_pacing_reserve() -> Result {
+    let rig = policy_codex_fixture()?;
+    let auth = br#"{"tokens":{"account_id":"fixture-one"}}"#;
+    let key = provenant_providers::identity::codex_account(auth).ok_or("account key")?;
+    support::register_account(&rig, "codex", "one", &key, &rig.root.join("codex"))?;
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[domains.routing.pacing]\ncodex='pace'"
+    )?;
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs(),
+    )?;
+    let scope = provenant_quota::AccountScope {
+        adapter: "codex".into(),
+        account_key: key.clone(),
+        label: "one".into(),
+    };
+    let mut record = provenant_quota::AccountRecord::empty(scope.clone());
+    record.snapshot = Some(provenant_quota::QuotaSnapshot {
+        schema_version: 1,
+        account: scope,
+        revision: 0,
+        status: provenant_quota::QuotaStatus::Available,
+        observed_unix_seconds: now,
+        source_ref: "fixture".into(),
+        authority_ref: None,
+        windows: vec![provenant_quota::QuotaWindow {
+            pool: "five_hour".into(),
+            window_seconds: Some(18_000),
+            used_basis_points: 9_000,
+            resets_unix_seconds: Some(now + 9_000),
+        }],
+        details: None,
+    });
+    let quota = rig.state.join("quota").join(key);
+    fs::create_dir_all(&quota)?;
+    fs::set_permissions(rig.state.join("quota"), fs::Permissions::from_mode(0o700))?;
+    fs::set_permissions(&quota, fs::Permissions::from_mode(0o700))?;
+    let snapshot = quota.join("codex.json");
+    fs::write(&snapshot, serde_json::to_vec(&record)?)?;
+    fs::set_permissions(snapshot, fs::Permissions::from_mode(0o600))?;
+    let prompt = rig.root.join("prompt.txt");
+    fs::write(&prompt, "Reply OK.")?;
+    let output = rig.command(&[
+        "run",
+        "--model",
+        "codex/gpt-6-luna",
+        "--account",
+        "one",
+        "--mode",
+        "read-only",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt")?,
+        "--json",
+    ])?;
+    assert_ne!(code(&output), 0, "{output:?}");
+    let response = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout.bytes),
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    assert!(response.contains("PacingReserve"), "{output:?}");
+    Ok(())
+}
+
 /// `settled` is the exit `run` gives when the whole retry chain settles
 /// inside its own wait; otherwise it returns `waiting` (0) and `lanes` waits on.
 /// Which one happens depends on host speed, so both are accepted. A wait that
@@ -1315,8 +1397,8 @@ fn printed_credentials_leave_no_plaintext_in_run_files() -> Result {
         let run_dir = rig.state.join("runs").join(run);
         let attempt = run_dir.join("attempts").join(id);
         assert_eq!(
-            fs::read(attempt.join("result.md"))?,
-            b"credential [REDACTED]"
+            fs::read_to_string(attempt.join("result.md"))?,
+            format!("credential [REDACTED]{DONE_FENCE}")
         );
         assert_eq!(
             fs::read(attempt.join("stderr.log"))?,
@@ -1431,7 +1513,10 @@ fn codex_dispatch_observes_rollout() -> Result {
             assert!(lane["applied_route"]["account_label"].as_str().is_some());
             let result: Value = serde_json::from_slice(&out.stdout.bytes)?;
             let id = lane["attempt_id"].as_str().ok_or("attempt")?;
-            assert_eq!(result["data"]["result_tails"][id]["bytes"]["data"], "OK");
+            assert_eq!(
+                result["data"]["result_tails"][id]["bytes"]["data"],
+                format!("OK{DONE_FENCE}")
+            );
             fs::write(&prompt_file, "fixture slow result")?;
             let slow = rig.command(&[
                 "run",
@@ -2401,7 +2486,7 @@ fn graph_node_reads_full_upstream_result_from_its_inputs_directory() -> Result {
         .collect::<String>()
         + "END-OF-LARGE-RESULT";
     assert_eq!(
-        excerpt,
+        without_done(excerpt),
         format!(
             "read {} bytes; tail END-OF-LARGE-RESULT; sibling write denied true; parent listing denied true; Review=case-result-Review; review=case-result-review",
             full.len()
@@ -3479,7 +3564,7 @@ fn agy_denied_command_reaches_result_and_terminal_reason() -> Result {
     }
     // A valid successful answer wins even when stderr contains a denial notice.
     let success = br###"{"event":"init","conversation_id":"fixture-session","init":{"model":"gemini-3.8-flash"}}
-{"event":"result","result":{"conversation_id":"fixture-session","status":"SUCCESS","response":"## Findings\nVerified.\n## Evidence\nChecked the claim.","error":null,"usage":{"input_tokens":0,"output_tokens":0}}}"###;
+{"event":"result","result":{"conversation_id":"fixture-session","status":"SUCCESS","response":"## Findings\nVerified.\n## Evidence\nChecked the claim.\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"verified\"}\n```","error":null,"usage":{"input_tokens":0,"output_tokens":0}}}"###;
     let (rig, terminal) = persisted_attempt(
         "agy",
         "agy/gemini-3.8-flash",
@@ -3498,9 +3583,12 @@ fn agy_denied_command_reaches_result_and_terminal_reason() -> Result {
     let output = rig.command(&["output", &terminal.attempt_id.to_string(), "--json"])?;
     assert_eq!(code(&output), 0, "{:?}", output.stderr.bytes);
     let output: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert_eq!(
-        output["data"]["bytes"]["data"],
-        "## Findings\nVerified.\n## Evidence\nChecked the claim."
+    let result = output["data"]["bytes"]["data"]
+        .as_str()
+        .ok_or("result bytes")?;
+    assert!(
+        result.starts_with("## Findings\nVerified.\n## Evidence\nChecked the claim."),
+        "{output}"
     );
     Ok(())
 }
@@ -4152,6 +4240,7 @@ fn main() -> ExitCode {
             &[
                 #[cfg(target_os = "macos")]
                 "dispatch_proceeds_when_provider_update_is_busy",
+                "run_refuses_pacing_reserve",
                 "cancel_wait_settles_stalled_import_with_durable_exit",
                 "receipt_output_reports_unknown_route_for_settled_lost_attempt",
                 "output_names_the_attempt_it_reads_and_writes_or_locates_parts",
@@ -4190,6 +4279,7 @@ fn main() -> ExitCode {
                 let result = match name {
                     #[cfg(target_os = "macos")]
                     "dispatch_proceeds_when_provider_update_is_busy" => dispatch_proceeds_when_provider_update_is_busy(),
+                    "run_refuses_pacing_reserve" => run_refuses_pacing_reserve(),
                     "cancel_wait_settles_stalled_import_with_durable_exit" => cancel_wait_settles_stalled_import_with_durable_exit(),
                     "receipt_output_reports_unknown_route_for_settled_lost_attempt" => {
                         receipt_output_reports_unknown_route_for_settled_lost_attempt()

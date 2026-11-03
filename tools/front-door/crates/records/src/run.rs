@@ -743,6 +743,60 @@ pub enum TerminalEvidence {
     },
 }
 
+/// The closed reason an attempt reached its terminal state. The free-text
+/// reason on the state explains; this enum is what callers match on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettlementReason {
+    /// The provider finished and reported its results.
+    Completed,
+    /// The provider finished without a final handoff, so nothing was reported.
+    HandoffMissing,
+    /// The lane declared that work remains.
+    DeclaredStop,
+    /// The provider stopped for a reason other than a finished turn.
+    ProviderStop,
+    /// A writer left edits it did not commit.
+    UncommittedWork,
+    /// Refused before any process started.
+    PreLaunchRefusal,
+    Cancelled,
+    Lost,
+    Unsettled,
+    /// The provider ran and ended in a non-success outcome.
+    Failed,
+}
+impl SettlementReason {
+    /// Derive the reason from facts the terminal decision already holds.
+    pub fn derive(
+        outcome: Outcome,
+        evidence: Option<&TerminalEvidence>,
+        partial: &[PartialSignal],
+    ) -> Self {
+        match (evidence, outcome) {
+            // A lost or unsettled outcome may still carry a process exit: the
+            // process ran, but custody or reporting was not proven. The
+            // outcome names the reason, whatever evidence accompanied it.
+            (_, Outcome::Lost) => Self::Lost,
+            (_, Outcome::Unsettled) => Self::Unsettled,
+            (Some(TerminalEvidence::Lost { .. }), _) => Self::Lost,
+            (Some(TerminalEvidence::Unsettled { .. }), _) => Self::Unsettled,
+            (_, Outcome::Cancelled) => Self::Cancelled,
+            (Some(TerminalEvidence::PreLaunchRefusal), _) => Self::PreLaunchRefusal,
+            (_, Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted) => [
+                (PartialSignal::DeclaredStop, Self::DeclaredStop),
+                (PartialSignal::HandoffMissing, Self::HandoffMissing),
+                (PartialSignal::ProviderStop, Self::ProviderStop),
+                (PartialSignal::UncommittedWork, Self::UncommittedWork),
+            ]
+            .into_iter()
+            .find(|(signal, _)| partial.contains(signal))
+            .map_or(Self::Completed, |(_, reason)| reason),
+            _ => Self::Failed,
+        }
+    }
+}
+
 /// Independently retried work after a terminal decision.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -896,6 +950,10 @@ pub struct AttemptRecord {
     /// Absent on records written before terminal decisions were recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_evidence: Option<TerminalEvidence>,
+    /// Why the attempt ended, as a closed set a waiter can match on. Stamped
+    /// with every terminal decision, including refusals before launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlement_reason: Option<SettlementReason>,
     /// The cancellation disposition known when the decision was sealed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancellation_disposition: Option<CancellationDisposition>,
@@ -1127,6 +1185,27 @@ mod tests {
         let parsed: HarnessProfile = serde_json::from_value(sealed.clone())?;
         assert_eq!(serde_json::to_value(parsed)?, sealed);
         Ok(())
+    }
+
+    #[test]
+    fn a_lost_or_unsettled_outcome_names_its_reason_with_any_evidence() {
+        // The process ran, but custody or reporting was not proven.
+        for evidence in [
+            TerminalEvidence::ProcessExit,
+            TerminalEvidence::PreLaunchRefusal,
+            TerminalEvidence::Lost {
+                reason: "gone".into(),
+            },
+        ] {
+            assert_eq!(
+                SettlementReason::derive(Outcome::Lost, Some(&evidence), &[]),
+                SettlementReason::Lost
+            );
+            assert_eq!(
+                SettlementReason::derive(Outcome::Unsettled, Some(&evidence), &[]),
+                SettlementReason::Unsettled
+            );
+        }
     }
 
     #[test]

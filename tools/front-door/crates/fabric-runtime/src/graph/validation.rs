@@ -393,6 +393,7 @@ pub(super) fn validate_flat_plan(
             required_verdict: node.required_verdict.clone(),
             deadline_seconds: node.deadline_seconds,
             require_findings: node.require_findings,
+            skip_without_findings: node.skip_without_findings,
         });
     }
 

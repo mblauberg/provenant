@@ -524,6 +524,7 @@ fn output_read(
             "attempt_id": id,
             "state": state,
             "reason": reason,
+            "settlement_reason": record.settlement_reason,
             "part": format!("{:?}", command.part).to_lowercase(),
             "offset": chunk.offset,
             "next_offset": chunk.next_offset,
