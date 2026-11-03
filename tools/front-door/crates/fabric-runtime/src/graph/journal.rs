@@ -563,7 +563,8 @@ pub(super) fn decode_checkpoint(
             .expansions
             .iter()
             .any(|expansion| expansion.review.is_some() || nodes_have_v2(&expansion.nodes));
-    if !matches!(document.schema_version, 1 | 2) || (document.schema_version == 2) != has_v2 {
+    // Matches validate_schema: version 2 may omit every v2 field.
+    if !matches!(document.schema_version, 1 | 2) || document.schema_version == 1 && has_v2 {
         return Err(JournalError::BadEnvelope);
     }
     let digest = CanonicalV1::record_digest(

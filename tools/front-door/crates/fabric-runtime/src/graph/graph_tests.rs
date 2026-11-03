@@ -673,6 +673,113 @@ fn family_group_passes_peers_and_records_shared_family() {
 }
 
 #[test]
+fn panel_with_one_usage_limited_member_reaches_synthesis() {
+    let alias = GraphRoute {
+        extra: Default::default(),
+        adapter: None,
+        name: None,
+        model: None,
+        alias: Some("junior".into()),
+        effort: None,
+        account: None,
+    };
+    let mut nodes = Vec::new();
+    for id in ["one", "two", "three"] {
+        let mut member = node(id, route("first"));
+        member.route = None;
+        member.routes = Some(vec![alias.clone(), alias.clone()]);
+        member.family_group = Some("panel".into());
+        nodes.push(member);
+    }
+    let mut synthesis = node("synthesis", route("first"));
+    synthesis.depends_on = vec!["one".into(), "two".into(), "three".into()];
+    nodes.push(synthesis);
+    let mut document = graph(nodes);
+    document.schema_version = 2;
+    let mut limited = done_as("h/1");
+    if let AttemptObservation::Terminal { outcome, .. } = &mut limited {
+        *outcome = AttemptOutcome::UsageLimited;
+    }
+    let mut owner = FakeOwner {
+        observations: [
+            limited,
+            done_as("h/2"),
+            done_as("h/3"),
+            done_as("h/4"),
+            done_as("h/5"),
+        ]
+        .into(),
+        models: [("h/1".into(), "go/glm-flash".into())].into(),
+        families: [
+            ("h/1".into(), "zhipu".into()),
+            ("h/2".into(), "openai".into()),
+            ("h/3".into(), "anthropic".into()),
+            ("h/4".into(), "google".into()),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert!(run.checkpoint.successful(), "{:#?}", run.checkpoint.nodes);
+    assert_eq!(run.checkpoint.nodes[0].attempts.len(), 2);
+    // The retry excludes the refused model by id, as the host receives it.
+    assert_eq!(owner.prior_attempts[1], ["go/glm-flash"]);
+    // Siblings prefer the families already used; none of them is a gate.
+    assert_eq!(owner.family_peers[2], ["zhipu", "openai"]);
+    assert_eq!(owner.family_peers[3], ["zhipu", "openai", "anthropic"]);
+    assert!(owner.require_distinct.iter().all(|required| !required));
+    let separation = run.checkpoint.nodes[2].separation.as_ref().unwrap();
+    assert_eq!(separation.strength, FamilyStrength::Prefer);
+    assert_eq!(separation.outcome, SeparationOutcome::Separated);
+}
+
+#[test]
+fn required_writer_separation_records_only_the_enforced_families() {
+    let mut write = node("write", route("first"));
+    write.access = AccessMode::WorktreeWrite;
+    write.worktree = Some(".worktrees/write".into());
+    let mut lenses = Vec::new();
+    for id in ["one", "two"] {
+        let mut lens = node(id, route("first"));
+        lens.source = Some(SourceBinding::Node {
+            node: "write".into(),
+        });
+        lens.depends_on = vec!["write".into()];
+        lens.distinct_from = Some(DistinctFrom::Writer);
+        lens.distinct_strength = Some(FamilyStrength::Require);
+        lens.family_group = Some("panel".into());
+        lenses.push(lens);
+    }
+    let mut nodes = vec![write];
+    nodes.extend(lenses);
+    let mut document = graph(nodes);
+    document.schema_version = 2;
+    let mut writer_done = done_as("h/1");
+    if let AttemptObservation::Terminal { commit, .. } = &mut writer_done {
+        *commit = Some("3".repeat(40));
+    }
+    let mut owner = FakeOwner {
+        observations: [writer_done, done_as("h/2"), done_as("h/3")].into(),
+        families: [
+            ("h/1".into(), "openai".into()),
+            ("h/2".into(), "anthropic".into()),
+            ("h/3".into(), "anthropic".into()),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert!(run.checkpoint.successful(), "{:#?}", run.checkpoint.nodes);
+    assert_eq!(owner.family_peers[2], ["anthropic"]);
+    assert!(owner.require_distinct[2]);
+    // The host enforces the writer family alone, so the journal says so.
+    let separation = run.checkpoint.nodes[2].separation.as_ref().unwrap();
+    assert_eq!(separation.strength, FamilyStrength::Require);
+    assert_eq!(separation.excluded, ["openai"]);
+    assert_eq!(separation.outcome, SeparationOutcome::Separated);
+}
+
+#[test]
 fn distinct_from_dependencies_excludes_every_upstream_attempt_and_records_the_separation() {
     let (owner, checkpoint) = separation_run(None, "openai");
     let verify = owner.distinct_from.last().unwrap();
@@ -3455,6 +3562,42 @@ fn usage_limit_failure_reports_cause_instead_of_missing_findings() {
             .iter()
             .any(|warning| warning.contains("findings block missing"))
     );
+}
+
+#[test]
+fn exhausted_pool_names_the_cause_and_the_pool() {
+    let alias = GraphRoute {
+        extra: Default::default(),
+        adapter: None,
+        name: None,
+        model: None,
+        alias: Some("junior".into()),
+        effort: None,
+        account: None,
+    };
+    let mut lens = node("lens", route("first"));
+    lens.route = None;
+    lens.routes = Some(vec![alias.clone(), alias]);
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([
+            terminal(AttemptOutcome::UsageLimited),
+            terminal(AttemptOutcome::UsageLimited),
+        ]),
+        ..FakeOwner::default()
+    };
+    let run = advance(
+        &graph(vec![lens]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    let node = &run.checkpoint.nodes[0];
+    assert_eq!(node.state, NodeState::Failed);
+    assert_eq!(node.attempts.len(), 2);
+    assert_eq!(node.advance_error_code.as_deref(), Some("usage_limited"));
+    let error = node.advance_error.as_deref().unwrap();
+    assert!(error.contains("quota or rate limit"), "{error}");
+    assert!(error.contains("pool junior"), "{error}");
 }
 
 fn check_fallback(

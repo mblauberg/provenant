@@ -1694,6 +1694,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         prior_attempts.push(model);
                     }
                 }
+                let require_distinct = node.distinct_strength == Some(FamilyStrength::Require)
+                    && (node.family_group.is_none() || node.distinct_from.is_some());
                 let continued = land::continued_branch(node, &checkpoint, &positions);
                 let observation = match owner.observe_or_start(
                     &key,
@@ -1703,8 +1705,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         context: node_context(&plan, node),
                         read_roots: &node.read_roots,
                         distinct_from_attempts: &distinct_attempts,
-                        require_distinct: node.distinct_strength == Some(FamilyStrength::Require)
-                            && (node.family_group.is_none() || node.distinct_from.is_some()),
+                        require_distinct,
                         source_commit: checkpoint.nodes[node_index].source_commit.as_deref(),
                         title: node.title.as_deref().unwrap_or(&node.id),
                         prompt: &prompt,
@@ -1790,9 +1791,15 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             let mut excluded = owner
                                 .attempt_families(&distinct_attempts)
                                 .unwrap_or_default();
-                            for family in &family_peers {
-                                if !excluded.contains(family) {
-                                    excluded.push(family.clone());
+                            // A required writer separation is the route's only
+                            // constraint; otherwise sibling families join the
+                            // preference, as the host routed them.
+                            let enforced = require_distinct && !excluded.is_empty();
+                            if !enforced {
+                                for family in &family_peers {
+                                    if !excluded.contains(family) {
+                                        excluded.push(family.clone());
+                                    }
                                 }
                             }
                             let applied = attempt_ref.as_ref().and_then(|reference| {
@@ -1802,7 +1809,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     .and_then(|families| families.into_iter().next())
                             });
                             Some(separation(
-                                if node.family_group.is_some() {
+                                if enforced {
+                                    FamilyStrength::Require
+                                } else if node.family_group.is_some() {
                                     FamilyStrength::Prefer
                                 } else {
                                     node.distinct_strength.unwrap_or_default()
@@ -1933,7 +1942,19 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                         if outcome == AttemptOutcome::UsageLimited {
                                             progress.advance_error_code =
                                                 Some("usage_limited".into());
-                                            progress.advance_error = Some("Provider quota or rate limit reached; wait for the allowance to reset or choose an eligible route.".into());
+                                            // Name the pool so the user knows which allowance ran out.
+                                            let pool = route
+                                                .alias
+                                                .as_deref()
+                                                .map_or_else(String::new, |alias| {
+                                                    format!(" for pool {alias}")
+                                                });
+                                            progress.advance_error = Some(bounded(
+                                                &format!(
+                                                    "Provider quota or rate limit reached{pool}; wait for the allowance to reset or choose an eligible route."
+                                                ),
+                                                MAX_ADVANCE_ERROR_BYTES,
+                                            ));
                                         }
                                         progress.state = NodeState::Failed;
                                         false

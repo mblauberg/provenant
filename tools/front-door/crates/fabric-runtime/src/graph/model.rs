@@ -916,8 +916,9 @@ pub struct NodeInput<'a> {
     pub read_roots: &'a [String],
     /// Attempts of the source writer whose model families must be avoided.
     pub distinct_from_attempts: &'a [String],
-    /// Refuse a route inside distinct_from_attempts' families; family_peers
-    /// remain a preference even when this is true.
+    /// Refuse a route inside distinct_from_attempts' families. family_peers
+    /// are never required: an enforced writer separation is the route's only
+    /// family constraint, and otherwise peers join the preferred exclusions.
     pub require_distinct: bool,
     pub source_commit: Option<&'a str>,
     pub title: &'a str,

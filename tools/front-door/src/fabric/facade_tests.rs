@@ -1408,9 +1408,11 @@ mod peer_tests {
         let seed = (0..256).find(|seed| provenant_routing::resolve_with_seed(&request, &context, "retry", *seed)
             .is_ok_and(|route| format!("{}/{}", route.adapter, route.model) == "codex/gpt-6-luna")).ok_or("no first draw")?;
         let alias: graph::GraphRoute = serde_json::from_value(serde_json::json!({"alias":"retry-trial"}))?;
-        let exclusions = owner.route_exclusions(&alias, std::slice::from_ref(&prior), false)?;
+        // The runtime passes the prior models it resolved from attempt records.
+        let prior_models = owner.prior_models(std::slice::from_ref(&prior))?;
+        let exclusions = owner.route_exclusions(&alias, &prior_models, false);
         assert_eq!(exclusions, ["codex/gpt-6-luna"]);
-        assert!(owner.route_exclusions(&alias, &[prior], true)?.is_empty());
+        assert!(owner.route_exclusions(&alias, &prior_models, true).is_empty());
         let rules = [ExclusionRule { selector: ExclusionSelector::Model(ModelId::parse(&exclusions[0])?), source: ExclusionSource::Graph }];
         let second = provenant_routing::resolve_for_account_with_seed_excluding(&request, &context, None, "retry", seed, &[], &rules)?;
         assert_eq!(format!("{}/{}", second.adapter, second.model), "claude/claude-haiku-5-5");
@@ -1435,6 +1437,107 @@ mod peer_tests {
         assert_eq!(separation.strength, graph::FamilyStrength::Require);
         assert_eq!(separation.excluded, ["openai"]);
         assert_eq!(separation.outcome, graph::SeparationOutcome::Unavailable);
+        Ok(())
+    }
+
+    #[test]
+    fn graph_owner_submits_sibling_families_as_a_preference_and_alias_retry_exclusions()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test(
+            "fabric::peer_tests::graph_owner_submits_sibling_families_as_a_preference_and_alias_retry_exclusions",
+        )? {
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::{self, AttemptOwner};
+        use provenant_records::run::RequestedRoute;
+        let fixture = SettlementFixture::resumed()?;
+        let factory = Factory {
+            context: Context::open(
+                fixture.roots.clone(),
+                &fixture.rig.home,
+                &fixture.rig.project,
+            )?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: fixture.rig.home.clone(),
+            cwd: fixture.rig.project.clone(),
+            assets: fixture.rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let mut bound = BoundGraphOwner {
+            factory: &factory,
+            integration_base: None,
+            integration_branch: None,
+            network: None,
+            exclude: Vec::new(),
+            budget,
+            cancel: &cancel,
+            prices: None,
+            tick: false,
+        };
+        let actor = bound.actor();
+        let owner = BinaryRunOwner {
+            factory: &factory,
+            allow_remote: true,
+            actor: None,
+            chair: None,
+        };
+        let store = owner.store(&cancel)?;
+        let alias: graph::GraphRoute = serde_json::from_value(serde_json::json!({"alias":"junior"}))?;
+        // Submit one lens attempt through the production owner and return the
+        // route and knobs it recorded.
+        let mut submit = |node_id: &str,
+                          route_index: u16,
+                          peers: &[String],
+                          prior: &[String],
+                          require: bool|
+         -> Result<(RequestedRoute, Vec<String>), Box<dyn std::error::Error>> {
+            let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
+                "graph_id":"sibling-lenses", "node_id":node_id, "route_index":route_index
+            }))?;
+            bound.observe_or_start(&key, graph::NodeInput {
+                prior_attempts: prior, family_peers: peers, context: Default::default(), read_roots: &[],
+                distinct_from_attempts: &[], require_distinct: require, source_commit: None,
+                title: "lens", prompt: "review", required_verdict: None, deadline_seconds: None,
+                inputs_dir: None,
+            }, &alias, graph::AccessMode::ReadOnly, None, graph::Replay {
+                delivery: None, branch: None, fast_forward_only: false, stored_ref: None, launch_actor: &actor,
+            })?;
+            let operation = graph_operation("graph-attempt-operation", &key)?;
+            let operation = store.operation(&operation, &owner.call(&cancel))?.ok_or("lens operation missing")?;
+            let request = store.request(operation.run_id, &owner.call(&cancel))?;
+            let task = request.tasks.first().ok_or("task missing")?;
+            Ok((task.route.clone(), task.profile.overrides.clone()))
+        };
+        let review = |excluded: &[&str]| RequestedRoute::Review {
+            extra: Default::default(),
+            name: "junior".into(),
+            effort: None,
+            excluded_families: excluded.iter().map(|family| (*family).to_owned()).collect(),
+            distinct_families: true,
+            require_distinct: false,
+        };
+        // The first sibling has no peers yet and takes the plain alias.
+        let (route, _) = submit("one", 0, &[], &[], false)?;
+        assert_eq!(route, RequestedRoute::Named { extra: Default::default(), name: "junior".into(), effort: None });
+        // Later siblings prefer other families. A preference never refuses, so
+        // with one family available every lens still runs.
+        let peers = ["openai".to_owned(), "anthropic".to_owned()];
+        assert_eq!(submit("two", 0, &peers[..1], &[], false)?.0, review(&["openai"]));
+        assert_eq!(submit("three", 0, &peers, &[], false)?.0, review(&["openai", "anthropic"]));
+        // A required writer separation with no writer family to enforce still
+        // leaves sibling families as a preference.
+        assert_eq!(submit("four", 0, &peers[..1], &[], true)?.0, review(&["openai"]));
+        // An alias retry excludes the model ids the runtime resolved.
+        let (route, knobs) = submit("two", 1, &peers[..1], &["codex/first".to_owned()], false)?;
+        assert_eq!(route, review(&["openai"]));
+        assert_eq!(knobs, [r#"routing.graph_exclude=["codex/first"]"#]);
         Ok(())
     }
 
@@ -2006,6 +2109,25 @@ mod peer_tests {
         let exact = bound.resolve_review(&deferred(None, serde_json::json!([{"name":"tests","when":null,"tier":"codex/gpt-6@high"}]))?, &head)?;
         let route = exact.nodes[1].route.as_ref().ok_or("exact route missing")?;
         assert_eq!((route.adapter.as_deref(), route.model.as_deref(), route.effort.as_deref()), (Some("codex"), Some("gpt-6"), Some("high")));
+        // That lens launches on that model: the owner submits an exact model
+        // route, even with sibling families to prefer against.
+        let exact_key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
+            "graph_id":"pinned-base", "node_id":exact.nodes[1].id, "route_index":0
+        }))?;
+        bound.observe_or_start(&exact_key, graph::NodeInput {
+            prior_attempts: &[], family_peers: &["openai".to_owned()], context: Default::default(), read_roots: &[],
+            distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
+            title: "exact lens", prompt: "review", required_verdict: None, deadline_seconds: None,
+            inputs_dir: None,
+        }, route, graph::AccessMode::ReadOnly, None, graph::Replay {
+            delivery: None, branch: None, fast_forward_only: false, stored_ref: None, launch_actor: &actor,
+        })?;
+        let operation = graph_operation("graph-attempt-operation", &exact_key)?;
+        let operation = store.operation(&operation, &owner.call(&cancel))?.ok_or("exact lens operation missing")?;
+        let request = store.request(operation.run_id, &owner.call(&cancel))?;
+        assert_eq!(request.tasks[0].route, provenant_records::run::RequestedRoute::Model {
+            extra: Default::default(), provider: "codex".into(), model: "codex/gpt-6".into(), effort: Some("high".into()),
+        });
         // A lens with no lowered template is refused by name.
         let mut missing = deferred(None, serde_json::json!([]))?;
         missing.extra.insert("lens_templates".into(), serde_json::json!({}));
