@@ -441,34 +441,47 @@ impl StageBuilder<'_> {
     /// subjects, an explicit size or shape, and integration councils expand
     /// statically.
     pub(super) fn defers_review_size(&self) -> bool {
+        let subject_type = self
+            .parameters
+            .get("subject")
+            .and_then(|subject| subject.get("type"))
+            .and_then(Value::as_str);
+        matches!(subject_type, Some("head" | "node")) && self.size_unpinned()
+    }
+
+    /// A review whose size and shape the stage leaves to the host.
+    fn size_unpinned(&self) -> bool {
         let text = |key: &str| {
             self.parameters
                 .get(key)
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty())
         };
-        let subject_type = self
-            .parameters
-            .get("subject")
-            .and_then(|subject| subject.get("type"))
-            .and_then(Value::as_str);
-        self.layers.review.is_some()
-            && matches!(subject_type, Some("head" | "node"))
-            && text("size").is_none()
-            && text("review_shape").is_none()
+        self.layers.review.is_some() && text("size").is_none() && text("review_shape").is_none()
     }
 
     fn review_is_deferred(
         &self,
         entries: &[Value],
         object: &serde_json::Map<String, Value>,
+        nodes: &[Value],
     ) -> bool {
-        matches!(entries, [entry] if super::list_is_lenses(entry.get("for_each")))
-            && object
-                .get("source")
-                .and_then(|source| source["type"].as_str())
-                == Some("node")
-            && self.defers_review_size()
+        let source = object.get("source");
+        if !matches!(entries, [entry] if super::list_is_lenses(entry.get("for_each")))
+            || source.and_then(|source| source["type"].as_str()) != Some("node")
+        {
+            return false;
+        }
+        // Lenses over a writer review output that does not exist until it runs,
+        // whatever commit the preset's own subject names.
+        let writes = source
+            .and_then(|source| source["node"].as_str())
+            .is_some_and(|id| {
+                nodes.iter().any(|node| {
+                    node["id"] == id && node["access"].as_str() == Some("worktree_write")
+                })
+            });
+        self.size_unpinned() && (writes || self.defers_review_size())
     }
 
     /// The deferred node that replaces a lens stage: a read-only plan node that
@@ -487,6 +500,7 @@ impl StageBuilder<'_> {
         deps: &[String],
         outputs: &Value,
         depth: usize,
+        nodes: &[Value],
     ) -> Result<Option<Value>, String> {
         // Static and deferred review stages alike record the requested base.
         if self.layers.review.is_some()
@@ -504,7 +518,7 @@ impl StageBuilder<'_> {
                     .insert(base.to_owned());
             }
         }
-        if !self.review_is_deferred(entries, object) {
+        if !self.review_is_deferred(entries, object, nodes) {
             return Ok(None);
         }
         let spec = self.review_spec()?;

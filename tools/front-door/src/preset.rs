@@ -2165,7 +2165,7 @@ impl StageBuilder<'_> {
                     .filter(|entries| !entries.is_empty())
                     .ok_or("parallel must be a nonempty array")?;
                 if let Some(deferred) =
-                    self.deferred_review(&id, entries, &object, deps, &outputs, depth)?
+                    self.deferred_review(&id, entries, &object, deps, &outputs, depth, nodes)?
                 {
                     object.remove("min_successful");
                     object.remove("exports");

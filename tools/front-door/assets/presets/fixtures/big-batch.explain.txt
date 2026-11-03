@@ -1,6 +1,6 @@
 Graph <id>
 Preset selection: big-batch (override)
-Review shape: deep (by_kind; size=unknown; kind=integration; risk=unknown), standard (default; size=pending (measured at review launch); kind=unknown; risk=unknown), standard (default; size=unknown; kind=unknown; risk=unknown)
+Review shape: deep (by_kind; size=unknown; kind=integration; risk=unknown), standard (default; size=pending (measured at review launch); kind=unknown; risk=unknown)
 plan: off -> off (planning turned off)
 Requires configuration: "writer worktree"
 scout  role=- tier=- family=any kind=composite access=read_only worktree=-
@@ -31,18 +31,9 @@ lanes  role=- tier=- family=any kind=composite access=read_only worktree=-
       write_scope: ["."]
       source: {"commit":"<commit>","type":"commit"}
       acceptance_checks: ["Run targeted tests and required static checks","Commit the completed slice"]
-    lens  role=- tier=- family=any kind=composite access=read_only worktree=-
+    lens  role=- tier=- family=any kind=plan access=read_only worktree=-
       source: {"node":"implement","type":"node"}
       inputs: [{"node":"implement","outputs":["result"]}]
-      lens-correctness-spec  role=lens.correctness-spec tier=junior family=distinct_from_writer kind=- access=read_only worktree=-
-        reference: skill:code-review/references/reviewer-context.md <digest>
-        reference: skill:code-review/references/lenses/correctness-spec.md <digest>
-        read_roots: ["<root>/skills"]
-      lens-simplicity  role=lens.simplicity tier=junior family=any kind=- access=read_only worktree=-
-        reference: skill:code-review/references/reviewer-context.md <digest>
-        reference: skill:code-review/references/lenses/simplicity.md <digest>
-        read_roots: ["<root>/skills"]
-      exports: [{"node":"lens-correctness-spec","outputs":["result","findings"]},{"node":"lens-simplicity","outputs":["result","findings"]}]
     evaluate  role=review.evaluator tier=senior family=any kind=synthesise access=read_only worktree=-
       source: {"node":"implement","type":"node"}
       inputs: [{"node":"lens","outputs":["result"]}]
@@ -52,18 +43,9 @@ lanes  role=- tier=- family=any kind=composite access=read_only worktree=-
       write_scope: ["."]
       source: {"commit":"<commit>","type":"commit"}
       acceptance_checks: ["Run targeted tests and required static checks","Commit the completed slice"]
-    lens  role=- tier=- family=any kind=composite access=read_only worktree=-
+    lens  role=- tier=- family=any kind=plan access=read_only worktree=-
       source: {"node":"implement","type":"node"}
       inputs: [{"node":"implement","outputs":["result"]}]
-      lens-correctness-spec  role=lens.correctness-spec tier=junior family=distinct_from_writer kind=- access=read_only worktree=-
-        reference: skill:code-review/references/reviewer-context.md <digest>
-        reference: skill:code-review/references/lenses/correctness-spec.md <digest>
-        read_roots: ["<root>/skills"]
-      lens-simplicity  role=lens.simplicity tier=junior family=any kind=- access=read_only worktree=-
-        reference: skill:code-review/references/reviewer-context.md <digest>
-        reference: skill:code-review/references/lenses/simplicity.md <digest>
-        read_roots: ["<root>/skills"]
-      exports: [{"node":"lens-correctness-spec","outputs":["result","findings"]},{"node":"lens-simplicity","outputs":["result","findings"]}]
     evaluate  role=review.evaluator tier=senior family=any kind=synthesise access=read_only worktree=-
       source: {"node":"implement","type":"node"}
       inputs: [{"node":"lens","outputs":["result"]}]

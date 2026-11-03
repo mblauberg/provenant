@@ -4391,3 +4391,34 @@ fn a_static_commit_council_records_the_requested_base() {
     assert!(document["nodes"][1]["composite"].is_object());
     assert_eq!(document["review_base"], "origin/main");
 }
+
+/// The lenses of a generator-evaluator judge what the writer commits, so the
+/// panel is resolved after the writer runs even though the preset's own subject
+/// is a commit.
+#[test]
+fn a_generator_review_defers_its_size_until_the_writer_has_run() {
+    let layers = real_selector("/nonexistent");
+    let document = expand(
+        &layers,
+        "generator-evaluator",
+        "brief",
+        &["parameters.worktree='/repo/lane'".into()],
+    )
+    .unwrap()
+    .document;
+    assert_eq!(document["schema_version"], 2);
+    let text = document.to_string();
+    assert!(text.contains("lens_templates"), "{text}");
+    let sized = expand(
+        &layers,
+        "generator-evaluator",
+        "brief",
+        &[
+            "parameters.worktree='/repo/lane'".into(),
+            "parameters.size='small'".into(),
+        ],
+    )
+    .unwrap()
+    .document;
+    assert_eq!(sized["schema_version"], 1);
+}
