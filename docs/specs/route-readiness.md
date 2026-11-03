@@ -17,10 +17,44 @@ the limit still establishes exhaustion. Account refusals cover all routes for
 that account; pool refusals cover only the verified pool. Refusals publish as
 soon as observed and retain the existing clearing and isolation rules.
 
-Persist readiness separately at `quota/<account-key>/<adapter>.readiness.json`,
-under the account file's lock and atomic replacement protocol. An absent file
-reads as unknown and schedules a probe. Reuse the quota probe interval. A changed
-agy fingerprint makes the old account unavailable and registers the new identity.
+Persist readiness in its own tree, `<state>/readiness/<account-key>/<adapter>.json`,
+outside `quota/` (older readers treat every JSON file there as an account
+snapshot). The file holds every observation for that account and adapter, at
+most 64, and is written under the quota lock with the same private atomic
+replacement as the account JSON. Readers take no lock. No existing reader
+rejects an unknown top-level state directory: the disk report counts it as
+other state and the other state walkers visit only the directories they name.
+An absent file reads as unknown and schedules a probe. Reuse the quota probe
+interval. A changed agy fingerprint makes the old account unavailable and
+registers the new identity.
+
+Scope. An observation's route is a canonical `adapter/model`, a verified pool,
+or `*` for every route of the account. A pool refusal covers its pool only, a
+refusal without a pool its model only, and an account observation all routes.
+Host is `local` for observations this machine publishes.
+
+Writing. Quota derives provider-refusal observations from the account record
+each time it commits that record: a refusal is published as `unavailable` with
+the refusal's scope and reset, and removed when the account record no longer
+holds it or when a fresh reading of the pool proves headroom
+(`Admission::refusal_holds`, the rule admission uses). Forgetting the account
+removes the file. A failed readiness write leaves it unknown, never ready.
+
+Reading. `provenant_quota::ReadinessFile::get(scope, now)` returns a
+`ReadinessRead` (state, reason, expiry, reset, evidence reference) and
+`ReadinessRead::project()` the receipt form. In the CLI edge,
+`quota::read_readiness(state, scope, now)` opens the file without creating
+anything and returns unknown when it is absent, stale, for another scope or
+damaged. Routing, route commands and diagnostics read only through these.
+
+Receipts. The receipt enum `RouteReadiness` (ready, unavailable) gains no
+variant, because an older reader rejects an unrecognised status. Unknown
+projects onto unavailable with the existing `unknown_availability` reason, or
+`stale_availability` when the evidence expired (`RouteReadiness::unknown`,
+`::stale`, `::is_unknown`). Observed reasons map to existing exclusion names:
+missing executable, signed out to `auth_required`, account mismatch,
+exhausted and provider refusal to `provider_refused`; the rest project as
+unknown.
 
 Routing, route commands, dispatch, host diagnostics, peer responses and quota
 displays consume this record. Route previews do not perform host I/O unless
