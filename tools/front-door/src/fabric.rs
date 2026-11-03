@@ -28,6 +28,27 @@ include!("fabric/facade_tests.rs");
 include!("fabric/graph_tests.rs");
 
 use provenant_cli::fabric::Context;
+
+/// Repeat a list-then-read tail lookup until two consecutive passes name the
+/// same attempt, and return the earlier pass's record. The later pass listed
+/// after the earlier one read its state, so agreement proves no successor had
+/// been committed with that state. Bounded by the policy chain ceiling.
+fn confirm_stable_tail<R, K: PartialEq>(
+    mut pass: impl FnMut() -> Result<R, FacadeError>,
+    id: impl Fn(&R) -> K,
+) -> Result<R, FacadeError> {
+    let mut previous: Option<R> = None;
+    for _ in 0..=provenant_run::POLICY_ATTEMPT_CEILING {
+        let tail = pass()?;
+        if let Some(earlier) = previous.take()
+            && id(&earlier) == id(&tail)
+        {
+            return Ok(earlier);
+        }
+        previous = Some(tail);
+    }
+    Err(FacadeError::StateCorrupt)
+}
 use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::{CancelToken, Clock, WaitBudget};
 use provenant_fabric_mcp::{
@@ -1728,17 +1749,10 @@ impl BinaryRunOwner<'_> {
         // commits a terminal state and its successor together, so a later pass that
         // lists after the earlier pass's read and finds the same tail proves the
         // earlier record has no successor. Return that earlier record.
-        let mut previous: Option<provenant_records::run::AttemptRecord> = None;
-        for _ in 0..=provenant_run::POLICY_ATTEMPT_CEILING {
-            let tail = self.graph_policy_tail_remote_pass(target.clone(), budget, cancel)?;
-            if let Some(earlier) = previous.take()
-                && earlier.attempt_id == tail.attempt_id
-            {
-                return Ok(earlier);
-            }
-            previous = Some(tail);
-        }
-        Err(FacadeError::StateCorrupt)
+        confirm_stable_tail(
+            || self.graph_policy_tail_remote_pass(target.clone(), budget, cancel),
+            |record| record.attempt_id,
+        )
     }
 
     fn graph_policy_tail_remote_pass(
