@@ -493,7 +493,9 @@ fn source_fast_forward_refuses_dirty_diverged_or_leased_tree() -> Result<(), Box
             .err()
             .ok_or_else(|| format!("{scenario} source writer advanced"))?;
         match scenario {
-            "dirty" => assert!(matches!(error, WorktreeError::Dirty)),
+            "dirty" => {
+                assert!(matches!(error, WorktreeError::Dirty(ref paths) if paths.contains("keep")))
+            }
             "diverged" => assert!(
                 matches!(error, WorktreeError::SourceDiverged { current, target: requested } if current == before && requested == target)
             ),
@@ -608,18 +610,19 @@ fn lane_owner_reassignment_holds_custody_and_preserves_adopted_owners() -> Resul
     assert_eq!(load_owner(&tree)?, Some(owner.clone()));
     drop(held);
     fs::write(info.path.join("dirty"), "keep")?;
-    assert!(matches!(
-        save_lane_owner_when_free(
-            &context,
-            &tree,
-            &next,
-            info.head,
-            Some(&owner),
-            true,
-            &cancel()
-        ),
-        Err(WorktreeError::Dirty)
-    ));
+    let error = save_lane_owner_when_free(
+        &context,
+        &tree,
+        &next,
+        info.head,
+        Some(&owner),
+        true,
+        &cancel(),
+    )
+    .err()
+    .ok_or("dirty worktree owner saved")?;
+    assert!(matches!(&error, WorktreeError::Dirty(paths) if paths.contains("dirty")));
+    assert!(error.to_string().contains("dirty"));
     fs::remove_file(info.path.join("dirty"))?;
     // Another writer moves the branch after the caller observed and validated
     // `info.head`: the stale observation must not be published.
@@ -665,6 +668,114 @@ fn lane_owner_reassignment_holds_custody_and_preserves_adopted_owners() -> Resul
             .is_err()
     );
     assert_eq!(load_owner(&tree)?, Some(owner));
+    Ok(())
+}
+
+#[test]
+fn ignored_paths_are_accepted_and_dirty_paths_are_named_in_error() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    fs::write(
+        fixture.root.join(".git/info/exclude"),
+        "target/\n.provenant/\n",
+    )?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let info = create(
+        &context,
+        WorktreeCreate {
+            branch: "ignored-test".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let tree = verify_worktree(&fixture.repo, &info.path)?;
+    let owner = WorktreeOwner {
+        attempt_id: Some(provenant_core::AttemptId::from_bytes([7; 16])),
+        operation_id: Some("op-ignored".parse()?),
+        branch: "ignored-test".into(),
+        base: info.head.to_string(),
+        host: provenant_core::HostId::from_bytes([8; 16]),
+        created_at: context.clock.wall_now()?,
+        origin: WorktreeOrigin::Lane,
+        label: None,
+    };
+
+    // 1. Acceptance 1: A worktree containing only ignored paths (such as target/
+    // or .provenant/scratch/graphs/) is accepted as clean.
+    fs::create_dir_all(info.path.join("target/debug"))?;
+    fs::write(info.path.join("target/debug/output.bin"), "binary")?;
+    fs::create_dir_all(info.path.join(".provenant/scratch/graphs"))?;
+    fs::write(
+        info.path.join(".provenant/scratch/graphs/preset-1.json"),
+        "{}",
+    )?;
+    save_lane_owner_when_free(&context, &tree, &owner, info.head, None, false, &cancel())?;
+    assert_eq!(load_owner(&tree)?, Some(owner.clone()));
+
+    // 2. Acceptance 2: A dirty worktree's error names its paths.
+    let next_owner = WorktreeOwner {
+        attempt_id: Some(provenant_core::AttemptId::from_bytes([9; 16])),
+        operation_id: Some("op-dirty".parse()?),
+        ..owner.clone()
+    };
+    fs::write(info.path.join("uncommitted.rs"), "fn uncommitted() {}")?;
+    let error = save_lane_owner_when_free(
+        &context,
+        &tree,
+        &next_owner,
+        info.head,
+        Some(&owner),
+        true,
+        &cancel(),
+    )
+    .err()
+    .ok_or("dirty tree owner saved")?;
+    match &error {
+        WorktreeError::Dirty(paths) => {
+            assert!(
+                paths.contains("uncommitted.rs"),
+                "expected path in dirty list: {paths}"
+            );
+        }
+        other => panic!("expected WorktreeError::Dirty, got: {other}"),
+    }
+    let error_text = error.to_string();
+    assert!(
+        error_text.contains("worktree is dirty: uncommitted.rs"),
+        "{error_text}"
+    );
+    let with_repair = error.with_repair();
+    assert!(
+        with_repair.contains("worktree is dirty: uncommitted.rs")
+            && with_repair.contains("run `git -C PATH status`"),
+        "{with_repair}"
+    );
+
+    // Verify up to 12 dirty paths listed and remaining counted.
+    for n in 0..15 {
+        fs::write(info.path.join(format!("dirty_{n:02}.txt")), "dirty")?;
+    }
+    let many_error = save_lane_owner_when_free(
+        &context,
+        &tree,
+        &next_owner,
+        info.head,
+        Some(&owner),
+        true,
+        &cancel(),
+    )
+    .err()
+    .ok_or("many dirty tree owner saved")?;
+    match &many_error {
+        WorktreeError::Dirty(paths) => {
+            assert!(
+                paths.contains("and 4 more"),
+                "expected count of remaining paths: {paths}"
+            );
+        }
+        other => panic!("expected WorktreeError::Dirty, got: {other}"),
+    }
+
     Ok(())
 }
 
@@ -988,7 +1099,8 @@ fn detached_removal_keeps_dirty_unmerged_and_live_work() -> Result<(), Box<dyn E
             .ok_or("removed protected tree")?;
         assert!(
             match scenario {
-                "dirty" => matches!(error, WorktreeError::Dirty),
+                "dirty" =>
+                    matches!(error, WorktreeError::Dirty(ref paths) if paths.contains("notes")),
                 "unmerged" => matches!(error, WorktreeError::DetachedUnmerged { .. }),
                 "live" => matches!(error, WorktreeError::LiveProcess(_)),
                 "changed-head" => matches!(error, WorktreeError::IdentityChanged),

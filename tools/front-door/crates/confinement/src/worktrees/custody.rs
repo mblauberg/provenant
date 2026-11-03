@@ -43,15 +43,69 @@ pub(super) fn initialised_gitlink(root: &Path, path: &[u8]) -> Result<bool, Work
     }
 }
 
-pub(super) fn worktree_dirty_at(
+const DIRTY_PATHS_LISTED: usize = 12;
+const DIRTY_SUMMARY_BYTES: usize = 1024;
+
+pub(super) fn dirty_paths_summary(paths: &[StatusPath]) -> String {
+    let raw: Vec<&[u8]> = paths
+        .iter()
+        .flat_map(|path| std::iter::once(path.path.as_slice()).chain(path.original_path.as_deref()))
+        .collect();
+    dirty_paths_summary_bytes(&raw)
+}
+
+fn dirty_paths_summary_bytes(paths: &[&[u8]]) -> String {
+    if paths.is_empty() {
+        return String::new();
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut unique = Vec::new();
+    for path in paths {
+        let lossy = String::from_utf8_lossy(path).into_owned();
+        if seen.insert(lossy.clone()) {
+            unique.push(lossy);
+        }
+    }
+    // List whole names only, within the count and byte budgets, so the
+    // omission count is never cut off. The first name is always listed,
+    // shortened only if it alone exceeds the budget.
+    let mut summary = String::new();
+    let mut listed = 0;
+    for name in unique.iter().take(DIRTY_PATHS_LISTED) {
+        let separator = if listed == 0 { "" } else { ", " };
+        if listed > 0 && summary.len() + separator.len() + name.len() > DIRTY_SUMMARY_BYTES {
+            break;
+        }
+        summary.push_str(separator);
+        summary.push_str(name);
+        listed += 1;
+    }
+    summary.truncate(summary.floor_char_boundary(DIRTY_SUMMARY_BYTES));
+    let more = unique.len() - listed;
+    if more > 0 {
+        summary.push_str(&format!(" and {more} more"));
+    }
+    summary
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum WorktreeCleanliness {
+    Clean,
+    Ignored,
+    Dirty(String),
+    GitOperationInProgress,
+    Unknown,
+}
+
+pub(super) fn worktree_cleanliness_at(
     context: &WorktreeContext<'_>,
     repo: &VerifiedRepo,
     cancel: &CancelToken,
-) -> Result<WorktreeCondition, WorktreeError> {
+) -> Result<WorktreeCleanliness, WorktreeError> {
     match check_writer_terminal(repo) {
         Ok(()) => {}
         Err(WorktreeError::GitOperationInProgress) => {
-            return Ok(WorktreeCondition::GitOperationInProgress);
+            return Ok(WorktreeCleanliness::GitOperationInProgress);
         }
         Err(error) => return Err(error),
     }
@@ -62,31 +116,49 @@ pub(super) fn worktree_dirty_at(
         cancel,
     )?;
     if exit_code(&index)? != 0 {
-        return Ok(WorktreeCondition::Unknown);
+        return Ok(WorktreeCleanliness::Unknown);
     }
     for entry in
         parse_index_entries(&index.stdout.bytes).map_err(|_| WorktreeError::InvalidOutput)?
     {
         let entry = entry.map_err(|_| WorktreeError::InvalidOutput)?;
         if entry.mode == 0o160000 && initialised_gitlink(repo.root_path(), entry.path)? {
-            return Ok(WorktreeCondition::Unknown);
+            return Ok(WorktreeCleanliness::Unknown);
         }
     }
     let outcome = run_git(context, repo, GitRead::StatusIncludingIgnored, cancel)?;
     if exit_code(&outcome)? != 0 {
-        return Ok(WorktreeCondition::Unknown);
+        return Ok(WorktreeCleanliness::Unknown);
     }
     let records =
         parse_porcelain_v2_z(&outcome.stdout.bytes).map_err(|_| WorktreeError::InvalidOutput)?;
-    Ok(if records.is_empty() {
-        WorktreeCondition::Clean
-    } else if records
-        .iter()
-        .all(|record| record.kind == StatusKind::Ignored)
-    {
-        WorktreeCondition::Ignored
+    if records.is_empty() {
+        return Ok(WorktreeCleanliness::Clean);
+    }
+    let dirty_records: Vec<_> = records
+        .into_iter()
+        .filter(|record| record.kind != StatusKind::Ignored)
+        .collect();
+    if dirty_records.is_empty() {
+        Ok(WorktreeCleanliness::Ignored)
     } else {
-        WorktreeCondition::Dirty
+        Ok(WorktreeCleanliness::Dirty(dirty_paths_summary(
+            &dirty_records,
+        )))
+    }
+}
+
+pub(super) fn worktree_dirty_at(
+    context: &WorktreeContext<'_>,
+    repo: &VerifiedRepo,
+    cancel: &CancelToken,
+) -> Result<WorktreeCondition, WorktreeError> {
+    Ok(match worktree_cleanliness_at(context, repo, cancel)? {
+        WorktreeCleanliness::Clean => WorktreeCondition::Clean,
+        WorktreeCleanliness::Ignored => WorktreeCondition::Ignored,
+        WorktreeCleanliness::Dirty(_) => WorktreeCondition::Dirty,
+        WorktreeCleanliness::GitOperationInProgress => WorktreeCondition::GitOperationInProgress,
+        WorktreeCleanliness::Unknown => WorktreeCondition::Unknown,
     })
 }
 
@@ -298,4 +370,49 @@ pub fn cache_writer_guard(
             FsError::LockTimeout { .. } => WorkerState::Busy,
             _ => WorkerState::Unknown,
         })
+}
+
+#[cfg(test)]
+mod dirty_tests {
+    use super::*;
+
+    #[test]
+    fn summary_includes_both_rename_paths() {
+        let paths = [StatusPath {
+            kind: StatusKind::RenameOrCopy,
+            path: b"new name".to_vec(),
+            original_path: Some(b"old name".to_vec()),
+        }];
+        assert_eq!(dirty_paths_summary(&paths), "new name, old name");
+    }
+
+    #[test]
+    fn summary_lists_dirty_paths_and_counts_the_rest() {
+        assert_eq!(dirty_paths_summary_bytes(&[]), "");
+        let one = dirty_paths_summary_bytes(&[b"a.rs", b"b/c.rs"]);
+        assert_eq!(one, "a.rs, b/c.rs");
+        let dedup = dirty_paths_summary_bytes(&[b"a.rs", b"a.rs", b"b.rs"]);
+        assert_eq!(dedup, "a.rs, b.rs");
+        let many: Vec<Vec<u8>> = (0..15).map(|n| format!("f{n}").into_bytes()).collect();
+        let many_refs: Vec<&[u8]> = many.iter().map(Vec::as_slice).collect();
+        let summary = dirty_paths_summary_bytes(&many_refs);
+        assert!(
+            summary.contains("f11") && !summary.contains("f12"),
+            "{summary}"
+        );
+        assert!(summary.ends_with(" and 3 more"), "{summary}");
+        let long = vec![b'x'; 4000];
+        let long_summary = dirty_paths_summary_bytes(&[&long]);
+        assert!(long_summary.len() <= 1024);
+        // Long names that overflow the byte budget are left whole and counted.
+        let wide: Vec<Vec<u8>> = (0..12)
+            .map(|n| format!("{n:02}{}", "y".repeat(200)).into_bytes())
+            .collect();
+        let wide_refs: Vec<&[u8]> = wide.iter().map(Vec::as_slice).collect();
+        let summary = dirty_paths_summary_bytes(&wide_refs);
+        let (names, rest) = summary.split_once(" and ").expect("omission count");
+        let listed: Vec<_> = names.split(", ").collect();
+        assert!(listed.iter().all(|name| name.len() == 202), "{summary}");
+        assert_eq!(rest, format!("{} more", 12 - listed.len()), "{summary}");
+    }
 }
