@@ -1445,6 +1445,7 @@ pub fn resolve_with_seed(
         Excluded {
             rejected: &[],
             rules: &[],
+            pool: None,
         },
     )
 }
@@ -1503,7 +1504,7 @@ pub fn resolve_for_account_with_seed_excluding(
         .filter(|record| {
             !rules
                 .iter()
-                .filter_map(ExclusionRule::account)
+                .filter_map(|rule| rule.account(context.now))
                 .any(|(adapter, key)| {
                     record.adapter == adapter && record.account_key.as_deref() == Some(key)
                 })
@@ -1518,6 +1519,12 @@ pub fn resolve_for_account_with_seed_excluding(
     let excluded_members = Excluded {
         rejected: if named { excluded_members } else { &[] },
         rules,
+        pool: match &request.choice {
+            RouteChoice::NamedRoute(name) if effective_pool(context, name.as_str()).is_some() => {
+                Some(name.as_str())
+            }
+            _ => None,
+        },
     };
     if let AccountSelection::Known(account) = account {
         let adapters: BTreeSet<&str> = match &request.choice {
@@ -1580,6 +1587,7 @@ pub fn resolve(
         Excluded {
             rejected: &[],
             rules: &[],
+            pool: None,
         },
     )
 }
@@ -1590,6 +1598,7 @@ pub fn resolve(
 struct Excluded<'a> {
     rejected: &'a [ModelId],
     rules: &'a [ExclusionRule],
+    pool: Option<&'a str>,
 }
 impl Excluded<'_> {
     /// The reason a named-route member is excluded, if any. Rules come first,
@@ -1608,7 +1617,7 @@ impl Excluded<'_> {
         if let Some(rule) = self
             .rules
             .iter()
-            .find(|rule| rule.removes(model, serving_accounts_remain))
+            .find(|rule| rule.removes(model, self.pool, serving_accounts_remain, context.now))
         {
             return Some(rule.to_string());
         }
@@ -1676,6 +1685,7 @@ fn resolve_inner(
                 let single = Excluded {
                     rejected: &[],
                     rules: excluded_members.rules,
+                    pool: None,
                 };
                 if let Some(detail) = single.reason(&named.model, context) {
                     return Err(RoutingError::NoEligiblePoolMember {
