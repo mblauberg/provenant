@@ -302,19 +302,27 @@ pub(super) fn expand(
 ) -> Result<GraphDocument, String> {
     let mut expanded = loops::expand(document, extensions, limits)?;
     let mut sources = std::collections::BTreeSet::new();
+    let mut review_base = None;
     for addition in expansions {
+        if let Some(review) = &addition.review {
+            if review_base.is_some_and(|base| base != review.base) {
+                return Err("review expansions disagree on the base".into());
+            }
+            review_base = Some(review.base);
+        }
         if addition.nodes.is_empty()
             || !sources.insert(&addition.source)
             || !expanded.nodes.iter().any(|n| n.id == addition.source)
         {
             return Err("invalid expansion source".into());
         }
+        validate_review_addition(&expanded, addition)?;
         append(&mut expanded, addition);
     }
     Ok(expanded)
 }
 
-fn append(document: &mut GraphDocument, expansion: &Expansion) {
+pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
     let round = document
         .nodes
         .iter()
@@ -331,6 +339,21 @@ fn append(document: &mut GraphDocument, expansion: &Expansion) {
                 .extend(expansion.nodes.iter().map(|n| n.id.clone()));
             if !expansion.continuation {
                 wire_exports(node, &expansion.source, &exported);
+                if expansion.review.is_some()
+                    && let Some(root) = exported.first()
+                    && let Some(composite) = &mut node.composite
+                {
+                    for export in &mut composite.exports {
+                        if export.node == expansion.source {
+                            export.node = root.node.clone();
+                        }
+                    }
+                    for member in &mut node.composite_members {
+                        if *member == expansion.source {
+                            *member = root.node.clone();
+                        }
+                    }
+                }
             }
             if expansion.continuation {
                 if let Some(composite) = &mut node.composite {
@@ -354,6 +377,34 @@ fn append(document: &mut GraphDocument, expansion: &Expansion) {
     document
         .nodes
         .extend(expansion.nodes.iter().cloned().map(|mut child| {
+            if expansion.review.is_some()
+                && child.composite.is_some()
+                && child.composite_members.is_empty()
+            {
+                let prefix = format!("{}--", child.id);
+                child.composite_members = expansion
+                    .nodes
+                    .iter()
+                    .filter_map(|member| {
+                        member
+                            .id
+                            .strip_prefix(&prefix)
+                            .filter(|_| {
+                                !expansion.nodes.iter().any(|parent| {
+                                    parent.composite.is_some()
+                                        && parent.id != child.id
+                                        && parent.id != member.id
+                                        && parent.id.starts_with(&prefix)
+                                        && member.id.starts_with(&format!("{}--", parent.id))
+                                })
+                            })
+                            .map(|_| member.id.clone())
+                    })
+                    .collect();
+                child
+                    .after_expansion
+                    .extend(child.composite_members.clone());
+            }
             child.round = round.clone().map(|mut round| {
                 round.until = false;
                 round.node_id = child.id.clone();
@@ -363,9 +414,92 @@ fn append(document: &mut GraphDocument, expansion: &Expansion) {
         }));
 }
 
+/// Check the host's review fragment before publication and again on replay.
+pub(super) fn validate_review_addition(
+    document: &GraphDocument,
+    addition: &Expansion,
+) -> Result<(), String> {
+    let source = document
+        .nodes
+        .iter()
+        .find(|node| node.id == addition.source)
+        .ok_or("invalid expansion source")?;
+    let Some(spec) = &source.review else {
+        return if addition.review.is_none() {
+            Ok(())
+        } else {
+            Err("review expansion has no review source".into())
+        };
+    };
+    let root = addition
+        .nodes
+        .iter()
+        .find(|root| {
+            root.composite.is_some()
+                && root.id.starts_with(&format!("{}--", source.id))
+                && addition.nodes.iter().all(|node| {
+                    node.id == root.id || node.id.starts_with(&format!("{}--", root.id))
+                })
+        })
+        .ok_or("review composite root missing")?;
+    let subject = addition
+        .review
+        .as_ref()
+        .map(|review| review.subject.to_string());
+    if addition.review.is_none()
+        || addition.nodes.iter().filter(|node| node.composite.is_none()).any(|node| !matches!(&node.source, Some(SourceBinding::Commit { commit }) if Some(commit) == subject.as_ref()))
+        || addition.continuation
+        || !addition.patterns.is_empty()
+        || addition.nodes.len() < 2
+        || addition.nodes.len() > spec.max_nodes
+        || root.composite.as_ref().is_none_or(|composite| {
+            let mut exported = std::collections::BTreeSet::new();
+            composite.min_successful != spec.min_successful
+                || composite.exports.is_empty()
+                || composite.exports.iter().any(|export| {
+                    export.outputs.is_empty() || !exported.insert(&export.node)
+                        || !addition.nodes.iter().any(|member| member.id == export.node && member.id != root.id)
+                        || addition.nodes.iter().any(|parent| parent.id != root.id && parent.id != export.node && parent.composite.is_some() && export.node.starts_with(&format!("{}--", parent.id)))
+                })
+        })
+        || addition
+            .nodes
+            .iter()
+            .any(|node| node.access != AccessMode::ReadOnly || node.review.is_some())
+    {
+        return Err("invalid review expansion".into());
+    }
+    Ok(())
+}
+
 /// The flat nodes and outputs that a fragment's pattern instances export, in
 /// instantiation order. Instance IDs are already namespaced by the planner.
 fn fragment_exports(document: &GraphDocument, expansion: &Expansion) -> Vec<GraphInput> {
+    if expansion.review.is_some()
+        && let Some(root) = expansion.nodes.iter().find(|root| {
+            root.composite.is_some()
+                && expansion.nodes.iter().all(|node| {
+                    node.id == root.id || node.id.starts_with(&format!("{}--", root.id))
+                })
+        })
+    {
+        let mut outputs = Vec::new();
+        for output in root
+            .composite
+            .iter()
+            .flat_map(|spec| &spec.exports)
+            .flat_map(|export| &export.outputs)
+        {
+            if !outputs.contains(output) {
+                outputs.push(*output);
+            }
+        }
+        return vec![GraphInput {
+            extra: Default::default(),
+            node: root.id.clone(),
+            outputs,
+        }];
+    }
     let Some(spec) = document
         .nodes
         .iter()
@@ -991,11 +1125,26 @@ pub(super) fn remaining(
     if document
         .nodes
         .iter()
-        .any(|n| n.plan.is_some() || n.access == AccessMode::WorktreeWrite)
+        .any(|n| n.plan.is_some() || n.review.is_some() || n.access == AccessMode::WorktreeWrite)
     {
         checkpoint.remaining = Some(RemainingBudgets {
             extra: Default::default(),
-            nodes: limits.nodes.saturating_sub(document.nodes.len()),
+            nodes: limits.nodes.saturating_sub(
+                document
+                    .nodes
+                    .iter()
+                    .filter_map(|node| {
+                        node.review.as_ref().filter(|_| {
+                            !checkpoint
+                                .expansions
+                                .iter()
+                                .any(|expansion| expansion.source == node.id)
+                        })
+                    })
+                    .fold(document.nodes.len(), |count, review| {
+                        count.saturating_add(review.max_nodes)
+                    }),
+            ),
             edges: limits.edges.saturating_sub(
                 document
                     .nodes
@@ -1057,7 +1206,7 @@ pub(super) fn settle(
             let mut expansions = checkpoint.expansions.clone();
             expansions.push(addition.clone());
             if let Some(reason) =
-                envelope::reason(source, &expansions, &checkpoint.extensions, &plan)
+                graph_envelope_reason(source, &expansions, &checkpoint.extensions, &plan)
             {
                 return Err(reason);
             }
@@ -1155,7 +1304,9 @@ pub(super) fn settle(
         }
         let mut expansions = checkpoint.expansions.clone();
         expansions.push(addition.clone());
-        if let Some(reason) = envelope::reason(source, &expansions, &checkpoint.extensions, &plan) {
+        if let Some(reason) =
+            graph_envelope_reason(source, &expansions, &checkpoint.extensions, &plan)
+        {
             return Err(reason);
         }
         Ok((addition, plan, positions, preview))
@@ -1206,7 +1357,7 @@ pub(super) fn settle(
                     let mut expansions = checkpoint.expansions.clone();
                     expansions.push(addition.clone());
                     if let Some(reason) =
-                        envelope::reason(source, &expansions, &checkpoint.extensions, &plan)
+                        graph_envelope_reason(source, &expansions, &checkpoint.extensions, &plan)
                     {
                         return Err(reason);
                     }

@@ -908,13 +908,16 @@ pub struct Replay<'a> {
 
 /// User-facing content for a graph node's submitted task.
 pub struct NodeInput<'a> {
+    /// Models selected for earlier attempts of this node.
     pub prior_attempts: &'a [String],
+    /// Sibling families to avoid where possible, never a routing requirement.
     pub family_peers: &'a [String],
     pub context: provenant_records::run::WorkContext,
     pub read_roots: &'a [String],
     /// Attempts of the source writer whose model families must be avoided.
     pub distinct_from_attempts: &'a [String],
-    /// Refuse a route inside those families instead of substituting one.
+    /// Refuse a route inside distinct_from_attempts' families; family_peers
+    /// remain a preference even when this is true.
     pub require_distinct: bool,
     pub source_commit: Option<&'a str>,
     pub title: &'a str,

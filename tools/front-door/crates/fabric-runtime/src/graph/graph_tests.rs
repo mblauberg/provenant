@@ -54,6 +54,12 @@ struct FakeOwner {
     source_commits: Vec<Option<String>>,
     read_roots: Vec<Vec<String>>,
     distinct_from: Vec<Vec<String>>,
+    family_peers: Vec<Vec<String>>,
+    family_pool: Vec<String>,
+    prior_attempts: Vec<Vec<String>>,
+    models: std::collections::BTreeMap<String, String>,
+    review_expansion: Option<Expansion>,
+    review_calls: usize,
     require_distinct: Vec<bool>,
     deadlines: Vec<Option<u64>>,
     families: std::collections::BTreeMap<String, String>,
@@ -79,6 +85,22 @@ fn reply(option: Option<&str>, text: Option<&str>) -> AskReply {
 impl AttemptOwner for FakeOwner {
     type Error = NoObservation;
 
+    fn resolve_review(
+        &mut self,
+        _node: &GraphNode,
+        _subject: &str,
+    ) -> Result<Expansion, ReviewResolveError> {
+        self.review_calls += 1;
+        self.review_expansion
+            .clone()
+            .ok_or(ReviewResolveError::Unsupported)
+    }
+    fn attempt_models(&mut self, attempts: &[String]) -> Result<Vec<String>, Self::Error> {
+        Ok(attempts
+            .iter()
+            .filter_map(|attempt| self.models.get(attempt).cloned())
+            .collect())
+    }
     fn actor(&self) -> String {
         self.actor.clone()
     }
@@ -166,6 +188,8 @@ impl AttemptOwner for FakeOwner {
         self.read_roots.push(node.read_roots.to_vec());
         self.distinct_from
             .push(node.distinct_from_attempts.to_vec());
+        self.family_peers.push(node.family_peers.to_vec());
+        self.prior_attempts.push(node.prior_attempts.to_vec());
         self.require_distinct.push(node.require_distinct);
         self.deadlines.push(node.deadline_seconds);
         self.titles.push(node.title.to_owned());
@@ -176,6 +200,17 @@ impl AttemptOwner for FakeOwner {
         self.launch_actors.push(replay.launch_actor.to_owned());
         self.calls.push((key.clone(), route.clone()));
         self.permissions.push((access, worktree.map(str::to_owned)));
+        if !self.family_pool.is_empty() {
+            let family = self
+                .family_pool
+                .iter()
+                .find(|family| !node.family_peers.contains(family))
+                .unwrap_or(&self.family_pool[0])
+                .clone();
+            let reference = format!("h/{}", self.calls.len());
+            self.families.insert(reference.clone(), family);
+            return Ok(done_as(&reference));
+        }
         self.observations.pop_front().ok_or(NoObservation)
     }
 }
@@ -381,6 +416,260 @@ fn separation_run(
     )
     .unwrap();
     (owner, run.checkpoint)
+}
+
+#[test]
+fn deferred_review_journals_and_replays_without_resolving_again() {
+    let oid = "1".repeat(40);
+    let mut review = node("review", route("first"));
+    review.kind = Some(NodeKind::Plan);
+    review.route = None;
+    review.source = Some(SourceBinding::Commit {
+        commit: oid.clone(),
+    });
+    review.review = Some(ReviewSpec {
+        shape: None,
+        risk_tier: None,
+        kind: None,
+        size: None,
+        risk_tags: vec![],
+        worktree: None,
+        lenses: vec![],
+        min_successful: Some(1),
+        max_nodes: 3,
+    });
+    let mut outer = node("outer", route("first"));
+    outer.kind = Some(NodeKind::Composite);
+    outer.route = None;
+    outer.prompt.clear();
+    outer.composite = Some(CompositeSpec {
+        min_successful: Some(1),
+        nodes: vec![review],
+        exports: vec![GraphInput {
+            extra: Default::default(),
+            node: "review".into(),
+            outputs: vec![OutputKind::Result],
+        }],
+    });
+    let mut document = graph(vec![outer]);
+    document.schema_version = 2;
+    let unsupported = advance(
+        &document,
+        &mut FakeOwner::default(),
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    let failed = unsupported
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "outer--review")
+        .unwrap();
+    assert_eq!(
+        failed.advance_error_code.as_deref(),
+        Some("review_resolution_unsupported")
+    );
+    let mut root = node("outer--review--review", route("first"));
+    root.kind = Some(NodeKind::Composite);
+    root.route = None;
+    root.prompt.clear();
+    let mut lens = node("lens", route("first"));
+    lens.source = Some(SourceBinding::Commit {
+        commit: oid.clone(),
+    });
+    root.composite = Some(CompositeSpec {
+        min_successful: Some(1),
+        nodes: vec![lens],
+        exports: vec![GraphInput {
+            extra: Default::default(),
+            node: "lens".into(),
+            outputs: vec![OutputKind::Result],
+        }],
+    });
+    let expanded = composites::expand(&graph(vec![root]), &plans::generous()).unwrap();
+    let addition = Expansion {
+        review: Some(ReviewResolution {
+            subject: oid.parse().unwrap(),
+            base: oid.parse().unwrap(),
+            measured_size: "small".into(),
+            shape: "quick".into(),
+            source: "fixture".into(),
+        }),
+        extra: Default::default(),
+        source: "outer--review".into(),
+        continuation: false,
+        nodes: expanded.nodes,
+        patterns: vec![],
+    };
+    let mut invalid = addition.clone();
+    invalid.review = None;
+    let invalid_run = advance(
+        &document,
+        &mut FakeOwner {
+            review_expansion: Some(invalid),
+            ..Default::default()
+        },
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    let failed = invalid_run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "outer--review")
+        .unwrap();
+    assert_eq!(
+        failed.advance_error_code.as_deref(),
+        Some("review_resolution_failed")
+    );
+    assert!(invalid_run.checkpoint.expansions.is_empty());
+    let mut owner = FakeOwner {
+        review_expansion: Some(addition),
+        observations: [
+            AttemptObservation::Pending {
+                attempt_ref: Some("h/1".into()),
+            },
+            terminal_from("lens result", "h/1"),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let first = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(first.checkpoint.expansions.len(), 1);
+    assert_eq!(owner.review_calls, 1);
+    journal.0 = Some(
+        serde_json::from_str(&serde_json::to_string(journal.0.as_ref().unwrap()).unwrap()).unwrap(),
+    );
+    let completed = resume(&document, &mut owner, &mut journal).unwrap();
+    assert!(completed.checkpoint.successful());
+    let outer = completed
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "outer")
+        .unwrap();
+    assert_eq!(
+        outer
+            .outputs
+            .as_ref()
+            .unwrap()
+            .result
+            .as_ref()
+            .unwrap()
+            .excerpt,
+        "lens result"
+    );
+    assert_eq!(owner.review_calls, 1);
+}
+
+#[test]
+fn family_group_replay_keeps_launch_peers() {
+    let mut nodes = Vec::new();
+    for id in ["one", "two", "three"] {
+        let mut member = node(id, route("first"));
+        member.family_group = Some("panel".into());
+        nodes.push(member);
+    }
+    let mut document = graph(nodes);
+    document.schema_version = 2;
+    let mut owner = FakeOwner {
+        observations: [
+            done_as("h/1"),
+            AttemptObservation::Pending {
+                attempt_ref: Some("h/2".into()),
+            },
+            done_as("h/3"),
+            done_as("h/2"),
+        ]
+        .into(),
+        families: [
+            ("h/1".into(), "a".into()),
+            ("h/2".into(), "b".into()),
+            ("h/3".into(), "c".into()),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    advance(&document, &mut owner, &mut journal).unwrap();
+    let run = resume(&document, &mut owner, &mut journal).unwrap();
+    assert!(run.checkpoint.successful());
+    assert_eq!(owner.family_peers[3], ["a"]);
+    assert_eq!(
+        run.checkpoint.nodes[1]
+            .separation
+            .as_ref()
+            .unwrap()
+            .excluded,
+        ["a"]
+    );
+}
+
+#[test]
+fn alias_retry_receives_the_prior_model() {
+    let mut member = node("lens", route("first"));
+    let alias = GraphRoute {
+        extra: Default::default(),
+        adapter: None,
+        name: None,
+        model: None,
+        alias: Some("senior".into()),
+        effort: None,
+        account: None,
+    };
+    member.route = None;
+    member.routes = Some(vec![alias.clone(), alias]);
+    let mut limited = done_as("h/1");
+    if let AttemptObservation::Terminal { outcome, .. } = &mut limited {
+        *outcome = AttemptOutcome::UsageLimited;
+    }
+    let mut owner = FakeOwner {
+        observations: [limited, done_as("h/2")].into(),
+        models: [("h/1".into(), "first/model".into())].into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![member]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert!(run.checkpoint.successful());
+    assert_eq!(run.checkpoint.nodes[0].attempts.len(), 2);
+    assert_eq!(owner.prior_attempts[1], ["first/model"]);
+}
+
+#[test]
+fn family_group_passes_peers_and_records_shared_family() {
+    for families in [["a", "b", "c"], ["a", "a", "a"]] {
+        let mut nodes = Vec::new();
+        for id in ["one", "two", "three"] {
+            let mut member = node(id, route("first"));
+            member.family_group = Some("panel".into());
+            nodes.push(member);
+        }
+        let mut document = graph(nodes);
+        document.schema_version = 2;
+        let mut owner = FakeOwner {
+            family_pool: families.iter().map(|family| (*family).to_owned()).collect(),
+            ..Default::default()
+        };
+        let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+        assert!(run.checkpoint.successful());
+        assert_eq!(owner.family_peers[1], [families[0]]);
+        assert_eq!(owner.families["h/1"], families[0]);
+        assert_eq!(owner.families["h/2"], families[1]);
+        assert_eq!(owner.families["h/3"], families[2]);
+        assert_eq!(
+            run.checkpoint.nodes[2].separation.as_ref().unwrap().outcome,
+            if families[0] == families[2] {
+                SeparationOutcome::Unavailable
+            } else {
+                SeparationOutcome::Separated
+            }
+        );
+    }
 }
 
 #[test]

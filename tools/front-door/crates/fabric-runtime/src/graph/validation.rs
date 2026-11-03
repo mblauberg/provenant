@@ -139,6 +139,13 @@ pub(super) fn validate_flat_plan(
         {
             return Err("review requires a read-only plan node with a source and no plan");
         }
+        if node
+            .review
+            .as_ref()
+            .is_some_and(|review| review.max_nodes == 0)
+        {
+            return Err("review max_nodes must be positive");
+        }
         if node.review.is_none() {
             plans::validate_spec(node)?;
         }
@@ -889,6 +896,15 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                     attempt.state == AttemptState::Terminal
                         && attempt.outcome == Some(AttemptOutcome::Succeeded)
                 }) || fallback_settled(node, progress, document, checkpoint)
+                    || (node.review.is_some()
+                        && progress.source_commit.as_ref().is_some_and(|subject| {
+                            checkpoint.expansions.iter().any(|expansion| {
+                                expansion.source == node.id
+                                    && expansion.review.as_ref().is_some_and(|review| {
+                                        review.subject.to_string() == *subject
+                                    })
+                            })
+                        }))
             }
             NodeState::Failed if progress.advance_error.is_some() => last.is_none_or(|attempt| {
                 attempt.state == AttemptState::Terminal
