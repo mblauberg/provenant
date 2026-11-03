@@ -389,9 +389,11 @@ the `spec` (an issue number or file) and the `base` (the diff reference). File
 specs resolve first in the bound writer worktree, then in the launch checkout
 root, then in the main checkout. Relative writer worktrees resolve from the
 launch directory. Each
-review brief includes the file path, SHA-256 of the full file and an excerpt
+review brief includes the resolved file path, SHA-256 of the full file and an excerpt
 (default 16,384 bytes); set `parameters.spec_max_bytes` from 1 to 65,536 to
-change the cap. Missing or unreadable files produce a named warning in explain
+change the cap. Planned batch lanes include labeled excerpts for each allowed
+writer worktree because the planner assigns the worktree after expansion.
+Missing or unreadable files produce a named warning in explain
 and at launch. Issue numbers are passed through unchanged. The subject node
 states both. Prompts live in
 `skills/code-review/references/lenses/`. After the lenses a verifier tries to

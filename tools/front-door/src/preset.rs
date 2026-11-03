@@ -1389,7 +1389,8 @@ fn read_spec_context(layers: &Layers, parameters: &Value) -> Option<String> {
                         text.truncate(end);
                     }
                     return Some(format!(
-                        "\n\nSpec file: {spec} (sha256:{digest}; excerpt up to {cap} bytes)\n{text}"
+                        "\n\nSpec file: {} (sha256:{digest}; excerpt up to {cap} bytes)\n{text}",
+                        candidate.display()
                     ));
                 }
             }

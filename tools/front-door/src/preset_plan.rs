@@ -17,7 +17,8 @@
 //! choose lenses that panel allows, at a tier it may lower or raise but never
 //! at a lens the panel left out.
 use super::{
-    Layers, StageBuilder, Value, flatten_parameters, interpolate, json, lower_leaf, stage_id,
+    Layers, StageBuilder, Value, flatten_parameters, interpolate, json, lower_leaf, spec_context,
+    stage_id,
 };
 use provenant_fabric_runtime::config::{PlanAuto, PlanMode};
 use std::collections::{BTreeMap, BTreeSet};
@@ -730,7 +731,7 @@ fn lower_pattern(
     for parameter in declared.keys() {
         slots.insert(parameter.clone(), json!(format!("${{{parameter}}}")));
     }
-    let parameters = interpolate(&Value::Object(declared.clone()), values, brief, 1)
+    let mut parameters = interpolate(&Value::Object(declared.clone()), values, brief, 1)
         .map_err(|error| format!("plan pattern {name}: {error}"))?;
     // The brief is text for the planner's lanes, never a template.
     let brief = brief.replace("${", "$ {");
@@ -775,7 +776,53 @@ fn lower_pattern(
         if let Some(item) = entry.remove("item") {
             values["item"] = item;
         }
+        // The assigned worktree is a runtime placeholder. Resolve each allowed
+        // choice now and label it so the reviewer can select its lane's spec.
+        let role = entry
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let lane_review =
+            name == "writer-lane" && (role.starts_with("lens.") || role.starts_with("review."));
+        let mut contexts = Vec::new();
+        if lane_review {
+            let worktrees = parameters["worktree"]["enum"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            for worktree in worktrees {
+                let mut candidate = values.clone();
+                candidate["worktree"] = worktree.clone();
+                if let Some(context) = spec_context(layers, &candidate) {
+                    contexts.push(format!(
+                        "\n\nFor writer worktree {}:{context}",
+                        worktree.as_str().unwrap_or_default()
+                    ));
+                }
+            }
+            if contexts.iter().any(|context| context.contains("${")) {
+                if declared.contains_key("spec_literal_dollar") {
+                    return Err("plan pattern reserves spec_literal_dollar for file specs".into());
+                }
+                parameters["spec_literal_dollar"] =
+                    json!({"type": "string", "default": "$", "enum": ["$"]});
+                for context in &mut contexts {
+                    *context = context.replace("${", "${spec_literal_dollar}{");
+                }
+            }
+            values
+                .as_object_mut()
+                .ok_or("parameters must be a table")?
+                .remove("spec_max_bytes");
+        }
         let mut node = lower_leaf(layers, &entry, roles, &values, &task, 1, &id, &[])?;
+        if !contexts.is_empty() {
+            let prompt = node["prompt"].as_str().unwrap_or_default();
+            node["prompt"] = json!(format!(
+                "{prompt}\n\nUse the spec for the assigned writer worktree ${{worktree}}.{}",
+                contexts.join("")
+            ));
+        }
         for (key, value) in kept {
             node[key] = interpolate(&value, &bound, &task, 1)?;
         }

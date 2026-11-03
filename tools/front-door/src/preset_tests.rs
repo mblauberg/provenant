@@ -4066,6 +4066,70 @@ mod planner_front_end {
     }
 
     #[test]
+    fn planned_big_batch_review_receives_lane_file_spec_and_warns_when_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let writer = temp.path().join("writer");
+        std::fs::create_dir_all(writer.join(".agent-run")).unwrap();
+        let second = temp.path().join("second");
+        std::fs::create_dir_all(second.join(".agent-run")).unwrap();
+        std::fs::write(second.join(".agent-run/spec.md"), "second lane criteria").unwrap();
+        let path = writer.join(".agent-run/spec.md");
+        std::fs::write(&path, "writer acceptance criteria").unwrap();
+        let mut layers = layers(PlanMode::On, None);
+        layers.project_dir = Some(temp.path().to_owned());
+        let params = vec![
+            ("worktrees".into(), json!([writer, second])),
+            ("batch_worktree".into(), json!(temp.path().join("batch"))),
+            ("spec".into(), json!(".agent-run/spec.md")),
+        ];
+        let expansion = run(&layers, "big-batch", "brief", params.clone());
+        let nodes = &expansion.document["nodes"][1]["plan"]["patterns"][0]["nodes"];
+        for role in [
+            "lens.correctness-spec",
+            "lens.simplicity",
+            "review.evaluator",
+        ] {
+            let prompt = find_prompt(nodes, role).unwrap();
+            assert!(prompt.contains("writer acceptance criteria"), "{role}");
+            assert!(prompt.contains("second lane criteria"), "{role}");
+            assert!(
+                prompt.contains(&second.join(".agent-run/spec.md").display().to_string()),
+                "{role}"
+            );
+            assert!(
+                prompt.contains("assigned writer worktree ${worktree}"),
+                "{role}"
+            );
+            assert!(prompt.contains(&path.display().to_string()), "{role}");
+            assert!(
+                prompt.contains("2e4b7d401613f23b5002dfe69d8e2b02606c5982fc2a53941d2ea8b0aa05e4d0"),
+                "{role}"
+            );
+        }
+        std::fs::write(&path, "literal ${not_a_pattern_parameter}").unwrap();
+        let literal = run(&layers, "big-batch", "brief", params.clone());
+        let pattern = &literal.document["nodes"][1]["plan"]["patterns"][0];
+        assert_eq!(pattern["parameters"]["spec_literal_dollar"]["default"], "$");
+        assert!(
+            find_prompt(&pattern["nodes"], "lens.correctness-spec")
+                .unwrap()
+                .contains("${spec_literal_dollar}{not_a_pattern_parameter}")
+        );
+        let document: provenant_fabric_runtime::graph::GraphDocument =
+            serde_json::from_value(literal.document).unwrap();
+        document.inspect(&Default::default()).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let missing = run(&layers, "big-batch", "brief", params);
+        assert!(
+            missing
+                .warnings
+                .iter()
+                .any(|w| w.contains("spec file '.agent-run/spec.md'")
+                    && w.contains(&writer.display().to_string()))
+        );
+    }
+
+    #[test]
     fn planned_big_batch_matches_its_golden_graph() {
         let expansion = run(
             &layers(PlanMode::On, None),
@@ -4207,31 +4271,46 @@ fn preset_file_spec_reaches_review_nodes_and_warns_when_missing() {
         let document: provenant_fabric_runtime::graph::GraphDocument =
             serde_json::from_value(expanded.document.clone()).unwrap();
         let _ = document;
-        for role in if preset == "generator-evaluator" {
-            vec![
-                "lens.correctness-spec",
-                "lens.simplicity",
-                "review.evaluator",
-            ]
-        } else {
-            vec![
-                "plan.review",
-                "lens.correctness-spec",
-                "review.verify",
-                "review.synthesis",
-            ]
-        } {
-            let brief = find_prompt(&expanded.document["nodes"], role).unwrap();
-            assert!(brief.contains("writer acceptanc"), "{role}: {brief}");
-            assert!(
-                brief.contains("Spec file: .agent-run/spec.md (sha256:"),
-                "{role}"
-            );
-            assert!(
-                brief.contains("2e4b7d401613f23b5002dfe69d8e2b02606c5982fc2a53941d2ea8b0aa05e4d0")
-            );
-            assert!(!brief.contains("wrong project spec"));
+        fn check_reviews(value: &serde_json::Value, expected_path: &str) -> usize {
+            let mut count = 0;
+            match value {
+                serde_json::Value::Object(map) => {
+                    if let Some(role) = map.get("role").and_then(serde_json::Value::as_str)
+                        && (role.starts_with("lens.")
+                            || role.starts_with("review.")
+                            || role == "plan.review")
+                    {
+                        let brief = map["prompt"].as_str().unwrap();
+                        assert!(brief.contains("writer acceptanc"), "{role}: {brief}");
+                        assert!(
+                            brief.contains(&format!("Spec file: {expected_path} (sha256:")),
+                            "{role}"
+                        );
+                        assert!(brief.contains(
+                            "2e4b7d401613f23b5002dfe69d8e2b02606c5982fc2a53941d2ea8b0aa05e4d0"
+                        ));
+                        assert!(!brief.contains("wrong project spec"));
+                        count += 1;
+                    }
+                    for child in map.values() {
+                        count += check_reviews(child, expected_path);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for child in items {
+                        count += check_reviews(child, expected_path);
+                    }
+                }
+                _ => {}
+            }
+            count
         }
+        assert!(
+            check_reviews(
+                &expanded.document["nodes"],
+                &writer.join(".agent-run/spec.md").display().to_string()
+            ) >= 3
+        );
         let missing = super::preset::expand_with(
             &layers,
             preset,
@@ -4274,11 +4353,9 @@ fn preset_file_spec_reaches_review_nodes_and_warns_when_missing() {
         &[],
     )
     .unwrap();
-    assert!(
-        find_prompt(&fallback.document["nodes"], "lens.correctness-spec")
-            .unwrap()
-            .contains("wrong project spec")
-    );
+    let brief = find_prompt(&fallback.document["nodes"], "lens.correctness-spec").unwrap();
+    assert!(brief.contains("wrong project spec"));
+    assert!(brief.contains(&project.join(".agent-run/spec.md").display().to_string()));
 }
 
 #[cfg(unix)]
@@ -4419,14 +4496,17 @@ fn preset_file_spec_resolves_relative_writer_from_launch_and_falls_back_to_main(
 fn file_spec_expansion_golden() {
     let mut layers = Layers::empty();
     layers.project_dir = Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    let expanded = expand(
+    let mut expanded = expand(
         &layers,
         "generator-evaluator",
         "brief",
         &["parameters.spec='assets/presets/fixtures/review-spec.md'".into()],
     )
     .unwrap();
-    let mut actual = serde_json::to_string_pretty(&expanded.document).unwrap();
+    expanded.document["graph_id"] = json!("<graph-id>");
+    let mut actual = serde_json::to_string_pretty(&expanded.document)
+        .unwrap()
+        .replace(env!("CARGO_MANIFEST_DIR"), "<project>");
     actual.push('\n');
     let path = layers
         .project_dir
