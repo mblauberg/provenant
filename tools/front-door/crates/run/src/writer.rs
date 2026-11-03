@@ -1003,7 +1003,19 @@ mod cargo_setup_tests {
             custody: None,
             review_exempt: Default::default(),
         };
-        let other = GitOid::parse(&"1".repeat(40))?;
+        // Use a real unrelated root, so both named commits exist.
+        let tree = run(&["rev-parse", "HEAD^{tree}"])?;
+        let unrelated = run(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit-tree",
+            &tree,
+            "-m",
+            "unrelated root",
+        ])?;
+        let other = GitOid::parse(&unrelated)?;
         let mismatch = writer
             .require_source(other)
             .err()
