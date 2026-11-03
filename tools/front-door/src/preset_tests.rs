@@ -4407,8 +4407,16 @@ fn a_generator_review_defers_its_size_until_the_writer_has_run() {
     .unwrap()
     .document;
     assert_eq!(document["schema_version"], 2);
-    let text = document.to_string();
-    assert!(text.contains("lens_templates"), "{text}");
+    let lens = document["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == "lens")
+        .unwrap();
+    assert_eq!(lens["kind"], "plan");
+    assert_eq!(lens["source"]["type"], "node");
+    assert_eq!(lens["source"]["node"], "implement");
+    assert!(lens["lens_templates"].is_object());
     let sized = expand(
         &layers,
         "generator-evaluator",

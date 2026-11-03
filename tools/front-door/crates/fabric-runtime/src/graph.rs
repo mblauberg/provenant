@@ -1614,8 +1614,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         && let Some(origin) = checkpoint
                             .expansions
                             .iter()
-                            .filter(|expansion| expansion.review.is_some())
-                            .find(|expansion| expansion.nodes.iter().any(|n| n.id == node.id))
+                            .find(|expansion| {
+                                expansion.review.is_some()
+                                    && expansion.nodes.iter().any(|n| n.id == node.id)
+                            })
                             .and_then(|expansion| positions.get(&expansion.source))
                     {
                         current = &plan.nodes[*origin];

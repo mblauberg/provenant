@@ -503,13 +503,11 @@ impl StageBuilder<'_> {
         nodes: &[Value],
     ) -> Result<Option<Value>, String> {
         // Static and deferred review stages alike record the requested base.
-        if self.layers.review.is_some()
-            && matches!(entries, [entry] if super::list_is_lenses(entry.get("for_each")))
-            && let Some(base) = self
-                .parameters
-                .get("base")
-                .and_then(Value::as_str)
-                .filter(|base| !base.is_empty())
+        let is_review = self.layers.review.is_some()
+            && matches!(entries, [entry] if super::list_is_lenses(entry.get("for_each")));
+        if let Some(base) = self.parameters.get("base").and_then(Value::as_str)
+            && is_review
+            && !base.is_empty()
         {
             self.layers
                 .review_bases
