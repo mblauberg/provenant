@@ -1917,6 +1917,24 @@ mod peer_tests {
     }
 
     #[test]
+    fn detached_writer_reports_branch_requirement() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::detached_writer_reports_branch_requirement")? { return Ok(()); }
+        let fixture = SettlementFixture::resumed()?;
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        let output = fixture.rig.execute(&git, &["-C", fixture.worktree.to_str().ok_or("path")?, "checkout", "--detach"], None)?;
+        assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        let factory = Factory { context: Context::open(fixture.roots.clone(), &fixture.rig.home, &fixture.rig.project)?, project_attribution: false, clock: SystemClock, backoff: ThreadPause, executor: SystemExecutor::new(1)?, home: fixture.rig.home.clone(), cwd: fixture.rig.project.clone(), assets: fixture.rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers };
+        let document = fixture.rig.project.join("detached-writer.json");
+        std::fs::write(&document, serde_json::to_vec(&serde_json::json!({"schema_version":1,"graph_id":"detached-writer","nodes":[{"id":"writer","prompt":"write","access":"worktree_write","worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}}]}))?)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let run = factory.graph(GraphInput::Run { extra: Default::default(), document }, budget, &cancel)?;
+        let node = &run.checkpoint.nodes[0];
+        assert!(node.advance_error.as_deref().is_some_and(|error| error.contains("writer needs a branch")), "{node:#?}");
+        Ok(())
+    }
+
+    #[test]
     fn retained_lane_settlement_collects_only_its_output_and_cache()
     -> Result<(), Box<dyn std::error::Error>> {
         if host_test(

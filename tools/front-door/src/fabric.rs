@@ -4179,6 +4179,29 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     commit: None,
                 });
             }
+            // Preserve the specific detached-writer refusal in node status.
+            if !accepted
+                && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+                && let Some(path) = worktree
+            {
+                let writer = provenant_run::resolve_writer(
+                    self.factory.context.roots.state.as_path(),
+                    &self.factory.cwd,
+                    Path::new(path),
+                )
+                .map_err(run_error)?;
+                if let Err(provenant_run::RunError::Validation("writer needs a branch")) =
+                    provenant_run::prepare_writer(
+                        &writer,
+                        self.factory.context.roots.state.as_path(),
+                        self.factory.context.identity.project,
+                    )
+                {
+                    return Err(FacadeError::DispatchRefused {
+                        reason: "writer needs a branch".into(),
+                    });
+                }
+            }
             if !accepted && let (Some(path), Some(commit)) = (worktree, node.source_commit) {
                 let head = commit.parse().map_err(|_| FacadeError::InvalidInput)?;
                 provenant_confinement::worktrees::with_context(
