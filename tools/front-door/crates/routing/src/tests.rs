@@ -5283,3 +5283,13 @@ fn unavailable_pool_member_is_drawn_around() -> Result<(), Box<dyn std::error::E
     );
     Ok(())
 }
+
+#[test]
+fn routing_default_matches_bundled_asset() {
+    let asset: RoutingConfig =
+        toml_edit::de::from_str(include_str!("../assets/review-defaults.toml")).unwrap();
+    assert_eq!(
+        serde_json::to_value(RoutingConfig::default()).unwrap(),
+        serde_json::to_value(asset).unwrap()
+    );
+}

@@ -256,6 +256,7 @@ pub fn inspect_config<T: DeserializeOwned + Serialize>(
             | ConfigError::MissingVersion { .. }
             | ConfigError::UnsupportedVersion { .. }
             | ConfigError::Schema { .. }
+            | ConfigError::MisplacedDomainKnob { .. }
             | ConfigError::CollectionLimit { .. }
             | ConfigError::Domain { .. }),
         ) => {
@@ -423,7 +424,14 @@ fn inspect<T: DeserializeOwned + Serialize>(
         .and_then(Profile::from_name)
         .unwrap_or_default();
     let mut valid_knobs = knobs_item.clone().and_then(|item| item.into_table().ok());
-    let mut knob_boundary = None;
+    let mut knob_boundary = user
+        .get("profile")
+        .and_then(Item::as_str)
+        .filter(|name| Profile::from_name(name).is_none())
+        .map(|_| ConfigError::Schema {
+            location: site(&user_sites, "profile", &user_origin, false),
+            rule: "range",
+        });
     // The knobs table holds capability and authority knobs, so a malformed
     // container refuses like a malformed strict knob.
     if knobs_item.is_some() && valid_knobs.is_none() {
@@ -444,7 +452,14 @@ fn inspect<T: DeserializeOwned + Serialize>(
                 let location = site(&user_sites, &key, &user_origin, rule == "unknown_key");
                 // An invalid capability or authority knob never recovers to
                 // its default, which could grant what the user withheld.
-                if crate::knobs::strict(key.trim_start_matches("knobs.")) {
+                if rule == "unknown_key" && key.starts_with("knobs.domains.") {
+                    knob_boundary.get_or_insert(ConfigError::MisplacedDomainKnob {
+                        name: key.trim_start_matches("knobs.").to_owned(),
+                        location,
+                    });
+                } else if rule == "unknown_key"
+                    || crate::knobs::strict(key.trim_start_matches("knobs."))
+                {
                     knob_boundary.get_or_insert(ConfigError::Schema { location, rule });
                 } else {
                     issues.push(Issue {
@@ -760,7 +775,7 @@ fn inspect<T: DeserializeOwned + Serialize>(
     })
 }
 fn boundary_issue<T>(issue: &Issue, sections: &DomainSections<T>) -> bool {
-    if issue.rule == "unknown_key" {
+    if issue.rule == "unknown_key" && issue.source.is_none() {
         return false;
     }
     sections.entries.iter().any(|entry| {

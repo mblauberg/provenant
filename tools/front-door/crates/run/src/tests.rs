@@ -2977,3 +2977,31 @@ fn receipt_busy_then_replay_converges_and_retains_conflict() -> TestResult {
         Ok(())
     })
 }
+
+#[test]
+fn pressure_collection_uses_configured_logs_age() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let input = settle_one(&store, &call)?;
+    let id = input.attempts[0].attempt_id;
+    store.drain_reactions(input.run_id, &clock, &cancel, &mut |reaction, _| {
+        reaction.graph_done = true;
+        reaction.notice_done = true;
+        reaction.log_done = true;
+        Ok(())
+    })?;
+    store
+        .db
+        .execute("UPDATE reactions SET settled_at=100", [])?;
+    let directory = provenant_os::fs::Directory::open_anchor(context.state_root.as_path())?;
+    let now = provenant_core::WallTime::from_micros((100 + 10 * 86_400) * 1_000_000)?;
+    store.gc_temporary(&directory, 7, 20, now, false, &call)?;
+    assert!(store.reaction(id, &call)?.is_some());
+    store.gc_temporary(&directory, 7, 5, now, false, &call)?;
+    assert!(store.reaction(id, &call)?.is_none());
+    Ok(())
+}

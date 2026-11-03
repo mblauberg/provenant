@@ -2043,6 +2043,23 @@ fn plan_flag_decides_and_explains_the_planner_front_end() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn default_config_expands_big_batch() -> Result<(), Box<dyn std::error::Error>> {
+    let text = explain_text(
+        "big-batch",
+        &[
+            "--plan",
+            "off",
+            "--set",
+            "parameters.batch_worktree=\"{project}\"",
+            "--set",
+            "parameters.worktrees=[\"{project}\"]",
+        ],
+    )?;
+    assert!(text.contains("big-batch"), "{text}");
+    Ok(())
+}
+
+#[test]
 fn preset_run_followed_by_provenant_run_on_same_bound_worktree_succeeds()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;

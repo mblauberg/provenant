@@ -134,19 +134,12 @@ pub enum HostNativeConfig {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-#[allow(clippy::manual_non_exhaustive)] // Consumes a retired config key without retaining its value.
 pub struct GraphConfig {
     pub limits: GraphLimits,
     pub budget: GraphBudget,
     /// Backoff for pending CI observations; node overrides take precedence.
     pub ci_poll_backoff: crate::graph::CiPollBackoff,
     pub ci_poll_overrides: BTreeMap<String, crate::graph::CiPollBackoff>,
-    #[serde(
-        rename = "limit_ceiling",
-        skip_serializing,
-        deserialize_with = "ignore_limit_ceiling"
-    )]
-    _limit_ceiling: (),
     /// Absolute host directories graph nodes may read besides the project's own
     /// registered worktrees. Empty confines read roots to the project.
     pub allowed_read_roots: Vec<String>,
@@ -265,20 +258,6 @@ impl GraphLand {
     }
 }
 
-const LIMIT_CEILING_WARNING: &str = "warning: domains.fabric.graph.limit_ceiling is deprecated and ignored; host graph limits apply";
-
-#[allow(clippy::print_stderr)]
-fn ignore_limit_ceiling<'de, D>(deserializer: D) -> Result<(), D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    serde::de::IgnoredAny::deserialize(deserializer)?;
-    // Validation and loading can deserialize the same configuration section.
-    static WARNED: std::sync::Once = std::sync::Once::new();
-    WARNED.call_once(|| eprintln!("{LIMIT_CEILING_WARNING}"));
-    Ok(())
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GraphLimits {
@@ -309,18 +288,37 @@ where
     Ok(Option::<usize>::deserialize(deserializer)?.filter(|value| *value != 0))
 }
 impl Default for GraphLimits {
+    #[allow(clippy::expect_used)] // The bundled asset is validated by tests.
     fn default() -> Self {
-        Self {
-            continuations: 2,
-            nodes: 512,
-            edges: 4096,
-            routes_per_node: 16,
-            node_prompt_bytes: 256 * 1024,
-            graph_prompt_bytes: 4 * 1024 * 1024,
-            expansion_depth: 64,
-            fan_out_width: 32,
-            concurrency: None,
-        }
+        static DEFAULT: std::sync::OnceLock<GraphLimits> = std::sync::OnceLock::new();
+        DEFAULT
+            .get_or_init(|| {
+                let asset: toml_edit::DocumentMut = defaults(Profile::Balanced)
+                    .parse()
+                    .expect("bundled fabric defaults are valid TOML");
+                let limits = &asset["graph"]["limits"];
+                let number = |name: &str| -> usize {
+                    limits[name]
+                        .as_integer()
+                        .and_then(|value| usize::try_from(value).ok())
+                        .expect("bundled graph limit is a non-negative integer")
+                };
+                Self {
+                    continuations: number("continuations"),
+                    nodes: number("nodes"),
+                    edges: number("edges"),
+                    routes_per_node: number("routes_per_node"),
+                    node_prompt_bytes: number("node_prompt_bytes"),
+                    graph_prompt_bytes: number("graph_prompt_bytes"),
+                    expansion_depth: number("expansion_depth"),
+                    fan_out_width: number("fan_out_width"),
+                    concurrency: match number("concurrency") {
+                        0 => None,
+                        value => Some(value),
+                    },
+                }
+            })
+            .clone()
     }
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -756,7 +754,18 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("home_hosts.{host}", "string"),
 ];
 fn boundary(error: &SectionError) -> bool {
-    error.code != "retired.bundle_bytes" && boundary_existing(error)
+    if error.code == "retired.bundle_bytes" {
+        return false;
+    }
+    if error.code == "unknown_key" {
+        if error.field == "graph.limit_ceiling" || error.field.starts_with("graph.limit_ceiling.") {
+            return true;
+        }
+        if error.field.starts_with("graph.") || error.field.starts_with("plan.") {
+            return false;
+        }
+    }
+    boundary_existing(error)
 }
 
 pub const SECTION: DomainSection = DomainSection::new::<FabricConfig>("fabric", defaults)
@@ -1094,26 +1103,49 @@ mod tests {
     }
 
     #[test]
-    fn retired_graph_ceiling_is_ignored_but_other_config_keys_remain_strict() {
-        let mut value = serde_json::to_value(config()).unwrap();
-        value["graph"]["limit_ceiling"] = serde_json::json!({"nodes": 1, "future": true});
-        let loaded: FabricConfig = serde_json::from_value(value.clone()).unwrap();
-        assert_eq!(loaded.graph, GraphConfig::default());
-        assert!(
-            serde_json::to_value(&loaded).unwrap()["graph"]
-                .get("limit_ceiling")
-                .is_none()
+    fn graph_limits_match_asset_and_registry() {
+        let asset: toml_edit::DocumentMut = defaults(Profile::Balanced).parse().unwrap();
+        let registry: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../../config/harness-knobs.json")).unwrap();
+        let limits = serde_json::to_value(GraphLimits::default()).unwrap();
+        let entries = limits.as_object().unwrap();
+        let documented_limits = registry["host_graph_settings"]["settings"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|name| name.starts_with("limits."))
+            .count();
+        assert_eq!(entries.len(), documented_limits, "registry limit coverage");
+        assert_eq!(
+            entries.len(),
+            asset["graph"]["limits"].as_table().unwrap().len(),
+            "asset limit coverage"
         );
-        assert_eq!(LIMIT_CEILING_WARNING.lines().count(), 1);
-        assert!(LIMIT_CEILING_WARNING.contains("deprecated and ignored"));
+        for (name, value) in entries {
+            let asset_value = asset["graph"]["limits"][name].as_integer().unwrap();
+            assert_eq!(value.as_u64().unwrap(), asset_value as u64, "asset {name}");
+            let documented = registry["host_graph_settings"]["settings"][format!("limits.{name}")]
+                ["default"]
+                .as_str()
+                .unwrap();
+            assert_eq!(value.to_string(), documented, "registry {name}");
+        }
+    }
 
+    #[test]
+    fn retired_graph_ceiling_is_rejected() {
+        let mut value = serde_json::to_value(config()).unwrap();
+        value["graph"]["limit_ceiling"] = serde_json::json!({"nodes": 1});
+        let error = serde_json::from_value::<FabricConfig>(value).unwrap_err();
+        assert!(error.to_string().contains("unknown field `limit_ceiling`"));
         for pointer in ["graph", "limits", "peers"] {
-            let mut unknown = value.clone();
+            let mut unknown = serde_json::to_value(config()).unwrap();
             unknown[pointer]["unexpected"] = serde_json::json!({"nodes": 1});
             assert!(serde_json::from_value::<FabricConfig>(unknown).is_err());
         }
-        value["graph"]["limits"]["unexpected"] = true.into();
-        assert!(serde_json::from_value::<FabricConfig>(value).is_err());
+        let mut unknown = serde_json::to_value(config()).unwrap();
+        unknown["graph"]["limits"]["unexpected"] = true.into();
+        assert!(serde_json::from_value::<FabricConfig>(unknown).is_err());
     }
 
     #[test]
@@ -1217,7 +1249,26 @@ mod tests {
         inputs.state_dir = Some("/fixture/state".into());
         let roots = inputs.resolve(&Resolver).unwrap();
         let sections = provenant_config::DomainSections::<Domains>::new(&[SECTION]);
-        let text = b"schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 10\nedges = 20\n[domains.fabric.graph.limit_ceiling]\nnodes = 1\n[domains.fabric.graph.ci_poll_backoff]\ninitial_seconds = 60\nmax_seconds = 300\n[domains.fabric.graph.ci_poll_overrides.build]\ninitial_seconds = 120\nmax_seconds = 600\n";
+        let text = b"schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 10\nedges = 20\n[domains.fabric.graph.ci_poll_backoff]\ninitial_seconds = 60\nmax_seconds = 300\n[domains.fabric.graph.ci_poll_overrides.build]\ninitial_seconds = 120\nmax_seconds = 600\n";
+        let retired = b"schema_version = 1\n[domains.fabric.graph.limit_ceiling]\nnodes = 1\n";
+        let error = provenant_config::load_with_domains(&roots, Some(&retired[..]), &sections)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown_key"), "{error}");
+        assert!(error.to_string().contains("limit_ceiling"), "{error}");
+        let unknown =
+            b"schema_version = 1\n[domains.fabric.graph.limits]\nunknown_limit = 1\nnodes = 10\n";
+        let loaded =
+            provenant_config::load_with_domains(&roots, Some(&unknown[..]), &sections).unwrap();
+        assert_eq!(loaded.domains.fabric.graph.limits.nodes, 10);
+        for section in ["graph.budget", "plan"] {
+            let unknown =
+                format!("schema_version = 1\n[domains.fabric.{section}]\nunknown_field = 1\n");
+            let loaded =
+                provenant_config::load_with_domains(&roots, Some(unknown.as_bytes()), &sections)
+                    .unwrap();
+            assert!(!loaded.warnings.is_empty());
+        }
         let config =
             provenant_config::load_with_domains(&roots, Some(&text[..]), &sections).unwrap();
         assert_eq!(config.domains.fabric.graph.limits.nodes, 10);

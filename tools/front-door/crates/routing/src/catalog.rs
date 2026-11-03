@@ -256,26 +256,56 @@ pub const MAX_SETTLEMENT_RETRIES: u8 = 32;
 /// Longest configurable settlement retry wait: one week.
 pub const MAX_RETRY_WAIT_SECONDS: u64 = 7 * 24 * 3_600;
 
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct BundledRoutingDefaults {
+    model_exclusions: ModelExclusions,
+    model_policy: crate::ModelPolicies,
+    writer_advisory: Option<WriterAdvisoryOverride>,
+    suppress_opus_writer_warning: bool,
+    capacity_cooldown_seconds: u64,
+    settlement_retries: u8,
+    capacity_retry_seconds: u64,
+    capacity_retry_max_seconds: u64,
+    retry_delay_ceiling_seconds: u64,
+    review: crate::ReviewConfig,
+    routes: BTreeMap<String, NamedRoute>,
+    pools: BTreeMap<String, Vec<RoutePoolMember>>,
+    pacing: PacingSettings,
+    pacing_reserve: BTreeMap<String, PacingReserve>,
+    pacing_overrides: Vec<PacingOverride>,
+    opencode_go: OpenCodeGoSettings,
+}
+
 impl Default for RoutingConfig {
+    #[allow(clippy::expect_used)] // The bundled asset is validated by tests.
     fn default() -> Self {
-        Self {
-            model_exclusions: ModelExclusions::default(),
-            model_policy: crate::ModelPolicies::default(),
-            writer_advisory: None,
-            suppress_opus_writer_warning: false,
-            capacity_cooldown_seconds: 600,
-            settlement_retries: 2,
-            capacity_retry_seconds: 30,
-            capacity_retry_max_seconds: 600,
-            retry_delay_ceiling_seconds: 3_600,
-            review: crate::ReviewConfig::default(),
-            routes: BTreeMap::new(),
-            pools: BTreeMap::new(),
-            pacing: PacingSettings::default(),
-            pacing_reserve: BTreeMap::new(),
-            pacing_overrides: Vec::new(),
-            opencode_go: OpenCodeGoSettings::default(),
-        }
+        static DEFAULT: std::sync::OnceLock<RoutingConfig> = std::sync::OnceLock::new();
+        DEFAULT
+            .get_or_init(|| {
+                let asset: BundledRoutingDefaults =
+                    toml_edit::de::from_str(defaults(Profile::Balanced))
+                        .expect("bundled routing defaults are valid");
+                Self {
+                    model_exclusions: asset.model_exclusions,
+                    model_policy: asset.model_policy,
+                    writer_advisory: asset.writer_advisory,
+                    suppress_opus_writer_warning: asset.suppress_opus_writer_warning,
+                    capacity_cooldown_seconds: asset.capacity_cooldown_seconds,
+                    settlement_retries: asset.settlement_retries,
+                    capacity_retry_seconds: asset.capacity_retry_seconds,
+                    capacity_retry_max_seconds: asset.capacity_retry_max_seconds,
+                    retry_delay_ceiling_seconds: asset.retry_delay_ceiling_seconds,
+                    review: asset.review,
+                    routes: asset.routes,
+                    pools: asset.pools,
+                    pacing: asset.pacing,
+                    pacing_reserve: asset.pacing_reserve,
+                    pacing_overrides: asset.pacing_overrides,
+                    opencode_go: asset.opencode_go,
+                }
+            })
+            .clone()
     }
 }
 

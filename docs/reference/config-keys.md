@@ -44,6 +44,14 @@ Set these in `[domains.fabric.graph]` in the host configuration. Omit a key for 
 | `ci_poll_overrides.<node_id>` | empty | Override the host CI polling policy for one node ID. Values and origins appear in config show. (initial_seconds and max_seconds). |
 | `allowed_read_roots` | empty (read roots stay inside the project and its registered worktrees) | Absolute host directories that graph and preset `read_roots` may name besides the project's own registered worktrees. (absolute directory paths). |
 | `limits.expansion_depth` | 64 | Longest dependency chain in edges, root nodes at depth 0, and deepest composite nesting a graph may expand to. The bundled `big-batch` preset needs 33. Graph documents cannot raise it. (1 or more). |
+| `limits.continuations` | 2 | Graph continuations limit. (0 or more). |
+| `limits.nodes` | 512 | Graph nodes limit. (1 or more). |
+| `limits.edges` | 4096 | Graph edges limit. (1 or more). |
+| `limits.routes_per_node` | 16 | Graph routes per node limit. (1 or more). |
+| `limits.node_prompt_bytes` | 262144 | Graph node prompt bytes limit. (1 or more). |
+| `limits.graph_prompt_bytes` | 4194304 | Graph graph prompt bytes limit. (1 or more). |
+| `limits.fan_out_width` | 32 | Graph fan out width limit. (1 or more). |
+| `limits.concurrency` | 0 | Graph concurrency limit. Zero uses host lane caps. (0 or more). |
 
 ## Host store settings
 
@@ -231,17 +239,6 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `trade_off` | `"A higher count keeps a longer audit trail but a larger history file."` |
 | `type` | `"int"` |
 
-## `confinement.census_host_list_complete`
-
-| Field | Value |
-|---|---|
-| `default` | `false` |
-| `effect` | `"Host-owner declaration that unreadable daemon exceptions are complete. Enables the native clean-Free acceptance assertion; grants no census exception or cleanup authority. Set only after listing the host's daemons."` |
-| `host_only` | `true` |
-| `status` | `"wired"` |
-| `strict` | `true` |
-| `type` | `"bool"` |
-
 ## `confinement.census_ignore_unreadable`
 
 | Field | Value |
@@ -252,70 +249,6 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `status` | `"wired"` |
 | `strict` | `true` |
 | `type` | `"census_ignore_list"` |
-
-## `domains.routing.capacity_cooldown_seconds`
-
-| Field | Value |
-|---|---|
-| `default` | `600` |
-| `effect` | `"Avoid a model and account in automatic draws for this many seconds after a provider capacity error. Zero disables new cooldowns."` |
-| `min` | `0` |
-| `reader` | `"tools/front-door/crates/cli/src/run.rs"` |
-| `status` | `"wired"` |
-| `trade_off` | `"Longer cooldowns reduce repeated capacity errors but keep affected models out of automatic draws for longer."` |
-| `type` | `"int"` |
-
-## `domains.routing.capacity_retry_max_seconds`
-
-| Field | Value |
-|---|---|
-| `default` | `600` |
-| `effect` | `"Cap one capacity retry's wait, jitter included, at this many seconds."` |
-| `max` | `604800` |
-| `min` | `0` |
-| `reader` | `"tools/front-door/crates/cli/src/run.rs"` |
-| `status` | `"wired"` |
-| `trade_off` | `"A higher cap lets later retries back off further from a provider that stays at capacity, at the cost of a longer stall."` |
-| `type` | `"int"` |
-
-## `domains.routing.capacity_retry_seconds`
-
-| Field | Value |
-|---|---|
-| `default` | `30` |
-| `effect` | `"Wait this long before a capacity retry, multiplied by the retry's number, plus up to a quarter of jitter, then capped by domains.routing.capacity_retry_max_seconds and domains.routing.retry_delay_ceiling_seconds. Quota retries do not wait."` |
-| `max` | `604800` |
-| `min` | `0` |
-| `reader` | `"tools/front-door/crates/cli/src/run.rs"` |
-| `status` | `"wired"` |
-| `trade_off` | `"A longer wait gives the provider time to recover but delays the lane."` |
-| `type` | `"int"` |
-
-## `domains.routing.retry_delay_ceiling_seconds`
-
-| Field | Value |
-|---|---|
-| `default` | `3600` |
-| `effect` | `"Ceiling on the wait any settlement retry seals before its successor may launch. The successor's admission window opens when the wait ends."` |
-| `max` | `604800` |
-| `min` | `0` |
-| `reader` | `"tools/front-door/crates/cli/src/run.rs"` |
-| `status` | `"wired"` |
-| `trade_off` | `"A higher ceiling allows long waits for a recovering provider but holds a queued successor for longer."` |
-| `type` | `"int"` |
-
-## `domains.routing.settlement_retries`
-
-| Field | Value |
-|---|---|
-| `default` | `2` |
-| `effect` | `"Retry a lane that settled for provider capacity or a spent account up to this many times. A capacity stop resumes its session where the adapter supports resume, or redraws the route when it has none. A quota stop retries the applied model at once when another unpinned, unspent account serves it, and admission skips the spent account. Zero disables these retries."` |
-| `max` | `32` |
-| `min` | `0` |
-| `reader` | `"tools/front-door/crates/cli/src/run.rs"` |
-| `status` | `"wired"` |
-| `trade_off` | `"More retries recover more lanes without a chair turn but spend more attempts when a provider stays at capacity."` |
-| `type` | `"int"` |
 
 ## `fabric.accept_handoff`
 
@@ -402,55 +335,6 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `status` | `"wired"` |
 | `trade_off` | `"Lower marks silence sooner; the process census and observation cadence stays unchanged."` |
 | `type` | `"int"` |
-
-## `review.cross_family`
-
-| Field | Value |
-|---|---|
-| `default` | `"prefer"` |
-| `effect` | `"Not wired. Changing this value has no effect on review."` |
-| `project` | `"strengthen"` |
-| `status` | `"not wired"` |
-| `trade_off` | `"None while unwired."` |
-| `type` | `"enum"` |
-| `values` | `["prefer", "require"]` |
-
-## `review.extra_reviewers`
-
-| Field | Value |
-|---|---|
-| `default` | `0` |
-| `effect` | `"Not wired. Changing this value has no effect on review."` |
-| `max` | `2` |
-| `min` | `0` |
-| `project` | `"strengthen"` |
-| `status` | `"not wired"` |
-| `trade_off` | `"None while unwired."` |
-| `type` | `"int"` |
-
-## `review.polish`
-
-| Field | Value |
-|---|---|
-| `default` | `"auto"` |
-| `effect` | `"Not wired. Changing this value has no effect on review."` |
-| `project` | `"strengthen"` |
-| `status` | `"not wired"` |
-| `trade_off` | `"None while unwired."` |
-| `type` | `"enum"` |
-| `values` | `["auto", "always", "off"]` |
-
-## `review.rereview_scope`
-
-| Field | Value |
-|---|---|
-| `default` | `"delta"` |
-| `effect` | `"Not wired. Changing this value has no effect on review."` |
-| `project` | `"strengthen"` |
-| `status` | `"not wired"` |
-| `trade_off` | `"None while unwired."` |
-| `type` | `"enum"` |
-| `values` | `["delta", "full"]` |
 
 ## `routing.exclude`
 
@@ -566,17 +450,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
       "description": "Lower lane concurrency, accepting slower runs.",
       "knobs": {
         "lanes.max_concurrency": 4,
-        "lanes.max_concurrency_read_only": 8,
-        "review.polish": "off"
-      }
-    },
-    "rigorous": {
-      "description": "Review settings are retained for configuration tests but are not wired.",
-      "knobs": {
-        "review.cross_family": "require",
-        "review.extra_reviewers": 1,
-        "review.polish": "always",
-        "review.rereview_scope": "full"
+        "lanes.max_concurrency_read_only": 8
       }
     }
   },
