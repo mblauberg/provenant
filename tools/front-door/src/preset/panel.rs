@@ -488,6 +488,22 @@ impl StageBuilder<'_> {
         outputs: &Value,
         depth: usize,
     ) -> Result<Option<Value>, String> {
+        // Static and deferred review stages alike record the requested base.
+        if self.layers.review.is_some()
+            && matches!(entries, [entry] if super::list_is_lenses(entry.get("for_each")))
+        {
+            if let Some(base) = self
+                .parameters
+                .get("base")
+                .and_then(Value::as_str)
+                .filter(|base| !base.is_empty())
+            {
+                self.layers
+                    .review_bases
+                    .borrow_mut()
+                    .insert(base.to_owned());
+            }
+        }
         if !self.review_is_deferred(entries, object) {
             return Ok(None);
         }
@@ -536,17 +552,6 @@ impl StageBuilder<'_> {
                 read_roots.get_or_insert(roots);
             }
             templates.insert(name, leaf);
-        }
-        if let Some(base) = self
-            .parameters
-            .get("base")
-            .and_then(Value::as_str)
-            .filter(|base| !base.is_empty())
-        {
-            self.layers
-                .review_bases
-                .borrow_mut()
-                .insert(base.to_owned());
         }
         let mut node = json!({
             "id": id,

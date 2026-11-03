@@ -4371,3 +4371,23 @@ fn an_unknown_size_override_is_refused() {
     .unwrap_err();
     assert!(error.contains("unknown review size"), "{error}");
 }
+
+/// A council over a pinned commit expands statically, yet it still records the
+/// requested base so the host submits a real diff rather than a self-diff.
+#[test]
+fn a_static_commit_council_records_the_requested_base() {
+    let layers = real_selector("/nonexistent");
+    let document = expand(
+        &layers,
+        "review-council",
+        "brief",
+        &[
+            "parameters.worktree='/repo/w'".into(),
+            "parameters.base='origin/main'".into(),
+        ],
+    )
+    .unwrap()
+    .document;
+    assert!(document["nodes"][1]["composite"].is_object());
+    assert_eq!(document["review_base"], "origin/main");
+}
