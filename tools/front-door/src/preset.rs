@@ -251,7 +251,7 @@ impl Layers {
 
     /// The typed interface of a preset, rendered for a reader. Creates no state.
     pub fn explain(&self, name: &str) -> Result<Value, String> {
-        expand(self, name, "", &[])?;
+        let expansion = expand(self, name, "", &[])?;
         let (config, origins) = self.resolve(name)?;
         let origin_of = |key: &str| {
             let path = format!("parameters.{key}");
@@ -265,6 +265,13 @@ impl Layers {
                 })
                 .cloned()
         };
+        let parameters = flatten_parameters(
+            name,
+            config.get("parameters").unwrap_or(&json!({})),
+            "",
+            &origins,
+        )?;
+        let (policy_origin, policy_text) = self.local_check_policy(&parameters, &origins)?;
         let parameters: Vec<Value> = config
             .get("parameters")
             .and_then(Value::as_object)
@@ -309,18 +316,54 @@ impl Layers {
             .flatten()
             .map(|(role, profile)| json!({"name": role, "tier": profile.get("tier")}))
             .collect();
+        let prompts: BTreeMap<_, _> = expansion
+            .roles
+            .keys()
+            .filter_map(|role| {
+                find_prompt(&expansion.document["nodes"], role).map(|prompt| (role, prompt))
+            })
+            .collect();
         Ok(json!({
             "name": name,
             "pattern": config.get("pattern"),
             "parameters": parameters,
             "stages": stages,
             "roles": roles,
+            "prompts": prompts,
+            "local_check_policy": json!({
+                "prompt": policy_text,
+                "origin": policy_origin,
+            }),
             "layers": self.entries.get(name).into_iter().flatten().map(|(origin, _)| origin).collect::<Vec<_>>(),
             "next": [
                 format!("provenant run --preset {name} --prompt-file FILE --explain"),
                 format!("provenant run --preset {name} --prompt-file FILE --set STAGE.PARAMETER=VALUE")
             ]
         }))
+    }
+
+    /// A non-empty preset parameter wins; otherwise use the layered role library.
+    fn local_check_policy(
+        &self,
+        parameters: &Value,
+        origins: &BTreeMap<String, String>,
+    ) -> Result<(String, String), String> {
+        if let Some(text) = parameters
+            .get("local_check_policy")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+        {
+            let origin = origins
+                .get("parameters.local_check_policy")
+                .or_else(|| origins.get("parameters.local_check_policy.default"))
+                .map(String::as_str)
+                .unwrap_or("preset");
+            return Ok((origin.to_owned(), text.to_owned()));
+        }
+        self.roles
+            .policy(self.exclude_repo.get())
+            .map(|(origin, text)| (origin.to_owned(), text.to_owned()))
+            .ok_or_else(|| "roles library is missing local_check_policy".into())
     }
 
     pub fn resolve(&self, name: &str) -> Result<(Value, BTreeMap<String, String>), String> {
@@ -407,7 +450,7 @@ fn valid_name(name: &str) -> bool {
 const SPEC_KEYS: [&str; 6] = ["type", "default", "min", "max", "enum", "doc"];
 const TYPE_NAMES: [&str; 6] = ["string", "integer", "number", "boolean", "list", "table"];
 /// Parameters every parent hands to a child preset that declares them.
-const AMBIENT: [&str; 2] = ["risk_tier", "subject"];
+const AMBIENT: [&str; 3] = ["risk_tier", "subject", "local_check_policy"];
 
 /// A table made only of typed-parameter keys. Other tables are plain values.
 /// A `type` that is not a type name marks a plain value (`{ type = "commit" }`)
@@ -1118,6 +1161,34 @@ fn interpolate(
     interpolate_inner(value, parameters, prompt, index, false)
 }
 
+/// The prompt of the first node in `nodes` that runs `role`, searching nested
+/// composites, loops and plans.
+pub(crate) fn find_prompt(nodes: &Value, role: &str) -> Option<String> {
+    if let Some(items) = nodes.as_array() {
+        for node in items {
+            if let Some(found) = find_prompt(node, role) {
+                return Some(found);
+            }
+        }
+    } else if let Some(map) = nodes.as_object() {
+        if map.get("role").and_then(Value::as_str) == Some(role)
+            && let Some(prompt) = map.get("prompt").and_then(Value::as_str)
+        {
+            return Some(prompt.to_string());
+        }
+        for (key, val) in map {
+            if matches!(
+                key.as_str(),
+                "composite" | "loop" | "plan" | "patterns" | "nodes" | "body"
+            ) && let Some(found) = find_prompt(val, role)
+            {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
 const MUTATION_TESTING_PROMPT: &str = r#"
 
 Diff-scoped mutation evidence (optional; crucial or terminal risk only):
@@ -1668,12 +1739,15 @@ fn build_stages(
         return Err(invalid_config(name, key, "unknown field", scope, origins));
     }
     check_pattern(name, config.get("pattern"), scope, origins)?;
-    let parameters = flatten_parameters(
+    let mut parameters = flatten_parameters(
         name,
         config.get("parameters").unwrap_or(&json!({})),
         scope,
         origins,
     )?;
+    let (policy_origin, policy_text) = layers.local_check_policy(&parameters, origins)?;
+    parameters["local_check_policy"] = json!(policy_text);
+    origins.insert("parameters.local_check_policy".into(), policy_origin);
     let mut builder = StageBuilder {
         layers,
         name,
