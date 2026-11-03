@@ -59,6 +59,18 @@ final class SourceBoundaryTests: XCTestCase {
         XCTAssertEqual(InboxColumnWidth.load(from: reopened), 410)
     }
 
+    func testInboxColumnMaximumIsAnOverridableDefault() throws {
+        let suite = "InboxColumnMaximumTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertEqual(InboxColumnWidth.maximum(from: defaults), InboxColumnWidth.defaultMaximum)
+        defaults.set(900.0, forKey: "inboxColumnMaximum")
+        XCTAssertEqual(InboxColumnWidth.maximum(from: defaults), 900)
+        XCTAssertEqual(InboxColumnWidth.clamped(1200, minimum: 220, maximum: 900), 900)
+        XCTAssertEqual(InboxColumnWidth.clamped(100, minimum: 220, maximum: 900), 220)
+        XCTAssertEqual(InboxColumnWidth.clamped(500, minimum: 220, maximum: 100), 220)
+    }
+
     func testShippingSourcesDoNotUseSwiftPMResourceBundles() throws {
         for target in ["ProvenantKit", "ProvenantDesign", "ProvenantConsole", "QuotaMenuBar"] {
             let files = try swiftFiles(in: target)

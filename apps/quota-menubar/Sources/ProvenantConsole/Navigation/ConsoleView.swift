@@ -14,6 +14,7 @@ struct ConsoleView: View {
     static let detailMinimum: CGFloat = 270
     static let inspectorMinimum: CGFloat = 280
     static let windowMinimum: CGFloat = 960
+    private var inboxMaximum: CGFloat { max(InboxColumnWidth.maximum(), Self.inboxMinimum) }
 
     var body: some View {
         columns
@@ -71,9 +72,9 @@ struct ConsoleView: View {
                 sidebar
             } content: {
                 RequestList(model: console.inbox)
-                    .navigationSplitViewColumnWidth(min: Self.inboxMinimum, ideal: min(max(initialInboxWidth, Self.inboxMinimum), 500), max: 500)
+                    .navigationSplitViewColumnWidth(min: Self.inboxMinimum, ideal: InboxColumnWidth.clamped(initialInboxWidth, minimum: Self.inboxMinimum, maximum: inboxMaximum), max: inboxMaximum)
                     .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
-                        if width >= Self.inboxMinimum && width <= 500 { InboxColumnWidth.save(width) }
+                        if width >= Self.inboxMinimum { InboxColumnWidth.save(width) }
                     }
             } detail: {
                 InboxScreen(model: console.inbox)
@@ -108,8 +109,18 @@ struct ConsoleView: View {
 
 
 /// A remembered width is an initial preference; the native divider remains free to resize.
+/// The Inbox list column's remembered width. The maximum is a default the
+/// user can override with `defaults write <bundle> inboxColumnMaximum <points>`.
 enum InboxColumnWidth {
     private static let key = "inboxColumnWidth"
+    private static let maximumKey = "inboxColumnMaximum"
+    static let defaultMaximum: Double = 720
+    static func maximum(from defaults: UserDefaults = .standard) -> Double {
+        defaults.object(forKey: maximumKey) as? Double ?? defaultMaximum
+    }
+    static func clamped(_ width: Double, minimum: Double, maximum: Double) -> Double {
+        min(max(width, minimum), max(maximum, minimum))
+    }
     static func load(from defaults: UserDefaults = .standard) -> Double {
         defaults.object(forKey: key) as? Double ?? 300
     }
