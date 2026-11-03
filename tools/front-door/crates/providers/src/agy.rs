@@ -52,7 +52,9 @@ fn identity_file(directory: &std::path::Path) -> String {
     )
 }
 
-fn keychain_stamp(directory: &std::path::Path) -> Option<(u64, u64, u64, i64, i64)> {
+pub(crate) type KeychainStamp = (u64, u64, u64, i64, i64);
+
+pub(crate) fn keychain_stamp(directory: &std::path::Path) -> Option<KeychainStamp> {
     use std::os::unix::fs::MetadataExt;
     let stat = std::fs::metadata(directory.join(KEYCHAIN)).ok()?;
     Some((
@@ -88,13 +90,18 @@ pub(crate) fn remember_identity(
     directory: &std::path::Path,
     key: &str,
     now: i64,
-) {
+    expected_stamp: Option<KeychainStamp>,
+) -> bool {
+    let current_stamp = keychain_stamp(directory);
+    if current_stamp != expected_stamp {
+        return false;
+    }
     let publish = || -> Result<(), Box<dyn std::error::Error>> {
         let root = provenant_os::fs::Directory::open_anchor(state)?;
         let bytes = serde_json::to_vec(&IdentityProbe {
             key: key.into(),
             observed: now,
-            stamp: keychain_stamp(directory),
+            stamp: current_stamp,
         })?;
         root.atomic_write(
             identity_file(directory).as_ref(),
@@ -105,7 +112,7 @@ pub(crate) fn remember_identity(
         .require_durable()?;
         Ok(())
     };
-    let _ = publish();
+    publish().is_ok()
 }
 
 pub(crate) fn forget_identity(state: &std::path::Path, directory: &std::path::Path) {
@@ -678,7 +685,8 @@ mod identity_tests {
         std::fs::create_dir_all(keychain.parent().unwrap()).unwrap();
         std::fs::write(&keychain, "synthetic").unwrap();
         let key = "agy-google-0123456789ab";
-        remember_identity(temp.path(), &directory, key, 100);
+        let stamp = keychain_stamp(&directory);
+        assert!(remember_identity(temp.path(), &directory, key, 100, stamp));
         assert_eq!(
             cached_identity(temp.path(), &directory, 100).as_deref(),
             Some(key)
@@ -692,8 +700,38 @@ mod identity_tests {
         assert!(cached_identity(temp.path(), &temp.path().join("other"), 101).is_none());
         std::fs::write(&keychain, "changed synthetic keychain").unwrap();
         assert!(cached_identity(temp.path(), &directory, 101).is_none());
-        remember_identity(temp.path(), &directory, key, 102);
+        let new_stamp = keychain_stamp(&directory);
+        assert!(remember_identity(
+            temp.path(),
+            &directory,
+            key,
+            102,
+            new_stamp
+        ));
         forget_identity(temp.path(), &directory);
         assert!(cached_identity(temp.path(), &directory, 103).is_none());
+    }
+
+    #[test]
+    fn agy_identity_refuses_to_cache_when_keychain_changes_during_probe() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("home");
+        let keychain = directory.join(KEYCHAIN);
+        std::fs::create_dir_all(keychain.parent().unwrap()).unwrap();
+        std::fs::write(&keychain, "initial").unwrap();
+        let initial_stamp = keychain_stamp(&directory);
+        assert!(initial_stamp.is_some());
+        // Simulate a sign-in during the probe: keychain changes before remember_identity runs.
+        std::fs::write(&keychain, "signed in as different account").unwrap();
+        let key = "agy-google-0123456789ab";
+        // Publishing with the pre-probe stamp is refused because the file changed.
+        assert!(!remember_identity(
+            temp.path(),
+            &directory,
+            key,
+            100,
+            initial_stamp
+        ));
+        assert!(cached_identity(temp.path(), &directory, 100).is_none());
     }
 }

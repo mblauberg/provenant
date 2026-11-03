@@ -429,6 +429,7 @@ pub fn detect_with_org(
             return Ok((key, None));
         }
         crate::agy::forget_identity(probe_root, directory);
+        let stamp_before = crate::agy::keychain_stamp(directory);
         let key = detect_agy(
             &guarded,
             executable,
@@ -437,7 +438,7 @@ pub fn detect_with_org(
             cwd,
             probe_root,
         )?;
-        crate::agy::remember_identity(probe_root, directory, &key, now);
+        crate::agy::remember_identity(probe_root, directory, &key, now, stamp_before);
         return Ok((key, None));
     }
     if adapter == "codex" {

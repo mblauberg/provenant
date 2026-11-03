@@ -84,6 +84,7 @@ pub struct LiveQuota {
     refresh_expired: bool,
     claude_default: RefCell<Option<claude::Identity>>,
     readiness_failure: RefCell<Option<provenant_quota::ReadinessReason>>,
+    last_reconcile_error: RefCell<Option<String>>,
     clock: SystemClock,
     /// Stands in for the system executor so tests can see each probe's command.
     #[cfg(test)]
@@ -176,10 +177,15 @@ impl LiveQuota {
             refresh_expired: true,
             claude_default: RefCell::new(None),
             readiness_failure: RefCell::new(None),
+            last_reconcile_error: RefCell::new(None),
             clock: SystemClock::new(),
             #[cfg(test)]
             executor: None,
         })
+    }
+    #[cfg(test)]
+    pub(crate) fn last_reconcile_error(&self) -> Option<String> {
+        self.last_reconcile_error.borrow().clone()
     }
     fn now(&self) -> i64 {
         self.clock.unix_seconds()
@@ -536,6 +542,7 @@ impl LiveQuota {
             deadline,
         )
     }
+    #[allow(clippy::print_stderr)]
     fn agy(
         &self,
         account: &Account,
@@ -547,6 +554,7 @@ impl LiveQuota {
         // probe re-checks it around the spawn.
         // Never let a failed quota probe leave an earlier dispatch identity cached.
         crate::agy::forget_identity(&self.state, &account.identity_dir);
+        let stamp_before = crate::agy::keychain_stamp(&account.identity_dir);
         let probe_home =
             crate::agy::ProbeHome::select(&account.identity_dir, &self.home).map_err(|error| {
                 match error {
@@ -578,24 +586,34 @@ impl LiveQuota {
         let signed_in = payload.get("status").and_then(Value::as_str) == Some("SUCCESS");
         let actual = agy_signed_in_account(signed_in, read(&log).ok())?;
         let key = format!("agy-{actual}");
-        crate::agy::remember_identity(&self.state, &account.identity_dir, &key, self.now());
+        crate::agy::remember_identity(
+            &self.state,
+            &account.identity_dir,
+            &key,
+            self.now(),
+            stamp_before,
+        );
         if key != account.scope.account_key {
             if let Some(roots) = &self.roots {
                 // Failure to save never makes the stale identity routable. A
                 // later quota probe retries under the normal mismatch backoff.
-                if matches!(
-                    crate::accounts::reconcile_agy(
-                        roots,
-                        &account.identity_dir,
-                        &account.scope.account_key,
-                        &key,
-                    ),
-                    Ok(true)
+                match crate::accounts::reconcile_agy(
+                    roots,
+                    &account.identity_dir,
+                    &account.scope.account_key,
+                    &key,
                 ) {
-                    for registered in self.accounts.borrow_mut().iter_mut() {
-                        if registered.scope == account.scope {
-                            registered.scope.account_key.clone_from(&key);
+                    Ok(true) => {
+                        for registered in self.accounts.borrow_mut().iter_mut() {
+                            if registered.scope == account.scope {
+                                registered.scope.account_key.clone_from(&key);
+                            }
                         }
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        *self.last_reconcile_error.borrow_mut() = Some(error.to_string());
+                        eprintln!("provenant: failed to reconcile agy account switch: {error}");
                     }
                 }
             }
@@ -660,6 +678,7 @@ mod tests {
             refresh_expired: false,
             claude_default: RefCell::new(None),
             readiness_failure: RefCell::new(None),
+            last_reconcile_error: RefCell::new(None),
             clock: SystemClock::new(),
             executor: None,
         }
@@ -790,6 +809,94 @@ mod tests {
             Some(new)
         );
         assert_eq!(homes.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn agy_switch_surfaces_rebind_error_when_new_key_already_registered() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let other = root.path().join("other");
+        let state = root.path().join("state");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        fs::create_dir_all(&state).unwrap();
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), root.path().join("repo"));
+        inputs.state_dir = Some(state.clone());
+        let roots = inputs
+            .resolve(&provenant_os::fs::SystemPathResolver)
+            .unwrap();
+        let key = |email: &str| {
+            format!(
+                "agy-{}",
+                agy_fingerprint(
+                    format!("OAuth: authenticated successfully as {email}\n").as_bytes()
+                )
+                .unwrap()
+            )
+        };
+        let old = key("old@example.test");
+        let new = key("new@example.test");
+        let config = format!(
+            "schema_version=1\n[domains.accounts.entries.agy-work]\nadapter='agy'\nlabel='work'\nkey='{old}'\ndirectory='{}'\n[domains.accounts.entries.agy-other]\nadapter='agy'\nlabel='other'\nkey='{new}'\ndirectory='{}'\n",
+            home.display(),
+            other.display()
+        );
+        fs::write(state.join("config.toml"), &config).unwrap();
+        let settings: Settings = provenant_config::read_domain(&state, "accounts").unwrap();
+        let mut live = LiveQuota::new(&roots, &home, &settings).unwrap();
+        let homes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let fake = |email| {
+            Box::new(AgyUsage {
+                sign_ins: vec![(home.clone(), email)],
+                homes: homes.clone(),
+            })
+        };
+        live.executor = Some(fake("new@example.test"));
+        let account = live
+            .accounts
+            .borrow()
+            .iter()
+            .find(|a| a.scope.account_key == old)
+            .unwrap()
+            .clone();
+        let outcome = live
+            .agy(&account, live.now() + 60, &mut QuotaDetails::default())
+            .map(|_| unreachable!());
+        assert_eq!(outcome, Err(ProbeFailure::AccountMismatch));
+        let error = live
+            .last_reconcile_error()
+            .expect("rebind error must be recorded");
+        assert!(
+            error.contains("agy identity is already registered; run `provenant accounts list`"),
+            "{error}"
+        );
+        // Stale key remains excluded from admission
+        let now = live.now();
+        let mut stale = AccountRecord::empty(account.scope.clone());
+        stale.last_attempt_unix_seconds = Some(now);
+        stale.claim = Some(provenant_quota::RefreshClaim {
+            token: "refused-rebind".into(),
+            deadline_unix_seconds: now + provenant_quota::schedule::TICK_BUDGET_SECONDS,
+        });
+        let stale =
+            provenant_quota::schedule::complete(&stale, "refused-rebind", now, outcome, None)
+                .unwrap()
+                .replacement
+                .unwrap();
+        let admission = provenant_quota::Admission {
+            policies: &[],
+            records: std::slice::from_ref(&stale),
+            pools: &[],
+            now_unix_seconds: now,
+        };
+        assert_eq!(
+            admission.account_block("agy", &old, "model").unwrap(),
+            Some(provenant_quota::AccountBlock::Mismatch)
+        );
+        // Config was not rewritten with duplicate key
+        let saved: Settings = provenant_config::read_domain(&state, "accounts").unwrap();
+        assert_eq!(saved.entries["agy-work"].key, old);
+        assert_eq!(saved.entries["agy-other"].key, new);
     }
 
     /// A fake `agy` that signs in as one Google account per `HOME`, recording
