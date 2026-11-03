@@ -1,7 +1,8 @@
 //! Review panel selection for pipeline presets: the shape a review stage
 //! selects, and the lenses that fill it.
 use super::StageBuilder;
-use provenant_routing::{LensPlan, ReviewConfig};
+use provenant_fabric_runtime::graph::{ReviewLens, ReviewSpec};
+use provenant_routing::{LensPlan, ReviewConfig, ReviewReviewer, tier_is_set};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
@@ -37,12 +38,43 @@ pub struct ShapeHint {
     pub slots: Vec<String>,
     /// Lens names a shape reviewer group names explicitly, with its pool.
     pub named: Vec<(String, String)>,
+    /// Reviewer groups from the selected review shape.
+    pub groups: Vec<ReviewReviewer>,
     /// Which lenses fill the slots for the stage's change kind.
     pub plan: LensPlan,
     /// The review size, measured or given; `None` when unknown.
     pub size: Option<String>,
     /// Measurement problems; the size was left unknown.
     pub warnings: Vec<String>,
+}
+
+impl ShapeHint {
+    /// The `family_group` a lens belongs to when its reviewer group prefers
+    /// distinct model families: the group that names the lens, else the group
+    /// of the slot it fills. Siblings in a group avoid each other's families as
+    /// far as the pool allows; a pool with one family still runs every lens.
+    fn family_group(&self, name: &Value, slot: Option<usize>) -> Option<String> {
+        let name = name.as_str().unwrap_or_default();
+        let named = self.groups.iter().position(|group| {
+            group
+                .lenses
+                .iter()
+                .any(|lens| name == lens || name.starts_with(&format!("{lens}-")))
+        });
+        let index = named.or_else(|| self.group_of_slot(slot?))?;
+        self.groups[index]
+            .distinct_families
+            .then(|| format_family_group(index))
+    }
+
+    /// The index of the reviewer group that owns the `slot`th entry of `slots`.
+    fn group_of_slot(&self, slot: usize) -> Option<usize> {
+        let mut end = 0;
+        self.groups.iter().position(|group| {
+            end += group.count;
+            slot < end
+        })
+    }
 }
 
 /// Build the selector for the routing review configuration. `directory` is
@@ -134,13 +166,14 @@ fn review_selector_with_git(
                 } else {
                     format!("; lenses={}", lens_reason.join(","))
                 },
-                size.unwrap_or("unknown"),
+                size_text(size, false),
                 kind.unwrap_or("unknown"),
                 query.risk.unwrap_or("unknown")
             ),
             plan,
             size: size.map(str::to_owned),
             warnings,
+            groups: selected.shape.reviewers.clone(),
             ..Default::default()
         };
         for group in &selected.shape.reviewers {
@@ -329,12 +362,15 @@ impl StageBuilder<'_> {
                 ));
                 continue;
             }
-            let tier = item.get("tier").and_then(Value::as_str).unwrap_or_default();
-            if tier.is_empty() {
+            // A route table or list is a tier too; only an empty one defers to the shape.
+            let has_tier = item.get("tier").is_some_and(tier_is_set);
+            let mut slot = None;
+            if !has_tier {
                 let name = item["name"].as_str().unwrap_or_default().to_owned();
                 if when.is_empty() {
                     if governed < limit {
                         governed += 1;
+                        slot = Some(governed - 1);
                     } else if !plan.is_some_and(|plan| in_list(&plan.add, &item)) {
                         self.layers.warnings.borrow_mut().push(format!(
                             "preset {}: omitted lens {name}: review shape has {limit} slots",
@@ -359,6 +395,11 @@ impl StageBuilder<'_> {
                 });
                 item["tier"] = json!(pool.unwrap_or_else(|| "senior".into()));
             }
+            // Lenses that fill a shape slot join their group's family preference;
+            // an explicit tier is an override and stays out of it.
+            if let Some(group) = shape.and_then(|shape| shape.family_group(&item["name"], slot)) {
+                item["family_group"] = json!(group);
+            }
             selected.push(item);
         }
         if selected.is_empty() {
@@ -366,6 +407,114 @@ impl StageBuilder<'_> {
         }
         Ok(selected)
     }
+
+    /// The `ReviewSpec` this stage hands to launch-time resolution. Only what the
+    /// stage states goes in: a size is recorded when the stage overrides it,
+    /// and otherwise the host measures it when the review launches.
+    #[allow(
+        dead_code,
+        reason = "the deferred review stage calls this once it is wired in"
+    )]
+    pub fn review_spec(&self) -> Result<ReviewSpec, String> {
+        let text = |key: &str| {
+            self.parameters
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        };
+        let subject_type = self
+            .parameters
+            .get("subject")
+            .and_then(|subject| subject.get("type"))
+            .and_then(Value::as_str);
+        let kind = if subject_type == Some("integration") {
+            Some("integration".to_owned())
+        } else {
+            text("kind")
+        };
+        let risk_tags = self
+            .parameters
+            .get("risk_tags")
+            .and_then(Value::as_array)
+            .map(|tags| {
+                tags.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut lenses = Vec::new();
+        for lens in self
+            .parameters
+            .get("lenses")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let name = lens
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or("review lens needs a name")?;
+            lenses.push(ReviewLens {
+                name: name.to_owned(),
+                when: lens
+                    .get("when")
+                    .and_then(Value::as_str)
+                    .filter(|when| !when.is_empty())
+                    .map(str::to_owned),
+                tier: lens
+                    .get("tier")
+                    .filter(|tier| tier_is_set(tier))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            });
+        }
+        // The most lenses a launch can run: the stage's own, plus what the change
+        // kind adds. Paths found at launch can add more; the host bounds those.
+        let mut names: Vec<String> = lenses.iter().map(|lens| lens.name.clone()).collect();
+        if let Some(hint) = self.shape_hint()? {
+            names.extend(hint.plan.add);
+        }
+        names.sort_unstable();
+        names.dedup();
+        Ok(ReviewSpec {
+            shape: text("review_shape"),
+            risk_tier: text("risk_tier"),
+            kind,
+            size: text("size"),
+            risk_tags,
+            worktree: text("worktree"),
+            lenses,
+            min_successful: self
+                .parameters
+                .get("min_reviews")
+                .and_then(Value::as_u64)
+                .filter(|count| *count > 0)
+                .and_then(|count| usize::try_from(count).ok()),
+            max_nodes: names.len().max(1),
+        })
+    }
+}
+
+/// The size text when the review measures its change at launch rather than
+/// at expansion. Explain output shows it in place of `unknown`.
+pub const PENDING_REVIEW_SIZE: &str = "pending (measured at review launch)";
+
+/// How explain output names a review size: the size itself, the pending text
+/// when launch measures it, else `unknown`.
+fn size_text(size: Option<&str>, pending: bool) -> &str {
+    size.unwrap_or(if pending {
+        PENDING_REVIEW_SIZE
+    } else {
+        "unknown"
+    })
+}
+
+/// The `family_group` for a reviewer group: siblings in it avoid each other's
+/// model families where the pool allows.
+fn format_family_group(group_index: usize) -> String {
+    format!("group-{group_index}")
 }
 
 fn append_plan_additions(list: &mut Vec<Value>, additions: &[String]) {
@@ -377,60 +526,10 @@ fn append_plan_additions(list: &mut Vec<Value>, additions: &[String]) {
 }
 
 #[cfg(test)]
-mod tests {
-    #[allow(unused_imports, reason = "used by the panel unit tests")]
-    use super::{ShapeQuery, append_plan_additions, review_selector_with_git};
-    #[allow(unused_imports, reason = "used by the panel unit test")]
-    use provenant_routing::ReviewConfig;
-    #[allow(unused_imports, reason = "used by the panel unit test")]
-    use std::path::PathBuf;
-
-    #[test]
-    fn default_preset_scans_test_paths_without_changing_shape_selection() {
-        let mut review = ReviewConfig::default();
-        review
-            .select
-            .by_paths
-            .insert("**/tests/**".into(), "deep".into());
-        let selector = review_selector_with_git(
-            review,
-            PathBuf::from("/repo"),
-            None,
-            Box::new(|_, args| {
-                Ok(match args[0] {
-                    "symbolic-ref" => "main\n".into(),
-                    "rev-parse" => "main\n".into(),
-                    "diff" if args.contains(&"--name-only") => "crates/x/tests/a.rs\0".into(),
-                    "diff" if args.contains(&"--unified=0") => "@@ -1,0 +2 @@\n+#[test]\n".into(),
-                    _ => String::new(),
-                })
-            }),
-        );
-        let hint = selector(&ShapeQuery {
-            risk: Some("routine"),
-            ..Default::default()
-        })
-        .unwrap();
-        assert_eq!(hint.name, "quick");
-        assert!(
-            hint.source.contains("by_paths:**/tests/**"),
-            "{}",
-            hint.source
-        );
-        assert!(hint.source.contains("test-marker"), "{}", hint.source);
-        assert_eq!(hint.plan.add, ["tests"]);
-    }
-
-    #[test]
-    fn plan_additions_are_included_once_even_when_lenses_are_caller_supplied() {
-        let mut lenses = vec![serde_json::json!({"name": "review"})];
-        append_plan_additions(&mut lenses, &["tests".into(), "review".into()]);
-        assert_eq!(
-            lenses,
-            [
-                serde_json::json!({"name": "review"}),
-                serde_json::json!({"name": "tests"})
-            ]
-        );
-    }
-}
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "the custom worktree test driver includes this library without the test harness"
+)]
+#[path = "panel_tests.rs"]
+mod tests;

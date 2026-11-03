@@ -153,6 +153,17 @@ count must be between 1 and 32, and a non-empty `lenses` array must have one
 identifier per reviewer. Pools and selected shape names must exist. A shape may
 dispatch at most 64 reviewers.
 
+`distinct_families` is a preference. Reviewers in one group are labelled with a
+shared `family_group`, and the scheduler picks routes outside the families their
+siblings already use. When the pool has too few families it reuses one and
+records the substitution; it never drops a lens or fails the review. Running
+every selected lens is required, and model-family spread is best effort.
+
+A lens tier is a pool name, an exact `ADAPTER/ID[@effort]` model or a route
+table. Panel resolution keeps a tier as given and fills only an empty one from
+the shape. A lens with its own tier takes no shape slot and joins no family
+group.
+
 The default size bands measure added plus removed lines, changed files and
 crate roots in the diff from the merge base of the base ref to the subject.
 Small is at most 150 lines, 3 files and 1 crate; medium is at most 1,000 lines,
