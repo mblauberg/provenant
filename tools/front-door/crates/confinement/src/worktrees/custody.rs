@@ -44,6 +44,7 @@ pub(super) fn initialised_gitlink(root: &Path, path: &[u8]) -> Result<bool, Work
 }
 
 const DIRTY_PATHS_LISTED: usize = 12;
+const DIRTY_SUMMARY_BYTES: usize = 1024;
 
 pub(super) fn dirty_paths_summary(paths: &[StatusPath]) -> String {
     let raw: Vec<&[u8]> = paths
@@ -65,13 +66,25 @@ fn dirty_paths_summary_bytes(paths: &[&[u8]]) -> String {
             unique.push(lossy);
         }
     }
-    let listed: Vec<_> = unique.iter().take(DIRTY_PATHS_LISTED).cloned().collect();
-    let more = unique.len().saturating_sub(DIRTY_PATHS_LISTED);
-    let mut summary = listed.join(", ");
+    // List whole names only, within the count and byte budgets, so the
+    // omission count is never cut off. The first name is always listed,
+    // shortened only if it alone exceeds the budget.
+    let mut summary = String::new();
+    let mut listed = 0;
+    for name in unique.iter().take(DIRTY_PATHS_LISTED) {
+        let separator = if listed == 0 { "" } else { ", " };
+        if listed > 0 && summary.len() + separator.len() + name.len() > DIRTY_SUMMARY_BYTES {
+            break;
+        }
+        summary.push_str(separator);
+        summary.push_str(name);
+        listed += 1;
+    }
+    summary.truncate(summary.floor_char_boundary(DIRTY_SUMMARY_BYTES));
+    let more = unique.len() - listed;
     if more > 0 {
         summary.push_str(&format!(" and {more} more"));
     }
-    summary.truncate(summary.floor_char_boundary(1024));
     summary
 }
 
@@ -391,5 +404,15 @@ mod dirty_tests {
         let long = vec![b'x'; 4000];
         let long_summary = dirty_paths_summary_bytes(&[&long]);
         assert!(long_summary.len() <= 1024);
+        // Long names that overflow the byte budget are left whole and counted.
+        let wide: Vec<Vec<u8>> = (0..12)
+            .map(|n| format!("{n:02}{}", "y".repeat(200)).into_bytes())
+            .collect();
+        let wide_refs: Vec<&[u8]> = wide.iter().map(Vec::as_slice).collect();
+        let summary = dirty_paths_summary_bytes(&wide_refs);
+        let (names, rest) = summary.split_once(" and ").expect("omission count");
+        let listed: Vec<_> = names.split(", ").collect();
+        assert!(listed.iter().all(|name| name.len() == 202), "{summary}");
+        assert_eq!(rest, format!("{} more", 12 - listed.len()), "{summary}");
     }
 }
