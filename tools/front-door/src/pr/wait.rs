@@ -311,7 +311,12 @@ fn is_rate_limit(headers: &str, stderr: &str, stdout: &str) -> bool {
 }
 #[allow(clippy::disallowed_methods)]
 fn rate_delay(headers: &str, fallback: Duration) -> (Duration, String) {
-    let now = jiff::Timestamp::now().as_second();
+    rate_delay_at(headers, fallback, jiff::Timestamp::now().as_second())
+}
+
+/// The retry delay and the time it ends, for a response received at `now`
+/// (Unix seconds).
+fn rate_delay_at(headers: &str, fallback: Duration, now: i64) -> (Duration, String) {
     let mut retry = None;
     let mut reset = None;
     let mut remaining = None;
@@ -673,12 +678,14 @@ mod tests {
         assert_eq!(reset, "unknown");
         // Retry-After chooses the delay, so the reported time follows it, not
         // the later primary reset.
-        let (delay, reset) = rate_delay(
+        // 2026-11-03T00:00:00Z; the retry ends 17 s later, not at the reset.
+        let (delay, reset) = rate_delay_at(
             "Retry-After: 17\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 4102444800\r\n",
             Duration::from_secs(1),
+            1_793_664_000,
         );
         assert_eq!(delay, Duration::from_secs(17));
-        assert!(!reset.starts_with("2100"), "{reset}");
+        assert_eq!(reset, "2026-11-03T00:00:17Z");
         let (delay, _) = rate_delay("Retry-After: 17\r\n", Duration::from_secs(1));
         assert_eq!(delay, Duration::from_secs(17));
         let (delay, reset) = rate_delay(
