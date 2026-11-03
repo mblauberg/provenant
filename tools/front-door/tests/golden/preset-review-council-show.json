@@ -11,6 +11,10 @@
       "parameters.kind.doc": "bundled",
       "parameters.kind.type": "bundled",
       "parameters.lenses": "bundled",
+      "parameters.local_check_policy": "bundled",
+      "parameters.local_check_policy.default": "bundled",
+      "parameters.local_check_policy.doc": "bundled",
+      "parameters.local_check_policy.type": "bundled",
       "parameters.min_reviews.default": "bundled",
       "parameters.min_reviews.doc": "bundled",
       "parameters.min_reviews.max": "bundled",
@@ -151,6 +155,11 @@
             "when": "terminal"
           }
         ],
+        "local_check_policy": {
+          "default": "",
+          "doc": "Local check policy inherited by nested presets; empty uses the layered roles library.",
+          "type": "string"
+        },
         "min_reviews": {
           "default": 0,
           "doc": "Lenses that must succeed. Fewer fails the lens group, which stops the council for the chair to substitute a lens or decide. 0 takes the review ladder minimum for risk_tier, at least 1.",

@@ -2338,6 +2338,7 @@ fn generator_evaluator_ends_with_an_evaluator_over_the_lens_list() {
         &[
             "parameters.worktree='/repo/lane'".into(),
             "parameters.evaluator='principal'".into(),
+            "parameters.base='main'".into(),
         ],
     )
     .unwrap();
@@ -2345,6 +2346,28 @@ fn generator_evaluator_ends_with_an_evaluator_over_the_lens_list() {
     assert_eq!(evaluate["kind"], "synthesise");
     assert_eq!(evaluate["route"]["alias"], "principal");
     assert_eq!(evaluate["source"]["node"], "implement");
+    assert_eq!(evaluate["review_base"], "main");
+    let document: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(expanded.document.clone()).unwrap();
+    let graph = document
+        .expanded(&provenant_fabric_runtime::config::GraphLimits::default())
+        .unwrap();
+    let lenses: Vec<_> = graph
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.role
+                .as_deref()
+                .is_some_and(|role| role.starts_with("lens."))
+        })
+        .collect();
+    assert!(!lenses.is_empty());
+    for lens in lenses {
+        assert_eq!(lens.extra.get("review_base"), Some(&json!("main")));
+        assert!(
+            matches!(&lens.source, Some(provenant_fabric_runtime::graph::SourceBinding::Node { node }) if node == "implement")
+        );
+    }
     assert!(
         evaluate["prompt"]
             .as_str()
@@ -4200,17 +4223,30 @@ fn preset_show_and_explain_json_match_snapshots() {
         Outcome::Ok,
         layers.explain("review-council").unwrap(),
     );
-    for (actual, expected) in [
+    // `UPDATE_GOLDEN=1` rewrites the fixtures.
+    let golden = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+    for (actual, name) in [
         (
             serde_json::to_value(show).unwrap(),
-            include_str!("../tests/golden/preset-review-council-show.json"),
+            "preset-review-council-show.json",
         ),
         (
             serde_json::to_value(explain).unwrap(),
-            include_str!("../tests/golden/preset-review-council-explain.json"),
+            "preset-review-council-explain.json",
         ),
     ] {
-        assert_eq!(actual, serde_json::from_str::<Value>(expected).unwrap());
+        let path = golden.join(name);
+        if std::env::var_os("UPDATE_GOLDEN").is_some() {
+            let mut text = serde_json::to_string_pretty(&actual).unwrap();
+            text.push('\n');
+            std::fs::write(&path, text).unwrap();
+        }
+        let expected = std::fs::read_to_string(&path).unwrap_or_default();
+        assert_eq!(
+            actual,
+            serde_json::from_str::<Value>(&expected).unwrap_or_default(),
+            "{name}: rerun with UPDATE_GOLDEN=1 to refresh"
+        );
     }
 }
 

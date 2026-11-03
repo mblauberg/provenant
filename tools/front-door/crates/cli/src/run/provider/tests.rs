@@ -1346,6 +1346,101 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
     )?;
     // A failed diagnostic write must not fail an otherwise valid launch.
     std::fs::create_dir(attempt.join("availability.json"))?;
+    // Check configuration precedence through real preparation and adapter grants.
+    let skills = home.join(".cursor/skills");
+    let skill_target = base.join("installed-skill");
+    std::fs::create_dir_all(&skills)?;
+    std::fs::create_dir_all(&skill_target)?;
+    std::os::unix::fs::symlink(&skill_target, skills.join("linked"))?;
+    let project_id = binding.project_id().to_string();
+    for (settings, expected, source) in [
+        (String::new(), true, "host"),
+        (
+            "[domains.lanes]\nuser_skills = 'off'\n".into(),
+            false,
+            "host",
+        ),
+        (
+            format!(
+                "[domains.lanes]\nuser_skills = 'discover'\n[domains.lanes.projects.{project_id}]\nuser_skills = 'off'\n"
+            ),
+            false,
+            "project",
+        ),
+        (
+            format!(
+                "[domains.lanes]\nuser_skills = 'off'\n[domains.lanes.projects.{project_id}]\nuser_skills = 'discover'\n"
+            ),
+            true,
+            "project",
+        ),
+        (
+            format!(
+                "[domains.lanes.projects.{project_id}]\nuser_skills = 'discover'\n[[domains.routing.model_policy.rules]]\nadapter = 'cursor'\n[domains.routing.model_policy.rules.policy.lane]\nuser_skills = 'off'\n"
+            ),
+            false,
+            "route",
+        ),
+        (
+            format!(
+                "[domains.lanes.projects.{project_id}]\nuser_skills = 'off'\n[[domains.routing.model_policy.rules]]\nadapter = 'cursor'\n[domains.routing.model_policy.rules.policy.lane]\nuser_skills = 'discover'\n"
+            ),
+            true,
+            "route",
+        ),
+    ] {
+        std::fs::write(
+            state.join("config.toml"),
+            format!("schema_version = 1\n{settings}"),
+        )?;
+        let prepared = prepare_with(
+            &registry,
+            &task,
+            "skill fixture",
+            &paths,
+            None,
+            |_| Ok(executable.clone()),
+            None,
+        )?;
+        let confinement = prepared.confinement.as_ref().ok_or("confinement")?;
+        let reads = &confinement.profile.spec.runtime_reads;
+        let writes = provenant_confinement::write_grants(
+            confinement.plan.permissions(),
+            &confinement.profile,
+        );
+        for path in [&skills, &skill_target] {
+            assert_eq!(
+                reads.iter().any(|grant| grant.path == *path),
+                expected,
+                "{settings}: {path:?}"
+            );
+            assert!(
+                !writes
+                    .iter()
+                    .any(|grant| path.starts_with(&grant.path) || grant.path.starts_with(path)),
+                "write grant for {path:?}: {settings}"
+            );
+        }
+        let receipt = &prepared.route.extra["user_skills"];
+        assert_eq!(receipt["exposed"], expected, "{settings}");
+        if source == "route" {
+            assert!(receipt["source"]["route_policy"].is_array());
+        } else {
+            let key = if source == "project" {
+                format!("domains.lanes.projects.{project_id}.user_skills")
+            } else {
+                "domains.lanes.user_skills".into()
+            };
+            assert_eq!(receipt["source"]["key"], key);
+        }
+    }
+    std::fs::write(
+        state.join("config.toml"),
+        format!(
+            "schema_version = 1\n[domains.accounts.entries.unrelated]\nadapter = 'claude'\nlabel = 'other'\nkey = 'fixture-other'\ndirectory = '{}'\n",
+            home.join(".claude-other").display()
+        ),
+    )?;
     let launch = prepare_with(
         &registry,
         &task,

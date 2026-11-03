@@ -58,6 +58,7 @@ pub struct LanePolicy {
     pub stop_early_ok: Option<bool>,
     pub max_continuations: Option<u8>,
     pub read_only: Option<bool>,
+    pub user_skills: Option<provenant_records::run::UserSkillsMode>,
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -104,7 +105,8 @@ impl ModelPolicy {
             max_turns,
             stop_early_ok,
             max_continuations,
-            read_only
+            read_only,
+            user_skills,
         );
         overlay!(
             self.result,
@@ -899,6 +901,33 @@ mod tests {
 
     fn at(seconds: i64) -> WallTime {
         WallTime::from_unix_seconds(seconds).expect("instant")
+    }
+
+    #[test]
+    fn user_skills_route_policy_overlays_defaults() -> Result<(), Box<dyn std::error::Error>> {
+        let policies: ModelPolicies = toml_edit::de::from_str(
+            "[defaults.lane]\nuser_skills='off'\n[[rules]]\nadapter='claude'\n[rules.policy.lane]\nuser_skills='discover'\n",
+        )?;
+        for (model, expected) in [
+            (
+                "claude/claude-sonnet-5-5",
+                provenant_records::UserSkillsMode::Discover,
+            ),
+            (
+                "codex/gpt-6.1-terra",
+                provenant_records::UserSkillsMode::Off,
+            ),
+        ] {
+            assert_eq!(
+                policies
+                    .effective(&ModelId::parse(model)?, None, at(1))
+                    .policy
+                    .lane
+                    .user_skills,
+                Some(expected)
+            );
+        }
+        Ok(())
     }
 
     #[test]

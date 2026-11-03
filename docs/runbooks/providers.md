@@ -155,12 +155,56 @@ refreshes tokens. This is an accepted limit. A lane is not granted other
 providers' credential stores, and GitHub CLI configuration stays denied
 ([#2432](https://github.com/mblauberg/provenant/issues/2432)).
 
-Codex scans `$HOME/.agents/skills` at startup, independently of `CODEX_HOME`.
-`HOME` is unchanged for the lane, so HOME-derived defaults keep working. A
-Codex lane (read-only or worktree-write) is granted the host's
-`~/.agents/skills` directory read-only when it exists at prepare time, so the
-scan succeeds. There is no write grant for it. Repository-local skills remain
-discoverable.
+## User skills in lanes
+
+Lanes discover host user skills read-only by default. The
+`domains.lanes.user_skills` setting accepts `"discover"` (default) or `"off"`.
+`provenant config show` and `provenant config schema` show its value, default
+and origin. Set it in the selected state root's `config.toml`:
+
+```toml
+[domains.lanes]
+user_skills = "off"
+
+# Override the host default for a registered Fabric project ID.
+# Find the ID with `provenant fabric identity`.
+[domains.lanes.projects."PROJECT-ID"]
+user_skills = "discover"
+
+# Narrow discovery to particular routes with the existing model policy.
+[[domains.routing.model_policy.rules]]
+adapter = "claude"
+[domains.routing.model_policy.rules.policy.lane]
+user_skills = "off"
+```
+
+A supplied route policy wins over the project override, which wins over the
+host default. Omit an override to inherit. A brief can still name or quote a
+skill explicitly when discovery is off. Project skills remain in the worktree;
+this setting controls host user skills only.
+
+| Provider | Host user skill directory | Lane placement |
+|---|---|---|
+| Claude | `~/.claude/skills` | Linked as `skills` in the private `CLAUDE_CONFIG_DIR` for writers and registered readers; default readers discover it at the host path. |
+| Codex | `~/.agents/skills` | Native HOME discovery, independent of private `CODEX_HOME`. With discovery off, HOME points at private state so its startup scan sees no host skills. |
+| agy | `~/.gemini/skills` | Linked into the private home's `.gemini/skills`. |
+| OpenCode | `$XDG_CONFIG_HOME/opencode/skills`, falling back to `~/.config/opencode/skills` | Native XDG discovery; relative XDG overrides are ignored. |
+| Cursor | `~/.cursor/skills` | Native user discovery ([Cursor skills](https://cursor.com/docs/skills)). |
+
+Missing directories are skipped silently. Grants cover canonical skill
+directories and resolved symlink targets, including installed skills under
+`~/.local/share/provenant/v1/releases/<digest>/` and linked resource files.
+These grants are read-only: no skill write or execute grant is added, and they
+do not expose the containing host configuration. OpenCode retains its existing
+provider configuration reads through separate grants that exclude `skills`. Existing worktree and credential scopes
+are unchanged. Reading a skill does not change nested dispatch policy.
+Very large linked collections remain subject to the sandbox's existing limit
+of 128 runtime read grants; discovery can be turned off for affected routes.
+
+Each attempt's applied route records `user_skills` with the requested mode,
+whether it was exposed, its host directory, canonical read grants and setting
+source. `provenant output ATTEMPT --json` includes that receipt; human output
+shows it as a `grant user_skills` line. Older attempts have no receipt.
 
 ## Claude network access
 
