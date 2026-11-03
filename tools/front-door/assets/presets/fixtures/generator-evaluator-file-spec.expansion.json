@@ -69,9 +69,14 @@
             ],
             "role": "lens.correctness-spec",
             "role_digest": "sha256:bf578197d0881e91746f43b0888c298a0bc6ce3a4f97293690e3b495a9138ea2",
-            "route": {
-              "alias": "senior"
-            },
+            "routes": [
+              {
+                "alias": "senior"
+              },
+              {
+                "alias": "senior"
+              }
+            ],
             "title": "lens-correctness-spec"
           },
           {
@@ -93,9 +98,14 @@
             ],
             "role": "lens.simplicity",
             "role_digest": "sha256:46d20a75ff5d5cb89b53165b558efb8205a2801263593b4365e23d20150c41b4",
-            "route": {
-              "alias": "senior"
-            },
+            "routes": [
+              {
+                "alias": "senior"
+              },
+              {
+                "alias": "senior"
+              }
+            ],
             "title": "lens-simplicity"
           }
         ]
@@ -142,9 +152,14 @@
       "prompt": "You evaluate a writer's commit from its lens findings and decide whether it is accepted.\n\nEvaluate the implementation of: brief\nSpec (acceptance criteria): assets/presets/fixtures/review-spec.md\nWeigh the lens findings against the evidence. Give every finding exactly one\ndisposition with a one-line reason: accepted, rejected or deferred. End with a\nfenced findings block (schema_version 1) with one entry per finding id; each\nentry carries \"disposition\" and \"reason\". Emit one\nexact VERDICT: PASS only when no accepted finding remains, otherwise\nVERDICT: FAIL.\n\n\nSpec file: <project>/assets/presets/fixtures/review-spec.md (sha256:1c974fb1d819bc7234bce4a1b173df30c077658eb2400f3dcea6fc46e738c564; excerpt up to 16384 bytes)\n# Acceptance criteria\n\nThe review receives this writer-worktree spec.\n",
       "role": "review.evaluator",
       "role_digest": "sha256:8bf23a83b0b87661cf925300b45475434805c87d7d58c13803c6413a756c36d0",
-      "route": {
-        "alias": "senior"
-      },
+      "routes": [
+        {
+          "alias": "senior"
+        },
+        {
+          "alias": "senior"
+        }
+      ],
       "source": {
         "node": "implement",
         "type": "node"
