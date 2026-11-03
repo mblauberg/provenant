@@ -15,7 +15,7 @@ pub fn component(text: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
-fn reference(text: &str) -> bool {
+pub(crate) fn reference(text: &str) -> bool {
     !text.is_empty()
         && text.len() <= 256
         && text
@@ -264,6 +264,16 @@ pub enum ProbeFailure {
     Malformed,
 }
 impl ProbeFailure {
+    /// Default readiness classification, before provider execution detail.
+    pub fn readiness_reason(self) -> crate::ReadinessReason {
+        match self {
+            Self::MissingCli | Self::Disabled => crate::ReadinessReason::MissingExecutable,
+            Self::Auth => crate::ReadinessReason::SignedOut,
+            Self::AccountMismatch => crate::ReadinessReason::AccountMismatch,
+            _ => crate::ReadinessReason::CommandFailure,
+        }
+    }
+
     /// Failures only a login or re-registration repairs; the account is
     /// reported as `auth_required` until then.
     pub fn needs_login(self) -> bool {

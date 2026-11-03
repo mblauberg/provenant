@@ -85,15 +85,7 @@ pub trait QuotaEffects {
     /// A richer, memory-only reason for this attempt. Implementations may
     /// retain provider execution details without changing the v1 account file.
     fn readiness_reason(&self, failure: crate::ProbeFailure) -> crate::ReadinessReason {
-        match failure {
-            crate::ProbeFailure::MissingCli | crate::ProbeFailure::Disabled => {
-                crate::ReadinessReason::MissingExecutable
-            }
-            crate::ProbeFailure::Auth => crate::ReadinessReason::SignedOut,
-            crate::ProbeFailure::AccountMismatch => crate::ReadinessReason::AccountMismatch,
-            crate::ProbeFailure::Network => crate::ReadinessReason::CommandFailure,
-            _ => crate::ReadinessReason::CommandFailure,
-        }
+        failure.readiness_reason()
     }
 }
 

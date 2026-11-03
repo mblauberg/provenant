@@ -449,8 +449,9 @@ JSON with `schema_version: 1` and a `findings` array. Each finding has `id`,
 ````
 
 The runtime accepts at most 32 findings. A missing or invalid block produces
-an empty list and, when a result exists, a warning rather than failing the node. See the
-[graph spec](../specs/fabric.md#typed-node-outputs) for the output contract.
+an empty list and a warning by default; a node with `require_findings = true`
+fails with `findings_required`. See the [graph spec](../specs/fabric.md#typed-node-outputs)
+for the output contract.
 
 ```sh
 provenant fabric graph run --document graph.json

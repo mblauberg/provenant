@@ -1067,7 +1067,12 @@ fn partial_composite_exports_only_successful_members_and_lists_the_unavailable()
             .unwrap()
     };
     assert_eq!(run.status, GraphStatus::Complete);
+    assert_eq!(node("lens-a").state, NodeState::Succeeded);
     assert_eq!(node("lens-b").state, NodeState::Failed);
+    assert_eq!(
+        node("lens-b").advance_error_code.as_deref(),
+        Some("findings_required")
+    );
     assert_eq!(node("verify").state, NodeState::Succeeded);
     let lenses = node("lenses").outputs.as_ref().unwrap();
     assert_eq!(lenses.findings.len(), 1);
@@ -3527,11 +3532,9 @@ fn output_parsing_is_lenient_and_rendering_fails_instead_of_omitting() {
         "```findings\n{{\"schema_version\":1,\"findings\":[],\"extra\":\"{}\"}}\n```",
         "x".repeat(8192)
     );
-    assert!(
-        make_outputs(Some(&capture(&oversized)), None, None, None, None)
-            .findings
-            .is_empty()
-    );
+    let parsed = make_outputs(Some(&capture(&oversized)), None, None, None, None);
+    assert!(parsed.findings.is_empty());
+    assert!(parsed.warnings.is_empty());
 
     let mut child = node("child", route("fixture"));
     child.depends_on.push("parent".into());
@@ -3609,6 +3612,47 @@ fn findings_and_verdict_at_the_end_of_a_large_result_are_parsed() {
     assert_eq!(outputs.verdict.as_deref(), Some("VERDICT: PASS"));
     assert_eq!(outputs.findings[0].id, "F1");
     assert!(outputs.result.unwrap().truncated);
+
+    let findings: Vec<_> = (0..20)
+        .map(|index| {
+            serde_json::json!({
+                "id": format!("F{index}"), "severity": "high", "file": "src/lib.rs",
+                "line": 12, "summary": "s".repeat(150), "status": "open",
+                "disposition": "accepted", "reason": "r".repeat(150)
+            })
+        })
+        .collect();
+    let block = serde_json::json!({"schema_version": 1, "findings": findings}).to_string();
+    assert!(block.len() > 8 * 1024);
+    let text = format!("```findings\n{block}\n```\nVERDICT: FAIL\n");
+    let outputs = make_outputs(Some(&capture(&text)), None, None, None, None);
+    assert_eq!(outputs.findings.len(), 20);
+    assert!(
+        outputs
+            .findings
+            .iter()
+            .all(|finding| finding.disposition.as_deref() == Some("accepted")
+                && finding.reason.as_deref() == Some("r".repeat(150).as_str()))
+    );
+    assert!(outputs.warnings.is_empty());
+
+    let finding = serde_json::json!({
+        "id": "F1", "severity": "high", "file": "a.rs", "line": 1,
+        "summary": "issue", "status": "open"
+    });
+    for invalid in [
+        vec![finding.clone(); MAX_FINDINGS + 1],
+        vec![serde_json::json!({
+            "id": "F1", "severity": "high", "file": "a.rs", "line": 1,
+            "summary": "x".repeat(OUTPUT_FIELD_BYTES + 1), "status": "open"
+        })],
+    ] {
+        let block = serde_json::json!({"schema_version": 1, "findings": invalid});
+        let text = format!("```findings\n{block}\n```");
+        let outputs = make_outputs(Some(&capture(&text)), None, None, None, None);
+        assert!(outputs.findings.is_empty());
+        assert_eq!(outputs.warnings, [FINDINGS_INVALID]);
+    }
 }
 
 #[test]

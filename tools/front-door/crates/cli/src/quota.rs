@@ -679,7 +679,6 @@ fn sync_readiness(state: &Path, intent: &UpdateIntent, now: i64) -> Result<(), E
             records: std::slice::from_ref(record),
             pools: &[],
         };
-        file.sync_refusals(record, LOCAL_HOST, &admission)?;
         if let Some(reason) = intent.readiness_probe_result {
             let interval = policies
                 .iter()
@@ -687,6 +686,7 @@ fn sync_readiness(state: &Path, intent: &UpdateIntent, now: i64) -> Result<(), E
                 .map_or(300, |policy| policy.timer_seconds);
             file.sync_probe_result(record, LOCAL_HOST, now, interval, reason)?;
         }
+        file.sync_refusals(record, LOCAL_HOST, &admission)?;
     } else {
         file.records.clear();
     }
@@ -769,9 +769,14 @@ fn write_intent(
             }
         }
     }
-    // Readiness is derived from what was just committed. A failure leaves it
-    // unknown, which routing treats as unproven, never as ready.
-    let _ = sync_readiness(state, intent, SystemClock::new().unix_seconds());
+    // The account commit remains authoritative if derived publication fails.
+    if let Err(error) = sync_readiness(state, intent, SystemClock::new().unix_seconds()) {
+        use std::io::Write;
+        let _ = writeln!(
+            io::stderr().lock(),
+            "Warning: could not sync quota readiness: {error}"
+        );
+    }
     signal_quota(state);
     Ok(())
 }
@@ -1173,7 +1178,7 @@ fn execute(
             .iter()
             .filter_map(|r| r.quota_source)
             .find(|s| s.adapter_id() == account.adapter);
-        let (outcome, readiness_reason) = match source {
+        let outcome = match source {
             Some(source) => {
                 let probe_deadline = schedule::probe_deadline(plan.deadline_unix_seconds, at)?;
                 let input = QuotaProbeInput {
@@ -1181,30 +1186,22 @@ fn execute(
                     deadline_unix_seconds: probe_deadline,
                     authority_ref: Some("configured-local-quota".into()),
                 };
-                match source.probe(account, &input) {
-                    Ok(probe) => match effects.capture(&probe, current.as_ref()) {
-                        Ok(capture) => match source.decode(&probe, &capture) {
-                            Ok(snapshot) => (Ok(snapshot), Some(None)),
-                            Err(_) => (
-                                Err(ProbeFailure::Malformed),
-                                Some(Some(ReadinessReason::CommandFailure)),
-                            ),
-                        },
-                        Err(failure) => {
-                            (Err(failure), Some(Some(effects.readiness_reason(failure))))
-                        }
-                    },
-                    Err(_) => (
-                        Err(ProbeFailure::Disabled),
-                        Some(Some(ReadinessReason::MissingExecutable)),
-                    ),
-                }
+                source
+                    .probe(account, &input)
+                    .map_err(|_| ProbeFailure::Disabled)
+                    .and_then(|probe| {
+                        let capture = effects.capture(&probe, current.as_ref())?;
+                        source
+                            .decode(&probe, &capture)
+                            .map_err(|_| ProbeFailure::Malformed)
+                    })
             }
-            None => (
-                Err(ProbeFailure::Disabled),
-                Some(Some(ReadinessReason::MissingExecutable)),
-            ),
+            None => Err(ProbeFailure::Disabled),
         };
+        let readiness_reason = outcome
+            .as_ref()
+            .err()
+            .map(|failure| effects.readiness_reason(*failure));
         let finished = clock
             .wall_now()
             .map_err(|_| EdgeError::Time)?
@@ -1219,7 +1216,7 @@ fn execute(
         {
             match schedule::complete(reserved, &token, finished, outcome, None) {
                 Ok(mut complete) => {
-                    complete.readiness_probe_result = readiness_reason;
+                    complete.readiness_probe_result = Some(readiness_reason);
                     write_intent(&dir, roots.state.as_path(), &complete, &mut records)?;
                     // Best effort: a history fault never fails the refresh.
                     if let Some(snapshot) = complete
@@ -2910,6 +2907,163 @@ mod tests {
     }
 
     #[test]
+    fn execute_publishes_probe_outcomes_as_readiness() -> Result<(), Box<dyn std::error::Error>> {
+        struct Effects {
+            failure: Option<ProbeFailure>,
+            malformed: bool,
+        }
+        impl QuotaEffects for Effects {
+            fn accounts(&self) -> Result<Vec<AccountScope>, QuotaError> {
+                Ok(vec![AccountScope {
+                    adapter: "codex".into(),
+                    account_key: "key".into(),
+                    label: "fixture".into(),
+                }])
+            }
+            fn capture(
+                &self,
+                _: &QuotaProbePlan,
+                _: Option<&AccountRecord>,
+            ) -> Result<ProbeCapture, ProbeFailure> {
+                if let Some(failure) = self.failure {
+                    return Err(failure);
+                }
+                Ok(ProbeCapture {
+                    stdout: if self.malformed {
+                        b"{".to_vec()
+                    } else {
+                        include_bytes!("../../providers/src/quota/fixtures/codex-app-server.json")
+                            .to_vec()
+                    },
+                    stderr: vec![],
+                    exit_code: Some(0),
+                    overflowed: false,
+                })
+            }
+        }
+        for (failure, malformed, expected) in [
+            (None, false, None),
+            (None, true, Some(ReadinessReason::CommandFailure)),
+            (
+                Some(ProbeFailure::MissingCli),
+                false,
+                Some(ReadinessReason::MissingExecutable),
+            ),
+            (
+                Some(ProbeFailure::Auth),
+                false,
+                Some(ReadinessReason::SignedOut),
+            ),
+            (
+                Some(ProbeFailure::AccountMismatch),
+                false,
+                Some(ReadinessReason::AccountMismatch),
+            ),
+            (
+                Some(ProbeFailure::Network),
+                false,
+                Some(ReadinessReason::CommandFailure),
+            ),
+        ] {
+            let temp = tempfile::tempdir()?;
+            let mut inputs = provenant_core::RootInputs::new(
+                temp.path().join("home"),
+                temp.path().join("checkout"),
+            );
+            inputs.state_dir = Some(temp.path().join("state"));
+            let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+            let command = Quota::Tick {
+                adapter: Filter {
+                    adapter: Some("codex".into()),
+                },
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            };
+            execute(
+                &command,
+                &roots,
+                provenant_providers::REGISTRY,
+                &Effects { failure, malformed },
+            )?;
+            let read = read_readiness(
+                roots.state.as_path(),
+                &ReadinessScope {
+                    host: LOCAL_HOST.into(),
+                    adapter: "codex".into(),
+                    account_key: "key".into(),
+                    route: "codex/model".into(),
+                },
+                SystemClock::new().unix_seconds(),
+            );
+            assert_eq!(
+                read.reason,
+                Some(expected.unwrap_or(ReadinessReason::NotProbed)),
+                "{failure:?}/{malformed}"
+            );
+            assert_eq!(
+                read.state,
+                if expected.is_some() {
+                    ReadinessState::Unavailable
+                } else {
+                    ReadinessState::Unknown
+                }
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn readiness_edge_rejects_damaged_wrong_mode_and_oversized_files()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+        let root = private(temp.path())?;
+        let readiness = child(&root, OsStr::new(READINESS_DIRECTORY))?;
+        let _account = child(&readiness, OsStr::new("key"))?;
+        let path = temp.path().join("readiness/key/claude.json");
+        let scope = ReadinessScope {
+            host: LOCAL_HOST.into(),
+            adapter: "claude".into(),
+            account_key: "key".into(),
+            route: "claude/model".into(),
+        };
+        let file = ReadinessFile {
+            schema_version: 1,
+            records: vec![provenant_quota::RouteReadiness {
+                schema_version: 1,
+                scope: scope.clone(),
+                state: ReadinessState::Ready,
+                reason: None,
+                observed_unix_seconds: 100,
+                expires_unix_seconds: 200,
+                reset_unix_seconds: None,
+                evidence_ref: Some("fixture".into()),
+            }],
+        };
+        let valid = serde_json::to_vec(&file)?;
+        for (bytes, mode, expected) in [
+            (valid.clone(), 0o600, ReadinessState::Ready),
+            (b"{".to_vec(), 0o600, ReadinessState::Unknown),
+            (valid, 0o644, ReadinessState::Unknown),
+            (
+                vec![b' '; MAX_RECORD_BYTES as usize + 1],
+                0o600,
+                ReadinessState::Unknown,
+            ),
+        ] {
+            std::fs::write(&path, bytes)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))?;
+            let read = read_readiness(temp.path(), &scope, 150);
+            assert_eq!(read.state, expected);
+            if expected == ReadinessState::Unknown {
+                assert_eq!(read.reason, Some(ReadinessReason::InvalidEvidence));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn probe_failure_readiness_is_account_wide_and_a_fresh_success_clears_it()
     -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
@@ -2925,6 +3079,17 @@ mod tests {
         let mut records = Vec::new();
         let mut initial = AccountRecord::empty(account.clone());
         initial.revision = 1;
+        let now = SystemClock::new().unix_seconds();
+        initial.refusals = (0..provenant_quota::MAX_READINESS_RECORDS)
+            .map(|i| provenant_quota::Refusal {
+                extra: Default::default(),
+                account: account.clone(),
+                model: format!("model-{i}"),
+                pool: Some(format!("pool-{i}")),
+                observed_unix_seconds: now - 10,
+                resets_unix_seconds: Some(now + 600),
+            })
+            .collect();
         write_intent(
             &dir,
             state,
@@ -2972,6 +3137,14 @@ mod tests {
         assert_eq!(
             read_readiness(state, &route, SystemClock::new().unix_seconds()).state,
             ReadinessState::Unknown
+        );
+        let pool = ReadinessScope {
+            route: "pool-0".into(),
+            ..route.clone()
+        };
+        assert_eq!(
+            read_readiness(state, &pool, SystemClock::new().unix_seconds()).reason,
+            Some(ReadinessReason::ProviderRefusal)
         );
         let bytes = std::fs::read(state.join("quota/work/agy.json"))?;
         assert_eq!(AccountRecord::decode(&bytes)?, records[0]);

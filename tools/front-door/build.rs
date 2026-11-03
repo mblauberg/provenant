@@ -127,7 +127,13 @@ impl TrackedFiles {
             .current_dir(workspace)
             .output()?;
         if !index.status.success() {
-            return Err(invalid("cannot resolve source inventory git index").into());
+            return Err(git_failure(
+                "cannot resolve source inventory git index",
+                workspace,
+                index.status,
+                &index.stderr,
+            )
+            .into());
         }
         let index = index_path_from_output(&index.stdout)?;
         watch(watched, index)?;
@@ -142,7 +148,13 @@ impl TrackedFiles {
             .current_dir(workspace)
             .output()?;
         if !output.status.success() {
-            return Err(invalid("cannot list tracked source files").into());
+            return Err(git_failure(
+                "cannot list tracked source files",
+                workspace,
+                output.status,
+                &output.stderr,
+            )
+            .into());
         }
         let names = output
             .stdout
@@ -866,6 +878,24 @@ fn validate_metadata_value(value: &str) -> BuildResult<()> {
     Ok(())
 }
 
+/// Names the workspace, exit status and a bounded excerpt of git's stderr.
+fn git_failure(
+    what: &str,
+    workspace: &Path,
+    status: std::process::ExitStatus,
+    stderr: &[u8],
+) -> io::Error {
+    const LIMIT: usize = 500;
+    let excerpt = &stderr[..stderr.len().min(LIMIT)];
+    let text = String::from_utf8_lossy(excerpt);
+    let truncated = if stderr.len() > LIMIT { "..." } else { "" };
+    io::Error::other(format!(
+        "{what} in {}: git {status}: {}{truncated}",
+        workspace.display(),
+        text.trim()
+    ))
+}
+
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
@@ -874,12 +904,15 @@ fn invalid(message: &'static str) -> io::Error {
 mod tests {
     use super::{
         BuildResult, Inputs, TrackedFiles, collect_external_tree, collect_member_inputs,
-        discover_members, index_path_from_output, invalid, parse_toml, source_digest, watch,
+        discover_members, git_failure, index_path_from_output, invalid, parse_toml, source_digest,
+        watch,
     };
     use provenant_records::{SourceDigest, SourceInput};
     use std::collections::BTreeSet;
     use std::fs;
+    use std::os::unix::process::ExitStatusExt;
     use std::path::Path;
+    use std::process::ExitStatus;
 
     #[test]
     fn dangling_untracked_symlink_is_not_watched() -> BuildResult<()> {
@@ -908,6 +941,18 @@ mod tests {
             index_path_from_output(b"/missing/index\n")?,
             Path::new("/missing/index")
         );
+
+        let message = git_failure(
+            "cannot resolve source inventory git index",
+            Path::new("/work/tree"),
+            ExitStatus::from_raw(128 << 8),
+            format!(" fatal: not a repository\n{}", "x".repeat(600)).as_bytes(),
+        )
+        .to_string();
+        assert!(message.starts_with("cannot resolve source inventory git index in /work/tree: "));
+        assert!(message.contains("exit status: 128: fatal: not a repository"));
+        assert!(message.ends_with("..."));
+        assert!(message.len() < 650);
         Ok(())
     }
 

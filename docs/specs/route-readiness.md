@@ -42,7 +42,12 @@ each time it commits that record: a refusal is published as `unavailable` with
 the refusal's scope and reset, and removed when the account record no longer
 holds it or when a fresh reading of the pool proves headroom
 (`Admission::refusal_holds`, the rule admission uses). Forgetting the account
-removes the file. A failed readiness write leaves it unknown, never ready.
+removes the file. A same-scope refusal replaces any prior observation. An
+account-wide probe failure supersedes this host's per-route observations to
+stay within the file bound; after probe success or expiry, the next account
+sync rebuilds held refusals from the account record. A failed readiness write
+leaves it unknown, never ready. The CLI warns if readiness publication fails;
+the account commit remains authoritative.
 
 Reading. `provenant_quota::ReadinessFile::get(scope, now)` returns a
 `ReadinessRead` (state, reason, expiry, reset, evidence reference) and
