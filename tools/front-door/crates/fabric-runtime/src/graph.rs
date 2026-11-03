@@ -95,6 +95,9 @@ const COMPOSITE_EXCERPT_BYTES: usize = 65_536;
 /// The raw findings block is at most 8 KiB of JSON; canonical form adds at
 /// most a null `line` per finding.
 const FINDINGS_BYTES: usize = 9_216;
+// Each disposition can inherit an entire bounded upstream entry and supply
+// independently bounded, JSON-escaped fields of its own.
+const DISPOSITION_FINDINGS_BYTES: usize = 32 * (FINDINGS_BYTES + 7 * (6 * 1024 + 2) + 512);
 const WARNING_BYTES: usize = 512;
 /// Output parsing, writer handoff and an empty review range can each add warnings.
 const MAX_WARNINGS: usize = 5;
@@ -1160,6 +1163,18 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
 
         for node_index in 0..plan.nodes.len() {
             if checkpoint.nodes[node_index].state.settled() {
+                if checkpoint.nodes[node_index].state == NodeState::Blocked
+                    && dependency_state(&plan.nodes[node_index], &plan, &checkpoint, &positions)
+                        == Some(NodeState::Blocked)
+                    && attribute_blocker(
+                        node_index,
+                        &plan.nodes[node_index],
+                        &mut checkpoint,
+                        &positions,
+                    )
+                {
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                }
                 continue;
             }
 
@@ -1234,7 +1249,17 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             }
             let dependency = dependency_state(node, &plan, &checkpoint, &positions);
             if let Some(state) = dependency {
-                if checkpoint.nodes[node_index].state != state {
+                let mut changed = checkpoint.nodes[node_index].state != state;
+                if state == NodeState::Blocked {
+                    changed |= attribute_blocker(node_index, node, &mut checkpoint, &positions);
+                } else if changed
+                    && checkpoint.nodes[node_index].advance_error_code.as_deref()
+                        == Some("upstream_blocked")
+                {
+                    checkpoint.nodes[node_index].advance_error = None;
+                    checkpoint.nodes[node_index].advance_error_code = None;
+                }
+                if changed {
                     checkpoint.nodes[node_index].state = state;
                     journal.save(&checkpoint).map_err(GraphError::Journal)?;
                 }
@@ -2058,18 +2083,14 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         _ => None,
                     };
                 // Every selected upstream finding identity needs a disposition.
-                let upstream_findings: std::collections::BTreeSet<String> =
-                    if node.dispositions.is_empty() {
-                        Default::default()
-                    } else {
-                        node.inputs
-                            .iter()
-                            .filter(|input| input.outputs.contains(&OutputKind::Findings))
-                            .filter_map(|input| positions.get(&input.node))
-                            .filter_map(|index| checkpoint.nodes[*index].outputs.as_ref())
-                            .flat_map(|outputs| outputs.findings.iter().map(|f| f.id.clone()))
-                            .collect()
-                    };
+                let upstream_findings: Vec<Finding> = if node.dispositions.is_empty() {
+                    Default::default()
+                } else {
+                    selected_findings(node, &checkpoint, &positions)
+                        .into_iter()
+                        .map(|(_, finding)| finding)
+                        .collect()
+                };
                 let mut settled_result = None;
                 let retry_was_pending;
                 let should_continue = {
@@ -2115,12 +2136,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             attempt.attempt_ref = attempt_ref;
                             // Provider success alone does not satisfy an explicit result contract.
                             let warned = result_warning.is_some();
-                            let mut outputs = make_outputs(
+                            let mut outputs = make_outputs_with_upstream(
                                 result.as_deref(),
                                 result_warning,
                                 result_path,
                                 branch,
                                 commit,
+                                &upstream_findings,
                             );
                             if node.access == AccessMode::ReadOnly
                                 && node.role.as_deref().is_some_and(|role| {
@@ -2140,26 +2162,51 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             if outcome == AttemptOutcome::UsageLimited {
                                 outputs
                                     .warnings
-                                    .retain(|warning| warning != FINDINGS_INVALID);
+                                    .retain(|warning| !warning.starts_with(FINDINGS_INVALID));
                             }
                             let disposition_error = if node.require_findings
                                 && (outputs.result.is_none()
                                     || outputs
                                         .warnings
                                         .iter()
-                                        .any(|warning| warning == FINDINGS_INVALID))
+                                        .any(|warning| warning.starts_with(FINDINGS_INVALID)))
                             {
                                 Some((
                                     "findings_required",
-                                    "the findings block is missing or invalid".to_owned(),
+                                    outputs
+                                        .warnings
+                                        .iter()
+                                        .find(|warning| warning.starts_with(FINDINGS_INVALID))
+                                        .cloned()
+                                        .unwrap_or_else(|| {
+                                            "the findings block is missing or invalid".to_owned()
+                                        }),
                                 ))
                             } else {
                                 disposition_error(&node.dispositions, &upstream_findings, &outputs)
                             };
-                            let outcome = if warned {
+                            let review_result = node.access == AccessMode::ReadOnly
+                                && node.role.as_deref().is_some_and(|role| {
+                                    role.starts_with("lens.") || role.starts_with("review.")
+                                })
+                                && outputs.verdict.is_some()
+                                && outputs.verdict_error.is_none()
+                                && outputs.result.is_some()
+                                && !outputs
+                                    .warnings
+                                    .iter()
+                                    .any(|warning| warning.starts_with(FINDINGS_INVALID))
+                                && disposition_error.is_none();
+                            let outcome = if outcome == AttemptOutcome::DeclaredStop
+                                && review_result
+                                && !warned
+                            {
+                                AttemptOutcome::Succeeded
+                            } else if warned || outcome == AttemptOutcome::DeclaredStop {
                                 AttemptOutcome::OtherFailure
                             } else if outcome == AttemptOutcome::Succeeded
-                                && (node.required_verdict.is_some()
+                                && (!review_result
+                                    && node.required_verdict.is_some()
                                     && !(plans::writer(node)
                                         && result.as_ref().is_some_and(|capture| {
                                             plans::handoff(capture).ok().flatten().is_some()
@@ -2223,7 +2270,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     progress.state = NodeState::Failed;
                                     false
                                 }
-                                AttemptOutcome::TaskFailed | AttemptOutcome::OtherFailure => {
+                                AttemptOutcome::TaskFailed
+                                | AttemptOutcome::OtherFailure
+                                | AttemptOutcome::DeclaredStop => {
                                     progress.state = NodeState::Failed;
                                     false
                                 }
@@ -2381,6 +2430,39 @@ impl PlannedNode {
                 .iter()
                 .any(|input| input.node == gate && input.outputs.contains(&OutputKind::Findings))
         })
+    }
+}
+
+/// Explain an unexplained Blocked non-gate node by naming its first failed or blocked parent.
+/// Returns whether the checkpoint changed.
+fn attribute_blocker(
+    node_index: usize,
+    node: &PlannedNode,
+    checkpoint: &mut GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> bool {
+    // These nodes have their own settlement and checkpoint evidence rules.
+    if node.condition.is_some()
+        || node.composite.is_some()
+        || node.land.is_some()
+        || checkpoint.nodes[node_index].advance_error.is_some()
+    {
+        return false;
+    }
+    let blocker = node
+        .after_expansion
+        .iter()
+        .chain(&node.depends_on)
+        .map(|id| &checkpoint.nodes[positions[id]])
+        .find(|parent| matches!(parent.state, NodeState::Failed | NodeState::Blocked));
+    if let Some(parent) = blocker {
+        let reason = format!("blocked by {} ({:?})", parent.id, parent.state);
+        checkpoint.nodes[node_index].advance_error =
+            Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
+        checkpoint.nodes[node_index].advance_error_code = Some("upstream_blocked".into());
+        true
+    } else {
+        false
     }
 }
 

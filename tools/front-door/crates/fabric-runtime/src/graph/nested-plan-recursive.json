@@ -159,7 +159,7 @@
         "branch": null,
         "commit": null,
         "warnings": [
-          "findings block missing or invalid"
+          "findings block missing or invalid: field findings: block missing"
         ]
       },
       "attempts": [
@@ -199,7 +199,7 @@
         "branch": null,
         "commit": null,
         "warnings": [
-          "findings block missing or invalid"
+          "findings block missing or invalid: field findings: block missing"
         ]
       },
       "attempts": [
@@ -239,7 +239,7 @@
         "branch": null,
         "commit": null,
         "warnings": [
-          "findings block missing or invalid"
+          "findings block missing or invalid: field findings: block missing"
         ]
       },
       "attempts": [
@@ -279,7 +279,7 @@
         "branch": null,
         "commit": null,
         "warnings": [
-          "findings block missing or invalid"
+          "findings block missing or invalid: field findings: block missing"
         ]
       },
       "attempts": [

@@ -385,12 +385,26 @@ correctness against the spec and simplicity by default. Every lens prompt
 carries the same context. The reviewer has read access to the whole
 repository, treats the diff stat and slices as navigation aids rather than the
 scope, reads callers, existing utilities and architecture, and reviews against
-the `spec` (an issue number or file) and the `base` (the diff reference). The
+the `spec` (an issue number or file) and the `base` (the diff reference). File
+specs resolve first in the bound writer worktree, then in the launch checkout
+root, then in the main checkout. Relative writer worktrees resolve from the
+launch directory. Each
+review brief includes the resolved file path, SHA-256 of the full file and an excerpt
+(default 16,384 bytes); set `parameters.spec_max_bytes` from 1 to 65,536 to
+change the cap. Planned big-batch reviews share one excerpt resolved from the
+bound `batch_worktree`, then the project roots above. They do not resolve
+specs from the worktrees the planner may assign to lanes. Missing or unreadable
+files produce a named warning in explain and at launch, with guidance to pass
+an issue-number spec instead. Issue numbers are passed through unchanged. The
 subject node states both. Prompts live in
 `skills/code-review/references/lenses/`. After the lenses a verifier tries to
 falsify every finding (`verifiers = 0` skips it), and the synthesis gives each
 finding one disposition: accepted, rejected or deferred, with a reason. The
-`generator-evaluator` evaluator does the same over its lens findings.
+`generator-evaluator` evaluator does the same over its lens findings. Its
+`min_lenses` parameter defaults to 0 (all selected lenses but one, at least
+one); set a positive number to require that many, including the full panel.
+Preset explain shows the parameter and its origin. Unavailable lenses are
+named in the evaluator input.
 
 A review of a `head` or `node` subject with no `size` or `review_shape`
 (`deliver`, `generator-evaluator`, `big-batch`) cannot be measured when the

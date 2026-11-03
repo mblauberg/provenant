@@ -2325,3 +2325,155 @@ fn preset_run_followed_by_provenant_run_on_same_bound_worktree_succeeds()
 
     Ok(())
 }
+
+#[test]
+fn preset_missing_spec_warns_in_explain_and_launch() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    std::fs::create_dir(temp.path().join("home"))?;
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "initial",
+        ],
+    ] {
+        assert!(
+            provenant_os::fixture::git_command()
+                .current_dir(&project)
+                .args(args)
+                .status()?
+                .success()
+        );
+    }
+    let writer = temp.path().join("writer");
+    let batch = temp.path().join("batch");
+    for (branch, worktree) in [("writer", &writer), ("batch", &batch)] {
+        assert!(
+            provenant_os::fixture::git_command()
+                .current_dir(&project)
+                .args(["worktree", "add", "-q", "-b", branch])
+                .arg(worktree)
+                .status()?
+                .success()
+        );
+    }
+    std::fs::create_dir_all(writer.join(".agent-run"))?;
+    std::fs::write(writer.join(".agent-run/missing.md"), "lane-only criteria")?;
+    let prompt = temp.path().join("brief");
+    std::fs::write(&prompt, "review")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (preset, explain) in [
+        ("review-council", true),
+        ("review-council", false),
+        ("big-batch", true),
+        ("big-batch", false),
+    ] {
+        let mut command = fixture_cli();
+        command
+            .current_dir(&project)
+            .env("HOME", temp.path().join("home"))
+            .env("PATH", "/usr/bin:/bin")
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .arg("--state-dir")
+            .arg(temp.path().join("state"))
+            .args(["run", "--preset", preset, "--prompt-file"])
+            .arg(&prompt)
+            .args(["--set", "parameters.spec='.agent-run/missing.md'"]);
+        if preset == "big-batch" {
+            command.args([
+                "--plan",
+                "on",
+                "--set",
+                &format!("parameters.batch_worktree='{}'", batch.display()),
+                "--set",
+                &format!("parameters.worktrees=['{}']", writer.display()),
+            ]);
+        }
+        if explain {
+            command.arg("--explain");
+        } else {
+            command.args(["--wait", "1s"]);
+        }
+        let output = command.output()?;
+        let stderr = String::from_utf8(output.stderr)?;
+        assert!(
+            stderr.contains("spec file '.agent-run/missing.md' could not be read"),
+            "{preset}, explain={explain}: {stderr} / {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            stderr.contains("pass an issue-number spec instead"),
+            "{stderr}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn preset_file_spec_resolves_from_checkout_subdirectory() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    let subdir = project.join("nested");
+    std::fs::create_dir_all(&subdir)?;
+    assert!(
+        provenant_os::fixture::git_command()
+            .current_dir(&project)
+            .args(["init", "-q"])
+            .status()?
+            .success()
+    );
+    assert!(
+        provenant_os::fixture::git_command()
+            .current_dir(&project)
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "initial",
+            ])
+            .status()?
+            .success()
+    );
+    std::fs::write(project.join("spec.md"), "root acceptance criteria")?;
+    let prompt = temp.path().join("brief");
+    std::fs::write(&prompt, "review")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = fixture_cli()
+        .current_dir(&subdir)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .arg("--state-dir")
+        .arg(temp.path().join("state"))
+        .args([
+            "--json",
+            "run",
+            "--preset",
+            "review-council",
+            "--prompt-file",
+        ])
+        .arg(&prompt)
+        .args(["--explain", "--set", "parameters.spec='spec.md'"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let output = String::from_utf8(output.stdout)?;
+    assert!(output.contains("root acceptance criteria"), "{output}");
+    Ok(())
+}
