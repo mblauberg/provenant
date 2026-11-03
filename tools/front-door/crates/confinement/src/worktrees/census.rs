@@ -36,6 +36,18 @@ pub trait WorkerObserver: Send + Sync {
         (self.observe_roots_for_land(roots), BTreeMap::new())
     }
 
+    fn observe_roots_with_taints(&self, roots: &[PathBuf]) -> WorkerTaintObservations {
+        let (states, _) = self.observe_roots_with_details(roots);
+        let taints = default_taints(&states, &|root| self.live_process(root));
+        (states, taints)
+    }
+
+    fn observe_roots_for_land_with_taints(&self, roots: &[PathBuf]) -> WorkerTaintObservations {
+        let (states, _) = self.observe_roots_for_land_with_details(roots);
+        let taints = default_taints(&states, &|root| self.live_process_for_land(root));
+        (states, taints)
+    }
+
     /// Composition supplies host configuration. Injected observers retain
     /// their own refusal semantics; the native observer uses these entries.
     fn observe_roots_with_policy(
@@ -48,6 +60,19 @@ pub trait WorkerObserver: Send + Sync {
             self.observe_roots_for_land_with_details(roots)
         } else {
             self.observe_roots_with_details(roots)
+        }
+    }
+
+    fn observe_roots_with_policy_taints(
+        &self,
+        roots: &[PathBuf],
+        _entries: &[CensusIgnoreEntry],
+        for_land: bool,
+    ) -> WorkerTaintObservations {
+        if for_land {
+            self.observe_roots_for_land_with_taints(roots)
+        } else {
+            self.observe_roots_with_taints(roots)
         }
     }
 
@@ -69,6 +94,29 @@ pub trait WorkerObserver: Send + Sync {
     fn incomplete_census_detail(&self) -> String {
         "process census unavailable".into()
     }
+}
+
+fn default_taints(
+    states: &BTreeMap<PathBuf, WorkerState>,
+    live: &dyn Fn(&Path) -> Option<ObservedProcess>,
+) -> BTreeMap<PathBuf, TaintCause> {
+    states
+        .iter()
+        .filter_map(|(root, state)| {
+            let taint = match state {
+                WorkerState::Free => return None,
+                WorkerState::Busy => TaintCause::LockContention,
+                WorkerState::Live => live(root).map_or_else(
+                    || TaintCause::UnattributedLiveWriter,
+                    TaintCause::LiveWriter,
+                ),
+                WorkerState::Unknown => {
+                    TaintCause::Uncertainty(UncertaintyReason::CensusUnavailable)
+                }
+            };
+            Some((root.clone(), taint))
+        })
+        .collect()
 }
 
 /// Immutable host policy around either native observations or an injected seam.
@@ -98,6 +146,15 @@ impl WorkerObserver for CensusPolicyWorkers<'_> {
         self.inner
             .observe_roots_with_policy(roots, entries, for_land)
     }
+    fn observe_roots_with_policy_taints(
+        &self,
+        roots: &[PathBuf],
+        entries: &[CensusIgnoreEntry],
+        for_land: bool,
+    ) -> WorkerTaintObservations {
+        self.inner
+            .observe_roots_with_policy_taints(roots, entries, for_land)
+    }
     fn live_process_with_policy(
         &self,
         root: &Path,
@@ -122,6 +179,14 @@ impl WorkerObserver for CensusPolicyWorkers<'_> {
     fn observe_roots_for_land_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
         self.inner
             .observe_roots_with_policy(roots, &self.entries, true)
+    }
+    fn observe_roots_with_taints(&self, roots: &[PathBuf]) -> WorkerTaintObservations {
+        self.inner
+            .observe_roots_with_policy_taints(roots, &self.entries, false)
+    }
+    fn observe_roots_for_land_with_taints(&self, roots: &[PathBuf]) -> WorkerTaintObservations {
+        self.inner
+            .observe_roots_with_policy_taints(roots, &self.entries, true)
     }
     fn live_process(&self, root: &Path) -> Option<ObservedProcess> {
         self.inner
@@ -156,6 +221,14 @@ impl WorkerObserver for SystemWorkerObserver {
     ) -> WorkerObservations {
         system_worker_roots_with_policy(roots, for_land, entries)
     }
+    fn observe_roots_with_policy_taints(
+        &self,
+        roots: &[PathBuf],
+        entries: &[CensusIgnoreEntry],
+        for_land: bool,
+    ) -> WorkerTaintObservations {
+        system_worker_roots_with_policy_taints(roots, for_land, entries)
+    }
     fn live_process_with_policy(
         &self,
         root: &Path,
@@ -187,6 +260,14 @@ impl WorkerObserver for SystemWorkerObserver {
     fn observe_roots_for_land_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
         system_worker_roots(roots, true)
     }
+
+    fn observe_roots_with_taints(&self, roots: &[PathBuf]) -> WorkerTaintObservations {
+        system_worker_roots_with_taints(roots, false)
+    }
+
+    fn observe_roots_for_land_with_taints(&self, roots: &[PathBuf]) -> WorkerTaintObservations {
+        system_worker_roots_with_taints(roots, true)
+    }
 }
 
 pub(super) fn system_live_process(root: &Path, ancestors: bool) -> Option<ObservedProcess> {
@@ -217,10 +298,20 @@ pub(super) fn system_worker_roots(roots: &[PathBuf], ancestors: bool) -> WorkerO
     system_worker_roots_with_policy(roots, ancestors, &[])
 }
 
+pub(super) fn system_worker_roots_with_taints(
+    roots: &[PathBuf],
+    ancestors: bool,
+) -> WorkerTaintObservations {
+    system_worker_roots_with_policy_taints(roots, ancestors, &[])
+}
+
 pub(super) struct PolicyCwdObserver<'a>(pub(super) &'a [CensusIgnoreEntry]);
 impl CwdObserver for PolicyCwdObserver<'_> {
     fn occupancy(&self, pid: i64) -> provenant_os::pid::OccupancyObservation {
         SystemCwdObserver.occupancy(pid)
+    }
+    fn executable(&self, pid: i64) -> Option<PathBuf> {
+        SystemCwdObserver.executable(pid)
     }
     fn sealed_system_image(&self, pid: i64) -> Option<provenant_os::pid::SealedSystemImage> {
         SystemCwdObserver.sealed_system_image(pid)
@@ -286,6 +377,39 @@ pub(super) fn system_worker_roots_with_policy(
     )
 }
 
+pub(super) fn system_worker_roots_with_policy_taints(
+    roots: &[PathBuf],
+    ancestors: bool,
+    entries: &[CensusIgnoreEntry],
+) -> WorkerTaintObservations {
+    let ProcessObservation::Present(current) = current_process() else {
+        return (
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, WorkerState::Unknown))
+                .collect(),
+            roots
+                .iter()
+                .cloned()
+                .map(|root| {
+                    (
+                        root,
+                        TaintCause::Uncertainty(UncertaintyReason::CensusUnavailable),
+                    )
+                })
+                .collect(),
+        );
+    };
+    observe_worker_root_taints(
+        roots,
+        &SystemProcessObserver,
+        &PolicyCwdObserver(entries),
+        &current,
+        ancestors,
+    )
+}
+
 pub(super) fn observe_worker_roots(
     roots: &[PathBuf],
     observer: &dyn ProcessObserver,
@@ -296,6 +420,24 @@ pub(super) fn observe_worker_roots(
     let (states, _, details) =
         observe_worker_holders(roots, observer, cwd_observer, current, ancestors);
     (states, details)
+}
+
+pub(super) fn observe_worker_root_taints(
+    roots: &[PathBuf],
+    observer: &dyn ProcessObserver,
+    cwd_observer: &dyn CwdObserver,
+    current: &ProcessFact,
+    ancestors: bool,
+) -> WorkerTaintObservations {
+    let (states, _, _, taints) = observe_worker_holders_with_taints_and_audit(
+        roots,
+        observer,
+        cwd_observer,
+        current,
+        ancestors,
+        &mut |_, _| {},
+    );
+    (states, taints)
 }
 
 /// The per-root state, and the first process seen inside each root.
@@ -310,18 +452,20 @@ pub(super) fn observe_worker_holders(
     BTreeMap<PathBuf, ObservedProcess>,
     BTreeMap<PathBuf, String>,
 ) {
-    observe_worker_holders_with_audit(
+    let (states, holders, details, _) = observe_worker_holders_with_taints_and_audit(
         roots,
         observer,
         cwd_observer,
         current,
         ancestors,
         &mut |_, _| {},
-    )
+    );
+    (states, holders, details)
 }
 
 /// Audit the same decisions that produce custody, without a second census or
 /// diagnostic re-query deciding why an image failed the policy.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn observe_worker_holders_with_audit(
     roots: &[PathBuf],
     observer: &dyn ProcessObserver,
@@ -334,6 +478,32 @@ pub(super) fn observe_worker_holders_with_audit(
     BTreeMap<PathBuf, ObservedProcess>,
     BTreeMap<PathBuf, String>,
 ) {
+    let (states, holders, details, _) = observe_worker_holders_with_taints_and_audit(
+        roots,
+        observer,
+        cwd_observer,
+        current,
+        ancestors,
+        unplaceable,
+    );
+    (states, holders, details)
+}
+
+type WorkerHolderAudit = (
+    BTreeMap<PathBuf, WorkerState>,
+    BTreeMap<PathBuf, ObservedProcess>,
+    BTreeMap<PathBuf, String>,
+    BTreeMap<PathBuf, TaintCause>,
+);
+
+pub(super) fn observe_worker_holders_with_taints_and_audit(
+    roots: &[PathBuf],
+    observer: &dyn ProcessObserver,
+    cwd_observer: &dyn CwdObserver,
+    current: &ProcessFact,
+    ancestors: bool,
+    unplaceable: &mut dyn FnMut(Option<i64>, Option<&'static str>),
+) -> WorkerHolderAudit {
     let mut states: BTreeMap<_, _> = roots
         .iter()
         .cloned()
@@ -341,8 +511,9 @@ pub(super) fn observe_worker_holders_with_audit(
         .collect();
     let mut holders = BTreeMap::new();
     let mut details = BTreeMap::new();
+    let mut taints = BTreeMap::new();
     if roots.is_empty() {
-        return (states, holders, details);
+        return (states, holders, details, taints);
     }
     let census = match observer.census(65_536) {
         Ok(census) => census,
@@ -369,6 +540,16 @@ pub(super) fn observe_worker_holders_with_audit(
                     .cloned()
                     .map(|root| (root, detail.into()))
                     .collect(),
+                roots
+                    .iter()
+                    .cloned()
+                    .map(|root| {
+                        (
+                            root,
+                            TaintCause::Uncertainty(UncertaintyReason::CensusUnavailable),
+                        )
+                    })
+                    .collect(),
             );
         }
     };
@@ -380,7 +561,13 @@ pub(super) fn observe_worker_holders_with_audit(
     for (&pid, &issue) in census.unknown_pids() {
         unplaceable(Some(pid), Some("stable process identity unavailable"));
         let detail = process_detail(cwd_observer, pid, &format!("{issue:?}"));
-        record_unknown_all(&mut states, &mut details, &detail);
+        record_unknown_all_with_taint(
+            &mut states,
+            &mut details,
+            &mut taints,
+            &detail,
+            TaintCause::Uncertainty(UncertaintyReason::UnstableProcessIdentity),
+        );
     }
     // Exclude the caller's verified ancestors. A walk that stops early leaves
     // the remaining ancestors in the census, where one inside a root still
@@ -456,21 +643,19 @@ pub(super) fn observe_worker_holders_with_audit(
                             pid,
                             &format!("occupancy path unavailable: {}", path.display()),
                         );
-                        let mut affected = false;
+                        // Unresolved paths may alias any candidate root.
                         for (root, state) in &mut states {
-                            if occupancy_path_could_be_under(path, root) {
-                                affected = true;
-                                if *state != WorkerState::Live {
-                                    *state = WorkerState::Unknown;
-                                    details
-                                        .entry(root.clone())
-                                        .or_insert_with(|| detail.clone());
-                                }
+                            if *state != WorkerState::Live {
+                                *state = WorkerState::Unknown;
+                                details
+                                    .entry(root.clone())
+                                    .or_insert_with(|| detail.clone());
+                                taints.entry(root.clone()).or_insert_with(|| {
+                                    TaintCause::Uncertainty(UncertaintyReason::PathUnplaceable)
+                                });
                             }
                         }
-                        if affected {
-                            unplaceable(Some(pid), Some("occupancy path placement required"));
-                        }
+                        unplaceable(Some(pid), Some("occupancy path placement required"));
                         continue;
                     };
                     let location = match std::fs::metadata(&canonical) {
@@ -497,19 +682,42 @@ pub(super) fn observe_worker_holders_with_audit(
                                         "occupancy path or root identity unreadable",
                                     )
                                 });
+                                taints.entry(root.clone()).or_insert_with(|| {
+                                    TaintCause::Uncertainty(UncertaintyReason::PathUnplaceable)
+                                });
                             }
                         }
                     }
+                    let is_exe = cwd_observer
+                        .executable(pid)
+                        .and_then(|path| canonical_cwd(&path))
+                        .as_ref()
+                        == Some(&canonical);
+                    let kind = if is_exe {
+                        ProcessEvidenceKind::ExecutableImage
+                    } else {
+                        ProcessEvidenceKind::OtherHeldPath
+                    };
                     for root in placed {
-                        holders
+                        let holder = holders
                             .entry(root.clone())
+                            .and_modify(|h| {
+                                if h.pid == pid
+                                    && h.kind == ProcessEvidenceKind::OtherHeldPath
+                                    && kind == ProcessEvidenceKind::ExecutableImage
+                                {
+                                    h.kind = ProcessEvidenceKind::ExecutableImage;
+                                }
+                            })
                             .or_insert_with(|| ObservedProcess {
                                 pid,
                                 command: fact.command.clone(),
+                                kind,
                             });
+                        taints.insert(root.clone(), TaintCause::LiveWriter(holder.clone()));
                         details.insert(
                             root,
-                            format!("process {pid}: executable or open file inside root"),
+                            format!("process {}: {} inside root", holder.pid, holder.kind),
                         );
                     }
                 }
@@ -540,10 +748,12 @@ pub(super) fn observe_worker_holders_with_audit(
                             "real/effective/saved system uids foreign to every root owner required",
                         ),
                     );
-                    record_unknown_all(
+                    record_unknown_all_with_taint(
                         &mut states,
                         &mut details,
+                        &mut taints,
                         &process_detail(cwd_observer, pid, "cwd unreadable"),
+                        TaintCause::Uncertainty(UncertaintyReason::PolicyRejected),
                     );
                 }
             }
@@ -557,9 +767,10 @@ pub(super) fn observe_worker_holders_with_audit(
                 if !setuid_excused {
                     unplaceable(Some(pid), failure.builtin_condition);
                     let condition = failure.condition;
-                    record_unknown_all(
+                    record_unknown_all_with_taint(
                         &mut states,
                         &mut details,
+                        &mut taints,
                         &process_detail(
                             cwd_observer,
                             pid,
@@ -571,6 +782,7 @@ pub(super) fn observe_worker_holders_with_audit(
                                 format!("cwd unreadable; policy_condition={condition}")
                             },
                         ),
+                        TaintCause::Uncertainty(UncertaintyReason::PolicyRejected),
                     );
                 }
             }
@@ -581,10 +793,17 @@ pub(super) fn observe_worker_holders_with_audit(
                     "stable process identity unavailable"
                 };
                 unplaceable(Some(pid), Some(condition));
-                record_unknown_all(
+                let reason = if category.starts_with("cwd ") {
+                    UncertaintyReason::CwdUnreadable
+                } else {
+                    UncertaintyReason::UnstableProcessIdentity
+                };
+                record_unknown_all_with_taint(
                     &mut states,
                     &mut details,
+                    &mut taints,
                     &process_detail(cwd_observer, pid, &category),
+                    TaintCause::Uncertainty(reason),
                 );
             }
             NativeCwd::Path(path) => {
@@ -605,16 +824,25 @@ pub(super) fn observe_worker_holders_with_audit(
                             details.entry(root.clone()).or_insert_with(|| {
                                 process_detail(cwd_observer, pid, "cwd or root identity unreadable")
                             });
+                            taints.entry(root.clone()).or_insert_with(|| {
+                                TaintCause::Uncertainty(UncertaintyReason::PathUnplaceable)
+                            });
                         }
                     }
                     for root in placed {
-                        let holder =
-                            holders
-                                .entry(root.clone())
-                                .or_insert_with(|| ObservedProcess {
-                                    pid,
-                                    command: fact.command.clone(),
-                                });
+                        let holder = holders
+                            .entry(root.clone())
+                            .and_modify(|h| {
+                                if h.pid == pid {
+                                    h.kind = ProcessEvidenceKind::WorkingDirectory;
+                                }
+                            })
+                            .or_insert_with(|| ObservedProcess {
+                                pid,
+                                command: fact.command.clone(),
+                                kind: ProcessEvidenceKind::WorkingDirectory,
+                            });
+                        taints.insert(root.clone(), TaintCause::LiveWriter(holder.clone()));
                         details.insert(root, format!("process {}: cwd inside root", holder.pid));
                     }
                 } else {
@@ -622,11 +850,18 @@ pub(super) fn observe_worker_holders_with_audit(
                         Some(pid),
                         Some("actual cwd EPERM required (readable cwd placement failed)"),
                     );
-                    record_unknown_all(
-                        &mut states,
-                        &mut details,
-                        &process_detail(cwd_observer, pid, "cwd unreadable"),
-                    );
+                    let detail = process_detail(cwd_observer, pid, "cwd unreadable");
+                    for (root, state) in &mut states {
+                        if *state != WorkerState::Live {
+                            *state = WorkerState::Unknown;
+                            details
+                                .entry(root.clone())
+                                .or_insert_with(|| detail.clone());
+                            taints.entry(root.clone()).or_insert_with(|| {
+                                TaintCause::Uncertainty(UncertaintyReason::CwdUnreadable)
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -638,27 +873,31 @@ pub(super) fn observe_worker_holders_with_audit(
                 && (setuid_excused
                     || (cwd_outside && cwd_observer.sealed_system_image(pid).is_some()));
             if !excused {
-                record_unknown_all(
+                record_unknown_all_with_taint(
                     &mut states,
                     &mut details,
+                    &mut taints,
                     &process_detail(
                         cwd_observer,
                         pid,
                         &format!("occupancy incomplete: {}", gap.describe()),
                     ),
+                    TaintCause::Uncertainty(UncertaintyReason::OccupancyIncomplete),
                 );
             }
         }
     }
     if !census.listing_is_complete() {
         unplaceable(None, Some("complete process listing required"));
-        record_unknown_all(
+        record_unknown_all_with_taint(
             &mut states,
             &mut details,
+            &mut taints,
             "process listing truncated or incomplete",
+            TaintCause::Uncertainty(UncertaintyReason::ListingIncomplete),
         );
     }
-    (states, holders, details)
+    (states, holders, details, taints)
 }
 
 /// Canonicalise a process's working directory. A directory that has since been
@@ -694,26 +933,6 @@ pub(super) fn canonical_cwd(path: &Path) -> Option<PathBuf> {
     }
 }
 
-pub(super) fn occupancy_path_could_be_under(path: &Path, root: &Path) -> bool {
-    if !path.is_absolute() {
-        return true;
-    }
-    // Parent components cannot safely rule out a root without resolving the
-    // preceding components (which might themselves be symlinks).
-    if path
-        .components()
-        .any(|part| part == std::path::Component::ParentDir)
-    {
-        return true;
-    }
-    let private = Path::new("/private");
-    let alias = match root.strip_prefix(private) {
-        Ok(suffix) => Path::new("/").join(suffix),
-        Err(_) => private.join(root.strip_prefix("/").unwrap_or(root)),
-    };
-    path.starts_with(root) || path.starts_with(alias)
-}
-
 pub(super) enum NativeCwd {
     Path(PathBuf),
     Gone,
@@ -731,10 +950,12 @@ pub(super) fn process_detail(observer: &dyn CwdObserver, pid: i64, category: &st
     detail
 }
 
-pub(super) fn record_unknown_all(
+pub(super) fn record_unknown_all_with_taint(
     states: &mut BTreeMap<PathBuf, WorkerState>,
     details: &mut BTreeMap<PathBuf, String>,
+    taints: &mut BTreeMap<PathBuf, TaintCause>,
     detail: &str,
+    taint: TaintCause,
 ) {
     for (root, state) in states {
         if *state != WorkerState::Live {
@@ -742,6 +963,7 @@ pub(super) fn record_unknown_all(
             details
                 .entry(root.clone())
                 .or_insert_with(|| detail.to_owned());
+            taints.entry(root.clone()).or_insert_with(|| taint.clone());
         }
     }
 }
@@ -793,6 +1015,15 @@ pub(super) fn record_live_path_with_audit(
     cwd: &Path,
     unplaceable: &mut dyn FnMut(),
 ) -> Vec<PathBuf> {
+    if !cwd.is_absolute() {
+        unplaceable();
+        for state in states.values_mut() {
+            if *state != WorkerState::Live {
+                *state = WorkerState::Unknown;
+            }
+        }
+        return Vec::new();
+    }
     let ancestors = cwd.ancestors().try_fold(BTreeSet::new(), |mut ids, path| {
         match std::fs::metadata(path) {
             Ok(metadata) if metadata.is_dir() => {

@@ -35,6 +35,7 @@ fn live_writer_cwd_refusal_suggests_running_from_the_main_checkout() {
         provenant_confinement::worktrees::ObservedProcess {
             pid: 42,
             command: Some("zsh".into()),
+            kind: provenant_confinement::worktrees::ProcessEvidenceKind::WorkingDirectory,
         },
     );
     assert!(
