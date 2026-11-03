@@ -2411,7 +2411,19 @@ fn claude_dispatch(host_native: bool, pool: bool) -> Result {
         .join("attempts")
         .join(lane["attempt_id"].as_str().ok_or("attempt")?);
     if pool {
-        for name in ["launch.json", "attempt.json", "result.md"] {
+        // The sentinel does reach the attempt, so its absence below is evidence.
+        assert!(
+            fs::read_to_string(attempt.join("prompt.txt"))?
+                .contains("prompt-sentinel-2719-indigo-owl")
+        );
+        // Every launched attempt writes these, so a missing one fails the
+        // test rather than hiding a leak. prompt.txt holds the prompt by design.
+        for name in [
+            "launch.json",
+            "process.json",
+            "terminal-commit.json",
+            "result.md",
+        ] {
             let artifact = fs::read_to_string(attempt.join(name))?;
             assert!(
                 !artifact.contains("prompt-sentinel-2719-indigo-owl"),
