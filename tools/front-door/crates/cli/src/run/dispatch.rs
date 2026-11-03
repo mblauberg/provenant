@@ -615,13 +615,21 @@ pub(super) fn dispatch_inner(
             Some(path) => {
                 let prompt = read_bounded(path)?;
                 let access = lane_access(&command.access, edge.roots.state.as_path(), edge.home)?;
-                brief_read_root_warnings(
-                    &prompt,
-                    edge.cwd,
-                    command.access.worktree.as_deref(),
-                    &access.read_roots,
-                    edge.home,
-                )
+                let run_config =
+                    provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
+                        .map(|config| config.domains.run)
+                        .unwrap_or_default();
+                if run_config.brief_read_root_warnings {
+                    brief_read_root_warnings(
+                        &prompt,
+                        edge.cwd,
+                        command.access.worktree.as_deref(),
+                        &access.read_roots,
+                        edge.home,
+                    )
+                } else {
+                    Vec::new()
+                }
             }
             None => Vec::new(),
         };
@@ -1116,22 +1124,23 @@ pub(super) fn dispatch_inner(
             },
         )
         .collect();
-    let brief_warnings = if command.input.manifest.is_none() {
-        tasks
-            .first()
-            .map(|task| {
-                brief_read_root_warnings(
-                    &task.prompt,
-                    edge.cwd,
-                    command.access.worktree.as_deref(),
-                    &lane_access.read_roots,
-                    edge.home,
-                )
-            })
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let brief_warnings =
+        if command.input.manifest.is_none() && config.domains.run.brief_read_root_warnings {
+            tasks
+                .first()
+                .map(|task| {
+                    brief_read_root_warnings(
+                        &task.prompt,
+                        edge.cwd,
+                        command.access.worktree.as_deref(),
+                        &lane_access.read_roots,
+                        edge.home,
+                    )
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
     let (record, started) = submit_with_host_and_wait(
         &session,
         edge,
@@ -1202,6 +1211,9 @@ pub fn brief_read_root_warnings(
                     '`' | '\'' | '"' | ')' | ']' | '}' | '>' | ',' | '.' | ';' | ':'
                 )
             });
+        if token.trim_end_matches('/') == "~" || token.chars().all(|character| character == '/') {
+            continue;
+        }
         let candidate = if let Some(relative) = token.strip_prefix("~/") {
             home.join(relative)
         } else if token.starts_with('/') {
@@ -1212,7 +1224,13 @@ pub fn brief_read_root_warnings(
         let Ok(path) = std::fs::canonicalize(&candidate) else {
             continue;
         };
-        if roots.iter().any(|root| path.starts_with(root)) {
+        if path == Path::new("/") {
+            continue;
+        }
+        if roots
+            .iter()
+            .any(|root| path.starts_with(root) || root.starts_with(&path))
+        {
             continue;
         }
         warnings.insert(format!(

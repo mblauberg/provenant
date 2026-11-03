@@ -232,10 +232,11 @@ fn run_explain_warns_once_for_existing_brief_paths_outside_read_roots()
     std::fs::write(
         &brief,
         format!(
-            "Read `{}` and `{}` plus ~/home-rubric.md; also see `{}`.",
+            "Read `{}` and `{}` plus ~/home-rubric.md; also see `{}` and `/` and `{}`.",
             outside.display(),
             outside.display(),
-            project.join("inside.md").display()
+            project.join("inside.md").display(),
+            root.display()
         ),
     )?;
     let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
@@ -288,6 +289,92 @@ fn run_explain_warns_once_for_existing_brief_paths_outside_read_roots()
         &home,
     );
     assert!(warnings.is_empty());
+    Ok(())
+}
+
+#[test]
+fn brief_read_root_warnings_skips_root_ancestors_and_home_and_warns_on_outside_files()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let project = root.join("project");
+    std::fs::create_dir_all(&project)?;
+    let outside = root.join("rubric.md");
+    std::fs::write(&outside, "rubric")?;
+    let home = root.join("home");
+    std::fs::create_dir_all(&home)?;
+
+    // Acceptance 1: A brief containing `/` and the parent of the worktree gives no warning.
+    let worktree_parent = project.parent().ok_or("worktree parent")?;
+    let brief = format!(
+        "Inspect `/` and `{}` and `~` and `~/`; do not touch them.",
+        worktree_parent.display()
+    );
+    let warnings = super::brief_read_root_warnings(&brief, &project, None, &[], &home);
+    assert!(
+        warnings.is_empty(),
+        "expected no warnings for `/`, `~` and worktree parent, got: {warnings:?}"
+    );
+
+    // Acceptance 2: A brief citing an existing file outside the roots still warns.
+    let citing_outside = format!("Review `{}`.", outside.display());
+    let warnings = super::brief_read_root_warnings(&citing_outside, &project, None, &[], &home);
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains(&outside.display().to_string()));
+
+    Ok(())
+}
+
+#[test]
+fn brief_read_root_warning_switch_turns_off_warnings() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let project = root.join("project");
+    std::fs::create_dir_all(&project)?;
+    let outside = root.join("rubric.md");
+    std::fs::write(&outside, "rubric")?;
+    let home = root.join("home");
+    std::fs::create_dir_all(&home)?;
+
+    let state = root.join("state");
+    std::fs::create_dir_all(&state)?;
+    std::fs::write(
+        state.join("config.toml"),
+        "schema_version = 1\n[domains.run]\nbrief_read_root_warnings = false\n",
+    )?;
+
+    let brief = root.join("brief.md");
+    std::fs::write(&brief, format!("Read `{}`.", outside.display()))?;
+
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+    inputs.state_dir = Some(state);
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let edge = Edge {
+        roots: &roots,
+        home: &home,
+        assets: &project,
+        cwd: &project,
+    };
+    let brief_arg = brief.to_string_lossy().into_owned();
+    let command = parsed_run(&[
+        "--model",
+        "codex/gpt-6-luna",
+        "--prompt-file",
+        &brief_arg,
+        "--explain",
+    ])?;
+    let reply = super::run(command, &edge);
+    assert_eq!(reply.result.status, Status::Ok, "{:?}", reply.result.error);
+    assert!(
+        !reply.human.contains("warning: brief references"),
+        "expected no warnings with switch off, got: {}",
+        reply.human
+    );
+    assert!(
+        reply.result.data.get("warnings").is_none(),
+        "expected no carried warnings with switch off"
+    );
+
     Ok(())
 }
 

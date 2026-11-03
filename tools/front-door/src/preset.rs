@@ -3497,13 +3497,21 @@ pub fn run(
                 Ok(())
             },
         )?;
-        let brief_warnings = provenant_cli::run::brief_read_root_warnings(
-            prompt,
-            &directory,
-            None,
-            &effective,
-            &roots.home,
-        );
+        let run_config =
+            provenant_config::read_with_domains(&roots.roots, &provenant_cli::domains::SECTIONS)
+                .map(|config| config.domains.run)
+                .unwrap_or_default();
+        let brief_warnings = if run_config.brief_read_root_warnings {
+            provenant_cli::run::brief_read_root_warnings(
+                prompt,
+                &directory,
+                None,
+                &effective,
+                &roots.home,
+            )
+        } else {
+            Vec::new()
+        };
         Ok((expansion, brief_warnings))
     })();
     match result {
