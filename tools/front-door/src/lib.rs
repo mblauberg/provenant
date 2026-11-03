@@ -487,9 +487,6 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                     ..options
                 };
                 let edited = config::edit_config(&roots, sections, &options, |doc, current| {
-                    let current = current.ok_or(provenant_config::ConfigError::Edit {
-                        reason: "configuration unavailable",
-                    })?;
                     config::apply_patch(&patch, doc, current, sections)
                 })?;
                 serde_json::json!({

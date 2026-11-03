@@ -15,9 +15,6 @@ fn patch(
     options: &EditOptions,
 ) -> Result<crate::Edited<crate::NoDomains>, ConfigError> {
     edit_config(roots, &NO_DOMAINS, options, |doc, current| {
-        let current = current.ok_or(ConfigError::Edit {
-            reason: "configuration unavailable",
-        })?;
         apply_patch(&value, doc, current, &NO_DOMAINS)
     })
 }

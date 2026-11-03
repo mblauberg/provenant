@@ -758,8 +758,12 @@ fn boundary(error: &SectionError) -> bool {
         return false;
     }
     if error.code == "unknown_key" {
-        return error.field == "graph.limit_ceiling"
-            || error.field.starts_with("graph.limit_ceiling.");
+        if error.field == "graph.limit_ceiling" || error.field.starts_with("graph.limit_ceiling.") {
+            return true;
+        }
+        if error.field.starts_with("graph.") || error.field.starts_with("plan.") {
+            return false;
+        }
     }
     boundary_existing(error)
 }
@@ -1257,6 +1261,14 @@ mod tests {
         let loaded =
             provenant_config::load_with_domains(&roots, Some(&unknown[..]), &sections).unwrap();
         assert_eq!(loaded.domains.fabric.graph.limits.nodes, 10);
+        for section in ["graph.budget", "plan"] {
+            let unknown =
+                format!("schema_version = 1\n[domains.fabric.{section}]\nunknown_field = 1\n");
+            let loaded =
+                provenant_config::load_with_domains(&roots, Some(unknown.as_bytes()), &sections)
+                    .unwrap();
+            assert!(!loaded.warnings.is_empty());
+        }
         let config =
             provenant_config::load_with_domains(&roots, Some(&text[..]), &sections).unwrap();
         assert_eq!(config.domains.fabric.graph.limits.nodes, 10);

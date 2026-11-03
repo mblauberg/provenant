@@ -122,7 +122,7 @@ fn native_full_census_places_clean_merged_worktree_and_same_user_sleep()
         );
     } else {
         eprintln!(
-            "SKIP: clean-Free assertion: confinement.census_host_list_complete=false; host exceptions are not declared complete; land cleanup may report the first unlisted daemon: {first}"
+            "SKIP: clean-Free assertion: PROVENANT_CENSUS_HOST_LIST_COMPLETE is unset; host exceptions are not declared complete; land cleanup may report the first unlisted daemon: {first}"
         );
     }
     Ok(())

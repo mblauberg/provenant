@@ -329,9 +329,6 @@ pub fn set_quota_display(
         &crate::domains::SECTIONS,
         &provenant_config::EditOptions::new("cli"),
         |doc, current| {
-            let current = current.ok_or(provenant_config::ConfigError::Edit {
-                reason: "configuration unavailable",
-            })?;
             let icon = match icon {
                 Some(provenant_quota::MOST_CONSTRAINED) => {
                     Ok(Some(provenant_quota::MOST_CONSTRAINED.into()))
@@ -485,18 +482,13 @@ fn edit_accounts(
         roots,
         &crate::domains::SECTIONS,
         &provenant_config::EditOptions::new("cli"),
-        |doc, current| {
-            let current = current.ok_or(provenant_config::ConfigError::Edit {
-                reason: "configuration unavailable",
-            })?;
-            match change(current.domains.accounts.clone())
-                .and_then(|settings| apply_settings(doc, &settings))
-            {
-                Ok(()) => Ok(()),
-                Err(reason) => {
-                    refusal = Some(reason.clone());
-                    Err(provenant_config::ConfigError::Refused(reason))
-                }
+        |doc, current| match change(current.domains.accounts.clone())
+            .and_then(|settings| apply_settings(doc, &settings))
+        {
+            Ok(()) => Ok(()),
+            Err(reason) => {
+                refusal = Some(reason.clone());
+                Err(provenant_config::ConfigError::Refused(reason))
             }
         },
     );

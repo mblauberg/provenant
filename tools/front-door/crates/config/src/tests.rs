@@ -1586,37 +1586,11 @@ fn knob_edit_preserves_unknown_keys_while_applying_the_edit() {
     assert_eq!(read(&roots).unwrap().profile, Profile::Economy);
 }
 #[test]
-fn knob_edit_can_repair_invalid_profile_or_refused_knobs() {
-    let dir = tempfile::tempdir().unwrap();
-    let roots = state_roots(dir.path());
-    let path = dir.path().join("config.toml");
-
-    std::fs::write(&path, "schema_version = 1\nprofile = 'rigorous'\n").unwrap();
-    assert!(read(&roots).is_err());
-    let config = knob_edit(&roots, KnobEdit::Profile("economy")).unwrap();
-    assert_eq!(config.profile, Profile::Economy);
-    assert_eq!(read(&roots).unwrap().profile, Profile::Economy);
-
-    std::fs::write(
-        &path,
-        "schema_version = 1\n[knobs]\n'review.polish' = 'always'\n",
-    )
-    .unwrap();
-    assert!(read(&roots).is_err());
-    knob_edit(&roots, KnobEdit::Unset("review.polish")).unwrap();
-    assert!(read(&roots).is_ok());
-    assert!(
-        !std::fs::read_to_string(&path)
-            .unwrap()
-            .contains("review.polish")
-    );
-}
-#[test]
 fn migrate_drops_rigorous_profile_and_refused_knobs() {
     let dir = tempfile::tempdir().unwrap();
     let roots = state_roots(dir.path());
     let path = dir.path().join("config.toml");
-    let content = "schema_version = 1\nprofile = 'rigorous'\n[knobs]\n'review.polish' = 'always'\n'lanes.max_concurrency' = 4\n";
+    let content = "schema_version = 1\nprofile = 'rigorous'\n[knobs]\n'review.polish' = 'always'\n'domains.routing.capacity_cooldown_seconds' = 30\n'confinement.census_host_list_complete' = true\n'lanes.max_concurrency' = 4\n";
     std::fs::write(&path, content).unwrap();
     assert!(read(&roots).is_err());
 
@@ -1635,7 +1609,17 @@ fn migrate_drops_rigorous_profile_and_refused_knobs() {
         .find(|m| m.location == "knobs")
         .unwrap();
     assert_eq!(knobs_m.action, "dropped");
-    assert_eq!(knobs_m.keys, vec!["review.polish"]);
+    assert!(knobs_m.keys.contains(&"review.polish".to_owned()));
+    assert!(
+        knobs_m
+            .keys
+            .contains(&"domains.routing.capacity_cooldown_seconds".to_owned())
+    );
+    assert!(
+        knobs_m
+            .keys
+            .contains(&"confinement.census_host_list_complete".to_owned())
+    );
 
     let loaded = read(&roots).unwrap();
     assert_eq!(loaded.profile, Profile::Balanced);
@@ -1644,6 +1628,17 @@ fn migrate_drops_rigorous_profile_and_refused_knobs() {
     assert!(!after_text.contains("rigorous"));
     assert!(!after_text.contains("review.polish"));
     assert!(after_text.contains("lanes.max_concurrency"));
+}
+#[test]
+fn migrate_preserves_unrecognised_knobs() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = state_roots(dir.path());
+    let path = dir.path().join("config.toml");
+    let original =
+        "schema_version = 1\n[knobs]\n'review.polish' = 'always'\n'domains.routing.future' = 1\n";
+    std::fs::write(&path, original).unwrap();
+    assert!(crate::migrate(&roots, &crate::domains::NO_DOMAINS, false).is_err());
+    assert_eq!(std::fs::read_to_string(path).unwrap(), original);
 }
 #[test]
 fn set_creates_a_missing_private_state_directory() {
@@ -1802,6 +1797,35 @@ fn owner_marked_tables_replace_defaults_and_allow_empty_overrides() {
 
 #[test]
 fn registered_knobs_have_production_readers() {
+    fn production_only(text: &str) -> String {
+        let mut result = String::new();
+        let mut skip = false;
+        let mut depth = 0_i32;
+        let mut opened = false;
+        for line in text.lines() {
+            if line.trim() == "#[cfg(test)]" {
+                skip = true;
+                depth = 0;
+                opened = false;
+                continue;
+            }
+            if skip {
+                depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+                opened |= line.contains('{');
+                if (opened && depth == 0) || (!opened && line.trim_end().ends_with(';')) {
+                    skip = false;
+                }
+            } else if !line.trim_start().starts_with("//") {
+                result.push_str(line);
+                result.push('\n');
+            }
+        }
+        result
+    }
+    assert!(
+        !production_only("#[cfg(test)]\nmod tests {\n get(\"unread.knob\");\n}\n")
+            .contains("unread.knob")
+    );
     fn sources(path: &std::path::Path, output: &mut String) {
         for entry in std::fs::read_dir(path).unwrap() {
             let path = entry.unwrap().path();
@@ -1811,7 +1835,8 @@ fn registered_knobs_have_production_readers() {
                 && path.file_name().unwrap() != "knobs.rs"
                 && !path.file_name().unwrap().to_string_lossy().contains("test")
             {
-                output.push_str(&std::fs::read_to_string(path).unwrap());
+                let text = std::fs::read_to_string(path).unwrap();
+                output.push_str(&production_only(&text));
                 output.push('\n');
             }
         }
@@ -1825,28 +1850,26 @@ fn registered_knobs_have_production_readers() {
             sources(&src, &mut source);
         }
     }
-    let has_reader = |name: &str| {
+    let source: String = source.chars().filter(|c| !c.is_whitespace()).collect();
+    fn has_reader(source: &str, name: &str) -> bool {
         if name == "confinement.census_ignore_unreadable" {
-            source.contains(".census_ignore_unreadable()")
-        } else {
-            source.contains(&format!(".get(\"{name}\")"))
-                || source.contains(&format!("[\"{name}\"]"))
-                || source.contains(&format!(".knob(\"{name}\")"))
-                || source.contains(&format!(".knob_u64(\"{name}\")"))
-                || source.contains(&format!(".knob_bool(\"{name}\")"))
-                || source.contains(&format!(".knob_is_set(\"{name}\")"))
-                || source.contains(&format!("get(\"{name}\""))
-                || source.contains(&format!("knob(\"{name}\")"))
-                || source.contains(&format!("\"{name}\","))
-                || source.contains(&format!("\"{name}=\""))
+            return source.contains(".census_ignore_unreadable()");
         }
-    };
-    assert!(!has_reader(&["unread", "knob"].join(".")));
-    // An incidental mention in a log message or comment does not count as a reader
-    let incidental = format!("error: unread.knob is not set");
-    assert!(!has_reader("unread.knob") && !incidental.contains(".knob("));
+        [".get(", "get(", "knob(", ".knob_u64(", ".knob_is_set("]
+            .iter()
+            .any(|call| source.contains(&format!("{call}\"{name}\"")))
+            || (name.starts_with("routing.") && source.contains(&format!("(\"{name}\",")))
+    }
+    assert!(!has_reader("log(\"unread.knob\", value)", "unread.knob"));
+    assert!(has_reader(
+        "config.knobs.get(\"unread.knob\")",
+        "unread.knob"
+    ));
     for name in crate::knobs::registry().unwrap().knobs.keys() {
-        assert!(has_reader(name), "registered knob {name} has no reader");
+        assert!(
+            has_reader(&source, name),
+            "registered knob {name} has no reader"
+        );
     }
 }
 

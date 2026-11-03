@@ -375,20 +375,12 @@ fn apply(doc: &mut DocumentMut, edit: KnobEdit) -> Result<(), ConfigError> {
             }
         }
         KnobEdit::Unset(name) => {
-            let bare_name = name.strip_prefix("knobs.").unwrap_or(name);
-            if let Some(item) = doc.get_mut("knobs")
-                && let Some(knobs) = item.as_table_like_mut()
-            {
-                if knobs.remove(bare_name).is_some() || knobs.remove(name).is_some() {
-                    return Ok(());
-                }
-            }
-            spec(registry, bare_name)?;
+            spec(registry, name)?;
             if let Some(item) = doc.get_mut("knobs") {
                 let knobs = item
                     .as_table_like_mut()
                     .ok_or_else(|| invalid("knobs", "type"))?;
-                knobs.remove(bare_name);
+                knobs.remove(name);
             }
         }
     }
