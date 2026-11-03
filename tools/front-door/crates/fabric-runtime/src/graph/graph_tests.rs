@@ -5282,3 +5282,90 @@ fn review_plan_schema_validation() {
     document.nodes[0].kind = None;
     assert!(validate_plan(&document).is_err());
 }
+
+/// A resolved review lens is pinned to a commit, yet it still finds the writer
+/// through the deferred node it expanded from, so family separation holds.
+#[test]
+fn a_deferred_review_lens_keeps_the_writer_for_family_separation() {
+    let oid = "3".repeat(40);
+    let mut write = node("write", route("first"));
+    write.access = AccessMode::WorktreeWrite;
+    write.worktree = Some(".worktrees/write".into());
+    let mut review = node("review", route("first"));
+    review.kind = Some(NodeKind::Plan);
+    review.route = None;
+    review.depends_on = vec!["write".into()];
+    review.source = Some(SourceBinding::Node {
+        node: "write".into(),
+    });
+    review.review = Some(ReviewSpec {
+        shape: None,
+        risk_tier: None,
+        kind: None,
+        size: None,
+        risk_tags: vec![],
+        worktree: None,
+        lenses: vec![],
+        min_successful: Some(1),
+        max_nodes: 3,
+    });
+    let mut root = node("review--review", route("first"));
+    root.kind = Some(NodeKind::Composite);
+    root.route = None;
+    root.prompt.clear();
+    let mut lens = node("lens", route("first"));
+    lens.distinct_from = Some(DistinctFrom::Writer);
+    lens.distinct_strength = Some(FamilyStrength::Require);
+    root.composite = Some(CompositeSpec {
+        min_successful: Some(1),
+        nodes: vec![lens],
+        exports: vec![GraphInput {
+            extra: Default::default(),
+            node: "lens".into(),
+            outputs: vec![OutputKind::Result],
+        }],
+    });
+    let expanded = composites::expand(&graph(vec![root]), &plans::generous()).unwrap();
+    let mut nodes = expanded.nodes;
+    for member in &mut nodes {
+        member.depends_on = vec!["write".into()];
+    }
+    for member in nodes.iter_mut().filter(|member| member.composite.is_none()) {
+        member.source = Some(SourceBinding::Commit {
+            commit: oid.clone(),
+        });
+    }
+    let addition = Expansion {
+        review: Some(ReviewResolution {
+            subject: oid.parse().unwrap(),
+            base: "2".repeat(40).parse().unwrap(),
+            measured_size: "small".into(),
+            shape: "quick".into(),
+            source: "fixture".into(),
+        }),
+        extra: Default::default(),
+        source: "review".into(),
+        continuation: false,
+        nodes,
+        patterns: vec![],
+    };
+    let writer_done = AttemptObservation::Terminal {
+        attempt_ref: Some("host/7".into()),
+        outcome: AttemptOutcome::Succeeded,
+        launched: true,
+        result: None,
+        result_warning: None,
+        result_path: None,
+        branch: Some("writer".into()),
+        commit: Some(oid.clone()),
+    };
+    let mut owner = FakeOwner {
+        observations: [writer_done, terminal(AttemptOutcome::Succeeded)].into(),
+        review_expansion: Some(addition),
+        ..Default::default()
+    };
+    let mut document = graph(vec![write, review]);
+    document.schema_version = 2;
+    advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(owner.distinct_from.last(), Some(&vec!["host/7".to_owned()]));
+}
