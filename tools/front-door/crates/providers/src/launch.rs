@@ -88,6 +88,12 @@ pub struct PrepareInput<'a> {
     pub provenant: crate::LaneRuntime<'a>,
 }
 
+impl PrepareInput<'_> {
+    pub fn user_skills(&self) -> bool {
+        self.route.user_skills()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Access {
@@ -670,6 +676,52 @@ pub(crate) fn subtree(path: impl Into<PathBuf>) -> PathGrant {
     PathGrant {
         path: path.into(),
         scope: PathScope::Subtree,
+    }
+}
+
+/// Read-only grants for the user skill directory and its symlink targets.
+pub(crate) fn user_skills_grants(skills_dir: &Path) -> Vec<PathGrant> {
+    let mut grants = Vec::new();
+    if !skills_dir.is_dir() {
+        return grants;
+    }
+    grants.push(subtree(skills_dir));
+    let mut targets = std::collections::BTreeSet::new();
+    collect_symlink_targets(skills_dir, skills_dir, &mut targets, 0);
+    for target in targets {
+        grants.push(subtree(target));
+    }
+    grants
+}
+
+fn collect_symlink_targets(
+    root: &Path,
+    current: &Path,
+    targets: &mut std::collections::BTreeSet<PathBuf>,
+    depth: usize,
+) {
+    if depth > 5 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(current) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_symlink = entry.file_type().map_or(false, |ft| ft.is_symlink());
+        if is_symlink {
+            if let Ok(target) = std::fs::canonicalize(&path) {
+                if !target.starts_with(root) && !targets.contains(&target) {
+                    let is_dir = target.is_dir();
+                    targets.insert(target.clone());
+                    if is_dir {
+                        collect_symlink_targets(root, &target, targets, depth + 1);
+                    }
+                }
+            }
+        } else if path.is_dir() {
+            collect_symlink_targets(root, &path, targets, depth + 1);
+        }
     }
 }
 

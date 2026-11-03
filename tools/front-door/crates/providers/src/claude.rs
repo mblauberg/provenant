@@ -643,6 +643,8 @@ fn prepare(
     if !shell {
         setup.push(SetupStep::CreateDir(transcript_dir.clone()));
     }
+    let user_skills = input.home.join(".claude/skills");
+    let discover_skills = input.user_skills() && user_skills.is_dir();
     if shell {
         let config = plan
             .private_state
@@ -651,11 +653,20 @@ fn prepare(
             .path
             .join("claude-config");
         env.push(("CLAUDE_CONFIG_DIR".into(), config.clone().into_os_string()));
-        setup.push(SetupStep::CreateDir(config));
+        setup.push(SetupStep::CreateDir(config.clone()));
+        if discover_skills {
+            setup.push(SetupStep::Symlink {
+                link: config.join("skills"),
+                target: user_skills.clone(),
+            });
+        }
     } else if input.account.is_some() {
         env.push(("CLAUDE_CONFIG_DIR".into(), config_dir.into_os_string()));
     }
     let mut runtime_reads = vec![subtree(package)];
+    if discover_skills {
+        runtime_reads.extend(crate::launch::user_skills_grants(&user_skills));
+    }
     let mut tool_exec_roots = ["/bin", "/usr/bin", "/usr/libexec"].map(subtree).to_vec();
     let tool_writes = Vec::new();
     env.extend([

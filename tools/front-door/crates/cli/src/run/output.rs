@@ -394,6 +394,7 @@ fn output_read(
             "read_only_writable": record.read_only_writable,
             "write_grants": record.write_grants,
             "git_grants_digest": record.git_grants_digest,
+            "user_skills": record.user_skills(),
         });
         let grant_lines = grants_lines(&record);
         let trace = trace_chain(&session.store, record, call)?;
@@ -890,6 +891,12 @@ pub(super) fn grants_lines(record: &run::AttemptRecord) -> String {
     }
     if let Some(digest) = record.git_grants_digest {
         text.push_str(&format!("grant git digest={digest}\n"));
+    }
+    if let Some(skills) = record.user_skills() {
+        text.push_str(&format!(
+            "grant user_skills path={}\n",
+            plain_text(skills, usize::MAX)
+        ));
     }
     text
 }

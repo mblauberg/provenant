@@ -4,6 +4,14 @@
 
 Source: `config/harness-knobs.json`.
 
+## Host lane settings
+
+Set these in `[domains.lanes]` in the host configuration. Omit a key for its default.
+
+| Key | Default | Effect |
+|---|---|---|
+| `user_skills` | discover | Discover host user skills for lanes read-only. off disables user skill discovery for all lanes unless overridden by a project or route policy. (discover or off). |
+
 ## Host lane build settings
 
 Set these in `[domains.fabric.lanes]` in the host configuration. Omit a key for its host-dependent default; -1 also selects automatic behaviour.

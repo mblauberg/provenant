@@ -298,6 +298,8 @@ fn prepare(
         }
     }
     env.push(("SHELL".into(), SHELL.into()));
+    let user_skills = input.home.join(".gemini/skills");
+    let discover_skills = input.user_skills() && user_skills.is_dir();
     let keychains = home.join("Library/Keychains");
     let mut setup = vec![
         SetupStep::CreateDir(keychains.clone()),
@@ -306,8 +308,18 @@ fn prepare(
             target: keychain.clone(),
         },
     ];
+    if discover_skills {
+        setup.push(SetupStep::CreateDir(home.join(".gemini")));
+        setup.push(SetupStep::Symlink {
+            link: home.join(".gemini/skills"),
+            target: user_skills.clone(),
+        });
+    }
     // Both lanes run system commands; only writers get the additional tools.
     let mut runtime_reads = Vec::new();
+    if discover_skills {
+        runtime_reads.extend(crate::launch::user_skills_grants(&user_skills));
+    }
     let mut tool_exec_roots = vec![
         subtree("/bin"),
         subtree("/usr/bin"),

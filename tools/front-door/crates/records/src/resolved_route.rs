@@ -23,6 +23,30 @@ pub struct ResolvedRoute {
     pub pool_selection: Option<RouteSelectionReceipt>,
 }
 
+impl ResolvedRoute {
+    /// Whether user skills discovery is enabled for this route (default: true).
+    pub fn user_skills(&self) -> bool {
+        self.extra
+            .get("user_skills")
+            .and_then(|v| {
+                if let Some(b) = v.as_bool() {
+                    Some(b)
+                } else if let Some(s) = v.as_str() {
+                    Some(s == "discover" || s == "on")
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(true)
+    }
+
+    /// Override user skills discovery for this route.
+    pub fn set_user_skills(&mut self, enabled: bool) {
+        self.extra
+            .insert("user_skills".into(), serde_json::Value::Bool(enabled));
+    }
+}
+
 /// Auditable outcome of a weighted pool selection. Factors use basis points,
 /// with 10,000 representing 1.0.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

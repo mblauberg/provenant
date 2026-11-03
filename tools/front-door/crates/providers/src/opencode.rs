@@ -176,9 +176,9 @@ fn prepare(
     if access == Access::WorktreeWrite {
         runtime_reads.extend(crate::launch::git_global_files(&config_home));
     }
-    let config_dir = config_home.join("opencode");
-    if config_dir.is_dir() {
-        runtime_reads.push(subtree(config_dir));
+    let user_skills = config_home.join("opencode/skills");
+    if input.user_skills() && user_skills.is_dir() {
+        runtime_reads.extend(crate::launch::user_skills_grants(&user_skills));
     }
     // Keep the account store readable but outside all writable state grants.
     let mut state_writes = ["opencode.db", "opencode.db-shm", "opencode.db-wal"]

@@ -105,6 +105,17 @@
       "effect": "Prices over time for the account. The entry with the latest effective_from on or before a reading applies to it, and quota history --json shows it as plan_price, with price and notional_usd. Dates must differ within an account; unknown keys, negative or non-finite prices and bad dates refuse the config. This is not the detected plan label, which comes from the provider or the account's plan option."
     }
   },
+  "host_lane_settings": {
+    "path": "domains.lanes",
+    "settings": {
+      "user_skills": {
+        "type": "enum",
+        "allowed": "discover or off",
+        "default": "discover",
+        "effect": "Discover host user skills for lanes read-only. off disables user skill discovery for all lanes unless overridden by a project or route policy."
+      }
+    }
+  },
   "host_lane_build_settings": {
     "path": "domains.fabric.lanes",
     "settings": {

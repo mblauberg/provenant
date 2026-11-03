@@ -58,6 +58,7 @@ pub struct LanePolicy {
     pub stop_early_ok: Option<bool>,
     pub max_continuations: Option<u8>,
     pub read_only: Option<bool>,
+    pub user_skills: Option<provenant_records::run::UserSkillsMode>,
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -104,7 +105,8 @@ impl ModelPolicy {
             max_turns,
             stop_early_ok,
             max_continuations,
-            read_only
+            read_only,
+            user_skills,
         );
         overlay!(
             self.result,

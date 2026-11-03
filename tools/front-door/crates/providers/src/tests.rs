@@ -3197,12 +3197,12 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
             let data_home = Path::new(env("XDG_DATA_HOME").expect("data home"));
             assert!(!config_home.starts_with("/fixture/state"));
             assert!(!data_home.starts_with("/fixture/state"));
-            if config_home.join("opencode").is_dir() {
+            if config_home.join("opencode/skills").is_dir() {
                 assert!(
                     spec.profile
                         .spec
                         .runtime_reads
-                        .contains(&crate::launch::subtree(config_home.join("opencode")))
+                        .contains(&crate::launch::subtree(config_home.join("opencode/skills")))
                 );
             }
             assert!(
@@ -6559,4 +6559,290 @@ fn free_plan_notional_value_and_extra_directories_parse_and_validate() {
     assert!(ok.validate().is_empty());
     let relative = accounts_with_plans("directories = [\"rel/dir\"]\n").unwrap();
     assert!(!relative.validate().is_empty());
+}
+
+#[test]
+fn user_skills_grants_resolve_symlink_targets_read_only() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let canonical_temp = temp.path().canonicalize()?;
+    let skills_dir = canonical_temp.join("skills");
+    let releases_dir = canonical_temp.join("releases");
+    let skill_a_target = releases_dir.join("digest_a/skills/skill-a");
+    let skill_b_target = releases_dir.join("digest_b/skills/skill-b");
+
+    std::fs::create_dir_all(&skill_a_target)?;
+    std::fs::create_dir_all(&skill_b_target)?;
+    std::fs::create_dir_all(&skills_dir)?;
+
+    std::os::unix::fs::symlink(&skill_a_target, skills_dir.join("skill-a"))?;
+    std::os::unix::fs::symlink(&skill_b_target, skills_dir.join("skill-b"))?;
+    std::os::unix::fs::symlink(releases_dir.join("nonexistent"), skills_dir.join("broken"))?;
+
+    let grants = crate::launch::user_skills_grants(&skills_dir);
+    assert!(grants.contains(&crate::launch::subtree(&skills_dir)));
+    assert!(grants.contains(&crate::launch::subtree(&skill_a_target)));
+    assert!(grants.contains(&crate::launch::subtree(&skill_b_target)));
+    assert_eq!(grants.len(), 3);
+    Ok(())
+}
+
+#[test]
+fn lane_adapters_grant_user_skills_and_symlink_targets_read_only() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().canonicalize()?;
+    let releases_dir = home.join("releases");
+    let target = releases_dir.join("v1/releases/digest123/skills/super-skill");
+    std::fs::create_dir_all(&target)?;
+
+    let claude_skills = home.join(".claude/skills");
+    let codex_skills = home.join(".agents/skills");
+    let agy_skills = home.join(".gemini/skills");
+    let opencode_skills = home.join(".config/opencode/skills");
+
+    for dir in [&claude_skills, &codex_skills, &agy_skills, &opencode_skills] {
+        std::fs::create_dir_all(dir)?;
+        std::os::unix::fs::symlink(&target, dir.join("super-skill"))?;
+    }
+
+    let prompt = Prompt::new("test prompt".into());
+    let claude_token = fixture_token();
+    let agy_account = legacy_agy_account();
+
+    for adapter_name in ["claude", "codex", "agy", "opencode"] {
+        for access in [Access::ReadOnly, Access::WorktreeWrite] {
+            let plan = fixture_access_plan(access, Some("login"), false);
+            let mut route = route(adapter_name, "fixture-model");
+            route.account_key = None;
+
+            let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+            input.home = &home;
+            if adapter_name == "claude" {
+                input.token = Some(&claude_token);
+            } else if adapter_name == "agy" {
+                input.account = Some(&agy_account);
+            }
+
+            let spec = match adapter_name {
+                "claude" => crate::claude::Claude.prepare(input)?,
+                "codex" => crate::codex::Codex.prepare(input)?,
+                "agy" => crate::agy::Agy.prepare(input)?,
+                "opencode" => crate::opencode::OpenCode.prepare(input)?,
+                _ => unreachable!(),
+            };
+            let profile_spec = &spec.profile.spec;
+
+            let expected_skill_dir = match adapter_name {
+                "claude" => &claude_skills,
+                "codex" => &codex_skills,
+                "agy" => &agy_skills,
+                "opencode" => &opencode_skills,
+                _ => unreachable!(),
+            };
+
+            // 1. Read grant for skill directory and symlink target
+            assert!(
+                profile_spec
+                    .runtime_reads
+                    .contains(&crate::launch::subtree(expected_skill_dir)),
+                "{adapter_name} ({access:?}): missing grant for skill dir {expected_skill_dir:?}"
+            );
+            assert!(
+                profile_spec
+                    .runtime_reads
+                    .contains(&crate::launch::subtree(&target)),
+                "{adapter_name} ({access:?}): missing grant for link target {target:?}"
+            );
+
+            // 2. No write grant covering skill dir or target
+            let writable = profile_spec
+                .tool_writes
+                .iter()
+                .chain(&profile_spec.state_writes)
+                .chain(
+                    profile_spec
+                        .authentication
+                        .iter()
+                        .flat_map(|auth| &auth.in_place_writes),
+                )
+                .chain(std::iter::once(&plan.permissions().scratch))
+                .chain(&plan.permissions().private_state);
+            for grant in writable {
+                assert!(
+                    !covers(grant, expected_skill_dir),
+                    "{adapter_name} ({access:?}): skill dir is writable: {grant:?}"
+                );
+                assert!(
+                    !covers(grant, &target),
+                    "{adapter_name} ({access:?}): link target is writable: {grant:?}"
+                );
+            }
+
+            // 3. Setup steps for claude and agy private configs
+            if adapter_name == "claude" {
+                assert!(
+                    spec.profile.steps.iter().any(|step| matches!(
+                        step,
+                        SetupStep::Symlink { link, target: tgt }
+                            if link.ends_with("skills") && tgt == expected_skill_dir
+                    )),
+                    "claude missing private skills symlink step"
+                );
+            } else if adapter_name == "agy" {
+                assert!(
+                    spec.profile.steps.iter().any(|step| matches!(
+                        step,
+                        SetupStep::Symlink { link, target: tgt }
+                            if link.ends_with(".gemini/skills") && tgt == expected_skill_dir
+                    )),
+                    "agy missing private skills symlink step"
+                );
+            }
+        }
+    }
+
+    // Cursor does not support user skill discovery
+    let plan = fixture_access_plan(Access::ReadOnly, Some("login"), false);
+    let mut route = route("cursor", "fixture-model");
+    route.account_key = None;
+    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.home = &home;
+    let spec = crate::cursor::Cursor.prepare(input)?;
+    assert!(
+        spec.profile
+            .spec
+            .runtime_reads
+            .iter()
+            .all(|grant| !grant.path.ends_with("skills")),
+        "cursor should not grant user skills"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn lane_adapters_skip_user_skills_when_disabled() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().canonicalize()?;
+    let releases_dir = home.join("releases");
+    let target = releases_dir.join("v1/releases/digest123/skills/super-skill");
+    std::fs::create_dir_all(&target)?;
+
+    let claude_skills = home.join(".claude/skills");
+    let codex_skills = home.join(".agents/skills");
+    let agy_skills = home.join(".gemini/skills");
+    let opencode_skills = home.join(".config/opencode/skills");
+
+    for dir in [&claude_skills, &codex_skills, &agy_skills, &opencode_skills] {
+        std::fs::create_dir_all(dir)?;
+        std::os::unix::fs::symlink(&target, dir.join("super-skill"))?;
+    }
+
+    let prompt = Prompt::new("test prompt".into());
+    let claude_token = fixture_token();
+    let agy_account = legacy_agy_account();
+    let plan = fixture_access_plan(Access::ReadOnly, Some("login"), false);
+
+    for adapter_name in ["claude", "codex", "agy", "opencode"] {
+        let mut route = route(adapter_name, "fixture-model");
+        route.account_key = None;
+        route.set_user_skills(false);
+
+        let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+        input.home = &home;
+        if adapter_name == "claude" {
+            input.token = Some(&claude_token);
+        } else if adapter_name == "agy" {
+            input.account = Some(&agy_account);
+        }
+
+        let spec = match adapter_name {
+            "claude" => crate::claude::Claude.prepare(input)?,
+            "codex" => crate::codex::Codex.prepare(input)?,
+            "agy" => crate::agy::Agy.prepare(input)?,
+            "opencode" => crate::opencode::OpenCode.prepare(input)?,
+            _ => unreachable!(),
+        };
+        let profile_spec = &spec.profile.spec;
+
+        let expected_skill_dir = match adapter_name {
+            "claude" => &claude_skills,
+            "codex" => &codex_skills,
+            "agy" => &agy_skills,
+            "opencode" => &opencode_skills,
+            _ => unreachable!(),
+        };
+
+        assert!(
+            !profile_spec
+                .runtime_reads
+                .contains(&crate::launch::subtree(expected_skill_dir)),
+            "{adapter_name}: skill dir should not be granted when disabled"
+        );
+        assert!(
+            !profile_spec
+                .runtime_reads
+                .contains(&crate::launch::subtree(&target)),
+            "{adapter_name}: link target should not be granted when disabled"
+        );
+
+        if adapter_name == "claude" {
+            assert!(
+                !spec.profile.steps.iter().any(|step| matches!(
+                    step,
+                    SetupStep::Symlink { link, .. } if link.ends_with("skills")
+                )),
+                "claude should not have skills symlink step when disabled"
+            );
+        } else if adapter_name == "agy" {
+            assert!(
+                !spec.profile.steps.iter().any(|step| matches!(
+                    step,
+                    SetupStep::Symlink { link, .. } if link.ends_with(".gemini/skills")
+                )),
+                "agy should not have skills symlink step when disabled"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn lane_adapters_skip_missing_user_skills_silently() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().canonicalize()?;
+
+    let prompt = Prompt::new("test prompt".into());
+    let claude_token = fixture_token();
+    let agy_account = legacy_agy_account();
+    let plan = fixture_access_plan(Access::ReadOnly, Some("login"), false);
+
+    for adapter_name in ["claude", "codex", "agy", "opencode"] {
+        let mut route = route(adapter_name, "fixture-model");
+        route.account_key = None;
+
+        let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+        input.home = &home;
+        if adapter_name == "claude" {
+            input.token = Some(&claude_token);
+        } else if adapter_name == "agy" {
+            input.account = Some(&agy_account);
+        }
+
+        let spec = match adapter_name {
+            "claude" => crate::claude::Claude.prepare(input)?,
+            "codex" => crate::codex::Codex.prepare(input)?,
+            "agy" => crate::agy::Agy.prepare(input)?,
+            "opencode" => crate::opencode::OpenCode.prepare(input)?,
+            _ => unreachable!(),
+        };
+        assert!(
+            spec.profile
+                .spec
+                .runtime_reads
+                .iter()
+                .all(|g| !g.path.ends_with("skills")),
+            "{adapter_name}: missing skills dir should not be in runtime_reads"
+        );
+    }
+    Ok(())
 }

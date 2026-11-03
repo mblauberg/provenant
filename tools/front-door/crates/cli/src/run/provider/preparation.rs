@@ -955,7 +955,19 @@ pub(super) fn prepare_candidates(
             "claude" => fixture_token.or(refreshed.as_ref()),
             _ => None,
         };
-        let provider_route = adapter_route(&route);
+        let mut provider_route = adapter_route(&route);
+        let project_id_str = project_id.to_string();
+        let project_name = cwd.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let user_skills_mode = model_policy
+            .lane
+            .user_skills
+            .unwrap_or_else(|| {
+                config
+                    .domains
+                    .lanes
+                    .user_skills_for_any(&[&project_id_str, project_name])
+            });
+        provider_route.set_user_skills(user_skills_mode.is_discover());
         let nonce = entropy_128().map_err(|error| error.to_string())?;
         let grant_digest = task.authority_digest.to_string();
         let mut spec = match adapter.prepare(PrepareInput {
@@ -1147,6 +1159,25 @@ pub(super) fn prepare_candidates(
             provider
                 .extra
                 .insert("dependency_preparation".into(), event.clone());
+        }
+        if user_skills_mode.is_discover() {
+            let config_home = std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .unwrap_or_else(|| home.join(".config"));
+            let exposed = match adapter.id() {
+                "claude" => Some(home.join(".claude/skills")),
+                "codex" => Some(home.join(".agents/skills")),
+                "agy" => Some(home.join(".gemini/skills")),
+                "opencode" => Some(config_home.join("opencode/skills")),
+                _ => None,
+            }
+            .filter(|p| p.is_dir());
+            if let Some(path) = exposed {
+                provider
+                    .extra
+                    .insert("user_skills".into(), path.display().to_string().into());
+            }
         }
         let stdin = match spec.stdin {
             Stdin::Bytes(bytes) => bytes,

@@ -263,6 +263,56 @@ impl LaneAccess {
     }
 }
 
+/// Whether a lane discovers the host's user skills read-only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserSkillsMode {
+    Discover,
+    Off,
+}
+
+impl Default for UserSkillsMode {
+    fn default() -> Self {
+        Self::Discover
+    }
+}
+
+impl UserSkillsMode {
+    pub fn is_discover(&self) -> bool {
+        matches!(self, Self::Discover)
+    }
+}
+
+impl<'de> Deserialize<'de> for UserSkillsMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct Visitor;
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = UserSkillsMode;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("'discover', 'off', or a boolean")
+            }
+            fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E> {
+                Ok(if v {
+                    UserSkillsMode::Discover
+                } else {
+                    UserSkillsMode::Off
+                })
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                match v {
+                    "discover" | "on" => Ok(UserSkillsMode::Discover),
+                    "off" => Ok(UserSkillsMode::Off),
+                    _ => Err(E::unknown_variant(v, &["discover", "off"])),
+                }
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
 /// Canonical repository and linked worktree selected at the submission edge.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WriterRequest {
@@ -994,6 +1044,19 @@ pub struct AttemptRecord {
     /// all unknown.
     #[serde(default)]
     pub trace: crate::Trace,
+}
+impl AttemptRecord {
+    pub fn user_skills(&self) -> Option<&str> {
+        self.applied_route
+            .as_ref()
+            .and_then(|r| r.extra.get("user_skills"))
+            .and_then(|v| v.as_str())
+            .or_else(|| self.extra.get("user_skills").and_then(|v| v.as_str()))
+    }
+    pub fn set_user_skills(&mut self, path: impl Into<String>) {
+        self.extra
+            .insert("user_skills".into(), serde_json::Value::String(path.into()));
+    }
 }
 /// A live-only value that is deliberately absent from durable identity and
 /// equality. It can decorate a record read without making two reads of that
