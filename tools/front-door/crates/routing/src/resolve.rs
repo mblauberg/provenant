@@ -82,11 +82,20 @@ impl RoutingContext<'_> {
     }
 }
 
-struct ValidatedContext<'a>(RoutingContext<'a>);
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResolutionPurpose {
+    Dispatch,
+    Preview,
+}
+
+struct ValidatedContext<'a>(RoutingContext<'a>, ResolutionPurpose);
 impl<'a> ValidatedContext<'a> {
     fn new(context: &RoutingContext<'a>) -> Result<Self, RoutingError> {
         context.validate()?;
-        Ok(Self(RoutingContext { ..*context }))
+        Ok(Self(
+            RoutingContext { ..*context },
+            ResolutionPurpose::Dispatch,
+        ))
     }
 }
 impl<'a> std::ops::Deref for ValidatedContext<'a> {
@@ -113,6 +122,9 @@ impl<'a> AccountSelection<'a> {
 #[derive(Debug, Serialize)]
 pub struct RouteList {
     pub valid_pairs: Vec<ValidRoutePair>,
+    /// Host readiness projected by the CLI preview, without dispatch grants.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub readiness: BTreeMap<ModelId, RouteReadiness>,
     pub catalogue_revision: String,
     pub models: Vec<ModelEntry>,
     pub named_routes: std::collections::BTreeMap<String, NamedRoute>,
@@ -230,6 +242,7 @@ pub fn list(
         pools.clear();
     }
     Ok(RouteList {
+        readiness: BTreeMap::new(),
         valid_pairs,
         catalogue_revision: context.catalogue.revision.clone(),
         models: context
@@ -493,7 +506,9 @@ fn window_matches(
         }
         PacingWindow::Daily => window.window_seconds == Some(86_400) || name.ends_with("daily"),
         PacingWindow::Rolling => {
-            adapter == "opencode" && (name.ends_with("five_hour") || name.ends_with("rolling"))
+            provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
+                spec.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
+            }) && (name.ends_with("five_hour") || name.ends_with("rolling"))
         }
     }
 }
@@ -673,11 +688,12 @@ fn pace_snapshot_factor(
             let reset_known = window.resets_unix_seconds.is_some_and(|reset| reset > now);
             let reset = match window.resets_unix_seconds {
                 Some(reset) if reset > now => reset,
-                None if adapter == "opencode"
-                    && snapshot
-                        .details
-                        .as_ref()
-                        .is_some_and(|d| d.source.as_deref() == Some("local-ledger")) =>
+                None if provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
+                    spec.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
+                }) && snapshot
+                    .details
+                    .as_ref()
+                    .is_some_and(|d| d.source.as_deref() == Some("local-ledger")) =>
                 {
                     now.checked_add(i64::try_from(duration).ok()?)?
                 }
@@ -762,7 +778,10 @@ fn pacing_factor_basis_points(
         }
         _ => detail,
     };
-    let detail = if model.adapter() == "opencode" && model.model().starts_with("opencode-go/") {
+    let detail = if provenant_records::AdapterSpec::get(model.adapter())
+        .and_then(|spec| spec.allowance_prefix)
+        .is_some_and(|prefix| model.model().starts_with(prefix))
+    {
         let observation = go_quota_observation(model, account, context);
         let details = observation.and_then(|o| o.snapshot.details.as_ref());
         if details.is_some_and(|d| d.coverage.as_deref() == Some("complete")) {
@@ -968,7 +987,9 @@ fn pacing_reserve_window(
             percent > 0
                 && (window.resets_unix_seconds.is_some_and(|reset| reset > now)
                     || (window.resets_unix_seconds.is_none()
-                        && adapter == "opencode"
+                        && provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
+                            spec.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
+                        })
                         && snapshot
                             .details
                             .as_ref()
@@ -1004,13 +1025,19 @@ fn account_reason<'q>(
     model: &ModelId,
     availability: &AvailabilityRecord,
     access: Option<&AccessContext<'_>>,
-    context: &'q RoutingContext<'_>,
+    context: &'q ValidatedContext<'_>,
 ) -> (Option<RouteExclusionReason>, Option<&'q QuotaObservation>) {
     let mut reason = availability_reason(Some(availability), context);
-    if reason.is_none() && access.is_none_or(|a| a.disclosure_ref.is_empty()) {
+    if reason.is_none()
+        && context.1 == ResolutionPurpose::Dispatch
+        && access.is_none_or(|a| a.disclosure_ref.is_empty())
+    {
         reason = Some(RouteExclusionReason::DisclosureDenied);
     }
-    if reason.is_none() && access.is_none_or(|a| a.confinement_ref.is_empty()) {
+    if reason.is_none()
+        && context.1 == ResolutionPurpose::Dispatch
+        && access.is_none_or(|a| a.confinement_ref.is_empty())
+    {
         reason = Some(RouteExclusionReason::ConfinementUnavailable);
     }
     if reason.is_none()
@@ -1102,19 +1129,23 @@ fn account_block_reason(
 /// An `unavailable` readiness verdict for this account on the model's own
 /// route or any of its verified pools, or on the whole account, excludes the
 /// candidate with the verdict's projected reason. Unknown (absent, stale,
-/// unreachable or damaged) never excludes: it is reported, not enforced.
+/// unreachable or damaged) never excludes dispatch. Previews report unknown
+/// until fresh status evidence exists.
 fn readiness_reason(
     model: &ModelId,
     availability: &AvailabilityRecord,
-    context: &RoutingContext<'_>,
+    context: &ValidatedContext<'_>,
 ) -> Option<RouteExclusionReason> {
-    let lookup = context.readiness?;
+    let Some(lookup) = context.readiness else {
+        return (context.1 == ResolutionPurpose::Preview)
+            .then_some(RouteExclusionReason::UnknownAvailability);
+    };
     let account_key = availability.account_key.as_deref()?;
     let now = context.now_seconds();
-    std::iter::once(format!("{}/{}", model.adapter(), model.model()))
+    let reads: Vec<_> = std::iter::once(format!("{}/{}", model.adapter(), model.model()))
         .chain(context.catalogue.admission_pools(model))
-        .find_map(|route| {
-            let read = lookup(
+        .map(|route| {
+            lookup(
                 &provenant_quota::ReadinessScope {
                     host: provenant_quota::LOCAL_HOST.into(),
                     adapter: model.adapter().into(),
@@ -1122,15 +1153,31 @@ fn readiness_reason(
                     route,
                 },
                 now,
-            );
-            if read.state != provenant_quota::ReadinessState::Unavailable {
-                return None;
-            }
-            match read.project() {
-                RouteReadiness::Unavailable { reason, .. } => Some(reason),
-                _ => None,
-            }
+            )
         })
+        .collect();
+    if let Some(reason) = reads.iter().find_map(|read| {
+        if read.state != provenant_quota::ReadinessState::Unavailable {
+            return None;
+        }
+        match read.project() {
+            RouteReadiness::Unavailable { reason, .. } => Some(reason),
+            _ => None,
+        }
+    }) {
+        return Some(reason);
+    }
+    // A diagnostic preview has observed only executable presence until a
+    // sign-in/readiness record confirms this route. Dispatch retains its
+    // existing rule: unknown cached readiness never adds a refusal.
+    if context.1 == ResolutionPurpose::Preview
+        && !reads
+            .iter()
+            .any(|read| read.state == provenant_quota::ReadinessState::Ready)
+    {
+        return Some(RouteExclusionReason::UnknownAvailability);
+    }
+    None
 }
 /// The account's latest reading for this model, only a fresh one when
 /// `fresh`. Only a fresh reading may refuse the route; a stale one still ranks
@@ -1292,13 +1339,16 @@ fn admissible<'c>(
 /// OpenCode accepts only its catalogued routes. An explicit model outside the
 /// four flash entries is refused with the admitted routes named.
 fn refuse_unlisted_opencode(model: &ModelId, catalogue: &Catalogue) -> Result<(), RoutingError> {
-    if model.adapter() != "opencode" || catalogue.model(model).is_some() {
+    if !provenant_records::AdapterSpec::get(model.adapter())
+        .is_some_and(|spec| spec.catalogue_models_only)
+        || catalogue.model(model).is_some()
+    {
         return Ok(());
     }
     let admitted = catalogue
         .models()
         .iter()
-        .filter(|entry| entry.model.adapter() == "opencode")
+        .filter(|entry| entry.model.adapter() == model.adapter())
         .map(|entry| entry.model.as_str())
         .collect::<Vec<_>>();
     Err(RoutingError::UnlistedOpenCodeModel {
@@ -1490,8 +1540,40 @@ pub fn resolve_for_account_with_seed_excluding(
     excluded_members: &[ModelId],
     rules: &[ExclusionRule],
 ) -> Result<ResolvedRoute, RoutingError> {
-    let account = AccountSelection::parse(account)?;
     let context = ValidatedContext::new(context)?;
+    resolve_account_context(
+        request,
+        &context,
+        account,
+        (operation_id, task_index),
+        excluded_members,
+        rules,
+    )
+}
+
+/// Preview recorded host readiness and quota without granting disclosure or
+/// confinement authority. Dispatch entry points always require those grants.
+pub fn preview(
+    request: &RouteRequest,
+    context: &RoutingContext<'_>,
+    account: Option<&str>,
+    rules: &[ExclusionRule],
+) -> Result<ResolvedRoute, RoutingError> {
+    let mut context = ValidatedContext::new(context)?;
+    context.1 = ResolutionPurpose::Preview;
+    resolve_account_context(request, &context, account, ("route-preview", 0), &[], rules)
+}
+
+fn resolve_account_context(
+    request: &RouteRequest,
+    context: &ValidatedContext<'_>,
+    account: Option<&str>,
+    seed: (&str, u64),
+    excluded_members: &[ModelId],
+    rules: &[ExclusionRule],
+) -> Result<ResolvedRoute, RoutingError> {
+    let (operation_id, task_index) = seed;
+    let account = AccountSelection::parse(account)?;
     // Exclusions shape named-route pools only: a pinned model keeps its own
     // account and fallback whatever is excluded.
     let named = matches!(request.choice, RouteChoice::NamedRoute(_));
@@ -1510,10 +1592,13 @@ pub fn resolve_for_account_with_seed_excluding(
         })
         .cloned()
         .collect();
-    let kept = ValidatedContext(RoutingContext {
-        availability: &availability,
-        ..context.0
-    });
+    let kept = ValidatedContext(
+        RoutingContext {
+            availability: &availability,
+            ..context.0
+        },
+        context.1,
+    );
     let context = &kept;
     let excluded_members = Excluded {
         rejected: if named { excluded_members } else { &[] },
@@ -1549,10 +1634,13 @@ pub fn resolve_for_account_with_seed_excluding(
             .cloned()
             .collect();
         // Filtering a validated snapshot preserves its bounds and uniqueness.
-        let filtered = ValidatedContext(RoutingContext {
-            availability: &availability,
-            ..context.0
-        });
+        let filtered = ValidatedContext(
+            RoutingContext {
+                availability: &availability,
+                ..context.0
+            },
+            context.1,
+        );
         resolve_inner(
             request,
             &filtered,

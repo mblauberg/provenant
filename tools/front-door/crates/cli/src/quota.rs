@@ -855,29 +855,19 @@ fn credential_metadata(
     home: Option<&Path>,
 ) -> Option<Vec<CredentialMetadata>> {
     let directory = &registration.directory;
-    let names: &[&str] = match registration.adapter.as_str() {
-        "claude" => &[".credentials.json", "settings.json"],
-        "codex" => &["auth.json", "config.toml"],
-        "cursor" => &["state.vscdb", "state.vscdb-wal", "cli-config.json"],
-        "agy" => &["state.vscdb", "state.vscdb-wal"],
-        "opencode" => &[
-            "auth.json",
-            "opencode.db",
-            "opencode.db-wal",
-            "opencode.json",
-        ],
-        _ => &[],
-    };
+    let spec = provenant_records::AdapterSpec::get(&registration.adapter);
     let mut paths = vec![directory.clone()];
-    paths.extend(names.iter().map(|name| directory.join(name)));
-    if registration.adapter == "agy" {
-        // An isolated account keeps its sign-in in its own keychain, so a
-        // re-login replaces that file rather than the state database.
-        paths.push(directory.join("Library/Keychains/login.keychain-db"));
-    }
-    if registration.adapter == "claude" {
-        paths.push(directory.with_extension("json"));
-        if cfg!(target_os = "macos")
+    if let Some(spec) = spec {
+        paths.extend(
+            spec.credential_files
+                .iter()
+                .map(|name| directory.join(name)),
+        );
+        if spec.credential_profile_sibling {
+            paths.push(directory.with_extension("json"));
+        }
+        if spec.credential_host_keychain
+            && cfg!(target_os = "macos")
             && let Some(home) = home
         {
             paths.push(home.join("Library/Keychains/login.keychain-db"));
@@ -1019,10 +1009,10 @@ fn decorate(
         };
     for row in &mut report.accounts {
         row.repair = (row.error == Some(ProbeFailure::IsolatedKeychainUnavailable)).then(|| {
-            let entry = accounts
-                .entries
-                .values()
-                .find(|entry| entry.adapter == "agy" && entry.key == row.account.account_key);
+            let entry = accounts.entries.values().find(|entry| {
+                entry.adapter == provenant_records::Harness::Agy.spec().name
+                    && entry.key == row.account.account_key
+            });
             keychain_repair(entry, &row.account.label)
         });
         row.display = accounts
@@ -2428,6 +2418,62 @@ mod tests {
             &mut Vec::new(),
         )?;
         assert_eq!(provenant_os::changes::read(temp.path())?.quota, Some(1));
+        Ok(())
+    }
+
+    #[test]
+    fn credential_metadata_registry_preserves_watched_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let directory = temp.path().join("account");
+        let cases: &[(&str, &[&str])] = &[
+            ("claude", &[".credentials.json", "settings.json"]),
+            ("codex", &["auth.json", "config.toml"]),
+            (
+                "cursor",
+                &["state.vscdb", "state.vscdb-wal", "cli-config.json"],
+            ),
+            (
+                "agy",
+                &[
+                    "state.vscdb",
+                    "state.vscdb-wal",
+                    "Library/Keychains/login.keychain-db",
+                ],
+            ),
+            (
+                "opencode",
+                &[
+                    "auth.json",
+                    "opencode.db",
+                    "opencode.db-wal",
+                    "opencode.json",
+                ],
+            ),
+            ("unknown", &[]),
+        ];
+        for (adapter, files) in cases {
+            let registration = serde_json::from_value(serde_json::json!({
+                "adapter": adapter, "label": "fixture", "key": "fixture", "directory": directory,
+            }))?;
+            let mut expected = vec![directory.clone()];
+            expected.extend(files.iter().map(|file| directory.join(file)));
+            if *adapter == "claude" {
+                expected.push(directory.with_extension("json"));
+                if cfg!(target_os = "macos") {
+                    expected.push(temp.path().join("Library/Keychains/login.keychain-db"));
+                }
+            }
+            let observed = credential_metadata(&registration, Some(temp.path())).unwrap();
+            assert_eq!(
+                observed
+                    .into_iter()
+                    .map(|metadata| metadata.path)
+                    .collect::<Vec<_>>(),
+                expected,
+                "{adapter}"
+            );
+        }
         Ok(())
     }
 

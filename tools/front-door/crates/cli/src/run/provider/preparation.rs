@@ -97,7 +97,7 @@ pub(crate) fn prepare(
     paths: &run::LaunchPaths,
     resume: Option<&run::AttemptRecord>,
     wait: Option<u64>,
-) -> Result<run::PreparedLaunch, String> {
+) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
     prepare_with_wait(
         registry,
         task,
@@ -120,7 +120,7 @@ pub(crate) fn prepare(
         None,
         wait,
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.into_refusal())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -192,9 +192,25 @@ pub(super) enum PrepareError {
     Candidates {
         message: String,
         plans: Vec<provenant_confinement::PlanError>,
+        skipped_routes: Vec<SkippedRoute>,
     },
     #[error("{0}")]
     Other(String),
+}
+impl PrepareError {
+    fn into_refusal(self) -> run::PrepareRefusal {
+        match self {
+            Self::Candidates {
+                message,
+                skipped_routes,
+                ..
+            } => run::PrepareRefusal {
+                message,
+                skipped_routes,
+            },
+            other => other.to_string().into(),
+        }
+    }
 }
 impl From<String> for PrepareError {
     fn from(message: String) -> Self {
@@ -275,7 +291,7 @@ pub(super) fn prepare_with_wait(
         let mut delegated = task.clone();
         delegated.route = run::RequestedRoute::Model {
             extra: Default::default(),
-            provider: "claude".into(),
+            provider: provenant_records::Harness::Claude.spec().name.into(),
             model: model.clone(),
             effort: effort.clone(),
         };
@@ -443,60 +459,66 @@ pub(super) fn prepare_candidates(
     let settings = config.domains.accounts.with_derived_accounts();
     let host_writes = config.domains.run;
     let mut entries: Vec<_> = settings.entries.into_values().collect();
+    let mut default_failures = std::collections::BTreeMap::new();
     if eligible("codex") && !entries.iter().any(|e| e.adapter == "codex") {
         let directory = registry
             .host
             .and_then(|host| host.codex_home.clone())
             .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
             .unwrap_or_else(|| home.join(".codex"));
-        if let Ok(directory) = canonical(&directory)
-            && let Ok(executable) = locate("codex")
-            && let Ok(key) = provenant_providers::accounts::detect(
+        let mut entry = provenant_providers::accounts::Registration {
+            adapter: "codex".into(),
+            label: "default".into(),
+            key: String::new(),
+            org_fingerprint: None,
+            directory: directory.clone(),
+            plan: None,
+            priority: None,
+            billing_anchor: None,
+            plans: Vec::new(),
+            directories: Vec::new(),
+            limits: None,
+            display_name: None,
+            hidden: false,
+            order: None,
+            headline: None,
+            settings: Default::default(),
+        };
+        let discovered = (|| -> Result<(), AccountObservationError> {
+            let executable =
+                locate("codex").map_err(AccountObservationError::VersionUnavailable)?;
+            entry.directory = canonical(&directory)
+                .map_err(|detail| default_directory_error(&directory, detail))?;
+            entry.key = provenant_providers::accounts::detect(
                 &executor,
                 "codex",
                 &executable,
                 &home,
                 &user,
-                &directory,
+                &entry.directory,
                 executor.root(),
             )
-        {
-            entries.push(provenant_providers::accounts::Registration {
-                adapter: "codex".into(),
-                label: "default".into(),
-                key,
-                org_fingerprint: None,
-                directory,
-                plan: None,
-                priority: None,
-                billing_anchor: None,
-                plans: Vec::new(),
-                directories: Vec::new(),
-                limits: None,
-                display_name: None,
-                hidden: false,
-                order: None,
-                headline: None,
-                settings: Default::default(),
-            });
+            .map_err(|error| account_observation_error(&entry, &error))?;
+            Ok(())
+        })();
+        match discovered {
+            Ok(()) => entries.push(entry),
+            Err(error) => {
+                default_failures.insert("codex".to_owned(), (error.skip_kind(), error.to_string()));
+            }
         }
     }
     // These adapters use the CLI's existing local login and configuration.
-    for adapter in ADAPTER_SPECS
+    for spec in ADAPTER_SPECS
         .iter()
         .filter(|spec| spec.local_login && eligible(spec.name))
-        .map(|spec| spec.name)
     {
+        let adapter = spec.name;
         if !entries.iter().any(|entry| entry.adapter == adapter) && locate(adapter).is_ok() {
             entries.push(provenant_providers::accounts::Registration {
                 adapter: adapter.into(),
-                label: if adapter == "opencode" {
-                    "go"
-                } else {
-                    "default"
-                }
-                .into(),
-                key: if adapter == "opencode" { "go" } else { "local" }.into(),
+                label: spec.local_account.0.into(),
+                key: spec.local_account.1.into(),
                 org_fingerprint: None,
                 directory: home.clone(),
                 plan: None,
@@ -527,6 +549,8 @@ pub(super) fn prepare_candidates(
     let timestamp = clock.unix_seconds();
     let mut availability = Vec::new();
     let mut reasons: Vec<SkippedRoute> = Vec::new();
+    let mut auth_failures = std::collections::BTreeMap::new();
+    let mut observation_failures = std::collections::BTreeMap::new();
     let probe = Probe {
         roots: registry.roots,
         executor: &executor,
@@ -535,16 +559,22 @@ pub(super) fn prepare_candidates(
         scratch: &paths.scratch,
     };
     for entry in entries.iter().filter(|entry| eligible(&entry.adapter)) {
-        match locate(&entry.adapter).and_then(|executable| {
-            observe_account(entry, &executable, &probe, catalogue.revision(), timestamp)
-                .map_err(|error| error.to_string())
-        }) {
+        match locate(&entry.adapter)
+            .map_err(AccountObservationError::from)
+            .and_then(|executable| {
+                observe_account(entry, &executable, &probe, catalogue.revision(), timestamp)
+            }) {
             Ok(record) => availability.push(record),
-            Err(error) => reasons.push(skip(
-                &entry.adapter,
-                SkipKind::Account,
-                format!("account {}: {error}", entry.label),
-            )),
+            Err(AccountObservationError::AuthRequired(detail)) => {
+                auth_failures.insert((entry.adapter.clone(), entry.key.clone()), detail.clone());
+                observation_failures.insert((entry.adapter.clone(), entry.key.clone()), detail);
+            }
+            Err(error) => {
+                observation_failures.insert(
+                    (entry.adapter.clone(), entry.key.clone()),
+                    format!("account {}: {error}", entry.label),
+                );
+            }
         }
     }
     // Availability is diagnostic evidence; admission uses the in-memory records.
@@ -659,15 +689,6 @@ pub(super) fn prepare_candidates(
         &rules,
     )
     .map_err(|error| error.to_string())?;
-    if let Some(selection) = &resolved.pool_selection {
-        for redraw in &selection.redraws {
-            reasons.push(skip(
-                &redraw.rejected_pick,
-                SkipKind::Unavailable,
-                &redraw.reason,
-            ));
-        }
-    }
     for (candidate, route) in candidates(resolved).into_iter().enumerate() {
         let label = format!("{}/{}", route.adapter, route.model);
         let effective = config.domains.routing.model_policy.effective(
@@ -727,6 +748,57 @@ pub(super) fn prepare_candidates(
         };
         let adapter = registration.adapter;
         if let provenant_records::RouteReadiness::Unavailable { reason, .. } = &route.readiness {
+            if matches!(
+                reason,
+                provenant_records::RouteExclusionReason::UnknownAvailability
+            ) {
+                if let Some((kind, detail)) = default_failures.get(&route.adapter) {
+                    reasons.push(skip(&label, *kind, detail));
+                    continue;
+                }
+                let relevant: Vec<_> = entries
+                    .iter()
+                    .filter(|entry| {
+                        entry.adapter == route.adapter
+                            && selected
+                                .or(route.account_key.as_deref())
+                                .is_none_or(|key| key == entry.key)
+                    })
+                    .filter_map(|entry| {
+                        observation_failures.get(&(entry.adapter.clone(), entry.key.clone()))
+                    })
+                    .collect();
+                if unavailable_auth_detail(&route, selected, &entries, &auth_failures).is_none()
+                    && !relevant.is_empty()
+                {
+                    reasons.push(skip(
+                        &label,
+                        SkipKind::Account,
+                        relevant.into_iter().cloned().collect::<Vec<_>>().join("; "),
+                    ));
+                    continue;
+                }
+            }
+            if matches!(
+                reason,
+                provenant_records::RouteExclusionReason::AuthRequired
+            ) {
+                reasons.push(skip(
+                    &label,
+                    SkipKind::AuthRequired,
+                    provenant_routing::exclusion_detail(reason),
+                ));
+                continue;
+            }
+            if matches!(
+                reason,
+                provenant_records::RouteExclusionReason::UnknownAvailability
+            ) && let Some(detail) =
+                unavailable_auth_detail(&route, selected, &entries, &auth_failures)
+            {
+                reasons.push(skip(&label, SkipKind::AuthRequired, detail));
+                continue;
+            }
             // An adapter left out of `access` names its confinement error, not the router's denial.
             let detail = plan_errors
                 .get(route.adapter.as_str())
@@ -904,7 +976,9 @@ pub(super) fn prepare_candidates(
                 continue;
             }
         };
-        let refreshed = if adapter.id() == "claude" && fixture_token.is_none() {
+        let refreshed = if adapter.id() == provenant_records::Harness::Claude.spec().name
+            && fixture_token.is_none()
+        {
             let account = account.as_ref().ok_or("Claude account is not registered")?;
             let login = provenant_providers::claude::Login {
                 executable: &executable,
@@ -951,9 +1025,10 @@ pub(super) fn prepare_candidates(
         } else {
             None
         };
-        let token = match adapter.id() {
-            "claude" => fixture_token.or(refreshed.as_ref()),
-            _ => None,
+        let token = if adapter.id() == provenant_records::Harness::Claude.spec().name {
+            fixture_token.or(refreshed.as_ref())
+        } else {
+            None
         };
         let provider_route = adapter_route(&route);
         let nonce = entropy_128().map_err(|error| error.to_string())?;
@@ -1041,7 +1116,7 @@ pub(super) fn prepare_candidates(
                 .and_then(|host| host.cargo_build_jobs.as_deref()),
             build_settings.jobs(),
         );
-        if adapter.id() == "claude" {
+        if adapter.id() == provenant_records::Harness::Claude.spec().name {
             spec.configure_claude_shell(scratch)
                 .map_err(|error| error.to_string())?;
         }
@@ -1056,7 +1131,7 @@ pub(super) fn prepare_candidates(
                 continue;
             }
         }
-        if git_context.is_some() && adapter.id() == "claude" {
+        if git_context.is_some() && adapter.id() == provenant_records::Harness::Claude.spec().name {
             // Scratch is already granted by the outer profile. Claude's file
             // tools also need it in their working directories to read context.
             spec.argv
@@ -1064,7 +1139,7 @@ pub(super) fn prepare_candidates(
         }
         let transcript_account = account
             .as_ref()
-            .filter(|_| adapter.id() == "claude")
+            .filter(|_| adapter.id() == provenant_records::Harness::Claude.spec().name)
             .map(|account| account.directory());
         let mut setup_roots = vec![scratch, private_state, roots.state.as_path()];
         // Only directory creation uses these additional provider state roots;
@@ -1074,7 +1149,7 @@ pub(super) fn prepare_candidates(
             .iter()
             .find(|(key, _)| key == "XDG_DATA_HOME")
             .map(|(_, value)| Path::new(value));
-        if adapter.id() == "opencode" {
+        if adapter.id() == provenant_records::Harness::Opencode.spec().name {
             if let Some(data) = opencode_data {
                 let existing = data
                     .ancestors()
@@ -1184,6 +1259,7 @@ pub(super) fn prepare_candidates(
                 PlanCheckError::Other(_) => None,
             })
             .collect(),
+        skipped_routes: reasons,
     })
 }
 

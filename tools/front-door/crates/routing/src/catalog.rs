@@ -983,7 +983,11 @@ pub fn check_go_allowance(
     catalogue: &Catalogue,
 ) -> Result<(), String> {
     let floor = config.opencode_go.min_monthly_allowance_usd;
-    if floor == 0 || model.adapter() != "opencode" || !model.model().starts_with("opencode-go/") {
+    if floor == 0
+        || !provenant_records::AdapterSpec::get(model.adapter())
+            .and_then(|spec| spec.allowance_prefix)
+            .is_some_and(|prefix| model.model().starts_with(prefix))
+    {
         return Ok(());
     }
     let allowance = catalogue
@@ -1200,7 +1204,9 @@ impl Catalogue {
         }
         // Every OpenCode path component before the model name is its namespace.
         fn parts(id: &ModelId) -> (&str, &str) {
-            if id.adapter() == "opencode" {
+            if provenant_records::AdapterSpec::get(id.adapter())
+                .is_some_and(|spec| spec.namespaced_models)
+            {
                 id.model().rsplit_once('/').unwrap_or(("", id.model()))
             } else {
                 ("", id.model())

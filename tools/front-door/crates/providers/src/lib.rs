@@ -20,6 +20,7 @@ pub use lane::{BuildSlotGate, LaneRuntime};
 pub mod opencode;
 pub mod quota;
 pub mod quota_live;
+pub mod signin;
 mod stream;
 mod swift;
 pub use swift::toolchain_available as swift_toolchain_available;

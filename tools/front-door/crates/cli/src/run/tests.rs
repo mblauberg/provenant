@@ -2725,7 +2725,7 @@ fn refused_provider_continuation_keeps_a_durable_attempt() -> Result<(), Box<dyn
             _: &str,
             _: &run::LaunchPaths,
             resume: Option<&run::AttemptRecord>,
-        ) -> Result<run::PreparedLaunch, String> {
+        ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
             assert_eq!(resume.map(|prior| prior.attempt_id), self.prior);
             Err("fixture continuation refused; run provenant run".into())
         }
@@ -5352,4 +5352,41 @@ fn claude_absent_usage_names_its_reason() {
         decoded_no_usage.usage.source.as_deref(),
         Some("absent: result event has no usage")
     );
+}
+
+#[test]
+fn every_adapter_sign_in_failure_settles_auth_required() -> Result<(), Box<dyn std::error::Error>> {
+    use run::Providers;
+    let fixtures: &[(&str, &[u8])] = &[
+        (
+            "cursor",
+            include_bytes!("../../../../tests/fixtures/providers/cursor/auth-required.stderr"),
+        ),
+        (
+            "codex",
+            include_bytes!("../../../../tests/fixtures/providers/codex/auth-required.stderr"),
+        ),
+        (
+            "opencode",
+            include_bytes!("../../../../tests/fixtures/providers/opencode/auth-required.stderr"),
+        ),
+        (
+            "agy",
+            include_bytes!("../../../../tests/fixtures/providers/agy/auth-required.stderr"),
+        ),
+    ];
+    let temp = tempfile::tempdir()?;
+    let mut exit = clean_exit();
+    exit.termination = Some(provenant_os::exec::Termination::Exit(1));
+    for (adapter, stderr) in fixtures {
+        let route = run::RouteRecord {
+            provider: Some((*adapter).into()),
+            model: Some(format!("{adapter}/example")),
+            ..Default::default()
+        };
+        let decoded =
+            Registry::default().decode_captures(&route, b"", stderr, &exit, temp.path(), None)?;
+        assert_eq!(decoded.outcome, run::Outcome::AuthRequired, "{adapter}");
+    }
+    Ok(())
 }

@@ -43,8 +43,87 @@ struct AgyAccount {
     keychain_available: bool,
 }
 #[derive(Serialize, Deserialize)]
+struct ProviderSignin {
+    adapter: String,
+    label: String,
+    state: provenant_providers::signin::SigninState,
+    repair: String,
+}
+
+fn provider_signins(
+    home: &Path,
+    accounts: &provenant_providers::accounts::Settings,
+) -> Vec<ProviderSignin> {
+    let Ok(executor) = SystemExecutor::new(1) else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    for registration in provenant_providers::REGISTRY {
+        let Some(spec) = provenant_records::AdapterSpec::get(registration.adapter.id()) else {
+            continue;
+        };
+        if matches!(
+            spec.id,
+            provenant_records::Harness::Claude
+                | provenant_records::Harness::Command
+                | provenant_records::Harness::HostNative
+        ) {
+            continue; // Existing per-identity Claude diagnostics include keychain state.
+        }
+        let Some(binary) = executable(spec.binary) else {
+            continue;
+        };
+        let entries: Vec<_> = accounts
+            .entries
+            .values()
+            .filter(|entry| entry.adapter == spec.name)
+            .collect();
+        if entries.is_empty() {
+            rows.push(ProviderSignin {
+                adapter: spec.name.into(),
+                label: "default".into(),
+                state: provenant_providers::signin::probe(&executor, spec, &binary, home, None),
+                repair: spec.login_hint.into(),
+            });
+        } else {
+            for entry in entries {
+                let state = if spec.id == provenant_records::Harness::Agy {
+                    match provenant_providers::agy::ProbeHome::select(&entry.directory, home) {
+                        Ok(probe_home) => provenant_providers::signin::probe(
+                            &probe_home.guard(&executor),
+                            spec,
+                            &binary,
+                            home,
+                            Some(&entry.directory),
+                        ),
+                        Err(_) => provenant_providers::signin::SigninState::Unknown,
+                    }
+                } else {
+                    provenant_providers::signin::probe(
+                        &executor,
+                        spec,
+                        &binary,
+                        home,
+                        Some(&entry.directory),
+                    )
+                };
+                rows.push(ProviderSignin {
+                    adapter: spec.name.into(),
+                    label: entry.label.clone(),
+                    state,
+                    repair: spec.login_hint.into(),
+                });
+            }
+        }
+    }
+    rows
+}
+
+#[derive(Serialize, Deserialize)]
 pub(crate) struct Report {
     claude: Vec<Identity>,
+    #[serde(default)]
+    signins: Vec<ProviderSignin>,
     /// The executable lanes can resolve through their read-only Rust toolchain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     nextest: Option<String>,
@@ -260,8 +339,12 @@ pub(crate) fn local(
             .ok()
             .map(|config| agy_accounts(&config.domains.accounts, home))
             .unwrap_or_default();
+    let signins = provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS)
+        .map(|config| provider_signins(home, &config.domains.accounts))
+        .unwrap_or_else(|_| provider_signins(home, &Default::default()));
     Ok(Report {
         claude,
+        signins,
         nextest: lane_nextest(home),
         peer_agent: provenant_fabric_runtime::peer_agent::status(state, home),
         tick_agent: crate::tick_agent::diagnosis(state, home),
@@ -329,6 +412,12 @@ fn valid_remote(report: &Report) -> bool {
                 && row.label.len() <= 128
                 && !row.label.chars().any(char::is_control)
                 && row.signin.token_validity == "unverified"
+        })
+        && report.signins.len() <= 128
+        && report.signins.iter().all(|row| {
+            [&row.adapter, &row.label, &row.repair].iter().all(|text| {
+                !text.is_empty() && text.len() <= 1024 && !text.chars().any(char::is_control)
+            })
         })
         && report.managed.len() <= 128
         && report.managed.iter().all(|row| {
@@ -423,6 +512,21 @@ pub fn run(command: Hosts, globals: &Globals) -> u8 {
                     text.push_str(" (status probe could not confirm sign-in)");
                 }
                 text.push_str("; token validity unverified\n");
+            }
+            for row in &report.signins {
+                let state = match row.state {
+                    provenant_providers::signin::SigninState::SignedIn => "signed_in",
+                    provenant_providers::signin::SigninState::SignedOut => "signed_out",
+                    provenant_providers::signin::SigninState::Unknown => "unknown (not confirmed)",
+                };
+                text.push_str(&format!(
+                    "{} [{}]: {state}; token validity unverified",
+                    row.adapter, row.label
+                ));
+                if row.state != provenant_providers::signin::SigninState::SignedIn {
+                    text.push_str(&format!("; run `{}`", row.repair));
+                }
+                text.push('\n');
             }
             for row in &report.agy_accounts {
                 text.push_str(&format!(

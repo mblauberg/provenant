@@ -5,7 +5,19 @@ Anchor: tools/front-door/crates/providers/src
 Per-adapter launch notes. The model adapters (Claude, Codex, Cursor, Agy and
 OpenCode) are enabled by default in every access and session mode with a launch
 form; recordings serve replay tests only. Use `provenant route list`
-to inspect the catalogue; readiness is decided at dispatch.
+to inspect the catalogue. Route previews show recorded host readiness and
+quota evidence, probing sign-in when a readiness record is missing. Unknown
+means not confirmed, rather than signed out; `provenant quota tick` refreshes
+the recorded evidence. Dispatch still verifies identity, permissions and
+confinement before launch.
+
+`AdapterSpec` owns credential metadata watch files, sign-in commands and
+markers, login hints, compaction environment controls and allowance prefixes.
+Credential watches inspect metadata only. `provenant hosts doctor` reports
+non-secret sign-in status for installed adapters; it never prints status
+command captures. Recognised missing or expired provider logins settle as
+`auth_required`, including when every candidate is skipped before launch.
+Read-only graph nodes can then try their next declared route.
 
 ## Launch capabilities
 

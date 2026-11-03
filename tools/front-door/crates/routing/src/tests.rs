@@ -5200,3 +5200,67 @@ fn unavailable_pool_member_is_drawn_around() -> Result<(), Box<dyn std::error::E
     );
     Ok(())
 }
+
+#[test]
+fn preview_selects_ready_pool_members_without_granting_dispatch_access()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::{ReadinessReason as Why, ReadinessState as State};
+    let catalogue = Catalogue::bundled()?;
+    let config: RoutingConfig = toml_edit::de::from_str(
+        "[pools]\nmixed=[{model='agy/claude-sonnet-4-6',weight=1},{model='agy/gemini-3.8-flash',weight=1}]\n",
+    )?;
+    let records = [agy_account("work")];
+    let lookup = readiness_over(vec![
+        observation(
+            "agy",
+            "work",
+            "agy/claude-sonnet-4-6",
+            State::Unavailable,
+            Some(Why::SignedOut),
+            (80, 120),
+        ),
+        observation(
+            "agy",
+            "work",
+            "agy/gemini-3.8-flash",
+            State::Ready,
+            None,
+            (80, 120),
+        ),
+    ]);
+    let context = RoutingContext {
+        availability: &records,
+        readiness: Some(&lookup),
+        access: &[],
+        ..context(&catalogue, &config, now()?)
+    };
+    let query = RouteRequest {
+        intent: Default::default(),
+        choice: RouteChoice::NamedRoute(RouteName::parse("mixed")?),
+        effort: None,
+        confidential: false,
+        fallback: Fallback::None,
+    };
+    let selected = preview(&query, &context, None, &[])?;
+    assert_eq!(selected.model, "gemini-3.8-flash");
+    assert!(matches!(selected.readiness, RouteReadiness::Ready { .. }));
+    assert!(selected.confidentiality.evidence_ref.is_empty());
+    let dispatch = resolve(&request("agy/gemini-3.8-flash")?, &context)?;
+    assert!(matches!(
+        dispatch.readiness,
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::DisclosureDenied,
+            ..
+        }
+    ));
+    let missing = RoutingContext {
+        readiness: None,
+        ..context
+    };
+    assert!(
+        preview(&request("agy/gemini-3.8-flash")?, &missing, None, &[])?
+            .readiness
+            .is_unknown()
+    );
+    Ok(())
+}

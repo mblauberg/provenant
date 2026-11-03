@@ -6560,3 +6560,47 @@ fn free_plan_notional_value_and_extra_directories_parse_and_validate() {
     let relative = accounts_with_plans("directories = [\"rel/dir\"]\n").unwrap();
     assert!(!relative.validate().is_empty());
 }
+
+#[test]
+fn adapter_sign_in_stderr_has_a_typed_auth_cause() {
+    let fixtures: &[(&dyn Adapter, &[u8])] = &[
+        (
+            &cursor::Cursor,
+            include_bytes!("../../../tests/fixtures/providers/cursor/auth-required.stderr"),
+        ),
+        (
+            &codex::Codex,
+            include_bytes!("../../../tests/fixtures/providers/codex/auth-required.stderr"),
+        ),
+        (
+            &opencode::OpenCode,
+            include_bytes!("../../../tests/fixtures/providers/opencode/auth-required.stderr"),
+        ),
+        (
+            &agy::Agy,
+            include_bytes!("../../../tests/fixtures/providers/agy/auth-required.stderr"),
+        ),
+    ];
+    for (adapter, stderr) in fixtures {
+        assert_eq!(
+            adapter.failure_cause(stderr),
+            FailureCause::AuthRequired,
+            "{}",
+            adapter.id()
+        );
+        for unrelated in [
+            "connection closed",
+            "tool request failed: Unauthorized",
+            "application request unauthenticated",
+            "tool request failed: invalid API key",
+            "tool documentation mentions opencode auth login",
+        ] {
+            assert_eq!(
+                adapter.failure_cause(unrelated.as_bytes()),
+                FailureCause::Provider,
+                "{}: {unrelated}",
+                adapter.id()
+            );
+        }
+    }
+}

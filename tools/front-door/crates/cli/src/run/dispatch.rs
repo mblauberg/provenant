@@ -1552,7 +1552,7 @@ impl run::Providers for PreparedProvider<'_> {
         prompt: &str,
         paths: &run::LaunchPaths,
         resume: Option<&run::AttemptRecord>,
-    ) -> Result<run::PreparedLaunch, String> {
+    ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
         if let Some(ready) = self.ready {
             if ready.attempt != paths.attempt_id || ready.task != *task || resume.is_some() {
                 return Err("prepared continuation identity changed".into());
