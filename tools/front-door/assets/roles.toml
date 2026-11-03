@@ -168,8 +168,7 @@ Spec (acceptance criteria): ${spec}
 Check correctness against the spec as well as this lens.
 End with a findings block (schema_version 1) whose findings are a JSON array,
 with at most 32 entries and an empty array when there are no findings. Keep each
-summary to one line and the whole block under 8 KiB. Use this canonical array
-form:
+summary to one line. Use this canonical array form:
 ```findings
 {"schema_version":1,"findings":[{"id":"F1","severity":"high","file":"src/lib.rs","line":12,"summary":"Describe the finding","status":"open"}]}
 ```
@@ -233,8 +232,7 @@ Check correctness against the spec as well as this lens.
 ${mutation_testing}
 End with a findings block (schema_version 1) whose findings are a JSON array,
 with at most 32 entries and an empty array when there are no findings. Keep each
-summary to one line and the whole block under 8 KiB. Use this canonical array
-form:
+summary to one line. Use this canonical array form:
 ```findings
 {"schema_version":1,"findings":[{"id":"F1","severity":"high","file":"src/lib.rs","line":12,"summary":"Describe the finding","status":"open"}]}
 ```
