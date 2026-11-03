@@ -716,7 +716,8 @@ impl Registry<'_> {
             adapter.failure_cause(stderr)
         };
         let auth = failure_cause == provenant_providers::FailureCause::AuthRequired;
-        let provider_failed = outcome.status() == OutcomeStatus::Failed && !auth;
+        let provider_failed = outcome.status() == OutcomeStatus::Failed
+            && failure_cause == provenant_providers::FailureCause::Provider;
         (decoded.outcome, decoded.reason) = match outcome.status() {
             OutcomeStatus::Success => (run::Outcome::Succeeded, None),
             _ if auth && outcome.status() != OutcomeStatus::Success => (

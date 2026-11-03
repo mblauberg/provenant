@@ -473,16 +473,30 @@ pub fn detect_with_org(
     let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(4));
     options.env = Some(&env);
     options.stdout = StreamPolicy::Capture { limit: 65536 };
-    options.stderr = StreamPolicy::Discard;
+    options.stderr = StreamPolicy::Capture { limit: 65536 };
     options.stop_on_output_limit = true;
     let out = executor.execute(options).map_err(exec_error)?;
-    if out.termination != Termination::Exit(0)
-        || out.stdout.truncated
+    if out.stdout.truncated
         || out.stdout.read_failed
+        || out.stderr.truncated
+        || out.stderr.read_failed
+        || out.cancelled
+        || out.overflow_stopped
         || out.timed_out
         || out.drain_truncated
     {
         return Err(ProviderError::UnknownIdentity);
+    }
+    if out.termination != Termination::Exit(0) {
+        return Err(
+            if crate::Adapter::failure_cause(&crate::claude::Claude, &out.stderr.bytes)
+                == crate::FailureCause::AuthRequired
+            {
+                ProviderError::CredentialUnavailable
+            } else {
+                ProviderError::UnknownIdentity
+            },
+        );
     }
     #[derive(Deserialize)]
     struct Status {
@@ -548,17 +562,30 @@ fn detect_agy(
     );
     options.env = Some(&env);
     options.stdout = StreamPolicy::Capture { limit: 1024 * 1024 };
-    options.stderr = StreamPolicy::Discard;
+    options.stderr = StreamPolicy::Capture { limit: 65536 };
     options.stop_on_output_limit = true;
     let out = executor.execute(options).map_err(exec_error)?;
-    if out.termination != Termination::Exit(0)
-        || out.stdout.truncated
+    if out.stdout.truncated
         || out.stdout.read_failed
+        || out.stderr.truncated
+        || out.stderr.read_failed
+        || out.cancelled
         || out.timed_out
         || out.drain_truncated
         || out.overflow_stopped
     {
         return Err(ProviderError::UnknownIdentity);
+    }
+    if out.termination != Termination::Exit(0) {
+        return Err(
+            if crate::Adapter::failure_cause(&crate::agy::Agy, &out.stderr.bytes)
+                == crate::FailureCause::AuthRequired
+            {
+                ProviderError::CredentialUnavailable
+            } else {
+                ProviderError::UnknownIdentity
+            },
+        );
     }
     let payload: serde_json::Value =
         serde_json::from_slice(&out.stdout.bytes).map_err(|_| ProviderError::UnknownIdentity)?;

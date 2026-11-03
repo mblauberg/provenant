@@ -1573,7 +1573,12 @@ fn contained_artifact_refuses_symlink_escape_for_reads_and_writes() -> TestResul
 }
 pub(crate) fn crash_at(phase: &str) {
     let wanted = std::env::var("PROVENANT_RUN_TEST_CRASH").unwrap_or_default();
-    if wanted.strip_prefix("withdraw-").unwrap_or(&wanted) == phase {
+    if wanted
+        .strip_prefix("withdraw-auth-")
+        .or_else(|| wanted.strip_prefix("withdraw-"))
+        .unwrap_or(&wanted)
+        == phase
+    {
         std::process::exit(73);
     }
 }
@@ -1596,7 +1601,11 @@ fn publication_crash_worker() -> TestResult {
             AttemptState::Queued {
                 extra: Default::default(),
             },
-            Outcome::Cancelled,
+            if crash.starts_with("withdraw-auth-") {
+                Outcome::AuthRequired
+            } else {
+                Outcome::Cancelled
+            },
             "cancelled before the crash",
             WallTime::from_micros(150)?,
             &call,
@@ -1644,6 +1653,7 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
         "transaction",
         "committed",
         "withdraw-sealed",
+        "withdraw-auth-sealed",
     ] {
         let temp = tempfile::tempdir()?;
         let context = context(temp.path())?;
@@ -1720,7 +1730,9 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
                 vec![input.run_id]
             );
         }
-        seal_exit_fixture(&store, &input)?;
+        if !phase.starts_with("withdraw-") {
+            seal_exit_fixture(&store, &input)?;
+        }
         if matches!(phase, "sealed" | "transaction") {
             assert_eq!(admission_count(&store)?, 1);
             let mut recomputed = publication();
@@ -1731,7 +1743,7 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
             ));
             store.recover_terminal(id, &exit(), &call)?;
             assert_eq!(admission_count(&store)?, 0);
-        } else if phase == "withdraw-sealed" {
+        } else if phase.starts_with("withdraw-") {
             // The retry renders a new time and reason; the sealed intent wins.
             let record = store
                 .withdraw(
@@ -1750,6 +1762,12 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
                 record.state,
                 AttemptState::Terminal { finished_at, .. } if finished_at == sealed
             ));
+            assert!(record.exit_evidence.is_none());
+            assert_eq!(record.provider_launched, Some(false));
+            assert!(
+                matches!(record.state, AttemptState::Terminal { outcome, .. }
+                if outcome == if phase == "withdraw-auth-sealed" { Outcome::AuthRequired } else { Outcome::Cancelled })
+            );
             assert_eq!(admission_count(&store)?, 0);
         } else if phase == "result" {
             assert_eq!(admission_count(&store)?, 1);
@@ -1761,7 +1779,7 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
             store.publish_terminal(id, 1, &publication(), &exit(), &call)?;
         }
         assert_eq!(store.events(0, 64, None, &call)?.len(), 2);
-        if !matches!(phase, "reserved" | "withdraw-sealed") {
+        if phase != "reserved" && !phase.starts_with("withdraw-") {
             assert!(
                 matches!(store.record(id, &call)?.settlement_receipts.unwrap().manifest_conflict,
                 EffectDisposition::Failed { reason, retryable: true } if reason == "crash-retained conflict")

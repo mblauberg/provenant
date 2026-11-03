@@ -735,7 +735,10 @@ impl RunStore {
         finished_at: WallTime,
         call: &Request<'_>,
     ) -> Result<Option<AttemptRecord>> {
-        if !matches!(outcome, Outcome::Rejected | Outcome::Cancelled) {
+        if !matches!(
+            outcome,
+            Outcome::Rejected | Outcome::Cancelled | Outcome::AuthRequired
+        ) {
             return Err(RunError::Validation("withdrawal outcome"));
         }
         let defer_writer_cleanup = matches!(expected, AttemptState::Starting { .. });
@@ -774,7 +777,10 @@ impl RunStore {
                 super::reader::validate_attempt(&saved)?;
                 match saved.state {
                     AttemptState::Terminal {
-                        outcome: saved_outcome @ (Outcome::Rejected | Outcome::Cancelled),
+                        outcome:
+                            saved_outcome @ (Outcome::Rejected
+                            | Outcome::Cancelled
+                            | Outcome::AuthRequired),
                         exit_code: None,
                         finished_at,
                         reason,

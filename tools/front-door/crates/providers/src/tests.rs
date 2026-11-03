@@ -6604,3 +6604,58 @@ fn adapter_sign_in_stderr_has_a_typed_auth_cause() {
         }
     }
 }
+
+#[test]
+fn identity_probes_preserve_auth_failures_only_from_intact_captures() {
+    use provenant_os::exec::{
+        CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
+    };
+    struct SignedOut<'a>(&'a [u8], bool);
+    impl Executor for SignedOut<'_> {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            assert!(matches!(
+                options.stderr,
+                provenant_os::exec::StreamPolicy::Capture { .. }
+            ));
+            Ok(ExecOutcome {
+                termination: Termination::Exit(1),
+                stdout: Default::default(),
+                stderr: CapturedStream {
+                    bytes: self.0.to_vec(),
+                    truncated: self.1,
+                    ..Default::default()
+                },
+                timed_out: false,
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: false,
+                elapsed_micros: 0,
+            })
+        }
+    }
+    let scratch = tempfile::tempdir().unwrap();
+    for (adapter, capture) in [
+        (
+            "agy",
+            include_bytes!("../../../tests/fixtures/providers/agy/auth-required.stderr").as_slice(),
+        ),
+        ("claude", b"Not logged in".as_slice()),
+    ] {
+        for truncated in [false, true] {
+            let result = accounts::detect(
+                &SignedOut(capture, truncated),
+                adapter,
+                Path::new("/fixture/agy"),
+                scratch.path(),
+                OsStr::new("fixture"),
+                scratch.path(),
+                scratch.path(),
+            );
+            if truncated {
+                assert!(matches!(result, Err(ProviderError::UnknownIdentity)));
+            } else {
+                assert!(matches!(result, Err(ProviderError::CredentialUnavailable)));
+            }
+        }
+    }
+}

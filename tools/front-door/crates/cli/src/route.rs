@@ -1459,263 +1459,19 @@ pub(crate) fn check_dispatch_candidate(
     .map_err(|e| e.to_string())
 }
 
-/// Host observations for display only. These never supply dispatch grants.
-struct PreviewEvidence {
-    availability: Vec<AvailabilityRecord>,
-    readiness: std::collections::BTreeMap<(String, String), provenant_quota::ReadinessRead>,
-}
-
-fn preview_evidence(roots: &Roots, probe: bool) -> Result<PreviewEvidence, EdgeError> {
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let executor = (probe && !cfg!(test))
-        .then(|| provenant_os::exec::SystemExecutor::new(1).ok())
-        .flatten();
-    preview_evidence_with(
-        roots,
-        home.as_deref(),
-        &|name| crate::run::provider_executable(name).ok(),
-        &|spec, binary, directory| {
-            let (Some(executor), Some(home)) = (&executor, &home) else {
-                return provenant_providers::signin::SigninState::Unknown;
-            };
-            if spec.id == provenant_records::Harness::Agy {
-                match provenant_providers::agy::ProbeHome::select(directory, home) {
-                    Ok(probe_home) => provenant_providers::signin::probe(
-                        &probe_home.guard(executor),
-                        spec,
-                        binary,
-                        home,
-                        Some(directory),
-                    ),
-                    Err(_) => provenant_providers::signin::SigninState::Unknown,
-                }
-            } else {
-                provenant_providers::signin::probe(executor, spec, binary, home, Some(directory))
-            }
-        },
-    )
-}
-
-fn preview_evidence_with(
-    roots: &Roots,
-    home: Option<&std::path::Path>,
-    locate: &dyn Fn(&str) -> Option<std::path::PathBuf>,
-    probe: &dyn Fn(
-        &provenant_records::AdapterSpec,
-        &std::path::Path,
-        &std::path::Path,
-    ) -> provenant_providers::signin::SigninState,
-) -> Result<PreviewEvidence, EdgeError> {
-    use provenant_providers::signin::SigninState;
-    use provenant_quota::{ReadinessRead, ReadinessReason, ReadinessScope, ReadinessState};
-    let domains = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?.domains;
-    let catalogue = Catalogue::bundled()?;
-    let now = SystemClock::new().unix_seconds();
-
-    let mut entries = domains
-        .accounts
-        .with_derived_accounts()
-        .entries
-        .into_values()
-        .collect::<Vec<_>>();
-    // Local-login adapters need no registration. Include their installed login
-    // just as dispatch does; synthetic keys do not imply a verified identity.
-    if let Some(home) = home {
-        for spec in provenant_records::ADAPTER_SPECS
-            .iter()
-            .filter(|spec| spec.local_login || spec.default_login_directory.is_some())
-        {
-            if entries.iter().any(|entry| entry.adapter == spec.name) || locate(spec.name).is_none()
-            {
-                continue;
-            }
-            let (label, key) = spec.local_account;
-            let directory = spec.default_login_directory.map_or_else(
-                || home.to_path_buf(),
-                |relative| {
-                    spec.signin_config_env
-                        .and_then(std::env::var_os)
-                        .map(std::path::PathBuf::from)
-                        .filter(|path| path.is_absolute())
-                        .unwrap_or_else(|| home.join(relative))
-                },
-            );
-            if let Ok(entry) = serde_json::from_value::<provenant_providers::accounts::Registration>(
-                serde_json::json!({
-                    "adapter": spec.name, "label": label, "key": key, "directory": directory,
-                }),
-            ) {
-                entries.push(entry);
-            }
-        }
-    }
-    // Derived free-pool identities also apply to newly discovered local logins.
-    let entries = provenant_providers::accounts::Settings {
-        entries: entries
-            .into_iter()
-            .enumerate()
-            .map(|(index, entry)| (index.to_string(), entry))
-            .collect(),
-        ..Default::default()
-    }
-    .with_derived_accounts()
-    .entries;
-    let mut result = PreviewEvidence {
-        availability: Vec::new(),
-        readiness: Default::default(),
-    };
-    for entry in entries.into_values() {
-        let Some(spec) = provenant_records::AdapterSpec::get(&entry.adapter) else {
-            continue;
-        };
-        let scope = ReadinessScope {
-            host: provenant_quota::LOCAL_HOST.into(),
-            adapter: entry.adapter.clone(),
-            account_key: entry.key.clone(),
-            route: provenant_quota::ACCOUNT_ROUTE.into(),
-        };
-        let mut read = crate::quota::read_readiness(roots.state.as_path(), &scope, now);
-        let executable = locate(spec.name);
-        if executable.is_none() {
-            read = ReadinessRead {
-                state: ReadinessState::Unavailable,
-                reason: Some(ReadinessReason::MissingExecutable),
-                expires_unix_seconds: Some(now + 300),
-                reset_unix_seconds: None,
-                evidence_ref: Some("preview/executable".into()),
-            };
-        } else if read.state == ReadinessState::Unknown
-            && let Some(binary) = &executable
-        {
-            let signin = probe(spec, binary, &entry.directory);
-            read = match signin {
-                SigninState::Unknown => read,
-                SigninState::SignedIn | SigninState::SignedOut => ReadinessRead {
-                    state: if signin == SigninState::SignedIn {
-                        ReadinessState::Ready
-                    } else {
-                        ReadinessState::Unavailable
-                    },
-                    reason: (signin == SigninState::SignedOut)
-                        .then_some(ReadinessReason::SignedOut),
-                    expires_unix_seconds: Some(now + 300),
-                    reset_unix_seconds: None,
-                    evidence_ref: Some("preview/signin".into()),
-                },
-            };
-        }
-        // Retain absent-binary evidence so its account reports unavailable.
-        {
-            let executable = executable.unwrap_or_else(|| std::path::PathBuf::from(spec.binary));
-            result.availability.push(AvailabilityRecord {
-                schema_version: 1,
-                adapter: entry.adapter.clone(),
-                executable: executable.display().to_string(),
-                version: "status-probe".into(),
-                last_update: None,
-                fixture_ref: read
-                    .evidence_ref
-                    .clone()
-                    .unwrap_or_else(|| "preview/readiness".into()),
-                catalogue_revision: catalogue.revision().into(),
-                account_key: Some(entry.key.clone()),
-                observed_models: Vec::new(),
-                observed_unix_seconds: now,
-                expires_unix_seconds: read.expires_unix_seconds.unwrap_or(now + 300),
-            });
-        }
-        result.readiness.insert((entry.adapter, entry.key), read);
-    }
-    Ok(result)
-}
-
-fn with_preview_context<T>(
-    roots: &Roots,
-    evidence: &PreviewEvidence,
-    action: impl FnOnce(&RoutingContext<'_>, &[provenant_quota::AccountRecord]) -> Result<T, EdgeError>,
-) -> Result<T, EdgeError> {
-    with_context(
-        roots,
-        &evidence.availability,
-        &[],
-        "local-preview",
-        &[],
-        |context, records, _| {
-            let readiness = |scope: &provenant_quota::ReadinessScope, now| {
-                let account = evidence
-                    .readiness
-                    .get(&(scope.adapter.clone(), scope.account_key.clone()));
-                if let Some(account) = account
-                    .filter(|read| read.state == provenant_quota::ReadinessState::Unavailable)
-                {
-                    return account.clone();
-                }
-                let recorded = context
-                    .readiness
-                    .map_or_else(provenant_quota::ReadinessRead::absent, |read| {
-                        read(scope, now)
-                    });
-                if recorded.state != provenant_quota::ReadinessState::Unknown {
-                    return recorded;
-                }
-                evidence
-                    .readiness
-                    .get(&(scope.adapter.clone(), scope.account_key.clone()))
-                    .cloned()
-                    .unwrap_or(recorded)
-            };
-            action(
-                &RoutingContext {
-                    readiness: Some(&readiness),
-                    ..*context
-                },
-                records,
-            )
-        },
-    )
-}
-
-fn readiness_text(readiness: &RouteReadiness) -> String {
-    if readiness.is_unknown() {
-        return "unknown (not probed); run `provenant quota tick` to probe".into();
-    }
-    match readiness {
-        RouteReadiness::Ready { .. } => "ready".into(),
-        RouteReadiness::Unavailable { reason, .. } => {
-            format!("unavailable ({reason:?}); run `provenant quota tick` to probe")
-        }
-    }
-}
-
 fn list_data(
     roots: &Roots,
     query: &RouteListRequest,
 ) -> Result<Box<provenant_routing::RouteList>, EdgeError> {
-    let evidence = preview_evidence(roots, !query.valid)?;
-    with_preview_context(roots, &evidence, |context, _| {
-        let mut list = provenant_routing::list(
+    with_context(roots, &[], &[], "local-preview", &[], |context, _, _| {
+        Ok(Box::new(provenant_routing::list(
             &provenant_routing::RouteListQuery {
                 adapter: query.adapter.clone(),
                 pool: query.pool.clone(),
                 valid: query.valid,
             },
             context,
-        )?;
-        if !query.valid {
-            for model in list.models.iter().map(|entry| entry.model.clone()) {
-                let request = provenant_routing::RouteRequest {
-                    choice: RouteChoice::Model(model.clone()),
-                    intent: Default::default(),
-                    effort: None,
-                    confidential: false,
-                    fallback: Fallback::None,
-                };
-                if let Ok(route) = provenant_routing::preview(&request, context, None, &[]) {
-                    list.readiness.insert(model, route.readiness);
-                }
-            }
-        }
-        Ok(Box::new(list))
+        )?))
     })
 }
 
@@ -1728,16 +1484,7 @@ pub(crate) fn effective_members(
         adapter: None,
         pool: Some(pool.to_owned()),
     };
-    let listed = with_context(roots, &[], &[], "local-preview", &[], |context, _, _| {
-        Ok(provenant_routing::list(
-            &provenant_routing::RouteListQuery {
-                adapter: query.adapter.clone(),
-                pool: query.pool.clone(),
-                valid: false,
-            },
-            context,
-        )?)
-    })?;
+    let listed = list_data(roots, &query)?;
     let members = listed.pools.get(pool).ok_or(RoutingError::UnknownRoute)?;
     Ok(members
         .iter()
@@ -2250,33 +1997,30 @@ fn edit_model_exclusion(
 }
 
 fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeError> {
-    let evidence = if matches!(command, Route::Resolve(_)) {
-        Some(preview_evidence(roots, true)?)
-    } else {
-        None
-    };
-    execute_with_evidence(command, roots, now, evidence)
-}
-
-fn execute_with_evidence(
-    command: &Route,
-    roots: &Roots,
-    now: WallTime,
-    evidence: Option<PreviewEvidence>,
-) -> Result<Data, EdgeError> {
     match command {
         Route::List(query) => Ok(Data::List(list_data(roots, query)?)),
-        Route::Resolve(query) => with_preview_context(
+        Route::Resolve(query) => with_context(
             roots,
-            evidence.as_ref().ok_or(RoutingError::Availability)?,
-            |context, records| {
+            &[],
+            &[],
+            "local-preview",
+            &[],
+            |context, records, _| {
                 let context = &RoutingContext {
                     policy_account_hint: query.account.as_deref(),
                     ..*context
                 };
                 let request = resolve_request(query, context)?;
                 let rules = effective_exclusion_rules(&query.request.exclude, roots)?;
-                let route = provenant_routing::preview(&request, context, None, &rules)?;
+                let route = provenant_routing::resolve_for_account_with_seed_excluding(
+                    &request,
+                    context,
+                    None,
+                    "route-preview",
+                    0,
+                    &[],
+                    &rules,
+                )?;
                 let model = ModelId::parse(&format!("{}/{}", route.adapter, route.model))?;
                 let model_policy = context.config.model_policy.effective(
                     &model,
@@ -2570,11 +2314,11 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
         })
         .collect::<String>();
     let mut text = format!(
-        "{}/{} effort={} {}{}{}\n",
+        "{}/{} effort={} {:?}{}{}\n",
         route.adapter,
         route.model,
         route.effort.as_deref().unwrap_or("unspecified"),
-        readiness_text(&route.readiness),
+        route.readiness,
         route
             .pool_selection
             .as_ref()
@@ -2597,11 +2341,7 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
             }),
         diagnostics
     );
-    text.push_str(&format!(
-        "model policy sources={}\ncompaction break-even turns (15k summary, zero rework): {:?}\n",
-        preview.model_policy.sources.join(", "),
-        preview.compaction_break_even_turns
-    ));
+    text.push_str(&format!("model policy sources={}\n{}\ncompaction break-even turns (15k summary, zero rework): {:?}\n", preview.model_policy.sources.join(", "), preview.model_policy.policy.guidance(), preview.compaction_break_even_turns));
     for note in &preview.exclusion_notes {
         text.push_str(&format!("note: {note}\n"));
     }
@@ -2742,9 +2482,6 @@ pub fn run(
                             .map(|row| OverrideRow::model_exclusion(row, now).line()),
                     );
                 }
-                lines.extend(list.readiness.iter().map(|(model, readiness)| {
-                    format!("{} {}", model.as_str(), readiness_text(readiness))
-                }));
                 lines.extend(list.pools.iter().map(|(name, members)| {
                     let models = members
                         .iter()
@@ -2918,300 +2655,6 @@ mod route_tests {
         let roots = inputs.resolve(&Resolver)?;
         std::fs::create_dir_all(roots.state.as_path())?;
         Ok(roots)
-    }
-
-    #[test]
-    fn route_preview_uses_cached_ready_unavailable_unknown_and_probes_only_missing()
-    -> Result<(), Box<dyn Error>> {
-        use provenant_core::Clock;
-        use provenant_quota::{ReadinessFile, ReadinessReason, ReadinessScope, ReadinessState};
-        use std::{cell::Cell, os::unix::fs::PermissionsExt};
-        let now = provenant_os::clock::SystemClock::new().unix_seconds();
-        for state in [
-            ReadinessState::Ready,
-            ReadinessState::Unavailable,
-            ReadinessState::Unknown,
-        ] {
-            let temp = tempfile::tempdir()?;
-            let roots = exclusion_roots(&temp)?;
-            std::fs::set_permissions(
-                roots.state.as_path(),
-                std::fs::Permissions::from_mode(0o700),
-            )?;
-            let config = roots.state.as_path().join("config.toml");
-            std::fs::write(
-                &config,
-                "schema_version=1\n[domains.accounts.entries.work]\nadapter='codex'\nlabel='work'\nkey='work'\ndirectory='/fixture/codex'\n",
-            )?;
-            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))?;
-            if state != ReadinessState::Unknown {
-                let directory = roots.state.as_path().join("readiness/work");
-                std::fs::create_dir_all(&directory)?;
-                for path in [roots.state.as_path().join("readiness"), directory.clone()] {
-                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-                }
-                let file = ReadinessFile {
-                    schema_version: 1,
-                    records: vec![provenant_quota::RouteReadiness {
-                        schema_version: 1,
-                        scope: ReadinessScope {
-                            host: "local".into(),
-                            adapter: "codex".into(),
-                            account_key: "work".into(),
-                            route: "*".into(),
-                        },
-                        state,
-                        reason: (state == ReadinessState::Unavailable)
-                            .then_some(ReadinessReason::SignedOut),
-                        observed_unix_seconds: now - 1,
-                        expires_unix_seconds: now + 300,
-                        reset_unix_seconds: None,
-                        evidence_ref: Some("fixture/signin".into()),
-                    }],
-                };
-                let path = directory.join("codex.json");
-                std::fs::write(&path, serde_json::to_vec(&file)?)?;
-                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-            }
-            let probes = Cell::new(0);
-            let evidence = super::preview_evidence_with(
-                &roots,
-                None,
-                &|_| Some("/fixture/provider".into()),
-                &|_, _, _| {
-                    probes.set(probes.get() + 1);
-                    provenant_providers::signin::SigninState::Unknown
-                },
-            )?;
-            assert_eq!(probes.get(), usize::from(state == ReadinessState::Unknown));
-            let command = super::Route::Resolve(super::RouteResolve {
-                writes: false,
-                account: None,
-                name: None,
-                request: super::RouteRequest {
-                    read_heavy: false,
-                    model: Some(super::Model("codex/gpt-6-luna".into())),
-                    route: None,
-                    effort: None,
-                    confidential: false,
-                    fallback: Vec::new(),
-                    exclude: Vec::new(),
-                },
-            });
-            let retained = super::PreviewEvidence {
-                availability: evidence.availability.clone(),
-                readiness: evidence.readiness.clone(),
-            };
-            let result = super::execute_with_evidence(
-                &command,
-                &roots,
-                provenant_core::WallTime::from_unix_seconds(now)?,
-                Some(evidence),
-            )?;
-            let super::Data::Resolved(preview) = result else {
-                return Err("resolved preview".into());
-            };
-            match state {
-                ReadinessState::Ready => assert!(matches!(
-                    preview.route.readiness,
-                    RouteReadiness::Ready { .. }
-                )),
-                ReadinessState::Unavailable => assert!(matches!(
-                    preview.route.readiness,
-                    RouteReadiness::Unavailable {
-                        reason: provenant_records::RouteExclusionReason::AuthRequired,
-                        ..
-                    }
-                )),
-                ReadinessState::Unknown => assert!(preview.route.readiness.is_unknown()),
-            }
-            if state == ReadinessState::Ready {
-                let scope = provenant_quota::AccountScope {
-                    adapter: "codex".into(),
-                    account_key: "work".into(),
-                    label: "work".into(),
-                };
-                let mut record = provenant_quota::AccountRecord::empty(scope.clone());
-                record.snapshot = Some(provenant_quota::QuotaSnapshot {
-                    schema_version: 1,
-                    account: scope,
-                    revision: 0,
-                    status: provenant_quota::QuotaStatus::AuthRequired,
-                    observed_unix_seconds: now,
-                    source_ref: "fixture".into(),
-                    authority_ref: None,
-                    details: None,
-                    windows: Vec::new(),
-                });
-                let mut quota_route = preview.route.clone();
-                quota_route.readiness = RouteReadiness::unknown();
-                let policies = provenant_providers::quota_policies(provenant_providers::REGISTRY);
-                super::with_preview_context(&roots, &retained, |context, _| {
-                    let records = [record];
-                    let models = [super::ModelId::parse("codex/gpt-6-luna")?];
-                    let observations = super::quota_observations(
-                        context.catalogue,
-                        &retained.availability,
-                        &records,
-                        &policies,
-                        &models,
-                    )?;
-                    let context = super::RoutingContext {
-                        accounts: &records,
-                        quota_policies: &policies,
-                        quota: &observations,
-                        ..*context
-                    };
-                    quota_route = provenant_routing::preview(
-                        &super::resolve_request(
-                            match &command {
-                                super::Route::Resolve(query) => query,
-                                _ => unreachable!(),
-                            },
-                            &context,
-                        )?,
-                        &context,
-                        None,
-                        &[],
-                    )?;
-                    Ok(())
-                })?;
-                assert!(matches!(
-                    quota_route.readiness,
-                    RouteReadiness::Unavailable {
-                        reason: provenant_records::RouteExclusionReason::AuthRequired,
-                        ..
-                    }
-                ));
-            }
-            if state == ReadinessState::Unavailable {
-                let mut multiple = retained;
-                let mut ready = provenant_quota::ReadinessRead::absent();
-                ready.state = ReadinessState::Ready;
-                ready.expires_unix_seconds = Some(now + 300);
-                ready.evidence_ref = Some("fixture/second-account".into());
-                multiple
-                    .readiness
-                    .insert(("codex".into(), "second".into()), ready);
-                let mut candidate = multiple.availability[0].clone();
-                candidate.account_key = Some("second".into());
-                multiple.availability.push(candidate);
-                let result = super::execute_with_evidence(
-                    &command,
-                    &roots,
-                    provenant_core::WallTime::from_unix_seconds(now)?,
-                    Some(multiple),
-                )?;
-                let super::Data::Resolved(second) = result else {
-                    return Err("second-account preview".into());
-                };
-                assert!(matches!(
-                    second.route.readiness,
-                    RouteReadiness::Ready { .. }
-                ));
-                assert_eq!(second.route.account_key.as_deref(), Some("second"));
-            }
-            let missing = super::preview_evidence_with(&roots, None, &|_| None, &|_, _, _| {
-                panic!("missing binary must not be probed")
-            })?;
-            let missing = super::execute_with_evidence(
-                &command,
-                &roots,
-                provenant_core::WallTime::from_unix_seconds(now)?,
-                Some(missing),
-            )?;
-            let super::Data::Resolved(missing) = missing else {
-                return Err("missing executable preview".into());
-            };
-            assert!(matches!(
-                missing.route.readiness,
-                RouteReadiness::Unavailable {
-                    reason: provenant_records::RouteExclusionReason::MissingExecutable,
-                    ..
-                }
-            ));
-            let text = super::resolved_text(&preview);
-            assert!(!text.contains("Your final answer must include"));
-            assert!(!text.contains("Your final response must include"));
-            assert!(!text.contains("provider readiness"));
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn route_preview_probes_default_codex_and_derives_local_free_accounts()
-    -> Result<(), Box<dyn Error>> {
-        use provenant_records::Harness;
-        let temp = tempfile::tempdir()?;
-        let roots = exclusion_roots(&temp)?;
-        let home = temp.path().join("home");
-        let evidence = super::preview_evidence_with(
-            &roots,
-            Some(&home),
-            &|adapter| {
-                [Harness::Codex.spec().name, Harness::Opencode.spec().name]
-                    .contains(&adapter)
-                    .then(|| "/fixture/provider".into())
-            },
-            &|spec, _, directory| {
-                if spec.id == Harness::Codex && std::env::var_os("CODEX_HOME").is_none() {
-                    assert_eq!(directory, home.join(".codex"));
-                }
-                provenant_providers::signin::SigninState::SignedIn
-            },
-        )?;
-        assert!(
-            evidence
-                .readiness
-                .contains_key(&("codex".into(), "local".into()))
-        );
-        assert!(
-            evidence
-                .readiness
-                .contains_key(&("opencode".into(), "zen".into()))
-        );
-        super::with_preview_context(&roots, &evidence, |context, _| {
-            for model in ["codex/gpt-6-luna", "opencode/opencode/glm-5.3-flash-free"] {
-                let request = provenant_routing::RouteRequest {
-                    choice: provenant_routing::RouteChoice::Model(super::ModelId::parse(model)?),
-                    intent: Default::default(),
-                    effort: None,
-                    confidential: false,
-                    fallback: provenant_routing::Fallback::None,
-                };
-                assert!(
-                    matches!(
-                        provenant_routing::preview(&request, context, None, &[])?.readiness,
-                        RouteReadiness::Ready { .. }
-                    ),
-                    "{model}"
-                );
-            }
-            Ok(())
-        })?;
-        Ok(())
-    }
-
-    #[test]
-    fn route_resolve_displays_ready_unavailable_and_unknown() {
-        use provenant_records::{RouteExclusionReason, RouteReadiness};
-        assert_eq!(
-            super::readiness_text(&RouteReadiness::Ready {
-                extra: Default::default(),
-                availability_ref: "fixture".into(),
-                expires_unix_seconds: 100,
-            }),
-            "ready"
-        );
-        let unavailable = super::readiness_text(&RouteReadiness::Unavailable {
-            extra: Default::default(),
-            reason: RouteExclusionReason::AuthRequired,
-        });
-        assert!(unavailable.starts_with("unavailable (AuthRequired)"));
-        let unknown = super::readiness_text(&RouteReadiness::unknown());
-        assert!(unknown.starts_with("unknown (not probed)"));
-        assert!(unknown.contains("provenant quota tick"));
-        assert!(!unknown.contains("unavailable"));
     }
 
     #[test]

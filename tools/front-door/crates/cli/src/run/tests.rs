@@ -5550,6 +5550,33 @@ fn every_adapter_sign_in_failure_settles_auth_required() -> Result<(), Box<dyn s
         let decoded =
             Registry::default().decode_captures(&route, b"", stderr, &exit, temp.path(), None)?;
         assert_eq!(decoded.outcome, run::Outcome::AuthRequired, "{adapter}");
+        assert!(
+            decoded.reason.as_deref().unwrap().contains(
+                provenant_records::AdapterSpec::get(adapter)
+                    .unwrap()
+                    .login_hint
+            )
+        );
     }
     Ok(())
+}
+
+#[test]
+fn successful_output_with_incidental_auth_stderr_stays_successful() {
+    let route = run::RouteRecord {
+        provider: Some("cursor".into()),
+        model: Some("cursor/example".into()),
+        ..Default::default()
+    };
+    let decoded = Registry::default()
+        .decode_captures(
+            &route,
+            include_bytes!("../../../../tests/fixtures/providers/cursor/fresh.jsonl"),
+            include_bytes!("../../../../tests/fixtures/providers/cursor/auth-required.stderr"),
+            &clean_exit(),
+            Path::new("/unused"),
+            None,
+        )
+        .unwrap();
+    assert_eq!(decoded.outcome, run::Outcome::Succeeded);
 }

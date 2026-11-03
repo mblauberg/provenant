@@ -689,6 +689,15 @@ pub(super) fn prepare_candidates(
         &rules,
     )
     .map_err(|error| error.to_string())?;
+    if let Some(selection) = &resolved.pool_selection {
+        for redraw in &selection.redraws {
+            reasons.push(skip(
+                &redraw.rejected_pick,
+                SkipKind::Unavailable,
+                &redraw.reason,
+            ));
+        }
+    }
     for (candidate, route) in candidates(resolved).into_iter().enumerate() {
         let label = format!("{}/{}", route.adapter, route.model);
         let effective = config.domains.routing.model_policy.effective(
@@ -1116,10 +1125,9 @@ pub(super) fn prepare_candidates(
                 .and_then(|host| host.cargo_build_jobs.as_deref()),
             build_settings.jobs(),
         );
-        if adapter.id() == provenant_records::Harness::Claude.spec().name {
-            spec.configure_claude_shell(scratch)
-                .map_err(|error| error.to_string())?;
-        }
+        let adapter_spec = AdapterSpec::get(adapter.id()).ok_or("adapter is not registered")?;
+        spec.configure_shell(scratch, adapter_spec)
+            .map_err(|error| error.to_string())?;
         if let Some(gh) = publishing_gh.as_ref() {
             let policy = provenant_config::GithubPolicy::read(&roots.state, project_id)
                 .map_err(|error| error.to_string())?;
@@ -1131,11 +1139,13 @@ pub(super) fn prepare_candidates(
                 continue;
             }
         }
-        if git_context.is_some() && adapter.id() == provenant_records::Harness::Claude.spec().name {
+        if git_context.is_some()
+            && let Some(argument) = adapter_spec.context_directory_arg
+        {
             // Scratch is already granted by the outer profile. Claude's file
             // tools also need it in their working directories to read context.
             spec.argv
-                .splice(1..1, ["--add-dir".into(), scratch.as_os_str().to_owned()]);
+                .splice(1..1, [argument.into(), scratch.as_os_str().to_owned()]);
         }
         let transcript_account = account
             .as_ref()
