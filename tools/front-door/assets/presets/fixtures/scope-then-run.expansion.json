@@ -3,7 +3,7 @@
     "pattern": "scope-then-run",
     "preset": "scope-then-run"
   },
-  "graph_id": "preset-0fff41242a08c4f5f9da3bce5634751f",
+  "graph_id": "preset-b27784ff30eefbb2727aafc147577b51",
   "nodes": [
     {
       "access": "read_only",
@@ -321,6 +321,7 @@
                   ]
                 }
               ],
+              "min_successful": 1,
               "nodes": [
                 {
                   "access": "read_only",
@@ -340,6 +341,7 @@
                       "when": "always"
                     }
                   ],
+                  "require_findings": true,
                   "role": "lens.correctness-spec",
                   "role_digest": "sha256:bf578197d0881e91746f43b0888c298a0bc6ce3a4f97293690e3b495a9138ea2",
                   "routes": [
@@ -369,6 +371,7 @@
                       "when": "always"
                     }
                   ],
+                  "require_findings": true,
                   "role": "lens.simplicity",
                   "role_digest": "sha256:46d20a75ff5d5cb89b53165b558efb8205a2801263593b4365e23d20150c41b4",
                   "routes": [
@@ -479,6 +482,11 @@
       "expanded.run.parameters.local_check_policy.default": "bundled",
       "expanded.run.parameters.local_check_policy.doc": "bundled",
       "expanded.run.parameters.local_check_policy.type": "bundled",
+      "expanded.run.parameters.min_lenses.default": "bundled",
+      "expanded.run.parameters.min_lenses.doc": "bundled",
+      "expanded.run.parameters.min_lenses.max": "bundled",
+      "expanded.run.parameters.min_lenses.min": "bundled",
+      "expanded.run.parameters.min_lenses.type": "bundled",
       "expanded.run.parameters.review_shape": "entry",
       "expanded.run.parameters.review_shape.default": "bundled",
       "expanded.run.parameters.review_shape.doc": "bundled",

@@ -39,6 +39,12 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
         if let Some(reason) = &node.skip_reason {
             human.push_str(&format!(" ({})", bounded_reason(reason)));
         }
+        if !full
+            && node.state == provenant_fabric_runtime::graph::NodeState::Blocked
+            && let Some(error) = &node.advance_error
+        {
+            human.push_str(&format!(" ({})", bounded_reason(error)));
+        }
         if full {
             if let Some(attempt) = node.attempts.last() {
                 let route = &attempt.route;

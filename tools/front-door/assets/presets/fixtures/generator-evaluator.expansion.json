@@ -3,7 +3,7 @@
     "pattern": "generator-evaluator",
     "preset": "generator-evaluator"
   },
-  "graph_id": "preset-88198f0985861e3bcd8d4bca7e60337f",
+  "graph_id": "preset-d33497e2a69350b894fe0943788aa30d",
   "nodes": [
     {
       "acceptance_checks": [
@@ -48,6 +48,7 @@
             ]
           }
         ],
+        "min_successful": 1,
         "nodes": [
           {
             "access": "read_only",
@@ -67,6 +68,7 @@
                 "when": "always"
               }
             ],
+            "require_findings": true,
             "role": "lens.correctness-spec",
             "role_digest": "sha256:bf578197d0881e91746f43b0888c298a0bc6ce3a4f97293690e3b495a9138ea2",
             "routes": [
@@ -96,6 +98,7 @@
                 "when": "always"
               }
             ],
+            "require_findings": true,
             "role": "lens.simplicity",
             "role_digest": "sha256:46d20a75ff5d5cb89b53165b558efb8205a2801263593b4365e23d20150c41b4",
             "routes": [
@@ -187,6 +190,11 @@
       "parameters.local_check_policy.default": "bundled",
       "parameters.local_check_policy.doc": "bundled",
       "parameters.local_check_policy.type": "bundled",
+      "parameters.min_lenses.default": "bundled",
+      "parameters.min_lenses.doc": "bundled",
+      "parameters.min_lenses.max": "bundled",
+      "parameters.min_lenses.min": "bundled",
+      "parameters.min_lenses.type": "bundled",
       "parameters.review_shape.default": "bundled",
       "parameters.review_shape.doc": "bundled",
       "parameters.review_shape.type": "bundled",

@@ -3,7 +3,7 @@
     "pattern": "scope-then-run",
     "preset": "scope-then-run"
   },
-  "graph_id": "preset-b1ab6e8a57a04116c8c24db60884ce45",
+  "graph_id": "preset-d16051bfb5ad335423bfc920462575c6",
   "nodes": [
     {
       "access": "read_only",
@@ -537,7 +537,7 @@
               "kind": null,
               "lenses": [],
               "max_nodes": 2,
-              "min_successful": null,
+              "min_successful": 0,
               "risk_tags": [],
               "risk_tier": null,
               "shape": null,
@@ -630,6 +630,11 @@
       "expanded.run.parameters.local_check_policy.default": "bundled",
       "expanded.run.parameters.local_check_policy.doc": "bundled",
       "expanded.run.parameters.local_check_policy.type": "bundled",
+      "expanded.run.parameters.min_lenses.default": "bundled",
+      "expanded.run.parameters.min_lenses.doc": "bundled",
+      "expanded.run.parameters.min_lenses.max": "bundled",
+      "expanded.run.parameters.min_lenses.min": "bundled",
+      "expanded.run.parameters.min_lenses.type": "bundled",
       "expanded.run.parameters.review_shape": "entry",
       "expanded.run.parameters.review_shape.default": "bundled",
       "expanded.run.parameters.review_shape.doc": "bundled",
