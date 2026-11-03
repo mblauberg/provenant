@@ -51,9 +51,10 @@ references = [{ ref = "skill:scope/references/researcher.md", when = "always", i
 prompt = """
 External scout ${index}. Research outward for: ${prompt}
 Prefer primary sources and current documentation over memory, even when
-confident. Report each finding with its source URL and publication or
-retrieval date, mark vendor-reported figures, and state where sources
-disagree. Do not edit files.
+confident. Prefer sources from roughly the past two months and label older ones
+as background, unless the assignment sets another window. Report each finding
+with its source URL and publication or retrieval date, mark vendor-reported
+figures, and state where sources disagree. Do not edit files.
 """
 
 [roles.plan]
