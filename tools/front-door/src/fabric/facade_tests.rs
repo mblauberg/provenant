@@ -598,7 +598,7 @@ mod peer_tests {
                 "title":"inspect", "prompt":"Review the slice",
                 "route":{"kind":"model", "provider":"fixture", "model":"fixture/model"},
                 "timeout_seconds":factory.context.config.limits.graph_timeout_seconds
-            }], "concurrency":1
+            }], "concurrency":1, "knobs":["routing.graph_exclude=[\"codex/gpt-6-luna\"]"]
         }))?;
         let receipt = run_owner.submit_with_access(input, budget, &cancel, Default::default())?;
         let target = receipt.targets.first().ok_or("target")?;
@@ -620,6 +620,7 @@ mod peer_tests {
         let store = run_owner.store(&cancel)?;
         for prepared in [false, true] {
             if prepared {
+                graph_owner.exclude = vec!["codex/gpt-6-luna".into()];
                 // Reserve the legacy digest without the canonical request file,
                 // as a crash between row reservation and publication would leave it.
                 let call = run_owner.call(&cancel);
@@ -1382,6 +1383,36 @@ mod peer_tests {
             prices: None,
             tick: false,
         };
+        let prior = format!("{}/{}", factory.context.identity.host, upstream.attempt_id);
+        assert_eq!(owner.prior_models(&[prior.clone(), prior.clone()])?, ["codex/gpt-6-luna"]);
+        // Resolve the same alias again with the host's per-node exclusion list.
+        use provenant_routing::{AccessContext, Catalogue, ExclusionRule, ExclusionSelector, ExclusionSource, Fallback, ModelId, RouteChoice, RouteName, RouteRequest, RoutingConfig, RoutingContext};
+        let catalogue = Catalogue::bundled()?;
+        let members: Vec<provenant_routing::RoutePoolMember> = serde_json::from_value(serde_json::json!([
+            {"model":"codex/gpt-6-luna", "weight":1}, {"model":"claude/claude-haiku-5-5", "weight":1}
+        ]))?;
+        let availability: Vec<_> = members.iter().map(|member| provenant_providers::AvailabilityRecord {
+            schema_version: 1, adapter: member.model.adapter().into(), executable: "/fixture/provider".into(),
+            version: "fixture".into(), fixture_ref: "fixture".into(), catalogue_revision: catalogue.revision().into(),
+            account_key: Some(format!("{}-account", member.model.adapter())), observed_models: vec![member.model.model().into()],
+            observed_unix_seconds: 80, expires_unix_seconds: 120, last_update: None,
+        }).collect();
+        let access: Vec<_> = members.iter().map(|member| AccessContext { adapter: member.model.adapter(), disclosure_ref: "fixture", confinement_ref: "fixture" }).collect();
+        let mut config = RoutingConfig::default();
+        config.pools.insert("retry-trial".into(), members.clone());
+        let context = RoutingContext { policy_account_hint: None, catalogue: &catalogue, config: &config,
+            registry: provenant_providers::REGISTRY, availability: &availability, quota: &[], capacity_cooldowns: &[], accounts: &[], quota_policies: &[], access: &access,
+            now: provenant_core::WallTime::from_micros(100_000_000)?, host: "fixture" };
+        let request = RouteRequest { intent: Default::default(), choice: RouteChoice::NamedRoute(RouteName::parse("retry-trial")?), effort: None, confidential: false, fallback: Fallback::None };
+        let seed = (0..256).find(|seed| provenant_routing::resolve_with_seed(&request, &context, "retry", *seed)
+            .is_ok_and(|route| format!("{}/{}", route.adapter, route.model) == "codex/gpt-6-luna")).ok_or("no first draw")?;
+        let alias: graph::GraphRoute = serde_json::from_value(serde_json::json!({"alias":"retry-trial"}))?;
+        let exclusions = owner.route_exclusions(&alias, std::slice::from_ref(&prior), false)?;
+        assert_eq!(exclusions, ["codex/gpt-6-luna"]);
+        assert!(owner.route_exclusions(&alias, &[prior], true)?.is_empty());
+        let rules = [ExclusionRule { selector: ExclusionSelector::Model(ModelId::parse(&exclusions[0])?), source: ExclusionSource::Graph }];
+        let second = provenant_routing::resolve_for_account_with_seed_excluding(&request, &context, None, "retry", seed, &[], &rules)?;
+        assert_eq!(format!("{}/{}", second.adapter, second.model), "claude/claude-haiku-5-5");
         let run = graph::advance_with_budget(
             &document,
             &mut owner,
@@ -1741,6 +1772,14 @@ mod peer_tests {
             .rig
             .execute(&git, &["branch", "integration"], None)?;
         assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        for args in [
+            vec!["remote", "add", "origin", fixture.rig.project.to_str().ok_or("path")?],
+            vec!["update-ref", "refs/heads/main", "HEAD"],
+            vec!["update-ref", "refs/remotes/origin/main", "HEAD"],
+        ] {
+            let output = fixture.rig.execute(&git, &args, None)?;
+            assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        }
         let factory = Factory {
             context: Context::open(
                 fixture.roots.clone(),
@@ -1762,7 +1801,7 @@ mod peer_tests {
         std::fs::write(
             &document,
             serde_json::to_vec(&serde_json::json!({
-                "schema_version":1, "graph_id":"pinned-base", "integration_branch":"integration", "delivery":"pr",
+                "schema_version":2, "graph_id":"pinned-base", "integration_branch":"integration", "review_base":"origin/main", "delivery":"pr",
                 "nodes":[{"id":"one","prompt":"reply OK","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
             }))?,
         )?;
@@ -1836,6 +1875,11 @@ mod peer_tests {
                 )?
                 .head
         );
+        let output = fixture.rig.execute(&git, &["branch", "old-review", &base.to_string()], None)?;
+        assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        std::fs::write(fixture.rig.project.join("review-size-fixture.txt"), "small change\n")?;
+        let output = fixture.rig.execute(&git, &["add", "review-size-fixture.txt"], None)?;
+        assert_eq!(crate::worktree_tests::support::code(&output), 0);
         for args in [
             vec![
                 "commit",
@@ -1844,6 +1888,8 @@ mod peer_tests {
                 "Unrelated primary checkout",
             ],
             vec!["branch", "-f", "integration", "HEAD"],
+            vec!["update-ref", "refs/heads/main", "HEAD"],
+            vec!["update-ref", "refs/remotes/origin/main", "HEAD"],
         ] {
             let output = fixture.rig.execute(&git, &args, None)?;
             assert_eq!(crate::worktree_tests::support::code(&output), 0);
@@ -1867,6 +1913,90 @@ mod peer_tests {
             &factory.clock,
         )?;
         assert_eq!(journal.integration_base(), Some(base));
+        let execution = FileJournal::execution(&fixture.roots.state, fixture.settled.project_id, "pinned-base")?.ok_or("execution missing")?;
+        assert_eq!(execution.review_base, Some(base));
+        drop(journal);
+        let head_output = fixture.rig.execute(&git, &["rev-parse", "HEAD"], None)?;
+        let head = String::from_utf8(head_output.stdout.bytes)?.trim().to_owned();
+        // A later lens admitted after the reference moved still reads the pinned
+        // review base, independently of the integration base.
+        use provenant_fabric_runtime::graph::{self, AttemptOwner};
+        let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
+            "graph_id":"pinned-base", "node_id":"later-lens", "route_index":0
+        }))?;
+        let route = serde_json::from_value(serde_json::json!({"adapter":"fixture", "model":"fixture/model"}))?;
+        let mut bound = BoundGraphOwner {
+            factory: &factory, integration_base: None, integration_branch: None,
+            network: None, exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false,
+        };
+        let actor = bound.actor();
+        bound.observe_or_start(&key, graph::NodeInput {
+            prior_attempts: &[], family_peers: &[], context: Default::default(), read_roots: &[],
+            distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
+            title: "later lens", prompt: "review", required_verdict: None, deadline_seconds: None,
+            inputs_dir: None,
+        }, &route, graph::AccessMode::ReadOnly, None, graph::Replay {
+            delivery: None, branch: None, fast_forward_only: false, stored_ref: None, launch_actor: &actor,
+        })?;
+        let operation = graph_operation("graph-attempt-operation", &key)?;
+        let operation = store.operation(&operation, &owner.call(&cancel))?.ok_or("later lens operation missing")?;
+        let request = store.request(operation.run_id, &owner.call(&cancel))?;
+        let base_text = base.to_string();
+        assert_eq!(request.tasks[0].base.as_deref(), Some(base_text.as_str()));
+        assert_ne!(base_text, head);
+        bound.integration_base = Some(BoundGraphBases { integration: None, review: Some(base) });
+        let review_node: graph::GraphNode = serde_json::from_value(serde_json::json!({
+            "id":"review", "access":"read_only", "prompt":"review",
+            "review":{"shape":null,"risk_tier":null,"kind":null,"size":null,"risk_tags":[],"worktree":null,"lenses":[],"min_successful":null,"max_nodes":5}
+        }))?;
+        let measured = bound.measure_review(&review_node, &head)?;
+        assert_eq!(measured.size, Some("small"));
+        assert!(measured.warning.is_none(), "{measured:?}");
+        assert!(matches!(bound.resolve_review(&review_node, &head), Err(graph::ReviewResolveError::Unsupported)));
+        for (id, reference, expected) in [("review-base", "old-review", base_text.as_str()), ("empty-review-base", "", head.as_str())] {
+            let path = fixture.rig.project.join(format!("{id}.json"));
+            std::fs::write(&path, serde_json::to_vec(&serde_json::json!({
+                "schema_version":2, "graph_id":id, "review_base":reference,
+                "nodes":[{"id":"lens","prompt":"review","access":"read_only", "source":{"type":"commit","commit":head}, "route":{"adapter":"fixture","model":"fixture/model"}}]
+            }))?)?;
+            let result = factory.graph(GraphInput::Run { extra: Default::default(), document: path }, budget, &cancel)?;
+            let operation = graph_operation("graph-attempt-operation", &result.checkpoint.nodes[0].attempts[0].key)?;
+            let operation = store.operation(&operation, &owner.call(&cancel))?.ok_or("operation missing")?;
+            let request = store.request(operation.run_id, &owner.call(&cancel))?;
+            assert_eq!(request.tasks[0].base.as_deref(), Some(expected));
+            assert_eq!(request.tasks[0].head.as_deref(), Some(head.as_str()));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn detached_writer_reports_branch_requirement() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::detached_writer_reports_branch_requirement")? { return Ok(()); }
+        let fixture = SettlementFixture::resumed()?;
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        let output = fixture.rig.execute(&git, &["-C", fixture.worktree.to_str().ok_or("path")?, "checkout", "--detach"], None)?;
+        assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        let factory = Factory { context: Context::open(fixture.roots.clone(), &fixture.rig.home, &fixture.rig.project)?, project_attribution: false, clock: SystemClock, backoff: ThreadPause, executor: SystemExecutor::new(1)?, home: fixture.rig.home.clone(), cwd: fixture.rig.project.clone(), assets: fixture.rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers };
+        let document = fixture.rig.project.join("detached-writer.json");
+        std::fs::write(&document, serde_json::to_vec(&serde_json::json!({"schema_version":1,"graph_id":"detached-writer","nodes":[{"id":"writer","prompt":"write","access":"worktree_write","worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}}]}))?)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let run = factory.graph(GraphInput::Run { extra: Default::default(), document }, budget, &cancel)?;
+        let node = &run.checkpoint.nodes[0];
+        assert!(node.advance_error.as_deref().is_some_and(|error| error.contains("writer needs a branch")), "{node:#?}");
+        let detached_factory = Factory { context: Context::open(fixture.roots.clone(), &fixture.rig.home, &fixture.worktree)?, project_attribution: false, clock: SystemClock, backoff: ThreadPause, executor: SystemExecutor::new(1)?, home: fixture.rig.home.clone(), cwd: fixture.worktree.clone(), assets: fixture.rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers };
+        let head = fixture.rig.execute(&git, &["-C", fixture.worktree.to_str().ok_or("path")?, "rev-parse", "HEAD"], None)?;
+        let head = String::from_utf8(head.stdout.bytes)?.trim().to_owned();
+        let document = fixture.worktree.join("detached-review.json");
+        std::fs::write(&document, serde_json::to_vec(&serde_json::json!({"schema_version":1,"graph_id":"detached-review","nodes":[{"id":"review","prompt":"review","access":"read_only","source":{"type":"commit","commit":head},"route":{"adapter":"fixture","model":"fixture/model"}}]}))?)?;
+        let budget = WaitBudget::cli(detached_factory.clock.mono_now(), 30)?;
+        let run = detached_factory.graph(GraphInput::Run { extra: Default::default(), document }, budget, &cancel)?;
+        let node = &run.checkpoint.nodes[0];
+        assert!(node.advance_error.is_none(), "{node:#?}");
+        let key = &node.attempts.first().ok_or("review attempt missing")?.key;
+        let operation = graph_operation("graph-attempt-operation", key)?;
+        let owner = BinaryRunOwner { factory: &detached_factory, allow_remote: true, actor: None, chair: None };
+        assert!(owner.store(&cancel)?.operation(&operation, &owner.call(&cancel))?.is_some(), "review was not submitted");
         Ok(())
     }
 

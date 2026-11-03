@@ -134,6 +134,12 @@ fn resolve_writer_with(
     }
     let worktree = provenant_confinement::verify_worktree(&repo, &path)
         .map_err(worktrees::WorktreeError::from)?;
+    // Read-only contribution capture resolves the current worktree and treats
+    // a branch validation refusal as the absence of a contribution branch.
+    // Writers still receive the same branch requirement before launch.
+    if canonicalize(cwd).is_ok_and(|current| current == path) {
+        writer_branch(&worktree)?;
+    }
     Ok(WriterRequest {
         extra: Default::default(),
         project: project.to_path_buf(),
@@ -227,6 +233,29 @@ pub(crate) fn cleanup_git_pins(
     }
     Ok(())
 }
+fn writer_branch(worktree: &VerifiedWorktree) -> Result<GitRefName> {
+    let head_path = worktree.repo().private_git_dir().join("HEAD");
+    let mut head = Vec::new();
+    worktree
+        .repo()
+        .private_dir()
+        .open_read(OsStr::new("HEAD"))
+        .map_err(|error| anchored_error(error, worktree.repo().private_git_dir()))?
+        .take(4097)
+        .read_to_end(&mut head)
+        .map_err(error("read writer HEAD", Some(&head_path)))?;
+    if head.len() > 4096 {
+        return Err(RunError::Validation("writer HEAD exceeds bound"));
+    }
+    let head = std::str::from_utf8(&head).map_err(error("decode writer HEAD", Some(&head_path)))?;
+    GitRefName::new(
+        head.trim()
+            .strip_prefix("ref: ")
+            .ok_or(RunError::Validation("writer needs a branch"))?,
+    )
+    .map_err(error("parse writer branch", Some(&head_path)))
+}
+
 /// Reopen the persisted scope and verify current Git worktree membership.
 /// The subsequent supervisor writer flock supplies exclusion.
 pub fn prepare_writer(
@@ -242,26 +271,7 @@ pub fn prepare_writer(
         .map_err(error("open writer repository", Some(&request.project)))?;
     let worktree = provenant_confinement::verify_worktree(&repo, &request.worktree)
         .map_err(worktrees::WorktreeError::from)?;
-    let head_path = worktree.repo().private_git_dir().join("HEAD");
-    let mut head = Vec::new();
-    worktree
-        .repo()
-        .private_dir()
-        .open_read(OsStr::new("HEAD"))
-        .map_err(|error| anchored_error(error, worktree.repo().private_git_dir()))?
-        .take(4097)
-        .read_to_end(&mut head)
-        .map_err(error("read writer HEAD", Some(&head_path)))?;
-    if head.len() > 4096 {
-        return Err(RunError::Validation("writer HEAD exceeds bound"));
-    }
-    let head = std::str::from_utf8(&head).map_err(error("decode writer HEAD", Some(&head_path)))?;
-    let branch = GitRefName::new(
-        head.trim()
-            .strip_prefix("ref: ")
-            .ok_or(RunError::Validation("writer needs a branch"))?,
-    )
-    .map_err(error("parse writer branch", Some(&head_path)))?;
+    let branch = writer_branch(&worktree)?;
     let base = provenant_confinement::run_utility(
         &executor,
         provenant_confinement::GitRead::ResolveRefOid {
