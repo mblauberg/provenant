@@ -504,6 +504,14 @@ impl<'a> Service<'a> {
     ) -> Result<Vec<RunEvent>> {
         self.store.events(after, limit, attempt, call)
     }
+    pub fn abandon_settlement(
+        &self,
+        id: AttemptId,
+        reason: &str,
+        call: &Request<'_>,
+    ) -> Result<Reconciled> {
+        self.store.abandon_settlement(id, reason, call)
+    }
     pub fn reconcile(
         &self,
         run: RunId,

@@ -1364,6 +1364,61 @@ fn restoring_private_index_clears_flags_that_hide_uncommitted_files() -> TestRes
 }
 
 #[test]
+fn publication_rechecks_already_published_branch_before_removing_import_ref() -> TestResult {
+    let mut fixture = Fixture::new("sha1")?;
+    let (attempt, _) = fixture.overlay()?;
+    let source = super::bound_source(&attempt)?.ok_or("private view")?;
+    super::settle(
+        &fixture.git,
+        fixture.worktree.repo(),
+        Some(&source.objects),
+        fixture.head,
+    )?;
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["update-ref", "refs/heads/lane", &fixture.head.to_string()],
+    )?;
+    let wrapper = fixture.root.join("moving-git");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\n'{}' \"$@\" || exit $?\nfor arg do\n  if [ \"$arg\" = merge-base ]; then '{}' --git-dir '{}' update-ref refs/heads/lane '{}'; break; fi\ndone\n",
+            fixture.git.display(),
+            fixture.git.display(),
+            fixture.project.join(".git").display(),
+            fixture.base
+        ),
+    )?;
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+    assert!(
+        super::publish_branch(
+            &wrapper,
+            fixture.worktree.repo(),
+            "refs/heads/lane",
+            fixture.base,
+            fixture.head
+        )
+        .is_err()
+    );
+    assert_eq!(
+        super::resolve_ref(
+            &fixture.git,
+            fixture.worktree.repo(),
+            &format!("refs/provenant/import/{}", fixture.head)
+        )?,
+        fixture.head
+    );
+    assert_eq!(
+        super::resolve_ref(&fixture.git, fixture.worktree.repo(), "refs/heads/lane")?,
+        fixture.base
+    );
+    Ok(())
+}
+
+#[test]
 fn publication_refuses_orphan_history() -> TestResult {
     let fixture = Fixture::new("sha1")?;
     let tree = oid(git(

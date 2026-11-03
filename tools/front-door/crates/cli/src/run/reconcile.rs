@@ -14,6 +14,9 @@ pub(super) fn reconcile_summary(state: &run::Reconciled) -> String {
             plain_text(&path.to_string_lossy(), usize::MAX),
             plain_text(reason, usize::MAX)
         ),
+        run::Reconciled::Settling { .. } | run::Reconciled::Abandoned { .. } => {
+            plain_text(&state.to_string(), usize::MAX)
+        }
         run::Reconciled::Uncertain { reason } => {
             format!("uncertain: {}", plain_text(&reason.to_string(), usize::MAX))
         }
@@ -53,6 +56,22 @@ pub(super) fn reconcile_inner(
 ) -> Result<(Value, String), Fail> {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
+    if let Some(target) = command.abandon {
+        let (session, selected) =
+            targets::open(edge, &target.0, false, &request(&clock, &cancel)?)?;
+        let id = selected.attempt.ok_or(run::RunError::NotFound)?;
+        let reason = command
+            .reason
+            .ok_or(run::RunError::Validation("abandonment requires a reason"))?;
+        let state =
+            session
+                .service()
+                .abandon_settlement(id, &reason, &request(&clock, &cancel)?)?;
+        return Ok((
+            json!({"run_id": selected.run, "attempt_id": id, "found": state}),
+            format!("{id} {}\n", reconcile_summary(&state)),
+        ));
+    }
     let (runs, truncated) = if command.id.is_empty() {
         let session = open(edge, &request(&clock, &cancel)?)?;
         let mut runs = session
@@ -127,7 +146,12 @@ pub(super) fn reconcile_inner(
             .map(|(id, state)| {
                 if matches!(
                     state,
-                    run::Reconciled::Uncertain { .. } | run::Reconciled::Escaped { .. }
+                    run::Reconciled::Uncertain { .. }
+                        | run::Reconciled::Escaped { .. }
+                        | run::Reconciled::Settling {
+                            blocking_reason: Some(_),
+                            ..
+                        }
                 ) {
                     *fenced = true;
                 }
