@@ -8769,45 +8769,27 @@ fn failed_fresh_preparation_leaves_no_short_alias()
     Ok(())
 }
 
-/// Resolve a named route and persist its chosen effort at launch admission.
+/// Persist a named route's resolved effort at launch admission.
 #[test]
-fn alias_resolution_survives_launch_admission() -> TestResult {
-    use provenant_routing::{
-        Catalogue, Fallback, ModelId, NamedRoute, RouteChoice, RouteName, RouteRequest,
-        RoutingConfig, RoutingContext,
-    };
-    let catalogue = Catalogue::bundled()?;
-    let mut config = RoutingConfig::default();
-    config.routes.insert(
-        "fixture".into(),
-        NamedRoute {
-            model: ModelId::parse("codex/gpt-6.1-sol")?,
-            effort: Some("high".into()),
+fn resolved_named_route_survives_launch_admission() -> TestResult {
+    let resolved = provenant_records::ResolvedRoute {
+        extra: Default::default(),
+        adapter: "codex".into(),
+        model: "gpt-6.1-sol".into(),
+        effort: Some("high".into()),
+        catalogue_revision: "fixture".into(),
+        account_key: None,
+        host: "fixture".into(),
+        alternatives: Default::default(),
+        exclusions: vec![],
+        eligibility: provenant_records::RouteEligibility::Eligible,
+        readiness: provenant_records::RouteReadiness::unknown(),
+        confidentiality: provenant_records::RouteConfidentiality {
+            extra: Default::default(),
+            evidence_ref: "fixture".into(),
         },
-    );
-    let routing_context = RoutingContext {
-        policy_account_hint: None,
-        catalogue: &catalogue,
-        config: &config,
-        registry: provenant_providers::REGISTRY,
-        availability: &[],
-        quota: &[],
-        capacity_cooldowns: &[],
-        accounts: &[],
-        quota_policies: &[],
-        readiness: None,
-        access: &[],
-        now: WallTime::from_micros(100_000_000)?,
-        host: "fixture",
+        pool_selection: None,
     };
-    let request = RouteRequest {
-        intent: Default::default(),
-        choice: RouteChoice::NamedRoute(RouteName::parse("fixture")?),
-        effort: None,
-        confidential: false,
-        fallback: Fallback::None,
-    };
-    let resolved = provenant_routing::resolve(&request, &routing_context)?;
     let route = RouteRecord::from_resolved(&resolved, Some("fixture"), "named_route");
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
