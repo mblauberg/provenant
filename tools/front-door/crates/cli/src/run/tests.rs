@@ -6093,3 +6093,95 @@ fn admission_lock_wait_respects_deadline() -> Result<(), Box<dyn std::error::Err
     )??;
     Ok(())
 }
+
+#[test]
+fn dispatch_restart_honours_saved_admission_wake_and_deadline()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Counting(AtomicUsize);
+    impl WorkerObserver for Counting {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, WorkerState::Free))
+                .collect()
+        }
+    }
+    if reexec_test_in_lane(
+        "run::tests::dispatch_restart_honours_saved_admission_wake_and_deadline",
+    )? {
+        return Ok(());
+    }
+    let fixture = linked_fixture()?;
+    let prompt = fixture.root.join("prompt.md");
+    std::fs::write(&prompt, "reply OK")?;
+    with_edge(
+        &fixture.root,
+        &fixture.tree,
+        |edge| -> Result<(), Box<dyn std::error::Error>> {
+            std::fs::create_dir_all(edge.roots.state.as_path())?;
+            provenant_config::bind_host(edge.roots)?;
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+            let session = open(edge, &call).map_err(|fail| fail.message)?;
+            let now = clock.wall_now()?;
+            let op: OperationId = "restart-wake".parse()?;
+            session.store.save_admission_window(
+                &op,
+                run::AdmissionWindow {
+                    deadline: now.checked_add(DurationMicros::from_micros(5_000_000))?,
+                    wake_at: Some(now.checked_add(DurationMicros::from_micros(1_000_000))?),
+                },
+                &call,
+            )?;
+            let make = |id: &str| {
+                parsed_run(&[
+                    "--operation-id",
+                    id,
+                    "--model",
+                    "codex/gpt-6-luna",
+                    "--mode",
+                    "worktree-write",
+                    "--worktree",
+                    fixture.tree.to_str().unwrap(),
+                    "--prompt-file",
+                    prompt.to_str().unwrap(),
+                    "--admission-timeout",
+                    "60s",
+                ])
+            };
+            let workers = Counting(AtomicUsize::new(0));
+            let start = std::time::Instant::now();
+            let reply = dispatch_with_workers(make("restart-wake")?, edge, &workers);
+            assert_eq!(reply.result.status, Status::Ok, "{:?}", reply.result.error);
+            assert!(start.elapsed() >= Duration::from_millis(800));
+            let expired: OperationId = "restart-expired".parse()?;
+            session.store.save_admission_window(
+                &expired,
+                run::AdmissionWindow {
+                    deadline: now,
+                    wake_at: Some(now),
+                },
+                &call,
+            )?;
+            let before = workers.0.load(Ordering::SeqCst);
+            let reply = dispatch_with_workers(make("restart-expired")?, edge, &workers);
+            assert_eq!(
+                reply.result.status,
+                Status::Refused,
+                "{:?}",
+                reply.result.error
+            );
+            assert_eq!(workers.0.load(Ordering::SeqCst), before);
+            Ok(())
+        },
+    )??;
+    Ok(())
+}

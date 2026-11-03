@@ -1110,14 +1110,20 @@ pub(super) fn dispatch_inner(
             )
         })?;
 
-    let mut admission_window = session.store.save_admission_window(
-        &command.operation_id,
-        run::AdmissionWindow {
-            deadline: initial_deadline,
-            wake_at: None,
-        },
-        &call,
-    )?;
+    let mut admission_window = match session
+        .store
+        .admission_window(&command.operation_id, &call)?
+    {
+        Some(window) => window,
+        None => session.store.save_admission_window(
+            &command.operation_id,
+            run::AdmissionWindow {
+                deadline: initial_deadline,
+                wake_at: None,
+            },
+            &call,
+        )?,
+    };
 
     // Preflight is complete: create or claim the owned tree, then admit.
     let mut pinned_base = None;
@@ -1135,6 +1141,23 @@ pub(super) fn dispatch_inner(
                     ErrorKind::Cancelled,
                     "cancelled",
                 ));
+            }
+            if let Some(wake) = admission_window.wake_at {
+                let now = clock
+                    .wall_now()
+                    .map_err(|_| Fail::new(Status::Error, ErrorKind::Time, "wall clock"))?;
+                let until = wake.min(admission_window.deadline);
+                if now < until {
+                    let micros = u64::try_from(until.as_micros() - now.as_micros()).unwrap_or(0);
+                    let target = clock
+                        .mono_now()
+                        .checked_add(DurationMicros::from_micros(micros))
+                        .map_err(|_| Fail::new(Status::Error, ErrorKind::Time, "mono clock"))?;
+                    clock
+                        .wait_until(target)
+                        .map_err(|_| Fail::new(Status::Error, ErrorKind::Time, "wait until"))?;
+                    continue;
+                }
             }
             let now = clock
                 .wall_now()
