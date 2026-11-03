@@ -257,7 +257,7 @@ fn main() -> BuildResult<()> {
         collect_external_tree(&directory, release_name, &mut inputs, required, &tracked)?;
     }
     for (source, release_name) in [
-        ("AGENTS.md", "instructions/AGENTS.md"),
+        ("GLOBAL-AGENTS.md", "instructions/AGENTS.md"),
         ("HARNESS.md", "instructions/HARNESS.md"),
         ("install.sh", "scripts/install.sh"),
     ] {
