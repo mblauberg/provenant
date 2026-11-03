@@ -1722,6 +1722,60 @@ fn review_all_members_quorum_blocks_evaluator_and_names_upstream() {
 }
 
 #[test]
+fn replay_attributes_an_unexplained_blocked_node_without_overwriting_other_reasons() {
+    let (document, mut owner) = partial_review(3);
+    owner.observations[1] = terminal_with_result(AttemptOutcome::Succeeded, &findings_text(""));
+    let mut journal = MemoryJournal::default();
+    advance(&document, &mut owner, &mut journal).unwrap();
+    let checkpoint = journal.0.as_mut().unwrap();
+    let verify = checkpoint
+        .nodes
+        .iter_mut()
+        .find(|n| n.id == "verify")
+        .unwrap();
+    assert_eq!(verify.state, NodeState::Blocked);
+    verify.advance_error = None;
+    verify.advance_error_code = None;
+
+    let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
+    let verify = replay
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id == "verify")
+        .unwrap();
+    assert_eq!(
+        verify.advance_error_code.as_deref(),
+        Some("upstream_blocked")
+    );
+    assert_eq!(
+        verify.advance_error.as_deref(),
+        Some("blocked by lenses (Failed)")
+    );
+    assert_eq!(journal.0.as_ref().unwrap(), &replay.checkpoint);
+
+    let verify = journal
+        .0
+        .as_mut()
+        .unwrap()
+        .nodes
+        .iter_mut()
+        .find(|n| n.id == "verify")
+        .unwrap();
+    verify.advance_error = Some("existing reason".into());
+    verify.advance_error_code = Some("other_reason".into());
+    let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
+    let verify = replay
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id == "verify")
+        .unwrap();
+    assert_eq!(verify.advance_error.as_deref(), Some("existing reason"));
+    assert_eq!(verify.advance_error_code.as_deref(), Some("other_reason"));
+}
+
+#[test]
 fn partial_composite_exports_only_successful_members_and_lists_the_unavailable() {
     let (document, mut owner) = partial_review(1);
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();

@@ -1160,6 +1160,18 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
 
         for node_index in 0..plan.nodes.len() {
             if checkpoint.nodes[node_index].state.settled() {
+                if checkpoint.nodes[node_index].state == NodeState::Blocked
+                    && dependency_state(&plan.nodes[node_index], &plan, &checkpoint, &positions)
+                        == Some(NodeState::Blocked)
+                    && attribute_blocker(
+                        node_index,
+                        &plan.nodes[node_index],
+                        &mut checkpoint,
+                        &positions,
+                    )
+                {
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                }
                 continue;
             }
 
@@ -1234,29 +1246,17 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             }
             let dependency = dependency_state(node, &plan, &checkpoint, &positions);
             if let Some(state) = dependency {
-                if checkpoint.nodes[node_index].state != state {
-                    if state == NodeState::Blocked {
-                        let blocker = node
-                            .after_expansion
-                            .iter()
-                            .chain(&node.depends_on)
-                            .map(|id| &checkpoint.nodes[positions[id]])
-                            .find(|parent| {
-                                matches!(parent.state, NodeState::Failed | NodeState::Blocked)
-                            });
-                        if let Some(parent) = blocker {
-                            let reason = format!("blocked by {} ({:?})", parent.id, parent.state);
-                            checkpoint.nodes[node_index].advance_error =
-                                Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
-                            checkpoint.nodes[node_index].advance_error_code =
-                                Some("upstream_blocked".into());
-                        }
-                    } else if checkpoint.nodes[node_index].advance_error_code.as_deref()
+                let mut changed = checkpoint.nodes[node_index].state != state;
+                if state == NodeState::Blocked {
+                    changed |= attribute_blocker(node_index, node, &mut checkpoint, &positions);
+                } else if changed
+                    && checkpoint.nodes[node_index].advance_error_code.as_deref()
                         == Some("upstream_blocked")
-                    {
-                        checkpoint.nodes[node_index].advance_error = None;
-                        checkpoint.nodes[node_index].advance_error_code = None;
-                    }
+                {
+                    checkpoint.nodes[node_index].advance_error = None;
+                    checkpoint.nodes[node_index].advance_error_code = None;
+                }
+                if changed {
                     checkpoint.nodes[node_index].state = state;
                     journal.save(&checkpoint).map_err(GraphError::Journal)?;
                 }
@@ -2428,6 +2428,32 @@ impl PlannedNode {
 
 /// A failure target must declare its gate as a dependency. Other dependants
 /// follow the success edge; inactive paths propagate a skipped state.
+fn attribute_blocker(
+    node_index: usize,
+    node: &PlannedNode,
+    checkpoint: &mut GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> bool {
+    if checkpoint.nodes[node_index].advance_error.is_some() {
+        return false;
+    }
+    let blocker = node
+        .after_expansion
+        .iter()
+        .chain(&node.depends_on)
+        .map(|id| &checkpoint.nodes[positions[id]])
+        .find(|parent| matches!(parent.state, NodeState::Failed | NodeState::Blocked));
+    if let Some(parent) = blocker {
+        let reason = format!("blocked by {} ({:?})", parent.id, parent.state);
+        checkpoint.nodes[node_index].advance_error =
+            Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
+        checkpoint.nodes[node_index].advance_error_code = Some("upstream_blocked".into());
+        true
+    } else {
+        false
+    }
+}
+
 fn dependency_state(
     node: &PlannedNode,
     plan: &PlannedGraph,
