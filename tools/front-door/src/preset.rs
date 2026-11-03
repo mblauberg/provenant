@@ -11,6 +11,11 @@ const DEPTH: usize = 8;
 #[path = "preset_cli.rs"]
 mod presentation;
 
+#[cfg(test)]
+pub(super) fn human_for_test(data: &Value, full: bool) -> String {
+    presentation::human(data, full)
+}
+
 #[path = "preset_plan.rs"]
 pub mod planner;
 

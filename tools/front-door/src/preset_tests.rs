@@ -3897,3 +3897,20 @@ fn an_unknown_size_override_is_refused() {
     .unwrap_err();
     assert!(error.contains("unknown review size"), "{error}");
 }
+
+#[test]
+fn compact_preset_show_lists_review_council_parameter_docs() {
+    let layers = Layers::empty();
+    let (values, origins) = layers.resolve("review-council").unwrap();
+    let data = json!({"name": "review-council", "values": values, "origins": origins});
+    let shown = super::preset::human_for_test(&data, false);
+    for (name, value) in data["values"]["parameters"].as_object().unwrap() {
+        assert!(shown.contains(name), "missing {name}");
+        if let Some(doc) = value.get("doc").and_then(Value::as_str) {
+            let first = doc.find(". ").map_or(doc, |end| &doc[..=end]);
+            assert!(shown.contains(first), "missing {name}: {first}");
+        }
+    }
+    assert!(!shown.contains("Origins\n"));
+    assert!(super::preset::human_for_test(&data, true).contains("Origins\n"));
+}
