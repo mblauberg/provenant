@@ -3501,7 +3501,11 @@ pub fn run(
             provenant_config::read_with_domains(&roots.roots, &provenant_cli::domains::SECTIONS)
                 .map(|config| config.domains.run)
                 .unwrap_or_default();
-        let brief_warnings = if run_config.brief_read_root_warnings {
+        let brief_warnings = if provenant_cli::run::brief_read_root_warnings_enabled(
+            &run_config,
+            &roots.roots,
+            &directory,
+        ) {
             provenant_cli::run::brief_read_root_warnings(
                 prompt,
                 &directory,

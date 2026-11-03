@@ -619,7 +619,7 @@ pub(super) fn dispatch_inner(
                     provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
                         .map(|config| config.domains.run)
                         .unwrap_or_default();
-                if run_config.brief_read_root_warnings {
+                if brief_read_root_warnings_enabled(&run_config, edge.roots, edge.cwd) {
                     brief_read_root_warnings(
                         &prompt,
                         edge.cwd,
@@ -1124,23 +1124,27 @@ pub(super) fn dispatch_inner(
             },
         )
         .collect();
-    let brief_warnings =
-        if command.input.manifest.is_none() && config.domains.run.brief_read_root_warnings {
-            tasks
-                .first()
-                .map(|task| {
-                    brief_read_root_warnings(
-                        &task.prompt,
-                        edge.cwd,
-                        command.access.worktree.as_deref(),
-                        &lane_access.read_roots,
-                        edge.home,
-                    )
-                })
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+    let brief_warnings = if command.input.manifest.is_none()
+        && config
+            .domains
+            .run
+            .brief_read_root_warnings_for(&session.context.project_id.to_string())
+    {
+        tasks
+            .first()
+            .map(|task| {
+                brief_read_root_warnings(
+                    &task.prompt,
+                    edge.cwd,
+                    command.access.worktree.as_deref(),
+                    &lane_access.read_roots,
+                    edge.home,
+                )
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let (record, started) = submit_with_host_and_wait(
         &session,
         edge,
@@ -1183,6 +1187,33 @@ pub fn warnings_text(data: &Value) -> String {
         .filter_map(Value::as_str)
         .map(|warning| format!("warning: {}\n", plain_text(warning, usize::MAX)))
         .collect()
+}
+
+/// Resolve an existing project binding without creating state during previews.
+pub fn brief_read_root_warnings_enabled(
+    config: &provenant_confinement::run_config::RunConfig,
+    roots: &Roots,
+    cwd: &Path,
+) -> bool {
+    if config.projects.is_empty() {
+        return config.brief_read_root_warnings;
+    }
+    let project = (|| {
+        let git = provenant_os::git::git_executable()?;
+        let runtime = provenant_confinement::UtilityRuntime::read_only(git).ok()?;
+        let executor = provenant_os::exec::SystemExecutor::new(1).ok()?;
+        let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5)).ok()?;
+        let location = runtime
+            .project_location(&executor, cwd, budget, &CancelToken::new())
+            .ok()?
+            .location;
+        provenant_config::lookup_project(roots, &location)
+            .ok()?
+            .map(|binding| binding.project_id())
+    })();
+    project.map_or(config.brief_read_root_warnings, |id| {
+        config.brief_read_root_warnings_for(&id.to_string())
+    })
 }
 
 /// Existing absolute or `~/` paths in a brief that no effective read root covers.
