@@ -1900,4 +1900,8 @@ fn loop_checkpoint_from_before_node_asks_refuses_to_advance_but_can_be_cancelled
     journal.save(&checkpoint).unwrap();
     close_resolved_asks(&mut checkpoint, &mut reviews(&[]), &mut journal).unwrap();
     assert!(journal.0.as_ref().unwrap().cancelled);
+    journal.0.as_mut().unwrap().wake_at = Some(provenant_core::WallTime::from_micros(1).unwrap());
+    let stopped = advance(&document, &mut reviews(&[]), &mut journal).unwrap();
+    assert_eq!(stopped.status, GraphStatus::Cancelled);
+    assert!(stopped.checkpoint.nodes.iter().all(|node| !matches!(node.state, NodeState::Pending | NodeState::Running)));
 }

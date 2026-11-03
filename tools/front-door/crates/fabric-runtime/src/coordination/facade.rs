@@ -86,7 +86,11 @@ bounded_input! {
     pub enum GraphInput as WireGraphInput {
         Run { document: std::path::PathBuf },
         Status { id: String },
-        Cancel { id: String },
+        Cancel {
+            id: String,
+            #[serde(default)]
+            reason: Option<String>,
+        },
         Resume {
             document: std::path::PathBuf,
             #[serde(default)]

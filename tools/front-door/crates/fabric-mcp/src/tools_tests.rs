@@ -220,7 +220,10 @@ fn graph_control_operations_are_strict_and_cancel_is_a_mutation() {
         ("run", json!({"op":"run","document":"graph.json"})),
         ("resume", json!({"op":"resume","document":"graph.json"})),
         ("status", json!({"op":"status","id":"g-test"})),
-        ("cancel", json!({"op":"cancel","id":"g-test"})),
+        (
+            "cancel",
+            json!({"op":"cancel","id":"g-test","reason":"maintenance"}),
+        ),
     ] {
         let call = ToolCall::parse("fabric_graph", arguments.clone()).expect(op);
         assert_eq!(call.is_mutation(), op != "status");

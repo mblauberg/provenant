@@ -5516,3 +5516,40 @@ fn claude_absent_usage_names_its_reason() {
         Some("absent: result event has no usage")
     );
 }
+
+#[test]
+fn wait_follows_a_policy_chain_to_the_ceiling_reading_state_before_tail() {
+    let ceiling = provenant_run::POLICY_ATTEMPT_CEILING;
+    // Attempts 0..ceiling-1 form one full chain; each tail read names the next.
+    let last = ceiling - 1;
+    let mut calls = Vec::new();
+    let calls_ref = std::cell::RefCell::new(&mut calls);
+    let result: Result<(), ()> = wait::follow_policy_tail(
+        0_u64,
+        |id| {
+            calls_ref.borrow_mut().push(("state", id));
+            Ok(())
+        },
+        |id| {
+            calls_ref.borrow_mut().push(("tail", id));
+            Ok(if id < last { id + 1 } else { id })
+        },
+    );
+    assert_eq!(result, Ok(()));
+    let visited: Vec<u64> = calls
+        .iter()
+        .filter(|(kind, _)| *kind == "state")
+        .map(|(_, id)| *id)
+        .collect();
+    assert_eq!(
+        visited,
+        (0..ceiling).collect::<Vec<_>>(),
+        "every attempt to the ceiling"
+    );
+    assert!(
+        calls
+            .chunks(2)
+            .all(|pair| pair[0].0 == "state" && pair[1].0 == "tail" && pair[0].1 == pair[1].1),
+        "each hop reads state before its tail"
+    );
+}
