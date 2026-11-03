@@ -410,10 +410,11 @@ Preset commit parameters accept refs such as `HEAD`; the front door resolves
 them to full immutable object IDs before explain or submission. For example,
 `--set 'parameters.subject.commit="refs/heads/batch/graph"'` pins a council's
 subject. Raw graph commit bindings require the full object ID.
-When a preset's default subject is `HEAD` and a writer worktree is bound, the
-front door resolves that default against the worktree. An explicit `subject`
-continues to take precedence, and a preset without a bound worktree resolves
-`HEAD` from the invoking checkout.
+When a preset's default subject is `HEAD` and a writer or review worktree is
+bound, the front door resolves that default against the worktree. An explicit
+`subject` continues to take precedence, and a preset without a bound worktree
+resolves `HEAD` from the invoking checkout. `--explain` warns when a node's
+resolved commit source differs from the bound worktree's HEAD.
 The runtime pins the source before launch and retains it on replay. A review
 uses that exact subject. A later writer starts in an existing registered
 worktree at that head, or a clean ancestor context fast-forwards to it while
