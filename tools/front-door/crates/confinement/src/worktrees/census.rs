@@ -622,11 +622,16 @@ pub(super) fn observe_worker_holders_with_audit(
                         Some(pid),
                         Some("actual cwd EPERM required (readable cwd placement failed)"),
                     );
-                    record_unknown_all(
-                        &mut states,
-                        &mut details,
-                        &process_detail(cwd_observer, pid, "cwd unreadable"),
-                    );
+                    let detail = process_detail(cwd_observer, pid, "cwd unreadable");
+                    for (root, state) in &mut states {
+                        if occupancy_path_could_be_under(&path, root) && *state != WorkerState::Live
+                        {
+                            *state = WorkerState::Unknown;
+                            details
+                                .entry(root.clone())
+                                .or_insert_with(|| detail.clone());
+                        }
+                    }
                 }
             }
         }
@@ -819,7 +824,13 @@ pub(super) fn record_live_path_with_audit(
             Some(false) => {}
             None => {
                 unplaceable();
-                if *state != WorkerState::Live {
+                // A known cwd outside this root cannot be placed inside it
+                // merely because another ancestor could not be inspected.
+                // Keep an unreadable root itself conservative.
+                if *state != WorkerState::Live
+                    && (!std::fs::metadata(&*root).is_ok_and(|metadata| metadata.is_dir())
+                        || occupancy_path_could_be_under(cwd, root))
+                {
                     *state = WorkerState::Unknown;
                 }
             }

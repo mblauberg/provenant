@@ -795,6 +795,23 @@ fn occupancy_is_placed_per_root_and_partial_results_remain_conservative()
         )
         .0
     };
+    // An unresolvable cwd with a known path only affects its candidate root.
+    let unplaceable = a.join("cwd-loop");
+    std::os::unix::fs::symlink("cwd-loop", &unplaceable)?;
+    let states = observe_worker_roots(
+        &roots,
+        &processes,
+        &Occupancy {
+            cwd: unplaceable,
+            paths: vec![],
+            complete: true,
+        },
+        &current,
+        false,
+    )
+    .0;
+    assert_eq!(states[&a], WorkerState::Unknown);
+    assert_eq!(states[&b], WorkerState::Free);
     let free = observe(vec![], true);
     assert_eq!(free[&a], WorkerState::Free);
     assert_eq!(free[&b], WorkerState::Free);
@@ -2338,4 +2355,27 @@ mod narrowing {
         );
         Ok(())
     }
+}
+
+#[test]
+fn unplaceable_known_cwd_does_not_taint_unrelated_worktree() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let affected = temp.path().join("affected");
+    let unrelated = temp.path().join("unrelated");
+    fs::create_dir(&affected)?;
+    fs::create_dir(&unrelated)?;
+    let non_directory = affected.join("file");
+    fs::write(&non_directory, b"")?;
+    let mut states = BTreeMap::from([
+        (affected.clone(), WorkerState::Free),
+        (unrelated.clone(), WorkerState::Free),
+    ]);
+    let mut reported = false;
+    record_live_path_with_audit(&mut states, &non_directory.join("cwd"), &mut || {
+        reported = true;
+    });
+    assert!(reported);
+    assert_eq!(states[&affected], WorkerState::Unknown);
+    assert_eq!(states[&unrelated], WorkerState::Free);
+    Ok(())
 }
