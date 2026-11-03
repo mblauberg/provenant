@@ -365,6 +365,12 @@ falsify every finding (`verifiers = 0` skips it), and the synthesis gives each
 finding one disposition: accepted, rejected or deferred, with a reason. The
 `generator-evaluator` evaluator does the same over its lens findings.
 
+Every `review-council` lens emits a fenced `findings` block before its single
+verdict line. The block uses `schema_version: 1`, a `findings` array, and at
+most 32 entries, one-line summaries and under 8 KiB in all; a lens with no
+findings emits an empty array. A required
+findings block missing from a lens result makes that lens unavailable.
+
 The `review-council` lens group accepts partial success. A lens that fails or
 returns no valid findings block is recorded as unavailable with its cause, and
 only successful lenses flow to verification and synthesis, after an

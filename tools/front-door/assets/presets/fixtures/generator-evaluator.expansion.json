@@ -3,7 +3,7 @@
     "pattern": "generator-evaluator",
     "preset": "generator-evaluator"
   },
-  "graph_id": "preset-e8ffea50230737d0986e49eb107431c1",
+  "graph_id": "preset-e582860fba3646d9697bfdd709d7610c",
   "nodes": [
     {
       "acceptance_checks": [
@@ -54,10 +54,10 @@
             "depends_on": [],
             "distinct_from": "writer",
             "id": "lens-correctness-spec",
-            "prompt": "Lens correctness-spec. Check the change against the spec and for logic errors.\n\nLens: correctness-spec. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with one exact `VERDICT: PASS` or `VERDICT: FAIL` line.\n\n\n# Lens: correctness against the spec\n\nCanonical questions: [review-lenses.md](../review-lenses.md), sections\n\"Correctness and failure\" and \"Verification\".\n\nCheck the change against the spec (the issue or file you were given), not\nagainst the author's account of it.\n\n- Map each acceptance criterion to code and to evidence. Name any criterion with\n  no implementation or no test.\n- State the invariants that must hold before and after each operation, then try\n  to break them with empty, duplicate, stale, malformed, partial and retried input.\n- Follow failure paths: ordering, cancellation, timeouts, re-entry, partial\n  writes and errors that are converted to success.\n- Check public API, schema and protocol compatibility against the base.\n- For refactors, check that intended behaviour and failure handling are preserved.\n",
+            "prompt": "Lens correctness-spec. Check the change against the spec and for logic errors.\n\nLens: correctness-spec. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line and the whole block under 8 KiB. Use this canonical array\nform:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line and the whole\n  block under 8 KiB. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: correctness against the spec\n\nCanonical questions: [review-lenses.md](../review-lenses.md), sections\n\"Correctness and failure\" and \"Verification\".\n\nCheck the change against the spec (the issue or file you were given), not\nagainst the author's account of it.\n\n- Map each acceptance criterion to code and to evidence. Name any criterion with\n  no implementation or no test.\n- State the invariants that must hold before and after each operation, then try\n  to break them with empty, duplicate, stale, malformed, partial and retried input.\n- Follow failure paths: ordering, cancellation, timeouts, re-entry, partial\n  writes and errors that are converted to success.\n- Check public API, schema and protocol compatibility against the base.\n- For refactors, check that intended behaviour and failure handling are preserved.\n",
             "references": [
               {
-                "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
+                "digest": "sha256:3e63d36b168a833e7e65b83bfe82af5159944c8a54f55fa717273b560ef8e823",
                 "ref": "skill:code-review/references/reviewer-context.md",
                 "when": "always"
               },
@@ -68,7 +68,7 @@
               }
             ],
             "role": "lens.correctness-spec",
-            "role_digest": "sha256:c295b33bac0f50ce8d9ab198f36cfe6a784885d53d5710e2c4aa9a2f18547fb2",
+            "role_digest": "sha256:848b2cdd9b4b8b0ad645765b5fb8518d220cd13178c2d78e65158b3594b0f879",
             "route": {
               "alias": "senior"
             },
@@ -78,10 +78,10 @@
             "access": "read_only",
             "depends_on": [],
             "id": "lens-simplicity",
-            "prompt": "Lens simplicity. Look for unnecessary machinery and simpler designs.\n\nLens: simplicity. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with one exact `VERDICT: PASS` or `VERDICT: FAIL` line.\n\n\n# Lens: simplicity\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Ownership and structure\" (simplicity, YAGNI, the 1,000-line cap).\n\n- What can be deleted while keeping behaviour? Name the lines.\n- Flag speculative or rigid abstraction, thin wrappers that only move\n  complexity, options nothing uses, and layers with one caller.\n- Prefer a reframe that removes concepts, branches or synchronisation points,\n  but only one local enough to validate. Do not demand redesign beyond the\n  dependency cone.\n",
+            "prompt": "Lens simplicity. Look for unnecessary machinery and simpler designs.\n\nLens: simplicity. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line and the whole block under 8 KiB. Use this canonical array\nform:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line and the whole\n  block under 8 KiB. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: simplicity\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Ownership and structure\" (simplicity, YAGNI, the 1,000-line cap).\n\n- What can be deleted while keeping behaviour? Name the lines.\n- Flag speculative or rigid abstraction, thin wrappers that only move\n  complexity, options nothing uses, and layers with one caller.\n- Prefer a reframe that removes concepts, branches or synchronisation points,\n  but only one local enough to validate. Do not demand redesign beyond the\n  dependency cone.\n",
             "references": [
               {
-                "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
+                "digest": "sha256:3e63d36b168a833e7e65b83bfe82af5159944c8a54f55fa717273b560ef8e823",
                 "ref": "skill:code-review/references/reviewer-context.md",
                 "when": "always"
               },
@@ -92,7 +92,7 @@
               }
             ],
             "role": "lens.simplicity",
-            "role_digest": "sha256:f7de7e331f31e14f3de19f67e1a15832160951cac3272696ec3f9f57cabf6793",
+            "role_digest": "sha256:d1fb3a10ba832baa07b4525dd2eab31c1ee58542ceb493a0901052c3b8c67249",
             "route": {
               "alias": "senior"
             },
@@ -208,7 +208,7 @@
     "preset": "generator-evaluator",
     "roles": {
       "lens.correctness-spec": {
-        "digest": "sha256:c295b33bac0f50ce8d9ab198f36cfe6a784885d53d5710e2c4aa9a2f18547fb2",
+        "digest": "sha256:848b2cdd9b4b8b0ad645765b5fb8518d220cd13178c2d78e65158b3594b0f879",
         "extends": [
           "lens.correctness-spec",
           "lens"
@@ -216,7 +216,7 @@
         "origin": "bundled",
         "references": [
           {
-            "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
+            "digest": "sha256:3e63d36b168a833e7e65b83bfe82af5159944c8a54f55fa717273b560ef8e823",
             "ref": "skill:code-review/references/reviewer-context.md",
             "when": "always"
           },
@@ -228,7 +228,7 @@
         ]
       },
       "lens.simplicity": {
-        "digest": "sha256:f7de7e331f31e14f3de19f67e1a15832160951cac3272696ec3f9f57cabf6793",
+        "digest": "sha256:d1fb3a10ba832baa07b4525dd2eab31c1ee58542ceb493a0901052c3b8c67249",
         "extends": [
           "lens.simplicity",
           "lens"
@@ -236,7 +236,7 @@
         "origin": "bundled",
         "references": [
           {
-            "digest": "sha256:f8e898a80f958b43b8d62ea8316e8cd77e45fbdf9b045beef691e7ef1d43da91",
+            "digest": "sha256:3e63d36b168a833e7e65b83bfe82af5159944c8a54f55fa717273b560ef8e823",
             "ref": "skill:code-review/references/reviewer-context.md",
             "when": "always"
           },
