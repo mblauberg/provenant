@@ -929,6 +929,46 @@ fn chair_cost_is_complete_only_when_every_session_is_read() {
 }
 
 #[test]
+fn groups_by_resolved_model_and_effort() {
+    let high = fact(1, Some(10));
+    let mut low = fact(2, Some(20));
+    low.resolved_route.as_mut().unwrap().effort = Some("low".into());
+    let mut other_account = fact(3, Some(30));
+    other_account.resolved_route.as_mut().unwrap().account_label = Some("other".into());
+    let mut no_effort = fact(4, Some(40));
+    no_effort.resolved_route.as_mut().unwrap().effort = None;
+    let mut unknown = fact(5, Some(50));
+    unknown.resolved_route = None;
+    let groups = stats_by_context(
+        [high, low, other_account, no_effort, unknown],
+        &prices(Some(1)),
+        Window::default(),
+        ContextKey::Route,
+    )
+    .unwrap()
+    .context_groups
+    .unwrap();
+    let actual: Vec<_> = groups
+        .iter()
+        .map(|group| {
+            json!({
+                "route": group.value,
+                "attempts": group.totals.attempts,
+            })
+        })
+        .collect();
+    assert_eq!(
+        json!(actual),
+        json!([
+            {"route": null, "attempts": 1},
+            {"route": "m", "attempts": 1},
+            {"route": "m@high", "attempts": 2},
+            {"route": "m@low", "attempts": 1}
+        ])
+    );
+}
+
+#[test]
 fn groups_by_context_including_missing() {
     let mut first = fact(1, Some(10));
     first.context = Some(provenant_records::run::WorkContext {

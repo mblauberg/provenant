@@ -8768,3 +8768,68 @@ fn failed_fresh_preparation_leaves_no_short_alias()
     );
     Ok(())
 }
+
+/// Resolve a named route and persist its chosen effort at launch admission.
+#[test]
+fn alias_resolution_survives_launch_admission() -> TestResult {
+    use provenant_routing::{
+        Catalogue, Fallback, ModelId, NamedRoute, RouteChoice, RouteName, RouteRequest,
+        RoutingConfig, RoutingContext,
+    };
+    let catalogue = Catalogue::bundled()?;
+    let mut config = RoutingConfig::default();
+    config.routes.insert(
+        "fixture".into(),
+        NamedRoute {
+            model: ModelId::parse("codex/gpt-6.1-sol")?,
+            effort: Some("high".into()),
+        },
+    );
+    let routing_context = RoutingContext {
+        policy_account_hint: None,
+        catalogue: &catalogue,
+        config: &config,
+        registry: provenant_providers::REGISTRY,
+        availability: &[],
+        quota: &[],
+        capacity_cooldowns: &[],
+        accounts: &[],
+        quota_policies: &[],
+        readiness: None,
+        access: &[],
+        now: WallTime::from_micros(100_000_000)?,
+        host: "fixture",
+    };
+    let request = RouteRequest {
+        intent: Default::default(),
+        choice: RouteChoice::NamedRoute(RouteName::parse("fixture")?),
+        effort: None,
+        confidential: false,
+        fallback: Fallback::None,
+    };
+    let resolved = provenant_routing::resolve(&request, &routing_context)?;
+    let route = RouteRecord::from_resolved(&resolved, Some("fixture"), "named_route");
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut prepared = input();
+    prepared.request.tasks[0].route = RequestedRoute::Named {
+        extra: Default::default(),
+        name: "fixture".into(),
+        effort: None,
+    };
+    store.create(&prepared, &call)?;
+    let pending = store.record(prepared.attempts[0].attempt_id, &call)?;
+    store.mark_starting(&pending, &route, &[], &Default::default(), None, &call)?;
+    let record = store.record(prepared.attempts[0].attempt_id, &call)?;
+    assert_eq!(
+        record
+            .applied_route
+            .as_ref()
+            .and_then(|route| route.effort.as_deref()),
+        Some("high")
+    );
+    assert_eq!(record.resolved_route, record.applied_route);
+    Ok(())
+}
