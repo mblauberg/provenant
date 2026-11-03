@@ -286,7 +286,8 @@ find into process changes and repeatable evaluations.
 
 ## Contributing
 
-Read [`AGENTS.md`](AGENTS.md) for repository-wide instructions,
+Read [`AGENTS.md`](AGENTS.md) for repository instructions and
+[`GLOBAL-AGENTS.md`](GLOBAL-AGENTS.md) for the global rules,
 [`MAINTAINING.md`](MAINTAINING.md) for the change process and the
 [GitHub workflow](docs/runbooks/github-workflow.md) for branches, issues and
 delivery. Rust code lives under [`tools/front-door/`](tools/front-door); keep a
