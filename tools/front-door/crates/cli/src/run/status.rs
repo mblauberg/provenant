@@ -229,14 +229,34 @@ fn paused_graph_reply(
     if let Some(reason) = &reason {
         human.push_str(&format!("Pause reason: {reason}\n"));
     }
+    let cancel_reason = (status == "cancelled")
+        .then_some(checkpoint.cancel_reason.as_deref())
+        .flatten()
+        .map(|reason| provenant_fabric_runtime::hosts::plain_text(reason, 1024));
+    if let Some(reason) = &cancel_reason {
+        human.push_str(&format!("Cancellation reason: {reason}\n"));
+    }
     Some((
-        json!({"graph_id": graph_id, "status": status, "pause_reason": reason, "checkpoint": checkpoint}),
+        json!({"graph_id": graph_id, "status": status, "pause_reason": reason, "cancel_reason": cancel_reason, "checkpoint": checkpoint}),
         human,
     ))
 }
 
 #[cfg(test)]
 mod graph_status_tests {
+    #[test]
+    fn graph_target_status_shows_cancellation_reason() {
+        let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1, "graph_id": "graph-123", "plan_digest": "digest",
+                "nodes": [], "cancelled": true, "cancel_reason": "requested by chair"
+            }))
+            .unwrap();
+        let (data, human) = super::paused_graph_reply("graph-123", checkpoint).unwrap();
+        assert_eq!(data["cancel_reason"], "requested by chair");
+        assert!(human.contains("Cancellation reason: requested by chair"));
+    }
+
     #[test]
     fn graph_target_status_shows_a_bounded_sanitised_pause_reason() {
         let reason = format!("invalid planner fragment \u{1b}[31m{}", "x".repeat(2048));

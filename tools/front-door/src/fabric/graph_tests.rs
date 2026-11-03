@@ -577,6 +577,17 @@ mod result_tests {
     }
 
     #[test]
+    fn cancelled_graph_status_shows_reason() {
+        let mut run = graph_status_fixture();
+        run.checkpoint.cancelled = true;
+        run.checkpoint.cancel_reason = Some("requested by chair".into());
+        let run = super::graph_snapshot(run.checkpoint);
+        assert!(super::graph_human(&run).contains("Cancellation reason: requested by chair"));
+        let json = serde_json::to_value(&run).unwrap();
+        assert_eq!(json["checkpoint"]["cancel_reason"], "requested by chair");
+    }
+
+    #[test]
     fn graph_status_compact_and_json_remain_unchanged() {
         let run = graph_status_fixture();
         let ordinary = super::graph_human(&run);
