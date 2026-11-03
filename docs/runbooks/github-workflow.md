@@ -316,6 +316,8 @@ with `domains.pr.land.poll_seconds` in the state-root `config.toml`, or pass
 `--poll SECONDS` for one invocation. `land 148 --explain` shows the effective
 interval and retry budget with their sources. The `--wait` duration also bounds retries of
 GitHub rate limits; `RATE_LIMITED` reports the reset and a retry command.
+Without server timing, secondary limits wait at least a minute and back off,
+following [GitHub's rate-limit guidance](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#exceeding-the-rate-limit).
 `MERGE_NOT_ALLOWED` means GitHub refused the merge; resolve the reported
 mergeability problem and retry. `MERGE_STATE_UNKNOWN` means a merge was
 attempted but its result could not be confirmed; rerun land to confirm the

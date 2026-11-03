@@ -165,6 +165,7 @@ impl Reader<'_> {
         mutation: bool,
     ) -> Result<provenant_os::exec::ExecOutcome> {
         let backoff = Backoff::new(RETRY_FIRST, 2, RETRY_LAST);
+        let rate_backoff = Backoff::new(Duration::from_secs(60), 2, Duration::from_secs(900));
         let mut retries = 0_u64;
         let mut rate_reset = None;
         loop {
@@ -225,7 +226,7 @@ impl Reader<'_> {
                 return Ok(output);
             }
             let delay = if limited {
-                let (delay, reset) = rate_delay(&headers, backoff.delay(retries));
+                let (delay, reset) = rate_delay(&headers, rate_backoff.delay(retries));
                 rate_reset = Some(reset);
                 delay
             } else {
@@ -244,8 +245,11 @@ fn strip_headers(bytes: &[u8]) -> (String, Vec<u8>) {
     let mut headers = String::new();
     let mut body = Vec::new();
     let mut position = 0;
+    let mut quoted = false;
+    let mut escaped = false;
     while position < bytes.len() {
-        if bytes[position..].starts_with(b"HTTP/")
+        if !quoted
+            && bytes[position..].starts_with(b"HTTP/")
             && (position == 0 || matches!(bytes[position - 1], b'\n' | b'[' | b','))
         {
             let rest = &bytes[position..];
@@ -265,7 +269,19 @@ fn strip_headers(bytes: &[u8]) -> (String, Vec<u8>) {
                 continue;
             }
         }
-        body.push(bytes[position]);
+        let byte = bytes[position];
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+        } else if byte == b'"' {
+            quoted = true;
+        }
+        body.push(byte);
         position += 1;
     }
     (headers, body)
@@ -298,6 +314,7 @@ fn rate_delay(headers: &str, fallback: Duration) -> (Duration, String) {
     let now = jiff::Timestamp::now().as_second();
     let mut retry = None;
     let mut reset = None;
+    let mut remaining = None;
     for line in headers.lines() {
         let Some((name, value)) = line.split_once(':') else {
             continue;
@@ -312,8 +329,15 @@ fn rate_delay(headers: &str, fallback: Duration) -> (Duration, String) {
             });
         } else if name.eq_ignore_ascii_case("x-ratelimit-reset") {
             reset = value.trim().parse::<i64>().ok();
+        } else if name.eq_ignore_ascii_case("x-ratelimit-remaining") {
+            remaining = value.trim().parse::<u64>().ok();
         }
     }
+    // A secondary limit can include the unrelated primary window's headers.
+    // When primary tokens remain, retry the secondary limit after a minute
+    // rather than waiting for that primary window to reset.
+    let reset = reset.filter(|_| remaining.is_none_or(|tokens| tokens == 0));
+    let fallback = fallback.max(Duration::from_secs(60));
     let delay = retry
         .map(Duration::from_secs)
         .or_else(|| reset.map(|at| Duration::from_secs(at.saturating_sub(now).max(0) as u64)))
@@ -641,6 +665,15 @@ mod tests {
         let (delay, _) = rate_delay("Retry-After: 17\r\n", Duration::from_secs(1));
         assert_eq!(delay, Duration::from_secs(17));
         let (delay, reset) = rate_delay(
+            "X-RateLimit-Remaining: 100\r\nX-RateLimit-Reset: 4102444800\r\n",
+            Duration::from_secs(1),
+        );
+        assert_eq!(delay, Duration::from_secs(60));
+        assert_eq!(reset, "unknown");
+        let (delay, reset) = rate_delay("", Duration::from_secs(1));
+        assert_eq!(delay, Duration::from_secs(60));
+        assert_eq!(reset, "unknown");
+        let (delay, reset) = rate_delay(
             "Retry-After: Fri, 01 Jan 2100 00:00:00 GMT\r\n",
             Duration::from_secs(1),
         );
@@ -655,6 +688,15 @@ mod tests {
         assert!(headers.contains("X-RateLimit-Remaining: 9"));
         let pages: serde_json::Value = serde_json::from_slice(&body).expect("pages");
         assert_eq!(pages, json!([{"page":1},{"page":2}]));
+        // Header-looking text and escaped quotes in JSON must not consume
+        // the rest of a page or the next page's real headers.
+        let response = b"[HTTP/2 200 OK\r\n\r\n{\"summary\":\"[HTTP/2,HTTP/ \\\"quoted\\\" \\\\ tail\"},HTTP/2 200 OK\r\n\r\n{\"page\":2}]";
+        let (_, body) = strip_headers(response);
+        let pages: serde_json::Value = serde_json::from_slice(&body).expect("pages");
+        assert_eq!(
+            pages,
+            json!([{"summary":"[HTTP/2,HTTP/ \"quoted\" \\ tail"},{"page":2}])
+        );
     }
 
     #[test]
