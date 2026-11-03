@@ -1857,13 +1857,16 @@ pub(crate) fn seal_manifest(
 /// The cause shown for a lane that ended without a final handoff.
 pub const NO_HANDOFF_REASON: &str = "no handoff: the lane ended without reporting results";
 
-/// A lane that declares exactly one verdict has reported its result even
-/// without a handoff, so a reviewer's verdict alone still passes (#2707).
+/// A lane that reports a verdict has reported its result even without a
+/// handoff, so a reviewer's verdict alone still passes (#2707). It counts the
+/// shared final-line grammar, or the single legacy first-line declaration that
+/// review still reads (#2371): settlement and review accept the same shapes, so
+/// a reviewer the reader accepts is never settled as having reported nothing.
 fn reports_verdict(result: &str) -> bool {
     let mut capture = provenant_records::result_capture::ResultCapture::new(None);
     capture.push(result.as_bytes());
     let captured = capture.finish();
-    captured.verdict.is_some() || captured.declarations == 1
+    captured.verdict.is_some() || captured.legacy_verdict_token().is_some()
 }
 /// Stored instead of the provider's answer when settlement cannot filter it.
 const UNREDACTABLE_RESULT: &str = "[result withheld: redaction failed]";
@@ -1877,6 +1880,28 @@ fn bounded_note(note: &str) -> String {
 #[cfg(test)]
 mod host_clock_tests {
     use super::*;
+
+    #[test]
+    fn only_a_reportable_verdict_counts_as_a_lane_reporting() {
+        assert!(reports_verdict("Reviewed the change.\n\nVERDICT: APPROVE"));
+        assert!(reports_verdict(
+            "Reviewed the change.\nVERDICT: APPROVE\n```handoff\n{\"schema_version\":2,\"status\":\"done\"}\n```"
+        ));
+        // The one-release legacy shape review still reads: exactly one
+        // declaration, on the first non-empty line.
+        assert!(reports_verdict(
+            "Verdict: approve\nLens: correctness\nwrite denied: true"
+        ));
+        // A verdict that is not the first or last thing said is ambiguous: the
+        // reader refuses it, and so does settlement.
+        assert!(!reports_verdict(
+            "Reviewed the change.\nVERDICT: APPROVE\nOne more note."
+        ));
+        assert!(!reports_verdict(
+            "VERDICT: APPROVE\nVERDICT: REQUEST_CHANGES"
+        ));
+        assert!(!reports_verdict("Reviewed the change with no verdict."));
+    }
 
     #[test]
     fn admission_failures_reach_guardian_as_typed_causes() {
