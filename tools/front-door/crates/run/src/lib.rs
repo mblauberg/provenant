@@ -284,6 +284,8 @@ impl std::fmt::Display for ArtifactProvenance {
 #[derive(Debug, Error)]
 pub enum RunError {
     #[error("{0}")]
+    AccountNotRegistered(String),
+    #[error("{0}")]
     InvalidTaskTitle(String),
     #[error("{message}")]
     Input { kind: ErrorKind, message: String },

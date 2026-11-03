@@ -1051,6 +1051,36 @@ fn host_delivery_limit_keeps_its_text_as_typed_io_detail() {
 }
 
 #[test]
+fn host_delivery_limit_cli_error_matches_golden() -> Result<(), Box<dyn std::error::Error>> {
+    let failure = super::Fail::from(provenant_run::RunError::DeliveryLimit {
+        stage: provenant_records::run::WriterDeliveryStage::Integrate,
+        tool: "git",
+        command: "worktree list".into(),
+        limit: provenant_os::exec::DEFAULT_CAPTURE_LIMIT,
+    });
+    let reply = super::reply("run", Err(failure));
+    let mut rendered = Vec::new();
+    crate::render::render(
+        &reply.result,
+        crate::render::RenderMode::Human {
+            text: &reply.human,
+            summary: reply.summary.as_ref(),
+            read_only: reply.read_only,
+        },
+        &mut rendered,
+    )?;
+    let actual = String::from_utf8(rendered)?;
+    let golden_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/golden/delivery-limit-error.txt");
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        std::fs::write(&golden_path, &actual)?;
+    }
+    let expected = std::fs::read_to_string(&golden_path)?;
+    assert_eq!(actual, expected);
+    Ok(())
+}
+
+#[test]
 fn stats_summary_reports_cost_coverage() {
     use provenant_telemetry::{CostTotal, Money, Totals};
     let mut totals = Totals {

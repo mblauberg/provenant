@@ -158,7 +158,8 @@ impl From<run::RunError> for Fail {
             | ErrorKind::QueueFull
             | ErrorKind::SecretInput
             | ErrorKind::Unsupported
-            | ErrorKind::ContinuationUnsupported => Status::Refused,
+            | ErrorKind::ContinuationUnsupported
+            | ErrorKind::AccountNotRegistered => Status::Refused,
             _ => Status::Error,
         };
         Self {

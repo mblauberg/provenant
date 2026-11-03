@@ -628,6 +628,10 @@ fn pacing_profile_account_labels_resolve_and_unknown_names_fail() -> Result {
         ),
     )?;
     let duplicate = call(&rig, &["route", "list"], 2)?;
+    assert_eq!(
+        duplicate["error"]["code"], "MULTIPLE_PACING_PROFILES",
+        "{duplicate}"
+    );
     assert!(
         duplicate["error"]["message"]
             .as_str()
@@ -641,6 +645,10 @@ fn pacing_profile_account_labels_resolve_and_unknown_names_fail() -> Result {
         ),
     )?;
     let ambiguous = call(&rig, &["route", "list"], 2)?;
+    assert_eq!(
+        ambiguous["error"]["code"], "ACCOUNT_AMBIGUOUS",
+        "{ambiguous}"
+    );
     assert!(
         ambiguous["error"]["message"]
             .as_str()
@@ -669,6 +677,7 @@ fn pacing_profiles_warn_on_unknown_keys_and_list_accounts() -> Result {
         "{stderr}"
     );
     let output: Value = serde_json::from_slice(&out.stdout.bytes)?;
+    assert_eq!(output["error"]["code"], "UNKNOWN_ACCOUNT", "{output}");
     let message = output["error"]["message"].as_str().ok_or("config error")?;
     assert!(
         message.contains("unknown account `pro`") && message.contains("valid accounts"),

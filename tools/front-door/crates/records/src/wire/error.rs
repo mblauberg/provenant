@@ -63,6 +63,31 @@ pub const EDGE_ERROR_CODES: &[EdgeErrorCode] = &[
         CodeKind::Specific,
         "The account was registered, but syncing managed content failed.",
     ),
+    code(
+        "ACCOUNT_NOT_REGISTERED",
+        CodeKind::Specific,
+        "The account required for this task is not registered.",
+    ),
+    code(
+        "ACCOUNT_NEVER_SYNCED",
+        CodeKind::Specific,
+        "An account settings key cannot be synced because it carries identity or credentials.",
+    ),
+    code(
+        "ACCOUNT_AMBIGUOUS",
+        CodeKind::Specific,
+        "The account reference matches more than one registered account.",
+    ),
+    code(
+        "UNKNOWN_ACCOUNT",
+        CodeKind::Specific,
+        "No registered account matches the requested or configured key.",
+    ),
+    code(
+        "MULTIPLE_PACING_PROFILES",
+        CodeKind::Specific,
+        "Multiple pacing profiles resolve to the same account key.",
+    ),
     code("ACCOUNT", CodeKind::Umbrella, "An account command failed."),
     code(
         "EXPERIMENT_REPORT",

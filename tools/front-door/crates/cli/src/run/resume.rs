@@ -375,9 +375,16 @@ pub fn continue_attempt_mode(
         None
     };
     let run = accepted.map_err(|error| {
+        let (status, kind) = match &error {
+            run::RunError::Input { kind, .. } => (Status::Refused, *kind),
+            run::RunError::AccountNotRegistered(_) => {
+                (Status::Refused, ErrorKind::AccountNotRegistered)
+            }
+            _ => (Status::Refused, ErrorKind::ContinuationUnsupported),
+        };
         Fail::new(
-            Status::Refused,
-            ErrorKind::ContinuationUnsupported,
+            status,
+            kind,
             format!(
                 "continuation {}: {error}{}",
                 if unavailable.is_some() {

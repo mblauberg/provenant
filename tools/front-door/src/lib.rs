@@ -730,13 +730,24 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                         reply
                     }
                     Err(message) => {
+                        let code = if message.contains("unknown account") {
+                            "UNKNOWN_ACCOUNT"
+                        } else if message.contains("ambiguous") {
+                            "ACCOUNT_AMBIGUOUS"
+                        } else if message.contains("is not registered")
+                            || message.contains("not registered")
+                        {
+                            "ACCOUNT_NOT_REGISTERED"
+                        } else {
+                            "ACCOUNT"
+                        };
                         let mut result = CommandResult::new(
                             &inv.leaf,
                             Outcome::Refused,
                             serde_json::Value::Null,
                         );
                         result.error = Some(CommandError {
-                            code: "ACCOUNT".into(),
+                            code: code.into(),
                             message,
                             cause: None,
                             repair: None,

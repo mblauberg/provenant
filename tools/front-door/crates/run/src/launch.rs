@@ -336,9 +336,16 @@ impl RunStore {
                     .map(|_| plan)
                     .map_err(|error| error.to_string())
             })
-            .map_err(|message| RunError::Input {
-                kind: ErrorKind::ContinuationUnsupported,
-                message: format!("fresh fallback refused before admission: {message}"),
+            .map_err(|message| {
+                let kind = if message.contains("not registered") {
+                    ErrorKind::AccountNotRegistered
+                } else {
+                    ErrorKind::ContinuationUnsupported
+                };
+                RunError::Input {
+                    kind,
+                    message: format!("fresh fallback refused before admission: {message}"),
+                }
             })?;
         *ready.plan.get_mut() = Some(plan);
         Ok(ready)
