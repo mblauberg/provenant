@@ -374,7 +374,11 @@ fn node_bound(
             + OUTPUT_FIELD_BYTES
             + OUTPUT_FIELD_BYTES
             + 64
-            + FINDINGS_BYTES
+            + if node.dispositions.is_empty() {
+                FINDINGS_BYTES
+            } else {
+                DISPOSITION_FINDINGS_BYTES
+            }
             + 2 * OUTPUT_FIELD_BYTES
             + MAX_WARNINGS * (WARNING_BYTES + 3);
     }
