@@ -221,8 +221,12 @@ Quota probes also verify the signed-in fingerprint. When it changes, the old
 key is marked `account_mismatch` and excluded from routing. Provenant updates
 that directory's registration to the new key under the config lock, preserving
 its label and settings; the new account appears on the next quota pass. A
-concurrent manual registration takes precedence. Dispatch can reuse a verified
-fingerprint for 30 seconds, and a keychain metadata change or a new quota probe
+concurrent manual registration takes precedence; if the new identity is already
+registered under another account, automatic rebinding is refused and Provenant
+prompts to inspect accounts with `provenant accounts list` while keeping the stale
+key excluded from routing. Dispatch can reuse a verified
+fingerprint for 30 seconds, capturing keychain metadata before probing to guard
+against concurrent sign-ins; a keychain metadata change or a new quota probe
 invalidates the cached observation earlier. No credentials or email addresses
 are stored in this cache.
 

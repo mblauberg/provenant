@@ -183,8 +183,7 @@ impl LiveQuota {
             executor: None,
         })
     }
-    #[cfg(test)]
-    pub(crate) fn last_reconcile_error(&self) -> Option<String> {
+    pub fn last_reconcile_error(&self) -> Option<String> {
         self.last_reconcile_error.borrow().clone()
     }
     fn now(&self) -> i64 {

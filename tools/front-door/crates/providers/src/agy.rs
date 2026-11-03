@@ -733,5 +733,16 @@ mod identity_tests {
             initial_stamp
         ));
         assert!(cached_identity(temp.path(), &directory, 100).is_none());
+
+        // Vanishing keychain during probe also refuses to publish.
+        std::fs::remove_file(&keychain).unwrap();
+        assert!(!remember_identity(
+            temp.path(),
+            &directory,
+            key,
+            100,
+            initial_stamp
+        ));
+        assert!(cached_identity(temp.path(), &directory, 100).is_none());
     }
 }
