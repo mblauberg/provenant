@@ -19,6 +19,14 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
     {
         human.push_str(&format!("Pause reason: {}\n", bounded_reason(reason)));
     }
+    if run.status == provenant_fabric_runtime::graph::GraphStatus::Cancelled
+        && let Some(reason) = &run.checkpoint.cancel_reason
+    {
+        human.push_str(&format!(
+            "Cancellation reason: {}\n",
+            bounded_reason(reason)
+        ));
+    }
     for node in &run.checkpoint.nodes {
         let waiting_ci = node.ci.as_ref().filter(|ci| {
             node.state == provenant_fabric_runtime::graph::NodeState::Running
@@ -28,6 +36,9 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
             continue;
         }
         human.push_str(&format!("  {}: {:?}", node.id, node.state));
+        if let Some(reason) = &node.skip_reason {
+            human.push_str(&format!(" ({})", bounded_reason(reason)));
+        }
         if full {
             if let Some(attempt) = node.attempts.last() {
                 let route = &attempt.route;

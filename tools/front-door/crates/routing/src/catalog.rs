@@ -411,6 +411,18 @@ impl Default for PacingReserve {
     }
 }
 impl RoutingConfig {
+    /// Every name a node may use as its route alias: configured named routes
+    /// and pools, plus the catalogue's pools. Dispatch resolves all three, so
+    /// a check that a requested route exists must accept all three.
+    pub fn route_names(&self, catalogue: &Catalogue) -> std::collections::BTreeSet<String> {
+        self.routes
+            .keys()
+            .chain(self.pools.keys())
+            .chain(catalogue.pools.keys())
+            .cloned()
+            .collect()
+    }
+
     /// Dispatch warning for each configured pool member whose efforts no
     /// longer appear in the catalogue. The efforts are dropped at resolution.
     pub fn pool_effort_warnings(&self, catalogue: &Catalogue) -> Vec<String> {
@@ -1411,6 +1423,19 @@ mod tests {
     use crate::{AccessContext, Fallback, RouteChoice, RouteRequest, RoutingContext, resolve};
     use provenant_providers::{AvailabilityRecord, REGISTRY};
     use provenant_records::{RouteEligibility, RouteReadiness};
+
+    #[test]
+    fn route_names_include_configured_and_catalogue_pools() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let catalogue = Catalogue::bundled()?;
+        let mut config = RoutingConfig::default();
+        config.pools.insert("verifier".into(), Vec::new());
+        let names = config.route_names(&catalogue);
+        assert!(names.contains("verifier"), "{names:?}");
+        assert!(names.contains("junior"), "{names:?}");
+        assert!(!names.contains("absent"), "{names:?}");
+        Ok(())
+    }
 
     #[test]
     fn writer_advisory_classes_and_pool_priority_are_overridable()

@@ -28,6 +28,12 @@
       "effect": "Cap on the wall-clock runtime of any lane on this provider. A dispatch's own --provider-timeout applies when it is shorter. At the deadline the provider is stopped and the attempt settles as timed_out, whatever the host did meanwhile, including sleeping."
     }
   },
+  "host_land_settings": {
+    "path": "domains.pr.land",
+    "settings": {
+      "poll_seconds": {"type": "int", "allowed": "seconds, 1 or more", "default": "30", "effect": "Initial delay between pending land CI samples; later delays double up to four times this value. A per-command --poll overrides it."}
+    }
+  },
   "host_graph_settings": {
     "path": "domains.fabric.graph",
     "settings": {

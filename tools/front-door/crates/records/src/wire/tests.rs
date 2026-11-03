@@ -15,6 +15,7 @@ fn row() -> LaneRow {
         lane_class: Some("writer".into()),
         waiting_for: None,
         requested_route: json!({"kind": "named", "name": "utility"}),
+        resolved_route: Some(Value::Null),
         applied_route: Value::Null,
         skipped_routes: json!([]),
         account: Value::Null,

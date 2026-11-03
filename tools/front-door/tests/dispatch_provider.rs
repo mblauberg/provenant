@@ -206,6 +206,14 @@ fn handoff_recovery_provider(prompt: &str, args: &[String], auth: &Value) -> Res
     Ok(())
 }
 
+/// Fake answers close with a done handoff, as every lane brief asks (#2707).
+const DONE_FENCE: &str = "\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"finished\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```";
+
+/// An upstream answer without the fake's closing handoff.
+fn without_done(text: &str) -> &str {
+    text.strip_suffix(DONE_FENCE).unwrap_or(text)
+}
+
 fn fixture() -> Result {
     let args: Vec<_> = std::env::args().collect();
     if args.get(1).is_some_and(|v| v == "--version") {
@@ -244,7 +252,7 @@ fn fixture() -> Result {
         // Restricted routes must supply the sections requested at launch.
         let frames = frames.replace(
             r#""text":"OK""#,
-            r###""text":"## Findings\nOK\n## Evidence\nFixture checked.""###,
+            r###""text":"## Findings\nOK\n## Evidence\nFixture checked.\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"finished\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```""###,
         );
         io::stdout().write_all(frames.as_bytes())?;
         return Ok(());
@@ -265,7 +273,7 @@ fn fixture() -> Result {
             fs::write(
                 dir.join(".credentials.json"),
                 serde_json::to_vec(
-                    &json!({"claudeAiOauth":{"accessToken":"fixture-refreshed-token","expiresAt":expiry}}),
+                    &json!({"claudeAiOauth":{"accessToken":"credential-sentinel-2719-violet-fox","expiresAt":expiry}}),
                 )?,
             )?;
             fs::write(dir.join("refreshed"), b"yes")?;
@@ -274,7 +282,7 @@ fn fixture() -> Result {
         assert!(std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN").is_none());
         let fd: i32 = std::env::var("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR")?.parse()?;
         let token = provenant_os::sys::fixture_read_secret_pipe(fd)?;
-        assert_eq!(token, b"fixture-refreshed-token");
+        assert_eq!(token, b"credential-sentinel-2719-violet-fox");
         let mut prompt = String::new();
         io::stdin().read_to_string(&mut prompt)?;
         if prompt.contains("fixture host-native") {
@@ -315,6 +323,7 @@ fn fixture() -> Result {
                 .map(|(path, _)| PathBuf::from(path))
                 .ok_or("upstream file entry")?;
             let text = fs::read_to_string(&path)?;
+            let text = without_done(&text);
             let sibling = path.with_file_name("other.md");
             // Upstreams whose ids differ only by case each keep their own file.
             let mut cases = String::new();
@@ -327,7 +336,10 @@ fn fixture() -> Result {
                     .and_then(|line| line.split_once(" ("))
                     .map(|(path, _)| PathBuf::from(path))
                     .ok_or("case upstream file entry")?;
-                cases.push_str(&format!("; {label}={}", fs::read_to_string(path)?));
+                cases.push_str(&format!(
+                    "; {label}={}",
+                    without_done(&fs::read_to_string(path)?)
+                ));
             }
             format!(
                 "read {} bytes; tail {}; sibling write denied {}; parent listing denied {}{cases}",
@@ -339,6 +351,7 @@ fn fixture() -> Result {
         } else {
             "OK".to_owned()
         };
+        let answer = format!("{answer}{DONE_FENCE}");
         for frame in [
             json!({"type":"system","subtype":"init","session_id":"fixture-session"}),
             json!({"type":"assistant","session_id":"fixture-session","parent_tool_use_id":null,"message":{"model":"claude-sonnet-5-5","role":"assistant","content":[{"type":"text","text":answer}],"usage":{"input_tokens":1,"output_tokens":1}}}),
@@ -409,7 +422,7 @@ fn fixture() -> Result {
         write!(io::stderr(), "diagnostic {token}")?;
         for frame in [
             json!({"type":"thread.started","thread_id":session}),
-            json!({"type":"item.completed","item":{"type":"agent_message","text":format!("credential {token}")}}),
+            json!({"type":"item.completed","item":{"type":"agent_message","text":format!("credential {token}{DONE_FENCE}")}}),
             json!({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}),
         ] {
             let frame = frame.to_string();
@@ -453,7 +466,7 @@ fn fixture() -> Result {
             format!("Verdict: approve\n{lens}\nwrite denied: {denied}")
         }
     } else {
-        "OK".into()
+        format!("OK{DONE_FENCE}")
     };
     for frame in [
         json!({"type":"thread.started","thread_id":session}),
@@ -484,6 +497,75 @@ fn policy_codex_fixture() -> Result<TestRig> {
     ));
     Ok(rig)
 }
+fn run_refuses_pacing_reserve() -> Result {
+    let rig = policy_codex_fixture()?;
+    let auth = br#"{"tokens":{"account_id":"fixture-one"}}"#;
+    let key = provenant_providers::identity::codex_account(auth).ok_or("account key")?;
+    support::register_account(&rig, "codex", "one", &key, &rig.root.join("codex"))?;
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[domains.routing.pacing]\ncodex='pace'"
+    )?;
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs(),
+    )?;
+    let scope = provenant_quota::AccountScope {
+        adapter: "codex".into(),
+        account_key: key.clone(),
+        label: "one".into(),
+    };
+    let mut record = provenant_quota::AccountRecord::empty(scope.clone());
+    record.snapshot = Some(provenant_quota::QuotaSnapshot {
+        schema_version: 1,
+        account: scope,
+        revision: 0,
+        status: provenant_quota::QuotaStatus::Available,
+        observed_unix_seconds: now,
+        source_ref: "fixture".into(),
+        authority_ref: None,
+        windows: vec![provenant_quota::QuotaWindow {
+            pool: "five_hour".into(),
+            window_seconds: Some(18_000),
+            used_basis_points: 9_000,
+            resets_unix_seconds: Some(now + 9_000),
+        }],
+        details: None,
+    });
+    let quota = rig.state.join("quota").join(key);
+    fs::create_dir_all(&quota)?;
+    fs::set_permissions(rig.state.join("quota"), fs::Permissions::from_mode(0o700))?;
+    fs::set_permissions(&quota, fs::Permissions::from_mode(0o700))?;
+    let snapshot = quota.join("codex.json");
+    fs::write(&snapshot, serde_json::to_vec(&record)?)?;
+    fs::set_permissions(snapshot, fs::Permissions::from_mode(0o600))?;
+    let prompt = rig.root.join("prompt.txt");
+    fs::write(&prompt, "Reply OK.")?;
+    let output = rig.command(&[
+        "run",
+        "--model",
+        "codex/gpt-6-luna",
+        "--account",
+        "one",
+        "--mode",
+        "read-only",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt")?,
+        "--json",
+    ])?;
+    assert_ne!(code(&output), 0, "{output:?}");
+    let response = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout.bytes),
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    assert!(response.contains("PacingReserve"), "{output:?}");
+    Ok(())
+}
+
 /// `settled` is the exit `run` gives when the whole retry chain settles
 /// inside its own wait; otherwise it returns `waiting` (0) and `lanes` waits on.
 /// Which one happens depends on host speed, so both are accepted. A wait that
@@ -771,14 +853,18 @@ fn stats_reports_partial_signals_outside_graph_groups() -> Result {
         rig.project.join("config/telemetry-prices.toml"),
         include_str!("../../../config/telemetry-prices.toml"),
     )?;
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[domains.routing.routes.receipt-fixture]\nmodel='codex/gpt-6-luna'\neffort='low'"
+    )?;
     let prompt = rig.root.join("prompt.txt");
     fs::write(&prompt, "fixture partial stop")?;
     let output = rig.command(&[
         "run",
-        "--model",
-        "codex/gpt-6-luna",
-        "--effort",
-        "low",
+        "--route",
+        "receipt-fixture",
         "--operation-id",
         "partial-stop",
         "--prompt-file",
@@ -788,10 +874,33 @@ fn stats_reports_partial_signals_outside_graph_groups() -> Result {
         "--json",
     ])?;
     let lanes = settled_policy_lanes(&rig, output, 0)?;
+    assert_eq!(lanes["data"]["lanes"][0]["applied_route"]["effort"], "low");
+    assert_eq!(
+        lanes["data"]["lanes"][0]["resolved_route"]["source"],
+        "named_route"
+    );
     assert_eq!(
         lanes["data"]["lanes"][0]["partial_signals"],
         json!(["declared_stop"]),
         "{lanes}"
+    );
+    let route_stats = rig.command(&["telemetry", "stats", "--by", "route", "--json"])?;
+    assert_eq!(code(&route_stats), 0, "{route_stats:?}");
+    let route_stats: Value = serde_json::from_slice(&route_stats.stdout.bytes)?;
+    assert_eq!(
+        route_stats["data"]["context_groups"][0]["value"],
+        "codex/gpt-6-luna@low"
+    );
+    assert_eq!(
+        route_stats["data"]["context_groups"][0]["totals"]["attempts"],
+        1
+    );
+    let human = rig.command(&["telemetry", "stats", "--by", "route"])?;
+    assert_eq!(code(&human), 0, "{human:?}");
+    let human = String::from_utf8(human.stdout.bytes)?;
+    assert!(
+        human.contains("by route: 1 groups\ncodex/gpt-6-luna@low  "),
+        "{human}"
     );
     for args in [
         &["telemetry", "stats", "--json"][..],
@@ -845,6 +954,7 @@ fn policy_incomplete_result_continues_the_retained_session() -> Result {
     assert_eq!(first["state"], "failed", "{lanes}");
     assert_eq!(second["state"], "succeeded", "{lanes}");
     assert_eq!(second["continuation"], "policy_continuation");
+    assert_eq!(second["resolved_route"]["account_source"], "continuation");
     assert_eq!(second["applied_route"]["model"], "codex/gpt-6.1-terra");
     assert_eq!(
         first["transcript"]["session"]
@@ -1315,8 +1425,8 @@ fn printed_credentials_leave_no_plaintext_in_run_files() -> Result {
         let run_dir = rig.state.join("runs").join(run);
         let attempt = run_dir.join("attempts").join(id);
         assert_eq!(
-            fs::read(attempt.join("result.md"))?,
-            b"credential [REDACTED]"
+            fs::read_to_string(attempt.join("result.md"))?,
+            format!("credential [REDACTED]{DONE_FENCE}")
         );
         assert_eq!(
             fs::read(attempt.join("stderr.log"))?,
@@ -1431,7 +1541,10 @@ fn codex_dispatch_observes_rollout() -> Result {
             assert!(lane["applied_route"]["account_label"].as_str().is_some());
             let result: Value = serde_json::from_slice(&out.stdout.bytes)?;
             let id = lane["attempt_id"].as_str().ok_or("attempt")?;
-            assert_eq!(result["data"]["result_tails"][id]["bytes"]["data"], "OK");
+            assert_eq!(
+                result["data"]["result_tails"][id]["bytes"]["data"],
+                format!("OK{DONE_FENCE}")
+            );
             fs::write(&prompt_file, "fixture slow result")?;
             let slow = rig.command(&[
                 "run",
@@ -1814,7 +1927,7 @@ fn opus_writer_dispatch_advises_a_cheaper_route() -> Result {
 }
 
 fn claude_dispatch_refreshes_registered_account() -> Result {
-    claude_dispatch(false)
+    claude_dispatch(false, false)
 }
 
 fn host_native_dispatch_uses_the_declared_agent_and_refuses_resume() -> Result {
@@ -1825,7 +1938,7 @@ fn host_native_dispatch_uses_the_declared_agent_and_refuses_resume() -> Result {
         )?;
         return Ok(());
     }
-    claude_dispatch(true)
+    claude_dispatch(true, false)
 }
 
 fn unconfigured_host_native_repair_launches_alias_fallback() -> Result {
@@ -1961,7 +2074,7 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
     fs::write(
         rig.home.join(".claude-pro/.credentials.json"),
         serde_json::to_vec(
-            &json!({"claudeAiOauth":{"accessToken":"fixture-refreshed-token","expiresAt":provenant_core::Clock::wall_now(&provenant_os::clock::SystemClock::new())?.unix_millis() + 3_600_000}}),
+            &json!({"claudeAiOauth":{"accessToken":"credential-sentinel-2719-violet-fox","expiresAt":provenant_core::Clock::wall_now(&provenant_os::clock::SystemClock::new())?.unix_millis() + 3_600_000}}),
         )?,
     )?;
     let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
@@ -2035,6 +2148,78 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
         "host-native absent is not configured in domains.fabric.host_native"
     );
     assert_eq!(fs::read_dir(&paths.temporary)?.count(), 0);
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[domains.routing.routes.receipt-fixture]\nmodel='claude/claude-sonnet-5-5'\neffort='medium'"
+    )?;
+    let mut named = task.clone();
+    named.route = provenant_run::RequestedRoute::Named {
+        extra: Default::default(),
+        name: "receipt-fixture".into(),
+        effort: None,
+    };
+    let named_launch = provenant_run::Providers::prepare(
+        &registry,
+        &named,
+        "synthetic-prompt-secret-2719",
+        &paths,
+        None,
+    )?;
+    assert_eq!(
+        named_launch.route.model.as_deref(),
+        Some("claude/claude-sonnet-5-5")
+    );
+    assert_eq!(named_launch.route.effort.as_deref(), Some("medium"));
+    assert_eq!(named_launch.route.source.as_deref(), Some("named_route"));
+    assert_eq!(named_launch.route.extra["account_source"], "pin");
+    let receipt = serde_json::to_string(&named_launch.route)?;
+    assert!(!receipt.contains("synthetic-prompt-secret-2719"));
+    assert!(!receipt.contains("credential-sentinel-2719-violet-fox"));
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[domains.routing.pools]\nsecret-fixture = [{{ model = 'claude/claude-sonnet-5-5', effort = 'medium' }}]"
+    )?;
+    let mut pooled = task.clone();
+    pooled.route = provenant_run::RequestedRoute::Review {
+        extra: Default::default(),
+        name: "secret-fixture".into(),
+        effort: None,
+        excluded_families: vec![],
+        distinct_families: false,
+        require_distinct: false,
+    };
+    let pool_launch = provenant_run::Providers::prepare(
+        &registry,
+        &pooled,
+        "prompt-sentinel-2719-indigo-owl",
+        &paths,
+        None,
+    )?;
+    assert_eq!(pool_launch.route.source.as_deref(), Some("pool"));
+    assert_eq!(
+        serde_json::to_value(&pool_launch.route)?["pool_selection"]["pool"],
+        "secret-fixture"
+    );
+    assert!(
+        String::from_utf8_lossy(&pool_launch.stdin).contains("prompt-sentinel-2719-indigo-owl")
+    );
+    assert!(pool_launch.secret_input.is_some());
+    let receipt = serde_json::to_string(&pool_launch.route)?;
+    assert!(!receipt.contains("prompt-sentinel-2719-indigo-owl"));
+    assert!(!receipt.contains("credential-sentinel-2719-violet-fox"));
+    named.account = None;
+    let automatic = provenant_run::Providers::prepare(
+        &registry,
+        &named,
+        "synthetic-prompt-secret-2719",
+        &paths,
+        None,
+    )?;
+    assert_eq!(automatic.route.extra["account_source"], "automatic");
     let launch =
         provenant_run::Providers::prepare(&registry, &task, "fixture host-native", &paths, None)?;
     assert_eq!(launch.route.provider.as_deref(), Some("claude"));
@@ -2083,6 +2268,15 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
     for path in [&nested.temporary, &nested.provider_state, &nested.scratch] {
         fs::create_dir_all(path)?;
     }
+    let fallback = provenant_run::Providers::prepare(
+        &registry,
+        &named,
+        "synthetic-prompt-secret-2719",
+        &nested,
+        None,
+    )?;
+    assert_eq!(fallback.route.source.as_deref(), Some("fallback"));
+    assert_eq!(fallback.route.effort.as_deref(), Some("high"));
     let error =
         provenant_run::Providers::prepare(&registry, &task, "fixture host-native", &nested, None)
             .err()
@@ -2094,7 +2288,14 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
     Ok(())
 }
 
-fn claude_dispatch(host_native: bool) -> Result {
+fn pool_receipt_excludes_prompt_and_credential_from_artifacts() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    claude_dispatch(false, true)
+}
+
+fn claude_dispatch(host_native: bool, pool: bool) -> Result {
     let rig = claude_fixture()?;
     // Open-network Claude dispatch must not require a Rust installation.
     assert!(!rig.home.join(".cargo").exists());
@@ -2109,6 +2310,14 @@ fn claude_dispatch(host_native: bool) -> Result {
             "\n[domains.fabric.host_native.ci-fixer]\nkind = 'claude-agent'\nmodel = 'claude/claude-sonnet-5-5'\neffort = 'medium'\ndescription = 'Repair CI'\nprompt = 'Repair failing CI checks.'"
         )?;
         json!({"kind":"adapter","provider":"host-native","name":"ci-fixer"})
+    } else if pool {
+        writeln!(
+            OpenOptions::new()
+                .append(true)
+                .open(rig.state.join("config.toml"))?,
+            "\n[domains.routing.pools]\nsecret-fixture = [{{ model = 'claude/claude-sonnet-5-5', effort = 'medium' }}]"
+        )?;
+        json!({"kind":"review","name":"secret-fixture","effort":null,"excluded_families":[],"distinct_families":false})
     } else {
         json!({"kind":"model","provider":"claude","model":"claude-sonnet-5-5","effort":"medium"})
     };
@@ -2116,7 +2325,7 @@ fn claude_dispatch(host_native: bool) -> Result {
     fs::write(
         &manifest,
         serde_json::to_vec(
-            &json!({"schema_version":1,"tasks":[{"prompt":if host_native { "fixture host-native" } else { "reply OK" },"route":route,"account":"pro"}]}),
+            &json!({"schema_version":1,"tasks":[{"prompt":if host_native { "fixture host-native" } else if pool { "prompt-sentinel-2719-indigo-owl" } else { "reply OK" },"route":route,"account":"pro"}]}),
         )?,
     )?;
     let out = rig.command(&[
@@ -2154,6 +2363,16 @@ fn claude_dispatch(host_native: bool) -> Result {
     }
     assert_eq!(lane["state"], "succeeded", "{lane}");
     assert_eq!(lane["account"], "pro");
+    if pool {
+        assert_eq!(lane["requested_route"]["kind"], "review");
+        assert_eq!(
+            lane["applied_route"]["pool_selection"]["pool"],
+            "secret-fixture"
+        );
+        let receipt = serde_json::to_string(&lane["resolved_route"])?;
+        assert!(!receipt.contains("prompt-sentinel-2719-indigo-owl"));
+        assert!(!receipt.contains("credential-sentinel-2719-violet-fox"));
+    }
     assert_eq!(lane["observed_route"]["model"], "claude/claude-sonnet-5-5");
     if host_native {
         assert_eq!(lane["requested_route"]["provider"], "host-native");
@@ -2191,6 +2410,31 @@ fn claude_dispatch(host_native: bool) -> Result {
         .join(lane["run_id"].as_str().ok_or("run")?)
         .join("attempts")
         .join(lane["attempt_id"].as_str().ok_or("attempt")?);
+    if pool {
+        // The sentinel does reach the attempt, so its absence below is evidence.
+        assert!(
+            fs::read_to_string(attempt.join("prompt.txt"))?
+                .contains("prompt-sentinel-2719-indigo-owl")
+        );
+        // Every launched attempt writes these, so a missing one fails the
+        // test rather than hiding a leak. prompt.txt holds the prompt by design.
+        for name in [
+            "launch.json",
+            "process.json",
+            "terminal-commit.json",
+            "result.md",
+        ] {
+            let artifact = fs::read_to_string(attempt.join(name))?;
+            assert!(
+                !artifact.contains("prompt-sentinel-2719-indigo-owl"),
+                "{name}"
+            );
+            assert!(
+                !artifact.contains("credential-sentinel-2719-violet-fox"),
+                "{name}"
+            );
+        }
+    }
     let authority: Value =
         serde_json::from_slice(&fs::read(attempt.join("credential-authority.json"))?)?;
     assert_eq!(authority["actor"], lane["run_id"]);
@@ -2207,7 +2451,9 @@ fn claude_dispatch(host_native: bool) -> Result {
         "credential-authority.json",
     ] {
         if let Ok(bytes) = fs::read(attempt.join(name)) {
-            assert!(!String::from_utf8_lossy(&bytes).contains("fixture-refreshed-token"));
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains("credential-sentinel-2719-violet-fox")
+            );
         }
     }
     rig.assert_legacy_unchanged()?;
@@ -2401,7 +2647,7 @@ fn graph_node_reads_full_upstream_result_from_its_inputs_directory() -> Result {
         .collect::<String>()
         + "END-OF-LARGE-RESULT";
     assert_eq!(
-        excerpt,
+        without_done(excerpt),
         format!(
             "read {} bytes; tail END-OF-LARGE-RESULT; sibling write denied true; parent listing denied true; Review=case-result-Review; review=case-result-review",
             full.len()
@@ -3479,7 +3725,7 @@ fn agy_denied_command_reaches_result_and_terminal_reason() -> Result {
     }
     // A valid successful answer wins even when stderr contains a denial notice.
     let success = br###"{"event":"init","conversation_id":"fixture-session","init":{"model":"gemini-3.8-flash"}}
-{"event":"result","result":{"conversation_id":"fixture-session","status":"SUCCESS","response":"## Findings\nVerified.\n## Evidence\nChecked the claim.","error":null,"usage":{"input_tokens":0,"output_tokens":0}}}"###;
+{"event":"result","result":{"conversation_id":"fixture-session","status":"SUCCESS","response":"## Findings\nVerified.\n## Evidence\nChecked the claim.\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"verified\"}\n```","error":null,"usage":{"input_tokens":0,"output_tokens":0}}}"###;
     let (rig, terminal) = persisted_attempt(
         "agy",
         "agy/gemini-3.8-flash",
@@ -3498,9 +3744,12 @@ fn agy_denied_command_reaches_result_and_terminal_reason() -> Result {
     let output = rig.command(&["output", &terminal.attempt_id.to_string(), "--json"])?;
     assert_eq!(code(&output), 0, "{:?}", output.stderr.bytes);
     let output: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert_eq!(
-        output["data"]["bytes"]["data"],
-        "## Findings\nVerified.\n## Evidence\nChecked the claim."
+    let result = output["data"]["bytes"]["data"]
+        .as_str()
+        .ok_or("result bytes")?;
+    assert!(
+        result.starts_with("## Findings\nVerified.\n## Evidence\nChecked the claim."),
+        "{output}"
     );
     Ok(())
 }
@@ -4152,6 +4401,7 @@ fn main() -> ExitCode {
             &[
                 #[cfg(target_os = "macos")]
                 "dispatch_proceeds_when_provider_update_is_busy",
+                "run_refuses_pacing_reserve",
                 "cancel_wait_settles_stalled_import_with_durable_exit",
                 "receipt_output_reports_unknown_route_for_settled_lost_attempt",
                 "output_names_the_attempt_it_reads_and_writes_or_locates_parts",
@@ -4172,6 +4422,7 @@ fn main() -> ExitCode {
                 "opencode_dispatch_observes_v2_wal_session",
                 "opus_writer_dispatch_advises_a_cheaper_route",
                 "claude_dispatch_refreshes_registered_account",
+                "pool_receipt_excludes_prompt_and_credential_from_artifacts",
                 "host_native_dispatch_uses_the_declared_agent_and_refuses_resume",
                 "host_native_preparation_uses_the_provider_contract",
                 "unconfigured_host_native_repair_launches_alias_fallback",
@@ -4190,6 +4441,7 @@ fn main() -> ExitCode {
                 let result = match name {
                     #[cfg(target_os = "macos")]
                     "dispatch_proceeds_when_provider_update_is_busy" => dispatch_proceeds_when_provider_update_is_busy(),
+                    "run_refuses_pacing_reserve" => run_refuses_pacing_reserve(),
                     "cancel_wait_settles_stalled_import_with_durable_exit" => cancel_wait_settles_stalled_import_with_durable_exit(),
                     "receipt_output_reports_unknown_route_for_settled_lost_attempt" => {
                         receipt_output_reports_unknown_route_for_settled_lost_attempt()
@@ -4225,6 +4477,7 @@ fn main() -> ExitCode {
                     "opus_writer_dispatch_advises_a_cheaper_route" => {
                         opus_writer_dispatch_advises_a_cheaper_route()
                     }
+                    "pool_receipt_excludes_prompt_and_credential_from_artifacts" => pool_receipt_excludes_prompt_and_credential_from_artifacts(),
                     "claude_dispatch_refreshes_registered_account" => {
                         claude_dispatch_refreshes_registered_account()
                     }

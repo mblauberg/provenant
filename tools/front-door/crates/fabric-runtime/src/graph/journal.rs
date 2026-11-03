@@ -253,16 +253,16 @@ impl FileJournal {
         }
         let directory = graph_directory(root, project)?;
         Ok(load_checkpoint(&directory, graph_id)?.and_then(|stored| {
-            (!stored.checkpoint.cancelled
-                && (stored
-                    .checkpoint
-                    .nodes
-                    .iter()
-                    .any(|node| matches!(node.state, NodeState::Pending | NodeState::Running))
-                    || !stored.checkpoint.delivered
-                        && stored.execution.document.delivery
-                            == Some(provenant_records::run::DeliveryMode::Pr)
-                        && stored.checkpoint.successful())
+            (stored
+                .checkpoint
+                .nodes
+                .iter()
+                .any(|node| matches!(node.state, NodeState::Pending | NodeState::Running))
+                || !stored.checkpoint.cancelled
+                    && !stored.checkpoint.delivered
+                    && stored.execution.document.delivery
+                        == Some(provenant_records::run::DeliveryMode::Pr)
+                    && stored.checkpoint.successful()
                 || stored
                     .checkpoint
                     .asks

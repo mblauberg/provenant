@@ -20,7 +20,7 @@ pub use owner::{
 use crate::repo::{
     GitRefName, GitRevision, RepoError, VerifiedRepo, VerifiedWorktree, verify_worktree,
 };
-use crate::status::{StatusKind, parse_index_entries, parse_porcelain_v2_z};
+use crate::status::{StatusKind, StatusPath, parse_index_entries, parse_porcelain_v2_z};
 use crate::utility::{
     GitMutation, GitRead, UtilityBudget, UtilityError, UtilityRuntime, execute_git_mutation,
     run_utility,
@@ -94,8 +94,8 @@ pub enum WorktreeError {
     BaseUnverified { base: String },
     #[error("worktree registration is stale; git worktree prune clears it")]
     StaleRegistration,
-    #[error("worktree is dirty")]
-    Dirty,
+    #[error("worktree is dirty{}", dirty_suffix(.0))]
+    Dirty(String),
     #[error("worktree HEAD {current} is not an ancestor of source commit {target}")]
     SourceDiverged { current: GitOid, target: GitOid },
     #[error("worktree could not fast-forward to source commit {target}")]
@@ -153,6 +153,14 @@ pub enum WorktreeError {
     PathWire(#[from] PathWireError),
 }
 
+fn dirty_suffix(paths: &str) -> String {
+    if paths.is_empty() {
+        String::new()
+    } else {
+        format!(": {paths}")
+    }
+}
+
 impl WorktreeError {
     /// Refusals that mean Provenant cannot prove who owns the tree. Callers
     /// that retain such a tree treat every one of them alike.
@@ -174,7 +182,7 @@ impl WorktreeError {
             Self::LockBusy | Self::LiveWriter | Self::WriterBusy { .. } => {
                 "run `provenant status` and wait for the writer holding the lock to finish, then retry"
             }
-            Self::Dirty => {
+            Self::Dirty(_) => {
                 "run `git -C PATH status`, then commit or preserve the changes before retrying"
             }
             Self::IgnoredPaths(_) => {

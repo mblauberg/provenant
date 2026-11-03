@@ -4843,6 +4843,78 @@ fn mcp_submission_places_read_only_work_on_a_named_peer() -> Result {
     Ok(())
 }
 
+#[test]
+fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Result {
+    use provenant_core::{CancelToken, Clock, ProjectId, RootInputs, WaitBudget};
+    use provenant_fabric_runtime::graph::{
+        FileJournal, GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
+    };
+    use provenant_os::clock::SystemClock;
+
+    let mut rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
+    let peer = loopback_peer(&mut rig)?;
+    let task = json!({"prompt":"fixture", "route":{"kind":"model","provider":"codex","model":"gpt-6-luna"},"timeout_seconds":60});
+    let replies = mcp(
+        &rig,
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fabric_run","arguments":{"op":"submit","operation_id":"graph-peer-fixture","tasks":[task],"host":peer.to_string()}}}),
+        ],
+    )?;
+    let placed = &replies.iter().find(|r| r["id"] == 1).ok_or("submission")?["result"];
+    assert_ne!(placed["isError"], true, "{placed}");
+    let target = &placed["structuredContent"]["receipt"]["targets"][0];
+    let attempt = target["attempt"].as_str().ok_or("attempt")?;
+    let identity = rig.command(&["fabric", "identity", "--json"])?;
+    assert_eq!(code(&identity), 0);
+    let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
+    let project = ProjectId::parse(identity["data"]["project"].as_str().ok_or("project")?)?;
+    let actor = identity["data"]["inbox"]["actor"].as_str().ok_or("actor")?;
+    let mut roots = RootInputs::new(rig.home.clone(), rig.project.clone());
+    roots.state_dir = Some(rig.state.clone());
+    let state = roots.resolve(&provenant_os::fs::SystemPathResolver)?.state;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+    let document: GraphDocument = serde_json::from_value(
+        json!({"schema_version":1,"graph_id":"remote-graph","nodes":[{"id":"one","access":"read_only","prompt":"fixture","route":{"alias":"senior"}}]}),
+    )?;
+    let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+        "schema_version":1,"graph_id":"remote-graph","plan_digest":"digest",
+        "nodes":[{"id":"one","state":"running","worktree":null,"attempts":[{
+            "launched":true,"key":{"graph_id":"remote-graph","node_id":"one","route_index":0},
+            "route":{"alias":"senior"},"state":"running","attempt_ref":format!("{peer}/{attempt}"),
+            "outcome":null,"launch_actor":actor
+        }]}]
+    }))?;
+    let mut journal = FileJournal::open(&state, project, "remote-graph", budget, &cancel, &clock)?;
+    journal.bind(GraphExecution {
+        extra: Default::default(),
+        integration_base: None,
+        directory: rig.project.clone(),
+        document,
+    })?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+    let (status, result) = json_command(
+        &rig,
+        &[
+            "fabric",
+            "graph",
+            "cancel",
+            "remote-graph",
+            "--reason",
+            "peer test",
+            "--json",
+        ],
+    )?;
+    assert_eq!(status, 0, "{result}");
+    assert_eq!(result["data"]["checkpoint"]["cancel_reason"], "peer test");
+    rig.assert_legacy_unchanged()?;
+    cleanup.disarm();
+    Ok(())
+}
+
 /// Seed one queued attempt with `prompt` in the owner store, optionally
 /// cancelled so it carries two events. Returns the attempt and its events.
 fn seed_attempt(

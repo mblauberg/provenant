@@ -125,7 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1_180, height: 720),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "Provenant Console"
-        window.contentMinSize = NSSize(width: 960, height: 560)
+        window.contentMinSize = NSSize(width: ConsoleView.windowMinimum, height: 560)
         window.contentView = NSHostingView(rootView: ConsoleView(console: console))
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed

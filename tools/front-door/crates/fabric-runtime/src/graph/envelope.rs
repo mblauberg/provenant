@@ -88,6 +88,7 @@ pub(super) fn checkpoint_bound(
         pull_request: Some(String::new()),
         integration_pin: Some(String::new()),
         cancelled: true,
+        cancel_reason: Some(String::new()),
         pause_reason: Some(String::new()),
         pause_code: Some("c".repeat(REFUSAL_CODE_BYTES)),
         unknown_usage: Vec::new(),
@@ -121,7 +122,12 @@ pub(super) fn checkpoint_bound(
         canonical_len(document),
         canonical_len(&skeleton),
         // instance ID, ask actor, PR URL, integration pin, pause reason and plan digest
-        64 + HOST_ID_BYTES + OUTPUT_FIELD_BYTES + 64 + PAUSE_REASON_BYTES + 80,
+        64 + HOST_ID_BYTES
+            + OUTPUT_FIELD_BYTES
+            + 64
+            + PAUSE_REASON_BYTES
+            + 80
+            + 6 * MAX_CANCEL_REASON_BYTES,
         MAX_UNKNOWN_USAGE * (UNKNOWN_USAGE_TEXT_BYTES + longest_id + 1),
         MAX_USAGE_EVENTS * (canonical_len(&event) + 64 + NOTE_BYTES + 1),
         // Pause asks: the kept history, one open and one awaiting its close.
@@ -235,6 +241,8 @@ fn node_bound(
         worktree: node.worktree.clone(),
         id: node.id.clone(),
         state: NodeState::Succeeded,
+        cancelled_from: Some(NodeState::Running),
+        skip_reason: Some("graph cancelled".into()),
         advance_error: Some(String::new()),
         advance_error_code: Some("c".repeat(REFUSAL_CODE_BYTES)),
         outputs: Some(if boundary {

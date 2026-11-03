@@ -771,6 +771,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | Argument | Contract |
 |---|---|
 | `id` | `{"description": "Graph ID, project-local document path or document SHA-256 hash", "name": "id", "positional": true, "required": true}` |
+| `--reason` | `{"bounds": [0, 256], "description": "Why the graph was cancelled (up to 256 bytes)", "name": "reason"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -780,7 +781,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
   "groups": [
     {
       "arguments": [
-        "id"
+        "id",
+        "reason"
       ],
       "multiple": true,
       "name": "Cancel",
@@ -2526,6 +2528,10 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
+| `--wait` | `{"bounds": [1, 14400], "conflicts": ["all", "cursor"], "description": "Wait for mixed targets (no value uses domains.wait.timeout_seconds)", "name": "wait"}` |
+| `--target` | `{"description": "Observe lane:ID, graph:ID, pr:NUMBER or land:NUMBER (repeatable; land only observes)", "name": "target", "repeatable": true, "requires": ["wait"]}` |
+| `--until` | `{"defaults": ["any"], "description": "Return on any transition or when all targets are terminal", "name": "until", "requires": ["wait"], "values": ["any", "all"]}` |
+| `--follow` | `{"defaults": ["false"], "description": "Stream transitions until all targets are terminal or the wait expires", "name": "follow", "requires": ["wait"], "values": ["true", "false"]}` |
 | `id` | `{"description": "Show this run, task, attempt or graph ID, including settled records", "name": "id", "positional": true}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "description": "Maximum full records per page", "name": "limit"}` |
 | `--cursor` | `{"description": "Continue a full-record page from its cursor", "name": "cursor"}` |
@@ -2535,10 +2541,19 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 ```json
 {
-  "description": "Show active and recent lanes, newest first",
+  "constraints": [
+    "wait requires at least one target via ID or repeated --target, up to domains.wait.max_targets (default 64); no duration uses domains.wait.timeout_seconds",
+    "with --wait, --json emits newline-delimited snapshot/transition events and a final end event; timeout exits 124",
+    "follow waits for all targets to be terminal; land targets only observe their PR"
+  ],
+  "description": "Show lanes or wait on lanes, graphs and PRs",
   "groups": [
     {
       "arguments": [
+        "wait",
+        "target",
+        "until",
+        "follow",
         "id",
         "limit",
         "cursor",
@@ -2559,6 +2574,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `number` | `{"name": "number", "positional": true, "required": true}` |
 | `--head` | `{"description": "Pin a reviewed head instead of using the current PR head", "name": "head"}` |
 | `--wait` | `{"bounds": [1, 14400], "description": "Wait for this head's CI (default 1 hour; maximum 4 hours)", "name": "wait"}` |
+| `--poll` | `{"description": "Initial CI poll interval in seconds (overrides domains.pr.land.poll_seconds, default 30)", "name": "poll"}` |
+| `--explain` | `{"defaults": ["false"], "description": "Show the effective polling interval and retry budget without landing", "name": "explain", "values": ["true", "false"]}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -2575,7 +2592,9 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
       "arguments": [
         "number",
         "head",
-        "wait"
+        "wait",
+        "poll",
+        "explain"
       ],
       "multiple": true,
       "name": "Land",
@@ -2988,7 +3007,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--since` | `{"description": "Count from this date or timestamp, or this many seconds ago", "name": "since"}` |
 | `--until` | `{"description": "Count up to this date or timestamp", "name": "until"}` |
 | `--run-id` | `{"description": "Restrict usage and cost to one run", "name": "run_id"}` |
-| `--by` | `{"conflicts": ["usage"], "description": "Group supervised attempts by work context or merged pull request; attempts with no value form an &#96;unattributed&#96; group", "name": "by", "values": ["pr", "issue", "graph", "node", "pattern", "preset", "role"]}` |
+| `--by` | `{"conflicts": ["usage"], "description": "Group supervised attempts by route, work context or merged pull request; attempts with no value form an &#96;unattributed&#96; group", "name": "by", "values": ["route", "pr", "issue", "graph", "node", "pattern", "preset", "role"]}` |
 | `--detail` | `{"conflicts": ["usage"], "defaults": ["false"], "description": "Include per-attempt detail", "name": "detail", "values": ["true", "false"]}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |

@@ -478,6 +478,8 @@ fn expand_loops(
                         .find(|n| n.id == local)
                         .is_some_and(|n| n.depends_on.is_empty())
                 {
+                    child.skip_without_findings =
+                        node.skip_without_findings.or(child.skip_without_findings);
                     // The loop's own inputs merge with a body selection of
                     // the same outer node.
                     for input in &node.inputs {
@@ -569,6 +571,8 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 worktree: n.worktree.clone(),
                 id: n.id.clone(),
                 state: NodeState::Pending,
+                cancelled_from: None,
+                skip_reason: None,
                 advance_error: None,
                 advance_error_code: None,
                 launch_retry: None,

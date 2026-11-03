@@ -119,6 +119,51 @@ mod peer_tests {
     }
 
     #[test]
+    fn graph_cancel_persists_reason_and_skips_pending_node() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::graph_cancel_persists_reason_and_skips_pending_node")? {
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::{FileJournal, GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal, NodeState};
+        let rig = crate::worktree_tests::support::TestRig::new()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots.clone(), &rig.home, &rig.project)?,
+            project_attribution: false, clock: SystemClock, backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
+            assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let project = factory.context.identity.project;
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": "reason-test", "nodes": [
+                {"id":"one", "prompt":"work", "access":"read_only", "route":{"alias":"senior"}}
+            ]
+        }))?;
+        let checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": "reason-test", "plan_digest": "digest", "nodes": [
+                {"id":"one", "state":"pending", "worktree":null, "attempts":[]}
+            ]
+        }))?;
+        let mut journal = FileJournal::open(&roots.state, project, "reason-test", budget, &cancel, &factory.clock)?;
+        journal.bind(GraphExecution { extra: Default::default(), integration_base: None, directory: rig.project.clone(), document })?;
+        journal.save(&checkpoint)?;
+        drop(journal);
+        let cancelled = factory.graph(GraphInput::Cancel {
+            extra: Default::default(), id: "reason-test".into(), reason: Some("test reason".into())
+        }, budget, &cancel)?;
+        assert_eq!(cancelled.checkpoint.cancel_reason.as_deref(), Some("test reason"));
+        assert_eq!(cancelled.checkpoint.nodes[0].state, NodeState::Skipped);
+        assert_eq!(cancelled.checkpoint.nodes[0].skip_reason.as_deref(), Some("graph cancelled"));
+        let status = factory.graph(GraphInput::Status { extra: Default::default(), id: "reason-test".into() }, budget, &cancel)?;
+        assert_eq!(status.checkpoint.cancel_reason.as_deref(), Some("test reason"));
+        assert!(super::graph_human(&status).contains("Cancellation reason: test reason"));
+        let repeated = factory.graph(GraphInput::Cancel { extra: Default::default(), id: "reason-test".into(), reason: None }, budget, &cancel)?;
+        assert_eq!(repeated.checkpoint.cancel_reason.as_deref(), Some("test reason"));
+        Ok(())
+    }
+
+    #[test]
     fn graph_status_and_cancel_retire_unreadable_record() -> Result<(), Box<dyn std::error::Error>>
     {
         use provenant_fabric_runtime::graph::{FileJournal, GraphStatus};
@@ -173,6 +218,7 @@ mod peer_tests {
             GraphInput::Cancel {
                 extra: Default::default(),
                 id: "broken".into(),
+                reason: None,
             },
             budget,
             &cancel,
