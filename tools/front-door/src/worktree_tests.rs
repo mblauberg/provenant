@@ -1193,6 +1193,7 @@ pub(super) fn writer_run(
                 title: None,
                 base: None,
                 head: None,
+                source_head: None,
                 base_ref: None,
                 account: None,
                 profile: provenant_run::HarnessProfile::default(),

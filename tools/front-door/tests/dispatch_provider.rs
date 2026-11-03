@@ -3069,6 +3069,7 @@ fn persisted_attempt_with(
                 title: None,
                 base: None,
                 head: None,
+                source_head: None,
                 base_ref: None,
                 profile: HarnessProfile::default(),
                 task_id,

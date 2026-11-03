@@ -247,6 +247,7 @@ impl<'a> Service<'a> {
                 base_ref,
                 base,
                 head: task.head,
+                source_head: None,
                 route: task.route,
                 account: task.account,
                 fallback: task.fallback,

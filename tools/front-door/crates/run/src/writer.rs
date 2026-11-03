@@ -162,6 +162,43 @@ impl WriterLaunch {
         }
         Ok(())
     }
+
+    /// Bind a graph writer continuation to its predecessor head, verifying that
+    /// the predecessor head descends from the original lineage source commit.
+    pub fn require_continuation_source(
+        &self,
+        git: &Path,
+        source: GitOid,
+        predecessor: GitOid,
+    ) -> Result<()> {
+        if self.base != predecessor {
+            return Err(RunError::WriterSourceMismatch {
+                expected: predecessor,
+                actual: self.base,
+            });
+        }
+        let repo = self.worktree.repo();
+        let descends = crate::objects::command(
+            git,
+            repo.common_git_dir(),
+            repo.root_path(),
+            &[
+                "merge-base".into(),
+                "--is-ancestor".into(),
+                source.to_string().into(),
+                predecessor.to_string().into(),
+            ],
+            None,
+        )
+        .is_ok();
+        if !descends {
+            return Err(RunError::WriterSourceMismatch {
+                expected: source,
+                actual: self.base,
+            });
+        }
+        Ok(())
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1027,6 +1064,46 @@ mod cargo_setup_tests {
         assert!(message.contains(&other.to_string()));
         assert!(message.contains(&expected));
         writer.require_source(writer.base)?;
+        // A continuation accepts when the predecessor descends from the original source.
+        let child_commit = run(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit-tree",
+            &tree,
+            "-p",
+            &expected,
+            "-m",
+            "child commit",
+        ])?;
+        let child_oid = GitOid::parse(&child_commit)?;
+        let source_oid = GitOid::parse(&expected)?;
+        writer.base = child_oid;
+        writer.require_continuation_source(utility.git_program_path(), source_oid, child_oid)?;
+        // Refuses when HEAD does not descend from the pinned source, naming both commits.
+        let ancestry_mismatch = writer
+            .require_continuation_source(utility.git_program_path(), other, child_oid)
+            .err()
+            .ok_or("unrelated source must refuse")?;
+        assert!(
+            matches!(ancestry_mismatch, RunError::WriterSourceMismatch { expected, actual } if expected == other && actual == child_oid)
+        );
+        let ancestry_message = ancestry_mismatch.to_string();
+        assert!(ancestry_message.contains(&other.to_string()));
+        assert!(ancestry_message.contains(&child_oid.to_string()));
+        // Refuses when the prepared base does not match the predecessor head, naming both commits.
+        let base_mismatch = writer
+            .require_continuation_source(utility.git_program_path(), source_oid, source_oid)
+            .err()
+            .ok_or("predecessor mismatch must refuse")?;
+        assert!(
+            matches!(base_mismatch, RunError::WriterSourceMismatch { expected, actual } if expected == source_oid && actual == child_oid)
+        );
+        let base_message = base_mismatch.to_string();
+        assert!(base_message.contains(&source_oid.to_string()));
+        assert!(base_message.contains(&child_oid.to_string()));
+        writer.base = source_oid;
         let second_tree = provenant_confinement::verify_worktree(&repo, &second_lane)?;
         let mut second = WriterLaunch {
             worktree: second_tree,

@@ -2758,6 +2758,7 @@ pub(super) fn trace_run(
                 title: None,
                 base: None,
                 head: None,
+                source_head: None,
                 base_ref: None,
                 task_id,
                 prompt_digest: CanonicalV1::file_digest(b"p"),

@@ -379,10 +379,25 @@ pub(super) fn prepare_candidates(
         Some(writer) => writer.worktree.path().to_owned(),
         None => canonical(registry.cwd.ok_or("working directory is unavailable")?)?,
     };
-    if let (Some(writer), Some(head)) = (&writer, task.head.as_deref()) {
-        writer
-            .require_source(head.parse().map_err(|_| "invalid pinned writer source")?)
-            .map_err(|error| error.to_string())?;
+    if let Some(writer) = &writer {
+        if let Some(source_head) = task.source_head.as_deref() {
+            let predecessor = task
+                .head
+                .as_deref()
+                .ok_or("missing predecessor head for writer continuation")?
+                .parse()
+                .map_err(|_| "invalid pinned writer predecessor head")?;
+            let source = source_head
+                .parse()
+                .map_err(|_| "invalid pinned writer source")?;
+            writer
+                .require_continuation_source(&git, source, predecessor)
+                .map_err(|error| error.to_string())?;
+        } else if let Some(head) = task.head.as_deref() {
+            writer
+                .require_source(head.parse().map_err(|_| "invalid pinned writer source")?)
+                .map_err(|error| error.to_string())?;
+        }
     }
     // Publishing is opt-in (`lanes.publish`): it hands the lane the GitHub
     // credential. Missing gh tools or configuration leave the

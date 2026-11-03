@@ -662,6 +662,7 @@ fn chair_snapshot_preserves_active_lanes_while_a_writer_is_open() -> Result {
                     title: None,
                     base: None,
                     head: None,
+                    source_head: None,
                     base_ref: None,
                     profile: Default::default(),
                     task_id,

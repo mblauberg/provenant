@@ -723,6 +723,7 @@ fn launch_prompt_refuses_invalid_input_before_account_resolution()
             title: None,
             base: None,
             head: None,
+            source_head: None,
             base_ref: None,
             task_id: provenant_core::TaskId::from_bytes([3; 16]),
             profile: Default::default(),
@@ -1101,6 +1102,7 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         title: None,
         base: Some(review_oid.clone()),
         head: Some(review_oid.clone()),
+        source_head: None,
         base_ref: None,
         task_id: TaskId::from_bytes([3; 16]),
         profile: provenant_records::run::HarnessProfile {

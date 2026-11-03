@@ -745,6 +745,7 @@ mod tests {
             title: None,
             base: None,
             head: None,
+            source_head: None,
             base_ref: None,
             task_id,
             prompt_digest: provenant_records::CanonicalV1::file_digest(b"p"),

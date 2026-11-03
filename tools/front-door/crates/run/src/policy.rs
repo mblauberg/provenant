@@ -944,4 +944,113 @@ mod tests {
         assert_eq!(store.run(input.run_id, &call)?.closure, Closure::Closed);
         Ok(())
     }
+
+    #[test]
+    fn writer_continuation_launches_pinned_to_predecessor_head()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let mut clock = clock();
+        let cancel = provenant_core::CancelToken::new();
+        let store = RunStore::open(&context(temp.path())?, &call(&clock, &cancel))?;
+        let mut input = input();
+        let source_head = "1".repeat(40);
+        let committed_head = provenant_core::GitOid::parse(&"2".repeat(40))?;
+        input.request.tasks[0].writer = Some(WriterRequest {
+            extra: Default::default(),
+            project: temp.path().join("project"),
+            worktree: temp.path().join("worktree"),
+        });
+        input.request.tasks[0].head = Some(source_head.clone());
+        store.create(&input, &call(&clock, &cancel))?;
+        seal_observation(&store, &input, &exit())?;
+        let id = input.attempts[0].attempt_id;
+        let old = store.record(id, &call(&clock, &cancel))?;
+        store.stage_policy_retry(
+            &old,
+            &PolicyRetry {
+                schema_version: 1,
+                cause: Some(PolicyCause::Quota),
+                action: Some(PolicyAction::Retry),
+                route: old.requested_route.clone(),
+                resume: false,
+                max_attempts: 2,
+                instruction: "Continue".into(),
+                not_before_unix_seconds: None,
+            },
+            &call(&clock, &cancel),
+        )?;
+        let attempt_dir = store.attempt_dir(input.run_id, id, false)?;
+        let writer_terminal = crate::writer::WriterTerminal {
+            schema_version: 1,
+            head: committed_head,
+            protected_paths: vec![],
+        };
+        crate::artifacts::seal(
+            &attempt_dir,
+            "writer-terminal.json",
+            &crate::db::bytes(&writer_terminal)?,
+            RECORD_LIMIT,
+        )?;
+        let mut publication = publication();
+        publication.outcome = Outcome::QuotaLimited;
+        let terminal =
+            store.publish_terminal(id, 1, &publication, &exit(), &call(&clock, &cancel))?;
+        assert_eq!(terminal.head, Some(committed_head));
+        let queued = store.pending_attempts(input.run_id, &call(&clock, &cancel))?;
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].retry_of, Some(id));
+
+        struct CaptureProvider {
+            task: std::cell::RefCell<Option<TaskRequest>>,
+        }
+        impl Providers for CaptureProvider {
+            fn prepare(
+                &self,
+                task: &TaskRequest,
+                _prompt: &str,
+                _paths: &LaunchPaths,
+                _resume: Option<&AttemptRecord>,
+            ) -> std::result::Result<PreparedLaunch, String> {
+                *self.task.borrow_mut() = Some(task.clone());
+                Err("stop after capturing effective task".into())
+            }
+            fn decode(
+                &self,
+                _route: &RouteRecord,
+                _stdout: &[u8],
+                _exit: &provenant_supervisor::custody::ExitObservation,
+                _provider_state: &std::path::Path,
+            ) -> std::result::Result<Decoded, String> {
+                unreachable!()
+            }
+        }
+        let provider = CaptureProvider {
+            task: std::cell::RefCell::new(None),
+        };
+        clock.advance(provenant_core::DurationMicros::from_micros(200))?;
+        let started = store.start(
+            input.run_id,
+            &provider,
+            &|_, _| unreachable!(),
+            &call(&clock, &cancel),
+        )?;
+        assert!(matches!(
+            started.as_slice(),
+            [Started::Refused {
+                kind: RefusalKind::Preparation,
+                ..
+            }]
+        ));
+        let captured = provider
+            .task
+            .borrow()
+            .clone()
+            .expect("provider received task");
+        assert_eq!(
+            captured.head.as_deref(),
+            Some(committed_head.to_string().as_str())
+        );
+        assert_eq!(captured.source_head.as_deref(), Some(source_head.as_str()));
+        Ok(())
+    }
 }
