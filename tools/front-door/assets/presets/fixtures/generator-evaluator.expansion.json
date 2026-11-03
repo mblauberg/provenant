@@ -3,7 +3,7 @@
     "pattern": "generator-evaluator",
     "preset": "generator-evaluator"
   },
-  "graph_id": "preset-e582860fba3646d9697bfdd709d7610c",
+  "graph_id": "preset-d6dff03ed59cfcfe4570361b55f4c599",
   "nodes": [
     {
       "acceptance_checks": [
@@ -69,9 +69,14 @@
             ],
             "role": "lens.correctness-spec",
             "role_digest": "sha256:848b2cdd9b4b8b0ad645765b5fb8518d220cd13178c2d78e65158b3594b0f879",
-            "route": {
-              "alias": "senior"
-            },
+            "routes": [
+              {
+                "alias": "senior"
+              },
+              {
+                "alias": "senior"
+              }
+            ],
             "title": "lens-correctness-spec"
           },
           {
@@ -93,9 +98,14 @@
             ],
             "role": "lens.simplicity",
             "role_digest": "sha256:d1fb3a10ba832baa07b4525dd2eab31c1ee58542ceb493a0901052c3b8c67249",
-            "route": {
-              "alias": "senior"
-            },
+            "routes": [
+              {
+                "alias": "senior"
+              },
+              {
+                "alias": "senior"
+              }
+            ],
             "title": "lens-simplicity"
           }
         ]
@@ -142,9 +152,14 @@
       "prompt": "You evaluate a writer's commit from its lens findings and decide whether it is accepted.\n\nEvaluate the implementation of: brief\nSpec (acceptance criteria): \nWeigh the lens findings against the evidence. Give every finding exactly one\ndisposition with a one-line reason: accepted, rejected or deferred. End with a\nfenced findings block (schema_version 1) with one entry per finding id; each\nentry carries \"disposition\" and \"reason\". Emit one\nexact VERDICT: PASS only when no accepted finding remains, otherwise\nVERDICT: FAIL.\n",
       "role": "review.evaluator",
       "role_digest": "sha256:8bf23a83b0b87661cf925300b45475434805c87d7d58c13803c6413a756c36d0",
-      "route": {
-        "alias": "senior"
-      },
+      "routes": [
+        {
+          "alias": "senior"
+        },
+        {
+          "alias": "senior"
+        }
+      ],
       "source": {
         "node": "implement",
         "type": "node"

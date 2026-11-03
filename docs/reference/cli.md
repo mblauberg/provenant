@@ -2367,6 +2367,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--set` | `{"description": "Override a preset value (PATH=TOML_VALUE); quote TOML strings; repeatable", "name": "preset_set", "repeatable": true, "requires": ["preset"]}` |
 | `--params-file` | `{"description": "Read preset parameters from a TOML table file; --set overrides it", "name": "preset_params_file", "requires": ["preset"]}` |
 | `--plan` | `{"description": "Planner front-end: auto, on or off; the default is [domains.fabric.plan] mode", "name": "preset_plan", "requires": ["preset"], "values": ["auto", "on", "off"]}` |
+| `--fresh` | `{"defaults": ["false"], "description": "Give this preset run a new graph identity, for example to rerun after a cancel", "name": "fresh", "requires": ["preset"], "values": ["true", "false"]}` |
 | `--explain` | `{"defaults": ["false"], "description": "Explain roles, limits and the expanded graph without running it", "name": "explain", "values": ["true", "false"]}` |
 | `--risk-tier` | `{"description": "Risk tier supplied to automatic preset selection", "name": "risk_tier"}` |
 | `--task-kind` | `{"description": "Task kind supplied to automatic preset selection", "name": "task_kind"}` |
@@ -2593,6 +2594,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--set` | `{"description": "Override a preset value (PATH=TOML_VALUE); quote TOML strings; repeatable", "name": "preset_set", "repeatable": true, "requires": ["preset"]}` |
 | `--params-file` | `{"description": "Read preset parameters from a TOML table file; --set overrides it", "name": "preset_params_file", "requires": ["preset"]}` |
 | `--plan` | `{"description": "Planner front-end: auto, on or off; the default is [domains.fabric.plan] mode", "name": "preset_plan", "requires": ["preset"], "values": ["auto", "on", "off"]}` |
+| `--fresh` | `{"defaults": ["false"], "description": "Give this preset run a new graph identity, for example to rerun after a cancel", "name": "fresh", "requires": ["preset"], "values": ["true", "false"]}` |
 | `--explain` | `{"defaults": ["false"], "description": "Explain roles, limits and the expanded graph without running it", "name": "explain", "values": ["true", "false"]}` |
 | `--risk-tier` | `{"description": "Risk tier supplied to automatic preset selection", "name": "risk_tier"}` |
 | `--task-kind` | `{"description": "Task kind supplied to automatic preset selection", "name": "task_kind"}` |

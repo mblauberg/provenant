@@ -3,7 +3,7 @@
     "pattern": "scout-swarm",
     "preset": "scout-swarm"
   },
-  "graph_id": "preset-476a6b486b2e9bbea8ff0692afb53002",
+  "graph_id": "preset-f36176d22f24c3d53275c32e23c695d5",
   "nodes": [
     {
       "access": "read_only",
@@ -80,9 +80,14 @@
                     ],
                     "role": "scout.codebase",
                     "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
-                    "route": {
-                      "alias": "junior"
-                    },
+                    "routes": [
+                      {
+                        "alias": "junior"
+                      },
+                      {
+                        "alias": "junior"
+                      }
+                    ],
                     "title": "scout-1"
                   },
                   {
@@ -102,9 +107,14 @@
                     ],
                     "role": "scout.codebase",
                     "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
-                    "route": {
-                      "alias": "junior"
-                    },
+                    "routes": [
+                      {
+                        "alias": "junior"
+                      },
+                      {
+                        "alias": "junior"
+                      }
+                    ],
                     "title": "scout-2"
                   },
                   {
@@ -124,9 +134,14 @@
                     ],
                     "role": "scout.codebase",
                     "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
-                    "route": {
-                      "alias": "junior"
-                    },
+                    "routes": [
+                      {
+                        "alias": "junior"
+                      },
+                      {
+                        "alias": "junior"
+                      }
+                    ],
                     "title": "scout-3"
                   },
                   {
@@ -146,9 +161,14 @@
                     ],
                     "role": "scout.codebase",
                     "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
-                    "route": {
-                      "alias": "junior"
-                    },
+                    "routes": [
+                      {
+                        "alias": "junior"
+                      },
+                      {
+                        "alias": "junior"
+                      }
+                    ],
                     "title": "scout-4"
                   },
                   {
@@ -165,9 +185,14 @@
                     ],
                     "role": "scout.external",
                     "role_digest": "sha256:b36af5ba65686417d7a356d16ea3778dfdedc9e66357e4ebdbb5a8fa1763ac96",
-                    "route": {
-                      "alias": "web"
-                    },
+                    "routes": [
+                      {
+                        "alias": "web"
+                      },
+                      {
+                        "alias": "web"
+                      }
+                    ],
                     "title": "external"
                   }
                 ]
@@ -216,9 +241,14 @@
                 ],
                 "role": "scout.codebase",
                 "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
-                "route": {
-                  "alias": "${route}"
-                },
+                "routes": [
+                  {
+                    "alias": "${route}"
+                  },
+                  {
+                    "alias": "${route}"
+                  }
+                ],
                 "title": "scout"
               }
             ],
@@ -268,9 +298,14 @@
                 ],
                 "role": "scout.external",
                 "role_digest": "sha256:b36af5ba65686417d7a356d16ea3778dfdedc9e66357e4ebdbb5a8fa1763ac96",
-                "route": {
-                  "alias": "web"
-                },
+                "routes": [
+                  {
+                    "alias": "web"
+                  },
+                  {
+                    "alias": "web"
+                  }
+                ],
                 "title": "scout"
               }
             ],
@@ -291,9 +326,14 @@
       ],
       "role": "plan.shape",
       "role_digest": "sha256:5ad13ac9c5d959f1c19a74924e0c34fdc24c5f7975a194c84a4dd5ebdb5e5e70",
-      "route": {
-        "alias": "principal"
-      },
+      "routes": [
+        {
+          "alias": "principal"
+        },
+        {
+          "alias": "principal"
+        }
+      ],
       "title": "plan"
     },
     {
@@ -314,9 +354,14 @@
       "prompt": "You reconcile research evidence into next steps.\n\nReconcile the scouts' evidence for: brief\nPreserve useful scope partitions, file references, dated external sources and\nunresolved uncertainty. Choose next implementation steps using judgement;\nretain every child's evidence.\n",
       "role": "plan.research",
       "role_digest": "sha256:0543c1d98c7aeabd6c1276c548ca2ac741d4f095e31397c74fb82c3323966a84",
-      "route": {
-        "alias": "senior"
-      },
+      "routes": [
+        {
+          "alias": "senior"
+        },
+        {
+          "alias": "senior"
+        }
+      ],
       "title": "synthesis"
     }
   ],

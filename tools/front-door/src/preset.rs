@@ -3060,6 +3060,8 @@ fn explain_tree(nodes: &[Value], indent: usize, text: &mut String) {
         let tier = node
             .pointer("/route/alias")
             .or_else(|| node.pointer("/route/model"))
+            .or_else(|| node.pointer("/routes/0/alias"))
+            .or_else(|| node.pointer("/routes/0/model"))
             .and_then(Value::as_str)
             .unwrap_or("-");
         text.push_str(&format!(
