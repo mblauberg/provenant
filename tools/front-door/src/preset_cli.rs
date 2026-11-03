@@ -79,6 +79,11 @@ pub(super) fn human(data: &Value, full: bool) -> String {
                                     .and_then(Value::as_str)
                                     .unwrap_or_else(|| match default_value {
                                         Some(Value::Bool(_)) => "boolean",
+                                        Some(Value::Number(number))
+                                            if number.is_i64() || number.is_u64() =>
+                                        {
+                                            "integer"
+                                        }
                                         Some(Value::Number(_)) => "number",
                                         Some(Value::String(_)) => "string",
                                         Some(Value::Array(_)) => "list",
