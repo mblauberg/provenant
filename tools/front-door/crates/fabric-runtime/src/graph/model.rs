@@ -31,6 +31,8 @@ pub(super) fn canonical_len<T: Serialize>(value: &T) -> usize {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<provenant_records::run::WorkContext>,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
@@ -73,6 +75,8 @@ pub struct GraphRoute {
 /// Host-only inputs retained for advancement after the submitting process exits.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphExecution {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_base: Option<provenant_core::GitOid>,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     /// Integration head pinned before the graph's first node is admitted.
@@ -113,6 +117,9 @@ pub struct FamilySeparation {
     pub strength: FamilyStrength,
     /// Families that served the upstream attempts.
     pub excluded: Vec<String>,
+    /// Sibling families avoided when possible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preferred: Vec<String>,
     /// Family of the attempt that settled, when it launched.
     pub applied: Option<String>,
     pub outcome: SeparationOutcome,
@@ -129,6 +136,38 @@ pub enum SeparationOutcome {
     Unconstrained,
 }
 
+/// Deferred review configuration supplied to the host resolver.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewSpec {
+    pub shape: Option<String>,
+    pub risk_tier: Option<String>,
+    pub kind: Option<String>,
+    pub size: Option<String>,
+    #[serde(default)]
+    pub risk_tags: Vec<String>,
+    pub worktree: Option<String>,
+    #[serde(default)]
+    pub lenses: Vec<ReviewLens>,
+    pub min_successful: Option<usize>,
+    pub max_nodes: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewLens {
+    pub name: String,
+    pub when: Option<String>,
+    pub tier: serde_json::Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewResolution {
+    pub subject: provenant_core::GitOid,
+    pub base: provenant_core::GitOid,
+    pub measured_size: String,
+    pub shape: String,
+    pub source: String,
+}
+
 // Wire presence is transient decoding metadata, not part of node identity.
 #[derive(Clone, Debug, Default)]
 pub(super) struct TopologyPresence(pub [bool; 2]);
@@ -142,6 +181,10 @@ impl Eq for TopologyPresence {}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphNode {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<ReviewSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family_group: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<provenant_records::run::WorkContext>,
     #[serde(flatten)]
@@ -894,11 +937,16 @@ pub struct Replay<'a> {
 
 /// User-facing content for a graph node's submitted task.
 pub struct NodeInput<'a> {
+    /// Models selected for earlier attempts of this node.
+    pub prior_attempts: &'a [String],
+    /// Sibling families to avoid where possible, never a routing requirement.
+    pub family_peers: &'a [String],
     pub context: provenant_records::run::WorkContext,
     pub read_roots: &'a [String],
     /// Attempts of the source writer whose model families must be avoided.
     pub distinct_from_attempts: &'a [String],
-    /// Refuse a route inside those families instead of substituting one.
+    /// Refuse a route inside distinct_from_attempts' families. family_peers
+    /// remain a preference even when writer separation is enforced.
     pub require_distinct: bool,
     pub source_commit: Option<&'a str>,
     pub review_base: Option<&'a str>,

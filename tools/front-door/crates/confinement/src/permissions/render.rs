@@ -198,7 +198,7 @@ pub(super) fn compile_sbpl(
         return Err(PermissionError::CredentialRoot);
     }
     for grant in read_grants {
-        anchors.verify_grant_held(grant)?;
+        anchors.verify_read_held(grant)?;
     }
     for grant in &profile.spec.discovery_reads {
         anchors.verify_discovery_grant(grant)?;

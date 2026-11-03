@@ -93,7 +93,12 @@ pub enum Reconciled {
     /// the deadline was requested of it. It settles the attempt as a timeout.
     DeadlineStop,
     /// The supervisor is resuming durable settlement in the background.
-    Settling { phase: String },
+    Settling {
+        phase: String,
+        blocking_reason: Option<String>,
+    },
+    /// A chair explicitly released settlement while retaining its evidence.
+    Abandoned { reason: String },
     /// A durable exit was committed and released.
     Finished,
     /// Leftover temporary data was removed from a terminal attempt.
@@ -117,7 +122,17 @@ impl std::fmt::Display for Reconciled {
             Self::Queued => f.write_str("queued"),
             Self::Held => f.write_str("held"),
             Self::DeadlineStop => f.write_str("deadline_stop"),
-            Self::Settling { phase } => write!(f, "settling ({phase})"),
+            Self::Settling {
+                phase,
+                blocking_reason,
+            } => {
+                write!(f, "settling ({phase})")?;
+                if let Some(reason) = blocking_reason {
+                    write!(f, ": {reason}")?;
+                }
+                Ok(())
+            }
+            Self::Abandoned { reason } => write!(f, "abandoned: {reason}"),
             Self::Finished => f.write_str("finished"),
             Self::TemporaryRemoved => f.write_str("temporary_removed"),
             Self::TemporaryRetained { path, reason } => {
@@ -2333,10 +2348,16 @@ impl RunStore {
         let progress = (|| {
             let scope = Self::scope(&self.record(id, call)?);
             let directory = self.attempt_dir(run, id, false)?;
-            if let Reconciled::Uncertain { reason } = &state {
-                crate::settlement::blocked(&directory, scope, &reason.to_string(), call.clock)
-            } else {
-                crate::settlement::clear_blocked(&directory, scope)
+            match &state {
+                Reconciled::Uncertain { reason } => {
+                    crate::settlement::blocked(&directory, scope, &reason.to_string(), call.clock)
+                }
+                Reconciled::Settling {
+                    blocking_reason: Some(_),
+                    ..
+                }
+                | Reconciled::Abandoned { .. } => Ok(()),
+                _ => crate::settlement::clear_blocked(&directory, scope),
             }
         })();
         if let Err(error) = progress {
@@ -2764,6 +2785,10 @@ impl RunStore {
         observer: &dyn ProcessObserver,
     ) -> Result<Option<Reconciled>> {
         let record = self.record(id, call)?;
+        let directory = self.attempt_dir(record.run_id, id, false)?;
+        if let Some(state) = crate::settlement::abandoned(&directory, Self::scope(&record))? {
+            return Ok(Some(state));
+        }
         if !matches!(record.state, AttemptState::Queued { .. })
             && self
                 .attempt_dir(record.run_id, id, false)
@@ -2805,9 +2830,7 @@ impl RunStore {
                 }
                 let current = self.record(id, call)?;
                 if !self.import_release_permitted(&current, call)? {
-                    return Ok(Some(Reconciled::Settling {
-                        phase: "import".into(),
-                    }));
+                    return Ok(Some(crate::settlement::settling(&directory, scope)?));
                 }
             }
             self.reconcile_terminal_effects(&record, call)?;
@@ -2875,9 +2898,7 @@ impl RunStore {
                         let attempt = dir()?;
                         let finished = self.finish(id, &attempt, &exit, providers, call)?;
                         if !self.import_release_permitted(&finished, call)? {
-                            return Ok(Reconciled::Settling {
-                                phase: "import".into(),
-                            });
+                            return crate::settlement::settling(&attempt, scope);
                         }
                         custody::publish_release(&attempt, scope)
                             .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
@@ -2990,8 +3011,13 @@ mod tests {
             );
             assert_eq!(found[1], (good, Reconciled::Queued));
             if failure != "blocked" {
-                assert!(matches!(&found[0].1, Reconciled::Uncertain { reason }
-                    if reason.to_string().starts_with("queued; settlement progress")));
+                // Recovery reads settlement progress before it decides, so the
+                // unreadable journal is the reason rather than a queued outcome.
+                assert!(
+                    matches!(&found[0].1, Reconciled::Uncertain { reason }
+                        if reason.to_string().contains("settlement progress update failed")),
+                    "{failure}: {found:?}"
+                );
             }
         }
         Ok(())

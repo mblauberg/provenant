@@ -500,6 +500,28 @@ impl RunStore {
             update_attempt(tx, &old, &next)
         })
     }
+    /// Advance an integration fixture through the real launch transition without
+    /// spawning a guardian. Custody fixtures require a nonzero generation.
+    #[cfg(feature = "fixture")]
+    #[doc(hidden)]
+    pub fn mark_starting_for_fixture(
+        &self,
+        id: AttemptId,
+        route: &RouteRecord,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        self.mark_starting_with_priority(
+            &self.record(id, call)?,
+            route,
+            &[],
+            &AppliedWriteGrants::default(),
+            None,
+            None,
+            0,
+            call,
+        )
+    }
+
     /// Move a queued attempt to `starting` with a fresh custody generation
     /// and its applied route, just before supervisor handoff. `head` is the
     /// checkout HEAD the host observed for a read-only lane; never lane output.

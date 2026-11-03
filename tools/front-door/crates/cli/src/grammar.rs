@@ -629,6 +629,9 @@ pub struct Dispatch {
     /// Planner front-end: auto, on or off; the default is [domains.fabric.plan] mode
     #[arg(long = "plan", catalog_requires = "preset", value_parser = ["auto", "on", "off"])]
     pub preset_plan: Option<String>,
+    /// Give this preset run a new graph identity, for example to rerun after a cancel
+    #[arg(long, catalog_requires = "preset")]
+    pub fresh: bool,
     /// Explain roles, limits and the expanded graph without running it
     #[arg(long)]
     pub explain: bool,
@@ -1006,6 +1009,12 @@ pub struct Reconcile {
     /// Reconcile only this run (repeatable)
     #[arg(long)]
     pub id: Vec<Target>,
+    /// Abandon settlement of this writer attempt, preserving its evidence
+    #[arg(long, catalog_requires = "reason", conflicts_with = "id")]
+    pub abandon: Option<Attempt>,
+    /// Why the chair is abandoning settlement
+    #[arg(long, catalog_requires = "abandon", catalog_bounds = (0, 256))]
+    pub reason: Option<String>,
 }
 #[derive(Debug, Subcommand)]
 pub enum Lane {

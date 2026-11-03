@@ -739,7 +739,7 @@ mod result_tests {
             &cancel,
             &factory.clock,
         )?;
-        journal.bind(GraphExecution {
+        journal.bind(GraphExecution {review_base: None,
             extra: Default::default(),
             integration_base: None,
             directory: rig.project.clone(),
@@ -1326,7 +1326,7 @@ mod result_tests {
     #[test]
     fn newer_graph_schemas_report_upgrade_required() {
         let document_error =
-            super::decode_graph_document(br#"{"schema_version":2,"future_shape":true}"#)
+            super::decode_graph_document(br#"{"schema_version":3,"future_shape":true}"#)
                 .unwrap_err();
         let decode_error = provenant_records::decode_v1::<serde_json::Value, _>(
             br#"{"schema_version":2,"future_shape":true}"#.as_slice(),
@@ -1336,9 +1336,9 @@ mod result_tests {
         let checkpoint_error = super::graph_journal_error(
             provenant_fabric_runtime::graph::JournalError::Decode(decode_error),
         );
-        for (error, record_kind) in [
-            (document_error, "graph document schema"),
-            (checkpoint_error, "graph checkpoint schema"),
+        for (error, record_kind, expected_version) in [
+            (document_error, "graph document schema", 3),
+            (checkpoint_error, "graph checkpoint schema", 2),
         ] {
             assert_eq!(error.code(), "upgrade_required");
             let super::FacadeError::UpgradeRequired {
@@ -1353,7 +1353,7 @@ mod result_tests {
             assert_eq!(reader_release, env!("CARGO_PKG_VERSION"));
             assert_eq!(writer_release, "unknown");
             assert_eq!(record, record_kind);
-            assert_eq!(version, 2);
+            assert_eq!(version, expected_version);
         }
         assert_eq!(
             super::decode_graph_document(br#"{"schema_version":0}"#).unwrap_err(),

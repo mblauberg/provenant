@@ -76,6 +76,82 @@ pub fn risk_lenses<S: AsRef<str>>(tags: &[S], risk: Option<&str>) -> Vec<&'stati
         .map(|(_, lens)| *lens)
         .collect()
 }
+/// Whether a lens tier value names a route: a pool name or exact model (a
+/// nonempty string), a route table (a nonempty object) or a route list (a
+/// nonempty array). Anything else leaves the tier to the review shape.
+pub fn tier_is_set(tier: &serde_json::Value) -> bool {
+    match tier {
+        serde_json::Value::String(text) => !text.is_empty(),
+        serde_json::Value::Object(table) => !table.is_empty(),
+        serde_json::Value::Array(list) => !list.is_empty(),
+        _ => false,
+    }
+}
+
+/// A lens candidate in a review request. An unset `tier` takes the review
+/// shape's pool; a set one (pool, exact `ADAPTER/ID[@effort]` or route table)
+/// is kept as given.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewLens {
+    pub name: String,
+    /// The risk tag that must be present for the lens to run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<String>,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub tier: serde_json::Value,
+}
+
+/// What a review asks of panel resolution. An empty `lenses` list takes the
+/// configured lens order and risk-tag lenses.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewRequest {
+    /// Explicit shape; the risk floor can still raise it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Explicit size override; it wins over the measured size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub risk_tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lenses: Vec<ReviewLens>,
+}
+
+/// One resolved reviewer slot in the panel.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedSlot {
+    pub lens: String,
+    /// A pool name, an exact `ADAPTER/ID[@effort]` or a route table, as given
+    /// or taken from the shape.
+    pub tier: serde_json::Value,
+    /// The shape reviewer group the slot came from.
+    pub group_index: usize,
+    /// A preference that sibling slots in the group use different model
+    /// families. The scheduler substitutes and records when it cannot; it
+    /// never drops the lens or fails the review for it.
+    pub distinct_families: bool,
+}
+
+/// A lens that was omitted from the panel, with the reason.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OmittedLens {
+    pub lens: String,
+    pub reason: String,
+}
+
+/// The result of resolving a review panel.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PanelResolution {
+    pub shape: String,
+    pub source: String,
+    pub slots: Vec<ResolvedSlot>,
+    pub omitted: Vec<OmittedLens>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ReviewSize {
@@ -561,6 +637,183 @@ impl ReviewConfig {
                 .map_or("", |(name, _)| name),
             source: selected.source,
             shape,
+        })
+    }
+
+    /// Resolve a review panel without side effects: the shape, then an ordered
+    /// slot per selected lens, and the lenses left out with reasons.
+    ///
+    /// The caller supplies the measured size (an explicit `request.size` wins),
+    /// the changed paths and whether the diff has test markers. Every lens the
+    /// shape has room for runs. `distinct_families` is carried on the slots as a
+    /// preference and never removes one.
+    pub fn resolve_panel(
+        &self,
+        request: &ReviewRequest,
+        measured_size: Option<&str>,
+        paths: &[String],
+        marker: bool,
+    ) -> Result<PanelResolution, String> {
+        fn text(value: &Option<String>) -> Option<&str> {
+            value.as_deref().filter(|text| !text.is_empty())
+        }
+        let size = text(&request.size);
+        if let Some(size) = size
+            && !["small", "medium", "large"].contains(&size)
+        {
+            return Err(format!("unknown review size '{size}'"));
+        }
+        let size = size.or(measured_size);
+        let (risk, kind) = (text(&request.risk_tier), text(&request.kind));
+        // Changed paths shape the lenses; they do not choose the shape.
+        let selected = self.select_shape(text(&request.shape), risk, kind, &[], size)?;
+
+        struct Seat {
+            pool: String,
+            group_index: usize,
+            distinct_families: bool,
+        }
+        let groups = &selected.shape.reviewers;
+        let mut seats = Vec::new();
+        let mut named = Vec::new();
+        for (group_index, group) in groups.iter().enumerate() {
+            let seat = || Seat {
+                pool: group.pool.clone(),
+                group_index,
+                distinct_families: group.distinct_families,
+            };
+            seats.extend((0..group.count).map(|_| seat()));
+            named.extend(group.lenses.iter().map(|lens| (lens.clone(), seat())));
+        }
+        let limit = seats.len().max(1);
+
+        let mut tags: Vec<&str> = request.risk_tags.iter().map(String::as_str).collect();
+        if risk == Some("terminal") {
+            tags.push("terminal");
+        }
+        let plan = self.lens_plan(kind, paths, marker);
+        let caller_supplied = !request.lenses.is_empty();
+        let lens = |name: &str, when: &str| ReviewLens {
+            name: name.to_owned(),
+            when: (!when.is_empty()).then(|| when.to_owned()),
+            tier: serde_json::Value::Null,
+        };
+        let mut list = if caller_supplied {
+            request.lenses.clone()
+        } else {
+            let mut list: Vec<_> = self
+                .lenses
+                .order
+                .iter()
+                .map(|name| lens(name, ""))
+                .collect();
+            for (tag, name) in RISK_TAG_LENSES {
+                if !list.iter().any(|item| item.name == name) {
+                    list.push(lens(name, tag));
+                }
+            }
+            list
+        };
+        // A caller's own list keeps its lenses and order; only what the change
+        // itself triggers is added to it.
+        let additions = if caller_supplied {
+            &plan.change_add
+        } else {
+            &plan.add
+        };
+        for name in additions {
+            if !list.iter().any(|item| &item.name == name) {
+                list.push(lens(name, ""));
+            }
+        }
+        if !caller_supplied && !plan.order.is_empty() {
+            if plan.exclusive {
+                list.retain(|item| {
+                    item.when.as_deref().is_some_and(|when| !when.is_empty())
+                        || plan.order.contains(&item.name)
+                        || plan.add.contains(&item.name)
+                });
+            }
+            list.sort_by_key(|item| {
+                plan.order
+                    .iter()
+                    .position(|name| *name == item.name)
+                    .unwrap_or(plan.order.len())
+            });
+        }
+
+        let last = groups.len().saturating_sub(1);
+        let mut governed = 0usize;
+        let mut slots = Vec::new();
+        let mut omitted = Vec::new();
+        for item in list {
+            let when = item.when.as_deref().unwrap_or_default();
+            let triggered = plan.change_add.contains(&item.name);
+            if !when.is_empty() && !tags.contains(&when) && !triggered {
+                omitted.push(OmittedLens {
+                    reason: format!("requires risk tag {when}"),
+                    lens: item.name,
+                });
+                continue;
+            }
+            if tier_is_set(&item.tier) {
+                // An explicit tier overrides the shape: it takes no slot and no
+                // family preference, and keeps the group of its pool if any.
+                let group_index = item.tier.as_str().map_or(last, |pool| {
+                    groups
+                        .iter()
+                        .position(|group| group.pool == pool)
+                        .unwrap_or(last)
+                });
+                slots.push(ResolvedSlot {
+                    lens: item.name,
+                    tier: item.tier,
+                    group_index,
+                    distinct_families: false,
+                });
+                continue;
+            }
+            let mut slot_taken = false;
+            if when.is_empty() {
+                if governed < limit {
+                    governed += 1;
+                    slot_taken = true;
+                } else if !plan.add.contains(&item.name) {
+                    omitted.push(OmittedLens {
+                        reason: format!("review shape has {limit} slots"),
+                        lens: item.name,
+                    });
+                    continue;
+                }
+            }
+            let named_seat = named
+                .iter()
+                .find(|(lens, _)| item.name == *lens || item.name.starts_with(&format!("{lens}-")))
+                .map(|(_, seat)| seat);
+            let seat =
+                named_seat.or_else(|| seats.get(governed.saturating_sub(1)).or(seats.last()));
+            let (pool, group_index, distinct_families) = match seat {
+                Some(seat) => (
+                    seat.pool.as_str(),
+                    seat.group_index,
+                    // Only lenses that fill a shape slot, or that the shape names,
+                    // join a family group.
+                    seat.distinct_families && (slot_taken || named_seat.is_some()),
+                ),
+                None => ("senior", 0, false),
+            };
+            slots.push(ResolvedSlot {
+                lens: item.name,
+                tier: serde_json::json!(pool),
+                group_index,
+                distinct_families,
+            });
+        }
+        Ok(PanelResolution {
+            shape: selected.name.to_owned(),
+            source: selected.source.to_owned(),
+            slots,
+            omitted,
         })
     }
     pub(crate) fn validate(
@@ -1294,5 +1547,155 @@ mod tests {
                 .iter()
                 .any(|e| e.field == "review.shapes.standard.reviewers" && e.code == "limit")
         );
+    }
+
+    fn request_lens(name: &str, tier: serde_json::Value) -> ReviewLens {
+        ReviewLens {
+            name: name.into(),
+            when: None,
+            tier,
+        }
+    }
+
+    fn resolve(request: &ReviewRequest) -> PanelResolution {
+        ReviewConfig::default()
+            .resolve_panel(request, None, &[], false)
+            .unwrap()
+    }
+
+    #[test]
+    fn panel_resolution_applies_risk_floor_kind_and_integration() {
+        let review = ReviewConfig::default();
+        let floor = ReviewRequest {
+            risk_tier: Some("crucial".into()),
+            size: Some("small".into()),
+            ..Default::default()
+        };
+        let floored = review
+            .resolve_panel(&floor, Some("small"), &[], false)
+            .unwrap();
+        assert_eq!(
+            (floored.shape.as_str(), floored.source.as_str()),
+            ("deep", "by_risk")
+        );
+
+        let integration = ReviewRequest {
+            kind: Some("integration".into()),
+            size: Some("small".into()),
+            ..Default::default()
+        };
+        let integration = review
+            .resolve_panel(&integration, Some("small"), &[], false)
+            .unwrap();
+        assert_eq!(
+            (integration.shape.as_str(), integration.source.as_str()),
+            ("deep", "by_kind")
+        );
+
+        let docs = resolve(&ReviewRequest {
+            kind: Some("docs".into()),
+            ..Default::default()
+        });
+        assert_eq!(docs.slots.len(), 1);
+        assert_eq!(docs.slots[0].lens, "conventions-readability");
+        assert!(
+            docs.omitted
+                .iter()
+                .any(|o| o.reason.starts_with("requires risk tag"))
+        );
+
+        let refactor = resolve(&ReviewRequest {
+            kind: Some("refactor".into()),
+            ..Default::default()
+        });
+        assert!(refactor.slots.iter().any(|s| s.lens == "refactor-cleanup"));
+
+        let standard = resolve(&ReviewRequest::default());
+        assert!(
+            standard
+                .omitted
+                .iter()
+                .any(|o| o.reason == "review shape has 3 slots")
+        );
+
+        let unknown = ReviewRequest {
+            size: Some("huge".into()),
+            ..Default::default()
+        };
+        assert!(review.resolve_panel(&unknown, None, &[], false).is_err());
+    }
+
+    #[test]
+    fn panel_resolution_retains_route_table_and_exact_model_tiers() {
+        let table = serde_json::json!({"model": "claude-sonnet", "effort": "high"});
+        let list = serde_json::json!([{"alias": "junior"}, {"alias": "senior"}]);
+        let exact = serde_json::json!("anthropic/claude-sonnet@high");
+        let resolution = resolve(&ReviewRequest {
+            shape: Some("quick".into()),
+            lenses: vec![
+                request_lens("correctness-spec", table.clone()),
+                request_lens("tests", exact.clone()),
+                request_lens("simplicity", list.clone()),
+                request_lens("design-fit-reuse", serde_json::Value::Null),
+            ],
+            ..Default::default()
+        });
+        let tiers: Vec<_> = resolution.slots.iter().map(|s| &s.tier).collect();
+        assert_eq!(tiers[..3], [&table, &exact, &list]);
+        // Explicit tiers take no shape slot, so the untiered lens takes the one slot.
+        assert_eq!(tiers[3], &serde_json::json!("junior"));
+        assert!(resolution.omitted.is_empty());
+    }
+
+    #[test]
+    fn panel_resolution_carries_group_flags() {
+        let quick = resolve(&ReviewRequest {
+            shape: Some("quick".into()),
+            ..Default::default()
+        });
+        assert_eq!(quick.slots.len(), 1);
+        assert!(!quick.slots[0].distinct_families);
+
+        let standard = resolve(&ReviewRequest {
+            shape: Some("standard".into()),
+            ..Default::default()
+        });
+        assert_eq!(standard.slots.len(), 3);
+        for slot in &standard.slots {
+            assert_eq!(slot.group_index, 0);
+            assert!(slot.distinct_families);
+            assert_eq!(slot.tier, serde_json::json!("junior"));
+        }
+
+        let deep = resolve(&ReviewRequest {
+            shape: Some("deep".into()),
+            ..Default::default()
+        });
+        let placed: Vec<_> = deep
+            .slots
+            .iter()
+            .map(|s| (s.group_index, s.tier.as_str().unwrap()))
+            .collect();
+        assert_eq!(placed[..4], [(0, "junior"); 4]);
+        assert_eq!(placed[4..8], [(1, "senior"); 4]);
+        assert!(deep.slots[..8].iter().all(|s| s.distinct_families));
+    }
+
+    #[test]
+    fn distinct_families_is_a_preference_that_never_drops_a_lens() {
+        // The resolver knows no catalogue, so it cannot tell that the pool has a
+        // single family. Whatever the pool holds, every lens the shape has room
+        // for stays in the panel and the flag only records the preference.
+        let panel = resolve(&ReviewRequest {
+            shape: Some("standard".into()),
+            lenses: ["correctness-spec", "tests", "simplicity"]
+                .map(|name| request_lens(name, serde_json::Value::Null))
+                .to_vec(),
+            ..Default::default()
+        });
+        let lenses: Vec<_> = panel.slots.iter().map(|s| s.lens.as_str()).collect();
+        assert_eq!(lenses, ["correctness-spec", "tests", "simplicity"]);
+        assert!(panel.slots.iter().all(|s| s.distinct_families));
+        assert!(panel.omitted.is_empty());
     }
 }

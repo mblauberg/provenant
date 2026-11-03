@@ -2310,6 +2310,7 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
         name: "secret-fixture".into(),
         effort: None,
         excluded_families: vec![],
+        preferred_families: vec![],
         distinct_families: false,
         require_distinct: false,
     };

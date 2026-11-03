@@ -1046,7 +1046,10 @@ pub(crate) fn tick_graphs(
                 };
                 let mut owner = BoundGraphOwner {
                     factory: &factory,
-                    integration_base: execution.integration_base,
+                    integration_base: Some(BoundGraphBases {
+                        integration: execution.integration_base,
+                        review: execution.review_base,
+                    }),
                     integration_branch: execution.document.integration_branch.clone(),
                     network: graph_network(&execution.document)?,
                     exclude: graph_exclude(&execution.document)?,
@@ -2729,9 +2732,16 @@ impl BinaryRunOwner<'_> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct BoundGraphBases {
+    integration: Option<provenant_core::GitOid>,
+    review: Option<provenant_core::GitOid>,
+}
+
 struct BoundGraphOwner<'a> {
     factory: &'a Factory,
-    integration_base: Option<provenant_core::GitOid>,
+    // Both immutable graph bases travel together through every host owner.
+    integration_base: Option<BoundGraphBases>,
     integration_branch: Option<String>,
     /// The graph's explicit network reach for every node lane, such as
     /// `run --network off` bound before automatic preset selection.
@@ -3093,19 +3103,22 @@ fn graph_attempt_usage(
 fn decode_graph_document(
     bytes: &[u8],
 ) -> Result<provenant_fabric_runtime::graph::GraphDocument, FacadeError> {
-    provenant_records::decode_v1(bytes, provenant_records::Limits::default()).map_err(|error| {
-        match error {
-            provenant_records::DecodeError::UnsupportedVersion { found, .. } if found > 1 => {
-                FacadeError::UpgradeRequired {
-                    reader_release: env!("CARGO_PKG_VERSION").into(),
-                    writer_release: "unknown".into(),
-                    record: "graph document schema".into(),
-                    version: found,
-                }
-            }
-            _ => FacadeError::InvalidInput,
-        }
-    })
+    let value: serde_json::Value =
+        provenant_records::decode(bytes, provenant_records::Limits::default())
+            .map_err(|_| FacadeError::InvalidInput)?;
+    match value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+    {
+        Some(1 | 2) => serde_json::from_value(value).map_err(|_| FacadeError::InvalidInput),
+        Some(version) if version > 2 => Err(FacadeError::UpgradeRequired {
+            reader_release: env!("CARGO_PKG_VERSION").into(),
+            writer_release: "unknown".into(),
+            record: "graph document schema".into(),
+            version,
+        }),
+        _ => Err(FacadeError::InvalidInput),
+    }
 }
 
 fn graph_journal_error(error: provenant_fabric_runtime::graph::JournalError) -> FacadeError {
@@ -3283,7 +3296,10 @@ fn advance_graphs_after_settlement(
             )?;
             let mut owner = BoundGraphOwner {
                 factory: &factory,
-                integration_base: execution.integration_base,
+                integration_base: Some(BoundGraphBases {
+                    integration: execution.integration_base,
+                    review: execution.review_base,
+                }),
                 integration_branch: execution.document.integration_branch.clone(),
                 network: graph_network(&execution.document)?,
                 exclude: graph_exclude(&execution.document)?,
@@ -3932,6 +3948,52 @@ fn settle_attempt(
 }
 
 impl BoundGraphOwner<'_> {
+    fn prior_models(&self, attempts: &[String]) -> Result<Vec<String>, FacadeError> {
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: true,
+            actor: None,
+            chair: None,
+        };
+        let mut models = Vec::new();
+        for reference in attempts {
+            let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+            let target = AttemptTarget {
+                extra: Default::default(),
+                host: Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?),
+                attempt: attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+            };
+            if let Some(model) = owner
+                .snapshot(target, self.budget, self.cancel)?
+                .applied_route
+                .and_then(|route| route.model)
+            {
+                models.push(model);
+            }
+        }
+        Ok(models)
+    }
+
+    /// The graph exclusions plus, on an alias retry, the models that earlier
+    /// attempts of this node already used. The runtime resolves those models
+    /// from the attempt records, so they arrive as model ids, not references.
+    fn route_exclusions(
+        &self,
+        route: &provenant_fabric_runtime::graph::GraphRoute,
+        prior_models: &[String],
+        accepted: bool,
+    ) -> Vec<String> {
+        let mut exclude = self.exclude.clone();
+        if !accepted && route.alias.is_some() {
+            for model in prior_models {
+                if !exclude.contains(model) {
+                    exclude.push(model.clone());
+                }
+            }
+        }
+        exclude
+    }
+
     /// Model families that served the writer attempts a reviewer must differ from.
     fn writer_families(&self, attempts: &[String]) -> Result<Vec<String>, FacadeError> {
         if attempts.is_empty() {
@@ -4003,8 +4065,296 @@ fn graph_review_node(document: &provenant_fabric_runtime::graph::GraphDocument, 
     })
 }
 
+/// What the host learned about a deferred review's pinned subject.
+struct ReviewMeasure {
+    routing: provenant_routing::RoutingConfig,
+    directory: PathBuf,
+    subject: provenant_core::GitOid,
+    base: provenant_core::GitOid,
+    measured: provenant_routing::Measured,
+}
+
+impl BoundGraphOwner<'_> {
+    fn review_git(&self, directory: &Path, args: &[&str]) -> Result<String, String> {
+        use provenant_os::exec::{ExecOptions, Executor, Termination};
+        let git = provenant_os::git::git_executable()
+            .ok_or_else(|| "Git executable unavailable".to_owned())?;
+        let mut argv = vec![git.into_os_string()];
+        argv.extend(args.iter().map(std::ffi::OsString::from));
+        let output = self
+            .factory
+            .executor
+            .execute(ExecOptions::new(
+                &argv,
+                directory,
+                std::time::Duration::from_secs(30),
+            ))
+            .map_err(|error| error.to_string())?;
+        if output.termination != Termination::Exit(0) || output.timed_out || output.stdout.truncated
+        {
+            return Err(format!(
+                "Git failed: {}",
+                String::from_utf8_lossy(&output.stderr.bytes).trim()
+            ));
+        }
+        String::from_utf8(output.stdout.bytes).map_err(|error| error.to_string())
+    }
+
+    fn measure_review(
+        &self,
+        node: &provenant_fabric_runtime::graph::GraphNode,
+        subject: &str,
+    ) -> Result<ReviewMeasure, provenant_fabric_runtime::graph::ReviewResolveError> {
+        use provenant_fabric_runtime::graph::ReviewResolveError;
+        let spec = node
+            .review
+            .as_ref()
+            .ok_or_else(|| ReviewResolveError::Failed("missing review specification".into()))?;
+        let subject = provenant_core::GitOid::parse(subject).map_err(|error| {
+            ReviewResolveError::Failed(format!("invalid pinned review subject: {error}"))
+        })?;
+        let base = self
+            .integration_base
+            .and_then(|bases| bases.review.or(bases.integration))
+            .unwrap_or(subject);
+        let directory = spec.worktree.as_deref().map_or_else(
+            || self.factory.cwd.clone(),
+            |path| self.factory.cwd.join(path),
+        );
+        let routing: provenant_routing::RoutingConfig =
+            provenant_config::read_domain(self.factory.context.roots.state.as_path(), "routing")
+                .map_err(|error| {
+                    ReviewResolveError::Failed(format!("read review configuration: {error}"))
+                })?;
+        let measured = routing.review.size.measure(
+            spec.kind.as_deref(),
+            &base.to_string(),
+            &subject.to_string(),
+            &mut |args| self.review_git(&directory, args),
+        );
+        Ok(ReviewMeasure {
+            routing,
+            directory,
+            subject,
+            base,
+            measured,
+        })
+    }
+
+    /// The lens members and composite root for a resolved panel, built from the
+    /// lowered lenses the preset stored on the deferred node. Every selected
+    /// lens runs: a family preference only labels it, and a lens the panel has
+    /// no room for is refused by name rather than dropped.
+    fn review_expansion(
+        node: &provenant_fabric_runtime::graph::GraphNode,
+        measure: &ReviewMeasure,
+        panel: &provenant_routing::PanelResolution,
+        source: String,
+    ) -> Result<
+        provenant_fabric_runtime::graph::Expansion,
+        provenant_fabric_runtime::graph::ReviewResolveError,
+    > {
+        use provenant_fabric_runtime::graph::{
+            Expansion, GraphNode, ReviewResolution, ReviewResolveError,
+        };
+        let failed = |message: String| ReviewResolveError::Failed(message);
+        let spec = node
+            .review
+            .as_ref()
+            .ok_or_else(|| failed("missing review specification".into()))?;
+        let templates = node
+            .extra
+            .get("lens_templates")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| failed("deferred review carries no lens templates".into()))?;
+        let root_id = format!("{}--review", node.id);
+        let subject = measure.subject.to_string();
+        let mut members: Vec<GraphNode> = Vec::new();
+        for slot in &panel.slots {
+            let mut template = templates
+                .get(&slot.lens)
+                .cloned()
+                .ok_or_else(|| failed(format!("no lowered lens for {}", slot.lens)))?;
+            let map = template
+                .as_object_mut()
+                .ok_or_else(|| failed(format!("lens template {} is not a table", slot.lens)))?;
+            let local = map
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| failed(format!("lens template {} has no id", slot.lens)))?
+                .to_owned();
+            let effort = map.remove("effort");
+            let read_only = map.get("access").is_none_or(|access| access == "read_only");
+            let (key, route) =
+                crate::preset::tier_route(&local, &slot.tier, effort.as_ref(), read_only)
+                    .map_err(failed)?;
+            map.insert(key.into(), route);
+            map.insert(
+                "id".into(),
+                serde_json::json!(format!("{root_id}--{local}")),
+            );
+            map.insert("depends_on".into(), serde_json::json!(node.depends_on));
+            if !node.inputs.is_empty() {
+                map.insert("inputs".into(), serde_json::json!(node.inputs));
+            }
+            if !node.read_roots.is_empty() {
+                map.insert("read_roots".into(), serde_json::json!(node.read_roots));
+            }
+            map.insert(
+                "source".into(),
+                serde_json::json!({"type":"commit","commit":subject}),
+            );
+            if slot.distinct_families {
+                map.insert(
+                    "family_group".into(),
+                    serde_json::json!(crate::preset::format_family_group(slot.group_index)),
+                );
+            }
+            let member: GraphNode = serde_json::from_value(template)
+                .map_err(|error| failed(format!("lens {} does not lower: {error}", slot.lens)))?;
+            if members.iter().any(|existing| existing.id == member.id) {
+                return Err(failed(format!("lens {} is selected twice", slot.lens)));
+            }
+            members.push(member);
+        }
+        if members.is_empty() {
+            return Err(failed("the review panel selected no lenses".into()));
+        }
+        if members.len() + 1 > spec.max_nodes {
+            return Err(failed(format!(
+                "the review panel selected {} lenses; the review allows {}",
+                members.len(),
+                spec.max_nodes.saturating_sub(1)
+            )));
+        }
+        let exports: Vec<_> = members
+            .iter()
+            .map(|member| serde_json::json!({"node": member.id, "outputs": ["result", "findings"]}))
+            .collect();
+        let root: GraphNode = serde_json::from_value(serde_json::json!({
+            "id": root_id,
+            "kind": "composite",
+            "access": "read_only",
+            "depends_on": node.depends_on,
+            "composite": {
+                "min_successful": spec.min_successful,
+                "nodes": [],
+                "exports": exports,
+            },
+        }))
+        .map_err(|error| failed(format!("review composite does not lower: {error}")))?;
+        let mut nodes = vec![root];
+        nodes.extend(members);
+        Ok(Expansion {
+            review: Some(ReviewResolution {
+                subject: measure.subject,
+                base: measure.base,
+                measured_size: measure.measured.size.unwrap_or("unknown").to_owned(),
+                shape: panel.shape.clone(),
+                source,
+            }),
+            extra: Default::default(),
+            source: node.id.clone(),
+            continuation: false,
+            nodes,
+            patterns: Vec::new(),
+        })
+    }
+}
+
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     type Error = FacadeError;
+
+    fn resolve_review(
+        &mut self,
+        node: &provenant_fabric_runtime::graph::GraphNode,
+        subject: &str,
+    ) -> Result<
+        provenant_fabric_runtime::graph::Expansion,
+        provenant_fabric_runtime::graph::ReviewResolveError,
+    > {
+        use provenant_fabric_runtime::graph::ReviewResolveError;
+        let measure = self.measure_review(node, subject)?;
+        let spec = node
+            .review
+            .as_ref()
+            .ok_or_else(|| ReviewResolveError::Failed("missing review specification".into()))?;
+        // Changed paths and test markers add lenses; a failed read only costs
+        // those additions, and the reason is recorded with the resolution.
+        let mut warnings: Vec<String> = measure.measured.warning.iter().cloned().collect();
+        let (mut paths, mut marker) = (Vec::new(), false);
+        let range = format!("{}...{}", measure.base, measure.subject);
+        if measure.base != measure.subject {
+            match self.review_git(
+                &measure.directory,
+                &["diff", "--no-renames", "--name-only", "-z", &range, "--"],
+            ) {
+                Ok(out) => {
+                    paths = out
+                        .split('\0')
+                        .filter(|path| !path.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                }
+                Err(error) => warnings.push(format!("cannot read changed paths: {error}")),
+            }
+            match self.review_git(
+                &measure.directory,
+                &["diff", "--no-ext-diff", "--unified=0", &range, "--"],
+            ) {
+                Ok(out) => marker = provenant_routing::diff_has_test_markers(&out),
+                Err(error) => warnings.push(format!("cannot scan test markers: {error}")),
+            }
+        }
+        let request = provenant_routing::ReviewRequest {
+            shape: spec.shape.clone(),
+            risk_tier: spec.risk_tier.clone(),
+            kind: spec.kind.clone(),
+            size: spec.size.clone(),
+            risk_tags: spec.risk_tags.clone(),
+            lenses: spec
+                .lenses
+                .iter()
+                .map(|lens| provenant_routing::ReviewLens {
+                    name: lens.name.clone(),
+                    when: lens.when.clone(),
+                    tier: lens.tier.clone(),
+                })
+                .collect(),
+        };
+        let panel = measure
+            .routing
+            .review
+            .resolve_panel(&request, measure.measured.size, &paths, marker)
+            .map_err(ReviewResolveError::Failed)?;
+        let mut source = format!(
+            "{}; size={}; kind={}; risk={}",
+            panel.source,
+            spec.size
+                .as_deref()
+                .or(measure.measured.size)
+                .unwrap_or("unknown"),
+            spec.kind.as_deref().unwrap_or("unknown"),
+            spec.risk_tier.as_deref().unwrap_or("unknown"),
+        );
+        if !panel.omitted.is_empty() {
+            let omitted: Vec<String> = panel
+                .omitted
+                .iter()
+                .map(|lens| format!("{} ({})", lens.lens, lens.reason))
+                .collect();
+            source.push_str(&format!("; omitted={}", omitted.join(", ")));
+        }
+        if !warnings.is_empty() {
+            source.push_str(&format!("; warnings={}", warnings.join(" | ")));
+        }
+        Self::review_expansion(node, &measure, &panel, source)
+    }
+
+    fn attempt_models(&mut self, attempts: &[String]) -> Result<Vec<String>, Self::Error> {
+        self.prior_models(attempts)
+    }
+
     fn equal_review_range(&mut self, reference: &str) -> Result<bool, Self::Error> {
         let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
         if host != self.factory.context.identity.host.to_string() {
@@ -4214,7 +4564,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .deliver_graph_pr(
                 &self.factory.cwd,
                 branch,
-                self.integration_base.ok_or(FacadeError::Conflict)?,
+                self.integration_base
+                    .and_then(|bases| bases.integration)
+                    .ok_or(FacadeError::Conflict)?,
                 &body,
             )
             .map_err(run_error)?;
@@ -4397,14 +4749,18 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             // A crash can leave an accepted operation without a checkpoint
             // reference. Preserve its immutable labels, including legacy None.
             let mut prepared_without_request = false;
+            let mut accepted_knobs = None;
+            let mut accepted_route = None;
             let context = match &operation {
                 Some(operation) => match store.request(operation.run_id, &call) {
-                    Ok(request) => request
-                        .tasks
-                        .first()
-                        .ok_or(FacadeError::StateCorrupt)?
-                        .context
-                        .clone(),
+                    Ok(request) => {
+                        let task = request.tasks.first().ok_or(FacadeError::StateCorrupt)?;
+                        if accepted {
+                            accepted_knobs = Some(task.profile.overrides.clone());
+                            accepted_route = Some(task.route.clone());
+                        }
+                        task.context.clone()
+                    }
                     Err(provenant_run::RunError::NotFound)
                         if operation.state == provenant_run::OperationState::Prepared =>
                     {
@@ -4437,6 +4793,36 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     branch: None,
                     commit: None,
                 });
+            }
+            // Preserve the specific detached-writer refusal in node status.
+            if !accepted
+                && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+                && let Some(path) = worktree
+            {
+                let writer = provenant_run::resolve_writer(
+                    self.factory.context.roots.state.as_path(),
+                    &self.factory.cwd,
+                    Path::new(path),
+                )
+                .map_err(|error| match error {
+                    provenant_run::RunError::Validation("writer needs a branch") => {
+                        FacadeError::DispatchRefused {
+                            reason: "writer needs a branch".into(),
+                        }
+                    }
+                    other => run_error(other),
+                })?;
+                if let Err(provenant_run::RunError::Validation("writer needs a branch")) =
+                    provenant_run::prepare_writer(
+                        &writer,
+                        self.factory.context.roots.state.as_path(),
+                        self.factory.context.identity.project,
+                    )
+                {
+                    return Err(FacadeError::DispatchRefused {
+                        reason: "writer needs a branch".into(),
+                    });
+                }
             }
             if !accepted && let (Some(path), Some(commit)) = (worktree, node.source_commit) {
                 let head = commit.parse().map_err(|_| FacadeError::InvalidInput)?;
@@ -4499,6 +4885,32 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             } else {
                 None
             };
+            let review_base = if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly {
+                provenant_fabric_runtime::graph::FileJournal::execution(
+                    &self.factory.context.roots.state,
+                    self.factory.context.identity.project,
+                    &key.graph_id,
+                )
+                .map_err(graph_journal_error)?
+                .and_then(|execution| execution.review_base)
+            } else {
+                None
+            };
+            // Writer separation is mandatory; sibling diversity remains a preference.
+            let enforced = node.require_distinct && !excluded_families.is_empty();
+            let mut avoided_families = excluded_families;
+            let mut preferred_families = Vec::new();
+            for family in node.family_peers {
+                let target = if enforced {
+                    &mut preferred_families
+                } else {
+                    &mut avoided_families
+                };
+                if !target.contains(family) {
+                    target.push(family.clone());
+                }
+            }
+            let exclude = self.route_exclusions(route, node.prior_attempts, accepted);
             let base = if accepted {
                 store
                     .request(
@@ -4522,12 +4934,20 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                             .map_err(run_error)
                     })
                     .transpose()?
-                    .or_else(|| self.integration_base.map(|base| base.to_string()))
+                    // A review base recorded with the graph execution comes next,
+                    // then the integration base.
+                    .or_else(|| review_base.map(|base| base.to_string()))
+                    .or_else(|| {
+                        self.integration_base
+                            .and_then(|bases| bases.integration)
+                            .map(|base| base.to_string())
+                    })
                     // Preserve the prior fallback without requiring origin/HEAD.
                     .or_else(|| node.source_commit.map(str::to_owned))
             } else {
                 node.source_commit.map(|head| {
                     self.integration_base
+                        .and_then(|bases| bases.integration)
                         .map_or_else(|| head.to_owned(), |base| base.to_string())
                 })
             };
@@ -4545,7 +4965,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     worktree: worktree.map(str::to_owned),
                     prompt: node.prompt.into(),
                     title: Some(node.title.to_owned()),
-                    route: match &route.model {
+                    route: accepted_route.unwrap_or(match &route.model {
                         None if route.name.is_some() => {
                             provenant_records::run::RequestedRoute::Adapter {
                                 extra: Default::default(),
@@ -4563,14 +4983,15 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                                 effort: route.effort.clone(),
                             }
                         }
-                        None if !excluded_families.is_empty() => {
+                        None if !avoided_families.is_empty() => {
                             provenant_records::run::RequestedRoute::Review {
                                 extra: Default::default(),
                                 name: route.alias.clone().ok_or(FacadeError::InvalidInput)?,
                                 effort: route.effort.clone(),
-                                excluded_families,
+                                excluded_families: avoided_families,
                                 distinct_families: true,
-                                require_distinct: node.require_distinct,
+                                preferred_families,
+                                require_distinct: enforced,
                             }
                         }
                         None => provenant_records::run::RequestedRoute::Named {
@@ -4578,7 +4999,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                             name: route.alias.clone().ok_or(FacadeError::InvalidInput)?,
                             effort: route.effort.clone(),
                         },
-                    },
+                    }),
                     timeout_seconds: node
                         .deadline_seconds
                         .unwrap_or(self.factory.context.config.limits.graph_timeout_seconds)
@@ -4588,12 +5009,14 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     new_worktree: None,
                 }],
                 concurrency: Some(1),
-                knobs: if self.exclude.is_empty() {
+                knobs: if let Some(knobs) = accepted_knobs {
+                    knobs
+                } else if exclude.is_empty() {
                     vec![]
                 } else {
                     vec![format!(
                         "routing.graph_exclude={}",
-                        serde_json::Value::from(self.exclude.clone())
+                        serde_json::Value::from(exclude)
                     )]
                 },
                 host: None,
@@ -5221,8 +5644,28 @@ impl Factory {
             } else {
                 None
             };
+            let review_base = if journal.load(id).map_err(graph_journal_error)?.is_some() {
+                FileJournal::execution(&self.context.roots.state, self.context.identity.project, id)
+                    .map_err(graph_journal_error)?
+                    .and_then(|execution| execution.review_base)
+            } else if let Some(reference) = document
+                .review_base
+                .as_deref()
+                .filter(|base| !base.is_empty())
+            {
+                let git = provenant_os::git::git_executable().ok_or(FacadeError::InvalidInput)?;
+                Some(
+                    provenant_run::resolve_git_base(&git, &self.cwd, reference)
+                        .map_err(run_error)?
+                        .parse()
+                        .map_err(|_| FacadeError::StateCorrupt)?,
+                )
+            } else {
+                None
+            };
             journal
                 .bind(provenant_fabric_runtime::graph::GraphExecution {
+                    review_base,
                     extra: Default::default(),
                     integration_base,
                     directory: self.cwd.clone(),
@@ -5236,7 +5679,10 @@ impl Factory {
                 })?;
             let mut owner = BoundGraphOwner {
                 factory: self,
-                integration_base,
+                integration_base: Some(BoundGraphBases {
+                    integration: integration_base,
+                    review: review_base,
+                }),
                 integration_branch: document.integration_branch.clone(),
                 network: graph_network(document)?,
                 exclude: graph_exclude(document)?,

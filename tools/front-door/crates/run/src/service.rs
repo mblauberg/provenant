@@ -393,6 +393,7 @@ impl<'a> Service<'a> {
                 effort,
                 excluded_families,
                 distinct_families,
+                preferred_families,
                 require_distinct,
                 ..
             } if !name.is_empty() => Ok(RequestedRoute::Review {
@@ -401,6 +402,7 @@ impl<'a> Service<'a> {
                 effort,
                 excluded_families,
                 distinct_families,
+                preferred_families,
                 require_distinct,
             }),
             _ => Err(input_error(
@@ -501,6 +503,14 @@ impl<'a> Service<'a> {
         call: &Request<'_>,
     ) -> Result<Vec<RunEvent>> {
         self.store.events(after, limit, attempt, call)
+    }
+    pub fn abandon_settlement(
+        &self,
+        id: AttemptId,
+        reason: &str,
+        call: &Request<'_>,
+    ) -> Result<Reconciled> {
+        self.store.abandon_settlement(id, reason, call)
     }
     pub fn reconcile(
         &self,
