@@ -3950,3 +3950,23 @@ fn preset_show_and_explain_json_match_snapshots() {
         assert_eq!(actual, serde_json::from_str::<Value>(expected).unwrap());
     }
 }
+
+#[test]
+fn preset_human_views_preserve_detail_and_type_plain_tables() {
+    let data = json!({"name":"example", "values":{"parameters":{
+        "schema":{"type":"integer", "default":1, "min":0, "doc":"First.\nSecond."},
+        "subject":{"type":"commit", "commit":"HEAD"}
+    }}, "origins":{}});
+    let compact = super::preset::human_for_test(&data, false);
+    assert!(compact.contains("schema  integer  1  First."));
+    assert!(!compact.contains("Second."));
+    assert!(compact.contains("subject  table"));
+    let full = super::preset::human_for_test(&data, true);
+    assert!(full.contains("\"min\":0"));
+    assert!(full.contains("Second."));
+    let explanation = json!({"name":"example", "pattern":{"summary":"Summary", "cost":"Cost", "select_when":"Condition"}, "parameters":[{"name":"base"}]});
+    let compact = super::preset::human_for_test(&explanation, false);
+    for value in ["Summary", "Cost", "Condition", "base"] {
+        assert!(compact.contains(value));
+    }
+}
