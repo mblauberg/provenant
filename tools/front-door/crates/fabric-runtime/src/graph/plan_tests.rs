@@ -46,6 +46,21 @@ fn planned_fan_out_survives_checkpoint_json_and_mixed_settlement() {
         assert_eq!(pending.checkpoint.expansions.len(), 1);
         assert_eq!(pending.checkpoint.nodes.iter().find(|n| n.id == "after").unwrap().state, NodeState::Pending);
         let mut wire = serde_json::to_value(&pending.checkpoint).unwrap();
+        if !legacy {
+            let mut tampered = pending.checkpoint.clone();
+            let boundary = tampered.expansions[0].nodes.iter_mut()
+                .find(|node| node.composite.is_some()).unwrap();
+            let boundary_id = boundary.id.clone();
+            boundary.composite_members[0] = "plan--tampered".into();
+            boundary.after_expansion[0] = "plan--tampered".into();
+            tampered.nodes.iter_mut().find(|node| node.id == boundary_id).unwrap()
+                .children = boundary.composite_members.clone();
+            journal.0 = Some(serde_json::from_value(serde_json::to_value(tampered).unwrap()).unwrap());
+            let error = advance(&doc, &mut fixture_owner(&[]), &mut journal).unwrap_err();
+            assert_eq!(error.code(), "bad_checkpoint");
+            assert!(error.to_string().contains(&boundary_id), "{error}");
+            assert!(error.to_string().contains("persisted composite topology must match the submitted specification"), "{error}");
+        }
         if legacy {
             for node in wire["expansions"][0]["nodes"].as_array_mut().unwrap() {
                 node.as_object_mut().unwrap().remove("composite_members");

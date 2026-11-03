@@ -378,24 +378,14 @@ pub(super) fn expand(
 }
 
 /// Older journals omitted computed topology from flattened expansion nodes.
-/// Rebuild it only from the submitted catalogue or deterministic fallback,
-/// never from progress rows (which the checkpoint validator must still check).
+/// Derive it from the submitted catalogue or deterministic fallback, restoring
+/// absent fields and checking persisted fields independently of progress rows.
 pub(super) fn restore_legacy_topology(
     document: &GraphDocument,
     extensions: &[String],
     expansions: &mut [Expansion],
     limits: &crate::config::GraphLimits,
 ) -> Result<(), (String, &'static str)> {
-    if !expansions
-        .iter()
-        .flat_map(|addition| &addition.nodes)
-        .any(|node| {
-            node.composite.is_some()
-                && (node.composite_members.is_empty() || node.after_expansion.is_empty())
-        })
-    {
-        return Ok(());
-    }
     let mut expanded = loops::expand(document, extensions, limits).map_err(|_| {
         (
             document.graph_id.clone(),
@@ -404,9 +394,9 @@ pub(super) fn restore_legacy_topology(
     })?;
     for addition in expansions {
         if addition.nodes.iter().any(|node| {
-            node.composite.is_some()
-                && (node.composite_members.is_empty() || node.after_expansion.is_empty())
-        }) {
+            node.composite.is_some() || node.id == format!("{}--fallback", addition.source)
+        }) || !addition.patterns.is_empty()
+        {
             let spec = expanded
                 .nodes
                 .iter()
@@ -497,11 +487,18 @@ pub(super) fn restore_legacy_topology(
             }
             if let Some(node) = addition.nodes.iter().find(|node| {
                 node.composite.is_some()
-                    && (node.composite_members.is_empty() || node.after_expansion.is_empty())
+                    && (node.composite_members.is_empty()
+                        || node.after_expansion.is_empty()
+                        || (!addition.nodes.iter().any(|candidate| {
+                            candidate.id == format!("{}--fallback", addition.source)
+                        }) && !addition
+                            .patterns
+                            .iter()
+                            .any(|pattern| pattern.id == node.id)))
             }) {
                 return Err((
                     node.id.clone(),
-                    "composite membership and completion edges are missing; rerun from the original document",
+                    "composite topology must derive from an approved pattern or fallback",
                 ));
             }
         }
