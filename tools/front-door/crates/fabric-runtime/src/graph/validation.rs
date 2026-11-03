@@ -22,10 +22,9 @@ pub(super) fn nodes_have_v2(nodes: &[GraphNode]) -> bool {
 
 pub(super) fn validate_schema(document: &GraphDocument) -> Result<(), &'static str> {
     let has_v2 = document.review_base.is_some() || nodes_have_v2(&document.nodes);
-    if !matches!(document.schema_version, 1 | 2)
-        || document.schema_version == 1 && has_v2
-        || document.schema_version == 2 && !has_v2
-    {
+    // Version 2 is a superset: it may omit every v2 field, but version 1
+    // cannot carry one.
+    if !matches!(document.schema_version, 1 | 2) || document.schema_version == 1 && has_v2 {
         return Err("schema version");
     }
     Ok(())
