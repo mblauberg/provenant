@@ -36,8 +36,10 @@ Acceptance, each item with how it is verified; Must not change; Verify; Durable 
 `path#Symbol`, never line numbers or scratch paths. The spec dies with the PR.
 Implementers cannot change acceptance criteria.
 
-Lifecycle: Draft, Ready (readiness test passes or `plan.scope` returns PASS),
-Approved, In progress, Delivered.
+Lifecycle is the project Status field, with the six options `setup-repo` seeds
+into the repository runbook: Backlog, Ready (readiness test passes or `plan.scope`
+returns PASS), In progress, In review, Awaiting user, Done. Do not invent other
+status names.
 
 ## File without sprawl
 

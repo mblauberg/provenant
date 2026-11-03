@@ -378,11 +378,13 @@ authorised merges, and risk-tier downgrades. Deleting a *merged* branch's own
 local ref and worktree is carried by the merge itself, under
 [post-merge pruning](../worktrees.md#ownership-and-cleanup).
 
-Branch protection requires the head to be strictly up to date with `main`, so
-concurrent pull requests still integrate as a serialised merge train: merge
-one, update the next onto the new `main`, rerun the exact-head checks and
-independent review (an update-merge is a new commit and invalidates prior
-exact-head evidence), then merge it.
+The live `Protect main` ruleset sets `strict_required_status_checks_policy: false`,
+so branch protection does not require the head to be up to date with `main`.
+`ci-status` gates the exact head only. Concurrent pull requests that touch the
+same files should still land as a serialised merge train: merge one, update the
+next onto the new `main`, rerun the exact-head checks and independent review (an
+update-merge is a new commit and invalidates prior exact-head evidence), then
+merge it.
 
 ### Rust build cache
 
