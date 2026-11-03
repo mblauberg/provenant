@@ -64,6 +64,8 @@ fn default_true() -> bool {
 #[serde(deny_unknown_fields)]
 pub struct ProjectRunConfig {
     #[serde(default)]
+    pub writer_writes: Option<Vec<PathBuf>>,
+    #[serde(default)]
     pub review_exempt: Option<Vec<String>>,
     #[serde(
         default,
@@ -91,8 +93,14 @@ impl Default for RunConfig {
     }
 }
 impl RunConfig {
-    pub fn writer_write_roots(&self) -> impl Iterator<Item = &Path> {
-        self.writer_writes.iter().map(PathBuf::as_path)
+    /// The project list replaces the host list when present, including when empty.
+    pub fn writer_write_roots_for(&self, project: &str) -> impl Iterator<Item = &Path> {
+        self.projects
+            .get(project)
+            .and_then(|s| s.writer_writes.as_ref())
+            .unwrap_or(&self.writer_writes)
+            .iter()
+            .map(PathBuf::as_path)
     }
 
     /// Read `[domains.run]` from the state root's `config.toml`.
@@ -170,10 +178,27 @@ fn valid_patterns(field: &str, patterns: &[String], errors: &mut Vec<SectionErro
         }
     }
 }
+fn valid_writer_writes(field: &str, paths: &[PathBuf], errors: &mut Vec<SectionError>) {
+    if paths.len() > MAX_WRITER_WRITES {
+        errors.push(SectionError {
+            field: field.into(),
+            code: "range",
+        });
+    }
+    for (index, path) in paths.iter().enumerate() {
+        if !valid_writer_write(path) {
+            errors.push(SectionError {
+                field: format!("{field}.{index}"),
+                code: "path",
+            });
+        }
+    }
+}
 impl DomainConfig for RunConfig {
     fn validate(&self) -> Vec<SectionError> {
         let mut errors = Vec::new();
         valid_patterns("review_exempt", &self.review_exempt, &mut errors);
+        valid_writer_writes("writer_writes", &self.writer_writes, &mut errors);
         for (project, settings) in &self.projects {
             if !project_key(project) {
                 errors.push(SectionError {
@@ -181,26 +206,19 @@ impl DomainConfig for RunConfig {
                     code: "key",
                 });
             }
+            if let Some(paths) = &settings.writer_writes {
+                valid_writer_writes(
+                    &format!("projects.{project}.writer_writes"),
+                    paths,
+                    &mut errors,
+                );
+            }
             if let Some(patterns) = &settings.review_exempt {
                 valid_patterns(
                     &format!("projects.{project}.review_exempt"),
                     patterns,
                     &mut errors,
                 );
-            }
-        }
-        if self.writer_writes.len() > MAX_WRITER_WRITES {
-            errors.push(SectionError {
-                field: "writer_writes".into(),
-                code: "range",
-            });
-        }
-        for (index, path) in self.writer_writes.iter().enumerate() {
-            if !valid_writer_write(path) {
-                errors.push(SectionError {
-                    field: format!("writer_writes.{index}"),
-                    code: "path",
-                });
             }
         }
         errors
@@ -220,6 +238,7 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("warn_brief_read_roots", "bool"),
     FieldMetadata::new("writer_writes", "array"),
     FieldMetadata::new("review_exempt", "array"),
+    FieldMetadata::new("projects.{project}.writer_writes", "array"),
     FieldMetadata::new("projects.{project}.review_exempt", "array"),
     FieldMetadata::new("projects.{project}.brief_read_root_warnings", "bool"),
     FieldMetadata::new("projects.{project}.warn_brief_read_roots", "bool"),
@@ -336,6 +355,53 @@ review_exempt = []
         assert_eq!(config.review_exempt_for("other"), ["Cargo.lock"]);
         assert!(config.review_exempt("p1").covers(b"docs/x.md"));
         assert!(!config.review_exempt("p2").covers(b"Cargo.lock"));
+    }
+
+    #[test]
+    fn project_writer_writes_replace_host_and_validate_identically() {
+        let config: RunConfig = toml_edit::de::from_str(
+            r#"
+writer_writes = ["/host/locks"]
+[projects.a]
+writer_writes = ["/a/locks"]
+[projects.empty]
+writer_writes = []
+[projects.inherit]
+"#,
+        )
+        .expect("parse");
+        let paths = |project| {
+            config
+                .writer_write_roots_for(project)
+                .map(Path::to_path_buf)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(paths("a"), [PathBuf::from("/a/locks")]);
+        assert!(paths("empty").is_empty());
+        assert_eq!(paths("inherit"), [PathBuf::from("/host/locks")]);
+        assert_eq!(paths("other"), [PathBuf::from("/host/locks")]);
+        assert!(config.validate().is_empty());
+        for path in [
+            "relative",
+            "/a/b c",
+            "/a/$HOME",
+            "/a/../b",
+            "/Users/a/.ssh/x",
+        ] {
+            let mut bad = config.clone();
+            bad.projects.get_mut("a").unwrap().writer_writes = Some(vec![path.into()]);
+            assert_eq!(
+                bad.validate()
+                    .iter()
+                    .map(|e| e.field.as_str())
+                    .collect::<Vec<_>>(),
+                ["projects.a.writer_writes.0"]
+            );
+        }
+        let mut bad = config;
+        bad.projects.get_mut("a").unwrap().writer_writes =
+            Some(vec![PathBuf::from("/a/locks"); MAX_WRITER_WRITES + 1]);
+        assert_eq!(bad.validate()[0].field, "projects.a.writer_writes");
     }
 
     #[test]

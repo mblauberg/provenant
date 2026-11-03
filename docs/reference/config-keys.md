@@ -566,6 +566,17 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
       }
     }
   },
+  "host_run_settings": {
+    "path": "domains.run",
+    "settings": {
+      "projects.{project}.writer_writes": {
+        "allowed": "up to 16 absolute, safe directory paths outside credential roots",
+        "default": "host writer_writes",
+        "effect": "Replace the host writer_writes list for this project; an empty list grants no host-configured writer roots. Origin: host configuration [domains.run.projects.<project ID>].",
+        "type": "string_list"
+      }
+    }
+  },
   "presets": {
     "balanced": {
       "description": "Today's behaviour: every knob at its registry default.",

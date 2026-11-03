@@ -28,6 +28,12 @@
       "effect": "Cap on the wall-clock runtime of any lane on this provider. A dispatch's own --provider-timeout applies when it is shorter. At the deadline the provider is stopped and the attempt settles as timed_out, whatever the host did meanwhile, including sleeping."
     }
   },
+  "host_run_settings": {
+    "path": "domains.run",
+    "settings": {
+      "projects.{project}.writer_writes": {"type": "string_list", "allowed": "up to 16 absolute, safe directory paths outside credential roots", "default": "host writer_writes", "effect": "Replace the host writer_writes list for this project; an empty list grants no host-configured writer roots. Origin: host configuration [domains.run.projects.<project ID>]."}
+    }
+  },
   "host_land_settings": {
     "path": "domains.pr.land",
     "settings": {
