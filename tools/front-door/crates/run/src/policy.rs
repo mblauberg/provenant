@@ -15,9 +15,30 @@ use serde::{Deserialize, Serialize};
 /// queue successors without end; routing's settlement retry limit stays below it.
 pub const POLICY_ATTEMPT_CEILING: u64 = 33;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyCause {
+    ResultCheck,
+    Unfinished,
+    Capacity,
+    Quota,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyAction {
+    Stop,
+    Resume,
+    Retry,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyRetry {
     pub schema_version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<PolicyCause>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<PolicyAction>,
     pub route: RequestedRoute,
     pub resume: bool,
     /// Attempts in this run including its first, capped again by the store.
@@ -31,6 +52,7 @@ pub struct PolicyRetry {
 }
 #[derive(Default)]
 pub struct ResultAssessment {
+    pub cause: Option<PolicyCause>,
     pub refusal: Option<String>,
     pub retry: Option<PolicyRetry>,
     /// Appended to the settled reason when the retry is staged.
@@ -209,6 +231,33 @@ impl RunStore {
         Ok(true)
     }
 
+    pub(crate) fn stage_policy_stop(
+        &self,
+        record: &AttemptRecord,
+        cause: PolicyCause,
+    ) -> Result<()> {
+        if self.staged_policy_retry(record)?.is_none() {
+            let decision = PolicyRetry {
+                schema_version: 1,
+                cause: Some(cause),
+                action: Some(PolicyAction::Stop),
+                route: record.requested_route.clone(),
+                resume: false,
+                max_attempts: 1,
+                instruction: String::new(),
+                not_before_unix_seconds: None,
+            };
+            let directory = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+            seal(
+                &directory,
+                AttemptFile::PolicyRetry.name(),
+                &bytes(&decision)?,
+                RECORD_LIMIT,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Prepare artefacts before the terminal transaction. Its INSERT and the
     /// old attempt's terminal UPDATE are atomic, so readers never see a closed
     /// run between a bad result and its replacement.
@@ -247,6 +296,9 @@ impl RunStore {
             return Ok(None);
         };
         let retry: PolicyRetry = decode(&raw)?;
+        if retry.action == Some(PolicyAction::Stop) {
+            return Ok(None);
+        }
         if self.policy_attempt_number(old, call)? >= retry.max_attempts
             || retry.max_attempts > POLICY_ATTEMPT_CEILING
         {
@@ -266,6 +318,11 @@ impl RunStore {
             .iter()
             .find(|task| task.task_id == old.task_id)
             .ok_or(RunError::Validation("policy retry task missing"))?;
+        if (task.writer.is_some() || !task.access.write_roots.is_empty())
+            && (retry.cause.is_none() || retry.action.is_none())
+        {
+            return Ok(None);
+        }
         if !retry_within_authority(&retry, task, old) {
             return Err(RunError::Validation(
                 "policy fallback to another route requires read-only authority",
@@ -428,6 +485,96 @@ mod tests {
     use crate::tests::{call, clock, context, exit, input, publication, seal_observation};
 
     #[test]
+    fn decision_round_trips_old_and_new_formats()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let old = serde_json::json!({"schema_version":1,"route":{"model":{"provider":"codex","model":"x"}},"resume":false,"max_attempts":2,"instruction":"Continue"});
+        // Use a real route serialization so the legacy fixture follows its existing schema.
+        let route = RequestedRoute::Model {
+            extra: Default::default(),
+            provider: "codex".into(),
+            model: "x".into(),
+            effort: None,
+        };
+        let mut old = old;
+        old["route"] = serde_json::to_value(route)?;
+        let decoded: PolicyRetry = serde_json::from_value(old.clone())?;
+        assert_eq!(decoded.cause, None);
+        assert_eq!(decoded.action, None);
+        assert_eq!(serde_json::to_value(&decoded)?, old);
+        let mut new = decoded;
+        new.cause = Some(PolicyCause::Quota);
+        new.action = Some(PolicyAction::Retry);
+        let decoded: PolicyRetry = serde_json::from_slice(&serde_json::to_vec(&new)?)?;
+        assert_eq!((decoded.cause, decoded.action), (new.cause, new.action));
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_stop_is_sealed_without_successor()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let input = input();
+        store.create(&input, &call)?;
+        seal_observation(&store, &input, &exit())?;
+        let old = store.record(input.attempts[0].attempt_id, &call)?;
+        store.stage_policy_stop(&old, PolicyCause::Quota)?;
+        store.publish_terminal(old.attempt_id, 1, &publication(), &exit(), &call)?;
+        let decision = store.staged_policy_retry(&old)?.unwrap();
+        assert_eq!(
+            (decision.cause, decision.action),
+            (Some(PolicyCause::Quota), Some(PolicyAction::Stop))
+        );
+        assert_eq!(
+            store.policy_tail(old.attempt_id, &call)?.attempt_id,
+            old.attempt_id
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_decision_cannot_retry_writer() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let mut input = input();
+        input.request.tasks[0].writer = Some(WriterRequest {
+            extra: Default::default(),
+            project: temp.path().to_path_buf(),
+            worktree: temp.path().join("lane"),
+        });
+        store.create(&input, &call)?;
+        let old = store.record(input.attempts[0].attempt_id, &call)?;
+        let retry = PolicyRetry {
+            schema_version: 1,
+            cause: None,
+            action: None,
+            route: old.requested_route.clone(),
+            resume: false,
+            max_attempts: 2,
+            instruction: "Continue".into(),
+            not_before_unix_seconds: None,
+        };
+        assert!(store.stage_policy_retry(&old, &retry, &call)?);
+        let mut terminal = old.clone();
+        terminal.state = AttemptState::Terminal {
+            extra: Default::default(),
+            outcome: Outcome::Failed,
+            finished_at: input.created_at,
+            exit_code: Some(1),
+            reason: None,
+        };
+        assert!(store.policy_successor(&old, &terminal, &call)?.is_none());
+        Ok(())
+    }
+
+    #[test]
     fn retry_disclosure_scans_decoded_handoff_strings()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -441,6 +588,8 @@ mod tests {
         let old = store.record(id, &call)?;
         let retry = PolicyRetry {
             schema_version: 1,
+            cause: Some(PolicyCause::Capacity),
+            action: Some(PolicyAction::Retry),
             route: old.requested_route.clone(),
             resume: false,
             max_attempts: 2,
@@ -504,6 +653,8 @@ mod tests {
         let old = store.record(id, &call)?;
         let retry = PolicyRetry {
             schema_version: 1,
+            cause: Some(PolicyCause::Capacity),
+            action: Some(PolicyAction::Retry),
             route: RequestedRoute::Model {
                 extra: Default::default(),
                 provider: "codex".into(),
@@ -516,6 +667,8 @@ mod tests {
             not_before_unix_seconds: None,
         };
         store.stage_policy_retry(&old, &retry, &call)?;
+        let sealed = store.staged_policy_retry(&old)?.unwrap();
+        assert_eq!((sealed.cause, sealed.action), (retry.cause, retry.action));
         let mut changed_policy = retry.clone();
         changed_policy.route = RequestedRoute::Model {
             extra: Default::default(),
@@ -531,6 +684,22 @@ mod tests {
         let mut publication = publication();
         publication.outcome = Outcome::Failed;
         publication.reason = Some("empty restricted result".into());
+        // Fail after the terminal update and successor insert to prove both
+        // roll back together while the typed sealed decision survives replay.
+        store.db.execute_batch("CREATE TRIGGER reject_policy_event BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'fixture transaction failure'); END;")?;
+        assert!(
+            store
+                .publish_terminal(id, 1, &publication, &exit(), &call)
+                .is_err()
+        );
+        assert_eq!(store.record(id, &call)?, old);
+        assert_eq!(store.pending_attempts(input.run_id, &call)?.len(), 1);
+        assert_eq!(store.policy_tail(id, &call)?.attempt_id, id);
+        let sealed = store.staged_policy_retry(&old)?.unwrap();
+        assert_eq!((sealed.cause, sealed.action), (retry.cause, retry.action));
+        store
+            .db
+            .execute_batch("DROP TRIGGER reject_policy_event;")?;
         let terminal = store.publish_terminal(id, 1, &publication, &exit(), &call)?;
         assert!(matches!(
             terminal.state,
@@ -545,6 +714,10 @@ mod tests {
         let next = &queued[0];
         assert_eq!(next.attempt_number, 2);
         assert_eq!(store.policy_tail(id, &call)?.attempt_id, next.attempt_id);
+        assert_eq!(
+            Service::new(&store).live_tail(id, &call)?.attempt_id,
+            next.attempt_id
+        );
         assert_eq!(next.retry_of, Some(id));
         assert_eq!(next.authority_digest, old.authority_digest);
         assert_eq!(next.requested_route, retry.route);
@@ -576,6 +749,8 @@ mod tests {
         store.create(&input, &call(&clock, &cancel))?;
         let retry = PolicyRetry {
             schema_version: 1,
+            cause: Some(PolicyCause::Capacity),
+            action: Some(PolicyAction::Retry),
             route: store
                 .record(input.attempts[0].attempt_id, &call(&clock, &cancel))?
                 .requested_route,
@@ -642,6 +817,8 @@ mod tests {
         let old = store.record(input.attempts[0].attempt_id, &call)?;
         let retry = PolicyRetry {
             schema_version: 1,
+            cause: Some(PolicyCause::Capacity),
+            action: Some(PolicyAction::Retry),
             route: old.requested_route.clone(),
             resume: false,
             max_attempts: 2,
@@ -710,6 +887,8 @@ mod tests {
         assert_eq!(old.attempt_number, 2);
         let retry = PolicyRetry {
             schema_version: 1,
+            cause: Some(PolicyCause::Capacity),
+            action: Some(PolicyAction::Retry),
             route: old.requested_route.clone(),
             resume: false,
             max_attempts: 2,
@@ -741,6 +920,8 @@ mod tests {
             &old,
             &PolicyRetry {
                 schema_version: 1,
+                cause: Some(PolicyCause::Capacity),
+                action: Some(PolicyAction::Retry),
                 route: old.requested_route.clone(),
                 resume: false,
                 max_attempts: 2,

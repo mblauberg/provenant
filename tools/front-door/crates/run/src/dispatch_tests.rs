@@ -8680,6 +8680,8 @@ fn a_policy_retry_launches_for_no_launcher_before_its_sealed_time() -> TestResul
     let old = store.record(id, &call(&clock, &cancel))?;
     let retry = crate::PolicyRetry {
         schema_version: 1,
+        cause: Some(crate::PolicyCause::Capacity),
+        action: Some(crate::PolicyAction::Retry),
         route: old.requested_route.clone(),
         resume: false,
         max_attempts: 2,
