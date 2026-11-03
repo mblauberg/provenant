@@ -2267,8 +2267,14 @@ fn preset_file_spec_resolves_from_checkout_subdirectory() -> Result<(), Box<dyn 
         provenant_os::fixture::git_command()
             .current_dir(&project)
             .args([
-                "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
-                "commit", "--allow-empty", "-qm", "initial",
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "initial",
             ])
             .status()?
             .success()
