@@ -939,6 +939,53 @@ fn findingless_ci_failure_still_runs_a_recovery_node_that_ignores_findings() {
 }
 
 #[test]
+fn findingless_ci_failure_respects_loop_recovery_override() {
+    for skip in [true, false] {
+        let mut doc = document();
+        doc.nodes[0].on_fail = Some("recovery".into());
+        let inputs = if skip {
+            serde_json::json!([])
+        } else {
+            serde_json::json!([{"node":"ci","outputs":["findings"]}])
+        };
+        doc.nodes.push(
+            serde_json::from_value(serde_json::json!({
+                "id":"recovery", "kind":"loop", "access":"read_only", "depends_on":["ci"],
+                "skip_without_findings":skip, "inputs":inputs,
+                "loop":{"max_rounds":1,"until":"gate","body":[
+                    {"id":"notify","access":"read_only","prompt":"notify",
+                     "route":{"adapter":"fixture","model":"fixture/model"}},
+                    {"id":"gate","kind":"gate","access":"read_only","depends_on":["notify"],
+                     "inputs":[{"node":"notify","outputs":["verdict"]}],
+                     "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
+                ]}
+            }))
+            .unwrap(),
+        );
+        let mut owner = Owner {
+            observations: VecDeque::from([observation(CiState::Failed, "failed")]),
+            ..Default::default()
+        };
+        let run = advance(&doc, &mut owner, &mut Journal::default()).unwrap();
+        let child = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == "recovery--r1--notify")
+            .unwrap();
+        assert_eq!(
+            child.state,
+            if skip {
+                NodeState::Skipped
+            } else {
+                NodeState::Succeeded
+            }
+        );
+        assert_eq!(owner.prompts.len(), usize::from(!skip));
+    }
+}
+
+#[test]
 fn ci_failed_checks_obey_count_and_canonical_byte_caps_with_unicode_and_escapes() {
     let mut check = failed_check();
     check.name = "é\"\\\n".repeat(20);

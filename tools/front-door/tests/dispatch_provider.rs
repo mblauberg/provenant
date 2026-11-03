@@ -484,6 +484,71 @@ fn policy_codex_fixture() -> Result<TestRig> {
     ));
     Ok(rig)
 }
+fn run_refuses_pacing_reserve() -> Result {
+    let rig = policy_codex_fixture()?;
+    let auth = br#"{"tokens":{"account_id":"fixture-one"}}"#;
+    let key = provenant_providers::identity::codex_account(auth).ok_or("account key")?;
+    support::register_account(&rig, "codex", "one", &key, &rig.root.join("codex"))?;
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[domains.routing.pacing]\ncodex='pace'"
+    )?;
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs(),
+    )?;
+    let scope = provenant_quota::AccountScope {
+        adapter: "codex".into(),
+        account_key: key.clone(),
+        label: "one".into(),
+    };
+    let mut record = provenant_quota::AccountRecord::empty(scope.clone());
+    record.snapshot = Some(provenant_quota::QuotaSnapshot {
+        schema_version: 1,
+        account: scope,
+        revision: 0,
+        status: provenant_quota::QuotaStatus::Available,
+        observed_unix_seconds: now,
+        source_ref: "fixture".into(),
+        authority_ref: None,
+        windows: vec![provenant_quota::QuotaWindow {
+            pool: "five_hour".into(),
+            window_seconds: Some(18_000),
+            used_basis_points: 9_000,
+            resets_unix_seconds: Some(now + 9_000),
+        }],
+        details: None,
+    });
+    let quota = rig.state.join("quota").join(key);
+    fs::create_dir_all(&quota)?;
+    fs::write(quota.join("codex.json"), serde_json::to_vec(&record)?)?;
+    let prompt = rig.root.join("prompt.txt");
+    fs::write(&prompt, "Reply OK.")?;
+    let output = rig.command(&[
+        "run",
+        "--model",
+        "codex/gpt-6-luna",
+        "--account",
+        "one",
+        "--mode",
+        "read-only",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt")?,
+        "--json",
+    ])?;
+    assert_ne!(code(&output), 0, "{output:?}");
+    let response = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout.bytes),
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    assert!(response.contains("PacingReserve"), "{output:?}");
+    Ok(())
+}
+
 /// `settled` is the exit `run` gives when the whole retry chain settles
 /// inside its own wait; otherwise it returns `waiting` (0) and `lanes` waits on.
 /// Which one happens depends on host speed, so both are accepted. A wait that
@@ -4155,6 +4220,7 @@ fn main() -> ExitCode {
             &[
                 #[cfg(target_os = "macos")]
                 "dispatch_proceeds_when_provider_update_is_busy",
+                "run_refuses_pacing_reserve",
                 "cancel_wait_settles_stalled_import_with_durable_exit",
                 "receipt_output_reports_unknown_route_for_settled_lost_attempt",
                 "output_names_the_attempt_it_reads_and_writes_or_locates_parts",
@@ -4193,6 +4259,7 @@ fn main() -> ExitCode {
                 let result = match name {
                     #[cfg(target_os = "macos")]
                     "dispatch_proceeds_when_provider_update_is_busy" => dispatch_proceeds_when_provider_update_is_busy(),
+                    "run_refuses_pacing_reserve" => run_refuses_pacing_reserve(),
                     "cancel_wait_settles_stalled_import_with_durable_exit" => cancel_wait_settles_stalled_import_with_durable_exit(),
                     "receipt_output_reports_unknown_route_for_settled_lost_attempt" => {
                         receipt_output_reports_unknown_route_for_settled_lost_attempt()
