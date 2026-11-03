@@ -45,7 +45,8 @@ holds it or when a fresh reading of the pool proves headroom
 removes the file. A same-scope refusal replaces any prior observation. An
 account-wide probe failure supersedes this host's per-route observations to
 stay within the file bound; after probe success or expiry, the next account
-sync rebuilds held refusals from the account record. The CLI warns if readiness publication fails;
+sync rebuilds held refusals from the account record. A failed readiness write
+leaves it unknown, never ready. The CLI warns if readiness publication fails;
 the account commit remains authoritative.
 
 Reading. `provenant_quota::ReadinessFile::get(scope, now)` returns a
