@@ -7,10 +7,13 @@ struct InboxScreen: View {
     @Bindable var model: InboxModel
 
     var body: some View {
-        HSplitView {
+        // A fixed list beside a flexible detail. A nested split with min/max frames reports a content-derived
+        // size to the window's column and re-triggers the constraints pass (issue 2726).
+        HStack(spacing: 0) {
             RequestList(model: model)
-                .frame(minWidth: 300, idealWidth: 360, maxWidth: 520)
-            detail.frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
+                .frame(width: 300)
+            Divider()
+            detail.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .onKeyPress(characters: CharacterSet(charactersIn: "jkJK")) { press in
             guard !model.isTypingReply, !model.searching, let character = press.characters.first else { return .ignored }

@@ -33,6 +33,18 @@ final class SourceBoundaryTests: XCTestCase {
         }
     }
 
+    /// A split column's min or max must not follow its content, or AppKit loops in the update-constraints pass
+    /// (issue 2726): no nested split views or min/max frames in screens; only the window's columns set widths.
+    func testConsoleScreensDeclareNoContentDrivenSplitSizing() throws {
+        let allowed: Set<String> = ["ConsoleView.swift"]
+        for file in try swiftFiles(in: "ProvenantConsole") where !allowed.contains(file.name) {
+            for word in ["HSplitView", "VSplitView", "NavigationSplitView", "GeometryReader", "PreferenceKey", "inspectorColumnWidth", "navigationSplitViewColumnWidth"] {
+                XCTAssertFalse(file.text.contains(word), "\(file.name) uses \(word)")
+            }
+            XCTAssertNil(file.text.range(of: #"minWidth:[^)]*maxWidth:\s*[0-9]"#, options: .regularExpression), "\(file.name) bounds a width range")
+        }
+    }
+
     func testMenuTargetHoldsNoConsoleCode() throws {
         for file in try swiftFiles(in: "QuotaMenuBar") {
             for word in ["import ProvenantConsole", "import Charts", "InboxClient", "InboxModel"] {
