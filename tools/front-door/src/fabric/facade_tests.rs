@@ -2366,6 +2366,28 @@ mod peer_tests {
             assert_eq!(request.tasks[0].base.as_deref(), Some(expected));
             assert_eq!(request.tasks[0].head.as_deref(), Some(head.as_str()));
         }
+        // Production scheduling carries a deferred review through resolution:
+        // the graph resolves the panel at the pinned subject and submits each
+        // lens with the requested base, not a self-diff.
+        let path = fixture.rig.project.join("deferred-review.json");
+        std::fs::write(&path, serde_json::to_vec(&serde_json::json!({
+            "schema_version":2, "graph_id":"deferred-review", "review_base":"old-review",
+            "nodes":[{
+                "id":"review", "kind":"plan", "access":"read_only", "prompt":"review",
+                "source":{"type":"commit","commit":head},
+                "review":{"shape":null,"risk_tier":null,"kind":null,"size":null,"risk_tags":[],"worktree":null,"lenses":[],"min_successful":1,"max_nodes":13},
+                "lens_templates": templates,
+            }]
+        }))?)?;
+        let result = factory.graph(GraphInput::Run { extra: Default::default(), document: path }, budget, &cancel)?;
+        let resolved = result.checkpoint.expansions.iter().find_map(|expansion| expansion.review.as_ref()).ok_or_else(|| format!("review not resolved: {:#?}", result.checkpoint.nodes))?;
+        assert_eq!((resolved.subject.to_string(), resolved.base.to_string()), (head.clone(), base_text.clone()));
+        let lens = result.checkpoint.nodes.iter().find(|node| node.id == "review--review--lens-correctness-spec").ok_or("lens missing")?;
+        let operation = graph_operation("graph-attempt-operation", &lens.attempts.first().ok_or("lens not scheduled")?.key)?;
+        let operation = store.operation(&operation, &owner.call(&cancel))?.ok_or("lens operation missing")?;
+        let request = store.request(operation.run_id, &owner.call(&cancel))?;
+        assert_eq!(request.tasks[0].base.as_deref(), Some(base_text.as_str()));
+        assert_eq!(request.tasks[0].head.as_deref(), Some(head.as_str()));
         Ok(())
     }
 
