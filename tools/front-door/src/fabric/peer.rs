@@ -447,6 +447,7 @@ pub fn peer(
                     host: context.identity.host,
                     available: true,
                     execution: Some(owner.capabilities().submit),
+                    readiness: Some(provenant_fabric_runtime::hosts::PeerReadiness::reporting()),
                 },
                 extra: Default::default(),
             },
