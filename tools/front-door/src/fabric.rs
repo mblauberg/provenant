@@ -3791,7 +3791,6 @@ impl BoundGraphOwner<'_> {
                 .snapshot(target, self.budget, self.cancel)?
                 .applied_route
                 .and_then(|route| route.model)
-                && !models.contains(&model)
             {
                 models.push(model);
             }
@@ -3966,6 +3965,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         // and construct the journalled expansion once the routing API lands.
         let _ = measured;
         Err(provenant_fabric_runtime::graph::ReviewResolveError::Unsupported)
+    }
+
+    fn attempt_models(&mut self, attempts: &[String]) -> Result<Vec<String>, Self::Error> {
+        self.prior_models(attempts)
     }
 
     fn respect_ci_wake(&self) -> bool {

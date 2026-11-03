@@ -46,6 +46,10 @@ pub struct ShapeHint {
     pub size: Option<String>,
     /// Measurement problems; the size was left unknown.
     pub warnings: Vec<String>,
+    /// Lenses that any changed-path rule or test marker may add at launch.
+    pub possible_additions: Vec<String>,
+    /// Candidates used when a review supplies no explicit lens list.
+    pub default_lenses: Vec<String>,
 }
 
 impl ShapeHint {
@@ -174,6 +178,24 @@ fn review_selector_with_git(
             size: size.map(str::to_owned),
             warnings,
             groups: selected.shape.reviewers.clone(),
+            default_lenses: review
+                .lenses
+                .order
+                .iter()
+                .cloned()
+                .chain(
+                    provenant_routing::RISK_TAG_LENSES
+                        .iter()
+                        .map(|(_, name)| (*name).to_owned()),
+                )
+                .collect(),
+            possible_additions: review
+                .lenses
+                .by_paths
+                .values()
+                .flat_map(|rule| rule.add.iter().cloned())
+                .chain(std::iter::once("tests".to_owned()))
+                .collect(),
             ..Default::default()
         };
         for group in &selected.shape.reviewers {
@@ -470,11 +492,15 @@ impl StageBuilder<'_> {
                     .unwrap_or(Value::Null),
             });
         }
-        // The most lenses a launch can run: the stage's own, plus what the change
-        // kind adds. Paths found at launch can add more; the host bounds those.
+        // Bound the composite root, the requested or default lenses, and every
+        // lens that the kind, changed paths or a test marker may add.
         let mut names: Vec<String> = lenses.iter().map(|lens| lens.name.clone()).collect();
         if let Some(hint) = self.shape_hint()? {
+            if names.is_empty() {
+                names.extend(hint.default_lenses);
+            }
             names.extend(hint.plan.add);
+            names.extend(hint.possible_additions);
         }
         names.sort_unstable();
         names.dedup();
@@ -489,10 +515,11 @@ impl StageBuilder<'_> {
             min_successful: self
                 .parameters
                 .get("min_reviews")
-                .and_then(Value::as_u64)
-                .filter(|count| *count > 0)
-                .and_then(|count| usize::try_from(count).ok()),
-            max_nodes: names.len().max(1),
+                .map(|value| self.minimum_successful(value))
+                .transpose()?
+                .map(|count| usize::try_from(count).map_err(|_| "min_reviews is too large"))
+                .transpose()?,
+            max_nodes: names.len().saturating_add(1).max(2),
         })
     }
 }

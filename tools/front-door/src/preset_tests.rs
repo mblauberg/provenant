@@ -272,6 +272,7 @@ stages = [{ id = "map", role = "scout" }, { id = "fix", role = "implementer" }]
 worktree = "/repo/lane"
 [roles.scout]
 tier = "junior"
+fallback_tier = "junior"
 title = "Map the call sites"
 prompt = "Find call sites for ${prompt}"
 read_roots = ["/repo/other"]
@@ -286,8 +287,20 @@ prompt = "Implement ${prompt}"
 "#,
         )
         .unwrap();
+    layers.known_routes = Some(["senior".to_owned()].into());
     let expanded = expand(&layers, "roles", "the change", &[]).unwrap();
     let leaves = &expanded.document["nodes"];
+    let exact = expand(
+        &layers,
+        "roles",
+        "the change",
+        &["map.tier='codex/gpt-6@high'".into()],
+    )
+    .unwrap();
+    assert_eq!(
+        exact.document["nodes"][0]["route"],
+        json!({"adapter":"codex","model":"gpt-6","effort":"high"})
+    );
     assert_eq!(leaves[0]["route"], json!({"alias":"junior"}));
     assert_eq!(leaves[0]["title"], "Map the call sites");
     assert_eq!(leaves[0]["prompt"], "Find call sites for the change");
@@ -1683,6 +1696,23 @@ fn lens_tiers_come_from_the_review_shape_unless_overridden() {
         .as_array()
         .unwrap();
     assert_eq!(nodes[0]["route"]["alias"], "principal");
+    for (tier, expected) in [
+        (
+            "'codex/gpt-6@high'",
+            json!({"adapter":"codex","model":"gpt-6","effort":"high"}),
+        ),
+        (
+            "{alias='senior',effort='high'}",
+            json!({"alias":"senior","effort":"high"}),
+        ),
+    ] {
+        let lenses = format!("parameters.lenses=[{{name='tests',tier={tier},when=''}}]");
+        let document = council(&["parameters.worktree='/repo/lane'", &lenses], true).unwrap();
+        assert_eq!(
+            document["nodes"][1]["composite"]["nodes"][0]["route"],
+            expected
+        );
+    }
 }
 
 fn lens_count(document: &serde_json::Value, council: &str) -> usize {

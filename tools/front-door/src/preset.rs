@@ -1485,6 +1485,7 @@ fn lower_leaf(
     if let Some(requested) = map.get("tier").and_then(Value::as_str).map(str::to_owned)
         && let Some(fallback) = fallback_tier.as_ref().and_then(Value::as_str)
         && let Some(routes) = &layers.known_routes
+        && !requested.contains('/')
         && !routes.contains(&requested)
         && requested != fallback
     {
@@ -1560,7 +1561,29 @@ fn lower_leaf(
                 map.insert("routes".into(), route);
             } else {
                 let mut route = match route {
-                    Value::String(name) if !name.is_empty() => json!({"alias":name}),
+                    Value::String(name) if !name.is_empty() => {
+                        if let Some((adapter, model)) = name.split_once('/') {
+                            let (model, embedded_effort) = model
+                                .split_once('@')
+                                .map_or((model, None), |(model, effort)| (model, Some(effort)));
+                            if adapter.is_empty() || model.is_empty() || embedded_effort == Some("")
+                            {
+                                return Err(format!("node {id}: invalid exact-model tier {name}"));
+                            }
+                            if embedded_effort.is_some() && effort.is_some() {
+                                return Err(format!(
+                                    "node {id}: exact-model tier and effort both specify effort"
+                                ));
+                            }
+                            let mut route = json!({"adapter":adapter,"model":model});
+                            if let Some(embedded_effort) = embedded_effort {
+                                route["effort"] = json!(embedded_effort);
+                            }
+                            route
+                        } else {
+                            json!({"alias":name})
+                        }
+                    }
                     Value::Object(_) => route,
                     _ => {
                         return Err(format!(

@@ -1384,7 +1384,8 @@ mod peer_tests {
             tick: false,
         };
         let prior = format!("{}/{}", factory.context.identity.host, upstream.attempt_id);
-        assert_eq!(owner.prior_models(&[prior.clone(), prior.clone()])?, ["codex/gpt-6-luna"]);
+        assert_eq!(owner.prior_models(&[prior.clone(), prior.clone()])?, ["codex/gpt-6-luna", "codex/gpt-6-luna"]);
+        assert_eq!(provenant_fabric_runtime::graph::AttemptOwner::attempt_models(&mut owner, &[prior.clone(), prior.clone()])?, ["codex/gpt-6-luna", "codex/gpt-6-luna"]);
         // Resolve the same alias again with the host's per-node exclusion list.
         use provenant_routing::{AccessContext, Catalogue, ExclusionRule, ExclusionSelector, ExclusionSource, Fallback, ModelId, RouteChoice, RouteName, RouteRequest, RoutingConfig, RoutingContext};
         let catalogue = Catalogue::bundled()?;

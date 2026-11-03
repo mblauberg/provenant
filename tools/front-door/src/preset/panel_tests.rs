@@ -126,7 +126,14 @@ fn select_items_names_the_family_group_of_each_slot() {
 #[test]
 fn review_spec_states_only_what_the_stage_sets() {
     let mut layers = Layers::empty();
-    layers.review = Some(selector(ReviewConfig::default()));
+    let mut review = ReviewConfig::default();
+    review.lenses.by_paths.insert(
+        "**/special/**".into(),
+        provenant_routing::PathLenses {
+            add: vec!["special-review".into()],
+        },
+    );
+    layers.review = Some(selector(review));
     let spec = |parameters: Value| {
         let (mut stack, mut origins, mut repo_files) = (Vec::new(), BTreeMap::new(), Vec::new());
         StageBuilder {
@@ -159,15 +166,18 @@ fn review_spec_states_only_what_the_stage_sets() {
     assert_eq!(spec_json["risk_tier"], "crucial");
     // The host measures an unset size at launch; no placeholder is recorded as an override.
     assert!(spec_json["size"].is_null());
-    assert!(spec_json["min_successful"].is_null());
+    assert_eq!(spec_json["min_successful"], 2);
     assert_eq!(spec_json["lenses"][0]["tier"], table);
     assert!(spec_json["lenses"][1]["tier"].is_null());
     assert_eq!(spec_json["lenses"][1]["when"], "security");
-    assert_eq!(spec_json["max_nodes"], 2);
+    // The root, test-marker lens and a possible changed-path lens are budgeted.
+    assert_eq!(spec_json["max_nodes"], 5);
 
     let sized = spec(json!({"size": "large", "min_reviews": 2}));
     assert_eq!(sized["size"], "large");
     assert_eq!(sized["min_successful"], 2);
+    // An empty list selects the configured default lenses at launch.
+    assert!(sized["max_nodes"].as_u64().unwrap() > 2);
 }
 
 #[test]
