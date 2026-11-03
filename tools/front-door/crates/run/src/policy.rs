@@ -168,7 +168,7 @@ impl RunStore {
         Err(RunError::Validation("policy successor chain limit"))
     }
     /// Seal the retry decision; true when this call staged it.
-    pub(crate) fn stage_policy_retry(
+    pub fn stage_policy_retry(
         &self,
         record: &AttemptRecord,
         retry: &PolicyRetry,

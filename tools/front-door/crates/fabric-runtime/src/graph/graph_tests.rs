@@ -4768,3 +4768,57 @@ fn advisory_composite_failure_preserves_cause_and_launches_dependant() {
         assert!(owner.prompts.last().unwrap().contains("scout: unavailable"));
     }
 }
+
+#[test]
+fn writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source() {
+    let node_source = "0".repeat(40);
+    let head_2 = "2".repeat(40);
+
+    let mut write = node("writer", route("first"));
+    write.access = AccessMode::WorktreeWrite;
+    write.worktree = Some(".worktrees/write".into());
+    write.source = Some(SourceBinding::Commit {
+        commit: node_source.clone(),
+    });
+
+    let mut lens = node("lens", route("first"));
+    lens.access = AccessMode::ReadOnly;
+    lens.depends_on = vec!["writer".into()];
+    lens.source = Some(SourceBinding::Commit {
+        commit: node_source.clone(),
+    });
+
+    // Writer predecessor committed and hit quota; its continuation succeeded with head_2.
+    let writer_done = AttemptObservation::Terminal {
+        attempt_ref: Some("host/writer-cont".into()),
+        outcome: AttemptOutcome::Succeeded,
+        launched: true,
+        result: None,
+        result_warning: None,
+        result_path: None,
+        branch: Some("writer".into()),
+        commit: Some(head_2.clone()),
+    };
+    let lens_done = terminal(AttemptOutcome::Succeeded);
+
+    let mut owner = FakeOwner {
+        observations: [writer_done, lens_done].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&graph(vec![write, lens]), &mut owner, &mut journal).unwrap();
+
+    assert!(run.checkpoint.successful());
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(
+        run.checkpoint.nodes[0]
+            .outputs
+            .as_ref()
+            .and_then(|o| o.commit.as_ref()),
+        Some(&head_2)
+    );
+    // Writer launched pinned to node_source.
+    assert_eq!(owner.source_commits[0], Some(node_source.clone()));
+    // Lens diff base stays the original node_source, not advancing to writer's intermediate/final head.
+    assert_eq!(owner.source_commits[1], Some(node_source));
+}

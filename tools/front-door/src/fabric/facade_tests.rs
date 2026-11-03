@@ -2589,4 +2589,295 @@ mod peer_tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source")? {
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::{self, AttemptOwner};
+        struct Seed(String);
+        impl AttemptOwner for Seed {
+            type Error = std::convert::Infallible;
+            fn actor(&self) -> String {
+                "fixture".into()
+            }
+            fn observe_or_start(
+                &mut self,
+                _: &graph::AttemptKey,
+                _: graph::NodeInput<'_>,
+                _: &graph::GraphRoute,
+                _: graph::AccessMode,
+                _: Option<&str>,
+                _: graph::Replay<'_>,
+            ) -> Result<graph::AttemptObservation, Self::Error> {
+                Ok(graph::AttemptObservation::Pending {
+                    attempt_ref: Some(self.0.clone()),
+                })
+            }
+        }
+        let fixture = SettlementFixture::resumed()?;
+        let factory = Factory {
+            context: Context::open(
+                fixture.roots.clone(),
+                &fixture.rig.home,
+                &fixture.rig.project,
+            )?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: fixture.rig.home.clone(),
+            cwd: fixture.rig.project.clone(),
+            assets: fixture.rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let call = provenant_run::Request {
+            clock: &factory.clock,
+            cancel: &cancel,
+        };
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        let node_source = provenant_run::resolve_git_base(&git, &fixture.rig.project, "HEAD")?
+            .parse::<provenant_core::GitOid>()?;
+
+        // 1. Dispatch writer attempt 1 on fixture.worktree with base = node_source.
+        let dispatch = provenant_run::Service::new(&fixture.store).dispatch(
+            provenant_run::DispatchRequest {
+                chair: None,
+                operation_id: "writer-quota-op".parse()?,
+                concurrency: 1,
+                lane_depth: 1,
+                parent_attempt: None,
+                tasks: vec![provenant_run::DispatchTask {
+                    context: None,
+                    build_heavy: false,
+                    title: Some("writer".into()),
+                    task_id: TaskId::from_bytes([60; 16]),
+                    prompt: "implement slice".into(),
+                    base: Some(node_source.to_string()),
+                    pinned_base: None,
+                    head: None,
+                    profile: Default::default(),
+                    route: provenant_run::RequestedRoute::Model {
+                        extra: Default::default(),
+                        provider: "fixture".into(),
+                        model: "fixture/model".into(),
+                        effort: None,
+                    },
+                    account: None,
+                    fallback: vec![],
+                    timeout_seconds: 30,
+                    delivery_id: None,
+                    deliver: None,
+                    worktree: Some(fixture.worktree.clone()),
+                    access: Default::default(),
+                }],
+            },
+            &fixture.rig.project,
+            &call,
+        )?;
+        let attempt_1 = fixture
+            .store
+            .pending_attempts(dispatch.run_id, &call)?
+            .first()
+            .ok_or("attempt_1")?
+            .attempt_id;
+        let attempt_1_record = fixture.store.record(attempt_1, &call)?;
+
+        let worktree_str = fixture.worktree.to_str().ok_or("worktree path")?;
+
+        // Attempt 1 commits head_1 in the worktree.
+        std::fs::write(fixture.worktree.join("first.txt"), b"first edit\n")?;
+        let output = fixture.rig.execute(&git, &["-C", worktree_str, "add", "first.txt"], None)?;
+        assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        let output = fixture.rig.execute(
+            &git,
+            &["-C", worktree_str, "commit", "-m", "first commit"],
+            None,
+        )?;
+        assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        let head_1 = provenant_run::resolve_git_base(&git, &fixture.worktree, "HEAD")?
+            .parse::<provenant_core::GitOid>()?;
+
+        // Attempt 1 hits provider quota: stages a policy retry and settles QuotaLimited.
+        let retry = provenant_run::PolicyRetry {
+            schema_version: 1,
+            cause: Some(provenant_run::PolicyCause::Quota),
+            action: Some(provenant_run::PolicyAction::Retry),
+            route: attempt_1_record.requested_route.clone(),
+            resume: false,
+            max_attempts: 2,
+            instruction: "Continue".into(),
+            not_before_unix_seconds: None,
+        };
+        fixture.store.stage_policy_retry(&attempt_1_record, &retry, &call)?;
+        publish_outcome(
+            &fixture.rig,
+            &fixture.store,
+            &attempt_1_record,
+            head_1,
+            Outcome::QuotaLimited,
+            &call,
+        )?;
+
+        // Policy retry queued attempt 2 in store.
+        let pending = fixture.store.pending_attempts(dispatch.run_id, &call)?;
+        assert_eq!(pending.len(), 1);
+        let attempt_2 = pending[0].attempt_id;
+        assert_eq!(pending[0].retry_of, Some(attempt_1));
+        let attempt_2_record = fixture.store.record(attempt_2, &call)?;
+
+        // Attempt 2 continues, commits head_2 in the worktree, and succeeds.
+        std::fs::write(fixture.worktree.join("second.txt"), b"second edit\n")?;
+        let output = fixture.rig.execute(&git, &["-C", worktree_str, "add", "second.txt"], None)?;
+        assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        let output = fixture.rig.execute(
+            &git,
+            &["-C", worktree_str, "commit", "-m", "second commit"],
+            None,
+        )?;
+        assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        let head_2 = provenant_run::resolve_git_base(&git, &fixture.worktree, "HEAD")?
+            .parse::<provenant_core::GitOid>()?;
+        publish_success(
+            &fixture.rig,
+            &fixture.store,
+            &attempt_2_record,
+            head_2,
+            &call,
+        )?;
+
+        // Check policy tail resolves to attempt_2.
+        assert_eq!(
+            fixture.store.policy_tail(attempt_1, &call)?.attempt_id,
+            attempt_2
+        );
+
+        // 2. Set up graph with writer node and dependent lens node.
+        let graph_id = "writer-quota-lens-graph";
+        let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "graph_id": graph_id,
+            "nodes": [
+                {
+                    "id": "writer",
+                    "prompt": "write",
+                    "access": "worktree_write",
+                    "worktree": fixture.worktree,
+                    "source": { "type": "commit", "commit": node_source.to_string() },
+                    "route": { "adapter": "fixture", "model": "fixture/model" }
+                },
+                {
+                    "id": "lens",
+                    "prompt": "review",
+                    "access": "read_only",
+                    "depends_on": ["writer"],
+                    "source": { "type": "node", "node": "writer" },
+                    "route": { "adapter": "fixture", "model": "fixture/model" }
+                }
+            ]
+        }))?;
+
+        let mut journal = graph::FileJournal::open(
+            &fixture.roots.state,
+            fixture.settled.project_id,
+            graph_id,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
+        journal.bind(graph::GraphExecution {
+            extra: Default::default(),
+            integration_base: Some(node_source),
+            directory: fixture.rig.project.clone(),
+            document: document.clone(),
+        })?;
+
+        // Seed attempt_1 for the writer node in the graph checkpoint.
+        let mut seed = Seed(format!(
+            "{}/{}",
+            factory.context.identity.host, attempt_1
+        ));
+        graph::advance_with_budget(
+            &document,
+            &mut seed,
+            &mut journal,
+            &Default::default(),
+            &Default::default(),
+        )?;
+
+        // Now advance with BoundGraphOwner.
+        let mut owner = BoundGraphOwner {
+            factory: &factory,
+            integration_base: Some(node_source),
+            integration_branch: None,
+            network: None,
+            exclude: Vec::new(),
+            budget,
+            cancel: &cancel,
+            prices: None,
+            tick: false,
+        };
+        let run = graph::advance_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &Default::default(),
+            &Default::default(),
+        )?;
+
+        // 3. Verification:
+        // - Writer node succeeded via continuation
+        let writer_progress = &run.checkpoint.nodes[0];
+        assert_eq!(writer_progress.state, graph::NodeState::Succeeded);
+        assert_eq!(
+            writer_progress
+                .outputs
+                .as_ref()
+                .and_then(|o| o.commit.as_ref()),
+            Some(&head_2.to_string())
+        );
+
+        // - Lens node was submitted, and its diff base stays node_source (not head_1)
+        let lens_progress = &run.checkpoint.nodes[1];
+        let lens_attempt_ref = lens_progress
+            .attempts
+            .first()
+            .and_then(|a| a.attempt_ref.as_ref())
+            .ok_or("lens attempt_ref")?;
+        let (_, lens_attempt_id) = lens_attempt_ref.split_once('/').ok_or("attempt split")?;
+        let lens_record = fixture.store.record(lens_attempt_id.parse()?, &call)?;
+        let lens_request = fixture.store.request(lens_record.run_id, &call)?;
+        let lens_task = lens_request
+            .tasks
+            .into_iter()
+            .find(|t| t.task_id == lens_record.task_id)
+            .ok_or("lens task")?;
+
+        let node_source_str = node_source.to_string();
+        let head_1_str = head_1.to_string();
+        let head_2_str = head_2.to_string();
+        assert_eq!(
+            lens_task.base.as_deref(),
+            Some(node_source_str.as_str()),
+            "lens diff base must stay the node source"
+        );
+        assert_ne!(
+            lens_task.base.as_deref(),
+            Some(head_1_str.as_str()),
+            "lens diff base must not advance to predecessor head"
+        );
+        assert_eq!(
+            lens_task.head.as_deref(),
+            Some(head_2_str.as_str()),
+            "lens subject commit must be continuation head"
+        );
+
+        Ok(())
+    }
 }
