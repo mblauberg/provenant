@@ -906,12 +906,26 @@ mod admission_tests {
     }
     #[test]
     fn lapsed_window_requires_headroom_to_clear_a_newer_refusal() {
-        for (used, allowed) in [(9700, false), (9600, false), (9500, false), (9499, true)] {
+        for (used, partial, calibrated_pool, expiry, allowed) in [
+            (9700, false, "pool-a", 5100, false),
+            (9600, false, "pool-a", 5100, false),
+            (9500, false, "pool-a", 5100, false),
+            (9499, false, "pool-a", 5100, true),
+            (9499, true, "pool-a", 5100, true),
+            (9499, true, "other", 5100, false),
+            (9499, true, "pool-a", 5000, false),
+        ] {
             let mut record = record(QuotaStatus::Available);
             let snapshot = record.snapshot.as_mut().unwrap();
             snapshot.observed_unix_seconds = 4990;
             snapshot.windows[0].used_basis_points = used;
             snapshot.windows[0].resets_unix_seconds = Some(1400);
+            snapshot.details = Some(crate::QuotaDetails {
+                coverage: partial.then(|| "partial".into()),
+                calibrated_windows: vec![calibrated_pool.into()],
+                calibration_expires_unix_seconds: Some(expiry),
+                ..Default::default()
+            });
             record.refusals.push(Refusal {
                 extra: Default::default(),
                 account: record.account.clone(),
@@ -920,18 +934,20 @@ mod admission_tests {
                 observed_unix_seconds: 4980,
                 resets_unix_seconds: None,
             });
+            let admission = Admission {
+                policies: crate::source::TEST_POLICIES,
+                now_unix_seconds: 5000,
+                records: std::slice::from_ref(&record),
+                pools: &["pool-a".into()],
+            };
             assert_eq!(
-                Admission {
-                    policies: crate::source::TEST_POLICIES,
-                    now_unix_seconds: 5000,
-                    records: &[record],
-                    pools: &["pool-a".into()],
-                }
-                .check(&route())
-                .is_ok(),
+                !admission
+                    .refusal_holds("claude", Some(&record), &record.refusals[0])
+                    .unwrap(),
                 allowed,
-                "used={used}"
+                "used={used}, partial={partial}, pool={calibrated_pool}, expiry={expiry}"
             );
+            assert_eq!(admission.check(&route()).is_ok(), allowed);
         }
     }
     #[test]

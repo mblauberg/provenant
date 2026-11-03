@@ -151,6 +151,29 @@ fn show_is_read_only_and_tick_publishes_partial_coverage() -> Result {
 }
 
 #[test]
+fn readiness_write_failure_warns_and_keeps_the_account_commit() -> Result {
+    let rig = quota_rig()?;
+    std::fs::write(rig.state.join("readiness"), b"blocked directory")?;
+    let output = rig.command(&["quota", "tick", "--json"])?;
+    assert_eq!(code(&output), 0);
+    assert!(
+        String::from_utf8_lossy(&output.stderr.bytes)
+            .contains("Warning: could not sync quota readiness:")
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let key = report["data"]["accounts"][0]["account"]["account_key"]
+        .as_str()
+        .ok_or("key")?;
+    let bytes = std::fs::read(rig.state.join("quota").join(key).join("codex.json"))?;
+    let record = provenant_quota::AccountRecord::decode(&bytes)?;
+    assert_eq!(
+        record.last_error,
+        Some(provenant_quota::ProbeFailure::MissingCli)
+    );
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
 fn disabled_modes_never_read_auth_or_invoke_external_tools() -> Result {
     use std::{fs, os::unix::fs::PermissionsExt};
     let mut rig = quota_rig()?;
