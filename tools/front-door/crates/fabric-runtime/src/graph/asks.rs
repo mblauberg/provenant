@@ -477,7 +477,10 @@ pub(super) fn decide<R: AttemptOwner, J: GraphJournal>(
                 return Ok(());
             }
             let session = decide_session(spec, plan.decision_session.as_deref())
-                .ok_or(GraphError::BadCheckpoint)?
+                .ok_or_else(|| GraphError::BadCheckpoint {
+                    node: node.id.clone(),
+                    invariant: "decision must name an inbox session",
+                })?
                 .to_owned();
             // A deadline is fixed before the ask exists. Without a clock the
             // advance is refused and retried, so the timeout is never lost.

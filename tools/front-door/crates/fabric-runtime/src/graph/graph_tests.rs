@@ -211,6 +211,7 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
         context: None,
         extra: Default::default(),
         composite_members: Vec::new(),
+        topology_present: Default::default(),
         distinct_from: None,
         distinct_strength: None,
         dispositions: Vec::new(),
@@ -1837,7 +1838,7 @@ fn gate_checkpoint_rejects_attempts_inconsistent_results_and_forged_skips() {
         journal.0 = Some(corrupt);
         assert!(matches!(
             advance(&document, &mut owner, &mut journal),
-            Err(GraphError::BadCheckpoint)
+            Err(GraphError::BadCheckpoint { .. })
         ));
     }
 }
@@ -2840,6 +2841,7 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
         context: None,
         extra: Default::default(),
         composite_members: Vec::new(),
+        topology_present: Default::default(),
         distinct_from: None,
         distinct_strength: None,
         dispositions: Vec::new(),
@@ -3078,6 +3080,7 @@ fn pending_and_unknown_keep_observing_the_same_route_without_fallback() {
             context: None,
             extra: Default::default(),
             composite_members: Vec::new(),
+            topology_present: Default::default(),
             distinct_from: None,
             distinct_strength: None,
             dispositions: Vec::new(),
@@ -3416,6 +3419,7 @@ fn terminal_task_failure_does_not_try_a_fallback_route() {
         context: None,
         extra: Default::default(),
         composite_members: Vec::new(),
+        topology_present: Default::default(),
         distinct_from: None,
         distinct_strength: None,
         dispositions: Vec::new(),
@@ -4019,7 +4023,7 @@ fn foreign_output_schema_is_rejected_on_resume() {
         .schema_version = 3;
     assert!(matches!(
         advance(&document, &mut owner, &mut journal),
-        Err(GraphError::BadCheckpoint)
+        Err(GraphError::BadCheckpoint { .. })
     ));
 }
 
@@ -4138,7 +4142,7 @@ fn cap_failure_on_fallback_preserves_prior_attempt_outcome() {
             &limits,
             &Default::default()
         ),
-        Err(GraphError::BadCheckpoint)
+        Err(GraphError::BadCheckpoint { .. })
     ));
 }
 
