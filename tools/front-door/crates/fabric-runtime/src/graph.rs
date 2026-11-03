@@ -119,6 +119,21 @@ pub trait CiStatus {
 pub trait AttemptOwner {
     type Error: Error + 'static;
 
+    /// Resolve the existing infrastructure allowance once, before admission.
+    /// Hosts without routing policy retain the legacy explicit-route behavior.
+    fn retry_allowance(
+        &self,
+        _node: &provenant_records::ExtraFields,
+        _graph: &provenant_records::ExtraFields,
+    ) -> Result<Option<(u8, String)>, Self::Error> {
+        Ok(None)
+    }
+
+    /// Infrastructure successors already published in this run lineage.
+    fn retry_successors(&mut self, _attempt_ref: &str) -> Result<u64, Self::Error> {
+        Ok(0)
+    }
+
     /// Pin the integration branch at the instant this node is first admitted.
     fn integration_head(&mut self) -> Result<Option<String>, Self::Error> {
         Ok(None)
@@ -1279,6 +1294,17 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 journal.save(&checkpoint).map_err(GraphError::Journal)?;
                 continue;
             }
+            if !checkpoint.nodes[node_index].extra.contains_key("retry")
+                && let Some((retries, origin)) = owner
+                    .retry_allowance(&node.extra, &plan.extra)
+                    .map_err(GraphError::Run)?
+            {
+                checkpoint.nodes[node_index].extra.insert(
+                    "retry".into(),
+                    serde_json::json!({"retries":retries,"origin":origin}),
+                );
+                journal.save(&checkpoint).map_err(GraphError::Journal)?;
+            }
             loop {
                 // A persisted launch wait defers this node until its own wake
                 // on every advance, tick or manual, so a failing host that
@@ -1307,6 +1333,45 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     }
                     Some(_) => break,
                 };
+                let allowance = progress
+                    .extra
+                    .get("retry")
+                    .and_then(|value| value["retries"].as_u64());
+                let mut spent = progress.attempts.len().saturating_sub(1) as u64;
+                for reference in progress
+                    .attempts
+                    .iter()
+                    .filter_map(|attempt| attempt.attempt_ref.as_deref())
+                {
+                    spent = spent.saturating_add(
+                        owner.retry_successors(reference).map_err(GraphError::Run)?,
+                    );
+                }
+                if route_index > 0
+                    && progress
+                        .attempts
+                        .last()
+                        .is_some_and(|attempt| attempt.state == AttemptState::Terminal)
+                    && allowance.is_some_and(|limit| spent >= limit)
+                {
+                    let progress = &mut checkpoint.nodes[node_index];
+                    progress.state = NodeState::Failed;
+                    progress.advance_error_code = Some("settlement_retries_exhausted".into());
+                    progress.advance_error =
+                        Some("Cumulative infrastructure-successor allowance exhausted".into());
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                    break;
+                }
+                // A new configured route consumes one successor; observation
+                // of an existing key consumes none.
+                let next_cost = u64::from(
+                    progress
+                        .attempts
+                        .last()
+                        .is_some_and(|attempt| attempt.state == AttemptState::Terminal),
+                );
+                let settlement_retries = allowance
+                    .map(|limit| limit.saturating_sub(spent).saturating_sub(next_cost) as u8);
                 let route = node
                     .routes
                     .get(route_index)
@@ -1612,6 +1677,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 let observation = match owner.observe_or_start(
                     &key,
                     NodeInput {
+                        settlement_retries,
+                        family_separation: node.distinct_from.is_some(),
                         context: node_context(&plan, node),
                         read_roots: &node.read_roots,
                         distinct_from_attempts: &distinct_attempts,

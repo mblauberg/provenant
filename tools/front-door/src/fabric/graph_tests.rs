@@ -1414,3 +1414,63 @@ mod policy_tail_confirmation_tests {
         assert_eq!(calls, ceiling + 1);
     }
 }
+
+#[cfg(test)]
+#[allow(dead_code, reason = "the custom worktree driver compiles helpers without libtest functions")]
+mod retry_allowance_tests {
+    use provenant_fabric_runtime::graph;
+    struct PolicyOwner((u8, String));
+    impl graph::AttemptOwner for PolicyOwner {
+        type Error = std::convert::Infallible;
+        fn actor(&self) -> String { "test".into() }
+        fn retry_allowance(&self, _: &provenant_records::ExtraFields, _: &provenant_records::ExtraFields) -> Result<Option<(u8, String)>, Self::Error> { Ok(Some(self.0.clone())) }
+        fn observe_or_start(&mut self, _: &graph::AttemptKey, _: graph::NodeInput<'_>, _: &graph::GraphRoute, _: graph::AccessMode, _: Option<&str>, _: graph::Replay<'_>) -> Result<graph::AttemptObservation, Self::Error> {
+            Ok(graph::AttemptObservation::Terminal { attempt_ref: None, outcome: graph::AttemptOutcome::Succeeded, launched: false, result: None, result_warning: None, result_path: None, branch: None, commit: None })
+        }
+    }
+    #[derive(Default)]
+    struct Journal(Option<graph::GraphCheckpoint>);
+    impl graph::GraphJournal for Journal {
+        type Error = std::convert::Infallible;
+        fn load(&mut self, _: &str) -> Result<Option<graph::GraphCheckpoint>, Self::Error> { Ok(self.0.clone()) }
+        fn save(&mut self, checkpoint: &graph::GraphCheckpoint) -> Result<(), Self::Error> { self.0 = Some(checkpoint.clone()); Ok(()) }
+    }
+    fn assert_display(policy: (u8, String)) -> Result<(), Box<dyn std::error::Error>> {
+        let document = serde_json::from_value(serde_json::json!({"schema_version":1,"graph_id":"policy","nodes":[{"id":"read","prompt":"inspect","access":"read_only","route":{"alias":"junior"}}]}))?;
+        let run = graph::advance_with_budget(&document, &mut PolicyOwner(policy.clone()), &mut Journal::default(), &Default::default(), &Default::default())?;
+        assert!(run.checkpoint.successful());
+        let human = super::graph_human::graph_human_full(&run);
+        assert!(human.contains(&format!("settlement_retries={} origin={}", policy.0, policy.1)), "{human}");
+        Ok(())
+    }
+    #[test]
+    fn graph_retry_allowance_resolves_default_host_preset_and_node_with_origin() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
+        inputs.state_dir = Some(root.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        std::fs::create_dir_all(roots.state.as_path())?;
+        let empty = Default::default();
+        assert_eq!(super::graph_retry_allowance(&empty, &empty, &roots)?, (2, "shipped_default".into()));
+        std::fs::write(roots.state.as_path().join("config.toml"), "schema_version=1\n[domains.routing]\nsettlement_retries=4\n")?;
+        assert_eq!(super::graph_retry_allowance(&empty, &empty, &roots)?, (4, "host_config".into()));
+        let config = provenant_config::read_with_domains(&roots, &provenant_cli::domains::SECTIONS)?;
+        let profile = config.dispatch_profile(&["domains.routing.settlement_retries=1".into()])?;
+        assert_eq!(profile.knobs["domains.routing.settlement_retries"], 1);
+        let preset = serde_json::from_value(serde_json::json!({"retry":{"retries":3}}))?;
+        assert_eq!(super::graph_retry_allowance(&empty, &preset, &roots)?, (3, "preset".into()));
+        let node = serde_json::from_value(serde_json::json!({"retry":{"retries":0}}))?;
+        assert_eq!(super::graph_retry_allowance(&node, &preset, &roots)?, (0, "node".into()));
+        let inherited = serde_json::from_value(serde_json::json!({"preset_retry":{"retries":0}}))?;
+        assert_eq!(super::graph_retry_allowance(&inherited, &preset, &roots)?, (0, "preset".into()));
+        for (node, graph) in [(&empty, &empty), (&empty, &preset), (&node, &preset), (&inherited, &preset)] {
+            assert_display(super::graph_retry_allowance(node, graph, &roots)?)?;
+        }
+        for retry in [serde_json::json!({"retries":-1}), serde_json::json!({"retries":33}), serde_json::json!({"retries":"two"})] {
+            let invalid = serde_json::from_value(serde_json::json!({"retry":retry}))?;
+            assert!(super::graph_retry_allowance(&invalid, &empty, &roots).is_err());
+        }
+        Ok(())
+    }
+}

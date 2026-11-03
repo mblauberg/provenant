@@ -1028,6 +1028,19 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
         run::Providers::assess_result(registry, &task, &record, &capacity, None, None, 1)
     };
     assert!(assess_recovered(&rooted)?.retry.is_none());
+    let mut profiled = task.clone();
+    profiled.profile = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?
+        .dispatch_profile(&[])?;
+    assert_eq!(
+        profiled.profile.knobs["domains.routing.settlement_retries"],
+        2
+    );
+    assert!(
+        run::Providers::assess_result(&rooted, &profiled, &record, &capacity, None, None, 1)?
+            .retry
+            .is_none()
+    );
+
     assert!(assess_recovered(&Registry::default())?.retry.is_some());
     const NOW: i64 = 1_800_000_000;
     let assess_at = |record: &run::AttemptRecord,
@@ -1102,6 +1115,31 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
     assert_eq!(writer.route, fallback.route);
     assert!(writer.instruction.contains("git status"));
     assert!(writer.instruction.contains("already pushed"));
+    // The settlement assessor cannot establish the extra graph writer safety
+    // evidence. It must not redraw an alias until the graph has checked it.
+    fallback.context = Some(provenant_records::run::WorkContext {
+        graph_id: Some("graph".into()),
+        node_id: Some("writer".into()),
+        ..Default::default()
+    });
+    let graph_writer = assess(&fallback, &sessionless, 1, false);
+    assert_eq!(graph_writer.cause, Some(run::PolicyCause::Capacity));
+    assert!(graph_writer.retry.is_none());
+    let mut separated = fallback.clone();
+    separated.route = run::RequestedRoute::Review {
+        extra: Default::default(),
+        name: "implement".into(),
+        effort: None,
+        excluded_families: vec!["other".into()],
+        distinct_families: true,
+        require_distinct: true,
+    };
+    assert!(assess(&separated, &sessionless, 1, false).retry.is_none());
+    separated.access.write_roots.clear();
+    assert!(assess(&separated, &sessionless, 1, false).retry.is_none());
+    assert!(assess(&fallback, &capacity, 1, false).retry.unwrap().resume);
+    fallback.access.write_roots.clear();
+    assert!(assess(&fallback, &sessionless, 1, false).retry.is_some());
     // Other model failures are not capacity.
     let unavailable = decoded(
         run::Outcome::ModelUnavailable,
@@ -1116,6 +1154,10 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
         None,
         "You've hit your weekly limit",
     );
+    fallback.access.write_roots.push(temp.path().to_owned());
+    let graph_writer_quota = assess(&fallback, &quota, 1, true);
+    assert_eq!(graph_writer_quota.cause, Some(run::PolicyCause::Quota));
+    assert!(graph_writer_quota.retry.is_none());
     // A named route on its only account, or every other account spent,
     // has nowhere to go: a redraw could reach the spent account again
     // through another model.
@@ -1143,6 +1185,65 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
     );
     exact.account = Some("work".into());
     assert!(assess(&exact, &quota, 1, true).retry.is_none());
+    let mut graph_reader = task.clone();
+    graph_reader.context = Some(provenant_records::run::WorkContext {
+        graph_id: Some("graph".into()),
+        node_id: Some("reader".into()),
+        ..Default::default()
+    });
+    for outcome in [
+        run::Outcome::QuotaLimited,
+        run::Outcome::RateLimited,
+        run::Outcome::AuthRequired,
+        run::Outcome::ModelUnavailable,
+    ] {
+        let refused = decoded(outcome, None, "refused");
+        let retry = assess(&graph_reader, &refused, 1, false)
+            .retry
+            .ok_or("graph alias redraw")?;
+        assert_eq!(retry.route, graph_reader.route);
+        assert!(!retry.resume);
+        assert_eq!(retry.max_attempts, 3);
+        assert!(assess(&graph_reader, &refused, 3, true).retry.is_none());
+    }
+    for outcome in [
+        run::Outcome::Failed,
+        run::Outcome::ReviewRequired,
+        run::Outcome::Lost,
+        run::Outcome::Unsettled,
+    ] {
+        assert!(
+            assess(
+                &graph_reader,
+                &decoded(outcome, None, "uncertain or task failure"),
+                1,
+                true
+            )
+            .retry
+            .is_none()
+        );
+    }
+    graph_reader
+        .profile
+        .overrides
+        .push("domains.routing.settlement_retries=0".into());
+    graph_reader.profile.knobs.insert(
+        "domains.routing.settlement_retries".into(),
+        serde_json::json!(0),
+    );
+    assert!(assess(&graph_reader, &quota, 1, true).retry.is_none());
+    graph_reader.profile.knobs.insert(
+        "domains.routing.settlement_retries".into(),
+        serde_json::json!(1),
+    );
+    assert_eq!(
+        assess(&graph_reader, &quota, 1, true)
+            .retry
+            .unwrap()
+            .max_attempts,
+        2
+    );
+    assert!(assess(&graph_reader, &quota, 2, true).retry.is_none());
     // Zero retries turns the behaviour off.
     let off = provenant_routing::RoutingConfig {
         settlement_retries: 0,

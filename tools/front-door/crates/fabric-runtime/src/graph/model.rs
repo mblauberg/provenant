@@ -897,6 +897,10 @@ pub struct Replay<'a> {
 
 /// User-facing content for a graph node's submitted task.
 pub struct NodeInput<'a> {
+    /// Remaining portion of the graph's single infrastructure allowance.
+    pub settlement_retries: Option<u8>,
+    /// A family-constrained node never redraws its alias after settlement.
+    pub family_separation: bool,
     pub context: provenant_records::run::WorkContext,
     pub read_roots: &'a [String],
     /// Attempts of the source writer whose model families must be avoided.

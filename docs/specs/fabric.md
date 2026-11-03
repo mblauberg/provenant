@@ -1309,9 +1309,19 @@ launches never fall back; after launch only read-only nodes may fall back. A fai
 writer keeps its worktree. Graph writers deliver only when their node explicitly requests it.
 An unreadable or integrity-invalid result fails the node without fallback,
 regardless of the provider outcome.
+Read-only alias nodes re-resolve the same pool through sealed run-policy
+successors, excluding refused members with `ExclusionSelector`. Terminal
+receipts and `retry_of` links remain immutable. Account refusals retain their
+evidenced scope. Exact pins and family-constrained nodes never redraw members.
+The existing `settlement_retries` allowance (default 2), overridden by preset
+then node `retry.retries`, is cumulative across run successors and configured
+graph-route transitions. First admission retains its effective value and origin
+for full graph status; replay does not replenish it.
 - Why: retrying a writer elsewhere would duplicate edits.
 - Test: `crates/fabric-runtime/src/graph.rs::writer_limit_after_launch_never_tries_a_second_route`;
-  `::terminal_task_failure_does_not_try_a_fallback_route`
+  `::terminal_task_failure_does_not_try_a_fallback_route`;
+  `tests/dispatch_provider.rs::graph_read_only_alias_redraws_after_quota_and_preserves_both_receipts`;
+  `crates/fabric-runtime/src/graph/graph_tests.rs::cumulative_allowance_counts_run_successors_and_survives_observation_replay`
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
 ### Settlement advances graphs

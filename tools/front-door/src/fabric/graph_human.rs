@@ -44,6 +44,13 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
             human.push_str(&format!(" ({})", bounded_reason(reason)));
         }
         if full {
+            if let Some(retry) = node.extra.get("retry") {
+                human.push_str(&format!(
+                    " settlement_retries={} origin={}",
+                    retry["retries"],
+                    retry["origin"].as_str().unwrap_or("unknown")
+                ));
+            }
             if let Some(attempt) = node.attempts.last() {
                 let route = &attempt.route;
                 for (name, value) in [

@@ -163,11 +163,47 @@ pub(super) fn assess_settlement_retry(
     policy_attempt: u64,
     now_unix_seconds: i64,
 ) -> run::ResultAssessment {
-    let max_attempts = u64::from(config.settlement_retries) + 1;
+    // The registry also fills a default knob with this name. Only an explicit
+    // dispatch override (the graph's sealed remaining allowance) wins over
+    // the host routing section; an unrelated filled default cannot shadow it.
+    let allowance = task
+        .profile
+        .overrides
+        .iter()
+        .any(|entry| entry.starts_with("domains.routing.settlement_retries="))
+        .then(|| {
+            task.profile
+                .knobs
+                .get("domains.routing.settlement_retries")
+                .and_then(serde_json::Value::as_u64)
+        })
+        .flatten()
+        .unwrap_or(u64::from(config.settlement_retries))
+        .min(u64::from(provenant_routing::MAX_SETTLEMENT_RETRIES));
+    let max_attempts = allowance + 1;
     let capacity = decoded.outcome == run::Outcome::ModelUnavailable
         && decoded.reason.as_deref().is_some_and(capacity_reason);
-    let quota = decoded.outcome == run::Outcome::QuotaLimited;
-    if !(capacity || quota) {
+    let quota = matches!(
+        decoded.outcome,
+        run::Outcome::QuotaLimited | run::Outcome::RateLimited
+    );
+    let graph_pool = task
+        .context
+        .as_ref()
+        .is_some_and(|context| context.graph_id.is_some())
+        && !run::Service::has_writes(task.writer.is_some(), &task.access.write_roots)
+        && task.account.is_none()
+        && provenant_routing::may_redraw(
+            !matches!(task.route, run::RequestedRoute::Named { .. }),
+            matches!(task.route, run::RequestedRoute::Review { .. }),
+            provenant_routing::RefusalKind::Infrastructure,
+        );
+    let unavailable = graph_pool
+        && matches!(
+            decoded.outcome,
+            run::Outcome::AuthRequired | run::Outcome::ModelUnavailable
+        );
+    if !(capacity || quota || unavailable) {
         let cause = record.applied_route.as_ref().and_then(|route| {
             let model = ModelId::parse(route.model.as_deref()?).ok()?;
             let now = WallTime::from_unix_seconds(now_unix_seconds).ok()?;
@@ -184,8 +220,12 @@ pub(super) fn assess_settlement_retry(
     }
     let typed_cause = if capacity {
         run::PolicyCause::Capacity
-    } else {
+    } else if quota {
         run::PolicyCause::Quota
+    } else if decoded.outcome == run::Outcome::AuthRequired {
+        run::PolicyCause::AuthRequired
+    } else {
+        run::PolicyCause::AdapterUnavailable
     };
     let Some(route) = record.applied_route.as_ref() else {
         return run::ResultAssessment {
@@ -193,7 +233,7 @@ pub(super) fn assess_settlement_retry(
             ..Default::default()
         };
     };
-    if config.settlement_retries == 0 || policy_attempt >= max_attempts {
+    if allowance == 0 || policy_attempt >= max_attempts {
         return run::ResultAssessment {
             cause: Some(typed_cause),
             ..Default::default()
@@ -215,7 +255,30 @@ pub(super) fn assess_settlement_retry(
             .as_deref()
             .and_then(provenant_records::AdapterSpec::get)
             .is_some_and(|spec| spec.launch.resume);
-    let (route_choice, resume) = if capacity && session {
+    // A graph writer may only redraw after the graph has verified released
+    // custody, its pinned source, a clean checkout and no publication. The
+    // settlement assessor has none of that evidence, so it must not redraw an
+    // alias or switch accounts on its own. Family-constrained routes must not
+    // be redrawn either.
+    // Session continuation stays on the applied model.
+    if task
+        .context
+        .as_ref()
+        .is_some_and(|context| context.graph_id.is_some())
+        && ((quota && writes)
+            || (capacity
+                && !session
+                && (matches!(task.route, run::RequestedRoute::Review { .. })
+                    || (writes && matches!(task.route, run::RequestedRoute::Named { .. })))))
+    {
+        return run::ResultAssessment {
+            cause: Some(typed_cause),
+            ..Default::default()
+        };
+    }
+    let (route_choice, resume) = if graph_pool {
+        (Some(task.route.clone()), false)
+    } else if capacity && session {
         (applied(), true)
     } else if quota {
         // A pinned account is the caller's choice. Otherwise another unspent
@@ -251,7 +314,7 @@ pub(super) fn assess_settlement_retry(
     };
     // Linear backoff with up to a quarter more, drawn from the attempt ID so
     // lanes that hit the same capacity error do not retry in step.
-    let backoff_seconds = if capacity {
+    let backoff_seconds = if capacity && !graph_pool {
         let base = config.capacity_retry_seconds.saturating_mul(policy_attempt);
         let draw = u64::from_le_bytes(
             record.attempt_id.as_bytes()[..8]
@@ -266,8 +329,10 @@ pub(super) fn assess_settlement_retry(
     };
     let cause = if capacity {
         "the provider was at capacity"
-    } else {
+    } else if quota {
         "the account's usage limit was reached"
+    } else {
+        "the provider was unavailable"
     };
     let instruction = if resume {
         format!(

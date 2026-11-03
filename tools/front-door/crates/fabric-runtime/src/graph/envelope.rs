@@ -192,7 +192,12 @@ fn node_bound(
     let ci = matches!(node.condition, Some(GateCondition::Ci { .. }));
     let boundary = gate || node.loop_body.is_some();
     let skeleton = NodeProgress {
-        extra: Default::default(),
+        extra: [(
+            "retry".into(),
+            serde_json::json!({"retries":u8::MAX,"origin":"shipped_default"}),
+        )]
+        .into_iter()
+        .collect(),
         children: node.composite_members.clone(),
         source_commit: node.source.as_ref().map(|_| String::new()),
         fragment: (node.plan.is_some() && !admitted).then(String::new),

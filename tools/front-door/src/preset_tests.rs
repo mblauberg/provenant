@@ -4181,3 +4181,40 @@ fn big_batch_without_scout_matches_golden() {
     }
     assert_eq!(actual, std::fs::read_to_string(path).unwrap_or_default());
 }
+
+#[test]
+fn retry_allowances_survive_preset_and_node_expansion() {
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "repo",
+            "retry-test",
+            "retry={retries=3}\nstages=[{id='read',tier='junior',retry={retries=1}}]\n",
+        )
+        .unwrap();
+    let result = expand(&layers, "retry-test", "brief", &[]).unwrap();
+    assert_eq!(result.document["retry"]["retries"], 3);
+    assert_eq!(result.document["nodes"][0]["retry"]["retries"], 1);
+    assert!(
+        serde_json::from_value::<provenant_fabric_runtime::graph::GraphDocument>(result.document)
+            .is_ok()
+    );
+}
+
+#[test]
+fn nested_presets_retain_the_nearest_retry_default() {
+    let mut layers = Layers::empty();
+    layers.insert("repo", "child-retry", "retry={retries=0}\nstages=[{id='read',tier='junior',fallback_stage={tier='junior'}}]\n").unwrap();
+    layers.insert("repo", "wrapper-retry", "retry={retries=4}\nstages=[{id='nested',preset='child-retry'},{id='outer',tier='junior'}]\n").unwrap();
+    let result = expand(&layers, "wrapper-retry", "brief", &[]).unwrap();
+    let nodes = result.document["nodes"].as_array().unwrap();
+    assert_eq!(
+        nodes[0]["composite"]["nodes"][0]["preset_retry"]["retries"],
+        0
+    );
+    assert_eq!(
+        nodes[0]["composite"]["nodes"][0]["fallback_stage"]["nodes"][0]["preset_retry"]["retries"],
+        0
+    );
+    assert_eq!(nodes[1]["preset_retry"]["retries"], 4);
+}

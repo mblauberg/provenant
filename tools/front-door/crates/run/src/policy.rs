@@ -22,6 +22,8 @@ pub enum PolicyCause {
     Unfinished,
     Capacity,
     Quota,
+    AuthRequired,
+    AdapterUnavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,11 +94,9 @@ fn handoff_brief(handoff: &provenant_records::handoff::Handoff) -> String {
 }
 
 impl RunStore {
-    pub(crate) fn policy_attempt_number(
-        &self,
-        record: &AttemptRecord,
-        call: &Request<'_>,
-    ) -> Result<u64> {
+    /// Ordinal in this task's run, including legacy successors whose cause is
+    /// unknown. Readers must not grant a fresh budget for an unknown cause.
+    pub fn policy_attempt_number(&self, record: &AttemptRecord, call: &Request<'_>) -> Result<u64> {
         call.check()?;
         let first: Option<i64> = {
             self.db.query_row(
@@ -167,6 +167,40 @@ impl RunStore {
         }
         Err(RunError::Validation("policy successor chain limit"))
     }
+    /// Immutable infrastructure refusals preceding this attempt. The launcher
+    /// projects these into routing's existing scoped exclusions, never a new journal.
+    pub fn policy_refusals(&self, id: AttemptId, call: &Request<'_>) -> Result<Vec<AttemptRecord>> {
+        let mut current = self.record(id, call)?;
+        let mut refused = Vec::new();
+        for _ in 0..POLICY_ATTEMPT_CEILING {
+            if !matches!(
+                current.continuation.as_deref(),
+                Some("policy_continuation" | "policy_fallback")
+            ) {
+                return Ok(refused);
+            }
+            let Some(prior) = current.retry_of else {
+                return Ok(refused);
+            };
+            let prior = self.record(prior, call)?;
+            if self.staged_policy_retry(&prior)?.is_some_and(|decision| {
+                matches!(
+                    decision.cause,
+                    Some(
+                        PolicyCause::Quota
+                            | PolicyCause::Capacity
+                            | PolicyCause::AuthRequired
+                            | PolicyCause::AdapterUnavailable
+                    )
+                )
+            }) {
+                refused.push(prior.clone());
+            }
+            current = prior;
+        }
+        Err(RunError::Validation("policy refusal chain limit"))
+    }
+
     /// Seal the retry decision; true when this call staged it.
     pub(crate) fn stage_policy_retry(
         &self,
@@ -747,7 +781,7 @@ mod tests {
         let store = RunStore::open(&context(temp.path())?, &call(&clock, &cancel))?;
         let input = input();
         store.create(&input, &call(&clock, &cancel))?;
-        let retry = PolicyRetry {
+        let mut retry = PolicyRetry {
             schema_version: 1,
             cause: Some(PolicyCause::Capacity),
             action: Some(PolicyAction::Retry),
@@ -765,6 +799,11 @@ mod tests {
         // Each settled attempt seals a retry and queues its successor; the
         // second successor must not collide with the first in the same run.
         for number in 2..=3 {
+            // A retained legacy successor spends allowance without becoming
+            // typed exclusion evidence.
+            if number == 3 {
+                retry.cause = None;
+            }
             let at = i64::try_from(number)? * 100;
             publication.started_at = Some(provenant_core::WallTime::from_micros(at + 50)?);
             publication.finished_at = provenant_core::WallTime::from_micros(at + 90)?;
@@ -787,6 +826,16 @@ mod tests {
             )?;
             let queued = store.pending_attempts(input.run_id, &call(&clock, &cancel))?;
             assert_eq!(queued.len(), 1);
+            assert_eq!(
+                store
+                    .policy_refusals(queued[0].attempt_id, &call(&clock, &cancel))?
+                    .len(),
+                1
+            );
+            assert_eq!(
+                store.policy_attempt_number(&queued[0], &call(&clock, &cancel))?,
+                number
+            );
             assert_eq!(queued[0].attempt_number, number);
             assert_eq!(queued[0].retry_of, Some(id));
             id = queued[0].attempt_id;
