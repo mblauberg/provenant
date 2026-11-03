@@ -221,6 +221,28 @@ impl Git<'_> {
             recovery,
             snapshot,
             comparison_base,
+            None,
+            quarantine_dir,
+            exempt,
+        )
+    }
+
+    /// Attribute committed changes through the pinned writer head while observing the live worktree.
+    pub fn quarantine_instructions_at(
+        &self,
+        recovery: &Recovery,
+        snapshot: &InstructionSnapshot,
+        comparison_base: GitOid,
+        writer_head: GitOid,
+        quarantine_dir: &Directory,
+        exempt: &ReviewExempt,
+    ) -> Result<QuarantineOutcome, QuarantineError> {
+        quarantine_instruction_changes(
+            self,
+            recovery,
+            snapshot,
+            comparison_base,
+            Some(writer_head),
             quarantine_dir,
             exempt,
         )
@@ -586,6 +608,7 @@ fn quarantine_instruction_changes(
     recovery: &Recovery,
     snapshot: &InstructionSnapshot,
     comparison_base: GitOid,
+    writer_head: Option<GitOid>,
     quarantine_dir: &Directory,
     exempt: &ReviewExempt,
 ) -> Result<QuarantineOutcome, QuarantineError> {
@@ -675,6 +698,7 @@ fn quarantine_instruction_changes(
     refuse_index_lock(repo.private_dir())?;
     let index_before = read_index_fingerprint(repo.private_dir())?;
     let head_before = git.head()?;
+    let writer_head = writer_head.unwrap_or(head_before);
     let status = git.read(GitRead::StatusIncludingIgnored)?;
     let mut status_paths = parse_porcelain_v2_z(&status.stdout.bytes)?;
     // Only changes introduced on the target since the shared history can be
@@ -693,9 +717,9 @@ fn quarantine_instruction_changes(
         .map(|upstream_base| (comparison_base, upstream_base))
         .unwrap_or((snapshot.head, snapshot.head))
     };
-    let mut own_paths = git.protected_changed_paths(snapshot.head, head_before, exempt)?;
+    let mut own_paths = git.protected_changed_paths(snapshot.head, writer_head, exempt)?;
     if comparison_base != snapshot.head {
-        let delivery_paths = git.protected_changed_paths(comparison_base, head_before, exempt)?;
+        let delivery_paths = git.protected_changed_paths(comparison_base, writer_head, exempt)?;
         own_paths.retain(|path| delivery_paths.contains(path));
     }
     let mut review_paths = own_paths.clone();
@@ -731,6 +755,21 @@ fn quarantine_instruction_changes(
                 own_paths.push(path.clone());
             }
             review_paths.push(path);
+        }
+    }
+    // Clean changes committed after this writer belong to the later tip, not
+    // this writer. Still examine dirty paths and paths this writer changed.
+    if writer_head != head_before {
+        for path in git.protected_changed_paths(writer_head, head_before, exempt)? {
+            if !own_paths.contains(&path)
+                && !status_paths.iter().any(|record| {
+                    record.path == path_bytes(&path)
+                        || record.original_path.as_deref() == Some(path_bytes(&path))
+                })
+                && matches_tree(git, head_before, &path)?
+            {
+                clean_upstream_paths.push(path);
+            }
         }
     }
     let upstream_paths = clean_upstream_paths;
@@ -774,7 +813,7 @@ fn quarantine_instruction_changes(
         git.executor,
         GitRead::MergeBaseIsAncestor {
             ancestor: snapshot.head,
-            tip: head_before,
+            tip: writer_head,
         },
         repo,
         git.runtime,
@@ -908,7 +947,7 @@ fn quarantine_instruction_changes(
     } else {
         git.read(GitRead::Diff {
             base: comparison_base,
-            head: head_before,
+            head: writer_head,
             paths: own_paths,
         })?
         .stdout
@@ -1059,7 +1098,7 @@ fn quarantine_instruction_changes(
         kind: "instruction_quarantine_evidence",
         start_head: snapshot.head,
         comparison_base,
-        observed_head: head_before,
+        observed_head: writer_head,
         start_index: snapshot.index,
         observed_index: index_before,
         status_digest: CanonicalV1::file_digest(&status.stdout.bytes),

@@ -1846,16 +1846,17 @@ impl WriterLaunch {
                 self.worktree.repo(),
                 provenant_confinement::GitRead::MergeBase {
                     left: target,
-                    right: tip,
+                    right: verified_tip,
                 },
             )
         })()
         .unwrap_or(snapshot.head());
         let outcome = git
-            .quarantine_instructions(
+            .quarantine_instructions_at(
                 custody,
                 &snapshot,
                 comparison_base,
+                verified_tip,
                 &archive,
                 &self.review_exempt,
             )
@@ -1903,7 +1904,7 @@ impl WriterLaunch {
             "writer-terminal.json",
             &crate::db::bytes(&WriterTerminal {
                 schema_version: 1,
-                head: tip,
+                head: verified_tip,
                 protected_paths,
             })?,
             crate::RECORD_LIMIT,
