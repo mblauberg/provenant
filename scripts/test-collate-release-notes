@@ -17,6 +17,7 @@ chmod +x "$tmp/bin/git"
 export PATH="$tmp/bin:$PATH" TEST_GIT_ROOT="$tmp"
 dir=docs/release-notes/next.d
 mkdir -p "$dir"
+printf 'Release introduction.\n' > "$dir/_intro.md"
 printf '## Additions\n\n- A valid fragment.\n### Details\n' > "$dir/valid.md"
 "$script" --check
 for heading in '## Fixes' '## Unexpected'; do
@@ -29,13 +30,13 @@ for heading in '## Fixes' '## Unexpected'; do
   grep -xF -- '- Second section.' "$tmp/out" > /dev/null
 done
 rm -f "$dir/invalid.md"
-printf '## Additions\n\n- See [policy](../../release-notes/README.md).\n' > "$dir/link.md"
+printf 'See [policy](../../release-notes/README.md).\n' > "$dir/_intro.md"
 "$script" | grep -F '(../release-notes/README.md)' > /dev/null
-if "$script" | grep -F '../../' > /dev/null; then exit 1; fi
-rm -f "$dir/link.md"
+if "$script" | sed -n '1,/^## /p' | grep -F '../../' > /dev/null; then exit 1; fi
 
 # Area order: small sections list entries flat, in area order, untagged last.
 rm -f "$dir"/*.md
+printf 'Intro.\n' > "$dir/_intro.md"
 printf '## Fixes\n### Fabric and MCP\n\n- Fabric fix.\n' > "$dir/a.md"
 printf '## Fixes\n### CLI and install\n\n- CLI fix.\n' > "$dir/b.md"
 printf '## Fixes\n\n- Untagged fix.\n' > "$dir/c.md"
@@ -52,6 +53,7 @@ actual=$(sed -n '/^## Fixes/,$p' "$tmp/out")
 
 # A section with more than 12 entries renders area sub-headings.
 rm -f "$dir"/*.md
+printf 'Intro.\n' > "$dir/_intro.md"
 printf '## Fixes\n### Fabric and MCP\n\n- Fabric fix.\n' > "$dir/a.md"
 printf '## Fixes\n### CLI and install\n\n- CLI fix.\n' > "$dir/b.md"
 printf '## Fixes\n\n- Untagged fix.\n' > "$dir/c.md"
@@ -88,7 +90,7 @@ rm -f "$dir/empty.md"
 # A release cut records one milestone when a session is known, and a missing
 # logger cannot turn a completed cut into a failure.
 rm -f "$dir"/*.md
-printf '## Additions\n\n- To be released.\n' > "$dir/entry.md"
+printf 'Intro.\n' > "$dir/_intro.md"
 mkdir -p "$tmp/bin"
 cat > "$tmp/bin/provenant" <<'EOF'
 #!/bin/sh
@@ -106,11 +108,12 @@ PATH="$tmp/bin:$PATH" "$script" v1.2.3
 [ "$(grep -c '^chair$' "$PROVENANT_LOG_CALLS")" -eq 1 ]
 grep -qxF 'release-v1.2.3' "$PROVENANT_LOG_CALLS"
 grep -qxF 'session-test' "$PROVENANT_LOG_CALLS"
-[ ! -e "$dir/entry.md" ]
 rm -f "$tmp/log-calls"
+printf 'Intro.\n' > "$dir/_intro.md"
 PROVENANT_LOG_FAIL=1 PATH="$tmp/bin:$PATH" "$script" v1.2.5
 [ -f docs/release-notes/v1.2.5.md ]
 rm -f "$tmp/log-calls"
+printf 'Intro.\n' > "$dir/_intro.md"
 unset PROVENANT_SESSION_ID
 PATH="$tmp/bin:$PATH" "$script" v1.2.4
 [ ! -e "$tmp/log-calls" ]

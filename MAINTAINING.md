@@ -49,12 +49,13 @@ cross-tracker routes, not a second current-work owner.
   and the release collator follow the
   `engineering-writing` release-notes guidance
   and the fragment rules in the [release-notes index](docs/release-notes/README.md#writing-a-fragment).
-  Each fragment's second line tags an area from the index; the collator decides whether to render it. The no-stability-promise policy lives only in that index. Before releasing,
+  Each fragment's second line tags an area from the index; the collator decides whether to render it. The no-stability-promise policy lives only in that index; release notes do not repeat it. Before releasing,
   read the collated preview (`scripts/collate-release-notes`) end to end, merge
-  entries on one topic and align tense and terms.
+  entries on one topic, align tense and terms, and write `_intro.md` last.
   To release, run `scripts/collate-release-notes vX.Y.Z`, which writes
-  `docs/release-notes/vX.Y.Z.md` and deletes the fragments; add the released
-  version to the index.
+  `docs/release-notes/vX.Y.Z.md` and deletes the fragments but `_intro.md`;
+  add the released version to the index and reset `_intro.md` for the next
+  release.
 
 ### Specifications
 

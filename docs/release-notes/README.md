@@ -27,7 +27,7 @@ Provenant makes no stability promise. Commands, flags, `--json` output,
 change in any release, with no deprecation period and no compatibility shims.
 Upgrade every host together, because peers on different versions are not
 supported. Each release lists its breaking changes first. This is the only
-place the policy is stated; release notes link here and do not repeat it.
+place the policy is stated; release notes do not repeat or link it.
 
 ## Writing a fragment
 
@@ -68,3 +68,6 @@ Add one file per user-visible change under `next.d/`, named `<issue>-<topic>.md`
   messages. A change no user can notice needs no fragment.
 - **Links.** Paths are relative to `next.d/`. Link to a guide or ADR for depth
   instead of explaining it in the entry.
+- **Intro.** `next.d/_intro.md` is two sentences on what the release is about
+  and a pointer to Breaking changes if the release has any. Maintainers write
+  it last.
