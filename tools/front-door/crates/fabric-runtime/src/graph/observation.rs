@@ -14,6 +14,8 @@ pub enum AttemptState {
 pub enum AttemptOutcome {
     Succeeded,
     TaskFailed,
+    /// A lane reported a declared stop; review roles may accept its result.
+    DeclaredStop,
     OtherFailure,
     AuthRequired,
     UsageLimited,

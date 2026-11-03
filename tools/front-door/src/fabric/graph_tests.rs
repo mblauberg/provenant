@@ -545,6 +545,18 @@ mod result_tests {
     }
 
     #[test]
+    fn graph_status_names_blocking_upstream() {
+        let mut run = graph_status_fixture();
+        let node = &mut run.checkpoint.nodes[1];
+        node.state = provenant_fabric_runtime::graph::NodeState::Blocked;
+        node.advance_error = Some("blocked by ordinary (Failed)".into());
+        assert!(super::graph_human(&run).contains("composite: Blocked (blocked by ordinary (Failed))"));
+        assert!(super::graph_human::graph_human_full(&run).contains("error=blocked by ordinary (Failed)"));
+        let summary = super::graph_human::graph_summary(&serde_json::to_value(&run).unwrap());
+        assert!(format!("{summary:?}").contains("blocked by ordinary (Failed)"));
+    }
+
+    #[test]
     fn graph_status_full_shows_node_warnings() {
         let mut run = graph_status_fixture();
         run.checkpoint.nodes[0].outputs = Some(serde_json::from_value(serde_json::json!({

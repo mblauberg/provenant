@@ -3,7 +3,7 @@
     "pattern": "scope-then-run",
     "preset": "scope-then-run"
   },
-  "graph_id": "preset-28bdc1c20e126f788cdae812d51d68ab",
+  "graph_id": "preset-b27784ff30eefbb2727aafc147577b51",
   "nodes": [
     {
       "access": "read_only",
@@ -321,6 +321,7 @@
                   ]
                 }
               ],
+              "min_successful": 1,
               "nodes": [
                 {
                   "access": "read_only",
@@ -340,6 +341,7 @@
                       "when": "always"
                     }
                   ],
+                  "require_findings": true,
                   "role": "lens.correctness-spec",
                   "role_digest": "sha256:bf578197d0881e91746f43b0888c298a0bc6ce3a4f97293690e3b495a9138ea2",
                   "routes": [
@@ -369,6 +371,7 @@
                       "when": "always"
                     }
                   ],
+                  "require_findings": true,
                   "role": "lens.simplicity",
                   "role_digest": "sha256:46d20a75ff5d5cb89b53165b558efb8205a2801263593b4365e23d20150c41b4",
                   "routes": [
@@ -422,9 +425,9 @@
               }
             ],
             "kind": "synthesise",
-            "prompt": "You evaluate a writer's commit from its lens findings and decide whether it is accepted.\n\nEvaluate the implementation of: brief\nSpec (acceptance criteria): \nWeigh the lens findings against the evidence. Give every finding exactly one\ndisposition with a one-line reason: accepted, rejected or deferred. End with a\nfenced findings block (schema_version 1) with one entry per finding id; each\nentry carries \"disposition\" and \"reason\". Emit one\nexact VERDICT: PASS only when no accepted finding remains, otherwise\nVERDICT: FAIL.\n",
+            "prompt": "You evaluate a writer's commit from its lens findings and decide whether it is accepted.\n\nEvaluate the implementation of: brief\nSpec (acceptance criteria): \nWeigh the lens findings against the evidence. Give every finding exactly one\ndisposition with a one-line reason: accepted, rejected or deferred. End with a\nfenced findings block (schema_version 1) with one entry per finding id; each\nentry carries \"id\", \"disposition\" and \"reason\". Copy the upstream qualified id\nexactly; a bare id works only when unambiguous. These three fields suffice for\nupstream findings; descriptive fields are inherited. New findings require\nseverity, file, summary and status as well. Emit one\nexact VERDICT: PASS only when no accepted finding remains, otherwise\nVERDICT: FAIL.\n",
             "role": "review.evaluator",
-            "role_digest": "sha256:8bf23a83b0b87661cf925300b45475434805c87d7d58c13803c6413a756c36d0",
+            "role_digest": "sha256:0fbf01f2902e4b4fa6417287dd573e381f40366e54bfe465b5cecabc2025a3a3",
             "routes": [
               {
                 "alias": "senior"
@@ -479,6 +482,11 @@
       "expanded.run.parameters.local_check_policy.default": "bundled",
       "expanded.run.parameters.local_check_policy.doc": "bundled",
       "expanded.run.parameters.local_check_policy.type": "bundled",
+      "expanded.run.parameters.min_lenses.default": "bundled",
+      "expanded.run.parameters.min_lenses.doc": "bundled",
+      "expanded.run.parameters.min_lenses.max": "bundled",
+      "expanded.run.parameters.min_lenses.min": "bundled",
+      "expanded.run.parameters.min_lenses.type": "bundled",
       "expanded.run.parameters.review_shape": "entry",
       "expanded.run.parameters.review_shape.default": "bundled",
       "expanded.run.parameters.review_shape.doc": "bundled",
@@ -501,6 +509,11 @@
       "expanded.run.parameters.spec.default": "bundled",
       "expanded.run.parameters.spec.doc": "bundled",
       "expanded.run.parameters.spec.type": "bundled",
+      "expanded.run.parameters.spec_max_bytes.default": "bundled",
+      "expanded.run.parameters.spec_max_bytes.doc": "bundled",
+      "expanded.run.parameters.spec_max_bytes.max": "bundled",
+      "expanded.run.parameters.spec_max_bytes.min": "bundled",
+      "expanded.run.parameters.spec_max_bytes.type": "bundled",
       "expanded.run.parameters.subject.default.commit": "bundled",
       "expanded.run.parameters.subject.default.type": "bundled",
       "expanded.run.parameters.subject.doc": "bundled",
@@ -682,7 +695,7 @@
         ]
       },
       "review.evaluator": {
-        "digest": "sha256:8bf23a83b0b87661cf925300b45475434805c87d7d58c13803c6413a756c36d0",
+        "digest": "sha256:0fbf01f2902e4b4fa6417287dd573e381f40366e54bfe465b5cecabc2025a3a3",
         "extends": [
           "review.evaluator"
         ],

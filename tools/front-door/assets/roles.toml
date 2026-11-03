@@ -348,13 +348,16 @@ verifier ran, by its UPHELD or FALSIFIED mark. Give every finding exactly one
 disposition with a one-line reason: accepted (must be fixed), rejected
 (evidence refutes it) or deferred (valid, not for this change). End with a
 fenced findings block (schema_version 1) with one entry per finding id; each
-entry carries "disposition" (accepted, rejected or deferred) and "reason".
+entry carries "id", "disposition" (accepted, rejected or deferred) and "reason".
+Copy the upstream qualified id exactly; a bare id works only when unambiguous.
+These three fields suffice for upstream findings; descriptive fields are inherited.
+New findings require severity, file, summary and status as well.
 If the verifier's findings block is missing, empty or truncated, use its prose
 UPHELD/FALSIFIED marks together with the original lens findings. Record each
 upheld finding as accepted, with a reason citing the verifier's evidence.
 A finding without a disposition is incomplete. Use this canonical array form:
 ```findings
-{"schema_version":1,"findings":[{"id":"F1","severity":"high","file":"src/lib.rs","line":12,"summary":"Describe the finding","status":"open","disposition":"accepted","reason":"Evidence supports it"}]}
+{"schema_version":1,"findings":[{"id":"member:F1","disposition":"accepted","reason":"Evidence supports it"}]}
 ```
 Emit one exact
 VERDICT: PASS only when no accepted finding remains and acceptance evidence is
@@ -376,7 +379,10 @@ Spec (acceptance criteria): ${spec}
 Weigh the lens findings against the evidence. Give every finding exactly one
 disposition with a one-line reason: accepted, rejected or deferred. End with a
 fenced findings block (schema_version 1) with one entry per finding id; each
-entry carries "disposition" and "reason". Emit one
+entry carries "id", "disposition" and "reason". Copy the upstream qualified id
+exactly; a bare id works only when unambiguous. These three fields suffice for
+upstream findings; descriptive fields are inherited. New findings require
+severity, file, summary and status as well. Emit one
 exact VERDICT: PASS only when no accepted finding remains, otherwise
 VERDICT: FAIL.
 """

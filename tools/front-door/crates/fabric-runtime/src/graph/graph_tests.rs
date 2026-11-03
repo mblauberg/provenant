@@ -1093,6 +1093,196 @@ fn a_synthesis_settles_with_a_disposition_and_reason_for_every_finding() {
     );
 }
 
+// Small: settlement uses only the in-memory graph owner.
+#[test]
+fn identity_only_dispositions_inherit_selected_findings() {
+    let mut synthesis = node("synthesis", route("first"));
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.depends_on = vec!["review".into()];
+    synthesis.inputs = vec![GraphInput {
+        extra: Default::default(),
+        node: "review".into(),
+        outputs: vec![OutputKind::Findings],
+    }];
+    for (id, state) in [
+        ("F1", NodeState::Succeeded),
+        ("missing-F9", NodeState::Failed),
+    ] {
+        let text = findings_text(&format!(
+            r#"{{"id":"{id}","disposition":"rejected","reason":"falsified"}}"#
+        ));
+        let mut owner = FakeOwner {
+            observations: [
+                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+                terminal_with_result(AttemptOutcome::Succeeded, &text),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let run = advance(
+            &graph(vec![node("review", route("first")), synthesis.clone()]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
+        let progress = &run.checkpoint.nodes[1];
+        assert_eq!(progress.state, state);
+        if state == NodeState::Succeeded {
+            let finding = &progress.outputs.as_ref().unwrap().findings[0];
+            assert_eq!(finding.summary, "s");
+            assert_eq!(finding.file, "a.rs");
+            assert_eq!(finding.severity, "high");
+            assert_eq!(finding.status, "open");
+            assert_eq!(finding.reason.as_deref(), Some("falsified"));
+        } else {
+            let error = progress.advance_error.as_deref().unwrap();
+            assert!(
+                error.contains("(missing-F9) field id: unknown upstream identity"),
+                "{error}"
+            );
+        }
+    }
+}
+
+// Small: composite export and downstream settlement share the real graph path.
+#[test]
+fn composite_findings_have_qualified_ids_and_unambiguous_bare_aliases() {
+    for (second_id, cited, state) in [
+        (
+            "F1",
+            vec!["reviews--a:F1", "reviews--b:F1"],
+            NodeState::Succeeded,
+        ),
+        ("F2", vec!["F1", "F2"], NodeState::Succeeded),
+        ("inner:F2", vec!["F1", "inner:F2"], NodeState::Succeeded),
+        (
+            "inner:F2",
+            vec!["reviews--a:F1", "reviews--b:inner:F2"],
+            NodeState::Succeeded,
+        ),
+        ("F1", vec!["F1", "reviews--b:F1"], NodeState::Failed),
+    ] {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1, "graph_id":"qualified-findings", "nodes":[
+                {"id":"reviews", "kind":"composite", "access":"read_only", "composite":{
+                    "nodes":[
+                        {"id":"a", "access":"read_only", "prompt":"review", "route":{"alias":"senior"}},
+                        {"id":"b", "access":"read_only", "prompt":"review", "route":{"alias":"senior"}}
+                    ], "exports":[{"node":"a", "outputs":["findings"]}, {"node":"b", "outputs":["findings"]}]
+                }},
+                {"id":"synthesis", "kind":"synthesise", "access":"read_only", "prompt":"dispose", "route":{"alias":"senior"},
+                 "depends_on":["reviews"], "inputs":[{"node":"reviews", "outputs":["findings"]}],
+                 "dispositions":["accepted", "rejected", "deferred"]}
+            ]
+        })).unwrap();
+        let entries: Vec<_> = cited
+            .iter()
+            .map(|id| serde_json::json!({"id":id, "disposition":"rejected", "reason":"falsified"}))
+            .collect();
+        let text = format!(
+            "```findings\n{}\n```\nVERDICT: PASS",
+            serde_json::json!({"schema_version":1,"findings":entries})
+        );
+        let mut owner = FakeOwner {
+            observations: [
+                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+                terminal_with_result(
+                    AttemptOutcome::Succeeded,
+                    &findings_text(&entry("").replace("F1", second_id)),
+                ),
+                terminal_with_result(AttemptOutcome::Succeeded, &text),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        let composite = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "reviews")
+            .unwrap();
+        let ids: Vec<_> = composite
+            .outputs
+            .as_ref()
+            .unwrap()
+            .findings
+            .iter()
+            .map(|finding| finding.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["reviews--a:F1", &format!("reviews--b:{second_id}")]
+        );
+        let synthesis = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "synthesis")
+            .unwrap();
+        assert_eq!(synthesis.state, state);
+        if state == NodeState::Succeeded {
+            assert_eq!(
+                synthesis
+                    .outputs
+                    .as_ref()
+                    .unwrap()
+                    .findings
+                    .iter()
+                    .map(|finding| finding.id.as_str())
+                    .collect::<Vec<_>>(),
+                ids
+            );
+        } else {
+            let error = synthesis.advance_error.as_deref().unwrap();
+            assert!(
+                error.contains("F1") && error.contains("ambiguous"),
+                "{error}"
+            );
+        }
+        assert_eq!(
+            advance(&document, &mut FakeOwner::default(), &mut journal)
+                .unwrap()
+                .checkpoint,
+            run.checkpoint
+        );
+    }
+}
+
+// Small: malformed entries must retain a bounded, actionable diagnostic.
+#[test]
+fn findings_error_names_first_entry_and_field() {
+    for (entry, field) in [
+        (
+            r#"{"id":"broken","severity":42},{"id":"later"}"#.to_owned(),
+            "severity",
+        ),
+        (
+            r#"{"id":"broken","severity":"high","file":"a"}"#.to_owned(),
+            "summary",
+        ),
+        (
+            entry("").replace("null", "-1").replace("F1", "broken"),
+            "line",
+        ),
+    ] {
+        let progress = synthesis_run(&findings_text(&entry));
+        let error = progress.advance_error.as_deref().unwrap();
+        assert!(
+            error.contains("entry 1") && error.contains("broken"),
+            "{error}"
+        );
+        assert!(error.contains(field), "{error}");
+        assert!(!error.contains("later"), "{error}");
+    }
+    let progress = synthesis_run(&findings_text(&format!(
+        r#"{{"id":"{}","disposition":"rejected","reason":"unknown"}}"#,
+        "界".repeat(2000)
+    )));
+    assert!(progress.advance_error.as_ref().unwrap().len() <= MAX_ADVANCE_ERROR_BYTES);
+}
+
 #[test]
 fn a_synthesis_must_dispose_of_every_selected_upstream_finding_exactly_once() {
     let disposed = |id: &str| {
@@ -1554,6 +1744,7 @@ fn composite_rejects_ambiguous_exports_and_blocks_on_child_failure() {
         run.checkpoint.nodes.last().unwrap().state,
         NodeState::Blocked
     );
+    assert_eq!(run.checkpoint.nodes.last().unwrap().advance_error, None);
     assert!(!run.checkpoint.successful());
     assert_eq!(
         advance(&document, &mut FakeOwner::default(), &mut journal)
@@ -1597,6 +1788,185 @@ fn partial_review(minimum: usize) -> (GraphDocument, FakeOwner) {
 }
 
 #[test]
+fn review_fail_and_one_unavailable_reach_evaluator() {
+    let (mut document, mut owner) = partial_review(2);
+    let spec = document.nodes[0].composite.as_mut().unwrap();
+    for (i, node) in spec.nodes.iter_mut().enumerate() {
+        node.role = Some(format!("lens.test{i}"));
+    }
+    let fail = findings_text(&entry("")).replace("VERDICT: PASS", "VERDICT: FAIL");
+    owner.observations = VecDeque::from([
+        terminal_with_result(AttemptOutcome::DeclaredStop, &fail),
+        terminal_with_result(AttemptOutcome::Succeeded, &findings_text("")),
+        terminal(AttemptOutcome::AdapterUnavailable),
+        terminal_with_result(AttemptOutcome::Succeeded, "evaluated"),
+    ]);
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let lens = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id.ends_with("--lens-a"))
+        .unwrap();
+    assert_eq!(lens.state, NodeState::Succeeded);
+    assert_eq!(
+        lens.outputs.as_ref().unwrap().verdict.as_deref(),
+        Some("VERDICT: FAIL")
+    );
+    assert_eq!(
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == "verify")
+            .unwrap()
+            .state,
+        NodeState::Succeeded
+    );
+    assert!(owner.prompts[3].contains("F1"));
+    assert!(owner.prompts[3].contains("lens-c"));
+}
+
+#[test]
+fn successful_review_with_fail_verdict_is_a_result() {
+    let mut review = node("review", route("fixture"));
+    review.role = Some("review.evaluator".into());
+    review.required_verdict = Some("VERDICT: PASS".into());
+    let result = findings_text("").replace("VERDICT: PASS", "VERDICT: FAIL");
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([terminal_with_result(AttemptOutcome::Succeeded, &result)]),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![review]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(
+        run.checkpoint.nodes[0]
+            .outputs
+            .as_ref()
+            .unwrap()
+            .verdict
+            .as_deref(),
+        Some("VERDICT: FAIL")
+    );
+}
+
+#[test]
+fn declared_stop_requires_a_valid_review_result_and_never_accepts_a_writer() {
+    for (role, text) in [
+        ("lens.test", "VERDICT: FAIL".to_owned()),
+        (
+            "lens.test",
+            "```findings\n{\"schema_version\":1,\"findings\":[]}\n```".to_owned(),
+        ),
+        ("write.implement", findings_text("")),
+    ] {
+        let mut subject = node("subject", route("fixture"));
+        subject.role = Some(role.into());
+        if role.starts_with("write.") {
+            subject.access = AccessMode::WorktreeWrite;
+            subject.worktree = Some(".worktrees/write".into());
+        }
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([terminal_with_result(
+                AttemptOutcome::DeclaredStop,
+                &text,
+            )]),
+            ..Default::default()
+        };
+        let run = advance(
+            &graph(vec![subject]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            run.checkpoint.nodes[0].state,
+            NodeState::Failed,
+            "{role}: {text}"
+        );
+    }
+}
+
+#[test]
+fn review_all_members_quorum_blocks_evaluator_and_names_upstream() {
+    let (document, mut owner) = partial_review(3);
+    owner.observations[1] = terminal_with_result(AttemptOutcome::Succeeded, &findings_text(""));
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let verify = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id == "verify")
+        .unwrap();
+    assert_eq!(verify.state, NodeState::Blocked);
+    assert!(
+        verify
+            .advance_error
+            .as_deref()
+            .unwrap()
+            .contains("lenses (Failed)")
+    );
+}
+
+#[test]
+fn replay_attributes_an_unexplained_blocked_node_without_overwriting_other_reasons() {
+    let (document, mut owner) = partial_review(3);
+    owner.observations[1] = terminal_with_result(AttemptOutcome::Succeeded, &findings_text(""));
+    let mut journal = MemoryJournal::default();
+    advance(&document, &mut owner, &mut journal).unwrap();
+    let checkpoint = journal.0.as_mut().unwrap();
+    let verify = checkpoint
+        .nodes
+        .iter_mut()
+        .find(|n| n.id == "verify")
+        .unwrap();
+    assert_eq!(verify.state, NodeState::Blocked);
+    verify.advance_error = None;
+    verify.advance_error_code = None;
+
+    let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
+    let verify = replay
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id == "verify")
+        .unwrap();
+    assert_eq!(
+        verify.advance_error_code.as_deref(),
+        Some("upstream_blocked")
+    );
+    assert_eq!(
+        verify.advance_error.as_deref(),
+        Some("blocked by lenses (Failed)")
+    );
+    assert_eq!(journal.0.as_ref().unwrap(), &replay.checkpoint);
+
+    let verify = journal
+        .0
+        .as_mut()
+        .unwrap()
+        .nodes
+        .iter_mut()
+        .find(|n| n.id == "verify")
+        .unwrap();
+    verify.advance_error = Some("existing reason".into());
+    verify.advance_error_code = Some("other_reason".into());
+    let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
+    let verify = replay
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id == "verify")
+        .unwrap();
+    assert_eq!(verify.advance_error.as_deref(), Some("existing reason"));
+    assert_eq!(verify.advance_error_code.as_deref(), Some("other_reason"));
+}
+
+#[test]
 fn partial_composite_exports_only_successful_members_and_lists_the_unavailable() {
     let (document, mut owner) = partial_review(1);
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
@@ -1618,7 +1988,10 @@ fn partial_composite_exports_only_successful_members_and_lists_the_unavailable()
     assert_eq!(lenses.findings.len(), 1);
     let excerpt = &lenses.result.as_ref().unwrap().excerpt;
     assert!(excerpt.starts_with("Unavailable lenses:"), "{excerpt}");
-    assert!(excerpt.contains("lens-b: the findings block is missing or invalid"));
+    assert!(
+        excerpt
+            .contains("lens-b: findings block missing or invalid: field findings: block missing")
+    );
     assert!(excerpt.contains("lens-c: adapter unavailable"));
     assert!(excerpt.contains("LENS-A-OK"));
     assert!(!excerpt.contains("LENS-B-NO-FINDINGS"));
@@ -4176,7 +4549,10 @@ fn outputs_feed_direct_dependants_and_survive_replay() {
 fn output_parsing_is_lenient_and_rendering_fails_instead_of_omitting() {
     let failed = make_outputs(Some(&capture("no findings")), None, None, None, None);
     assert!(failed.findings.is_empty());
-    assert_eq!(failed.warnings, ["findings block missing or invalid"]);
+    assert_eq!(
+        failed.warnings,
+        ["findings block missing or invalid: field findings: block missing"]
+    );
     let oversized = format!(
         "```findings\n{{\"schema_version\":1,\"findings\":[],\"extra\":\"{}\"}}\n```",
         "x".repeat(8192)
@@ -4300,7 +4676,8 @@ fn findings_and_verdict_at_the_end_of_a_large_result_are_parsed() {
         let text = format!("```findings\n{block}\n```");
         let outputs = make_outputs(Some(&capture(&text)), None, None, None, None);
         assert!(outputs.findings.is_empty());
-        assert_eq!(outputs.warnings, [FINDINGS_INVALID]);
+        assert_eq!(outputs.warnings.len(), 1);
+        assert!(outputs.warnings[0].starts_with(FINDINGS_INVALID));
     }
 }
 
@@ -5331,6 +5708,176 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
     }
     impl Error for Untyped {}
     assert!(!launch_retry_kind(&Untyped));
+}
+
+// Small: a qualified ID that cannot fit must fail the composite, including on replay.
+#[test]
+fn composite_rejects_overlong_qualified_finding_id() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":1,"graph_id":"long-id","nodes":[
+            {"id":"reviews","kind":"composite","access":"read_only","composite":{
+                "nodes":[{"id":"a","access":"read_only","prompt":"review","route":{"alias":"senior"}}],
+                "exports":[{"node":"a","outputs":["findings"]}]
+            }},
+            {"id":"synthesis","kind":"synthesise","access":"read_only","prompt":"dispose","route":{"alias":"senior"},
+             "depends_on":["reviews"],"inputs":[{"node":"reviews","outputs":["findings"]}],"dispositions":["rejected"]}
+        ]
+    })).unwrap();
+    let text = findings_text(&entry("").replace("F1", &"x".repeat(1024)));
+    let mut owner = FakeOwner {
+        observations: [terminal_with_result(AttemptOutcome::Succeeded, &text)].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let composite = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id == "reviews")
+        .unwrap();
+    assert_eq!(composite.state, NodeState::Failed);
+    assert_eq!(
+        composite.advance_error_code.as_deref(),
+        Some("composite_findings_exceed_cap")
+    );
+    assert_ne!(
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == "synthesis")
+            .unwrap()
+            .state,
+        NodeState::Succeeded
+    );
+    assert_eq!(
+        advance(&document, &mut FakeOwner::default(), &mut journal)
+            .unwrap()
+            .checkpoint,
+        run.checkpoint
+    );
+}
+
+// Small: inherited descriptions can exceed the ordinary findings budget.
+#[test]
+fn identity_dispositions_preserve_large_inherited_fields() {
+    let mut synthesis = node("synthesis", route("first"));
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.depends_on = vec!["review".into()];
+    synthesis.inputs = vec![GraphInput {
+        extra: Default::default(),
+        node: "review".into(),
+        outputs: vec![OutputKind::Findings],
+    }];
+    let long = "x".repeat(1024);
+    let entries: Vec<_> = (0..2).map(|i| serde_json::json!({"id":format!("F{i}"),"severity":long,"file":long,"summary":long,"status":long})).collect();
+    let review = format!(
+        "```findings\n{}\n```\nVERDICT: PASS",
+        serde_json::json!({"schema_version":1,"findings":entries})
+    );
+    let decisions = (0..2)
+        .map(|i| {
+            format!(
+                r#"{{"id":"F{i}","disposition":"rejected","reason":"{}"}}"#,
+                "r".repeat(700)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, &review),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&decisions)),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![node("review", route("first")), synthesis]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    let result = &run.checkpoint.nodes[1];
+    assert_eq!(
+        result.state,
+        NodeState::Succeeded,
+        "{:?}",
+        result.advance_error
+    );
+    let findings = &result.outputs.as_ref().unwrap().findings;
+    assert!(canonical_len(findings) > FINDINGS_BYTES);
+    assert_eq!(findings[0].summary, long);
+}
+
+// Small: directly selected sources with the same ID remain distinct.
+#[test]
+fn direct_reviewers_with_duplicate_ids_require_distinct_dispositions() {
+    let mut synthesis = node("synthesis", route("first"));
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.depends_on = vec!["a".into(), "b".into()];
+    synthesis.inputs = ["a", "b"]
+        .into_iter()
+        .map(|id| GraphInput {
+            extra: Default::default(),
+            node: id.into(),
+            outputs: vec![OutputKind::Findings],
+        })
+        .collect();
+    for (decisions, expected) in [
+        (
+            r#"{"id":"F1","disposition":"rejected","reason":"no"}"#,
+            NodeState::Failed,
+        ),
+        (
+            r#"{"id":"a:F1","disposition":"rejected","reason":"no"},{"id":"b:F1","disposition":"rejected","reason":"no"}"#,
+            NodeState::Succeeded,
+        ),
+    ] {
+        let mut owner = FakeOwner {
+            observations: [
+                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+                terminal_with_result(
+                    AttemptOutcome::Succeeded,
+                    &findings_text(
+                        &entry("").replace("\"summary\":\"s\"", "\"summary\":\"other\""),
+                    ),
+                ),
+                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(decisions)),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let run = advance(
+            &graph(vec![
+                node("a", route("first")),
+                node("b", route("first")),
+                synthesis.clone(),
+            ]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
+        let result = &run.checkpoint.nodes[2];
+        assert!(owner.prompts[2].contains("a:F1"));
+        assert!(owner.prompts[2].contains("b:F1"));
+        assert_eq!(result.state, expected, "{:?}", result.advance_error);
+        if expected == NodeState::Succeeded {
+            let findings = &result.outputs.as_ref().unwrap().findings;
+            assert_eq!(
+                (&findings[0].summary, &findings[1].summary),
+                (&"s".to_owned(), &"other".to_owned())
+            );
+        } else {
+            assert!(
+                result
+                    .advance_error
+                    .as_deref()
+                    .unwrap()
+                    .contains("ambiguous")
+            );
+        }
+    }
 }
 
 #[test]

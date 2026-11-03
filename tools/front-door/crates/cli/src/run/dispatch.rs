@@ -1235,7 +1235,27 @@ pub fn brief_read_root_warnings(
         .filter_map(|root| std::fs::canonicalize(root).ok())
         .collect();
     let mut warnings = std::collections::BTreeSet::new();
-    for token in prompt.split_whitespace() {
+    let permitted_lines = prompt.lines().filter(|line| {
+        let line = line.to_lowercase();
+        ![
+            "never",
+            "do not",
+            "don't",
+            "must not",
+            "not allowed",
+            "forbidden",
+        ]
+        .iter()
+        .any(|phrase| {
+            line.match_indices(phrase).any(|(start, matched)| {
+                let before = line[..start].chars().next_back();
+                let after = line[start + matched.len()..].chars().next();
+                before.is_none_or(|character| !character.is_alphanumeric())
+                    && after.is_none_or(|character| !character.is_alphanumeric())
+            })
+        })
+    });
+    for token in permitted_lines.flat_map(str::split_whitespace) {
         let token = token
             .trim_matches(|character: char| {
                 matches!(character, '`' | '\'' | '"' | '(' | '[' | '{' | '<')

@@ -74,6 +74,7 @@ publish = false
 license.workspace = true
 
 [dependencies]
+sha2 = { workspace = true }
 jiff = { workspace = true }
 provenant-os = { workspace = true }
 provenant-quota = { workspace = true }

@@ -3,6 +3,7 @@ use provenant_fabric_runtime::read_roots::ReadRoots;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -35,6 +36,10 @@ pub struct Layers {
     /// Routing review shapes. Each review stage selects its own shape from its
     /// final `review_shape` and `risk_tier` parameters.
     pub review: Option<ShapeSelector>,
+    pub project_dir: Option<PathBuf>,
+    /// Launch directory, used to resolve relative worktree bindings.
+    pub launch_dir: Option<PathBuf>,
+    pub default_worktree: Option<PathBuf>,
     used_shapes: std::cell::RefCell<BTreeSet<String>>,
     /// Bases of the deferred reviews this expansion emitted; a graph has one.
     review_bases: std::cell::RefCell<BTreeSet<String>>,
@@ -46,6 +51,7 @@ pub struct Layers {
     used_roles: std::cell::RefCell<BTreeMap<String, Value>>,
     pub substitutions: std::cell::RefCell<Vec<Value>>,
     warnings: std::cell::RefCell<Vec<String>>,
+    spec_contexts: std::cell::RefCell<BTreeMap<String, Option<String>>>,
     entries: BTreeMap<String, Vec<(String, Value)>>,
     errors: BTreeMap<String, Vec<String>>,
     repo_files: BTreeSet<String>,
@@ -891,6 +897,7 @@ pub fn expand_with(
     layers.used_roles.borrow_mut().clear();
     layers.substitutions.borrow_mut().clear();
     layers.warnings.borrow_mut().clear();
+    layers.spec_contexts.borrow_mut().clear();
     let mut repo_files = Vec::new();
     let (mut config, mut origins) = layers.resolve_inner(name, &mut Vec::new(), &mut repo_files)?;
     for (key, value) in params {
@@ -1337,6 +1344,114 @@ fn selected_inputs(deps: &[String], outputs: &Value) -> Value {
     )
 }
 
+fn spec_context(layers: &Layers, parameters: &Value) -> Option<String> {
+    let key = json!([
+        parameters.get("spec"),
+        parameters.get("worktree"),
+        parameters.get("spec_max_bytes")
+    ])
+    .to_string();
+    if let Some(context) = layers.spec_contexts.borrow().get(&key) {
+        return context.clone();
+    }
+    let context = read_spec_context(layers, parameters);
+    layers
+        .spec_contexts
+        .borrow_mut()
+        .insert(key, context.clone());
+    context
+}
+
+fn read_spec_context(layers: &Layers, parameters: &Value) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let spec = parameters.get("spec")?.as_str()?.trim();
+    if spec.is_empty()
+        || spec
+            .trim_start_matches('#')
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let cap = parameters.get("spec_max_bytes")?.as_u64()? as usize;
+    let project = layers
+        .project_dir
+        .clone()
+        .or_else(|| std::env::current_dir().ok())?;
+    let worktree = parameters
+        .get("worktree")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| layers.default_worktree.clone());
+    let path = Path::new(spec);
+    let launch = layers.launch_dir.as_deref().unwrap_or(&project);
+    let mut candidates: Vec<_> = worktree
+        .into_iter()
+        .map(|w| launch.join(w).join(path))
+        .chain(std::iter::once(project.join(path)))
+        .collect();
+    if let Some(main) = project_worktrees(&project).first() {
+        let candidate = main.join(path);
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+    let mut errors = Vec::new();
+    for candidate in candidates {
+        let error = match std::fs::File::open(&candidate) {
+            Ok(mut file) => {
+                let mut hash = Sha256::new();
+                let mut excerpt = Vec::new();
+                let mut buffer = [0u8; 8192];
+                let result = loop {
+                    match file.read(&mut buffer) {
+                        Ok(0) => break Ok(()),
+                        Ok(n) => {
+                            hash.update(&buffer[..n]);
+                            let take = n.min(cap.saturating_sub(excerpt.len()));
+                            excerpt.extend_from_slice(&buffer[..take]);
+                        }
+                        Err(e) => break Err(e),
+                    }
+                };
+                if let Err(error) = result {
+                    error
+                } else {
+                    let digest: String = hash
+                        .finalize()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect();
+                    let mut text = String::from_utf8_lossy(&excerpt).into_owned();
+                    if text.len() > cap {
+                        let mut end = cap;
+                        while !text.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        text.truncate(end);
+                    }
+                    return Some(format!(
+                        "\n\nSpec file: {} (sha256:{digest}; excerpt up to {cap} bytes)\n{text}",
+                        candidate.display()
+                    ));
+                }
+            }
+            Err(e) => e,
+        };
+        errors.push(format!("{}: {error}", candidate.display()));
+    }
+    let warning = format!(
+        "spec file '{spec}' could not be read: {}; pass an issue-number spec instead",
+        errors.join("; ")
+    );
+    let mut warnings = layers.warnings.borrow_mut();
+    if !warnings.contains(&warning) {
+        warnings.push(warning);
+    }
+    None
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "leaf lowering shares the preset's layers, roles and parameters"
@@ -1539,6 +1654,13 @@ fn lower_leaf(
             brief.push_str(&reference.text);
         }
         map.insert("prompt".into(), json!(brief));
+    }
+    if role.is_some_and(|role| {
+        role.starts_with("lens.") || role.starts_with("review.") || role == "plan.review"
+    }) && let Some(context) = spec_context(layers, parameters)
+    {
+        let brief = map.get("prompt").and_then(Value::as_str).unwrap_or(prompt);
+        map.insert("prompt".into(), json!(format!("{brief}{context}")));
     }
     match family.as_ref().and_then(Value::as_str) {
         None | Some("" | "any") => {}
@@ -2205,7 +2327,21 @@ impl StageBuilder<'_> {
                         .unwrap_or_else(|| selected_inputs(&ends, &json!(["result", "findings"])));
                     let min_successful = object
                         .remove("min_successful")
-                        .map(|value| self.minimum_successful(&value))
+                        .map(|value| {
+                            if value.as_str() == Some("${min_lenses}") {
+                                let requested =
+                                    interpolate(&value, &self.parameters, self.prompt, 1)?
+                                        .as_u64()
+                                        .ok_or("min_lenses must be a non-negative integer")?;
+                                Ok(if requested == 0 {
+                                    ends.len().saturating_sub(1).max(1) as u64
+                                } else {
+                                    requested
+                                })
+                            } else {
+                                self.minimum_successful(&value)
+                            }
+                        })
                         .transpose()?;
                     (
                         composite(&id, children, exports, deps, &outputs, min_successful),
@@ -3508,6 +3644,16 @@ pub fn run(
             None => Vec::new(),
         };
         let mut layers = configured(globals)?;
+        layers.launch_dir = Some(directory.clone());
+        // Default project selection may be a subdirectory of a checkout.
+        layers.project_dir = Some(
+            provenant_os::git::repository_path(
+                &directory,
+                provenant_os::git::RepositoryPath::Toplevel,
+            )
+            .unwrap_or_else(|_| directory.clone()),
+        );
+        layers.default_worktree = request.access.worktree.clone();
         let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
         layers.known_routes = Some(config.domains.routing.route_names(&catalogue));
         {

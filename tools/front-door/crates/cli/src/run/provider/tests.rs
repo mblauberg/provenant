@@ -1931,6 +1931,52 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
     assert!(continued.argv.iter().any(|arg| arg == "--resume"));
     let confinement = launch.confinement.ok_or("writer confinement missing")?;
     assert!(confinement.writer.is_some());
+    // Exercise the actual request builder with two distinct project overrides.
+    let project_a = binding.project_id();
+    let project_b = ProjectId::from_bytes([0xff; 16]);
+    let config = provenant_confinement::run_config::RunConfig {
+        projects: [
+            (
+                project_a.to_string(),
+                provenant_confinement::run_config::ProjectRunConfig {
+                    writer_writes: Some(vec![base.join("a-locks")]),
+                    ..Default::default()
+                },
+            ),
+            (
+                project_b.to_string(),
+                provenant_confinement::run_config::ProjectRunConfig {
+                    writer_writes: Some(vec![base.join("b-locks")]),
+                    ..Default::default()
+                },
+            ),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let request = confinement_request(
+        project_a,
+        ConfinementRoots {
+            cwd: &project,
+            home: &home,
+            scratch: &paths.scratch,
+            private_state: &paths.provider_state,
+            assets: &assets,
+            prompt_file: None,
+        },
+        confinement.writer.as_ref(),
+        &run::LaneAccess::default(),
+        &config,
+        "cursor",
+        false,
+    )?;
+    assert_eq!(
+        request.permissions.write_roots,
+        vec![PathGrant {
+            path: base.join("a-locks"),
+            scope: PathScope::Subtree,
+        }]
+    );
     // The default config enables the cargo seed, and prepare hands that to the
     // lane's launch confinement, where `seed_target` reads it.
     assert!(
@@ -3041,7 +3087,7 @@ fn host_write_paths_reach_writers_only() {
         ..Default::default()
     };
     let paths = |writer| -> Vec<PathBuf> {
-        write_roots(&access, &host, writer)
+        write_roots(&access, &host, writer, "project")
             .into_iter()
             .map(|grant| grant.path)
             .collect()
@@ -3051,6 +3097,45 @@ fn host_write_paths_reach_writers_only() {
         [PathBuf::from("/p/extra"), "/p/.agent-run/locks".into()]
     );
     assert_eq!(paths(false), [PathBuf::from("/p/extra")]);
+}
+
+#[test]
+fn writer_plan_roots_are_resolved_for_the_selected_project() {
+    use provenant_confinement::run_config::{ProjectRunConfig, RunConfig};
+    let config = RunConfig {
+        writer_writes: vec!["/host/locks".into()],
+        projects: [
+            (
+                "a".into(),
+                ProjectRunConfig {
+                    writer_writes: Some(vec!["/a/locks".into()]),
+                    ..Default::default()
+                },
+            ),
+            (
+                "b".into(),
+                ProjectRunConfig {
+                    writer_writes: Some(vec!["/b/locks".into()]),
+                    ..Default::default()
+                },
+            ),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let roots = write_roots(&run::LaneAccess::default(), &config, true, "a");
+    assert_eq!(
+        roots,
+        vec![PathGrant {
+            path: "/a/locks".into(),
+            scope: PathScope::Subtree
+        }]
+    );
+    assert!(
+        !roots
+            .iter()
+            .any(|grant| grant.path == Path::new("/b/locks"))
+    );
 }
 
 #[test]
