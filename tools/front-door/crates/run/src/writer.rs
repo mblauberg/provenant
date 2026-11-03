@@ -155,9 +155,10 @@ impl WriterLaunch {
     /// rechecks this prepared base while holding writer custody before launch.
     pub fn require_source(&self, expected: GitOid) -> Result<()> {
         if self.base != expected {
-            return Err(RunError::Validation(
-                "writer differs from pinned source commit",
-            ));
+            return Err(RunError::WriterSourceMismatch {
+                expected,
+                actual: self.base,
+            });
         }
         Ok(())
     }
@@ -1002,6 +1003,18 @@ mod cargo_setup_tests {
             custody: None,
             review_exempt: Default::default(),
         };
+        let other = GitOid::parse(&"1".repeat(40))?;
+        let mismatch = writer
+            .require_source(other)
+            .err()
+            .ok_or("different source must refuse")?;
+        assert!(
+            matches!(mismatch, RunError::WriterSourceMismatch { expected, actual } if expected == other && actual == writer.base)
+        );
+        let message = mismatch.to_string();
+        assert!(message.contains(&other.to_string()));
+        assert!(message.contains(&expected));
+        writer.require_source(writer.base)?;
         let second_tree = provenant_confinement::verify_worktree(&repo, &second_lane)?;
         let mut second = WriterLaunch {
             worktree: second_tree,

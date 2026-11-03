@@ -635,6 +635,7 @@ impl From<&RunError> for ErrorKind {
             RunError::ObjectImportLimit(_) => Self::ObjectImportLimit,
             RunError::Validation(_)
             | RunError::WriterHeadNotLaneBranch
+            | RunError::WriterSourceMismatch { .. }
             | RunError::ReviewAcceptanceRequired
             | RunError::InvalidBase(_)
             | RunError::TooLarge { .. } => Self::Invalid,
