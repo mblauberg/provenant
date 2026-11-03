@@ -3018,6 +3018,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir()?;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
         let root = private(temp.path())?;
         let readiness = child(&root, OsStr::new(READINESS_DIRECTORY))?;
         let _account = child(&readiness, OsStr::new("key"))?;
