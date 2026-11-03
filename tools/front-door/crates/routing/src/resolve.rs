@@ -8,6 +8,10 @@ use provenant_records::{
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// The readiness of one route at a time, in unix seconds.
+pub type ReadinessLookup<'a> =
+    &'a dyn Fn(&provenant_quota::ReadinessScope, i64) -> provenant_quota::ReadinessRead;
+
 /// Inputs are validated by their owning composition edges. Preview has no
 /// disclosure/confinement grant; dispatch supplies the separately validated refs.
 pub struct AccessContext<'a> {
@@ -28,6 +32,10 @@ pub struct RoutingContext<'a> {
     /// They supply persisted mismatch and refusal evidence only.
     pub accounts: &'a [provenant_quota::AccountRecord],
     pub quota_policies: &'a [provenant_quota::QuotaPolicy],
+    /// Readiness lookup supplied by the composition edge, called with the
+    /// scope and `now` in unix seconds. Routing performs no I/O; `None` reads
+    /// every route as unknown. Only an `unavailable` verdict excludes a route.
+    pub readiness: Option<ReadinessLookup<'a>>,
     pub access: &'a [AccessContext<'a>],
     pub now: provenant_core::WallTime,
     pub host: &'a str,
@@ -1010,6 +1018,9 @@ fn account_reason<'q>(
     {
         reason = account_block_reason(model, key, context);
     }
+    if reason.is_none() {
+        reason = readiness_reason(model, availability, context);
+    }
     // Explicit exact IDs use the executable/account preflight too. The provider
     // owns model availability; named routes and pools require catalogue entries.
     let quota = latest_reading(model, availability, context, true);
@@ -1087,6 +1098,39 @@ fn account_block_reason(
         Err(_) => Some(RouteExclusionReason::InvalidAccountEvidence),
         Ok(block) => block.map(provenant_quota::AccountBlock::exclusion_reason),
     }
+}
+/// An `unavailable` readiness verdict for this account on the model's own
+/// route or any of its verified pools, or on the whole account, excludes the
+/// candidate with the verdict's projected reason. Unknown (absent, stale,
+/// unreachable or damaged) never excludes: it is reported, not enforced.
+fn readiness_reason(
+    model: &ModelId,
+    availability: &AvailabilityRecord,
+    context: &RoutingContext<'_>,
+) -> Option<RouteExclusionReason> {
+    let lookup = context.readiness?;
+    let account_key = availability.account_key.as_deref()?;
+    let now = context.now_seconds();
+    std::iter::once(format!("{}/{}", model.adapter(), model.model()))
+        .chain(context.catalogue.admission_pools(model))
+        .find_map(|route| {
+            let read = lookup(
+                &provenant_quota::ReadinessScope {
+                    host: provenant_quota::LOCAL_HOST.into(),
+                    adapter: model.adapter().into(),
+                    account_key: account_key.into(),
+                    route,
+                },
+                now,
+            );
+            if read.state != provenant_quota::ReadinessState::Unavailable {
+                return None;
+            }
+            match read.project() {
+                RouteReadiness::Unavailable { reason, .. } => Some(reason),
+                _ => None,
+            }
+        })
 }
 /// The account's latest reading for this model, only a fresh one when
 /// `fresh`. Only a fresh reading may refuse the route; a stale one still ranks

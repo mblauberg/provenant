@@ -596,6 +596,10 @@ pub struct HostHealth {
     pub execution: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// What the host's route readiness reads as from here. Absent on the local
+    /// row and on rows nobody probed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<PeerReadiness>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerHealth {
@@ -605,6 +609,88 @@ pub struct PeerHealth {
     pub available: bool,
     /// Readiness requires the run owner; config presence alone proves nothing.
     pub execution: Option<bool>,
+    /// Present when this peer's build reports route readiness. An older peer
+    /// omits it, which is how a chair tells it cannot report readiness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<PeerReadiness>,
+}
+
+/// The state of a host's route readiness, with the quota record's wire names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerReadinessState {
+    Ready,
+    Unavailable,
+    Unknown,
+}
+
+/// Reason a peer reads as unknown: quota's `unreachable_peer` wire name.
+pub const READINESS_UNREACHABLE_PEER: &str = "unreachable_peer";
+/// Reason for a peer too old to report readiness: quota's
+/// `unsupported_peer_version` wire name. The protocol refusal itself keeps its
+/// own `peer_version` code.
+pub const READINESS_UNSUPPORTED_PEER_VERSION: &str = "unsupported_peer_version";
+/// Reason nothing was observed.
+pub const READINESS_NOT_PROBED: &str = "not_probed";
+
+/// A host's route readiness as it crosses the wire. It is additive: fields
+/// the reader does not know are kept, and a missing record is never ready.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerReadiness {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
+    pub state: PeerReadinessState,
+    /// A quota readiness reason wire name. Kept as text so a newer peer's
+    /// reason still decodes; bounded and cleaned when read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl PeerReadiness {
+    fn unknown(reason: &str) -> Self {
+        Self {
+            extra: Default::default(),
+            state: PeerReadinessState::Unknown,
+            reason: Some(reason.into()),
+        }
+    }
+    /// Nothing observed: the host was not asked.
+    pub fn not_probed() -> Self {
+        Self::unknown(READINESS_NOT_PROBED)
+    }
+    /// A peer that could not be asked reads as unknown, never as ready.
+    pub fn unreachable() -> Self {
+        Self::unknown(READINESS_UNREACHABLE_PEER)
+    }
+    /// A peer whose build predates readiness reporting.
+    pub fn unsupported_version() -> Self {
+        Self::unknown(READINESS_UNSUPPORTED_PEER_VERSION)
+    }
+    /// What this build reports of itself. It carries no per-route
+    /// observations yet, so it states only that it can report readiness.
+    pub fn reporting() -> Self {
+        Self::not_probed()
+    }
+    /// What a probe of a peer shows. A protocol mismatch or a health reply
+    /// without readiness comes from a peer too old to report it; any other
+    /// failure, or a reply that is not a health reply, is an unreachable peer.
+    pub fn from_probe(probe: &Result<PeerResponse, PeerError>) -> Self {
+        match probe {
+            Ok(PeerResponse {
+                result: PeerResult::Health { data, .. },
+                ..
+            }) => match &data.readiness {
+                Some(reported) => Self {
+                    extra: Default::default(),
+                    state: reported.state,
+                    reason: reported.reason.as_deref().map(|r| plain_text(r, 64)),
+                },
+                None => Self::unsupported_version(),
+            },
+            Err(PeerError::ProtocolMismatch { .. }) => Self::unsupported_version(),
+            _ => Self::unreachable(),
+        }
+    }
 }
 #[derive(Debug, Serialize, Deserialize)]
 // Internally tagged struct variants keep the existing result/data wire shape
@@ -1379,6 +1465,7 @@ mod tests {
                         host: request.target_host,
                         available: true,
                         execution: None,
+                        readiness: None,
                     },
                     extra: Default::default(),
                 },
@@ -1904,6 +1991,7 @@ mod tests {
             host: HostId::from_bytes([2; 16]),
             available: true,
             execution: Some(true),
+            readiness: None,
         };
         let value = serde_json::to_value(health).unwrap();
         assert_eq!(value.as_object().unwrap().len(), 3);
@@ -2035,6 +2123,68 @@ mod tests {
                 .protocol,
             Some(PROTOCOL)
         );
+    }
+
+    #[test]
+    fn peer_readiness_reads_old_and_unreachable_peers_as_unknown() {
+        let host = HostId::from_bytes([2; 16]);
+        let health = |data: serde_json::Value| -> Result<PeerResponse, PeerError> {
+            let response = serde_json::json!({
+                "version": 1, "protocol": PROTOCOL, "host": host,
+                "project": project_key(Path::new("/home/a")),
+                "result": {"result": "health", "data": data},
+            });
+            Ok(serde_json::from_value(response).unwrap())
+        };
+        let reason = |probe: &Result<PeerResponse, PeerError>| {
+            let read = PeerReadiness::from_probe(probe);
+            (read.state, read.reason)
+        };
+        let unknown = |reason: &str| (PeerReadinessState::Unknown, Some(reason.to_owned()));
+        // An older peer's health reply has no readiness: its version is too old.
+        let old = health(serde_json::json!({
+            "host": host, "available": true, "execution": true,
+        }));
+        assert_eq!(reason(&old), unknown("unsupported_peer_version"));
+        // A protocol mismatch cannot report readiness either.
+        let mismatch = Err(PeerError::ProtocolMismatch {
+            peer: "workshop".into(),
+            remote: 1,
+            expected: PROTOCOL,
+        });
+        assert_eq!(reason(&mismatch), unknown("unsupported_peer_version"));
+        // An unreachable peer, or any failed exchange, reads unknown, never ready.
+        for failed in [
+            PeerError::Unavailable,
+            PeerError::Failed("ssh".into()),
+            PeerError::Frame,
+        ] {
+            assert_eq!(reason(&Err(failed)), unknown("unreachable_peer"));
+        }
+        // A current peer's report is kept, with its reason bounded and cleaned.
+        let current = health(serde_json::json!({
+            "host": host, "available": true, "execution": true,
+            "readiness": {"state": "unavailable", "reason": "exhausted\u{202e}", "future": 1},
+        }));
+        assert_eq!(
+            reason(&current),
+            (
+                PeerReadinessState::Unavailable,
+                Some("exhausted".to_owned())
+            )
+        );
+        // What a current peer sends round-trips and decodes on an older chair's shape.
+        let sent = PeerHealth {
+            extra: Default::default(),
+            host,
+            available: true,
+            execution: Some(true),
+            readiness: Some(PeerReadiness::reporting()),
+        };
+        let value = serde_json::to_value(sent).unwrap();
+        assert_eq!(value["readiness"]["state"], "unknown");
+        assert_eq!(value["readiness"]["reason"], "not_probed");
+        assert!(value.get("extra").is_none());
     }
 
     #[test]

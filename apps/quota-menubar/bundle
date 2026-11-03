@@ -13,7 +13,6 @@ mkdir -p "$out/Contents/MacOS" "$out/Contents/Resources" "$helper/Contents/MacOS
 cp "$bin/provenant-console" "$out/Contents/MacOS/"
 cp "$bin/quota-menubar" "$helper/Contents/MacOS/"
 cp Resources/Menu-Info.plist "$helper/Contents/Info.plist"
-[ -d "$bin/quota-menubar_QuotaMenuBar.bundle" ] && cp -R "$bin/quota-menubar_QuotaMenuBar.bundle" "$helper/Contents/Resources/"
 # The brand icon (Icon Composer format) is compiled by actool. Without Xcode the app is built with no icon.
 icon_name=Provenant
 icon_source="$PWD/../../assets/brand/$icon_name.icon"

@@ -33,14 +33,22 @@ final class SourceBoundaryTests: XCTestCase {
         }
     }
 
-    /// A split column's min or max must not follow its content, or AppKit loops in the update-constraints pass
-    /// (issue 2726): no nested split views or min/max frames in screens; only the window's columns set widths.
     /// A split view nested in a `NavigationSplitView` column reports a content-derived minimum to that column,
     /// which can loop AppKit's update-constraints pass (#2726). Column sizing belongs to `ConsoleView` alone.
     func testConsoleScreensNestNoSplitViews() throws {
         for file in try swiftFiles(in: "ProvenantConsole") where file.name != "ConsoleView.swift" {
             for word in ["HSplitView", "VSplitView"] {
                 XCTAssertFalse(file.text.contains(word), "\(file.name) nests \(word)")
+            }
+        }
+    }
+
+    func testShippingSourcesDoNotUseSwiftPMResourceBundles() throws {
+        for target in ["ProvenantKit", "ProvenantDesign", "ProvenantConsole", "QuotaMenuBar"] {
+            let files = try swiftFiles(in: target)
+            XCTAssertFalse(files.isEmpty)
+            for file in files {
+                XCTAssertFalse(file.text.contains("Bundle.module"), "\(target)/\(file.name) uses Bundle.module")
             }
         }
     }
