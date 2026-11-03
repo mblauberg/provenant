@@ -17,6 +17,27 @@ fn fragments_cannot_inject_persisted_topology_through_extra_fields() {
 }
 
 #[test]
+fn raw_expansion_rejects_each_injected_topology_field() {
+    let doc = planner(2);
+    let output = result(vec![slice("child", &[])]);
+    let mut owner = fixture_owner(&[&output]);
+    owner.observations.push_back(AttemptObservation::Pending { attempt_ref: None });
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let wire = serde_json::to_value(&run.checkpoint).unwrap();
+    for field in ["composite_members", "after_expansion"] {
+        let mut tampered = wire.clone();
+        let node = &mut tampered["expansions"][0]["nodes"][0];
+        let id = node["id"].as_str().unwrap().to_owned();
+        node[field] = json!(["plan--injected"]);
+        let mut journal = MemoryJournal(Some(serde_json::from_value(tampered).unwrap()));
+        let error = advance(&doc, &mut fixture_owner(&[]), &mut journal).unwrap_err();
+        assert_eq!(error.code(), "bad_checkpoint");
+        assert!(error.to_string().contains(&id), "{error}");
+        assert!(error.to_string().contains(&format!("persisted {field} must match the approved topology")), "{error}");
+    }
+}
+
+#[test]
 fn planned_fan_out_survives_checkpoint_json_and_mixed_settlement() {
     for (fallback, legacy) in [(false, false), (true, false), (false, true), (true, true)] {
         let mut doc = planner(8);
@@ -47,19 +68,27 @@ fn planned_fan_out_survives_checkpoint_json_and_mixed_settlement() {
         assert_eq!(pending.checkpoint.nodes.iter().find(|n| n.id == "after").unwrap().state, NodeState::Pending);
         let mut wire = serde_json::to_value(&pending.checkpoint).unwrap();
         if !legacy {
-            let mut tampered = pending.checkpoint.clone();
-            let boundary = tampered.expansions[0].nodes.iter_mut()
-                .find(|node| node.composite.is_some()).unwrap();
-            let boundary_id = boundary.id.clone();
-            boundary.composite_members[0] = "plan--tampered".into();
-            boundary.after_expansion[0] = "plan--tampered".into();
-            tampered.nodes.iter_mut().find(|node| node.id == boundary_id).unwrap()
-                .children = boundary.composite_members.clone();
-            journal.0 = Some(serde_json::from_value(serde_json::to_value(tampered).unwrap()).unwrap());
-            let error = advance(&doc, &mut fixture_owner(&[]), &mut journal).unwrap_err();
-            assert_eq!(error.code(), "bad_checkpoint");
-            assert!(error.to_string().contains(&boundary_id), "{error}");
-            assert!(error.to_string().contains("persisted composite topology must match the submitted specification"), "{error}");
+            let nodes = wire["expansions"][0]["nodes"].as_array().unwrap();
+            let boundary = nodes.iter().position(|node| node.get("composite").is_some()).unwrap();
+            let member = nodes.iter().position(|node| node.get("composite").is_none()).unwrap();
+            for (index, field, value) in [
+                (boundary, "composite_members", json!(["plan--tampered"])),
+                (boundary, "after_expansion", json!(["plan--tampered"])),
+                (boundary, "composite_members", json!([])),
+                (boundary, "after_expansion", json!([])),
+                (member, "composite_members", json!(["plan--tampered"])),
+                (member, "after_expansion", json!(["plan--tampered"])),
+            ] {
+                let mut tampered = wire.clone();
+                let node = &mut tampered["expansions"][0]["nodes"][index];
+                let id = node["id"].as_str().unwrap().to_owned();
+                node[field] = value;
+                journal.0 = Some(serde_json::from_value(tampered).unwrap());
+                let error = advance(&doc, &mut fixture_owner(&[]), &mut journal).unwrap_err();
+                assert_eq!(error.code(), "bad_checkpoint");
+                assert!(error.to_string().contains(&id), "{error}");
+                assert!(error.to_string().contains(&format!("persisted {field} must match the approved topology")), "{error}");
+            }
         }
         if legacy {
             for node in wire["expansions"][0]["nodes"].as_array_mut().unwrap() {
