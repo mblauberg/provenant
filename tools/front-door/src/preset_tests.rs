@@ -3920,3 +3920,33 @@ fn compact_preset_explain_lists_parameter_names() {
     let data = json!({"name": "example", "parameters": [{"name": "base"}, {"name": "risk"}]});
     assert!(super::preset::human_for_test(&data, false).contains("Parameters: base, risk"));
 }
+
+#[test]
+fn preset_show_and_explain_json_match_snapshots() {
+    use provenant_records::{CommandResult, Outcome};
+    let layers = Layers::empty();
+    let (values, mut origins) = layers.resolve("review-council").unwrap();
+    origins.extend(expand(&layers, "review-council", "", &[]).unwrap().origins);
+    let show = CommandResult::new(
+        "preset",
+        Outcome::Ok,
+        json!({"name": "review-council", "values": values, "origins": origins}),
+    );
+    let explain = CommandResult::new(
+        "preset",
+        Outcome::Ok,
+        layers.explain("review-council").unwrap(),
+    );
+    for (actual, expected) in [
+        (
+            serde_json::to_value(show).unwrap(),
+            include_str!("../tests/golden/preset-review-council-show.json"),
+        ),
+        (
+            serde_json::to_value(explain).unwrap(),
+            include_str!("../tests/golden/preset-review-council-explain.json"),
+        ),
+    ] {
+        assert_eq!(actual, serde_json::from_str::<Value>(expected).unwrap());
+    }
+}

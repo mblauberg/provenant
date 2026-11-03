@@ -1,0 +1,203 @@
+{
+  "command": "preset",
+  "data": {
+    "layers": [
+      "bundled"
+    ],
+    "name": "review-council",
+    "next": [
+      "provenant run --preset review-council --prompt-file FILE --explain",
+      "provenant run --preset review-council --prompt-file FILE --set STAGE.PARAMETER=VALUE"
+    ],
+    "parameters": [
+      {
+        "default": "",
+        "doc": "Diff reference the change is measured from, for example origin/main.",
+        "name": "base",
+        "origin": "bundled",
+        "type": "string"
+      },
+      {
+        "default": "",
+        "doc": "Change kind, for example refactor, integration, or docs.",
+        "name": "kind",
+        "origin": "bundled",
+        "type": "string"
+      },
+      {
+        "default": [
+          {
+            "name": "correctness-spec",
+            "tier": "",
+            "when": ""
+          },
+          {
+            "name": "tests",
+            "tier": "",
+            "when": ""
+          },
+          {
+            "name": "design-fit-reuse",
+            "tier": "",
+            "when": ""
+          },
+          {
+            "name": "simplicity",
+            "tier": "",
+            "when": ""
+          },
+          {
+            "name": "conventions-readability",
+            "tier": "",
+            "when": ""
+          },
+          {
+            "name": "refactor-cleanup",
+            "tier": "",
+            "when": ""
+          },
+          {
+            "name": "reliability",
+            "tier": "",
+            "when": ""
+          },
+          {
+            "name": "flexibility",
+            "tier": "",
+            "when": ""
+          },
+          {
+            "name": "security-privacy",
+            "tier": "",
+            "when": "security"
+          },
+          {
+            "name": "concurrency-data-errors",
+            "tier": "",
+            "when": "concurrency"
+          },
+          {
+            "name": "adversarial",
+            "tier": "",
+            "when": "terminal"
+          }
+        ],
+        "name": "lenses",
+        "origin": "bundled"
+      },
+      {
+        "default": 0,
+        "doc": "Lenses that must succeed. Fewer fails the lens group, which stops the council for the chair to substitute a lens or decide. 0 takes the review ladder minimum for risk_tier, at least 1.",
+        "max": 32,
+        "min": 0,
+        "name": "min_reviews",
+        "origin": "bundled",
+        "type": "integer"
+      },
+      {
+        "default": "",
+        "doc": "Review depth override from routing review shapes (quick, standard, deep).",
+        "name": "review_shape",
+        "origin": "bundled",
+        "type": "string"
+      },
+      {
+        "default": [],
+        "doc": "Tags that trigger conditional lenses: security, concurrency, terminal.",
+        "name": "risk_tags",
+        "origin": "bundled",
+        "type": "list"
+      },
+      {
+        "default": "",
+        "doc": "Risk tier that selects the review shape.",
+        "name": "risk_tier",
+        "origin": "bundled",
+        "type": "string"
+      },
+      {
+        "default": "",
+        "doc": "Review size override: small, medium, or large.",
+        "name": "size",
+        "origin": "bundled",
+        "type": "string"
+      },
+      {
+        "default": "",
+        "doc": "Issue number or file the change answers.",
+        "name": "spec",
+        "origin": "bundled",
+        "type": "string"
+      },
+      {
+        "default": {
+          "commit": "HEAD",
+          "type": "commit"
+        },
+        "doc": "Immutable review subject: a commit, a node or the integration head.",
+        "name": "subject",
+        "origin": "bundled",
+        "type": "table"
+      },
+      {
+        "default": "verifier",
+        "doc": "Route for the verifier. Define a route named verifier in another model family; without one the senior route is used and the substitution is recorded.",
+        "name": "verifier_tier",
+        "origin": "bundled",
+        "type": "string"
+      },
+      {
+        "default": 1,
+        "doc": "Verifier stages between the lenses and the synthesis, preferably from another model family; 0 skips verification.",
+        "max": 1,
+        "min": 0,
+        "name": "verifiers",
+        "origin": "bundled",
+        "type": "integer"
+      },
+      {
+        "default": "",
+        "doc": "Worktree the reviewers may read.",
+        "name": "worktree",
+        "origin": "bundled",
+        "type": "string"
+      }
+    ],
+    "pattern": {
+      "citations": [
+        "Google engineering practices, code review",
+        "Claude Code review and Bugbot vendor reports (vendor-reported)"
+      ],
+      "cost": "1 framing attempt + one attempt per selected lens + verifiers + 1 synthesis",
+      "level": "default",
+      "select_when": "A change needs review before it lands; depth follows the routing review shape.",
+      "summary": "Independent lenses review one immutable subject; a verifier, preferably from another model family through configured routing, tries to falsify the findings; a senior synthesis reconciles them with a disposition per finding.",
+      "tags": [
+        "review"
+      ]
+    },
+    "roles": [],
+    "stages": [
+      {
+        "id": "subject",
+        "role": "plan.review"
+      },
+      {
+        "group": "parallel",
+        "id": "lenses"
+      },
+      {
+        "count": "${verifiers}",
+        "id": "verify",
+        "role": "review.verify"
+      },
+      {
+        "id": "synthesis",
+        "role": "review.synthesis"
+      }
+    ]
+  },
+  "error": null,
+  "schema_version": 1,
+  "status": "ok"
+}
