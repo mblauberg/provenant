@@ -119,6 +119,7 @@ pub struct RoleLibrary {
     /// The release root whose `skills/` directory `skill:` references resolve
     /// against. `None` uses the references compiled into the binary.
     pub skill_root: Option<PathBuf>,
+    policies: Vec<(String, String)>,
 }
 
 /// A role with its `extends` chain applied.
@@ -159,6 +160,7 @@ impl RoleLibrary {
             entries: BTreeMap::new(),
             repo: BTreeSet::new(),
             skill_root: None,
+            policies: Vec::new(),
         };
         library
             .add("bundled", include_str!("../assets/roles.toml"))
@@ -170,11 +172,18 @@ impl RoleLibrary {
     pub fn add(&mut self, origin: &str, text: &str) -> Result<(), String> {
         let document: Value =
             toml_edit::de::from_str(text).map_err(|error| format!("{origin}: {error}"))?;
-        if let Some(extra) = document
-            .as_object()
-            .and_then(|map| map.keys().find(|key| *key != "roles"))
-        {
+        if let Some(extra) = document.as_object().and_then(|map| {
+            map.keys()
+                .find(|key| *key != "roles" && *key != "local_check_policy")
+        }) {
             return Err(format!("{origin}: unknown top-level key: {extra}"));
+        }
+        if let Some(policy) = document.get("local_check_policy") {
+            let policy_str = policy
+                .as_str()
+                .ok_or_else(|| format!("{origin}: local_check_policy must be a string"))?;
+            self.policies
+                .push((origin.to_owned(), policy_str.trim().to_owned()));
         }
         let Some(roles) = document.get("roles") else {
             return Ok(());
@@ -223,6 +232,15 @@ impl RoleLibrary {
 
     pub fn names(&self) -> Vec<String> {
         self.entries.keys().cloned().collect()
+    }
+
+    /// The effective local check policy, if declared in a roles layer.
+    pub fn policy(&self, exclude_repo: bool) -> Option<(&str, &str)> {
+        self.policies
+            .iter()
+            .rev()
+            .find(|(origin, _)| !exclude_repo || !self.repo.contains(origin))
+            .map(|(origin, text)| (origin.as_str(), text.as_str()))
     }
 
     fn lookup(

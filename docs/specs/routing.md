@@ -37,8 +37,17 @@ A request names exactly one `--model ADAPTER/ID` or `--route NAME`. No
 adapter, upgrade, effort default or downgrade is inferred, and an unknown
 explicit ID runs only if availability, disclosure and confinement are
 independently established. A pool draws among ready members, weighted by
-the provider's pacing factor (0.25 to 2.0), optional cache preference and seeded from the operation ID
-and task index; the receipt records each weight, the random roll and the chosen member.
+the provider's pacing factor (0.25 to 2.0), optional cache preference and a
+seed from the operation ID and task index. The receipt records each weight and
+its config or catalogue source, pacing policy and source, exclusions, readiness,
+the draw rule, random roll and chosen member. An attempt records the resolved
+model, effort and account label, with `source` identifying a pool, named route,
+explicit pin, fallback or continuation. The receipt lists considered exclusion
+rules even when another account keeps a member eligible; the launch record names
+whether account selection was pinned, automatic or continued. For a fallback,
+`pool_selection.pick` retains the original pool draw; `source = fallback`
+identifies the route actually launched. The receipt contains routing evidence,
+not prompt or credential text.
 - Why: retries pick the same model without stored state, and the receipt
   names what ran.
 - Test: `crates/routing/src/tests.rs::exact_unknown_is_retained_but_never_upgraded_or_activated`;

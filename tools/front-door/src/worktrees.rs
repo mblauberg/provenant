@@ -101,7 +101,7 @@ impl Error {
                 | WorktreeError::BranchCollision { .. },
             ) => Outcome::Invalid,
             Self::Worktree(
-                WorktreeError::Dirty
+                WorktreeError::Dirty(_)
                 | WorktreeError::DetachedPrimary
                 | WorktreeError::DetachedUnmerged { .. }
                 | WorktreeError::IgnoredPaths(_)

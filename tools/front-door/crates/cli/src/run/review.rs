@@ -663,32 +663,8 @@ fn captured_review_verdict(captured: &CapturedResult) -> Option<ReviewVerdict> {
     if let Some(token) = captured.verdict.as_deref() {
         return ReviewVerdict::from_token(token);
     }
-    if captured.declarations != 1 {
-        return None;
-    }
-    let line = captured
-        .excerpt
-        .split_inclusive('\n')
-        .find(|line| !line.trim().is_empty())?;
-    // A clipped first line is not legacy evidence.
-    if captured.truncated && !line.ends_with('\n') {
-        return None;
-    }
-    let stripped = line.replace('*', "");
-    let (label, token) = stripped.trim().trim_matches('_').trim().split_once(':')?;
-    if !label
-        .trim_matches(|c| c == '*' || c == '_')
-        .trim()
-        .eq_ignore_ascii_case("verdict")
-    {
-        return None;
-    }
-    match token
-        .trim()
-        .trim_matches(|c| c == '*' || c == '_')
-        .to_ascii_lowercase()
-        .as_str()
-    {
+    let token = captured.legacy_verdict_token()?;
+    match token.to_ascii_lowercase().as_str() {
         "approve" => Some(ReviewVerdict::Approve),
         "request_changes" => Some(ReviewVerdict::RequestChanges),
         "inconclusive" => Some(ReviewVerdict::Inconclusive),

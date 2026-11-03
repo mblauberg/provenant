@@ -1362,7 +1362,8 @@ mod tests {
         let transport = fixture.transport();
         let sender = fixture.repo("sender");
         let base = commit(&transport, &sender, &["--allow-empty", "-m", "base"]);
-        // Incompressible content, so the pack itself exceeds the old bound.
+        // #2166 replaced bundle files, which capped a transported commit at 64 MiB,
+        // with index-pack. Incompressible content proves a larger commit transports.
         let mut state = 0x9e37_79b9_7f4a_7c15_u64;
         let bytes: Vec<u8> = (0..(65 << 20) / 8)
             .flat_map(|_| {

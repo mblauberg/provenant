@@ -19,6 +19,7 @@ pub const DEFAULT_REVIEW_EXEMPT: [&str; 4] = [
 const DEFAULTS: &str = r#"writer_writes = []
 review_exempt = ["docs/release-notes/next.d/", "docs/specs/", "Cargo.lock", ".tracker-input"]
 push_conflict_markers = true
+brief_read_root_warnings = true
 
 [projects]
 "#;
@@ -44,6 +45,14 @@ pub struct RunConfig {
     /// Refuse pushes whose added lines start with a literal conflict marker.
     #[serde(default = "default_true")]
     pub push_conflict_markers: bool,
+    /// Warn when a brief cites paths outside the effective read roots.
+    #[serde(
+        default = "default_true",
+        alias = "warn_brief_read_roots",
+        alias = "brief_read_root_warning",
+        alias = "warn_brief_read_root"
+    )]
+    pub brief_read_root_warnings: bool,
     #[serde(default)]
     pub projects: BTreeMap<String, ProjectRunConfig>,
 }
@@ -56,6 +65,13 @@ fn default_true() -> bool {
 pub struct ProjectRunConfig {
     #[serde(default)]
     pub review_exempt: Option<Vec<String>>,
+    #[serde(
+        default,
+        alias = "warn_brief_read_roots",
+        alias = "brief_read_root_warning",
+        alias = "warn_brief_read_root"
+    )]
+    pub brief_read_root_warnings: Option<bool>,
 }
 fn default_review_exempt() -> Vec<String> {
     DEFAULT_REVIEW_EXEMPT
@@ -69,6 +85,7 @@ impl Default for RunConfig {
             writer_writes: Vec::new(),
             review_exempt: default_review_exempt(),
             push_conflict_markers: true,
+            brief_read_root_warnings: true,
             projects: BTreeMap::new(),
         }
     }
@@ -108,6 +125,14 @@ impl RunConfig {
             |_| ReviewExempt::none(),
             |config| config.review_exempt(project),
         )
+    }
+
+    /// Whether brief read-root warnings are enabled for `project`.
+    pub fn brief_read_root_warnings_for(&self, project: &str) -> bool {
+        self.projects
+            .get(project)
+            .and_then(|settings| settings.brief_read_root_warnings)
+            .unwrap_or(self.brief_read_root_warnings)
     }
 }
 fn valid_writer_write(path: &Path) -> bool {
@@ -191,9 +216,13 @@ fn project_key(key: &str) -> bool {
 }
 pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("push_conflict_markers", "bool"),
+    FieldMetadata::new("brief_read_root_warnings", "bool"),
+    FieldMetadata::new("warn_brief_read_roots", "bool"),
     FieldMetadata::new("writer_writes", "array"),
     FieldMetadata::new("review_exempt", "array"),
     FieldMetadata::new("projects.{project}.review_exempt", "array"),
+    FieldMetadata::new("projects.{project}.brief_read_root_warnings", "bool"),
+    FieldMetadata::new("projects.{project}.warn_brief_read_roots", "bool"),
 ];
 pub const SECTION: DomainSection = DomainSection::new::<RunConfig>("run", |_| DEFAULTS)
     .with_boundary_checks()
@@ -261,6 +290,33 @@ mod tests {
     }
 
     #[test]
+    fn brief_read_root_warnings_defaults_on_and_can_be_turned_off() {
+        assert!(RunConfig::default().brief_read_root_warnings);
+        let config: RunConfig =
+            toml_edit::de::from_str("brief_read_root_warnings = false\n").expect("parse");
+        assert!(!config.brief_read_root_warnings);
+        assert!(config.validate().is_empty());
+
+        let aliased: RunConfig =
+            toml_edit::de::from_str("warn_brief_read_roots = false\n").expect("parse");
+        assert!(!aliased.brief_read_root_warnings);
+        assert!(aliased.validate().is_empty());
+
+        let project: RunConfig = toml_edit::de::from_str(
+            r#"
+brief_read_root_warnings = true
+[projects.quiet]
+brief_read_root_warnings = false
+"#,
+        )
+        .expect("parse");
+        assert!(project.brief_read_root_warnings);
+        assert!(!project.brief_read_root_warnings_for("quiet"));
+        assert!(project.brief_read_root_warnings_for("loud"));
+        assert!(project.validate().is_empty());
+    }
+
+    #[test]
     fn a_project_list_replaces_the_host_list_and_an_empty_one_turns_it_off() {
         let config: RunConfig = toml_edit::de::from_str(
             r#"
@@ -291,12 +347,14 @@ review_exempt = []
                     "bad key".to_owned(),
                     ProjectRunConfig {
                         review_exempt: Some(vec!["/abs".into()]),
+                        ..Default::default()
                     },
                 ),
                 (
                     "good".to_owned(),
                     ProjectRunConfig {
                         review_exempt: Some(vec!["x/".into()]),
+                        ..Default::default()
                     },
                 ),
             ]
