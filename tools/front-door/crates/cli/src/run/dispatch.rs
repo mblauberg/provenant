@@ -2105,17 +2105,26 @@ pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> 
     {
         return Ok(());
     }
-    // Pacing holds a route back through candidate preparation, so a
-    // `Preparation` refusal is a refusal too, never a successful run.
+    // Candidate preparation reports route exclusions as `route: detail` entries.
+    // Promote pacing specifically; other preparation refusals remain in the receipt.
     if let Some((attempt, reason)) = started.iter().find_map(|started| match started {
         run::Started::Refused {
             attempt,
             reason,
-            kind:
-                run::RefusalKind::Policy
-                | run::RefusalKind::Preparation
-                | run::RefusalKind::PriorityUnavailable,
+            kind: run::RefusalKind::Policy,
         } => Some((attempt, reason)),
+        run::Started::Refused {
+            attempt,
+            reason,
+            kind: run::RefusalKind::Preparation,
+        } if reason.split("; ").any(|entry| {
+            entry
+                .rsplit_once(": ")
+                .is_some_and(|(_, detail)| detail == "PacingReserve")
+        }) =>
+        {
+            Some((attempt, reason))
+        }
         _ => None,
     }) {
         return Err(Fail::new(

@@ -25,15 +25,18 @@ fn policy_refusal_preserves_uncertain_sibling_handoff() -> Result<(), String> {
         .ok_or("policy refusal was ignored")?;
     assert_eq!(error.status, Status::Refused);
     assert_eq!(error.kind, ErrorKind::Refused);
-    // A route held back by pacing is refused the same way, never printed as a run.
-    let error = check_launch_policy(&[run::Started::Refused {
-        attempt: AttemptId::from_bytes([3; 16]),
-        kind: run::RefusalKind::PriorityUnavailable,
-        reason: "PacingReserve".into(),
-    }])
-    .err()
-    .ok_or("priority refusal was ignored")?;
-    assert!(error.message.contains("PacingReserve"));
+    // Unavailable routes still return their normal per-attempt receipts.
+    for kind in [
+        run::RefusalKind::PriorityUnavailable,
+        run::RefusalKind::Preparation,
+    ] {
+        check_launch_policy(&[run::Started::Refused {
+            attempt: AttemptId::from_bytes([3; 16]),
+            kind,
+            reason: "codex/model: UnknownAvailability".into(),
+        }])
+        .map_err(|error| error.message)?;
+    }
     // Production classifies a pacing-held route as a preparation refusal whose
     // reason is the routing exclusion detail.
     let held = provenant_routing::exclusion_detail(
@@ -42,7 +45,7 @@ fn policy_refusal_preserves_uncertain_sibling_handoff() -> Result<(), String> {
     let error = check_launch_policy(&[run::Started::Refused {
         attempt: AttemptId::from_bytes([4; 16]),
         kind: run::RefusalKind::Preparation,
-        reason: held,
+        reason: format!("codex/model: {held}"),
     }])
     .err()
     .ok_or("pacing-held preparation refusal was ignored")?;
