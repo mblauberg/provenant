@@ -6,6 +6,10 @@ behaviour, prior art, competing tools or published evidence.
 Look outward first. Search current documentation, upstream source and credible
 write-ups before relying on memory, even when confident.
 
+Prefer sources from roughly the past two months. Label older sources as
+background, and say when no recent source supports a claim. The brief may
+override this window.
+
 Return for each finding:
 - The claim in one sentence.
 - The source URL and its publication or retrieval date.

@@ -39,11 +39,13 @@ The package has five targets:
 - `ProvenantConsole` is a separate process for the window and needs macOS 26; on an older system it prints a message and exits.
 - `ProvenantTestSupport` holds the recorded CLI output (`Tests/ProvenantTestSupport/Fixtures`, as bundle resources) and the one `Replay` both test targets use to stand in for the CLI.
 
-No console code enters the menu target, and a source test checks that.
+No console code enters the menu target, and shipping targets do not use SwiftPM resource bundles. Source tests check both boundaries. The menu agent embeds its brand glyph so it works after the app is moved.
 
 ## Console
 
 `provenant-console` opens one window with a sidebar (Overview, Inbox, Runs, Quota, Chairs & Projects), the chosen screen, and an inspector for one attempt.
+
+Column sizing lives in `ConsoleView` alone, as constants. A screen never nests an `HSplitView` or `VSplitView` inside a column: the nested split reports a minimum derived from its content, and when the columns' minimums exceed the window's, AppKit's update-constraints pass loops and aborts the app. The Inbox list is a native content column with a draggable divider; its last width is remembered as an initial preference. Tests check the split-view rule and that the column minimums fit the window minimum.
 
 | Screen | Reads | Shows |
 | --- | --- | --- |

@@ -22,6 +22,18 @@
 # Repository (.provenant/roles.toml) and user (XDG config provenant/roles.toml)
 # files add or replace roles; list them with `provenant preset show --roles`.
 
+# Default targeted local checks policy prompt injected into roles via ${local_check_policy}.
+# Overridable per project through .provenant/roles.toml or a preset parameter.
+local_check_policy = """
+Local check policy: run the tests you add or change and the named tests covering
+changed functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or
+`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or
+`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for
+touched crates and generators for touched generated outputs. Never run a whole
+package, `--workspace` or the full suite locally, since CI runs those on the PR;
+reviewers reproduce one finding with one targeted test.
+"""
+
 [roles.scout]
 tier = "junior"
 access = "read_only"
@@ -51,9 +63,10 @@ references = [{ ref = "skill:scope/references/researcher.md", when = "always", i
 prompt = """
 External scout ${index}. Research outward for: ${prompt}
 Prefer primary sources and current documentation over memory, even when
-confident. Report each finding with its source URL and publication or
-retrieval date, mark vendor-reported figures, and state where sources
-disagree. Do not edit files.
+confident. Prefer sources from roughly the past two months and label older ones
+as background, unless the assignment sets another window. Report each finding
+with its source URL and publication or retrieval date, mark vendor-reported
+figures, and state where sources disagree. Do not edit files.
 """
 
 [roles.plan]
@@ -166,6 +179,7 @@ Lens: ${item.name}. Subject: ${prompt}
 Base (diff reference): ${base}
 Spec (acceptance criteria): ${spec}
 Check correctness against the spec as well as this lens.
+${local_check_policy}
 End with a findings block (schema_version 1) whose findings are a JSON array,
 with at most 32 entries and an empty array when there are no findings. Keep each
 summary to one line. Use this canonical array form:
@@ -229,6 +243,7 @@ Lens: ${item.name}. Subject: ${prompt}
 Base (diff reference): ${base}
 Spec (acceptance criteria): ${spec}
 Check correctness against the spec as well as this lens.
+${local_check_policy}
 ${mutation_testing}
 End with a findings block (schema_version 1) whose findings are a JSON array,
 with at most 32 entries and an empty array when there are no findings. Keep each
@@ -312,6 +327,7 @@ Try to falsify every finding against the pinned commit: reproduce it, look for
 the code or test that contradicts it, and check it against the spec. Re-emit
 every finding verbatim with one of UPHELD, FALSIFIED or UNVERIFIABLE and your
 evidence. Add any finding the lenses missed and mark it NEW. Do not edit files.
+${local_check_policy}
 End with a findings block (schema_version 1) whose entries keep each finding's
 id and add "verification": "upheld", "falsified" or "unverifiable".
 Carry any listed unavailable lenses into your result.
@@ -378,6 +394,7 @@ prompt = """
 Implement one bounded slice: ${prompt}
 Spec (acceptance criteria): ${spec}
 Keep changes within the supplied write scope. Run targeted checks and commit.
+${local_check_policy}
 
 Authority envelope. The objective above and the acceptance criteria are
 approved. You hold authority to make any engineering decision that serves them

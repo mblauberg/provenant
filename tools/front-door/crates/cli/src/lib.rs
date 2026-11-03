@@ -10,6 +10,7 @@ pub mod quota;
 pub(crate) mod quota_history;
 pub mod route;
 pub mod run;
+pub mod wait;
 pub mod workflow;
 pub use bench::Bench;
 pub use fabric::Fabric;
@@ -985,6 +986,11 @@ fn constraints(path: &str) -> Vec<String> {
             "required checks must register and pass on the same head; head changes refuse merging",
             "already-merged PRs retry safe cleanup without CI or another merge",
         ],
+        "provenant status" => &[
+            "wait requires at least one target via ID or repeated --target, up to domains.wait.max_targets (default 64); no duration uses domains.wait.timeout_seconds",
+            "with --wait, --json emits newline-delimited snapshot/transition events and a final end event; timeout exits 124",
+            "follow waits for all targets to be terminal; land targets only observe their PR",
+        ],
         "provenant pr status" => &[
             "one head-and-checks snapshot per PR; unavailable PRs preserve other rows",
             "wait without a value means five minutes; unchanged snapshots exit 124",
@@ -1017,6 +1023,7 @@ fn bounds(path: &str, name: &str) -> Option<(u64, u64)> {
 fn requirements(path: &str, name: &str) -> Vec<String> {
     let names: &[&str] = match (path, name) {
         (_, "condition") => &["wait"],
+        ("provenant status", "target" | "until" | "follow") => &["wait"],
         ("provenant run" | "provenant dispatch", "preset") => &["prompt_file"],
         (
             "provenant run" | "provenant dispatch",
@@ -1165,6 +1172,28 @@ mod tests {
                 assert!(arg.description.as_deref().is_some_and(|s| !s.is_empty()));
             }
         }
+        let status = catalog
+            .commands
+            .iter()
+            .find(|c| c.command == "provenant status")
+            .unwrap();
+        for name in ["target", "until", "follow"] {
+            assert_eq!(
+                status
+                    .arguments
+                    .iter()
+                    .find(|a| a.name == name)
+                    .unwrap()
+                    .requires,
+                ["wait"]
+            );
+        }
+        assert!(
+            status
+                .constraints
+                .iter()
+                .any(|c| c.contains("newline-delimited"))
+        );
         let dispatch = catalog
             .commands
             .iter()
@@ -1438,6 +1467,21 @@ mod tests {
     }
     #[test]
     fn bounded_waits_counts_and_byte_windows() {
+        valid(&[
+            "status", "--wait", "--target", "pr:2721", "--until", "all", "--follow",
+        ]);
+        valid(&[
+            "status",
+            "--wait=2m",
+            "--target",
+            "graph:build",
+            "--target",
+            "pr:2721",
+        ]);
+        invalid(&["status", "--wait=0"]);
+        invalid(&["status", "--wait=5h"]);
+        invalid(&["status", "--follow"]);
+        invalid(&["status", "--target", "pr:2721"]);
         for wait in ["1", "14400"] {
             valid(&["lanes", "--wait", wait]);
         }
@@ -2170,7 +2214,9 @@ mod tests {
     }
     #[test]
     fn telemetry_stats_parses_every_grouping_dimension() {
-        for dimension in ["pr", "issue", "graph", "node", "pattern", "preset", "role"] {
+        for dimension in [
+            "route", "pr", "issue", "graph", "node", "pattern", "preset", "role",
+        ] {
             let invocation = valid(&["telemetry", "stats", "--by", dimension]);
             let Command::Telemetry(Telemetry::Stats(stats)) = invocation.command else {
                 panic!("telemetry stats");

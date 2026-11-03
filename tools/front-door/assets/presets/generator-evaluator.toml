@@ -19,6 +19,7 @@ select_when = "An approved slice has a spec and a registered writer worktree."
 tags = ["write", "review"]
 
 [parameters]
+local_check_policy = { type = "string", default = "", doc = "Local check policy inherited by nested presets; empty uses the layered roles library." }
 worktree = { type = "string", default = "", doc = "Registered writer worktree." }
 scope = { type = "list", default = ["."], doc = "Literal relative paths the writer may change." }
 subject = { type = "table", default = { type = "commit", commit = "HEAD" }, doc = "Source the writer starts from." }

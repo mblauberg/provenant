@@ -135,6 +135,7 @@
       "parameters.distinct_families.default": "bundled",
       "parameters.distinct_families.doc": "bundled",
       "parameters.distinct_families.type": "bundled",
+      "parameters.local_check_policy": "bundled",
       "parameters.route.default": "bundled",
       "parameters.route.doc": "bundled",
       "parameters.route.type": "bundled",

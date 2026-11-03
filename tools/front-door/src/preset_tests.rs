@@ -1,4 +1,4 @@
-use super::preset::{Expansion, Layers, expand};
+use super::preset::{Expansion, Layers, expand, find_prompt};
 use provenant_fabric_runtime::read_roots::ReadRoots;
 use serde_json::{Value, json};
 
@@ -1414,6 +1414,225 @@ fn tests_lens_includes_mutation_testing_only_for_crucial_or_terminal_risk() {
         assert!(
             !correctness_prompt.contains("Diff-scoped mutation evidence"),
             "correctness lens at risk tier {risk}"
+        );
+    }
+}
+
+#[test]
+fn preset_explain_big_batch_shows_targeted_checks_policy_and_origin() {
+    let layers = Layers::empty();
+    let explained = layers.explain("big-batch").unwrap();
+    for role_name in [
+        "write.implement",
+        "repairer",
+        "refactor-principal",
+        "review.verify",
+    ] {
+        let prompt = explained["prompts"][role_name].as_str().expect(role_name);
+        // Each prescribed limit is asserted on its own, so dropping any one
+        // of them from the bundled policy fails here, not only in goldens.
+        let flat = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+        for clause in [
+            "Local check policy: run the tests you add or change",
+            "the named tests covering changed functions, with a filter",
+            "cargo nextest run -p CRATE -E 'test(NAME)'",
+            "Run fmt, clippy for touched crates and generators for touched generated outputs",
+            "Never run a whole package, `--workspace` or the full suite locally",
+            "since CI runs those on the PR",
+            "reviewers reproduce one finding with one targeted test",
+        ] {
+            assert!(
+                flat.contains(clause),
+                "role {role_name} prompt missing policy clause {clause:?}: {prompt}"
+            );
+        }
+        assert!(
+            prompt.contains("scripts/select-affected-crate-tests"),
+            "role {role_name} missing affected tests script: {prompt}"
+        );
+        assert!(
+            prompt.contains("scripts/find-changed-tests"),
+            "role {role_name} missing find changed tests script: {prompt}"
+        );
+        assert_eq!(
+            explained["local_check_policy"]["origin"], "bundled",
+            "role {role_name} policy origin"
+        );
+    }
+}
+
+#[test]
+fn preset_explain_big_batch_project_override_replaces_policy_text() {
+    let mut layers = Layers::empty();
+    layers
+        .roles
+        .add(
+            ".provenant/roles.toml",
+            "local_check_policy = 'Custom project policy: run targeted tests only.'\n",
+        )
+        .unwrap();
+    let explained = layers.explain("big-batch").unwrap();
+    for role_name in [
+        "write.implement",
+        "repairer",
+        "refactor-principal",
+        "review.verify",
+    ] {
+        let prompt = explained["prompts"][role_name].as_str().expect(role_name);
+        assert!(
+            prompt.contains("Custom project policy: run targeted tests only."),
+            "role {role_name} missing overridden policy: {prompt}"
+        );
+        assert!(!prompt.contains("Local check policy: run the tests you add or change"));
+        assert_eq!(
+            explained["local_check_policy"]["origin"], ".provenant/roles.toml",
+            "role {role_name} policy origin"
+        );
+    }
+}
+
+#[test]
+fn preset_explain_big_batch_parameter_override_replaces_policy_text() {
+    let layers = Layers::empty();
+    let expanded = expand(
+        &layers,
+        "big-batch",
+        "brief",
+        &["parameters.local_check_policy='Preset param override: run targeted.'".into()],
+    )
+    .unwrap();
+    assert_eq!(expanded.origins["parameters.local_check_policy"], "--set");
+    for role_name in [
+        "write.implement",
+        "repairer",
+        "refactor-principal",
+        "review.verify",
+        "lens.tests",
+    ] {
+        let prompt = find_prompt(&expanded.document["nodes"], role_name).expect(role_name);
+        assert!(
+            prompt.contains("Preset param override: run targeted."),
+            "role {role_name} missing parameter overridden policy: {prompt}"
+        );
+        assert!(!prompt.contains("Local check policy: run the tests you add or change"));
+    }
+}
+
+#[test]
+fn preset_local_check_policy_parameter_propagates_through_compositions() {
+    let layers = Layers::empty();
+    for (preset, roles) in [
+        (
+            "generator-evaluator",
+            vec!["write.implement", "lens.correctness-spec"],
+        ),
+        (
+            "deliver",
+            vec!["write.implement", "repairer", "review.verify", "lens.tests"],
+        ),
+        (
+            "scope-then-run",
+            vec!["write.implement", "lens.correctness-spec"],
+        ),
+        ("review-council", vec!["review.verify", "lens.tests"]),
+    ] {
+        let expanded = expand(
+            &layers,
+            preset,
+            "brief",
+            &["parameters.local_check_policy='Parameter policy only.'".into()],
+        )
+        .unwrap();
+        assert_eq!(expanded.origins["parameters.local_check_policy"], "--set");
+        for role in roles {
+            let prompt = find_prompt(&expanded.document["nodes"], role).expect(role);
+            assert!(
+                prompt.contains("Parameter policy only."),
+                "{preset}: {role}"
+            );
+            assert!(!prompt.contains("Local check policy: run the tests you add or change"));
+        }
+    }
+}
+
+#[test]
+fn preset_local_check_policy_empty_parameter_uses_layered_roles() {
+    let mut layers = Layers::empty();
+    layers
+        .roles
+        .add("user/roles.toml", "local_check_policy = 'User policy.'")
+        .unwrap();
+    layers
+        .roles
+        .add(
+            ".provenant/roles.toml",
+            "local_check_policy = 'Project policy.'",
+        )
+        .unwrap();
+    let expanded = expand(
+        &layers,
+        "big-batch",
+        "brief",
+        &["parameters.local_check_policy=''".into()],
+    )
+    .unwrap();
+    assert_eq!(
+        expanded.origins["parameters.local_check_policy"],
+        ".provenant/roles.toml"
+    );
+    for role in [
+        "write.implement",
+        "repairer",
+        "refactor-principal",
+        "review.verify",
+        "lens.tests",
+    ] {
+        let prompt = find_prompt(&expanded.document["nodes"], role).expect(role);
+        assert!(prompt.contains("Project policy."), "{role}");
+        assert!(!prompt.contains("User policy."));
+    }
+}
+
+#[test]
+fn preset_local_check_policy_nonempty_default_wins_over_roles_library() {
+    let mut layers = Layers::empty();
+    layers
+        .roles
+        .add(
+            ".provenant/roles.toml",
+            "local_check_policy = 'Project policy.'",
+        )
+        .unwrap();
+    layers
+        .insert(
+            "user/presets/big-batch.toml",
+            "big-batch",
+            r#"
+[parameters.local_check_policy]
+default = "Preset default policy."
+"#,
+        )
+        .unwrap();
+    let explained = layers.explain("big-batch").unwrap();
+    assert_eq!(
+        explained["local_check_policy"]["origin"],
+        "user/presets/big-batch.toml"
+    );
+    assert_eq!(
+        explained["local_check_policy"]["prompt"],
+        "Preset default policy."
+    );
+    for role in [
+        "write.implement",
+        "repairer",
+        "refactor-principal",
+        "review.verify",
+    ] {
+        assert!(
+            explained["prompts"][role]
+                .as_str()
+                .unwrap()
+                .contains("Preset default policy.")
         );
     }
 }
@@ -2837,7 +3056,7 @@ fn previous_round_selections_resolve_against_the_loop_body() {
 }
 
 mod planner_front_end {
-    use super::super::preset::{Layers, expand_with, planner};
+    use super::super::preset::{Layers, expand_with, find_prompt, planner};
     use super::{route, shapes};
     use provenant_fabric_runtime::config::{PlanAuto, PlanMode};
     use serde_json::{Value, json};
@@ -3814,6 +4033,49 @@ mod planner_front_end {
             }
             let expected = std::fs::read_to_string(&path).unwrap_or_default();
             assert_eq!(actual, expected, "{name}: rerun with UPDATE_GOLDEN=1");
+        }
+    }
+
+    #[test]
+    fn planned_prompts_use_the_effective_local_check_policy() {
+        for preset in ["big-batch", "review-council", "scope-then-run"] {
+            for (project_policy, parameter, expected) in [
+                (
+                    None,
+                    "",
+                    "Local check policy: run the tests you add or change",
+                ),
+                (Some("Project policy."), "", "Project policy."),
+                (
+                    Some("Project policy."),
+                    "Parameter policy.",
+                    "Parameter policy.",
+                ),
+            ] {
+                let mut layers = layers(PlanMode::On, None);
+                if let Some(policy) = project_policy {
+                    layers
+                        .roles
+                        .add(
+                            ".provenant/roles.toml",
+                            &format!("local_check_policy = '{policy}'"),
+                        )
+                        .unwrap();
+                }
+                let mut params = worktrees();
+                if preset != "big-batch" {
+                    params = vec![("worktree".into(), json!("/repo/lane"))];
+                }
+                params.push(("local_check_policy".into(), json!(parameter)));
+                let expansion = run(&layers, preset, "brief", params);
+                let role = if preset == "review-council" {
+                    "lens.correctness-spec"
+                } else {
+                    "write.implement"
+                };
+                let prompt = find_prompt(&expansion.document["nodes"], role).expect(role);
+                assert!(prompt.contains(expected), "{preset}: {role}: {prompt}");
+            }
         }
     }
 

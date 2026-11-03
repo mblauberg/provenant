@@ -251,6 +251,11 @@ pub struct GraphNode {
     pub required_verdict: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub require_findings: bool,
+    /// On a CI gate's recovery node: skip when the gate failed with no
+    /// findings. Unset, a node skips only if it takes the gate's findings as
+    /// an input; `false` always runs it, `true` always skips it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_without_findings: Option<bool>,
 }
 
 impl GraphNode {

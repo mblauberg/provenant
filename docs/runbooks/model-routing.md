@@ -424,7 +424,7 @@ Omit `deadline` to pace to each window's own reset. A deadline can instead be:
   time zone. A monthly day beyond a shorter month's end, such as `"day 31"` in
   February, falls on that month's last day, and `route resolve` states the
   clamping.
-- `"2026-11-02T09:00"` for a one-off absolute time in the host's local time zone.
+- `"2026-11-10T09:00"` for a one-off absolute time in the host's local time zone.
 
 A reset reference stays within the paced window's current cycle: when the
 peer's freshly observed reset advances beyond the own reset, its previous reset

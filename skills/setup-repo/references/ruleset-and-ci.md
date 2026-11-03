@@ -40,7 +40,7 @@ gh api repos/<owner>/<repo>/rulesets --method POST --input - <<'JSON'
     {
       "type": "required_status_checks",
       "parameters": {
-        "strict_required_status_checks_policy": true,
+        "strict_required_status_checks_policy": false,
         "do_not_enforce_on_create": false,
         "required_status_checks": [
           { "context": "ci-status", "integration_id": 15368 }
@@ -65,6 +65,14 @@ gh api repos/<owner>/<repo>/commits/main/check-runs \
 `required_approving_review_count: 0` is provenant's own choice for a
 single-maintainer repo; a team repo should raise it and decide
 `require_code_owner_review` deliberately rather than copy the zero.
+
+`strict_required_status_checks_policy` is also a choice. `false` (provenant's
+live setting, and the template above) lets a head merge while it is behind
+`main`, so landing needs no update-merge and `ci-status` gates the exact head
+only. `true` requires an up-to-date head at merge time: every merge to `main`
+then forces each open pull request to update and rerun its exact-head checks.
+Pick `true` when a green check must always describe the post-merge base, and
+record the choice in the repository's runbook.
 
 ## Verifying it landed
 

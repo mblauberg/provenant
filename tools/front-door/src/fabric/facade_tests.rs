@@ -1407,7 +1407,7 @@ mod peer_tests {
         config.pools.insert("retry-trial".into(), members.clone());
         let context = RoutingContext { policy_account_hint: None, catalogue: &catalogue, config: &config,
             registry: provenant_providers::REGISTRY, availability: &availability, quota: &[], capacity_cooldowns: &[], accounts: &[], quota_policies: &[], access: &access,
-            now: provenant_core::WallTime::from_micros(100_000_000)?, host: "fixture" };
+            now: provenant_core::WallTime::from_micros(100_000_000)?, host: "fixture", readiness: None };
         let request = RouteRequest { intent: Default::default(), choice: RouteChoice::NamedRoute(RouteName::parse("retry-trial")?), effort: None, confidential: false, fallback: Fallback::None };
         let seed = (0..256).find(|seed| provenant_routing::resolve_with_seed(&request, &context, "retry", *seed)
             .is_ok_and(|route| format!("{}/{}", route.adapter, route.model) == "codex/gpt-6-luna")).ok_or("no first draw")?;

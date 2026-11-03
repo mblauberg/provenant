@@ -254,11 +254,7 @@ enum QuotaMenu {
                 parts = [account.status == .unknown && account.error != nil ? "Couldn’t check" : account.statusTitle]
             }
         }
-        parts += account.refusals.map { refusal in
-            let pool = refusal.pool.map { " in pool \($0)" } ?? ""
-            let expiry = refusal.resetsAt.map { " until \(Fmt.moment($0, now: now))" } ?? ""
-            return "Refusal recorded for \(refusal.model)\(pool)\(expiry)"
-        }
+        parts.append(refusalSummary(account.refusals, now: now))
         row.subtitle = parts.compactMap { $0 }.joined(separator: " · ")
         return row
     }
@@ -350,8 +346,25 @@ enum QuotaMenu {
             // Notes are one line; the full repair text is in the CLI output these commands print.
             account.repair == nil ? nil : .note("Repair steps: run provenant hosts doctor", .orange),
             account.status == .stale && account.error == nil ? .note("Window reset since reading", nil) : nil,
-        ].compactMap { $0 }
+        ].compactMap { $0 } + account.refusals.map { .note(clip(refusalLine($0, now: now)), .orange) }
         return [windows, info, notes].filter { !$0.isEmpty }.reduce([]) { $0.isEmpty ? $1 : $0 + [.separator] + $1 }
+    }
+
+    /// The row's one short line for recorded refusals: the model when there is one, otherwise a count, with the
+    /// soonest expiry. Each refusal is listed in full in the account's submenu, because a menu grows to its widest row.
+    static func refusalSummary(_ refusals: [QuotaReport.Refusal], now: Date) -> String? {
+        guard let first = refusals.first else { return nil }
+        let soonest = refusals.compactMap(\.resetsAt).min()
+        let model = first.model.split(separator: "/").last.map(String.init) ?? first.model
+        let subject = refusals.count == 1 ? "\(model) refused" : "\(refusals.count) models refused"
+        return subject + (soonest.map { " until \(Fmt.moment($0, now: now))" } ?? "")
+    }
+
+    /// "Refused claude-opus in pool claude until 4 Nov, 1:50 am" for the submenu.
+    static func refusalLine(_ refusal: QuotaReport.Refusal, now: Date) -> String {
+        let pool = refusal.pool.map { " in pool \($0)" } ?? ""
+        let expiry = refusal.resetsAt.map { " until \(Fmt.moment($0, now: now))" } ?? ""
+        return "Refused \(refusal.model)\(pool)\(expiry)"
     }
 
     /// "Resets in 3h 48m" within a day, otherwise the exact time, which the row has no room for.

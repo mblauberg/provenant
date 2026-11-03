@@ -39,6 +39,7 @@ nodes = [
 tier = { type = "string", default = "${item.tier}", enum = ["junior", "senior", "principal"], doc = "Route alias for the lens." }
 
 [parameters]
+local_check_policy = { type = "string", default = "", doc = "Local check policy inherited by nested presets; empty uses the layered roles library." }
 subject = { type = "table", default = { type = "commit", commit = "HEAD" }, doc = "Immutable review subject: a commit, a node or the integration head." }
 worktree = { type = "string", default = "", doc = "Worktree the reviewers may read." }
 base = { type = "string", default = "", doc = "Diff reference the change is measured from, for example origin/main." }

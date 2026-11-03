@@ -3,7 +3,7 @@
     "pattern": "scope-then-run",
     "preset": "scope-then-run"
   },
-  "graph_id": "preset-6df1893b8590ca4ec2865101e5631147",
+  "graph_id": "preset-d4fcfce96fd44acc855f1d7349a204ca",
   "nodes": [
     {
       "access": "read_only",
@@ -148,16 +148,16 @@
                           "access": "read_only",
                           "depends_on": [],
                           "id": "external",
-                          "prompt": "You are an external scout. Look outward first: documentation, upstream source, standards, competitors and prior art. Cite each source with its URL and date.\n\nExternal scout 1. Research outward for: brief\nPrefer primary sources and current documentation over memory, even when\nconfident. Report each finding with its source URL and publication or\nretrieval date, mark vendor-reported figures, and state where sources\ndisagree. Do not edit files.\n\n\n# Researcher\n\nUse when a scope depends on facts outside the repository: standards, vendor\nbehaviour, prior art, competing tools or published evidence.\n\nLook outward first. Search current documentation, upstream source and credible\nwrite-ups before relying on memory, even when confident.\n\nReturn for each finding:\n- The claim in one sentence.\n- The source URL and its publication or retrieval date.\n- Whether the source is primary (specification, source code, vendor\n  documentation) or secondary, and whether any figure is vendor-reported.\n- How the claim bears on the decision in front of the chair.\n\nSeparate established fact from inference. State disagreement between sources\nrather than resolving it silently. Cite no source you did not read.\n",
+                          "prompt": "You are an external scout. Look outward first: documentation, upstream source, standards, competitors and prior art. Cite each source with its URL and date.\n\nExternal scout 1. Research outward for: brief\nPrefer primary sources and current documentation over memory, even when\nconfident. Prefer sources from roughly the past two months and label older ones\nas background, unless the assignment sets another window. Report each finding\nwith its source URL and publication or retrieval date, mark vendor-reported\nfigures, and state where sources disagree. Do not edit files.\n\n\n# Researcher\n\nUse when a scope depends on facts outside the repository: standards, vendor\nbehaviour, prior art, competing tools or published evidence.\n\nLook outward first. Search current documentation, upstream source and credible\nwrite-ups before relying on memory, even when confident.\n\nPrefer sources from roughly the past two months. Label older sources as\nbackground, and say when no recent source supports a claim. The brief may\noverride this window.\n\nReturn for each finding:\n- The claim in one sentence.\n- The source URL and its publication or retrieval date.\n- Whether the source is primary (specification, source code, vendor\n  documentation) or secondary, and whether any figure is vendor-reported.\n- How the claim bears on the decision in front of the chair.\n\nSeparate established fact from inference. State disagreement between sources\nrather than resolving it silently. Cite no source you did not read.\n",
                           "references": [
                             {
-                              "digest": "sha256:34f67a52a0144687511c67303fff9acedaa139033493971d4c9fe293c5ce5b52",
+                              "digest": "sha256:e4fa928901af6d26760a39d52b26ce86284b6ffe0a9b662f21139e5437d3bbc9",
                               "ref": "skill:scope/references/researcher.md",
                               "when": "always"
                             }
                           ],
                           "role": "scout.external",
-                          "role_digest": "sha256:b36af5ba65686417d7a356d16ea3778dfdedc9e66357e4ebdbb5a8fa1763ac96",
+                          "role_digest": "sha256:1037e572ae7b8be53967840edb7d2ca08a1cbc9dd1c85848d9b3a4eb0d839495",
                           "routes": [
                             {
                               "alias": "web"
@@ -293,16 +293,16 @@
                 ],
                 "access": "read_only",
                 "id": "scout",
-                "prompt": "You are an external scout. Look outward first: documentation, upstream source, standards, competitors and prior art. Cite each source with its URL and date.\n\nExternal scout 1. Research outward for: brief\n\nYour question: ${question}\nPrefer primary sources and current documentation over memory, even when\nconfident. Report each finding with its source URL and publication or\nretrieval date, mark vendor-reported figures, and state where sources\ndisagree. Do not edit files.\n\n\n# Researcher\n\nUse when a scope depends on facts outside the repository: standards, vendor\nbehaviour, prior art, competing tools or published evidence.\n\nLook outward first. Search current documentation, upstream source and credible\nwrite-ups before relying on memory, even when confident.\n\nReturn for each finding:\n- The claim in one sentence.\n- The source URL and its publication or retrieval date.\n- Whether the source is primary (specification, source code, vendor\n  documentation) or secondary, and whether any figure is vendor-reported.\n- How the claim bears on the decision in front of the chair.\n\nSeparate established fact from inference. State disagreement between sources\nrather than resolving it silently. Cite no source you did not read.\n",
+                "prompt": "You are an external scout. Look outward first: documentation, upstream source, standards, competitors and prior art. Cite each source with its URL and date.\n\nExternal scout 1. Research outward for: brief\n\nYour question: ${question}\nPrefer primary sources and current documentation over memory, even when\nconfident. Prefer sources from roughly the past two months and label older ones\nas background, unless the assignment sets another window. Report each finding\nwith its source URL and publication or retrieval date, mark vendor-reported\nfigures, and state where sources disagree. Do not edit files.\n\n\n# Researcher\n\nUse when a scope depends on facts outside the repository: standards, vendor\nbehaviour, prior art, competing tools or published evidence.\n\nLook outward first. Search current documentation, upstream source and credible\nwrite-ups before relying on memory, even when confident.\n\nPrefer sources from roughly the past two months. Label older sources as\nbackground, and say when no recent source supports a claim. The brief may\noverride this window.\n\nReturn for each finding:\n- The claim in one sentence.\n- The source URL and its publication or retrieval date.\n- Whether the source is primary (specification, source code, vendor\n  documentation) or secondary, and whether any figure is vendor-reported.\n- How the claim bears on the decision in front of the chair.\n\nSeparate established fact from inference. State disagreement between sources\nrather than resolving it silently. Cite no source you did not read.\n",
                 "references": [
                   {
-                    "digest": "sha256:34f67a52a0144687511c67303fff9acedaa139033493971d4c9fe293c5ce5b52",
+                    "digest": "sha256:e4fa928901af6d26760a39d52b26ce86284b6ffe0a9b662f21139e5437d3bbc9",
                     "ref": "skill:scope/references/researcher.md",
                     "when": "always"
                   }
                 ],
                 "role": "scout.external",
-                "role_digest": "sha256:b36af5ba65686417d7a356d16ea3778dfdedc9e66357e4ebdbb5a8fa1763ac96",
+                "role_digest": "sha256:1037e572ae7b8be53967840edb7d2ca08a1cbc9dd1c85848d9b3a4eb0d839495",
                 "routes": [
                   {
                     "alias": "web"
@@ -500,9 +500,9 @@
             "delivery": "none",
             "depends_on": [],
             "id": "implement",
-            "prompt": "You implement one bounded slice inside the write scope, within the authority envelope below.\n\nImplement one bounded slice: brief\nSpec (acceptance criteria): \nKeep changes within the supplied write scope. Run targeted checks and commit.\n\nAuthority envelope. The objective above and the acceptance criteria are\napproved. You hold authority to make any engineering decision that serves them\nand is reversible: names, structure, tests, helper code and the order of work.\nDo not stop to ask about those. Make the call, state it as an assumption and\nrecord it in your final report under DECISIONS (decision, reason, how to\nreverse). Ask only when the decision belongs to the owner (product direction,\nscope, cost, irreversible or externally visible effects) or when the work needs\nauthority beyond the write scope and this envelope; then report NEEDS-USER\nwith the specific question and the option you would take.\n\n\nWrite scope (relative literal paths):\n- .\n\nAcceptance checks:\n- Run targeted tests and required static checks\n- Commit the completed slice",
+            "prompt": "You implement one bounded slice inside the write scope, within the authority envelope below.\n\nImplement one bounded slice: brief\nSpec (acceptance criteria): \nKeep changes within the supplied write scope. Run targeted checks and commit.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\n\nAuthority envelope. The objective above and the acceptance criteria are\napproved. You hold authority to make any engineering decision that serves them\nand is reversible: names, structure, tests, helper code and the order of work.\nDo not stop to ask about those. Make the call, state it as an assumption and\nrecord it in your final report under DECISIONS (decision, reason, how to\nreverse). Ask only when the decision belongs to the owner (product direction,\nscope, cost, irreversible or externally visible effects) or when the work needs\nauthority beyond the write scope and this envelope; then report NEEDS-USER\nwith the specific question and the option you would take.\n\n\nWrite scope (relative literal paths):\n- .\n\nAcceptance checks:\n- Run targeted tests and required static checks\n- Commit the completed slice",
             "role": "write.implement",
-            "role_digest": "sha256:065a17b832ac8f6726b3829edb9f465f44b8f887cdeed85f4815bd59f4b803c5",
+            "role_digest": "sha256:66a47c337c54fd277c461a71e017d90f9e2c84410669226509ca05391049b66a",
             "route": {
               "alias": "senior"
             },
@@ -541,7 +541,7 @@
                   "depends_on": [],
                   "distinct_from": "writer",
                   "id": "lens-correctness-spec",
-                  "prompt": "Lens correctness-spec. Check the change against the spec and for logic errors.\n\nLens: correctness-spec. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: correctness against the spec\n\nCanonical questions: [review-lenses.md](../review-lenses.md), sections\n\"Correctness and failure\" and \"Verification\".\n\nCheck the change against the spec (the issue or file you were given), not\nagainst the author's account of it.\n\n- Map each acceptance criterion to code and to evidence. Name any criterion with\n  no implementation or no test.\n- State the invariants that must hold before and after each operation, then try\n  to break them with empty, duplicate, stale, malformed, partial and retried input.\n- Follow failure paths: ordering, cancellation, timeouts, re-entry, partial\n  writes and errors that are converted to success.\n- Check public API, schema and protocol compatibility against the base.\n- For refactors, check that intended behaviour and failure handling are preserved.\n",
+                  "prompt": "Lens correctness-spec. Check the change against the spec and for logic errors.\n\nLens: correctness-spec. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: correctness against the spec\n\nCanonical questions: [review-lenses.md](../review-lenses.md), sections\n\"Correctness and failure\" and \"Verification\".\n\nCheck the change against the spec (the issue or file you were given), not\nagainst the author's account of it.\n\n- Map each acceptance criterion to code and to evidence. Name any criterion with\n  no implementation or no test.\n- State the invariants that must hold before and after each operation, then try\n  to break them with empty, duplicate, stale, malformed, partial and retried input.\n- Follow failure paths: ordering, cancellation, timeouts, re-entry, partial\n  writes and errors that are converted to success.\n- Check public API, schema and protocol compatibility against the base.\n- For refactors, check that intended behaviour and failure handling are preserved.\n",
                   "read_roots": [
                     "/repo/lane"
                   ],
@@ -558,7 +558,7 @@
                     }
                   ],
                   "role": "lens.correctness-spec",
-                  "role_digest": "sha256:64228400c8c7da471e8ab8958a466a977cae89dc824b8a16a40491251fc4f296",
+                  "role_digest": "sha256:bf578197d0881e91746f43b0888c298a0bc6ce3a4f97293690e3b495a9138ea2",
                   "routes": [
                     {
                       "alias": "junior"
@@ -573,7 +573,7 @@
                   "access": "read_only",
                   "depends_on": [],
                   "id": "lens-simplicity",
-                  "prompt": "Lens simplicity. Look for unnecessary machinery and simpler designs.\n\nLens: simplicity. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: simplicity\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Ownership and structure\" (simplicity, YAGNI, the 1,000-line cap).\n\n- What can be deleted while keeping behaviour? Name the lines.\n- Flag speculative or rigid abstraction, thin wrappers that only move\n  complexity, options nothing uses, and layers with one caller.\n- Prefer a reframe that removes concepts, branches or synchronisation points,\n  but only one local enough to validate. Do not demand redesign beyond the\n  dependency cone.\n",
+                  "prompt": "Lens simplicity. Look for unnecessary machinery and simpler designs.\n\nLens: simplicity. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: simplicity\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Ownership and structure\" (simplicity, YAGNI, the 1,000-line cap).\n\n- What can be deleted while keeping behaviour? Name the lines.\n- Flag speculative or rigid abstraction, thin wrappers that only move\n  complexity, options nothing uses, and layers with one caller.\n- Prefer a reframe that removes concepts, branches or synchronisation points,\n  but only one local enough to validate. Do not demand redesign beyond the\n  dependency cone.\n",
                   "read_roots": [
                     "/repo/lane"
                   ],
@@ -590,7 +590,7 @@
                     }
                   ],
                   "role": "lens.simplicity",
-                  "role_digest": "sha256:749b9c00107c241d5fd3445b76a2feaebe0ccf44e9268ded763afbd0ba3dc899",
+                  "role_digest": "sha256:46d20a75ff5d5cb89b53165b558efb8205a2801263593b4365e23d20150c41b4",
                   "routes": [
                     {
                       "alias": "junior"
@@ -698,6 +698,10 @@
       "expanded.run.parameters.kind.doc": "bundled",
       "expanded.run.parameters.kind.type": "bundled",
       "expanded.run.parameters.lenses": "bundled",
+      "expanded.run.parameters.local_check_policy": "ambient",
+      "expanded.run.parameters.local_check_policy.default": "bundled",
+      "expanded.run.parameters.local_check_policy.doc": "bundled",
+      "expanded.run.parameters.local_check_policy.type": "bundled",
       "expanded.run.parameters.review_shape": "entry",
       "expanded.run.parameters.review_shape.default": "bundled",
       "expanded.run.parameters.review_shape.doc": "bundled",
@@ -742,6 +746,7 @@
       "expanded.scout.parameters.external.max": "bundled",
       "expanded.scout.parameters.external.min": "bundled",
       "expanded.scout.parameters.external.type": "bundled",
+      "expanded.scout.parameters.local_check_policy": "bundled",
       "expanded.scout.parameters.read_roots": "entry",
       "expanded.scout.parameters.read_roots.default": "bundled",
       "expanded.scout.parameters.read_roots.doc": "bundled",
@@ -775,6 +780,10 @@
       "parameters.external.max": "bundled",
       "parameters.external.min": "bundled",
       "parameters.external.type": "bundled",
+      "parameters.local_check_policy": "bundled",
+      "parameters.local_check_policy.default": "bundled",
+      "parameters.local_check_policy.doc": "bundled",
+      "parameters.local_check_policy.type": "bundled",
       "parameters.read_roots.default": "bundled",
       "parameters.read_roots.doc": "bundled",
       "parameters.read_roots.type": "bundled",
@@ -831,7 +840,7 @@
     "preset": "scope-then-run",
     "roles": {
       "lens.correctness-spec": {
-        "digest": "sha256:64228400c8c7da471e8ab8958a466a977cae89dc824b8a16a40491251fc4f296",
+        "digest": "sha256:bf578197d0881e91746f43b0888c298a0bc6ce3a4f97293690e3b495a9138ea2",
         "extends": [
           "lens.correctness-spec",
           "lens"
@@ -851,7 +860,7 @@
         ]
       },
       "lens.simplicity": {
-        "digest": "sha256:749b9c00107c241d5fd3445b76a2feaebe0ccf44e9268ded763afbd0ba3dc899",
+        "digest": "sha256:46d20a75ff5d5cb89b53165b558efb8205a2801263593b4365e23d20150c41b4",
         "extends": [
           "lens.simplicity",
           "lens"
@@ -937,7 +946,7 @@
         ]
       },
       "scout.external": {
-        "digest": "sha256:b36af5ba65686417d7a356d16ea3778dfdedc9e66357e4ebdbb5a8fa1763ac96",
+        "digest": "sha256:1037e572ae7b8be53967840edb7d2ca08a1cbc9dd1c85848d9b3a4eb0d839495",
         "extends": [
           "scout.external",
           "scout"
@@ -945,14 +954,14 @@
         "origin": "bundled",
         "references": [
           {
-            "digest": "sha256:34f67a52a0144687511c67303fff9acedaa139033493971d4c9fe293c5ce5b52",
+            "digest": "sha256:e4fa928901af6d26760a39d52b26ce86284b6ffe0a9b662f21139e5437d3bbc9",
             "ref": "skill:scope/references/researcher.md",
             "when": "always"
           }
         ]
       },
       "write.implement": {
-        "digest": "sha256:065a17b832ac8f6726b3829edb9f465f44b8f887cdeed85f4815bd59f4b803c5",
+        "digest": "sha256:66a47c337c54fd277c461a71e017d90f9e2c84410669226509ca05391049b66a",
         "extends": [
           "write.implement"
         ],

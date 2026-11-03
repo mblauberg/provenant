@@ -482,3 +482,23 @@ pub fn write_line(line: &str) -> Result<(), Fail> {
         .and_then(|()| out.flush())
         .map_err(|_| Fail::new(Status::Error, ErrorKind::Io, "cannot write watch output"))
 }
+
+/// Mixed status waits share lane selection, settlement and policy-tail semantics.
+pub fn status_wait_lanes(
+    target: &Target,
+    edge: &Edge<'_>,
+) -> Result<Vec<run::AttemptRecord>, Fail> {
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel)?;
+    let resolved = targets::resolve(edge, target, true)?;
+    let (session, target) = targets::read_resolved(edge, resolved, &call)?;
+    let targets = [target];
+    let picks = Picks {
+        targets: &targets,
+        owner: session.context.actor_id,
+        label: None,
+        since: None,
+    };
+    candidates(&session, &picks, None)(Duration::ZERO)
+}

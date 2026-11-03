@@ -33,6 +33,7 @@ select_when = "An approved slice should go from implementation to a merged pull 
 tags = ["write", "review", "deliver"]
 
 [parameters]
+local_check_policy = { type = "string", default = "", doc = "Local check policy inherited by nested presets; empty uses the layered roles library." }
 worktree = { type = "string", default = "", doc = "Registered writer worktree; repairs continue its branch." }
 scope = { type = "list", default = ["."], doc = "Literal relative paths the writer and repairers may change." }
 subject = { type = "table", default = { type = "commit", commit = "HEAD" }, doc = "Source the writer starts from." }
@@ -74,4 +75,6 @@ handoff block where one was declared. Work from those
 and the worktree. Fix the cause rather than the symptom, keep within the write
 scope and commit on the current branch; the host pushes it to the same pull
 request and CI runs again on the new head.
+
+${local_check_policy}
 """

@@ -273,6 +273,7 @@ fn context<'a>(
         capacity_cooldowns: &[],
         accounts: &[],
         quota_policies: &[],
+        readiness: None,
         access: &[],
         now,
         host: "test-host",
@@ -1117,8 +1118,25 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
         let route = result?;
         let receipt = serde_json::to_value(&route)?["pool_selection"].clone();
         assert_eq!(receipt["pool"], "trial", "{}", case.name);
+        assert_eq!(receipt["weight_source"], "config");
+        assert_eq!(
+            receipt["selection_rule"],
+            if case.name == "weight zero fallback" {
+                "first_zero_weight_ready"
+            } else {
+                "weighted_draw"
+            },
+            "{}",
+            case.name
+        );
         let candidate_rows = receipt["candidates"].as_array().ok_or("candidates")?;
         assert_eq!(candidate_rows.len(), 3);
+        assert!(
+            candidate_rows
+                .iter()
+                .filter_map(|candidate| candidate["pacing_detail"].as_str())
+                .all(|detail| detail.contains("source=") && detail.contains("policy="))
+        );
         assert_eq!(
             candidate_rows
                 .iter()
@@ -4548,9 +4566,40 @@ fn provider_account_and_model_selectors_remove_only_their_members()
         key: "codex-key".into(),
     });
     assert_eq!(
-        trial_picks(&catalogue, &shared, &[account])?,
+        trial_picks(&catalogue, &shared, std::slice::from_ref(&account))?,
         ["claude", "codex"]
     );
+    let config = RoutingConfig::default();
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &shared;
+    let mut query = request("codex/test")?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
+    let route = resolve_for_account_with_seed_excluding(
+        &query,
+        &ctx,
+        None,
+        "exclusion",
+        0,
+        &[],
+        &[account],
+    )?;
+    let receipt = serde_json::to_value(route.pool_selection.ok_or("receipt")?)?;
+    assert_eq!(
+        receipt["considered_exclusions"][0],
+        "source=flag selector=account codex/codex-key"
+    );
+    assert!(
+        receipt["candidates"]
+            .as_array()
+            .ok_or("candidates")?
+            .iter()
+            .any(|candidate| candidate["model"]
+                .as_str()
+                .is_some_and(|model| model.starts_with("codex/"))
+                && candidate["exclusion"].is_null())
+    );
+    assert!(!receipt.to_string().contains("prompt"));
+    assert!(!receipt.to_string().contains("credential"));
     let codex = catalogue.pools["trial"][1].model.clone();
     let model = rule(ExclusionSelector::Model(codex));
     assert_eq!(trial_picks(&catalogue, &records, &[model])?, ["claude"]);
@@ -4861,5 +4910,341 @@ fn review_path_lens_rules_load_replace_or_clear_the_bundled_table_through_the_lo
         assert_eq!(plan.matched_paths, expected, "{text}");
         assert_eq!(plan.add.is_empty(), expected.is_empty(), "{text}");
     }
+    Ok(())
+}
+
+fn observation(
+    adapter: &str,
+    account: &str,
+    route: &str,
+    state: provenant_quota::ReadinessState,
+    reason: Option<provenant_quota::ReadinessReason>,
+    window: (i64, i64),
+) -> provenant_quota::RouteReadiness {
+    provenant_quota::RouteReadiness {
+        schema_version: 1,
+        scope: provenant_quota::ReadinessScope {
+            host: provenant_quota::LOCAL_HOST.into(),
+            adapter: adapter.into(),
+            account_key: account.into(),
+            route: route.into(),
+        },
+        state,
+        reason,
+        observed_unix_seconds: window.0,
+        expires_unix_seconds: window.1,
+        reset_unix_seconds: None,
+        evidence_ref: Some("fixture".into()),
+    }
+}
+
+/// A caller-built lookup over fixed observations, as the CLI builds one over
+/// the readiness files on disk.
+fn readiness_over(
+    records: Vec<provenant_quota::RouteReadiness>,
+) -> impl Fn(&provenant_quota::ReadinessScope, i64) -> provenant_quota::ReadinessRead {
+    move |scope, now| {
+        provenant_quota::ReadinessFile {
+            schema_version: 1,
+            records: records
+                .iter()
+                .filter(|r| {
+                    r.scope.adapter == scope.adapter && r.scope.account_key == scope.account_key
+                })
+                .cloned()
+                .collect(),
+        }
+        .get(scope, now)
+    }
+}
+
+fn readiness_access() -> [AccessContext<'static>; 2] {
+    ["codex", "agy"].map(|adapter| AccessContext {
+        adapter,
+        disclosure_ref: "fixture",
+        confinement_ref: "fixture",
+    })
+}
+
+fn agy_account(key: &str) -> AvailabilityRecord {
+    AvailabilityRecord {
+        adapter: "agy".into(),
+        account_key: Some(key.into()),
+        ..availability()
+    }
+}
+
+#[test]
+fn readiness_states_and_expiry_decide_selection() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::{ReadinessReason as Why, ReadinessState as State};
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let records = [availability()];
+    let access = readiness_access();
+    let fresh = (80, 120);
+    let status = |observed: Vec<provenant_quota::RouteReadiness>| {
+        let lookup = readiness_over(observed);
+        let context = RoutingContext {
+            availability: &records,
+            access: &access,
+            readiness: Some(&lookup),
+            ..context(&catalogue, &config, now()?)
+        };
+        Ok::<_, Box<dyn std::error::Error>>(
+            resolve(&request("codex/gpt-6-luna")?, &context)?.readiness,
+        )
+    };
+    let route = "codex/gpt-6-luna";
+    let one = |state, reason, window| {
+        vec![observation(
+            "codex",
+            "opaque-account",
+            route,
+            state,
+            reason,
+            window,
+        )]
+    };
+    // No record, a ready record and an unknown record all dispatch as before.
+    for observed in [
+        vec![],
+        one(State::Ready, None, fresh),
+        one(State::Unknown, Some(Why::SignedOut), fresh),
+        one(State::Unknown, Some(Why::UnreachablePeer), fresh),
+    ] {
+        assert!(
+            matches!(status(observed.clone())?, RouteReadiness::Ready { .. }),
+            "{observed:?}"
+        );
+    }
+    // Unavailable excludes with the projected reason.
+    for (why, expected) in [
+        (Why::SignedOut, RouteExclusionReason::AuthRequired),
+        (
+            Why::MissingExecutable,
+            RouteExclusionReason::MissingExecutable,
+        ),
+        (Why::AccountMismatch, RouteExclusionReason::AccountMismatch),
+        (Why::Exhausted, RouteExclusionReason::ProviderRefused),
+        (Why::ProviderRefusal, RouteExclusionReason::ProviderRefused),
+        (
+            Why::CommandFailure,
+            RouteExclusionReason::UnknownAvailability,
+        ),
+    ] {
+        match status(one(State::Unavailable, Some(why), fresh))? {
+            RouteReadiness::Unavailable { reason, .. } => assert_eq!(reason, expected, "{why:?}"),
+            other => panic!("{why:?} must exclude: {other:?}"),
+        }
+    }
+    // At or beyond expiry, and before the observation, it reads unknown.
+    for window in [(80, 100), (80, 90), (101, 200)] {
+        assert!(matches!(
+            status(one(State::Unavailable, Some(Why::SignedOut), window))?,
+            RouteReadiness::Ready { .. }
+        ));
+    }
+    // An unavailable record for another account, adapter or model is not this route's.
+    for other in [
+        observation(
+            "codex",
+            "someone-else",
+            "*",
+            State::Unavailable,
+            Some(Why::SignedOut),
+            fresh,
+        ),
+        observation(
+            "codex",
+            "opaque-account",
+            "codex/gpt-6.1-terra",
+            State::Unavailable,
+            Some(Why::SignedOut),
+            fresh,
+        ),
+    ] {
+        assert!(matches!(status(vec![other])?, RouteReadiness::Ready { .. }));
+    }
+    // Without a lookup nothing is read.
+    let context = RoutingContext {
+        availability: &records,
+        access: &access,
+        ..context(&catalogue, &config, now()?)
+    };
+    assert!(matches!(
+        resolve(&request(route)?, &context)?.readiness,
+        RouteReadiness::Ready { .. }
+    ));
+    Ok(())
+}
+
+#[test]
+fn unavailable_account_moves_selection_to_an_alternate_account()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::{ReadinessReason as Why, ReadinessState as State};
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let records = [
+        AvailabilityRecord {
+            account_key: Some("work".into()),
+            ..availability()
+        },
+        AvailabilityRecord {
+            account_key: Some("review".into()),
+            ..availability()
+        },
+    ];
+    let access = readiness_access();
+    let pick = |observed: Vec<provenant_quota::RouteReadiness>| {
+        let lookup = readiness_over(observed);
+        let context = RoutingContext {
+            availability: &records,
+            access: &access,
+            readiness: Some(&lookup),
+            ..context(&catalogue, &config, now()?)
+        };
+        Ok::<_, Box<dyn std::error::Error>>(resolve(&request("codex/gpt-6-luna")?, &context)?)
+    };
+    let refused = |account: &str, route: &str| {
+        observation(
+            "codex",
+            account,
+            route,
+            State::Unavailable,
+            Some(Why::ProviderRefusal),
+            (80, 120),
+        )
+    };
+    // The same account is chosen with no record; refusing it moves to the other.
+    for first in ["work", "review"] {
+        let other = if first == "work" { "review" } else { "work" };
+        for route in ["*", "codex/gpt-6-luna"] {
+            let chosen = pick(vec![refused(first, route)])?;
+            assert_eq!(
+                chosen.account_key.as_deref(),
+                Some(other),
+                "{first} {route}"
+            );
+            assert!(matches!(chosen.readiness, RouteReadiness::Ready { .. }));
+        }
+    }
+    // A refusal for one model does not cover the account's other models.
+    let other_model = refused("work", "codex/gpt-6.1-terra");
+    let chosen = pick(vec![other_model.clone()])?;
+    assert!(matches!(chosen.readiness, RouteReadiness::Ready { .. }));
+    // Every account refused leaves the route unavailable with the refusal.
+    let none = pick(vec![refused("work", "*"), refused("review", "*")])?;
+    assert!(matches!(
+        none.readiness,
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::ProviderRefused,
+            ..
+        }
+    ));
+    Ok(())
+}
+
+#[test]
+fn pool_refusal_covers_its_pool_and_a_model_refusal_only_its_model()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::{ReadinessReason as Why, ReadinessState as State};
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let records = [agy_account("work")];
+    let access = readiness_access();
+    let refused = |route: &str| {
+        observation(
+            "agy",
+            "work",
+            route,
+            State::Unavailable,
+            Some(Why::ProviderRefusal),
+            (80, 120),
+        )
+    };
+    let ready = |observed: Vec<provenant_quota::RouteReadiness>, model: &str| {
+        let lookup = readiness_over(observed);
+        let context = RoutingContext {
+            availability: &records,
+            access: &access,
+            readiness: Some(&lookup),
+            ..context(&catalogue, &config, now()?)
+        };
+        Ok::<_, Box<dyn std::error::Error>>(matches!(
+            resolve(&request(model)?, &context)?.readiness,
+            RouteReadiness::Ready { .. }
+        ))
+    };
+    let (sonnet, opus, gemini) = (
+        "agy/claude-sonnet-4-6",
+        "agy/claude-opus-4-6-thinking",
+        "agy/gemini-3.8-flash",
+    );
+    // The verified `claude` pool covers both of its models and nothing else.
+    let pool = vec![refused("claude")];
+    assert!(!ready(pool.clone(), sonnet)?);
+    assert!(!ready(pool.clone(), opus)?);
+    assert!(ready(pool, gemini)?);
+    // A refusal without a pool covers its model only.
+    let model = vec![refused(sonnet)];
+    assert!(!ready(model.clone(), sonnet)?);
+    assert!(ready(model.clone(), opus)?);
+    assert!(ready(model, gemini)?);
+    // An account refusal covers every route of the account.
+    let account = vec![refused("*")];
+    assert!(!ready(account.clone(), sonnet)?);
+    assert!(!ready(account, gemini)?);
+    Ok(())
+}
+
+#[test]
+fn unavailable_pool_member_is_drawn_around() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::{ReadinessReason as Why, ReadinessState as State};
+    let catalogue = Catalogue::bundled()?;
+    let config: RoutingConfig = toml_edit::de::from_str(
+        "[pools]\nmixed=[{model='agy/claude-sonnet-4-6',weight=1},{model='agy/gemini-3.8-flash',weight=1}]\n",
+    )?;
+    let records = [agy_account("work")];
+    let access = readiness_access();
+    let request = RouteRequest {
+        intent: Default::default(),
+        choice: RouteChoice::NamedRoute(RouteName::parse("mixed")?),
+        effort: None,
+        confidential: false,
+        fallback: Fallback::None,
+    };
+    let drawn = |observed: Vec<provenant_quota::RouteReadiness>| {
+        let lookup = readiness_over(observed);
+        let context = RoutingContext {
+            availability: &records,
+            access: &access,
+            readiness: Some(&lookup),
+            ..context(&catalogue, &config, now()?)
+        };
+        (0..16)
+            .map(|index| {
+                Ok::<_, Box<dyn std::error::Error>>(
+                    resolve_with_seed(&request, &context, "readiness", index)?
+                        .model
+                        .to_string(),
+                )
+            })
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()
+    };
+    // Unknown does not narrow the pool: both members are drawn.
+    assert_eq!(drawn(vec![])?.len(), 2);
+    // An unavailable `claude` pool leaves only the Gemini member.
+    let refused = observation(
+        "agy",
+        "work",
+        "claude",
+        State::Unavailable,
+        Some(Why::ProviderRefusal),
+        (80, 120),
+    );
+    assert_eq!(
+        drawn(vec![refused])?,
+        ["gemini-3.8-flash".to_owned()].into_iter().collect()
+    );
     Ok(())
 }

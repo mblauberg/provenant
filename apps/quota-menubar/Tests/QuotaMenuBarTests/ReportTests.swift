@@ -262,14 +262,34 @@ final class ReportTests: XCTestCase {
         let account = try XCTUnwrap(report.accounts.first)
         XCTAssertEqual(account.backAt, try Date("2026-11-02T00:11:00Z", strategy: .iso8601))
         let row = QuotaMenu.account(account, now: report.generatedAt, alert: report.alertPercent)
-        XCTAssertTrue(row.subtitle?.contains("Refusal recorded for opencode/beam-free") == true)
+        XCTAssertTrue(row.subtitle?.contains("beam-free refused") == true)
         let expiry = Fmt.moment(try Date("2026-11-02T00:11:00Z", strategy: .iso8601), now: report.generatedAt)
         XCTAssertTrue(row.subtitle?.contains("until \(expiry)") == true, row.subtitle ?? "")
         let noReset = try XCTUnwrap(report.accounts.last)
         XCTAssertNil(noReset.backAt)
         XCTAssertTrue(QuotaMenu.account(noReset, now: report.generatedAt, alert: report.alertPercent)
-            .subtitle?.contains("Refusal recorded for opencode/beam-free") == true)
+            .subtitle?.contains("beam-free refused") == true)
         XCTAssertFalse(QuotaMenu.account(noReset, now: report.generatedAt, alert: report.alertPercent)
             .subtitle?.contains("until") == true)
+    }
+
+    @MainActor
+    func testRefusalsStayShortInTheRowAndListInFullInTheSubmenu() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let soon = now.addingTimeInterval(3_600), later = now.addingTimeInterval(7_200)
+        let refusals = [QuotaReport.Refusal(model: "agy/claude-opus-4-6-thinking", pool: nil, resetsAt: later),
+                        QuotaReport.Refusal(model: "agy/claude-sonnet-4-6", pool: "claude", resetsAt: soon)]
+        XCTAssertEqual(QuotaMenu.refusalSummary(refusals, now: now), "2 models refused until \(Fmt.moment(soon, now: now))")
+        XCTAssertEqual(QuotaMenu.refusalSummary(Array(refusals.prefix(1)), now: now),
+                       "claude-opus-4-6-thinking refused until \(Fmt.moment(later, now: now))")
+        XCTAssertNil(QuotaMenu.refusalSummary([], now: now))
+        XCTAssertTrue(QuotaMenu.refusalLine(refusals[1], now: now).hasPrefix("Refused agy/claude-sonnet-4-6 in pool claude"))
+    }
+
+    @MainActor
+    func testFreeTextCannotWidenTheMenuPastTheMaximumColumn() {
+        let long = String(repeating: "Individual quota reached ", count: 12)
+        let spec = MenuItemSpec(title: "Antigravity", subtitle: long, icon: .ring(nil, .secondary))
+        XCTAssertEqual(MenuStyle.column(for: [spec]), max(MenuStyle.minimumColumn, MenuStyle.maximumColumn))
     }
 }

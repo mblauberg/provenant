@@ -1055,6 +1055,11 @@ fn with_context<T>(
         .flat_map(|record| record.capacity_cooldowns.iter().cloned())
         .collect();
     let now = WallTime::from_micros(timestamp.as_microsecond())?;
+    // Readiness is read from quota's own tree, never probed from here.
+    let state = roots.state.as_path();
+    let readiness = |scope: &provenant_quota::ReadinessScope, now: i64| {
+        crate::quota::read_readiness(state, scope, now)
+    };
     action(
         &RoutingContext {
             policy_account_hint: None,
@@ -1066,6 +1071,7 @@ fn with_context<T>(
             capacity_cooldowns: &capacity_cooldowns,
             accounts: &quota_records,
             quota_policies: &policies,
+            readiness: Some(&readiness),
             access,
             now,
             host,

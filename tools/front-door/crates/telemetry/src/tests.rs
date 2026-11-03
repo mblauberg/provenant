@@ -929,6 +929,115 @@ fn chair_cost_is_complete_only_when_every_session_is_read() {
 }
 
 #[test]
+fn groups_by_resolved_model_and_effort() {
+    let high = fact(1, Some(10));
+    let mut low = fact(2, Some(20));
+    low.resolved_route.as_mut().unwrap().effort = Some("low".into());
+    let mut other_account = fact(3, Some(30));
+    other_account.resolved_route.as_mut().unwrap().account_label = Some("other".into());
+    let mut no_effort = fact(4, Some(40));
+    no_effort.resolved_route.as_mut().unwrap().effort = None;
+    let mut unknown = fact(5, Some(50));
+    unknown.requested_route = unknown.resolved_route.take();
+    let groups = stats_by_context(
+        [high, low, other_account, no_effort, unknown],
+        &prices(Some(1)),
+        Window::default(),
+        ContextKey::Route,
+    )
+    .unwrap()
+    .context_groups
+    .unwrap();
+    let actual: Vec<_> = groups
+        .iter()
+        .map(|group| {
+            json!({
+                "route": group.value,
+                "attempts": group.totals.attempts,
+            })
+        })
+        .collect();
+    assert_eq!(
+        json!(actual),
+        json!([
+            {"route": null, "attempts": 1},
+            {"route": "m", "attempts": 1},
+            {"route": "m@high", "attempts": 2},
+            {"route": "m@low", "attempts": 1}
+        ])
+    );
+}
+
+#[test]
+fn route_group_key_length_boundaries() {
+    let mut long = fact(1, Some(10));
+    long.resolved_route.as_mut().unwrap().model = Some("m".repeat(257));
+    assert!(
+        stats_by_context(
+            [long.clone()],
+            &prices(Some(1)),
+            Window::default(),
+            ContextKey::Route
+        )
+        .is_ok()
+    );
+    long.resolved_route.as_mut().unwrap().model = Some("m".repeat(crate::MAX_KEY_BYTES + 1));
+    assert!(
+        stats_by_context(
+            [long],
+            &prices(Some(1)),
+            Window::default(),
+            ContextKey::Route
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn route_context_group_counts_toward_shared_one_mib_key_budget() {
+    let route_with_model_bytes = |bytes| {
+        let mut input = fact(1, Some(0));
+        input.resolved_route = Some(RouteFact {
+            provider: None,
+            model: Some("m".repeat(bytes)),
+            effort: None,
+            account_label: None,
+        });
+        input
+    };
+    // Each model is counted once for the route and once for the context group.
+    let exactly_one_mib = route_with_model_bytes(crate::MAX_KEY_BYTES / 2);
+    assert!(
+        stats_by_context(
+            [exactly_one_mib],
+            &prices(Some(1)),
+            Window::default(),
+            ContextKey::Route
+        )
+        .is_ok()
+    );
+    let two_bytes_over_one_mib = route_with_model_bytes(crate::MAX_KEY_BYTES / 2 + 1);
+    assert!(
+        stats(
+            [two_bytes_over_one_mib.clone()],
+            &prices(Some(1)),
+            Window::default()
+        )
+        .is_ok()
+    );
+    assert_eq!(
+        stats_by_context(
+            [two_bytes_over_one_mib],
+            &prices(Some(1)),
+            Window::default(),
+            ContextKey::Route
+        )
+        .unwrap_err(),
+        TelemetryError::TooLarge("1 MiB of group keys")
+    );
+}
+
+#[test]
 fn groups_by_context_including_missing() {
     let mut first = fact(1, Some(10));
     first.context = Some(provenant_records::run::WorkContext {

@@ -29,6 +29,8 @@ pub struct LaneRow {
     pub lane_class: Option<String>,
     pub waiting_for: Option<String>,
     pub requested_route: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_route: Option<Value>,
     pub applied_route: Value,
     pub skipped_routes: Value,
     pub account: Value,
@@ -167,6 +169,7 @@ pub fn lane_row_schema() -> Value {
             ),
         ],
         &[
+            ("resolved_route", any()),
             ("title", string()),
             ("requested_priority", integer()),
             ("provider_seconds", nullable(number())),

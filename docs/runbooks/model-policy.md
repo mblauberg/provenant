@@ -52,7 +52,7 @@ max_turns = 100
 [[domains.routing.model_policy.rules]]
 model = "opencode/opencode-go/deepseek-v4.1-flash"
 [domains.routing.model_policy.rules.schedule]
-expires = "2026-11-01T00:00:00Z"
+expires = "2027-01-01T00:00:00Z"
 windows = [{ weekdays = [0, 1, 2, 3, 4], start_hour = 1, end_hour = 4 }, { weekdays = [0, 1, 2, 3, 4], start_hour = 6, end_hour = 10 }]
 [domains.routing.model_policy.rules.policy.cache]
 price_multiplier = 2.0
@@ -62,7 +62,7 @@ read_heavy_weight = 2
 model = "agy/gemini-3.8-flash"
 account = "agy/work"
 [domains.routing.model_policy.rules.schedule]
-expires = "2026-11-01T00:00:00Z"
+expires = "2027-01-01T00:00:00Z"
 [domains.routing.model_policy.rules.policy.result]
 sections = ["## Findings", "## Evidence"]
 fallback = "codex/gpt-6-luna"
@@ -117,8 +117,11 @@ table. These are adjustable operating defaults:
 | Gemini Flash and OpenCode free routes | Non-empty result check; one fallback to Luna at high effort for an empty answer |
 | All models | Advisory cache-read share target 90% |
 
-Free routes are absent from bundled pools. Exact IDs and user-configured pools
-can still use them. Change result checks or lane restrictions for one account,
+The two OpenCode `*-free` routes (`free = true` in
+`tools/front-door/crates/routing/assets/catalogue.toml`) are members of the bundled
+`junior` pool at weight 50 each, against 1 to 4 for its paid members, so `junior`
+prefers them while they are eligible and available. Exact IDs and user-configured
+pools can use them too. Change result checks or lane restrictions for one account,
 including with an expiring rule.
 
 Use `provenant run --route junior --read-heavy ...` for surveys and triage.

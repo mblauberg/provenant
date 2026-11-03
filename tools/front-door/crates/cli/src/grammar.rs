@@ -95,7 +95,7 @@ pub enum Command {
     Run(Box<Dispatch>),
     /// Dispatch and collect a configured review shape
     Review(Review),
-    /// Show active and recent lanes, newest first
+    /// Show lanes or wait on lanes, graphs and PRs
     Status(Status),
     /// Merge on green CI and prune the merged worktree
     Land {
@@ -107,6 +107,12 @@ pub enum Command {
         /// Wait for this head's CI (default 1 hour; maximum 4 hours)
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "1h", value_parser = duration_seconds)]
         wait: Option<u64>,
+        /// Initial CI poll interval in seconds (overrides domains.pr.land.poll_seconds, default 30)
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        poll: Option<u64>,
+        /// Show the effective polling interval and retry budget without landing
+        #[arg(long)]
+        explain: bool,
     },
     /// Start a provider lane or manifest of lanes
     Dispatch(Box<Dispatch>),
@@ -1112,6 +1118,7 @@ pub struct Trace {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum StatsBy {
+    Route,
     Pr,
     Issue,
     Graph,
@@ -1145,7 +1152,7 @@ pub struct Stats {
     /// Restrict usage and cost to one run.
     #[arg(long)]
     pub run_id: Option<Target>,
-    /// Group supervised attempts by work context or merged pull request; attempts with no value form an `unattributed` group
+    /// Group supervised attempts by route, work context or merged pull request; attempts with no value form an `unattributed` group
     #[arg(long, value_enum, conflicts_with = "usage")]
     pub by: Option<StatsBy>,
     /// Include per-attempt detail
@@ -1451,6 +1458,14 @@ fn operation_id(value: &str) -> Result<OperationId, String> {
     ))
     .map_err(|error| error.to_string())
 }
+fn status_wait_seconds(value: &str) -> Result<u64, &'static str> {
+    // Zero is the parser's sentinel for the configured default, never a duration.
+    if value == "configured" {
+        Ok(0)
+    } else {
+        duration_seconds(value)
+    }
+}
 fn duration_seconds(value: &str) -> Result<u64, &'static str> {
     let (digits, multiplier) = match value.as_bytes().last() {
         Some(b's') => (&value[..value.len() - 1], 1),
@@ -1467,6 +1482,18 @@ fn duration_seconds(value: &str) -> Result<u64, &'static str> {
 }
 #[derive(Debug, Args)]
 pub struct Status {
+    /// Wait for mixed targets (no value uses domains.wait.timeout_seconds)
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "configured", value_parser = status_wait_seconds, conflicts_with_all = ["all", "cursor"])]
+    pub wait: Option<u64>,
+    /// Observe lane:ID, graph:ID, pr:NUMBER or land:NUMBER (repeatable; land only observes)
+    #[arg(long, requires = "wait")]
+    pub target: Vec<String>,
+    /// Return on any transition or when all targets are terminal
+    #[arg(long, requires = "wait", value_enum, default_value = "any")]
+    pub until: Condition,
+    /// Stream transitions until all targets are terminal or the wait expires
+    #[arg(long, requires = "wait")]
+    pub follow: bool,
     /// Show this run, task, attempt or graph ID, including settled records
     pub id: Option<String>,
     /// Maximum full records per page

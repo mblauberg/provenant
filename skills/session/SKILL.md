@@ -30,7 +30,14 @@ parallel mission queue.
 
 For a bounded goal, continue until its criteria and required verification hold.
 For a standing mission explicitly defined to run until STOP, only the owner's
-STOP ends the mission. An idle run or empty queue means no eligible work now;
+STOP ends the mission.
+
+For outstanding work, use one
+`provenant status --wait --target lane:ID --target graph:ID --target pr:N` call
+instead of repeated status reads or a sleep loop. Use `--until all` for all-terminal completion, or `--follow --json`
+for a monitor. The configured timeout is bounded; `--wait=30m` overrides it,
+and expiry leaves targets running. Reconcile the returned event before
+resuming graph work. An idle run or empty queue means no eligible work now;
 record the waiting condition and resume trigger, leaving the mission open.
 An invocation may end at its budget or waiting boundary without claiming the
 mission is done.

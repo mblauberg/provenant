@@ -36,13 +36,13 @@ pub fn fast_forward(
         return Err(WorktreeError::IdentityChanged);
     }
     let repo = locked.verified.repo();
-    match worktree_dirty_at(context, repo, cancel)? {
-        WorktreeCondition::Clean | WorktreeCondition::Ignored => {}
-        WorktreeCondition::Dirty => return Err(WorktreeError::Dirty),
-        WorktreeCondition::GitOperationInProgress => {
+    match worktree_cleanliness_at(context, repo, cancel)? {
+        WorktreeCleanliness::Clean | WorktreeCleanliness::Ignored => {}
+        WorktreeCleanliness::Dirty(paths) => return Err(WorktreeError::Dirty(paths)),
+        WorktreeCleanliness::GitOperationInProgress => {
             return Err(WorktreeError::GitOperationInProgress);
         }
-        WorktreeCondition::Unknown => return Err(WorktreeError::UnknownWriter),
+        WorktreeCleanliness::Unknown => return Err(WorktreeError::UnknownWriter),
     }
     // A retry or fallback writer resumes in a checkout that already holds work
     // committed past the pin; that descendant of the pin is not a divergence.
@@ -719,15 +719,14 @@ pub(super) fn remove_tree_when(
     if !fenced {
         return Err(WorktreeError::UnknownWriter);
     }
-    match worktree_dirty_at(context, locked.verified.repo(), cancel)? {
-        WorktreeCondition::Clean => {}
-        WorktreeCondition::Ignored | WorktreeCondition::Dirty => {
-            return Err(WorktreeError::Dirty);
-        }
-        WorktreeCondition::GitOperationInProgress => {
+    match worktree_cleanliness_at(context, locked.verified.repo(), cancel)? {
+        WorktreeCleanliness::Clean => {}
+        WorktreeCleanliness::Dirty(paths) => return Err(WorktreeError::Dirty(paths)),
+        WorktreeCleanliness::Ignored => return Err(WorktreeError::Dirty(String::new())),
+        WorktreeCleanliness::GitOperationInProgress => {
             return Err(WorktreeError::GitOperationInProgress);
         }
-        WorktreeCondition::Unknown => return Err(WorktreeError::UnknownWriter),
+        WorktreeCleanliness::Unknown => return Err(WorktreeError::UnknownWriter),
     }
     // A cache that cannot be derived must not block removal; warn and skip it.
     let cargo_cache = crate::permissions::worktree_cargo_cache(context.home, &locked.verified)
@@ -861,7 +860,7 @@ pub(super) fn pin_branch_ref(
 
 pub(super) fn retain_reason(error: &WorktreeError) -> RetainReason {
     match error {
-        WorktreeError::Dirty | WorktreeError::IgnoredPaths(_) => RetainReason::Dirty,
+        WorktreeError::Dirty(_) | WorktreeError::IgnoredPaths(_) => RetainReason::Dirty,
         WorktreeError::GitOperationInProgress => RetainReason::GitOperationInProgress,
         WorktreeError::LiveWriter | WorktreeError::LiveProcess(_) => RetainReason::LiveWriter,
         WorktreeError::LockBusy => RetainReason::LockBusy,
@@ -1095,18 +1094,18 @@ pub fn check_removal_preconditions(
     cancel: &CancelToken,
 ) -> Result<(), WorktreeError> {
     worktree.repo().revalidate()?;
-    match worktree_dirty_at(context, worktree.repo(), cancel)? {
-        WorktreeCondition::Clean => Ok(()),
-        WorktreeCondition::Ignored => gc::precheck_removal(
+    match worktree_cleanliness_at(context, worktree.repo(), cancel)? {
+        WorktreeCleanliness::Clean => Ok(()),
+        WorktreeCleanliness::Ignored => gc::precheck_removal(
             context,
             worktree.repo(),
             &output.regenerable,
             &output.keep,
             cancel,
         ),
-        WorktreeCondition::Dirty => Err(WorktreeError::Dirty),
-        WorktreeCondition::GitOperationInProgress => Err(WorktreeError::GitOperationInProgress),
-        WorktreeCondition::Unknown => Err(WorktreeError::UnknownWriter),
+        WorktreeCleanliness::Dirty(paths) => Err(WorktreeError::Dirty(paths)),
+        WorktreeCleanliness::GitOperationInProgress => Err(WorktreeError::GitOperationInProgress),
+        WorktreeCleanliness::Unknown => Err(WorktreeError::UnknownWriter),
     }
 }
 

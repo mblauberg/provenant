@@ -347,6 +347,33 @@ define a route named `verifier` in another model family. The role settings
 attempts. The low-level `distinct_from = "writer"` only separates a node
 from its writer.
 
+### Targeted local checks policy
+
+Writer (`write.implement`), repairer (`repairer`), refactor (`refactor-principal`),
+verifier (`review.verify`) and lens roles receive the targeted local check policy
+via the `${local_check_policy}` placeholder. By default, roles run only the fast
+targeted checks needed to prove their change locally:
+- Run the tests added or modified and the named tests covering changed functions,
+  with an explicit filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or
+  `cargo test -p CRATE NAME`).
+- Use `scripts/select-affected-crate-tests` or `scripts/find-changed-tests` to help
+  select targets.
+- Run `fmt`, `clippy` for touched crates and generators for touched generated outputs.
+- Never run a whole package, `--workspace` or the full suite locally; CI gates those
+  on the pull request, and combined checks run at the batch head.
+- Reviewers reproduce one finding with one targeted test.
+
+A project can change this policy without editing role prompts by setting
+`local_check_policy = "..."` at the top level of `.provenant/roles.toml`, or via
+a non-empty `local_check_policy` preset parameter (for example,
+`--set 'parameters.local_check_policy="..."'`). The effective source (`bundled`,
+`roles.toml` layer or the parameter origin) and rendered role prompts are
+visible in `provenant preset explain <preset>` under `local_check_policy` and
+`prompts`. An empty parameter uses the layered roles-library policy: bundled,
+then user, then project. Like `risk_tier` and `subject`, the policy is an ambient
+parameter inherited by nested presets that declare it, including big-batch,
+generator-evaluator, deliver, scope-then-run and review-council.
+
 ## Review and source subjects
 
 `review-council` runs one `lens.NAME` role per entry of the `lenses` list: correctness
@@ -583,7 +610,9 @@ allowed_read_roots = ["/absolute/path/to/shared-reference"]
 When a `run` brief, including a `--preset` brief, names an existing absolute or
 `~/` path outside the effective read roots (bound worktrees, `read_roots` and
 `--read-root`), submit and `--explain` print a warning and carry it in
-`data.warnings`. Copy the file into the worktree (for example `.agent-run/`) or
+`data.warnings`. Bare `/`, `~` and ancestors of the effective read roots are
+skipped, and `[domains.run] brief_read_root_warnings = false` turns the warning
+off. Copy the file into the worktree (for example `.agent-run/`) or
 add its directory with `--read-root`; the warning does not change confinement.
 
 A planner fragment cannot widen what its planner node holds. Each child
