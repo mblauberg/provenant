@@ -713,6 +713,80 @@ mod tests {
     }
 
     #[test]
+    fn agy_identity_refuses_to_cache_when_keychain_changes_during_probe() {
+        struct ChangingKeychain {
+            inner: AgyUsage,
+            keychain: PathBuf,
+        }
+        impl Executor for ChangingKeychain {
+            fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                let outcome = self.inner.execute(options)?;
+                // Modify in place: the inode guard still passes, but the stamp must not.
+                fs::write(&self.keychain, "signed in as a different account").unwrap();
+                Ok(outcome)
+            }
+        }
+        for quota_probe in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let home = root.path().join("home");
+            let state = root.path().join("state");
+            let keychain = home.join("Library/Keychains/login.keychain-db");
+            fs::create_dir_all(&state).unwrap();
+            fs::create_dir_all(keychain.parent().unwrap()).unwrap();
+            fs::write(&keychain, "initial").unwrap();
+            let stamp = crate::agy::keychain_stamp(&home);
+            let homes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let executor = ChangingKeychain {
+                inner: AgyUsage {
+                    sign_ins: vec![(home.clone(), "fixture@example.test")],
+                    homes: homes.clone(),
+                },
+                keychain,
+            };
+            let key = format!(
+                "agy-{}",
+                agy_fingerprint(b"OAuth: authenticated successfully as fixture@example.test\n")
+                    .unwrap()
+            );
+            let mut live = quota(&home, state.clone());
+            if quota_probe {
+                live.executor = Some(Box::new(executor));
+                let account = Account {
+                    scope: AccountScope {
+                        adapter: "agy".into(),
+                        account_key: key,
+                        label: "test".into(),
+                    },
+                    identity_dir: home.clone(),
+                    options: Value::Null,
+                };
+                live.agy(&account, live.now() + 60, &mut QuotaDetails::default())
+                    .unwrap();
+            } else {
+                assert_eq!(
+                    crate::accounts::detect(
+                        &executor,
+                        "agy",
+                        Path::new("agy"),
+                        &home,
+                        std::ffi::OsStr::new("test"),
+                        &home,
+                        &state,
+                    )
+                    .unwrap(),
+                    key
+                );
+            }
+            assert_eq!(homes.lock().unwrap().len(), 1);
+            assert_ne!(crate::agy::keychain_stamp(&home), stamp);
+            assert!(
+                crate::agy::cached_identity(&state, &home, live.now()).is_none(),
+                "probe cached a pre-switch identity (quota_probe={quota_probe})"
+            );
+        }
+    }
+
+    #[test]
     fn agy_switch_rebinds_registration_and_excludes_the_stale_key() {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("home");

@@ -711,38 +711,4 @@ mod identity_tests {
         forget_identity(temp.path(), &directory);
         assert!(cached_identity(temp.path(), &directory, 103).is_none());
     }
-
-    #[test]
-    fn agy_identity_refuses_to_cache_when_keychain_changes_during_probe() {
-        let temp = tempfile::tempdir().unwrap();
-        let directory = temp.path().join("home");
-        let keychain = directory.join(KEYCHAIN);
-        std::fs::create_dir_all(keychain.parent().unwrap()).unwrap();
-        std::fs::write(&keychain, "initial").unwrap();
-        let initial_stamp = keychain_stamp(&directory);
-        assert!(initial_stamp.is_some());
-        // Simulate a sign-in during the probe: keychain changes before remember_identity runs.
-        std::fs::write(&keychain, "signed in as different account").unwrap();
-        let key = "agy-google-0123456789ab";
-        // Publishing with the pre-probe stamp is refused because the file changed.
-        assert!(!remember_identity(
-            temp.path(),
-            &directory,
-            key,
-            100,
-            initial_stamp
-        ));
-        assert!(cached_identity(temp.path(), &directory, 100).is_none());
-
-        // Vanishing keychain during probe also refuses to publish.
-        std::fs::remove_file(&keychain).unwrap();
-        assert!(!remember_identity(
-            temp.path(),
-            &directory,
-            key,
-            100,
-            initial_stamp
-        ));
-        assert!(cached_identity(temp.path(), &directory, 100).is_none());
-    }
 }
