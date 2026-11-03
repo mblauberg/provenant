@@ -385,7 +385,7 @@ the graph identity. It requires `--preset`.
 
 Every `review-council` lens emits a fenced `findings` block before its single
 verdict line. The block uses `schema_version: 1`, a `findings` array, and at
-most 32 entries, one-line summaries and under 8 KiB in all; a lens with no
+most 32 entries and one-line summaries; a lens with no
 findings emits an empty array. A required
 findings block missing from a lens result makes that lens unavailable.
 

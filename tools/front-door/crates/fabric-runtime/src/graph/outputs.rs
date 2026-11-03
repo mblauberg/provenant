@@ -87,9 +87,6 @@ pub(super) fn make_outputs(
         })
         .and_then(|block| {
             let (block, _) = block.split_once("```")?;
-            if block.len() > 8 * 1024 {
-                return None;
-            }
             let block: serde_json::Value = serde_json::from_str(block).ok()?;
             let schema_version = block.get("schema_version")?.as_u64()?;
             let findings: Vec<Finding> = match block.get("findings")? {
