@@ -628,6 +628,7 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
             disk: Some(&disk),
             holder: Some(&holder),
             nested_children: Some(&holder),
+            stdout_decoder: Some(holder.stdout_decoder()),
             stdout_filter: Some(&mut stdout_filter),
             stderr_filter: Some(&mut stderr_filter),
             ..Default::default()

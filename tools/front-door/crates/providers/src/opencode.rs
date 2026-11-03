@@ -8,6 +8,28 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 pub struct OpenCode;
 
+/// Only a typed quota refusal ends a live attempt; ordinary text and malformed
+/// frames retain the existing exit-time decoding policy.
+impl provenant_os::capture::FrameDecoder for OpenCode {
+    fn decode(
+        &self,
+        frame: &[u8],
+    ) -> Result<provenant_os::capture::FrameEvent, provenant_os::capture::DecodeFailure> {
+        use provenant_os::capture::FrameEvent;
+        Ok(
+            if decode(frame).is_ok_and(|events| {
+                events
+                    .iter()
+                    .any(|event| matches!(event, E::QuotaLimited { .. }))
+            }) {
+                FrameEvent::Terminal
+            } else {
+                FrameEvent::Progress
+            },
+        )
+    }
+}
+
 pub const REGISTRATION: crate::Registration = crate::Registration {
     adapter: &OpenCode,
     quota_source: Some(&OpenCode),
