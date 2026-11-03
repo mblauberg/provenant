@@ -643,24 +643,17 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
                             pid,
                             &format!("occupancy path unavailable: {}", path.display()),
                         );
-                        let mut affected = false;
+                        // Unresolved paths may alias any candidate root.
                         for (root, state) in &mut states {
-                            if occupancy_path_could_be_under(path, root) {
-                                affected = true;
-                                if *state != WorkerState::Live {
-                                    *state = WorkerState::Unknown;
-                                    details
-                                        .entry(root.clone())
-                                        .or_insert_with(|| detail.clone());
-                                    taints.entry(root.clone()).or_insert_with(|| {
-                                        TaintCause::Uncertainty(UncertaintyReason::PathUnplaceable)
-                                    });
-                                }
+                            if *state != WorkerState::Live {
+                                *state = WorkerState::Unknown;
+                                details.entry(root.clone()).or_insert_with(|| detail.clone());
+                                taints.entry(root.clone()).or_insert_with(|| {
+                                    TaintCause::Uncertainty(UncertaintyReason::PathUnplaceable)
+                                });
                             }
                         }
-                        if affected {
-                            unplaceable(Some(pid), Some("occupancy path placement required"));
-                        }
+                        unplaceable(Some(pid), Some("occupancy path placement required"));
                         continue;
                     };
                     let location = match std::fs::metadata(&canonical) {
@@ -860,7 +853,7 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
                     );
                     let detail = process_detail(cwd_observer, pid, "cwd unreadable");
                     for (root, state) in &mut states {
-                        if occupancy_path_could_be_under(&path, root) && *state != WorkerState::Live
+                        if *state != WorkerState::Live
                         {
                             *state = WorkerState::Unknown;
                             details
@@ -940,26 +933,6 @@ pub(super) fn canonical_cwd(path: &Path) -> Option<PathBuf> {
         rest.push(existing.file_name()?.to_owned());
         existing = existing.parent()?;
     }
-}
-
-pub(super) fn occupancy_path_could_be_under(path: &Path, root: &Path) -> bool {
-    if !path.is_absolute() {
-        return true;
-    }
-    // Parent components cannot safely rule out a root without resolving the
-    // preceding components (which might themselves be symlinks).
-    if path
-        .components()
-        .any(|part| part == std::path::Component::ParentDir)
-    {
-        return true;
-    }
-    let private = Path::new("/private");
-    let alias = match root.strip_prefix(private) {
-        Ok(suffix) => Path::new("/").join(suffix),
-        Err(_) => private.join(root.strip_prefix("/").unwrap_or(root)),
-    };
-    path.starts_with(root) || path.starts_with(alias)
 }
 
 pub(super) enum NativeCwd {
@@ -1079,13 +1052,7 @@ pub(super) fn record_live_path_with_audit(
             Some(false) => {}
             None => {
                 unplaceable();
-                // A known cwd outside this root cannot be placed inside it
-                // merely because another ancestor could not be inspected.
-                // Keep an unreadable root itself conservative.
-                if *state != WorkerState::Live
-                    && (!std::fs::metadata(root).is_ok_and(|metadata| metadata.is_dir())
-                        || occupancy_path_could_be_under(cwd, root))
-                {
+                if *state != WorkerState::Live {
                     *state = WorkerState::Unknown;
                 }
             }

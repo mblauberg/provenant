@@ -795,7 +795,7 @@ fn occupancy_is_placed_per_root_and_partial_results_remain_conservative()
         )
         .0
     };
-    // An unresolvable cwd with a known path only affects its candidate root.
+    // An unresolvable cwd cannot rule out another root.
     let unplaceable = a.join("cwd-loop");
     std::os::unix::fs::symlink("cwd-loop", &unplaceable)?;
     let states = observe_worker_roots(
@@ -811,7 +811,7 @@ fn occupancy_is_placed_per_root_and_partial_results_remain_conservative()
     )
     .0;
     assert_eq!(states[&a], WorkerState::Unknown);
-    assert_eq!(states[&b], WorkerState::Free);
+    assert_eq!(states[&b], WorkerState::Unknown);
     let free = observe(vec![], true);
     assert_eq!(free[&a], WorkerState::Free);
     assert_eq!(free[&b], WorkerState::Free);
@@ -826,8 +826,8 @@ fn occupancy_is_placed_per_root_and_partial_results_remain_conservative()
     let outside = base.join("loop");
     std::os::unix::fs::symlink("loop", &outside)?;
     let outside_states = observe(vec![outside], true);
-    assert_eq!(outside_states[&a], WorkerState::Free);
-    assert_eq!(outside_states[&b], WorkerState::Free);
+    assert_eq!(outside_states[&a], WorkerState::Unknown);
+    assert_eq!(outside_states[&b], WorkerState::Unknown);
     let inside = a.join("loop");
     std::os::unix::fs::symlink("loop", &inside)?;
     let alias = if let Ok(suffix) = inside.strip_prefix("/private") {
@@ -835,11 +835,6 @@ fn occupancy_is_placed_per_root_and_partial_results_remain_conservative()
     } else {
         Path::new("/private").join(inside.strip_prefix("/")?)
     };
-    assert!(occupancy_path_could_be_under(&alias, &a));
-    assert!(occupancy_path_could_be_under(
-        &inside,
-        alias.parent().unwrap()
-    ));
     let alias_root = alias.parent().unwrap().to_path_buf();
     let (alias_states, alias_details) = observe_worker_roots(
         &[alias_root.clone(), b.clone()],
@@ -853,7 +848,7 @@ fn occupancy_is_placed_per_root_and_partial_results_remain_conservative()
         false,
     );
     assert_eq!(alias_states[&alias_root], WorkerState::Unknown);
-    assert_eq!(alias_states[&b], WorkerState::Free);
+    assert_eq!(alias_states[&b], WorkerState::Unknown);
     assert!(alias_details[&alias_root].contains(&inside.display().to_string()));
     {
         let path = inside;
@@ -869,7 +864,7 @@ fn occupancy_is_placed_per_root_and_partial_results_remain_conservative()
             false,
         );
         assert_eq!(states[&a], WorkerState::Unknown);
-        assert_eq!(states[&b], WorkerState::Free);
+        assert_eq!(states[&b], WorkerState::Unknown);
         assert!(details[&a].contains(&path.display().to_string()));
     }
     for path in [PathBuf::new(), PathBuf::from("relative")] {
@@ -2358,13 +2353,15 @@ mod narrowing {
 }
 
 #[test]
-fn unplaceable_known_cwd_does_not_taint_unrelated_worktree() -> Result<(), Box<dyn Error>> {
+fn unplaceable_aliased_cwd_taints_other_worktrees() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let affected = temp.path().join("affected");
     let unrelated = temp.path().join("unrelated");
     fs::create_dir(&affected)?;
     fs::create_dir(&unrelated)?;
-    let non_directory = affected.join("file");
+    let alias = temp.path().join("alias");
+    std::os::unix::fs::symlink(&affected, &alias)?;
+    let non_directory = alias.join("file");
     fs::write(&non_directory, b"")?;
     let mut states = BTreeMap::from([
         (affected.clone(), WorkerState::Free),
@@ -2376,7 +2373,7 @@ fn unplaceable_known_cwd_does_not_taint_unrelated_worktree() -> Result<(), Box<d
     });
     assert!(reported);
     assert_eq!(states[&affected], WorkerState::Unknown);
-    assert_eq!(states[&unrelated], WorkerState::Free);
+    assert_eq!(states[&unrelated], WorkerState::Unknown);
     Ok(())
 }
 
@@ -2550,7 +2547,7 @@ fn census_observation_produces_typed_taints_for_contention_and_uncertainty()
 
     assert_eq!(states[&live_root], WorkerState::Live);
     assert_eq!(states[&unknown_root], WorkerState::Unknown);
-    assert_eq!(states[&free_root], WorkerState::Free);
+    assert_eq!(states[&free_root], WorkerState::Unknown);
 
     let live_taint = &taints[&live_root];
     assert!(live_taint.is_contention());
@@ -2562,7 +2559,7 @@ fn census_observation_produces_typed_taints_for_contention_and_uncertainty()
     assert!(unknown_taint.is_uncertainty());
     assert!(matches!(unknown_taint, TaintCause::Uncertainty(_)));
 
-    assert!(!taints.contains_key(&free_root));
+    assert!(taints[&free_root].is_uncertainty());
 
     Ok(())
 }
