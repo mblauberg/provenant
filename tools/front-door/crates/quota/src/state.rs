@@ -15,7 +15,7 @@ pub fn component(text: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
-fn reference(text: &str) -> bool {
+pub(crate) fn reference(text: &str) -> bool {
     !text.is_empty()
         && text.len() <= 256
         && text
@@ -264,6 +264,16 @@ pub enum ProbeFailure {
     Malformed,
 }
 impl ProbeFailure {
+    /// Default readiness classification, before provider execution detail.
+    pub fn readiness_reason(self) -> crate::ReadinessReason {
+        match self {
+            Self::MissingCli | Self::Disabled => crate::ReadinessReason::MissingExecutable,
+            Self::Auth => crate::ReadinessReason::SignedOut,
+            Self::AccountMismatch => crate::ReadinessReason::AccountMismatch,
+            _ => crate::ReadinessReason::CommandFailure,
+        }
+    }
+
     /// Failures only a login or re-registration repairs; the account is
     /// reported as `auth_required` until then.
     pub fn needs_login(self) -> bool {
@@ -278,6 +288,9 @@ pub struct UpdateIntent {
     pub account: AccountScope,
     pub expected: Option<AccountRecord>,
     pub replacement: Option<AccountRecord>,
+    /// Probe result metadata stays in the in-memory write intent, never the
+    /// v1 quota account JSON. `Some(None)` means a successful probe cleared it.
+    pub readiness_probe_result: Option<Option<crate::ReadinessReason>>,
 }
 impl UpdateIntent {
     pub fn check(&self, current: Option<&AccountRecord>) -> Result<(), QuotaError> {
@@ -410,6 +423,23 @@ mod tests {
                 .validate()
                 .is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn readiness_failure_metadata_never_enters_the_v1_account_json()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut record = AccountRecord::empty(AccountScope {
+            adapter: "agy".into(),
+            account_key: "opaque".into(),
+            label: "work".into(),
+        });
+        record.last_error = Some(ProbeFailure::Network);
+        let bytes = serde_json::to_vec(&record)?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        assert!(value.get("readiness_probe_result").is_none());
+        let decoded = AccountRecord::decode(&bytes)?;
+        assert_eq!(decoded, record);
         Ok(())
     }
 

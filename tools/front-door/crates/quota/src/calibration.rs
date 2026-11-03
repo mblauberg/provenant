@@ -28,10 +28,16 @@ impl Calibration {
 }
 
 impl crate::Settings {
-    /// Calibrations are keyed by the OpenCode account key, usually `go`.
+    /// Calibrations use an account key or an unambiguous OpenCode account label.
     /// Call on raw records at every read, including routing, so cached snapshots
     /// cannot retain a floor beyond its expiry or a configuration change.
     pub fn apply_calibration(&self, records: &mut [AccountRecord], now: i64) {
+        let mut labels = std::collections::BTreeMap::<String, usize>::new();
+        let mut keys = std::collections::BTreeSet::new();
+        for record in records.iter().filter(|r| r.account.adapter == "opencode") {
+            *labels.entry(record.account.label.clone()).or_default() += 1;
+            keys.insert(record.account.account_key.clone());
+        }
         for record in records {
             if record.account.adapter != "opencode" || record.account.account_key == "zen" {
                 continue;
@@ -44,7 +50,16 @@ impl crate::Settings {
             details.coverage = Some("partial".into());
             details.calibrated_windows.clear();
             details.calibration_expires_unix_seconds = None;
-            let Some(calibration) = self.calibration.get(&record.account.account_key) else {
+            let Some(calibration) =
+                self.calibration
+                    .get(&record.account.account_key)
+                    .or_else(|| {
+                        (labels.get(&record.account.label) == Some(&1)
+                            && !keys.contains(&record.account.label))
+                        .then(|| self.calibration.get(&record.account.label))
+                        .flatten()
+                    })
+            else {
                 continue;
             };
             let expiry = calibration.expiry();
@@ -188,6 +203,29 @@ mod tests {
         assert_eq!(
             records[0].snapshot.as_ref().unwrap().status,
             QuotaStatus::Exhausted
+        );
+    }
+
+    #[test]
+    fn calibration_accepts_unique_label_but_not_ambiguous_label() {
+        let settings = settings("2026-11-04T00:00:00Z");
+        let mut first = ledger("opencode-go");
+        first.account.label = "go".into();
+        first.snapshot.as_mut().unwrap().account.label = "go".into();
+        let mut unique = vec![first.clone()];
+        settings.apply_calibration(&mut unique, 1);
+        assert_eq!(
+            unique[0].snapshot.as_ref().unwrap().windows[0].used_basis_points,
+            4300
+        );
+        let mut second = ledger("other");
+        second.account.label = "go".into();
+        second.snapshot.as_mut().unwrap().account.label = "go".into();
+        let mut ambiguous = vec![first, second];
+        settings.apply_calibration(&mut ambiguous, 1);
+        assert_eq!(
+            ambiguous[0].snapshot.as_ref().unwrap().windows[0].used_basis_points,
+            401
         );
     }
 

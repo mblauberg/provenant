@@ -1,0 +1,70 @@
+# Route readiness
+
+Owner: `crates/quota` (record, freshness, publication), `crates/cli/src/quota.rs`
+(persistence and the edge read)
+Anchor: `crates/quota/src/readiness.rs`, `crates/cli/src/quota.rs`, `tests/quota.rs`
+
+Quota owns one readiness record per host, adapter, account and canonical model
+or verified pool. It records a schema version, state (ready, unavailable or
+unknown), typed reason, observation and expiry times, optional reset time and a
+bounded non-secret evidence reference. Providers supply facts; quota publishes
+verdicts. Selection gates for access, confinement, effort and pacing remain
+contextual. Reasons include not probed, stale, probe timeout, command failure,
+missing executable, signed out, account mismatch, exhausted, provider refusal,
+uncalibrated partial coverage, invalid evidence, unreachable peer and
+unsupported peer version. Existing exclusion reason wire names stay stable.
+
+Missing records, future observations, scope mismatches and records at or beyond
+their expiry read as unknown. A reset does not by itself establish readiness.
+A partial, uncalibrated usage window cannot establish headroom; a lower bound at
+the limit still establishes exhaustion. Account refusals cover all routes for
+that account; pool refusals cover only the verified pool. Refusals publish as
+soon as observed and retain the existing clearing and isolation rules.
+
+Persist readiness in its own tree, `<state>/readiness/<account-key>/<adapter>.json`,
+outside `quota/` (older readers treat every JSON file there as an account
+snapshot). The file holds every observation for that account and adapter, at
+most 64, and is written under the quota lock with the same private atomic
+replacement as the account JSON. Readers take no lock. No existing reader
+rejects an unknown top-level state directory: the disk report counts it as
+other state and the other state walkers visit only the directories they name.
+An absent file reads as unknown and schedules a probe. Reuse the quota probe
+interval. A changed agy fingerprint makes the old account unavailable and
+registers the new identity.
+
+Scope. An observation's route is a canonical `adapter/model`, a verified pool,
+or `*` for every route of the account. A pool refusal covers its pool only, a
+refusal without a pool its model only, and an account observation all routes.
+Host is `local` for observations this machine publishes.
+
+Writing. Quota derives provider-refusal observations from the account record
+each time it commits that record: a refusal is published as `unavailable` with
+the refusal's scope and reset, and removed when the account record no longer
+holds it or when a fresh reading of the pool proves headroom
+(`Admission::refusal_holds`, the rule admission uses). Forgetting the account
+removes the file. A same-scope refusal replaces any prior observation. An
+account-wide probe failure supersedes this host's per-route observations to
+stay within the file bound; after probe success or expiry, the next account
+sync rebuilds held refusals from the account record. A failed readiness write
+leaves it unknown, never ready. The CLI warns if readiness publication fails;
+the account commit remains authoritative.
+
+Reading. `provenant_quota::ReadinessFile::get(scope, now)` returns a
+`ReadinessRead` (state, reason, expiry, reset, evidence reference) and
+`ReadinessRead::project()` the receipt form. In the CLI edge,
+`quota::read_readiness(state, scope, now)` opens the file without creating
+anything and returns unknown when it is absent, stale, for another scope or
+damaged. Routing, route commands and diagnostics read only through these.
+
+Receipts. The receipt enum `RouteReadiness` (ready, unavailable) gains no
+variant, because an older reader rejects an unrecognised status. Unknown
+projects onto unavailable with the existing `unknown_availability` reason, or
+`stale_availability` when the evidence expired (`RouteReadiness::unknown`,
+`::stale`, `::is_unknown`). Observed reasons map to existing exclusion names:
+missing executable, signed out to `auth_required`, account mismatch,
+exhausted and provider refusal to `provider_refused`; the rest project as
+unknown.
+
+Routing, route commands, dispatch, host diagnostics, peer responses and quota
+displays consume this record. Route previews do not perform host I/O unless
+explicitly asked to probe. Receipt wire names remain compatible.

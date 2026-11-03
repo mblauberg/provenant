@@ -81,6 +81,12 @@ pub trait QuotaEffects {
         plan: &QuotaProbePlan,
         previous: Option<&crate::AccountRecord>,
     ) -> Result<ProbeCapture, crate::ProbeFailure>;
+
+    /// A richer, memory-only reason for this attempt. Implementations may
+    /// retain provider execution details without changing the v1 account file.
+    fn readiness_reason(&self, failure: crate::ProbeFailure) -> crate::ReadinessReason {
+        failure.readiness_reason()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

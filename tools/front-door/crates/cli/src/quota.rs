@@ -500,6 +500,7 @@ pub(crate) fn persist_provider_success(
         account: next.account.clone(),
         expected: current,
         replacement: Some(next),
+        readiness_probe_result: None,
     };
     write_intent(&directory, state_root, &intent, &mut records)?;
 
@@ -583,6 +584,148 @@ fn signal_quota(state: &Path) {
     provenant_os::changes::hint(state, &[provenant_core::changes::Scope::Quota]);
 }
 
+fn open_readiness_account(state: &Path, key: &str) -> Result<Option<Directory>, EdgeError> {
+    let root = match Directory::open_anchor(state) {
+        Ok(root) => root,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut dir = root;
+    for name in [READINESS_DIRECTORY, key] {
+        dir = match dir.open_verified_directory(OsStr::new(name)) {
+            Ok(next) => next,
+            Err(error) if error.is_not_found() => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        check_private(&dir)?;
+    }
+    Ok(Some(dir))
+}
+
+fn read_readiness_file(
+    account_dir: &Directory,
+    adapter: &str,
+    key: &str,
+) -> Result<Option<ReadinessFile>, EdgeError> {
+    let name = format!("{adapter}.json");
+    let reader = match account_dir.open_read(OsStr::new(&name)) {
+        Ok(reader) => reader,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let meta = reader.metadata()?;
+    if meta.mode & 0o777 != 0o600 || meta.uid != provenant_os::fs::effective_uid() {
+        return Err(EdgeError::Permissions);
+    }
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_RECORD_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| EdgeError::Read {
+            path: PathBuf::from(key).join(&name),
+            source,
+        })?;
+    if bytes.len() as u64 > MAX_RECORD_BYTES {
+        return Err(QuotaError::Invalid("readiness bound").into());
+    }
+    Ok(Some(ReadinessFile::decode(&bytes, adapter, key)?))
+}
+
+/// The readiness of one route, read without locks, directory creation or
+/// provider I/O. A missing, stale, mismatched or damaged record is unknown;
+/// nothing here reads as ready unless fresh evidence says so. Routing and the
+/// route and host commands read through this.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn read_readiness(state: &Path, scope: &ReadinessScope, now: i64) -> ReadinessRead {
+    if !component(&scope.adapter) || !component(&scope.account_key) {
+        return ReadinessRead::unknown(ReadinessReason::InvalidEvidence);
+    }
+    let read = open_readiness_account(state, &scope.account_key).and_then(|dir| {
+        dir.map_or(Ok(None), |dir| {
+            read_readiness_file(&dir, &scope.adapter, &scope.account_key)
+        })
+    });
+    match read {
+        Ok(Some(file)) => file.get(scope, now),
+        Ok(None) => ReadinessRead::absent(),
+        Err(_) => ReadinessRead::unknown(ReadinessReason::InvalidEvidence),
+    }
+}
+
+/// Publish this host's readiness for the account just written, under the
+/// quota lock the caller holds. Quota is the only writer: provider refusals
+/// in the account record become unavailable observations, and clear when the
+/// record stops holding them. A dropped account loses its file.
+fn sync_readiness(state: &Path, intent: &UpdateIntent, now: i64) -> Result<(), EdgeError> {
+    let (adapter, key) = (&intent.account.adapter, &intent.account.account_key);
+    let name = format!("{adapter}.json");
+    let existing = open_readiness_account(state, key)?;
+    let current = match &existing {
+        Some(dir) => match read_readiness_file(dir, adapter, key) {
+            Ok(file) => file,
+            // A damaged file is rebuilt from the account record.
+            Err(EdgeError::Quota(_)) => None,
+            Err(error) => return Err(error),
+        },
+        None => None,
+    };
+    let mut file = current.clone().unwrap_or_default();
+    if let Some(record) = &intent.replacement {
+        // Default policies date the clearing reading; a custom probe interval
+        // only moves when a fresh reading stops counting as fresh.
+        let policies = provenant_providers::quota_policies(provenant_providers::REGISTRY);
+        let admission = Admission {
+            policies: &policies,
+            now_unix_seconds: now,
+            records: std::slice::from_ref(record),
+            pools: &[],
+        };
+        if let Some(reason) = intent.readiness_probe_result {
+            let interval = policies
+                .iter()
+                .find(|policy| policy.adapter == adapter)
+                .map_or(300, |policy| policy.timer_seconds);
+            file.sync_probe_result(record, LOCAL_HOST, now, interval, reason)?;
+        }
+        file.sync_refusals(record, LOCAL_HOST, &admission)?;
+    } else {
+        file.records.clear();
+    }
+    if file.records.is_empty() {
+        if let Some(dir) = existing {
+            match dir.unlink(OsStr::new(&name)) {
+                Ok(()) => dir.sync()?,
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error.into()),
+            }
+            drop(dir);
+            let root = Directory::open_anchor(state)?;
+            let readiness = root.open_verified_directory(OsStr::new(READINESS_DIRECTORY))?;
+            let _ = readiness.rmdir(OsStr::new(key));
+            let _ = readiness.sync();
+        }
+        return Ok(());
+    }
+    if current.as_ref() == Some(&file) {
+        return Ok(());
+    }
+    let bytes = serde_json::to_vec(&file)?;
+    if bytes.len() as u64 > MAX_RECORD_BYTES {
+        return Err(QuotaError::Invalid("readiness bound").into());
+    }
+    let root = private(state)?;
+    let readiness = child(&root, OsStr::new(READINESS_DIRECTORY))?;
+    let account_dir = child(&readiness, OsStr::new(key))?;
+    durable(provenant_os::fs::Directory::atomic_write_with_permissions(
+        &account_dir,
+        OsStr::new(&name),
+        ".readiness",
+        &bytes,
+        0o600,
+        PublishMode::Replace,
+    )?)
+}
+
 fn write_intent(
     dir: &Directory,
     state: &Path,
@@ -626,6 +769,14 @@ fn write_intent(
                 records.remove(p);
             }
         }
+    }
+    // The account commit remains authoritative if derived publication fails.
+    if let Err(error) = sync_readiness(state, intent, SystemClock::new().unix_seconds()) {
+        use std::io::Write;
+        let _ = writeln!(
+            io::stderr().lock(),
+            "Warning: could not sync quota readiness: {error}"
+        );
     }
     signal_quota(state);
     Ok(())
@@ -828,6 +979,7 @@ fn refresh_auth_metadata(
                 account: next.account.clone(),
                 expected: current,
                 replacement: Some(next),
+                readiness_probe_result: None,
             },
             records,
         )?;
@@ -1035,19 +1187,22 @@ fn execute(
                     deadline_unix_seconds: probe_deadline,
                     authority_ref: Some("configured-local-quota".into()),
                 };
-                match source.probe(account, &input) {
-                    Ok(probe) => effects
-                        .capture(&probe, current.as_ref())
-                        .and_then(|capture| {
-                            source
-                                .decode(&probe, &capture)
-                                .map_err(|_| ProbeFailure::Malformed)
-                        }),
-                    Err(_) => Err(ProbeFailure::Disabled),
-                }
+                source
+                    .probe(account, &input)
+                    .map_err(|_| ProbeFailure::Disabled)
+                    .and_then(|probe| {
+                        let capture = effects.capture(&probe, current.as_ref())?;
+                        source
+                            .decode(&probe, &capture)
+                            .map_err(|_| ProbeFailure::Malformed)
+                    })
             }
             None => Err(ProbeFailure::Disabled),
         };
+        let readiness_reason = outcome
+            .as_ref()
+            .err()
+            .map(|failure| effects.readiness_reason(*failure));
         let finished = clock
             .wall_now()
             .map_err(|_| EdgeError::Time)?
@@ -1061,7 +1216,8 @@ fn execute(
             })
         {
             match schedule::complete(reserved, &token, finished, outcome, None) {
-                Ok(complete) => {
+                Ok(mut complete) => {
+                    complete.readiness_probe_result = Some(readiness_reason);
                     write_intent(&dir, roots.state.as_path(), &complete, &mut records)?;
                     // Best effort: a history fault never fails the refresh.
                     if let Some(snapshot) = complete
@@ -2268,6 +2424,7 @@ mod tests {
                 account,
                 expected: None,
                 replacement: Some(record),
+                readiness_probe_result: None,
             },
             &mut Vec::new(),
         )?;
@@ -2345,6 +2502,7 @@ mod tests {
                 account: account.clone(),
                 expected: None,
                 replacement: Some(record),
+                readiness_probe_result: None,
             },
             &mut records,
         )?;
@@ -2410,6 +2568,7 @@ mod tests {
                 account: account.clone(),
                 expected: Some(records[0].clone()),
                 replacement: Some(reserved.clone()),
+                readiness_probe_result: None,
             },
             &mut records,
         )?;
@@ -2423,6 +2582,7 @@ mod tests {
                 account: account.clone(),
                 expected: Some(records[0].clone()),
                 replacement: Some(failed),
+                readiness_probe_result: None,
             },
             &mut records,
         )?;
@@ -2500,6 +2660,7 @@ mod tests {
                     account,
                     expected: None,
                     replacement: Some(record),
+                    readiness_probe_result: None,
                 },
                 &mut records,
             )?;
@@ -2627,6 +2788,371 @@ mod tests {
     }
 
     #[test]
+    fn refusal_publishes_scoped_readiness_outside_quota_and_fresh_evidence_clears_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+        let state = temp.path();
+        let now = SystemClock::new().unix_seconds();
+        let scope = |adapter: &str, key: &str, route: &str| ReadinessScope {
+            host: LOCAL_HOST.into(),
+            adapter: adapter.into(),
+            account_key: key.into(),
+            route: route.into(),
+        };
+        let pool = scope("claude", "key", "pool");
+        // No file reads as unknown, never ready.
+        assert_eq!(read_readiness(state, &pool, now), ReadinessRead::absent());
+
+        let refuse = |pool: Option<&str>, model: &str| {
+            persist_provider_refusal(
+                state,
+                &provenant_records::run::RouteRecord {
+                    provider: Some("claude".into()),
+                    model: Some(model.into()),
+                    account_key: Some("key".into()),
+                    account_label: Some("work".into()),
+                    ..Default::default()
+                },
+                pool,
+                now - 100,
+                Some(now + 600),
+            )
+        };
+        refuse(Some("pool"), "claude/one")?;
+        refuse(None, "claude/two")?;
+        let held = read_readiness(state, &pool, now);
+        assert_eq!(held.state, ReadinessState::Unavailable);
+        assert_eq!(held.reason, Some(ReadinessReason::ProviderRefusal));
+        assert_eq!(held.reset_unix_seconds, Some(now + 600));
+        // The pool refusal covers its pool, the model refusal only its model,
+        // and neither covers another pool or another account.
+        let state_of = |s: &ReadinessScope| read_readiness(state, s, now).state;
+        assert_eq!(
+            state_of(&scope("claude", "key", "claude/two")),
+            ReadinessState::Unavailable
+        );
+        assert_eq!(
+            state_of(&scope("claude", "key", "claude/one")),
+            ReadinessState::Unknown
+        );
+        assert_eq!(
+            state_of(&scope("claude", "key", "other")),
+            ReadinessState::Unknown
+        );
+        assert_eq!(
+            state_of(&scope("claude", "second", "pool")),
+            ReadinessState::Unknown
+        );
+        // Readiness is its own tree: quota/ keeps only the account snapshot.
+        let account_dir = state.join("quota").join("key");
+        assert_eq!(std::fs::read_dir(&account_dir)?.count(), 1);
+        assert!(state.join("readiness/key/claude.json").is_file());
+        assert_eq!(read_cache_at(state)?.len(), 1);
+        // A reset time passing does not turn the refusal into ready.
+        assert_eq!(
+            read_readiness(state, &pool, now + 600).state,
+            ReadinessState::Unknown
+        );
+
+        // A fresh reading with headroom in the pool clears that refusal only.
+        let mut records = read_cache_at(state)?;
+        let current = records[0].clone();
+        let mut next = current.clone();
+        next.revision += 1;
+        next.snapshot = Some(QuotaSnapshot {
+            schema_version: 1,
+            account: next.account.clone(),
+            revision: 0,
+            status: QuotaStatus::Available,
+            observed_unix_seconds: now - 10,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            details: None,
+            windows: vec![QuotaWindow {
+                pool: "pool".into(),
+                window_seconds: None,
+                used_basis_points: 1000,
+                resets_unix_seconds: None,
+            }],
+        });
+        let dir = child(&private(state)?, OsStr::new("quota"))?;
+        let account = current.account.clone();
+        write_intent(
+            &dir,
+            state,
+            &UpdateIntent {
+                account,
+                expected: Some(current),
+                replacement: Some(next),
+                readiness_probe_result: None,
+            },
+            &mut records,
+        )?;
+        assert_eq!(state_of(&pool), ReadinessState::Unknown);
+        assert_eq!(
+            state_of(&scope("claude", "key", "claude/two")),
+            ReadinessState::Unavailable
+        );
+        // Forgetting the account removes its readiness file.
+        let drop = UpdateIntent {
+            account: records[0].account.clone(),
+            expected: Some(records[0].clone()),
+            replacement: None,
+            readiness_probe_result: None,
+        };
+        write_intent(&dir, state, &drop, &mut records)?;
+        assert!(!state.join("readiness/key").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn execute_publishes_probe_outcomes_as_readiness() -> Result<(), Box<dyn std::error::Error>> {
+        struct Effects {
+            failure: Option<ProbeFailure>,
+            malformed: bool,
+        }
+        impl QuotaEffects for Effects {
+            fn accounts(&self) -> Result<Vec<AccountScope>, QuotaError> {
+                Ok(vec![AccountScope {
+                    adapter: "codex".into(),
+                    account_key: "key".into(),
+                    label: "fixture".into(),
+                }])
+            }
+            fn capture(
+                &self,
+                _: &QuotaProbePlan,
+                _: Option<&AccountRecord>,
+            ) -> Result<ProbeCapture, ProbeFailure> {
+                if let Some(failure) = self.failure {
+                    return Err(failure);
+                }
+                Ok(ProbeCapture {
+                    stdout: if self.malformed {
+                        b"{".to_vec()
+                    } else {
+                        include_bytes!("../../providers/src/quota/fixtures/codex-app-server.json")
+                            .to_vec()
+                    },
+                    stderr: vec![],
+                    exit_code: Some(0),
+                    overflowed: false,
+                })
+            }
+        }
+        for (failure, malformed, expected) in [
+            (None, false, None),
+            (None, true, Some(ReadinessReason::CommandFailure)),
+            (
+                Some(ProbeFailure::MissingCli),
+                false,
+                Some(ReadinessReason::MissingExecutable),
+            ),
+            (
+                Some(ProbeFailure::Auth),
+                false,
+                Some(ReadinessReason::SignedOut),
+            ),
+            (
+                Some(ProbeFailure::AccountMismatch),
+                false,
+                Some(ReadinessReason::AccountMismatch),
+            ),
+            (
+                Some(ProbeFailure::Network),
+                false,
+                Some(ReadinessReason::CommandFailure),
+            ),
+        ] {
+            let temp = tempfile::tempdir()?;
+            let mut inputs = provenant_core::RootInputs::new(
+                temp.path().join("home"),
+                temp.path().join("checkout"),
+            );
+            inputs.state_dir = Some(temp.path().join("state"));
+            let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+            let command = Quota::Tick {
+                adapter: Filter {
+                    adapter: Some("codex".into()),
+                },
+                trigger: Trigger::Manual,
+                power: Power::Ac,
+            };
+            execute(
+                &command,
+                &roots,
+                provenant_providers::REGISTRY,
+                &Effects { failure, malformed },
+            )?;
+            let read = read_readiness(
+                roots.state.as_path(),
+                &ReadinessScope {
+                    host: LOCAL_HOST.into(),
+                    adapter: "codex".into(),
+                    account_key: "key".into(),
+                    route: "codex/model".into(),
+                },
+                SystemClock::new().unix_seconds(),
+            );
+            assert_eq!(
+                read.reason,
+                Some(expected.unwrap_or(ReadinessReason::NotProbed)),
+                "{failure:?}/{malformed}"
+            );
+            assert_eq!(
+                read.state,
+                if expected.is_some() {
+                    ReadinessState::Unavailable
+                } else {
+                    ReadinessState::Unknown
+                }
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn readiness_edge_rejects_damaged_wrong_mode_and_oversized_files()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+        let root = private(temp.path())?;
+        let readiness = child(&root, OsStr::new(READINESS_DIRECTORY))?;
+        let _account = child(&readiness, OsStr::new("key"))?;
+        let path = temp.path().join("readiness/key/claude.json");
+        let scope = ReadinessScope {
+            host: LOCAL_HOST.into(),
+            adapter: "claude".into(),
+            account_key: "key".into(),
+            route: "claude/model".into(),
+        };
+        let file = ReadinessFile {
+            schema_version: 1,
+            records: vec![provenant_quota::RouteReadiness {
+                schema_version: 1,
+                scope: scope.clone(),
+                state: ReadinessState::Ready,
+                reason: None,
+                observed_unix_seconds: 100,
+                expires_unix_seconds: 200,
+                reset_unix_seconds: None,
+                evidence_ref: Some("fixture".into()),
+            }],
+        };
+        let valid = serde_json::to_vec(&file)?;
+        for (bytes, mode, expected) in [
+            (valid.clone(), 0o600, ReadinessState::Ready),
+            (b"{".to_vec(), 0o600, ReadinessState::Unknown),
+            (valid, 0o644, ReadinessState::Unknown),
+            (
+                vec![b' '; MAX_RECORD_BYTES as usize + 1],
+                0o600,
+                ReadinessState::Unknown,
+            ),
+        ] {
+            std::fs::write(&path, bytes)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))?;
+            let read = read_readiness(temp.path(), &scope, 150);
+            assert_eq!(read.state, expected);
+            if expected == ReadinessState::Unknown {
+                assert_eq!(read.reason, Some(ReadinessReason::InvalidEvidence));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn probe_failure_readiness_is_account_wide_and_a_fresh_success_clears_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+        let state = temp.path();
+        let dir = child(&private(state)?, OsStr::new("quota"))?;
+        let account = AccountScope {
+            adapter: "agy".into(),
+            account_key: "work".into(),
+            label: "work".into(),
+        };
+        let mut records = Vec::new();
+        let mut initial = AccountRecord::empty(account.clone());
+        initial.revision = 1;
+        let now = SystemClock::new().unix_seconds();
+        initial.refusals = (0..provenant_quota::MAX_READINESS_RECORDS)
+            .map(|i| provenant_quota::Refusal {
+                extra: Default::default(),
+                account: account.clone(),
+                model: format!("model-{i}"),
+                pool: Some(format!("pool-{i}")),
+                observed_unix_seconds: now - 10,
+                resets_unix_seconds: Some(now + 600),
+            })
+            .collect();
+        write_intent(
+            &dir,
+            state,
+            &UpdateIntent {
+                account: account.clone(),
+                expected: None,
+                replacement: Some(initial),
+                readiness_probe_result: None,
+            },
+            &mut records,
+        )?;
+
+        let current = records[0].clone();
+        let mut failed = current.clone();
+        failed.revision += 1;
+        failed.last_error = Some(ProbeFailure::Network);
+        let failure = UpdateIntent {
+            account: account.clone(),
+            expected: Some(current),
+            replacement: Some(failed),
+            readiness_probe_result: Some(Some(ReadinessReason::ProbeTimeout)),
+        };
+        write_intent(&dir, state, &failure, &mut records)?;
+        let route = ReadinessScope {
+            host: LOCAL_HOST.into(),
+            adapter: "agy".into(),
+            account_key: "work".into(),
+            route: "agy/model".into(),
+        };
+        let held = read_readiness(state, &route, SystemClock::new().unix_seconds());
+        assert_eq!(held.state, ReadinessState::Unavailable);
+        assert_eq!(held.reason, Some(ReadinessReason::ProbeTimeout));
+
+        let current = records[0].clone();
+        let mut succeeded = current.clone();
+        succeeded.revision += 1;
+        succeeded.last_error = None;
+        let success = UpdateIntent {
+            account,
+            expected: Some(current),
+            replacement: Some(succeeded),
+            readiness_probe_result: Some(None),
+        };
+        write_intent(&dir, state, &success, &mut records)?;
+        assert_eq!(
+            read_readiness(state, &route, SystemClock::new().unix_seconds()).state,
+            ReadinessState::Unknown
+        );
+        let pool = ReadinessScope {
+            route: "pool-0".into(),
+            ..route.clone()
+        };
+        assert_eq!(
+            read_readiness(state, &pool, SystemClock::new().unix_seconds()).reason,
+            Some(ReadinessReason::ProviderRefusal)
+        );
+        let bytes = std::fs::read(state.join("quota/work/agy.json"))?;
+        assert_eq!(AccountRecord::decode(&bytes)?, records[0]);
+        Ok(())
+    }
+
+    #[test]
     fn drop_removes_empty_orphan_quota_directory() -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir()?;
@@ -2644,6 +3170,7 @@ mod tests {
             account: account.clone(),
             expected: None,
             replacement: Some(initial),
+            readiness_probe_result: None,
         };
         write_intent(&dir, temp.path(), &add, &mut records)?;
         // The state root is explicit, so a directory not named quota still signals.
@@ -2655,6 +3182,7 @@ mod tests {
             account: account.clone(),
             expected: Some(records[0].clone()),
             replacement: None,
+            readiness_probe_result: None,
         };
         write_intent(&dir, temp.path(), &drop_intent, &mut records)?;
         assert_eq!(records.len(), 0);
