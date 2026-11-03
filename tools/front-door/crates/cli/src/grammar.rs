@@ -18,6 +18,8 @@ pub struct Invocation {
     pub command: Command,
     /// Space-separated subcommand path, such as `quota tick`.
     pub leaf: String,
+    /// Explicit flags that cannot be applied to an automatically selected preset.
+    pub preset_incompatible_flags: Vec<String>,
 }
 #[derive(Debug, Default)]
 pub struct Globals {
@@ -171,7 +173,7 @@ pub enum Command {
 pub enum Preset {
     /// List available presets
     List,
-    /// Show effective preset values and their origins, or the role library
+    /// Show effective preset values and parameters, or the role library; --full includes origins
     Show {
         /// Preset name, or with --roles a role name to show
         name: Option<String>,
@@ -601,7 +603,7 @@ pub struct DispatchInput {
 #[command(group(clap::ArgGroup::new("writer_target").args(["worktree", "branch", "worktree_branch"])))]
 pub struct Dispatch {
     /// Expand and run a named pipeline preset
-    #[arg(long, requires = "prompt_file", conflicts_with_all = ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "provider_timeout", "operation_id"])]
+    #[arg(long, requires = "prompt_file")]
     pub preset: Option<String>,
     /// Override a preset value (PATH=TOML_VALUE); quote TOML strings; repeatable
     #[arg(long = "set", requires = "preset")]
@@ -888,7 +890,7 @@ pub struct Lanes {
         default_missing_value = "14400",
         value_name = "SECONDS",
         conflicts_with_all = ["all", "states", "cursor"],
-        value_parser = clap::value_parser!(u64).range(1..=provenant_core::MAX_LANE_RUNTIME_SECONDS)
+        value_parser = duration_seconds
     )]
     pub watch: Option<u64>,
     /// Keep lanes in any of these states.
@@ -1351,9 +1353,15 @@ fn timestamp(value: &str) -> Result<jiff::Timestamp, &'static str> {
 }
 /// A positive whole number of seconds ago, a date or an RFC3339 timestamp.
 pub(crate) fn since(value: &str) -> Result<jiff::Timestamp, String> {
-    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
-        let seconds = value
-            .parse::<i64>()
+    if value
+        .bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_digit())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b's' | b'm' | b'h' | b'd'))
+    {
+        let seconds = i64::try_from(span_seconds(value).ok_or("invalid duration")?)
             .map_err(|_| "invalid duration".to_owned())?;
         if seconds <= 0 {
             return Err("duration must be positive".into());
@@ -1375,7 +1383,7 @@ mod target_tests {
     use provenant_core::{AttemptId, RunId, TaskId};
 
     #[test]
-    fn since_accepts_whole_seconds_only() {
+    fn since_accepts_spans() {
         use provenant_core::Clock;
         let clock = provenant_os::clock::SystemClock::new();
         let before = clock.wall_now().unwrap().as_timestamp();
@@ -1384,7 +1392,10 @@ mod target_tests {
         let duration = jiff::SignedDuration::from_secs(86_400);
         assert!(start >= before.checked_sub(duration).unwrap());
         assert!(start <= after.checked_sub(duration).unwrap());
-        for invalid in ["0", "24h", "5s", "1m", "2d", "7d", "-1", ""] {
+        for valid in ["24h", "5s", "1m", "2d", "7d"] {
+            assert!(since(valid).is_ok(), "{valid}");
+        }
+        for invalid in ["0", "-1", ""] {
             assert!(since(invalid).is_err(), "{invalid}");
         }
     }
@@ -1448,19 +1459,20 @@ fn operation_id(value: &str) -> Result<OperationId, String> {
     ))
     .map_err(|error| error.to_string())
 }
-fn duration_seconds(value: &str) -> Result<u64, &'static str> {
+fn span_seconds(value: &str) -> Option<u64> {
     let (digits, multiplier) = match value.as_bytes().last() {
         Some(b's') => (&value[..value.len() - 1], 1),
         Some(b'm') => (&value[..value.len() - 1], 60),
         Some(b'h') => (&value[..value.len() - 1], 3600),
+        Some(b'd') => (&value[..value.len() - 1], 86400),
         _ => (value, 1),
     };
-    digits
-        .parse::<u64>()
-        .ok()
-        .and_then(|n| n.checked_mul(multiplier))
+    digits.parse::<u64>().ok()?.checked_mul(multiplier)
+}
+pub(crate) fn duration_seconds(value: &str) -> Result<u64, &'static str> {
+    span_seconds(value)
         .filter(|n| (1..=provenant_core::MAX_LANE_RUNTIME_SECONDS).contains(n))
-        .ok_or("wait must be 1s to 4h; run `provenant help run` for examples")
+        .ok_or("duration must be 1s to 4h; run `provenant help` for examples")
 }
 #[derive(Debug, Args)]
 pub struct Status {

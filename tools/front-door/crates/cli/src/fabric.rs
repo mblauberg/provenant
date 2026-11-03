@@ -307,7 +307,7 @@ pub enum Events {
         #[command(flatten)]
         page: SequencePage,
         /// Wait up to this many seconds for new entries
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=provenant_core::MAX_LANE_RUNTIME_SECONDS))]
+        #[arg(long, value_parser = crate::grammar::duration_seconds)]
         wait: Option<u64>,
     },
     /// Add a note to the activity log
@@ -509,7 +509,7 @@ pub enum Landing {
         #[arg(long)]
         generation: u64,
         /// Seconds to wait (1 to 14400)
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=provenant_core::MAX_LANE_RUNTIME_SECONDS))]
+        #[arg(long, value_parser = crate::grammar::duration_seconds)]
         wait: u64,
     },
 }
