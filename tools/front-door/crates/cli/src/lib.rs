@@ -2211,7 +2211,9 @@ mod tests {
     }
     #[test]
     fn telemetry_stats_parses_every_grouping_dimension() {
-        for dimension in ["pr", "issue", "graph", "node", "pattern", "preset", "role"] {
+        for dimension in [
+            "route", "pr", "issue", "graph", "node", "pattern", "preset", "role",
+        ] {
             let invocation = valid(&["telemetry", "stats", "--by", dimension]);
             let Command::Telemetry(Telemetry::Stats(stats)) = invocation.command else {
                 panic!("telemetry stats");

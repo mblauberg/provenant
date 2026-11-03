@@ -3001,7 +3001,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--since` | `{"description": "Count from this date or timestamp, or this many seconds ago", "name": "since"}` |
 | `--until` | `{"description": "Count up to this date or timestamp", "name": "until"}` |
 | `--run-id` | `{"description": "Restrict usage and cost to one run", "name": "run_id"}` |
-| `--by` | `{"conflicts": ["usage"], "description": "Group supervised attempts by work context or merged pull request; attempts with no value form an &#96;unattributed&#96; group", "name": "by", "values": ["pr", "issue", "graph", "node", "pattern", "preset", "role"]}` |
+| `--by` | `{"conflicts": ["usage"], "description": "Group supervised attempts by route, work context or merged pull request; attempts with no value form an &#96;unattributed&#96; group", "name": "by", "values": ["route", "pr", "issue", "graph", "node", "pattern", "preset", "role"]}` |
 | `--detail` | `{"conflicts": ["usage"], "defaults": ["false"], "description": "Include per-attempt detail", "name": "detail", "values": ["true", "false"]}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |

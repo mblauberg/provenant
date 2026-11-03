@@ -1109,6 +1109,7 @@ pub struct Trace {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum StatsBy {
+    Route,
     Pr,
     Issue,
     Graph,
@@ -1142,7 +1143,7 @@ pub struct Stats {
     /// Restrict usage and cost to one run.
     #[arg(long)]
     pub run_id: Option<Target>,
-    /// Group supervised attempts by work context or merged pull request; attempts with no value form an `unattributed` group
+    /// Group supervised attempts by route, work context or merged pull request; attempts with no value form an `unattributed` group
     #[arg(long, value_enum, conflicts_with = "usage")]
     pub by: Option<StatsBy>,
     /// Include per-attempt detail

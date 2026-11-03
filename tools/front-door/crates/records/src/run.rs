@@ -493,6 +493,25 @@ pub struct RouteRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_selection: Option<crate::RouteSelectionReceipt>,
 }
+impl RouteRecord {
+    /// Copy the resolved routing decision into the launch record.
+    pub fn from_resolved(
+        route: &crate::ResolvedRoute,
+        account_label: Option<&str>,
+        source: &str,
+    ) -> Self {
+        Self {
+            provider: Some(route.adapter.clone()),
+            model: Some(format!("{}/{}", route.adapter, route.model)),
+            effort: route.effort.clone(),
+            account_label: account_label.map(str::to_owned),
+            account_key: route.account_key.clone(),
+            pool_selection: route.pool_selection.clone(),
+            source: Some(source.into()),
+            ..Default::default()
+        }
+    }
+}
 impl From<RouteRecord> for crate::RouteFact {
     fn from(r: RouteRecord) -> Self {
         Self {

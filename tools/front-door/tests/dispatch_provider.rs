@@ -273,7 +273,7 @@ fn fixture() -> Result {
             fs::write(
                 dir.join(".credentials.json"),
                 serde_json::to_vec(
-                    &json!({"claudeAiOauth":{"accessToken":"fixture-refreshed-token","expiresAt":expiry}}),
+                    &json!({"claudeAiOauth":{"accessToken":"credential-sentinel-2719-violet-fox","expiresAt":expiry}}),
                 )?,
             )?;
             fs::write(dir.join("refreshed"), b"yes")?;
@@ -282,7 +282,7 @@ fn fixture() -> Result {
         assert!(std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN").is_none());
         let fd: i32 = std::env::var("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR")?.parse()?;
         let token = provenant_os::sys::fixture_read_secret_pipe(fd)?;
-        assert_eq!(token, b"fixture-refreshed-token");
+        assert_eq!(token, b"credential-sentinel-2719-violet-fox");
         let mut prompt = String::new();
         io::stdin().read_to_string(&mut prompt)?;
         if prompt.contains("fixture host-native") {
@@ -853,14 +853,18 @@ fn stats_reports_partial_signals_outside_graph_groups() -> Result {
         rig.project.join("config/telemetry-prices.toml"),
         include_str!("../../../config/telemetry-prices.toml"),
     )?;
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[domains.routing.routes.receipt-fixture]\nmodel='codex/gpt-6-luna'\neffort='low'"
+    )?;
     let prompt = rig.root.join("prompt.txt");
     fs::write(&prompt, "fixture partial stop")?;
     let output = rig.command(&[
         "run",
-        "--model",
-        "codex/gpt-6-luna",
-        "--effort",
-        "low",
+        "--route",
+        "receipt-fixture",
         "--operation-id",
         "partial-stop",
         "--prompt-file",
@@ -870,10 +874,33 @@ fn stats_reports_partial_signals_outside_graph_groups() -> Result {
         "--json",
     ])?;
     let lanes = settled_policy_lanes(&rig, output, 0)?;
+    assert_eq!(lanes["data"]["lanes"][0]["applied_route"]["effort"], "low");
+    assert_eq!(
+        lanes["data"]["lanes"][0]["resolved_route"]["source"],
+        "named_route"
+    );
     assert_eq!(
         lanes["data"]["lanes"][0]["partial_signals"],
         json!(["declared_stop"]),
         "{lanes}"
+    );
+    let route_stats = rig.command(&["telemetry", "stats", "--by", "route", "--json"])?;
+    assert_eq!(code(&route_stats), 0, "{route_stats:?}");
+    let route_stats: Value = serde_json::from_slice(&route_stats.stdout.bytes)?;
+    assert_eq!(
+        route_stats["data"]["context_groups"][0]["value"],
+        "codex/gpt-6-luna@low"
+    );
+    assert_eq!(
+        route_stats["data"]["context_groups"][0]["totals"]["attempts"],
+        1
+    );
+    let human = rig.command(&["telemetry", "stats", "--by", "route"])?;
+    assert_eq!(code(&human), 0, "{human:?}");
+    let human = String::from_utf8(human.stdout.bytes)?;
+    assert!(
+        human.contains("by route: 1 groups\ncodex/gpt-6-luna@low  "),
+        "{human}"
     );
     for args in [
         &["telemetry", "stats", "--json"][..],
@@ -927,6 +954,7 @@ fn policy_incomplete_result_continues_the_retained_session() -> Result {
     assert_eq!(first["state"], "failed", "{lanes}");
     assert_eq!(second["state"], "succeeded", "{lanes}");
     assert_eq!(second["continuation"], "policy_continuation");
+    assert_eq!(second["resolved_route"]["account_source"], "continuation");
     assert_eq!(second["applied_route"]["model"], "codex/gpt-6.1-terra");
     assert_eq!(
         first["transcript"]["session"]
@@ -1899,7 +1927,7 @@ fn opus_writer_dispatch_advises_a_cheaper_route() -> Result {
 }
 
 fn claude_dispatch_refreshes_registered_account() -> Result {
-    claude_dispatch(false)
+    claude_dispatch(false, false)
 }
 
 fn host_native_dispatch_uses_the_declared_agent_and_refuses_resume() -> Result {
@@ -1910,7 +1938,7 @@ fn host_native_dispatch_uses_the_declared_agent_and_refuses_resume() -> Result {
         )?;
         return Ok(());
     }
-    claude_dispatch(true)
+    claude_dispatch(true, false)
 }
 
 fn unconfigured_host_native_repair_launches_alias_fallback() -> Result {
@@ -2046,7 +2074,7 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
     fs::write(
         rig.home.join(".claude-pro/.credentials.json"),
         serde_json::to_vec(
-            &json!({"claudeAiOauth":{"accessToken":"fixture-refreshed-token","expiresAt":provenant_core::Clock::wall_now(&provenant_os::clock::SystemClock::new())?.unix_millis() + 3_600_000}}),
+            &json!({"claudeAiOauth":{"accessToken":"credential-sentinel-2719-violet-fox","expiresAt":provenant_core::Clock::wall_now(&provenant_os::clock::SystemClock::new())?.unix_millis() + 3_600_000}}),
         )?,
     )?;
     let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
@@ -2120,6 +2148,78 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
         "host-native absent is not configured in domains.fabric.host_native"
     );
     assert_eq!(fs::read_dir(&paths.temporary)?.count(), 0);
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[domains.routing.routes.receipt-fixture]\nmodel='claude/claude-sonnet-5-5'\neffort='medium'"
+    )?;
+    let mut named = task.clone();
+    named.route = provenant_run::RequestedRoute::Named {
+        extra: Default::default(),
+        name: "receipt-fixture".into(),
+        effort: None,
+    };
+    let named_launch = provenant_run::Providers::prepare(
+        &registry,
+        &named,
+        "synthetic-prompt-secret-2719",
+        &paths,
+        None,
+    )?;
+    assert_eq!(
+        named_launch.route.model.as_deref(),
+        Some("claude/claude-sonnet-5-5")
+    );
+    assert_eq!(named_launch.route.effort.as_deref(), Some("medium"));
+    assert_eq!(named_launch.route.source.as_deref(), Some("named_route"));
+    assert_eq!(named_launch.route.extra["account_source"], "pin");
+    let receipt = serde_json::to_string(&named_launch.route)?;
+    assert!(!receipt.contains("synthetic-prompt-secret-2719"));
+    assert!(!receipt.contains("credential-sentinel-2719-violet-fox"));
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[domains.routing.pools]\nsecret-fixture = [{{ model = 'claude/claude-sonnet-5-5', effort = 'medium' }}]"
+    )?;
+    let mut pooled = task.clone();
+    pooled.route = provenant_run::RequestedRoute::Review {
+        extra: Default::default(),
+        name: "secret-fixture".into(),
+        effort: None,
+        excluded_families: vec![],
+        distinct_families: false,
+        require_distinct: false,
+    };
+    let pool_launch = provenant_run::Providers::prepare(
+        &registry,
+        &pooled,
+        "prompt-sentinel-2719-indigo-owl",
+        &paths,
+        None,
+    )?;
+    assert_eq!(pool_launch.route.source.as_deref(), Some("pool"));
+    assert_eq!(
+        serde_json::to_value(&pool_launch.route)?["pool_selection"]["pool"],
+        "secret-fixture"
+    );
+    assert!(
+        String::from_utf8_lossy(&pool_launch.stdin).contains("prompt-sentinel-2719-indigo-owl")
+    );
+    assert!(pool_launch.secret_input.is_some());
+    let receipt = serde_json::to_string(&pool_launch.route)?;
+    assert!(!receipt.contains("prompt-sentinel-2719-indigo-owl"));
+    assert!(!receipt.contains("credential-sentinel-2719-violet-fox"));
+    named.account = None;
+    let automatic = provenant_run::Providers::prepare(
+        &registry,
+        &named,
+        "synthetic-prompt-secret-2719",
+        &paths,
+        None,
+    )?;
+    assert_eq!(automatic.route.extra["account_source"], "automatic");
     let launch =
         provenant_run::Providers::prepare(&registry, &task, "fixture host-native", &paths, None)?;
     assert_eq!(launch.route.provider.as_deref(), Some("claude"));
@@ -2168,6 +2268,15 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
     for path in [&nested.temporary, &nested.provider_state, &nested.scratch] {
         fs::create_dir_all(path)?;
     }
+    let fallback = provenant_run::Providers::prepare(
+        &registry,
+        &named,
+        "synthetic-prompt-secret-2719",
+        &nested,
+        None,
+    )?;
+    assert_eq!(fallback.route.source.as_deref(), Some("fallback"));
+    assert_eq!(fallback.route.effort.as_deref(), Some("high"));
     let error =
         provenant_run::Providers::prepare(&registry, &task, "fixture host-native", &nested, None)
             .err()
@@ -2179,7 +2288,14 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
     Ok(())
 }
 
-fn claude_dispatch(host_native: bool) -> Result {
+fn pool_receipt_excludes_prompt_and_credential_from_artifacts() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    claude_dispatch(false, true)
+}
+
+fn claude_dispatch(host_native: bool, pool: bool) -> Result {
     let rig = claude_fixture()?;
     // Open-network Claude dispatch must not require a Rust installation.
     assert!(!rig.home.join(".cargo").exists());
@@ -2194,6 +2310,14 @@ fn claude_dispatch(host_native: bool) -> Result {
             "\n[domains.fabric.host_native.ci-fixer]\nkind = 'claude-agent'\nmodel = 'claude/claude-sonnet-5-5'\neffort = 'medium'\ndescription = 'Repair CI'\nprompt = 'Repair failing CI checks.'"
         )?;
         json!({"kind":"adapter","provider":"host-native","name":"ci-fixer"})
+    } else if pool {
+        writeln!(
+            OpenOptions::new()
+                .append(true)
+                .open(rig.state.join("config.toml"))?,
+            "\n[domains.routing.pools]\nsecret-fixture = [{{ model = 'claude/claude-sonnet-5-5', effort = 'medium' }}]"
+        )?;
+        json!({"kind":"review","name":"secret-fixture","effort":null,"excluded_families":[],"distinct_families":false})
     } else {
         json!({"kind":"model","provider":"claude","model":"claude-sonnet-5-5","effort":"medium"})
     };
@@ -2201,7 +2325,7 @@ fn claude_dispatch(host_native: bool) -> Result {
     fs::write(
         &manifest,
         serde_json::to_vec(
-            &json!({"schema_version":1,"tasks":[{"prompt":if host_native { "fixture host-native" } else { "reply OK" },"route":route,"account":"pro"}]}),
+            &json!({"schema_version":1,"tasks":[{"prompt":if host_native { "fixture host-native" } else if pool { "prompt-sentinel-2719-indigo-owl" } else { "reply OK" },"route":route,"account":"pro"}]}),
         )?,
     )?;
     let out = rig.command(&[
@@ -2239,6 +2363,16 @@ fn claude_dispatch(host_native: bool) -> Result {
     }
     assert_eq!(lane["state"], "succeeded", "{lane}");
     assert_eq!(lane["account"], "pro");
+    if pool {
+        assert_eq!(lane["requested_route"]["kind"], "review");
+        assert_eq!(
+            lane["applied_route"]["pool_selection"]["pool"],
+            "secret-fixture"
+        );
+        let receipt = serde_json::to_string(&lane["resolved_route"])?;
+        assert!(!receipt.contains("prompt-sentinel-2719-indigo-owl"));
+        assert!(!receipt.contains("credential-sentinel-2719-violet-fox"));
+    }
     assert_eq!(lane["observed_route"]["model"], "claude/claude-sonnet-5-5");
     if host_native {
         assert_eq!(lane["requested_route"]["provider"], "host-native");
@@ -2276,6 +2410,31 @@ fn claude_dispatch(host_native: bool) -> Result {
         .join(lane["run_id"].as_str().ok_or("run")?)
         .join("attempts")
         .join(lane["attempt_id"].as_str().ok_or("attempt")?);
+    if pool {
+        // The sentinel does reach the attempt, so its absence below is evidence.
+        assert!(
+            fs::read_to_string(attempt.join("prompt.txt"))?
+                .contains("prompt-sentinel-2719-indigo-owl")
+        );
+        // Every launched attempt writes these, so a missing one fails the
+        // test rather than hiding a leak. prompt.txt holds the prompt by design.
+        for name in [
+            "launch.json",
+            "process.json",
+            "terminal-commit.json",
+            "result.md",
+        ] {
+            let artifact = fs::read_to_string(attempt.join(name))?;
+            assert!(
+                !artifact.contains("prompt-sentinel-2719-indigo-owl"),
+                "{name}"
+            );
+            assert!(
+                !artifact.contains("credential-sentinel-2719-violet-fox"),
+                "{name}"
+            );
+        }
+    }
     let authority: Value =
         serde_json::from_slice(&fs::read(attempt.join("credential-authority.json"))?)?;
     assert_eq!(authority["actor"], lane["run_id"]);
@@ -2292,7 +2451,9 @@ fn claude_dispatch(host_native: bool) -> Result {
         "credential-authority.json",
     ] {
         if let Ok(bytes) = fs::read(attempt.join(name)) {
-            assert!(!String::from_utf8_lossy(&bytes).contains("fixture-refreshed-token"));
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains("credential-sentinel-2719-violet-fox")
+            );
         }
     }
     rig.assert_legacy_unchanged()?;
@@ -4261,6 +4422,7 @@ fn main() -> ExitCode {
                 "opencode_dispatch_observes_v2_wal_session",
                 "opus_writer_dispatch_advises_a_cheaper_route",
                 "claude_dispatch_refreshes_registered_account",
+                "pool_receipt_excludes_prompt_and_credential_from_artifacts",
                 "host_native_dispatch_uses_the_declared_agent_and_refuses_resume",
                 "host_native_preparation_uses_the_provider_contract",
                 "unconfigured_host_native_repair_launches_alias_fallback",
@@ -4315,6 +4477,7 @@ fn main() -> ExitCode {
                     "opus_writer_dispatch_advises_a_cheaper_route" => {
                         opus_writer_dispatch_advises_a_cheaper_route()
                     }
+                    "pool_receipt_excludes_prompt_and_credential_from_artifacts" => pool_receipt_excludes_prompt_and_credential_from_artifacts(),
                     "claude_dispatch_refreshes_registered_account" => {
                         claude_dispatch_refreshes_registered_account()
                     }
