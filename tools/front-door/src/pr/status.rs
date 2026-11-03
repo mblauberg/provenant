@@ -29,7 +29,7 @@ struct Check {
     bucket: String,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-struct Line {
+pub(crate) struct Line {
     number: u64,
     state: String,
     head: String,
@@ -45,7 +45,7 @@ struct Line {
 }
 impl Line {
     /// The state an operator acts on, most urgent first.
-    fn class(&self) -> &'static str {
+    pub(crate) fn class(&self) -> &'static str {
         if self.error.is_some() {
             "unavailable"
         } else if self.state != "OPEN" {
@@ -215,7 +215,15 @@ pub(super) fn required_policy(
         return None;
     }
     let repo = format!("repos/{}/{}", encode(owner), encode(name));
-    let branch = encode(&base.branch);
+    required_policy_for(&repo, &base.branch, read)
+}
+
+pub(super) fn required_policy_for(
+    repo: &str,
+    base: &str,
+    read: &dyn Fn(&[&str]) -> Option<provenant_os::exec::ExecOutcome>,
+) -> Option<Policy> {
+    let branch = encode(base);
     let get = |path: &str, paginate: bool| -> Option<Vec<u8>> {
         let args = if paginate {
             vec!["gh", "api", "--paginate", "--slurp", path]
@@ -242,7 +250,7 @@ pub(super) fn required_policy(
     )?)
     .ok()?;
     Some(Policy {
-        repository: repo,
+        repository: repo.to_owned(),
         checks: parse_required_checks(protection.as_ref(), &pages)?,
     })
 }
@@ -424,8 +432,16 @@ fn open_numbers(project: &Path) -> Result<Vec<u64>> {
     Ok(listed.into_iter().map(|entry| entry.number).collect())
 }
 fn line(project: &Path, number: u64, timeout: std::time::Duration) -> Result<Line> {
+    wait_line(project, number, timeout, None)
+}
+pub(crate) fn wait_line(
+    project: &Path,
+    number: u64,
+    timeout: std::time::Duration,
+    cancel: Option<&provenant_core::CancelToken>,
+) -> Result<Line> {
     let text = number.to_string();
-    let bytes = successful(super::execute_for(
+    let bytes = successful(super::execute_cancellable(
         project,
         &[
             "gh",
@@ -437,6 +453,8 @@ fn line(project: &Path, number: u64, timeout: std::time::Duration) -> Result<Lin
         ],
         timeout,
         false,
+        None,
+        cancel,
     )?)?;
     let view: View = serde_json::from_slice(&bytes)?;
     let checks = view

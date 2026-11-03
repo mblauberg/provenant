@@ -276,3 +276,57 @@ A root-package `cargo` command run inside a lane has failed in `build.rs` with
 reproduced outside a lane sandbox. `build.rs` removes `GIT_*` before it runs Git, so the likely
 reason is that it then loses the lane's binding. Track it in a separate issue before
 relying on this workaround.
+
+## Wait on mixed work
+
+Use one blocking status call when a chair has several kinds of work outstanding:
+
+```sh
+provenant status --wait --target lane:ATTEMPT_ID --target graph:GRAPH_ID --target pr:2721
+provenant status --wait=30m --until all --target lane:RUN_ID --target land:2721
+provenant status --wait=1h --follow --target graph:GRAPH_ID --target pr:2721 --json
+```
+
+`status ID --wait` also keeps the usual lane/graph ID resolution. `--target`
+is repeatable; explicit prefixes disambiguate lanes, graphs and PR numbers.
+`land:N` observes PR N only: it grants no merge authority. Use `land N --wait`
+when a merge is authorised.
+
+The default `--until any` returns on the first observed semantic transition,
+or immediately for a terminal target.
+An initially running lane selection does not count its older settled attempts.
+`--until all` waits for every target to become terminal. A lane selection is
+terminal when all its attempts, including policy successors, have settled;
+a graph when complete or cancelled; a PR when merged or closed. A ready or
+failing open PR is notable but remains nonterminal. `--follow` streams initial
+snapshots and each observed transition, and always waits for all targets to
+become terminal, regardless of `--until`.
+
+Each event occupies one line. With `--json`, stdout is newline-delimited JSON:
+`snapshot`/`transition` records carry `target`, `terminal` and `data`; the final
+`end` record carries `condition_met` and `timed_out`. An expired wait exits 124
+and leaves work running. Identical observations and elapsed-time changes emit
+no event. Initial transient reads retry within the budget; other unreadable
+sources fail the call initially. Later read failures retain the last good
+observation until recovery or timeout.
+
+The coordinator receives source events through one channel. Sources reuse the
+existing store and GitHub observations at bounded intervals; this is not a
+GitHub webhook subscription and cannot report intermediate states between
+samples. Configure the defaults in the selected state directory's `config.toml`:
+
+```toml
+[domains.wait]
+timeout_seconds = 300
+local_interval_ms = 500
+pr_interval_ms = 5000
+max_targets = 64
+pr_read_timeout_seconds = 60
+```
+
+`--wait=DURATION` overrides the timeout for one call (1 second to 4 hours).
+Source intervals accept 10 to 60000 milliseconds. `max_targets` caps the target
+count (default 64, 1 to 1024). `pr_read_timeout_seconds` bounds individual
+GitHub PR read operations (default 60 seconds, 1 to 600). Waiting observes graph
+checkpoints; use the graph's returned resume command when continuation needs
+an explicit decision. Repeated status calls or shell sleep loops are unnecessary.
