@@ -2263,6 +2263,16 @@ fn preset_file_spec_resolves_from_checkout_subdirectory() -> Result<(), Box<dyn 
             .status()?
             .success()
     );
+    assert!(
+        provenant_os::fixture::git_command()
+            .current_dir(&project)
+            .args([
+                "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                "commit", "--allow-empty", "-qm", "initial",
+            ])
+            .status()?
+            .success()
+    );
     std::fs::write(project.join("spec.md"), "root acceptance criteria")?;
     let prompt = temp.path().join("brief");
     std::fs::write(&prompt, "review")?;
