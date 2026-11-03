@@ -1023,6 +1023,19 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
         run::Providers::assess_result(registry, &task, &record, &capacity, None, None, 1)
     };
     assert!(assess_recovered(&rooted)?.retry.is_none());
+    let mut profiled = task.clone();
+    profiled.profile = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?
+        .dispatch_profile(&[])?;
+    assert_eq!(
+        profiled.profile.knobs["domains.routing.settlement_retries"],
+        2
+    );
+    assert!(
+        run::Providers::assess_result(&rooted, &profiled, &record, &capacity, None, None, 1)?
+            .retry
+            .is_none()
+    );
+
     assert!(assess_recovered(&Registry::default())?.retry.is_some());
     const NOW: i64 = 1_800_000_000;
     let assess_at = |record: &run::AttemptRecord,
@@ -1167,6 +1180,65 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
     );
     exact.account = Some("work".into());
     assert!(assess(&exact, &quota, 1, true).retry.is_none());
+    let mut graph_reader = task.clone();
+    graph_reader.context = Some(provenant_records::run::WorkContext {
+        graph_id: Some("graph".into()),
+        node_id: Some("reader".into()),
+        ..Default::default()
+    });
+    for outcome in [
+        run::Outcome::QuotaLimited,
+        run::Outcome::RateLimited,
+        run::Outcome::AuthRequired,
+        run::Outcome::ModelUnavailable,
+    ] {
+        let refused = decoded(outcome, None, "refused");
+        let retry = assess(&graph_reader, &refused, 1, false)
+            .retry
+            .ok_or("graph alias redraw")?;
+        assert_eq!(retry.route, graph_reader.route);
+        assert!(!retry.resume);
+        assert_eq!(retry.max_attempts, 3);
+        assert!(assess(&graph_reader, &refused, 3, true).retry.is_none());
+    }
+    for outcome in [
+        run::Outcome::Failed,
+        run::Outcome::ReviewRequired,
+        run::Outcome::Lost,
+        run::Outcome::Unsettled,
+    ] {
+        assert!(
+            assess(
+                &graph_reader,
+                &decoded(outcome, None, "uncertain or task failure"),
+                1,
+                true
+            )
+            .retry
+            .is_none()
+        );
+    }
+    graph_reader
+        .profile
+        .overrides
+        .push("domains.routing.settlement_retries=0".into());
+    graph_reader.profile.knobs.insert(
+        "domains.routing.settlement_retries".into(),
+        serde_json::json!(0),
+    );
+    assert!(assess(&graph_reader, &quota, 1, true).retry.is_none());
+    graph_reader.profile.knobs.insert(
+        "domains.routing.settlement_retries".into(),
+        serde_json::json!(1),
+    );
+    assert_eq!(
+        assess(&graph_reader, &quota, 1, true)
+            .retry
+            .unwrap()
+            .max_attempts,
+        2
+    );
+    assert!(assess(&graph_reader, &quota, 2, true).retry.is_none());
     // Zero retries turns the behaviour off.
     let off = provenant_routing::RoutingConfig {
         settlement_retries: 0,

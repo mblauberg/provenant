@@ -396,13 +396,26 @@ fn fixture() -> Result {
             format!(
                 "{}\n{}\n{}\n",
                 json!({"type":"session_meta","payload":{"id":recorded_session}}),
-                json!({"type":"turn_context","payload":{"model": if prompt.contains("fixture policy result") || prompt.contains("fixture policy continuation") { policy_model.unwrap_or("gpt-6-luna") } else if prompt.contains("fixture pool result") { "gpt-6.1-sol" } else { "gpt-6-luna" },"effort":"low"}}),
+                json!({"type":"turn_context","payload":{"model": if prompt.contains("fixture policy result") || prompt.contains("fixture policy continuation") || prompt.contains("fixture graph redraw") { policy_model.unwrap_or("gpt-6-luna") } else if prompt.contains("fixture pool result") { "gpt-6.1-sol" } else { "gpt-6-luna" },"effort":"low"}}),
                 json!({"type":"response_item","payload":{"content":recorded}})
             ),
         )?;
     }
     if prompt.contains("fixture handoff recovery") {
         return handoff_recovery_provider(&prompt, &args, &auth);
+    }
+    if prompt.contains("fixture graph redraw") && policy_model == Some("gpt-6-luna") {
+        writeln!(
+            io::stdout(),
+            "{}",
+            json!({"type":"thread.started","thread_id":session})
+        )?;
+        writeln!(
+            io::stdout(),
+            "{}",
+            json!({"type":"turn.failed","error":{"message":"usage limit reached","codex_error_info":"usage_limit_exceeded"}})
+        )?;
+        return Ok(());
     }
     if prompt.contains("fixture capacity") {
         writeln!(
@@ -2484,6 +2497,103 @@ fn graph_fixture_available() -> Result<bool> {
     Ok(true)
 }
 
+fn graph_read_only_alias_redraws_after_quota_and_preserves_both_receipts() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = policy_codex_fixture()?;
+    let cleanup = rig.process_cleanup();
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.routing.pools]\nretry-test=[{model='codex/gpt-6-luna',weight=1,effort='low'},{model='codex/gpt-6.1-terra',weight=0,effort='low'}]\n",
+    )?;
+    for (label, account) in [("one", "fixture-one"), ("two", "fixture-two")] {
+        let directory = rig.root.join(format!("codex-{label}"));
+        fs::create_dir_all(&directory)?;
+        let auth = serde_json::to_vec(&json!({"tokens":{"account_id":account}}))?;
+        fs::write(directory.join("auth.json"), &auth)?;
+        let key = provenant_providers::identity::codex_account(&auth).ok_or("account key")?;
+        support::register_account(&rig, "codex", label, &key, &directory)?;
+    }
+    fs::write(
+        rig.project.join("graph.json"),
+        serde_json::to_vec(&json!({
+            "schema_version":1,"graph_id":"quota-redraw","nodes":[{
+                "id":"read","prompt":"fixture graph redraw","access":"read_only","route":{"alias":"retry-test"}
+            }]
+        }))?,
+    )?;
+    let started = rig.command(&[
+        "fabric",
+        "graph",
+        "run",
+        "--document",
+        "graph.json",
+        "--json",
+    ])?;
+    assert_eq!(code(&started), 0, "{started:?}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let status = loop {
+        let status = rig.command(&["fabric", "graph", "status", "quota-redraw", "--json"])?;
+        assert_eq!(code(&status), 0, "{status:?}");
+        let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
+        if status["data"]["checkpoint"]["nodes"][0]["state"] == "succeeded" {
+            break status;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "graph did not recover: {status}"
+        );
+        std::thread::park_timeout(std::time::Duration::from_millis(50));
+    };
+    let reference = status["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
+        .as_str()
+        .ok_or("attempt reference")?;
+    let attempt = reference.split_once('/').ok_or("host reference")?.1;
+    let lanes = rig.command(&["lanes", "--all", "--json"])?;
+    assert_eq!(code(&lanes), 0, "{lanes:?}");
+    let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+    let rows = lanes["data"]["lanes"].as_array().ok_or("lanes")?;
+    assert_eq!(rows.len(), 2, "{lanes}");
+    let first = rows
+        .iter()
+        .find(|row| row["attempt_number"] == 1)
+        .ok_or("first")?;
+    let second = rows
+        .iter()
+        .find(|row| row["attempt_number"] == 2)
+        .ok_or("second")?;
+    assert_eq!(first["state"], "quota_limited");
+    assert_eq!(second["state"], "succeeded");
+    assert_ne!(
+        first["applied_route"]["model"],
+        second["applied_route"]["model"]
+    );
+    assert_eq!(second["attempt_id"], attempt);
+    let db = rusqlite::Connection::open_with_flags(rig.state.join("run.sqlite3"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let raw: Vec<u8> = db.query_row("SELECT record FROM attempts WHERE id=?1", [attempt], |row| row.get(0))?;
+    let record: Value = serde_json::from_slice(&raw)?;
+    assert_eq!(record["retry_of"], first["attempt_id"]);
+    let full = rig.command(&["fabric", "graph", "status", "quota-redraw", "--full"])?;
+    let human = String::from_utf8(full.stdout.bytes)?;
+    assert!(
+        human.contains("settlement_retries=2 origin=shipped_default"),
+        "{human}"
+    );
+    // Replaying the graph keeps its operation and its settled lineage.
+    let replay = rig.command(&[
+        "fabric",
+        "graph",
+        "run",
+        "--document",
+        "graph.json",
+        "--json",
+    ])?;
+    assert_eq!(code(&replay), 0, "{replay:?}");
+    cleanup.disarm();
+    Ok(())
+}
+
 fn graph_settlement_records_a_failed_advance_for_status() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -4426,6 +4536,7 @@ fn main() -> ExitCode {
                 "host_native_dispatch_uses_the_declared_agent_and_refuses_resume",
                 "host_native_preparation_uses_the_provider_contract",
                 "unconfigured_host_native_repair_launches_alias_fallback",
+                "graph_read_only_alias_redraws_after_quota_and_preserves_both_receipts",
                 "graph_settlement_advances_writer_and_account_routed_review",
                 "graph_node_reads_full_upstream_result_from_its_inputs_directory",
                 "graph_settlement_records_a_failed_advance_for_status",
@@ -4490,6 +4601,7 @@ fn main() -> ExitCode {
                     "unconfigured_host_native_repair_launches_alias_fallback" => {
                         unconfigured_host_native_repair_launches_alias_fallback()
                     }
+                    "graph_read_only_alias_redraws_after_quota_and_preserves_both_receipts" => graph_read_only_alias_redraws_after_quota_and_preserves_both_receipts(),
                     "graph_settlement_advances_writer_and_account_routed_review" => {
                         graph_settlement_advances_writer_and_account_routed_review()
                     }
