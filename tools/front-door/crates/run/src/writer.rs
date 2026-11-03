@@ -134,12 +134,6 @@ fn resolve_writer_with(
     }
     let worktree = provenant_confinement::verify_worktree(&repo, &path)
         .map_err(worktrees::WorktreeError::from)?;
-    // Read-only contribution capture resolves the current worktree and treats
-    // a branch validation refusal as the absence of a contribution branch.
-    // Writers still receive the same branch requirement before launch.
-    if canonicalize(cwd).is_ok_and(|current| current == path) {
-        writer_branch(&worktree)?;
-    }
     Ok(WriterRequest {
         extra: Default::default(),
         project: project.to_path_buf(),
