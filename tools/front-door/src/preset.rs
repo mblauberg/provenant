@@ -47,6 +47,8 @@ pub struct Layers {
 pub struct Expansion {
     pub review_shape: Option<String>,
     pub document: Value,
+    /// The preset's explicitly bound worktree, independent of its read roots.
+    pub worktree: Option<PathBuf>,
     pub origins: BTreeMap<String, String>,
     pub repo_files: Vec<String>,
     /// Library roles the graph used: origin, `extends` chain, digest and the
@@ -984,6 +986,11 @@ pub fn expand_with(
         )
         .filter(|shapes| !shapes.is_empty()),
         document,
+        worktree: parameters
+            .get("worktree")
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from),
         origins,
         repo_files,
         roles,
@@ -2708,41 +2715,38 @@ pub(crate) fn bind_run_context(
     Ok(())
 }
 
-/// Resolve a preset's default `HEAD` subject from its bound writer or review
+/// Resolve a preset's default `HEAD` subject from its bound writer or preset
 /// worktree. An explicitly supplied subject stays under the usual
 /// project-directory resolution in `bind_run_context`.
-fn bound_worktree_path(nodes: &[Value]) -> Option<PathBuf> {
-    for node in nodes {
-        if node["access"] == "worktree_write"
-            && let Some(path) = node.get("worktree").and_then(Value::as_str)
-            && !path.is_empty()
-        {
-            return Some(PathBuf::from(path));
-        }
-        if (node.get("role").and_then(Value::as_str) == Some("plan.review")
-            || node.get("id").and_then(Value::as_str) == Some("subject"))
-            && let Some(roots) = node.get("read_roots").and_then(Value::as_array)
-        {
-            for root in roots {
-                if let Some(path) = root.as_str()
-                    && !path.is_empty()
-                    && !path.ends_with("/skills")
-                {
-                    return Some(PathBuf::from(path));
+fn bound_worktree_path(expansion: &Expansion, cli_worktree: Option<&Path>) -> Option<PathBuf> {
+    fn writer_path(nodes: &[Value]) -> Option<PathBuf> {
+        for node in nodes {
+            if node["access"] == "worktree_write"
+                && let Some(path) = node.get("worktree").and_then(Value::as_str)
+                && !path.is_empty()
+            {
+                return Some(PathBuf::from(path));
+            }
+            for key in ["composite", "loop"] {
+                let nested = node
+                    .pointer(&format!("/{key}/nodes"))
+                    .or_else(|| node.pointer(&format!("/{key}/body")))
+                    .and_then(Value::as_array);
+                if let Some(path) = nested.and_then(|nested| writer_path(nested)) {
+                    return Some(path);
                 }
             }
         }
-        for key in ["composite", "loop"] {
-            let nested = node
-                .pointer(&format!("/{key}/nodes"))
-                .or_else(|| node.pointer(&format!("/{key}/body")))
-                .and_then(Value::as_array);
-            if let Some(path) = nested.and_then(|nested| bound_worktree_path(nested)) {
-                return Some(path);
-            }
-        }
+        None
     }
-    None
+    let nodes = expansion.document["nodes"].as_array()?;
+    if let Some(path) = writer_path(nodes) {
+        return Some(path);
+    }
+    expansion
+        .worktree
+        .clone()
+        .or_else(|| cli_worktree.map(Path::to_path_buf))
 }
 
 fn bind_default_subject_to_worktree(
@@ -2770,8 +2774,7 @@ fn bind_default_subject_to_worktree(
     if !has_default_head(nodes) {
         return Ok(());
     }
-    let Some(worktree) = bound_worktree_path(nodes).or_else(|| cli_worktree.map(Path::to_path_buf))
-    else {
+    let Some(worktree) = bound_worktree_path(expansion, cli_worktree) else {
         return Ok(());
     };
     let worktree = if worktree.is_absolute() {
@@ -2820,8 +2823,7 @@ fn warn_differing_source_and_worktree(
     let nodes = expansion.document["nodes"]
         .as_array()
         .ok_or("missing graph nodes")?;
-    let Some(worktree) = bound_worktree_path(nodes).or_else(|| cli_worktree.map(Path::to_path_buf))
-    else {
+    let Some(worktree) = bound_worktree_path(expansion, cli_worktree) else {
         return Ok(());
     };
     let worktree = if worktree.is_absolute() {
