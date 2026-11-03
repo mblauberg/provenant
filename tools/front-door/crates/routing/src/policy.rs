@@ -901,6 +901,33 @@ mod tests {
     }
 
     #[test]
+    fn user_skills_route_policy_overlays_defaults() -> Result<(), Box<dyn std::error::Error>> {
+        let policies: ModelPolicies = toml_edit::de::from_str(
+            "[defaults.lane]\nuser_skills='off'\n[[rules]]\nadapter='claude'\n[rules.policy.lane]\nuser_skills='discover'\n",
+        )?;
+        for (model, expected) in [
+            (
+                "claude/claude-sonnet-5-5",
+                provenant_records::UserSkillsMode::Discover,
+            ),
+            (
+                "codex/gpt-6.1-terra",
+                provenant_records::UserSkillsMode::Off,
+            ),
+        ] {
+            assert_eq!(
+                policies
+                    .effective(&ModelId::parse(model)?, None, at(1))
+                    .policy
+                    .lane
+                    .user_skills,
+                Some(expected)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn malformed_suffix_selectors_do_not_broaden_rules() -> Result<(), Box<dyn std::error::Error>> {
         for suffix in [
             serde_json::json!(""),

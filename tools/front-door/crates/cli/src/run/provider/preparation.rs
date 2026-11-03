@@ -957,16 +957,27 @@ pub(super) fn prepare_candidates(
         };
         let mut provider_route = adapter_route(&route);
         let project_id_str = project_id.to_string();
-        let project_name = cwd.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let project_key = format!("domains.lanes.projects.{project_id_str}.user_skills");
+        let project_override = config
+            .domains
+            .lanes
+            .projects
+            .get(&project_id_str)
+            .and_then(|project| project.user_skills);
         let user_skills_mode = model_policy
             .lane
             .user_skills
-            .unwrap_or_else(|| {
-                config
-                    .domains
-                    .lanes
-                    .user_skills_for_any(&[&project_id_str, project_name])
-            });
+            .unwrap_or_else(|| config.domains.lanes.user_skills_for(Some(&project_id_str)));
+        let user_skills_origin = if model_policy.lane.user_skills.is_some() {
+            serde_json::json!({"route_policy": effective.sources})
+        } else {
+            let key = if project_override.is_some() {
+                project_key.as_str()
+            } else {
+                "domains.lanes.user_skills"
+            };
+            serde_json::json!({"key": key, "origin": config.origins.get(key)})
+        };
         provider_route.set_user_skills(user_skills_mode.is_discover());
         let nonce = entropy_128().map_err(|error| error.to_string())?;
         let grant_digest = task.authority_digest.to_string();
@@ -1160,25 +1171,16 @@ pub(super) fn prepare_candidates(
                 .extra
                 .insert("dependency_preparation".into(), event.clone());
         }
-        if user_skills_mode.is_discover() {
-            let config_home = std::env::var_os("XDG_CONFIG_HOME")
-                .map(PathBuf::from)
-                .filter(|p| p.is_absolute())
-                .unwrap_or_else(|| home.join(".config"));
-            let exposed = match adapter.id() {
-                "claude" => Some(home.join(".claude/skills")),
-                "codex" => Some(home.join(".agents/skills")),
-                "agy" => Some(home.join(".gemini/skills")),
-                "opencode" => Some(config_home.join("opencode/skills")),
-                _ => None,
-            }
-            .filter(|p| p.is_dir());
-            if let Some(path) = exposed {
-                provider
-                    .extra
-                    .insert("user_skills".into(), path.display().to_string().into());
-            }
-        }
+        provider.extra.insert(
+            "user_skills".into(),
+            user_skills_exposure(
+                adapter.id(),
+                user_skills_mode,
+                &home,
+                &|key| std::env::var_os(key),
+                user_skills_origin,
+            ),
+        );
         let stdin = match spec.stdin {
             Stdin::Bytes(bytes) => bytes,
             Stdin::Null => Vec::new(),
@@ -1359,6 +1361,77 @@ mod receipt_tests {
         );
         assert!(wire.get("prompt").is_none());
         assert!(wire.get("credential").is_none());
+        Ok(())
+    }
+}
+
+/// Report the same provider-owned locations and grants used during prepare.
+fn user_skills_exposure(
+    adapter: &str,
+    mode: provenant_records::UserSkillsMode,
+    home: &Path,
+    host_var: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+    origin: serde_json::Value,
+) -> serde_json::Value {
+    let directory = mode
+        .is_discover()
+        .then(|| provenant_providers::user_skills_directory(adapter, home, host_var))
+        .flatten();
+    let reads = directory
+        .as_ref()
+        .map(|path| provenant_providers::user_skills_grants(path))
+        .unwrap_or_default();
+    serde_json::json!({
+        "mode": mode,
+        "exposed": !reads.is_empty(),
+        "directory": directory,
+        "read_grants": reads,
+        "source": origin,
+    })
+}
+
+#[cfg(test)]
+mod user_skills_tests {
+    use super::*;
+    #[test]
+    fn user_skills_record_reports_mode_origin_and_canonical_grants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().canonicalize()?;
+        let skills = home.join(".agents/skills");
+        let target = home.join("release/skill");
+        std::fs::create_dir_all(&skills)?;
+        std::fs::create_dir_all(&target)?;
+        std::os::unix::fs::symlink(&target, skills.join("skill"))?;
+        let origin = serde_json::json!({"key": "domains.lanes.user_skills", "origin": "compiled"});
+        let record = user_skills_exposure(
+            "codex",
+            provenant_records::UserSkillsMode::Discover,
+            &home,
+            &|_| None,
+            origin.clone(),
+        );
+        assert_eq!(record["exposed"], true);
+        assert_eq!(record["directory"], serde_json::json!(skills));
+        assert_eq!(
+            record["read_grants"]
+                .as_array()
+                .ok_or("missing grants")?
+                .len(),
+            2
+        );
+        assert_eq!(record["source"], origin);
+        let off = user_skills_exposure(
+            "codex",
+            provenant_records::UserSkillsMode::Off,
+            &home,
+            &|_| None,
+            serde_json::json!({"route_policy": ["rules[0]"]}),
+        );
+        assert_eq!(off["mode"], "off");
+        assert_eq!(off["exposed"], false);
+        assert_eq!(off["directory"], serde_json::Value::Null);
+        assert_eq!(off["read_grants"], serde_json::json!([]));
         Ok(())
     }
 }

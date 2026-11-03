@@ -3024,7 +3024,6 @@ fn explain_tree(nodes: &[Value], indent: usize, text: &mut String) {
         for key in [
             "write_scope",
             "read_roots",
-            "user_skills",
             "source",
             "inputs",
             "acceptance_checks",
@@ -3525,47 +3524,6 @@ pub fn run(
                 },
             )?;
         }
-        let project_name = directory.file_name().and_then(|n| n.to_str());
-        let user_skills_mode = config
-            .domains
-            .lanes
-            .user_skills_for(project_name);
-        let home = &roots.home;
-        let config_home = std::env::var_os("XDG_CONFIG_HOME")
-            .map(std::path::PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .unwrap_or_else(|| home.join(".config"));
-        visit_nodes(
-            expansion.document["nodes"]
-                .as_array_mut()
-                .ok_or("missing graph nodes")?,
-            &mut |node| {
-                let adapter = node
-                    .pointer("/route/adapter")
-                    .and_then(Value::as_str)
-                    .or_else(|| {
-                        node.pointer("/route/model")
-                            .and_then(Value::as_str)
-                            .and_then(|m| m.split_once('/').map(|(a, _)| a))
-                    });
-                let exposed = if user_skills_mode.is_discover() {
-                    match adapter {
-                        Some("claude") => Some(home.join(".claude/skills")),
-                        Some("codex") => Some(home.join(".agents/skills")),
-                        Some("agy") => Some(home.join(".gemini/skills")),
-                        Some("opencode") => Some(config_home.join("opencode/skills")),
-                        _ => None,
-                    }
-                    .filter(|p| p.is_dir())
-                } else {
-                    None
-                };
-                if let Some(path) = exposed {
-                    node["user_skills"] = json!(path.display().to_string());
-                }
-                Ok(())
-            },
-        )?;
         let policy = discover_read_roots(
             &directory,
             &config.domains.fabric.graph.allowed_read_roots,

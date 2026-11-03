@@ -894,8 +894,8 @@ pub(super) fn grants_lines(record: &run::AttemptRecord) -> String {
     }
     if let Some(skills) = record.user_skills() {
         text.push_str(&format!(
-            "grant user_skills path={}\n",
-            plain_text(skills, usize::MAX)
+            "grant user_skills {}\n",
+            plain_text(&skills.to_string(), usize::MAX)
         ));
     }
     text

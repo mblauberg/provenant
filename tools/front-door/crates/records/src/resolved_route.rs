@@ -28,15 +28,7 @@ impl ResolvedRoute {
     pub fn user_skills(&self) -> bool {
         self.extra
             .get("user_skills")
-            .and_then(|v| {
-                if let Some(b) = v.as_bool() {
-                    Some(b)
-                } else if let Some(s) = v.as_str() {
-                    Some(s == "discover" || s == "on")
-                } else {
-                    None
-                }
-            })
+            .and_then(serde_json::Value::as_bool)
             .unwrap_or(true)
     }
 

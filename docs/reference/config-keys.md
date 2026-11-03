@@ -10,7 +10,7 @@ Set these in `[domains.lanes]` in the host configuration. Omit a key for its def
 
 | Key | Default | Effect |
 |---|---|---|
-| `user_skills` | discover | Discover host user skills for lanes read-only. off disables user skill discovery for all lanes unless overridden by a project or route policy. (discover or off). |
+| `user_skills` | discover | Discover host user skills for lanes read-only. off disables host user skill discovery unless overridden by domains.lanes.projects.{project_id}.user_skills or route policy lane.user_skills. Route policy wins over project, then host. Inspect value, default and origin with config show or config schema. (discover or off). |
 
 ## Host lane build settings
 

@@ -83,17 +83,6 @@ impl LanesSettings {
             .and_then(|p| p.user_skills)
             .unwrap_or(self.user_skills)
     }
-
-    pub fn user_skills_for_any(&self, candidates: &[&str]) -> UserSkillsMode {
-        for candidate in candidates {
-            if let Some(cfg) = self.projects.get(*candidate)
-                && let Some(mode) = cfg.user_skills
-            {
-                return mode;
-            }
-        }
-        self.user_skills
-    }
 }
 
 impl DomainConfig for LanesSettings {
@@ -103,11 +92,12 @@ impl DomainConfig for LanesSettings {
 }
 
 const LANES_SECTION: DomainSection =
-    DomainSection::new::<LanesSettings>("lanes", |_| "user_skills = \"discover\"\n")
-        .with_fields(&[
+    DomainSection::new::<LanesSettings>("lanes", |_| "user_skills = \"discover\"\n").with_fields(
+        &[
             FieldMetadata::enumeration("user_skills", &["discover", "off"]),
             FieldMetadata::enumeration("projects.{project}.user_skills", &["discover", "off"]),
-        ]);
+        ],
+    );
 
 static ENTRIES: [DomainSection; 9] = [
     crate::wait::SECTION,
@@ -407,16 +397,38 @@ read_only = true
         let roots = roots(&temp);
 
         // Default value is discover.
-        let (config, _) = provenant_config::show(&roots, &SECTIONS).unwrap();
+        let (config, revision) = provenant_config::show(&roots, &SECTIONS).unwrap();
+        let schema = provenant_config::schema(&config, &SECTIONS, revision).unwrap();
+        let field = schema
+            .fields
+            .iter()
+            .find(|field| field.path == "domains.lanes.user_skills")
+            .unwrap();
+        assert_eq!(field.default, json!("discover"));
+        assert_eq!(field.source, provenant_config::Layer::Default);
+        assert_eq!(field.values, ["discover", "off"]);
         assert_eq!(config.domains.lanes.user_skills, UserSkillsMode::Discover);
-        assert_eq!(config.domains.lanes.user_skills_for(None), UserSkillsMode::Discover);
-        assert_eq!(config.domains.lanes.user_skills_for(Some("proj-a")), UserSkillsMode::Discover);
+        assert_eq!(
+            config.domains.lanes.user_skills_for(None),
+            UserSkillsMode::Discover
+        );
+        assert_eq!(
+            config.domains.lanes.user_skills_for(Some("proj-a")),
+            UserSkillsMode::Discover
+        );
 
         // Can be switched to "off".
         let edited = edit(&roots, json!({"domains.lanes.user_skills": "off"})).unwrap();
         assert_eq!(edited.config.domains.lanes.user_skills, UserSkillsMode::Off);
-        assert_eq!(edited.config.domains.lanes.user_skills_for(None), UserSkillsMode::Off);
+        assert_eq!(
+            edited.config.domains.lanes.user_skills_for(None),
+            UserSkillsMode::Off
+        );
 
+        assert!(matches!(
+            edited.config.origins.get("domains.lanes.user_skills"),
+            Some(provenant_config::Origin::User { .. })
+        ));
         // Project override overrides host default.
         let edited = edit(
             &roots,
@@ -432,12 +444,12 @@ read_only = true
             UserSkillsMode::Discover
         );
         assert_eq!(
-            edited.config.domains.lanes.user_skills_for(Some("other-proj")),
+            edited
+                .config
+                .domains
+                .lanes
+                .user_skills_for(Some("other-proj")),
             UserSkillsMode::Off
-        );
-        assert_eq!(
-            edited.config.domains.lanes.user_skills_for_any(&["uuid-123", "my-proj"]),
-            UserSkillsMode::Discover
         );
     }
 }

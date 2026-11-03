@@ -679,50 +679,70 @@ pub(crate) fn subtree(path: impl Into<PathBuf>) -> PathGrant {
     }
 }
 
-/// Read-only grants for the user skill directory and its symlink targets.
-pub(crate) fn user_skills_grants(skills_dir: &Path) -> Vec<PathGrant> {
-    let mut grants = Vec::new();
-    if !skills_dir.is_dir() {
-        return grants;
-    }
-    grants.push(subtree(skills_dir));
-    let mut targets = std::collections::BTreeSet::new();
-    collect_symlink_targets(skills_dir, skills_dir, &mut targets, 0);
-    for target in targets {
-        grants.push(subtree(target));
-    }
-    grants
+/// The native user skills location, without exposing the rest of host config.
+pub fn user_skills_directory(
+    adapter: &str,
+    home: &Path,
+    host_var: &dyn Fn(&str) -> Option<OsString>,
+) -> Option<PathBuf> {
+    let path = match adapter {
+        "claude" => home.join(".claude/skills"),
+        "codex" => home.join(".agents/skills"),
+        "agy" => home.join(".gemini/skills"),
+        "cursor" => home.join(".cursor/skills"),
+        "opencode" => host_var("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| home.join(".config"))
+            .join("opencode/skills"),
+        _ => return None,
+    };
+    path.is_dir().then_some(path)
 }
 
-fn collect_symlink_targets(
-    root: &Path,
-    current: &Path,
-    targets: &mut std::collections::BTreeSet<PathBuf>,
-    depth: usize,
-) {
-    if depth > 5 {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(current) else {
-        return;
+/// Canonical read-only grants, including linked skill resources. Directory
+/// identities bound traversal even when links form cycles; files need exact
+/// grants because a subtree grant requires a directory anchor.
+pub fn user_skills_grants(skills_dir: &Path) -> Vec<PathGrant> {
+    let Ok(root) = std::fs::canonicalize(skills_dir) else {
+        return Vec::new();
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let is_symlink = entry.file_type().map_or(false, |ft| ft.is_symlink());
-        if is_symlink {
-            if let Ok(target) = std::fs::canonicalize(&path) {
-                if !target.starts_with(root) && !targets.contains(&target) {
-                    let is_dir = target.is_dir();
-                    targets.insert(target.clone());
-                    if is_dir {
-                        collect_symlink_targets(root, &target, targets, depth + 1);
-                    }
-                }
+    if !root.is_dir() {
+        return Vec::new();
+    }
+    let mut grants = vec![subtree(&root)];
+    let mut pending = vec![root.clone()];
+    let mut visited = std::collections::BTreeSet::new();
+    let mut targets = std::collections::BTreeSet::new();
+    while let Some(directory) = pending.pop() {
+        if !visited.insert(directory.clone()) {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(target) = std::fs::canonicalize(&path) else {
+                continue;
+            };
+            let is_dir = target.is_dir();
+            if entry.file_type().is_ok_and(|ft| ft.is_symlink())
+                && !target.starts_with(&root)
+                && targets.insert(target.clone())
+            {
+                grants.push(if is_dir {
+                    subtree(&target)
+                } else {
+                    exact(&target)
+                });
             }
-        } else if path.is_dir() {
-            collect_symlink_targets(root, &path, targets, depth + 1);
+            if is_dir {
+                pending.push(target);
+            }
         }
     }
+    grants
 }
 
 /// Lowercase RFC 4122 version 4 spelling of caller randomness.

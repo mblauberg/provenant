@@ -251,7 +251,6 @@ fn prepare(
         input.executable.as_os_str(),
         "--output-format".as_ref(),
         "stream-json".as_ref(),
-        "--disable-slash-commands".as_ref(),
         "--print-timeout".as_ref(),
         PRINT_TIMEOUT.as_ref(),
     ]

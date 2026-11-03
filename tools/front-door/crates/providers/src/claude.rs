@@ -547,7 +547,6 @@ fn prepare(
         input.executable.as_os_str(),
         "-p".as_ref(),
         "--strict-mcp-config".as_ref(),
-        "--disable-slash-commands".as_ref(),
         "--permission-prompts".as_ref(),
         "none".as_ref(),
         "--output-format".as_ref(),
@@ -564,8 +563,8 @@ fn prepare(
     let shell = access == Access::WorktreeWrite;
     let web = plan.network == NetworkAccess::Open;
     let (mode, tools) = match access {
-        Access::ReadOnly => ("dontAsk", "Read,Grep,Glob,Bash"),
-        Access::WorktreeWrite => ("default", "Read,Grep,Glob,Edit,Write,Bash"),
+        Access::ReadOnly => ("dontAsk", "Read,Grep,Glob,Bash,Skill"),
+        Access::WorktreeWrite => ("default", "Read,Grep,Glob,Edit,Write,Bash,Skill"),
     };
     let tools = if web {
         format!("{tools},WebFetch,WebSearch")
@@ -611,9 +610,9 @@ fn prepare(
     let scratch = &plan.scratch.path;
     // Scrub mode forces default permissions, regardless of --permission-mode.
     let allowed_tools = if shell {
-        "Read,Grep,Glob,Edit,Write,Bash,mcp__fabric__*"
+        "Read,Grep,Glob,Edit,Write,Bash,Skill,mcp__fabric__*"
     } else {
-        "Bash,mcp__fabric__*"
+        "Bash,Skill,mcp__fabric__*"
     };
     let allowed_tools = if web {
         format!("{allowed_tools},WebFetch,WebSearch")
@@ -645,7 +644,7 @@ fn prepare(
     }
     let user_skills = input.home.join(".claude/skills");
     let discover_skills = input.user_skills() && user_skills.is_dir();
-    if shell {
+    if shell || (discover_skills && input.account.is_some()) {
         let config = plan
             .private_state
             .as_ref()
@@ -665,7 +664,11 @@ fn prepare(
     }
     let mut runtime_reads = vec![subtree(package)];
     if discover_skills {
-        runtime_reads.extend(crate::launch::user_skills_grants(&user_skills));
+        let grants = crate::launch::user_skills_grants(&user_skills);
+        for grant in &grants {
+            argv.extend(["--add-dir".into(), grant.path.as_os_str().to_owned()]);
+        }
+        runtime_reads.extend(grants);
     }
     let mut tool_exec_roots = ["/bin", "/usr/bin", "/usr/libexec"].map(subtree).to_vec();
     let tool_writes = Vec::new();
