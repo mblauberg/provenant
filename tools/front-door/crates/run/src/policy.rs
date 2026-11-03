@@ -22,6 +22,8 @@ pub enum PolicyCause {
     Unfinished,
     Capacity,
     Quota,
+    AuthRequired,
+    AdapterUnavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,6 +169,40 @@ impl RunStore {
         }
         Err(RunError::Validation("policy successor chain limit"))
     }
+    /// Immutable infrastructure refusals preceding this attempt. The launcher
+    /// projects these into routing's existing scoped exclusions, never a new journal.
+    pub fn policy_refusals(&self, id: AttemptId, call: &Request<'_>) -> Result<Vec<AttemptRecord>> {
+        let mut current = self.record(id, call)?;
+        let mut refused = Vec::new();
+        for _ in 0..POLICY_ATTEMPT_CEILING {
+            if !matches!(
+                current.continuation.as_deref(),
+                Some("policy_continuation" | "policy_fallback")
+            ) {
+                return Ok(refused);
+            }
+            let Some(prior) = current.retry_of else {
+                return Ok(refused);
+            };
+            let prior = self.record(prior, call)?;
+            if self.staged_policy_retry(&prior)?.is_some_and(|decision| {
+                matches!(
+                    decision.cause,
+                    Some(
+                        PolicyCause::Quota
+                            | PolicyCause::Capacity
+                            | PolicyCause::AuthRequired
+                            | PolicyCause::AdapterUnavailable
+                    )
+                )
+            }) {
+                refused.push(prior.clone());
+            }
+            current = prior;
+        }
+        Err(RunError::Validation("policy refusal chain limit"))
+    }
+
     /// Seal the retry decision; true when this call staged it.
     pub(crate) fn stage_policy_retry(
         &self,
@@ -787,6 +823,13 @@ mod tests {
             )?;
             let queued = store.pending_attempts(input.run_id, &call(&clock, &cancel))?;
             assert_eq!(queued.len(), 1);
+            assert_eq!(
+                store
+                    .policy_refusals(queued[0].attempt_id, &call(&clock, &cancel))?
+                    .len(),
+                usize::try_from(number - 1)?
+            );
+
             assert_eq!(queued[0].attempt_number, number);
             assert_eq!(queued[0].retry_of, Some(id));
             id = queued[0].attempt_id;
