@@ -666,7 +666,15 @@ fn prepare(
     if discover_skills {
         let grants = crate::launch::user_skills_grants(&user_skills);
         for grant in &grants {
-            argv.extend(["--add-dir".into(), grant.path.as_os_str().to_owned()]);
+            // Claude's workspace arguments accept directories only. The
+            // outer profile still grants linked files exactly, never siblings.
+            let directory = match grant.scope {
+                provenant_confinement::permissions::PathScope::Exact => {
+                    grant.path.parent().ok_or(ProviderError::InvalidPath)?
+                }
+                provenant_confinement::permissions::PathScope::Subtree => &grant.path,
+            };
+            argv.extend(["--add-dir".into(), directory.as_os_str().to_owned()]);
         }
         runtime_reads.extend(grants);
     }

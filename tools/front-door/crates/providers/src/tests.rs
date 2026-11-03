@@ -6613,6 +6613,10 @@ fn assert_lane_user_skills(adapter: &str) -> Result<(), Box<dyn std::error::Erro
     };
     let target = home.join(".local/share/provenant/v1/releases/digest/skill");
     std::fs::create_dir_all(&target)?;
+    let resource = home.join("shared/reference.md");
+    std::fs::create_dir_all(resource.parent().unwrap())?;
+    std::fs::write(&resource, "fixture reference")?;
+    std::os::unix::fs::symlink(&resource, target.join("reference.md"))?;
     let prompt = Prompt::new("fixture".into());
     let token = fixture_token();
     let authentication = match adapter {
@@ -6647,7 +6651,7 @@ fn assert_lane_user_skills(adapter: &str) -> Result<(), Box<dyn std::error::Erro
             input.host_var = &host_var;
             let spec = provider.prepare(input)?;
             let exposed = state == "discover";
-            for path in [&skills, &target] {
+            for path in [&skills, &target, &resource] {
                 assert_eq!(
                     spec.profile
                         .spec
@@ -6704,6 +6708,11 @@ fn assert_lane_user_skills(adapter: &str) -> Result<(), Box<dyn std::error::Erro
                         .iter()
                         .any(|arg| arg.to_string_lossy().contains("Skill"))
                 );
+                if exposed {
+                    assert!(spec.argv.windows(2).any(|pair| pair[0] == "--add-dir"
+                        && pair[1] == resource.parent().unwrap().as_os_str()));
+                    assert!(!spec.argv.iter().any(|arg| arg == resource.as_os_str()));
+                }
             }
             if adapter == "codex" && !enabled {
                 assert!(
