@@ -171,29 +171,47 @@ pub(super) fn candidates<'a>(
         };
         let mut lanes = Vec::with_capacity(ids.len());
         let mut included = std::collections::BTreeSet::new();
-        for mut id in ids {
+        for id in ids {
             // Settlement may have queued a successor after the selection read.
             // Keep the original receipt and wait for its current policy tail.
-            for _ in 0..9 {
-                let lane = session.service().status_for_wait(id, &call)?;
-                if included.insert(id)
-                    && (picks.label.is_none() || lane.verified_owner == Some(picks.owner))
-                {
-                    lanes.push(lane);
-                }
-                // Read the tail after the state: a terminal state must already
-                // have committed any successor in the same transaction.
-                let tail = session.store.policy_tail(id, &call)?.attempt_id;
-                if tail == id {
-                    break;
-                }
-                id = tail;
-            }
+            follow_policy_tail::<_, Fail>(
+                id,
+                |id| {
+                    let lane = session.service().status_for_wait(id, &call)?;
+                    if included.insert(id)
+                        && (picks.label.is_none() || lane.verified_owner == Some(picks.owner))
+                    {
+                        lanes.push(lane);
+                    }
+                    Ok(())
+                },
+                |id| Ok(session.store.policy_tail(id, &call)?.attempt_id),
+            )?;
         }
         let waits = session.store.lane_waits(&lanes, &call);
         apply_lane_wait_suppression(&mut lanes, &waits);
         Ok(lanes)
     }
+}
+
+/// Visit `id`, then each policy successor after it. Each hop reads the state
+/// before the tail: a terminal state commits its successor in the same
+/// transaction, so the tail read afterwards cannot miss it. A policy chain holds
+/// at most `POLICY_ATTEMPT_CEILING` attempts.
+pub(super) fn follow_policy_tail<K: Copy + PartialEq, E>(
+    mut id: K,
+    mut visit: impl FnMut(K) -> Result<(), E>,
+    mut tail: impl FnMut(K) -> Result<K, E>,
+) -> Result<(), E> {
+    for _ in 0..=provenant_run::POLICY_ATTEMPT_CEILING {
+        visit(id)?;
+        let next = tail(id)?;
+        if next == id {
+            break;
+        }
+        id = next;
+    }
+    Ok(())
 }
 
 pub(super) const LOCAL_POLL: Duration = Duration::from_millis(500);

@@ -404,7 +404,18 @@ impl ValidateInput for GraphInput {
                 }
                 Ok(())
             }
-            Self::Status { id, .. } | Self::Cancel { id, .. } => {
+            Self::Cancel { id, reason, .. } => {
+                if !crate::graph::valid_identifier(id) {
+                    return Err(field("id"));
+                }
+                if reason.as_ref().is_some_and(|reason| {
+                    reason.len() > crate::graph::MAX_CANCEL_REASON_BYTES || reason.contains('\0')
+                }) {
+                    return Err(field("reason"));
+                }
+                Ok(())
+            }
+            Self::Status { id, .. } => {
                 if crate::graph::valid_identifier(id) {
                     Ok(())
                 } else {
@@ -564,6 +575,21 @@ mod tests {
             "tasks":[{"prompt":"do work","route":{"kind":"named","name":"utility"},"timeout_seconds":1}]
         }))
         .is_ok_and(|input| input.validate_input(provenant_core::WaitTransport::Cli).is_ok())
+    }
+
+    #[test]
+    fn graph_cancel_reason_is_optional_and_bounded() {
+        for value in [
+            json!({"op":"cancel", "id":"g-test"}),
+            json!({"op":"cancel", "id":"g-test", "reason":""}),
+            json!({"op":"cancel", "id":"g-test", "reason":"x".repeat(256)}),
+        ] {
+            assert!(serde_json::from_value::<GraphInput>(value).is_ok());
+        }
+        rejects::<GraphInput>(
+            json!({"op":"cancel", "id":"g-test", "reason":"x".repeat(257)}),
+            "reason",
+        );
     }
 
     #[test]

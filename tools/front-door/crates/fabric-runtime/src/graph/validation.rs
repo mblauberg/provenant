@@ -96,6 +96,11 @@ pub(super) fn validate_flat_plan(
     let mut prompt_bytes = 0usize;
     let mut nodes = Vec::with_capacity(document.nodes.len());
     for node in &document.nodes {
+        if node.extra.contains_key("composite_members")
+            || node.extra.contains_key("after_expansion")
+        {
+            return Err("computed topology fields are reserved to checkpoint expansions");
+        }
         if node.deadline_seconds == Some(0) {
             return Err("node deadline_seconds must be positive");
         }
@@ -621,14 +626,19 @@ pub(super) fn validate_expanded_rows<R: Error + 'static, J: Error + 'static>(
     checkpoint: &GraphCheckpoint,
     plan: &PlannedGraph,
 ) -> Result<(), GraphError<R, J>> {
-    if checkpoint.nodes.len() != plan.nodes.len()
-        || checkpoint
-            .nodes
-            .iter()
-            .zip(&plan.nodes)
-            .any(|(progress, node)| progress.id != node.id || progress.round != node.round)
-    {
-        return Err(GraphError::BadCheckpoint);
+    if checkpoint.nodes.len() != plan.nodes.len() {
+        return Err(GraphError::BadCheckpoint {
+            node: plan.graph_id.clone(),
+            invariant: "checkpoint node count must match expanded plan",
+        });
+    }
+    for (progress, node) in checkpoint.nodes.iter().zip(&plan.nodes) {
+        if progress.id != node.id || progress.round != node.round {
+            return Err(GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "checkpoint row identity and round must match expanded plan",
+            });
+        }
     }
     Ok(())
 }
@@ -644,14 +654,20 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         .as_ref()
         .is_some_and(|id| id.parse::<provenant_core::RunId>().is_err())
     {
-        return Err(GraphError::BadCheckpoint);
+        return Err(GraphError::BadCheckpoint {
+            node: plan.graph_id.clone(),
+            invariant: "instance identity must be a run ID",
+        });
     }
     if checkpoint.schema_version != 1
         || checkpoint.graph_id != plan.graph_id
         || checkpoint.delivery_required
             != (plan.delivery == Some(provenant_records::run::DeliveryMode::Pr))
     {
-        return Err(GraphError::BadCheckpoint);
+        return Err(GraphError::BadCheckpoint {
+            node: plan.graph_id.clone(),
+            invariant: "schema, graph identity and delivery policy must match plan",
+        });
     }
     if checkpoint.plan_digest != digest {
         return Err(GraphError::PlanChanged);
@@ -662,9 +678,15 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             .as_ref()
             .is_some_and(|session| crate::inbox::session_id(session).is_err())
     {
-        return Err(GraphError::BadCheckpoint);
+        return Err(GraphError::BadCheckpoint {
+            node: plan.graph_id.clone(),
+            invariant: "node count and decision session must match plan",
+        });
     }
-    asks::validate(checkpoint, plan).map_err(|_| GraphError::BadCheckpoint)?;
+    asks::validate(checkpoint, plan).map_err(|_| GraphError::BadCheckpoint {
+        node: plan.graph_id.clone(),
+        invariant: "asks must match checkpoint identities and decision sessions",
+    })?;
     let positions = plan
         .nodes
         .iter()
@@ -672,22 +694,62 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         .map(|(i, node)| (node.id.clone(), i))
         .collect();
     for (progress, node) in checkpoint.nodes.iter().zip(&plan.nodes) {
-        if progress.round != node.round
-            || progress.children != node.composite_members
-            || progress.source_commit.is_some() && node.source.is_none()
-            || progress
-                .source_commit
-                .as_ref()
-                .is_some_and(|commit| commit.parse::<provenant_core::GitOid>().is_err())
-            || progress.id != node.id
-            || progress.worktree != node.worktree
-            || progress.attempts.len() > node.routes.len()
-            || progress
-                .outputs
-                .as_ref()
-                .is_some_and(|outputs| outputs.schema_version != 2)
-        {
-            return Err(GraphError::BadCheckpoint);
+        let bad = |invariant| GraphError::BadCheckpoint {
+            node: node.id.clone(),
+            invariant,
+        };
+        for (invalid, invariant) in [
+            (
+                progress.round != node.round,
+                "round must match expanded plan",
+            ),
+            (
+                progress.children != node.composite_members,
+                "composite children must match expanded plan membership",
+            ),
+            (
+                node.composite.is_some()
+                    && (node.composite_members.is_empty()
+                        || node
+                            .composite_members
+                            .iter()
+                            .any(|id| !node.after_expansion.contains(id))),
+                "composite completion edges must include every member",
+            ),
+            (
+                progress.source_commit.is_some() && node.source.is_none(),
+                "resolved source requires a source binding",
+            ),
+            (
+                progress
+                    .source_commit
+                    .as_ref()
+                    .is_some_and(|commit| commit.parse::<provenant_core::GitOid>().is_err()),
+                "resolved source must be a full commit ID",
+            ),
+            (
+                progress.id != node.id,
+                "row identity must match expanded plan order",
+            ),
+            (
+                progress.worktree != node.worktree,
+                "worktree must match expanded plan",
+            ),
+            (
+                progress.attempts.len() > node.routes.len(),
+                "attempt count must not exceed configured routes",
+            ),
+            (
+                progress
+                    .outputs
+                    .as_ref()
+                    .is_some_and(|outputs| outputs.schema_version != 2),
+                "output schema must be version 2",
+            ),
+        ] {
+            if invalid {
+                return Err(bad(invariant));
+            }
         }
         if let Some(condition) = &node.condition {
             let valid = match (&progress.gate, progress.state) {
@@ -729,10 +791,12 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                     && progress.gate.is_some()
                     && progress.ci.is_none())
             {
-                return Err(GraphError::BadCheckpoint);
+                return Err(bad(
+                    "gate evidence must match state, dependencies and condition",
+                ));
             }
         } else if progress.gate.is_some() || progress.ci.is_some() {
-            return Err(GraphError::BadCheckpoint);
+            return Err(bad("only gate nodes may carry gate or CI evidence"));
         }
         if progress.state == NodeState::Skipped
             && (dependency_state(node, plan, checkpoint, &positions) != Some(NodeState::Skipped)
@@ -740,34 +804,39 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 || !progress.attempts.is_empty()
                 || progress.outputs.is_some())
         {
-            return Err(GraphError::BadCheckpoint);
+            return Err(bad(
+                "skipped node must have an inactive dependency and no attempts or outputs",
+            ));
         }
         if node.loop_body.is_some() {
             loops::validate_progress(progress, node, checkpoint, &positions)
-                .map_err(|_| GraphError::BadCheckpoint)?;
+                .map_err(|_| bad("loop progress must match round state"))?;
             continue;
         }
         if node.composite.is_some() {
             composites::validate_progress(progress, node, plan, checkpoint, &positions)
-                .map_err(|_| GraphError::BadCheckpoint)?;
+                .map_err(|_| bad("composite state and outputs must match member settlement"))?;
             continue;
         }
         if node.decide.is_some() {
             asks::validate_progress(progress, node, checkpoint)
-                .map_err(|_| GraphError::BadCheckpoint)?;
+                .map_err(|_| bad("decision progress must match its ask"))?;
             continue;
         }
         if node.land.is_some() {
-            land::validate_progress(progress, checkpoint).map_err(|_| GraphError::BadCheckpoint)?;
+            land::validate_progress(progress, checkpoint)
+                .map_err(|_| bad("land progress must match its record"))?;
             continue;
         } else if progress.land.is_some() {
-            return Err(GraphError::BadCheckpoint);
+            return Err(bad("land record requires a land node"));
         }
         if !progress.attempts.is_empty()
             && node.source.is_some()
             && progress.source_commit.is_none()
         {
-            return Err(GraphError::BadCheckpoint);
+            return Err(bad(
+                "launched source-bound node must retain its resolved source commit",
+            ));
         }
         if let Some(commit) = &progress.source_commit {
             let expected = match &node.source {
@@ -783,7 +852,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 Some(SourceBinding::Commit { .. } | SourceBinding::Node { .. })
             ) && expected != Some(commit)
             {
-                return Err(GraphError::BadCheckpoint);
+                return Err(bad("resolved source commit must match its binding"));
             }
         }
         if node.condition.is_some() {
@@ -801,7 +870,9 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                             outcome.allows_route_fallback(node.access, attempt.launched)
                         })))
             {
-                return Err(GraphError::BadCheckpoint);
+                return Err(bad(
+                    "attempt key, route, terminal outcome and fallback order must match plan",
+                ));
             }
         }
         let last = progress.attempts.last();
@@ -852,7 +923,9 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             }),
         };
         if !state_is_consistent {
-            return Err(GraphError::BadCheckpoint);
+            return Err(bad(
+                "node state must agree with terminal attempt outcome or validated planner fallback",
+            ));
         }
     }
     Ok(())

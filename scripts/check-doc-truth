@@ -225,8 +225,8 @@ def main():
     documents = sorted((root / "docs/runbooks").glob("*.md")) + sorted((root / "docs/specs").glob("*.md"))
     missing = sum(inventory(root, document) for document in documents)
     if not args.inventory_only:
-        agents = root / "AGENTS.md"
-        for document in ([agents] if agents.exists() else []) + documents:
+        agents = [root / name for name in ("AGENTS.md", "GLOBAL-AGENTS.md")]
+        for document in [path for path in agents if path.exists()] + documents:
             check_references(root, document, commands, adrs, gone)
     return int(args.strict_inventory and bool(missing))
 

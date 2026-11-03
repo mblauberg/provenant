@@ -129,6 +129,17 @@ pub enum SeparationOutcome {
     Unconstrained,
 }
 
+// Wire presence is transient decoding metadata, not part of node identity.
+#[derive(Clone, Debug, Default)]
+pub(super) struct TopologyPresence(pub [bool; 2]);
+
+impl PartialEq for TopologyPresence {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+impl Eq for TopologyPresence {}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -137,6 +148,9 @@ pub struct GraphNode {
     pub extra: provenant_records::ExtraFields,
     #[serde(skip)]
     pub(super) composite_members: Vec<String>,
+    // Expansion journal presence, in composite_members / after_expansion order.
+    #[serde(skip)]
+    pub(super) topology_present: TopologyPresence,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub composite: Option<CompositeSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -573,6 +587,8 @@ pub struct GraphCheckpoint {
     #[serde(default)]
     pub cancelled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pause_reason: Option<String>,
     /// Stable cause of the pause, independent of its displayed explanation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -660,6 +676,11 @@ pub struct NodeProgress {
     pub worktree: Option<String>,
     pub id: String,
     pub state: NodeState,
+    /// State to restore when a cancelled graph is resumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancelled_from: Option<NodeState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
     /// An actionable admission or settlement failure, retained for status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advance_error: Option<String>,

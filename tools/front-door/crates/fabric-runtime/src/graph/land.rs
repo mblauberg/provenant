@@ -576,10 +576,14 @@ pub(super) fn advance<R: AttemptOwner, J: GraphJournal>(
         progress.state = NodeState::Running;
         journal.save(checkpoint).map_err(GraphError::Journal)?;
     }
-    let mut record = checkpoint.nodes[index]
-        .land
-        .clone()
-        .ok_or(GraphError::BadCheckpoint)?;
+    let mut record =
+        checkpoint.nodes[index]
+            .land
+            .clone()
+            .ok_or_else(|| GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "running land node must have a land record",
+            })?;
     // A tier that asks only observes: the chair lands by hand.
     let asked = match record.authorised_by {
         Some(_) => None,
