@@ -985,7 +985,7 @@ fn constraints(path: &str) -> Vec<String> {
             "already-merged PRs retry safe cleanup without CI or another merge",
         ],
         "provenant status" => &[
-            "wait requires 1 to 64 targets via ID or repeated --target; no duration uses domains.wait.timeout_seconds",
+            "wait requires at least one target via ID or repeated --target, up to domains.wait.max_targets (default 64); no duration uses domains.wait.timeout_seconds",
             "with --wait, --json emits newline-delimited snapshot/transition events and a final end event; timeout exits 124",
             "follow waits for all targets to be terminal; land targets only observe their PR",
         ],
