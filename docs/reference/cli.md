@@ -771,6 +771,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | Argument | Contract |
 |---|---|
 | `id` | `{"description": "Graph ID, project-local document path or document SHA-256 hash", "name": "id", "positional": true, "required": true}` |
+| `--reason` | `{"bounds": [0, 256], "description": "Why the graph was cancelled (up to 256 bytes)", "name": "reason"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -780,7 +781,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
   "groups": [
     {
       "arguments": [
-        "id"
+        "id",
+        "reason"
       ],
       "multiple": true,
       "name": "Cancel",
