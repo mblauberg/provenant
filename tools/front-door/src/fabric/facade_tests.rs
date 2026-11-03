@@ -2592,9 +2592,6 @@ pub(crate) mod peer_tests {
 
     pub(crate) fn writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source()
     -> Result<(), Box<dyn std::error::Error>> {
-        if !crate::worktree_tests::writer_backend_available()? {
-            return Ok(());
-        }
         use provenant_fabric_runtime::graph::{self, AttemptOwner};
         struct Seed(String);
         impl AttemptOwner for Seed {
@@ -2687,6 +2684,19 @@ pub(crate) mod peer_tests {
             .ok_or("attempt_1")?
             .attempt_id;
         let attempt_1_record = fixture.store.record(attempt_1, &call)?;
+        // This graph adopts the fixture's idle lane. Bind its owner to the
+        // writer attempt rather than the unrelated resume fixture lineage.
+        let writer = provenant_run::prepare_writer(
+            &provenant_run::WriterRequest {
+                extra: Default::default(), project: fixture.rig.project.clone(),
+                worktree: fixture.worktree.clone(),
+            }, fixture.roots.state.as_path(), fixture.settled.project_id,
+        )?;
+        let mut lane_owner = worktrees::load_owner(&writer.worktree)?.ok_or("lane owner")?;
+        lane_owner.attempt_id = Some(attempt_1);
+        lane_owner.operation_id = Some(dispatch.operation_id.clone());
+        worktrees::save_owner(&writer.worktree, &lane_owner)?;
+
 
         let worktree_str = fixture.worktree.to_str().ok_or("worktree path")?;
 
@@ -2748,6 +2758,9 @@ pub(crate) mod peer_tests {
             mode: "edit",
         };
         let holder = crate::worktree_tests::holder_context(&fixture.rig, &fixture.roots, &context);
+        if !crate::worktree_tests::writer_backend_available()? {
+            return Ok(());
+        }
         let started = crate::worktree_tests::start_writer(
             &fixture.store, dispatch.run_id, &provider, &holder, &call,
         )?;
