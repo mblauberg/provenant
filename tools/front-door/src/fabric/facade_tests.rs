@@ -19,7 +19,7 @@ fn scratch_prepare_io_error_retains_its_cause() {
 
 #[cfg(test)]
 #[allow(dead_code)] // The worktree driver includes these helpers without libtest.
-mod peer_tests {
+pub(crate) mod peer_tests {
     use super::*;
     #[allow(unused_imports)]
     // The worktree driver includes this module without libtest functions.
@@ -2590,10 +2590,9 @@ mod peer_tests {
         Ok(())
     }
 
-    #[test]
-    fn writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source()
+    pub(crate) fn writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source()
     -> Result<(), Box<dyn std::error::Error>> {
-        if host_test("fabric::peer_tests::writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source")? {
+        if !crate::worktree_tests::writer_backend_available()? {
             return Ok(());
         }
         use provenant_fabric_runtime::graph::{self, AttemptOwner};
@@ -2661,12 +2660,12 @@ mod peer_tests {
                     prompt: "implement slice".into(),
                     base: Some(node_source.to_string()),
                     pinned_base: None,
-                    head: None,
+                    head: Some(node_source.to_string()),
                     profile: Default::default(),
                     route: provenant_run::RequestedRoute::Model {
                         extra: Default::default(),
-                        provider: "fixture".into(),
-                        model: "fixture/model".into(),
+                        provider: "claude".into(),
+                        model: "claude/test-model".into(),
                         effort: None,
                     },
                     account: None,
@@ -2692,8 +2691,11 @@ mod peer_tests {
         let worktree_str = fixture.worktree.to_str().ok_or("worktree path")?;
 
         // Attempt 1 commits head_1 in the worktree.
+        // The fake successor writes the same tracked bytes, so it can settle
+        // successfully without an unrelated second commit obscuring the pin.
+        std::fs::write(fixture.worktree.join("writer-edited"), "writer fixture completed")?;
         std::fs::write(fixture.worktree.join("first.txt"), b"first edit\n")?;
-        let output = fixture.rig.execute(&git, &["-C", worktree_str, "add", "first.txt"], None)?;
+        let output = fixture.rig.execute(&git, &["-C", worktree_str, "add", "first.txt", "writer-edited"], None)?;
         assert_eq!(crate::worktree_tests::support::code(&output), 0);
         let output = fixture.rig.execute(
             &git,
@@ -2730,27 +2732,36 @@ mod peer_tests {
         assert_eq!(pending.len(), 1);
         let attempt_2 = pending[0].attempt_id;
         assert_eq!(pending[0].retry_of, Some(attempt_1));
-        let attempt_2_record = fixture.store.record(attempt_2, &call)?;
-
-        // Attempt 2 continues, commits head_2 in the worktree, and succeeds.
-        std::fs::write(fixture.worktree.join("second.txt"), b"second edit\n")?;
-        let output = fixture.rig.execute(&git, &["-C", worktree_str, "add", "second.txt"], None)?;
-        assert_eq!(crate::worktree_tests::support::code(&output), 0);
-        let output = fixture.rig.execute(
-            &git,
-            &["-C", worktree_str, "commit", "-m", "second commit"],
-            None,
+        // Launch the successor under real writer custody and confinement, then
+        // let the guardian publish its terminal result through RunHolder.
+        let context = provenant_run::ExecutionContext {
+            state_root: fixture.roots.state.clone(),
+            project_id: fixture.settled.project_id,
+            actor_id: fixture.settled.actor_id,
+            read_prompts: true,
+        };
+        let cleanup = crate::worktree_tests::writer_process_cleanup(&context);
+        let provider = crate::worktree_tests::WriterProvider {
+            state: fixture.rig.state.clone(),
+            home: fixture.rig.home.clone(),
+            project: context.project_id,
+            mode: "edit",
+        };
+        let holder = crate::worktree_tests::holder_context(&fixture.rig, &fixture.roots, &context);
+        let started = crate::worktree_tests::start_writer(
+            &fixture.store, dispatch.run_id, &provider, &holder, &call,
         )?;
-        assert_eq!(crate::worktree_tests::support::code(&output), 0);
-        let head_2 = provenant_run::resolve_git_base(&git, &fixture.worktree, "HEAD")?
-            .parse::<provenant_core::GitOid>()?;
-        publish_success(
-            &fixture.rig,
-            &fixture.store,
-            &attempt_2_record,
-            head_2,
-            &call,
-        )?;
+        assert!(matches!(started.as_slice(), [provenant_run::Started::Launched(id)] if *id == attempt_2), "{started:?}");
+        let terminal = crate::worktree_tests::await_terminal(&fixture.store, attempt_2, &call)?;
+        assert!(matches!(terminal.state, AttemptState::Terminal { outcome: Outcome::Succeeded, .. }), "{terminal:?}");
+        let head_2 = terminal.head.ok_or("successor head")?;
+        assert_eq!(head_1, head_2);
+        let pins: serde_json::Value = serde_json::from_slice(&std::fs::read(
+            fixture.rig.state.join(format!("runs/{}/attempts/{attempt_2}/writer-git-pins.json", dispatch.run_id)),
+        )?)?;
+        assert_eq!(pins["base"], head_1.to_string(), "launched writer must pin predecessor head");
+        crate::worktree_tests::wait_for_writer_release(&fixture.store)?;
+        cleanup.disarm();
 
         // Check policy tail resolves to attempt_2.
         assert_eq!(
