@@ -946,7 +946,7 @@ mod tests {
     }
 
     #[test]
-    fn writer_continuation_launches_pinned_to_predecessor_head()
+    fn writer_continuation_prepares_pinned_predecessor_task()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         writer_continuation_task(true)
     }

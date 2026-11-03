@@ -732,6 +732,7 @@ dependencies = [
  "provenant-records",
  "provenant-sqlite",
  "provenant-supervisor",
+ "provenant-test-support",
  "rusqlite",
  "serde",
  "serde_json",

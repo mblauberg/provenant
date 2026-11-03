@@ -1,5 +1,13 @@
 //! Durable execution records and bounded, project-scoped readers.
 #![forbid(unsafe_code)]
+#![cfg_attr(
+    all(test, feature = "fixture"),
+    allow(
+        dead_code,
+        unused_imports,
+        reason = "the custom continuation driver includes private fixtures without libtest"
+    )
+)]
 mod admission;
 mod artifacts;
 mod board;
@@ -501,3 +509,18 @@ mod delivery_tests;
 mod dispatch_tests;
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "fixture"))]
+mod continuation_test_driver;
+
+// The custom integration target reuses this crate root so its same-binary
+// guardian can exercise private settlement fixtures without exported test APIs.
+#[cfg(all(test, feature = "fixture"))]
+#[allow(dead_code)]
+fn main() {
+    if let Err(error) = continuation_test_driver::main() {
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr().lock(), "writer continuation: {error}");
+        std::process::exit(1);
+    }
+}
