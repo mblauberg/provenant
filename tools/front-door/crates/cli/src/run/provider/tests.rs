@@ -35,6 +35,7 @@ fn writer_dependency_preparation_installs_skips_and_reports_failure()
     std::fs::set_permissions(&pnpm, std::fs::Permissions::from_mode(0o700))?;
     let locate = || {
         std::env::join_paths([bin.as_path(), Path::new("/usr/bin"), Path::new("/bin")])
+            .map(|path| (path, "fixture"))
             .map_err(|error| error.to_string())
     };
     let cancel = provenant_core::CancelToken::new();
@@ -54,6 +55,18 @@ fn writer_dependency_preparation_installs_skips_and_reports_failure()
     assert_eq!(installed["outcome"], "installed");
     assert_eq!(installed["command"], "pnpm install --frozen-lockfile");
     assert_eq!(log(&fresh), "install --frozen-lockfile\n");
+
+    let fallback_tree = worktree("fallback")?;
+    let fallback = || {
+        super::dependency_path_with_fallback(
+            || Err("probe failed".into()),
+            Some(locate()?.0),
+            &cancel,
+        )
+    };
+    let installed = super::prepare_writer_dependencies(&fallback_tree, true, &fallback, &cancel)?;
+    assert_eq!(installed["path_source"], "daemon_fallback");
+    assert_eq!(log(&fallback_tree), "install --frozen-lockfile\n");
 
     // The completion marker marks an installed tree, so a second call skips.
     let skipped = super::prepare_writer_dependencies(&fresh, true, &locate, &cancel)?;
@@ -105,11 +118,13 @@ fn writer_preparation_uses_login_path_for_pnpm_and_node() -> Result<(), Box<dyn 
         std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o700))?;
     }
     let cancel = provenant_core::CancelToken::new();
-    let search_path = || super::login_dependency_path(&shell, &root, &cancel);
-    assert_eq!(search_path()?, path);
+    let search_path =
+        || super::login_dependency_path(&shell, &root, &cancel).map(|path| (path, "login_shell"));
+    assert_eq!(search_path()?.0, path);
     std::fs::write(root.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n")?;
     let installed = super::prepare_writer_dependencies(&root, true, &search_path, &cancel)?;
     assert_eq!(installed["outcome"], "installed");
+    assert_eq!(installed["path_source"], "login_shell");
     assert_eq!(
         std::fs::read_to_string(root.join("node.log"))?,
         format!("{} install --frozen-lockfile\n", pnpm.display())
@@ -120,9 +135,30 @@ fn writer_preparation_uses_login_path_for_pnpm_and_node() -> Result<(), Box<dyn 
     assert!(
         search_path()
             .expect_err("cancelled probe")
-            .starts_with("dependency_path_unavailable:")
+            .contains("cancelled")
     );
     Ok(())
+}
+
+#[test]
+fn writer_preparation_path_fallback_and_cancellation() {
+    let cancel = provenant_core::CancelToken::new();
+    let daemon = std::ffi::OsString::from("/daemon/bin");
+    let fallback = || {
+        super::dependency_path_with_fallback(
+            || Err("probe failed".into()),
+            Some(daemon.clone()),
+            &cancel,
+        )
+    };
+    assert_eq!(fallback().unwrap(), (daemon.clone(), "daemon_fallback"));
+    assert_eq!(
+        super::dependency_path_with_fallback(|| Err("probe failed".into()), None, &cancel,)
+            .unwrap_err(),
+        "probe failed"
+    );
+    cancel.cancel();
+    assert!(fallback().unwrap_err().contains("cancelled"));
 }
 
 #[test]
@@ -134,11 +170,16 @@ fn writer_preparation_missing_pnpm_names_searched_path() -> Result<(), Box<dyn s
     )?;
     let path = std::env::join_paths([temp.path()])?;
     let cancel = provenant_core::CancelToken::new();
-    let error =
-        super::prepare_writer_dependencies(temp.path(), true, &|| Ok(path.clone()), &cancel)
-            .expect_err("missing pnpm is refused");
+    let error = super::prepare_writer_dependencies(
+        temp.path(),
+        true,
+        &|| Ok((path.clone(), "fixture")),
+        &cancel,
+    )
+    .expect_err("missing pnpm is refused");
     assert!(error.starts_with("dependency_tool_not_found:"));
     assert!(error.contains(&format!("searched PATH={}", path.to_string_lossy())));
+    assert!(error.contains("source: fixture"));
     assert!(error.contains("pnpm --version"));
     Ok(())
 }
