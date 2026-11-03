@@ -67,6 +67,12 @@ fn prepare(
     if config.is_dir() {
         authentication.push(subtree(config));
     }
+    let mut skill_reads = Vec::new();
+    if input.user_skills()
+        && let Some(skills) = crate::user_skills_directory("cursor", input.home, input.host_var)
+    {
+        skill_reads = crate::user_skills_grants(&skills);
+    }
     let chats = input.home.join(".cursor/chats");
     let mut env = base_env(input, &plan.scratch.path, "/usr/bin:/bin");
     env.extend([
@@ -87,6 +93,7 @@ fn prepare(
                 allow_process_fork: true,
                 runtime_reads: [subtree(package)]
                     .into_iter()
+                    .chain(skill_reads)
                     .chain(if access == Access::WorktreeWrite {
                         crate::launch::git_global_files(&input.home.join(".config"))
                     } else {
