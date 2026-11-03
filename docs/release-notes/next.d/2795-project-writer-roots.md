@@ -1,4 +1,4 @@
-## Features
-### CLI and install
+## Additions
+### Lanes and settlement
 
-- Configure `writer_writes` per project to replace the host-wide writer roots, including with an empty list (#2795).
+- Configure `writer_writes` per project under `[domains.run.projects.<project ID>]` to replace the host-wide writer roots; an empty list grants none (#2795).
