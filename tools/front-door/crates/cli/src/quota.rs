@@ -1,4 +1,5 @@
 //! Quota arguments, composition through OS crate's safe filesystem, and render.
+use crate::metadata::CatalogueArg;
 use clap::{Args, Subcommand, ValueEnum};
 use provenant_core::{CancelToken, Clock, Roots, WaitBudget};
 use provenant_os::{
@@ -62,7 +63,7 @@ pub enum Quota {
         #[command(flatten)]
         adapter: Filter,
         /// Days to include, as a rolling window back from now
-        #[arg(long, default_value_t = 7, value_parser = clap::value_parser!(u32).range(1..=365))]
+        #[arg(long, default_value_t = 7, catalog_u32_range = 1..=365)]
         days: u32,
     },
     /// List recorded quota readings with resets, plan changes and the plan price in force
@@ -81,7 +82,7 @@ pub enum Quota {
         #[arg(long, value_parser = crate::grammar::since)]
         until: Option<jiff::Timestamp>,
         /// Most readings to return
-        #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u32).range(1..=100_000))]
+        #[arg(long, default_value_t = 1000, catalog_u32_range = 1..=100_000)]
         limit: u32,
     },
     /// Set menu bar display choices, then show quota

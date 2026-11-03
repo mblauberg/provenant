@@ -4159,3 +4159,76 @@ fn an_unknown_size_override_is_refused() {
     .unwrap_err();
     assert!(error.contains("unknown review size"), "{error}");
 }
+
+#[test]
+fn compact_preset_show_lists_review_council_parameter_docs() {
+    let layers = Layers::empty();
+    let (values, origins) = layers.resolve("review-council").unwrap();
+    let data = json!({"name": "review-council", "values": values, "origins": origins});
+    let shown = super::preset::human_for_test(&data, false);
+    for (name, value) in data["values"]["parameters"].as_object().unwrap() {
+        assert!(shown.contains(name), "missing {name}");
+        if let Some(doc) = value.get("doc").and_then(Value::as_str) {
+            let first = doc.find(". ").map_or(doc, |end| &doc[..=end]);
+            assert!(shown.contains(first), "missing {name}: {first}");
+        }
+    }
+    assert!(!shown.contains("Origins\n"));
+    assert!(super::preset::human_for_test(&data, true).contains("Origins\n"));
+}
+
+#[test]
+fn compact_preset_explain_lists_parameter_names() {
+    let data = json!({"name": "example", "parameters": [{"name": "base"}, {"name": "risk"}]});
+    assert!(super::preset::human_for_test(&data, false).contains("Parameters: base, risk"));
+}
+
+#[test]
+fn preset_show_and_explain_json_match_snapshots() {
+    use provenant_records::{CommandResult, Outcome};
+    let layers = Layers::empty();
+    let (values, mut origins) = layers.resolve("review-council").unwrap();
+    origins.extend(expand(&layers, "review-council", "", &[]).unwrap().origins);
+    let show = CommandResult::new(
+        "preset",
+        Outcome::Ok,
+        json!({"name": "review-council", "values": values, "origins": origins}),
+    );
+    let explain = CommandResult::new(
+        "preset",
+        Outcome::Ok,
+        layers.explain("review-council").unwrap(),
+    );
+    for (actual, expected) in [
+        (
+            serde_json::to_value(show).unwrap(),
+            include_str!("../tests/golden/preset-review-council-show.json"),
+        ),
+        (
+            serde_json::to_value(explain).unwrap(),
+            include_str!("../tests/golden/preset-review-council-explain.json"),
+        ),
+    ] {
+        assert_eq!(actual, serde_json::from_str::<Value>(expected).unwrap());
+    }
+}
+
+#[test]
+fn preset_human_views_preserve_detail_and_type_plain_tables() {
+    let data = json!({"name":"example", "values":{"parameters":{
+        "schema":{"type":"integer", "default":1, "min":0, "doc":"First.\nSecond."},
+        "subject":{"type":"commit", "commit":"HEAD"}
+    }}, "origins":{}});
+    let compact = super::preset::human_for_test(&data, false);
+    assert!(compact.contains("schema  integer  1  First."));
+    assert!(!compact.contains("Second."));
+    assert!(compact.contains("subject  table"));
+    let full = super::preset::human_for_test(&data, true);
+    assert!(full.contains("\"min\":0"));
+    assert!(full.contains("Second."));
+    let explanation = json!({"name":"example", "pattern":{"summary":"Summary", "cost":"Cost", "select_when":"Condition"}, "parameters":[{"name":"base"}]});
+    let compact = super::preset::human_for_test(&explanation, false);
+    for value in ["Summary", "Cost", "Condition", "base"] {
+        assert!(compact.contains(value));
+    }
+}

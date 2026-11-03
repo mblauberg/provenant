@@ -1,5 +1,5 @@
 //! Routing's frozen clap leaves and read-only composition/rendering edge.
-use crate::Globals;
+use crate::{Globals, metadata::CatalogueArg};
 use clap::{Args, Subcommand, ValueEnum};
 use provenant_core::{Clock, Roots, WallTime};
 use provenant_os::clock::SystemClock;
@@ -132,7 +132,7 @@ pub struct RouteSet {
     /// Exact catalogue model in ADAPTER/ID form.
     pub model: Model,
     /// Selection weight from 0 (fallback only) to 100.
-    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=100))]
+    #[arg(long, catalog_u8_range = 0..=100)]
     pub weight: Option<u8>,
     /// Default effort for this member.
     #[arg(long)]
@@ -209,7 +209,7 @@ pub struct RouteRequest {
     #[arg(long)]
     pub confidential: bool,
     /// Fallback models in ADAPTER/ID form, comma separated
-    #[arg(long, value_delimiter = ',', action = clap::ArgAction::Set)]
+    #[arg(long, value_delimiter = ',', action = clap::ArgAction::Set, catalog_bounds = (0, 2))]
     pub fallback: Vec<Model>,
     /// Keep a provider (claude), account (label, entry or ADAPTER/KEY) or
     /// exact model (ADAPTER/ID) out of a named route's pool (repeatable).
@@ -441,22 +441,6 @@ fn match_name(
 /// Up to eight routes and models that share the name as a substring or a
 /// prefix, or are one or two edits away.
 fn close_matches(lower: &str, routes: &BTreeSet<String>, models: &[String]) -> Vec<String> {
-    fn edits(a: &str, b: &str) -> usize {
-        let b: Vec<char> = b.chars().collect();
-        let mut row: Vec<usize> = (0..=b.len()).collect();
-        for (i, ca) in a.chars().enumerate() {
-            let mut diagonal = row[0];
-            row[0] = i + 1;
-            for (j, cb) in b.iter().enumerate() {
-                let above = row[j + 1];
-                row[j + 1] = (diagonal + usize::from(ca != *cb))
-                    .min(row[j] + 1)
-                    .min(above + 1);
-                diagonal = above;
-            }
-        }
-        row[b.len()]
-    }
     let near = |candidate: &str| {
         let candidate = candidate.to_ascii_lowercase();
         let id = candidate.split_once('/').map_or(&*candidate, |(_, id)| id);
@@ -468,8 +452,8 @@ fn close_matches(lower: &str, routes: &BTreeSet<String>, models: &[String]) -> V
         id.contains(lower)
             || lower.contains(id)
             || prefix >= 3
-            || edits(lower, id) <= 2
-            || edits(lower, &candidate) <= 2
+            || crate::edit_distance(lower, id) <= 2
+            || crate::edit_distance(lower, &candidate) <= 2
     };
     routes
         .iter()

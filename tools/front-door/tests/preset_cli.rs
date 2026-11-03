@@ -1568,6 +1568,80 @@ fn automatic_preset_selection_submits_network_off_and_refuses_lane_only_flags()
             .args(extra)
             .output()
     };
+    // Flags that choose a model, route or manifest bypass automatic selection;
+    // all other independently usable incompatible flags reach this boundary.
+    for args in [
+        vec!["--effort", "high"],
+        vec!["--account", "fixture"],
+        vec!["--fallback", "codex/model"],
+        vec!["--mode", "read-only"],
+        vec!["--worktree-branch", "topic"],
+        vec!["--host", "peer"],
+        vec!["--deliver", "none"],
+        vec!["--write-root", "/tmp"],
+        vec!["--capability", "postgres"],
+        vec!["--knob", "test=value"],
+        vec!["--task-id", "11111111111111111111111111111111"],
+        vec!["--delivery-id", "11111111111111111111111111111111"],
+        vec!["--head", "1111111111111111111111111111111111111111"],
+        vec!["--base", "main"],
+        vec!["--title", "title"],
+        vec!["--build-heavy"],
+        vec!["--read-heavy"],
+        vec!["--confidential"],
+        vec!["--provider-timeout", "3600"],
+        vec!["--operation-id", "chosen"],
+        vec!["--branch", "topic", "--host", "peer", "--base", "main"],
+        vec![
+            "--deliver-remote",
+            "origin",
+            "--deliver-branch",
+            "topic",
+            "--worktree-branch",
+            "work",
+        ],
+        vec![
+            "--open-pr",
+            "--deliver-remote",
+            "origin",
+            "--deliver-branch",
+            "topic",
+            "--worktree-branch",
+            "work",
+        ],
+    ] {
+        let automatic = run(&args)?;
+        let result: serde_json::Value = serde_json::from_slice(&automatic.stdout)?;
+        assert_eq!(result["error"]["code"], "preset", "{args:?}: {result}");
+        assert!(
+            result["error"]["message"]
+                .as_str()
+                .is_some_and(|s| s.contains(args[0])),
+            "{args:?}: {result}"
+        );
+        let mut explicit_args = vec!["--preset", "probe"];
+        explicit_args.extend(&args);
+        let explicit = run(&explicit_args)?;
+        assert!(!explicit.status.success(), "{args:?}");
+        let result: serde_json::Value = serde_json::from_slice(&explicit.stdout)?;
+        assert_eq!(result["status"], "invalid", "{args:?}: {result}");
+    }
+    let stdin = fixture_cli()
+        .current_dir(&project)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .args(["--json", "--state-dir"])
+        .arg(&state)
+        .args(["run", "--prompt-stdin"])
+        .output()?;
+    let result: serde_json::Value = serde_json::from_slice(&stdin.stdout)?;
+    assert_eq!(result["error"]["code"], "preset", "{result}");
+    assert!(
+        result["error"]["message"]
+            .as_str()
+            .is_some_and(|s| s.contains("--prompt-stdin")),
+        "{result}"
+    );
     let refused = run(&["--account", "fixture", "--effort", "high"])?;
     assert!(!refused.status.success());
     let refused: serde_json::Value = serde_json::from_slice(&refused.stdout)?;
@@ -1576,7 +1650,7 @@ fn automatic_preset_selection_submits_network_off_and_refuses_lane_only_flags()
     assert!(
         refused["error"]["message"]
             .as_str()
-            .is_some_and(|message| message.contains("--account, --effort")),
+            .is_some_and(|message| message.contains("--effort, --account")),
         "{refused}"
     );
     assert!(

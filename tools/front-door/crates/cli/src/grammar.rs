@@ -1,4 +1,5 @@
 //! CLI-owned grammar with mounted owner subtrees.
+use crate::metadata::CatalogueArg;
 use clap::{Args, Parser, Subcommand, ValueEnum, builder::TypedValueParser};
 use provenant_core::{DeliveryId, GitOid, OperationId, RunId, TaskId};
 pub use provenant_records::Harness;
@@ -18,6 +19,8 @@ pub struct Invocation {
     pub command: Command,
     /// Space-separated subcommand path, such as `quota tick`.
     pub leaf: String,
+    /// Explicit flags that cannot be applied to an automatically selected preset.
+    pub preset_incompatible_flags: Vec<String>,
 }
 #[derive(Debug, Default)]
 pub struct Globals {
@@ -56,14 +59,17 @@ pub enum Command {
     /// Read a fresh resident-memory sample of an owned lane process tree
     ProcessTree {
         /// PID of the supervised command inside this lane
-        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=i32::MAX as i64))]
+        #[arg(long, catalog_u32_range = 1..=i32::MAX as i64)]
         root: u32,
     },
     /// Post a human decision, assumption or question
+    #[command(add = crate::metadata::CoreCommand(4, "provenant ask --file request.json --session SESSION --json"))]
     Ask(crate::inbox::Ask),
     /// List, inspect, close and acknowledge human requests
+    #[command(add = crate::metadata::CoreCommand(5, "provenant inbox --json"))]
     Inbox(Box<crate::inbox::Inbox>),
     /// Answer a request using the revision you saw
+    #[command(add = crate::metadata::CoreCommand(6, "provenant help answer"))]
     Answer(Box<crate::inbox::Answer>),
     /// Register and list provider accounts
     #[command(subcommand)]
@@ -80,6 +86,7 @@ pub enum Command {
     #[command(subcommand)]
     Fabric(crate::fabric::Fabric),
     /// Install the release for chosen harnesses
+    #[command(add = crate::metadata::CoreCommand(7, "provenant install"))]
     Install(Install),
     /// Upgrade the recorded installation on this host and Fabric peers
     Upgrade(Upgrade),
@@ -92,23 +99,26 @@ pub enum Command {
     #[command(subcommand)]
     Preset(Preset),
     /// Dispatch, wait and read the result
+    #[command(add = crate::metadata::CoreCommand(0, "provenant run --prompt-file brief.md --route senior"))]
     Run(Box<Dispatch>),
     /// Dispatch and collect a configured review shape
     Review(Review),
     /// Show lanes or wait on lanes, graphs and PRs
+    #[command(add = crate::metadata::CoreCommand(1, "provenant status"))]
     Status(Status),
     /// Merge on green CI and prune the merged worktree
+    #[command(add = crate::metadata::CoreCommand(2, "provenant land 1947 --wait"))]
     Land {
-        #[arg(value_parser = clap::value_parser!(u64).range(1..))]
+        #[arg(catalog_u64_range = 1..)]
         number: u64,
         /// Pin a reviewed head instead of using the current PR head
         #[arg(long, hide = true)]
         head: Option<GitOid>,
         /// Wait for this head's CI (default 1 hour; maximum 4 hours)
-        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "1h", value_parser = duration_seconds)]
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "1h", catalog_duration())]
         wait: Option<u64>,
         /// Initial CI poll interval in seconds (overrides domains.pr.land.poll_seconds, default 30)
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        #[arg(long, catalog_u64_range = 1..)]
         poll: Option<u64>,
         /// Show the effective polling interval and retry budget without landing
         #[arg(long)]
@@ -135,6 +145,7 @@ pub enum Command {
     #[command(subcommand)]
     Telemetry(Telemetry),
     /// Show and refresh provider quota
+    #[command(add = crate::metadata::CoreCommand(3, "provenant quota"))]
     Quota {
         #[command(subcommand)]
         command: Option<crate::quota::Quota>,
@@ -177,7 +188,7 @@ pub enum Command {
 pub enum Preset {
     /// List available presets
     List,
-    /// Show effective preset values and their origins, or the role library
+    /// Show effective preset values and parameters, or the role library; --full includes origins
     Show {
         /// Preset name, or with --roles a role name to show
         name: Option<String>,
@@ -239,14 +250,14 @@ pub struct Review {
     #[arg(long)]
     pub explain: bool,
     /// Overall wait limit (seconds or a duration such as 30m)
-    #[arg(long, default_value = "3600", value_parser = duration_seconds)]
+    #[arg(long, default_value = "3600", catalog_duration())]
     pub wait: u64,
 }
 #[derive(Debug, Subcommand)]
 pub enum Pr {
     /// List retained local attempt contributions and missing peer coverage
     Contributions {
-        #[arg(value_parser = clap::value_parser!(u64).range(1..))]
+        #[arg(catalog_u64_range = 1..)]
         number: u64,
         /// Retry host binding to the observed PR branch and head; close ended bindings
         #[arg(long)]
@@ -254,7 +265,7 @@ pub enum Pr {
     },
     /// Wait for CI and report pass or fail with the pull request head
     Watch {
-        #[arg(value_parser = clap::value_parser!(u64).range(1..))]
+        #[arg(catalog_u64_range = 1..)]
         number: u64,
     },
     /// Open a pull request with the repository template filled from receipts
@@ -262,10 +273,10 @@ pub enum Pr {
     /// Print one line per pull request: state, head, checks, merge and review
     Status {
         /// Pull requests to report; this account's open ones when omitted
-        #[arg(value_parser = clap::value_parser!(u64).range(1..))]
+        #[arg(catalog_u64_range = 1..)]
         numbers: Vec<u64>,
         /// Block until the snapshot changes (default 5 minutes; maximum 4 hours)
-        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "5m", value_parser = duration_seconds)]
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "5m", catalog_duration())]
         wait: Option<u64>,
     },
 }
@@ -282,7 +293,7 @@ pub struct PrOpen {
     #[arg(long)]
     pub summary_file: PathBuf,
     /// Issue the pull request closes (repeatable)
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    #[arg(long, catalog_u64_range = 1..)]
     pub issue: Vec<u64>,
     /// Branch to open from; the attempt's delivered branch when omitted
     #[arg(long)]
@@ -335,7 +346,7 @@ pub enum ChairViewer {
         viewer: String,
         id: provenant_core::HumanRequestId,
         /// Revision actually viewed, or omit for unread
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        #[arg(long, catalog_u64_range = 1..)]
         seen_revision: Option<u64>,
         /// Snooze until this UTC timestamp
         #[arg(long)]
@@ -348,14 +359,14 @@ pub enum ChairViewer {
     Summary {
         viewer: String,
         session: String,
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        #[arg(long, catalog_u64_range = 1..)]
         to: Option<u64>,
     },
     /// Record the summary revision actually rendered by this viewer.
     Rendered {
         viewer: String,
         session: String,
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        #[arg(long, catalog_u64_range = 1..)]
         revision: u64,
     },
     /// Forget a viewer's summary baseline.
@@ -416,10 +427,10 @@ pub enum ChairSummary {
         /// Chair session ID
         session: String,
         /// Earlier summary revision
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        #[arg(long, catalog_u64_range = 1..)]
         from: u64,
         /// Later summary revision (defaults to current)
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        #[arg(long, catalog_u64_range = 1..)]
         to: Option<u64>,
     },
     /// Update selected fields from a JSON patch.
@@ -449,10 +460,10 @@ pub enum ChairLog {
         #[arg(long)]
         file: String,
         /// Stable retry key; generated when omitted
-        #[arg(long, requires = "issued_at", value_parser = explicit_operation_id)]
+        #[arg(long, catalog_requires = "issued_at", value_parser = explicit_operation_id)]
         operation_id: Option<OperationId>,
         /// Original operation creation time in UTC Unix seconds; reuse for retries
-        #[arg(long, requires = "operation_id")]
+        #[arg(long, catalog_requires = "operation_id")]
         issued_at: Option<i64>,
     },
     /// List a bounded page of updates in sequence order.
@@ -464,7 +475,7 @@ pub enum ChairLog {
         #[arg(long)]
         after: Option<u64>,
         /// Maximum entries in this page
-        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u64).range(1..=100))]
+        #[arg(long, default_value_t = 50, catalog_u64_range = 1..=100)]
         limit: u64,
     },
 }
@@ -514,11 +525,11 @@ pub enum Config {
     },
     /// List the bounded history of applied configuration changes, newest first.
     History {
-        /// Only entries since this RFC3339 time or this many seconds ago
+        /// Only entries since this RFC3339 time or a span such as 1d ago
         #[arg(long, value_parser = since)]
         since: Option<jiff::Timestamp>,
         /// Maximum entries (1 to 500)
-        #[arg(long, default_value = "50", value_parser = clap::value_parser!(u64).range(1..=500))]
+        #[arg(long, default_value = "50", catalog_u64_range = 1..=500)]
         limit: u64,
     },
     /// Rewrite retired routing timing keys to `schedule` and remove retired
@@ -572,16 +583,16 @@ pub struct Access {
     #[arg(long)]
     pub worktree: Option<PathBuf>,
     /// Extra directory the lane may read (repeatable)
-    #[arg(long)]
+    #[arg(long, catalog_bounds = (0, 32))]
     pub read_root: Vec<PathBuf>,
     /// Extra directory the lane may write, outside Git metadata (repeatable)
-    #[arg(long)]
+    #[arg(long, catalog_bounds = (0, 32))]
     pub write_root: Vec<PathBuf>,
     /// Network access [default: on]
     #[arg(long, value_enum)]
     pub network: Option<Switch>,
     /// Grant a named capability: postgres (repeatable)
-    #[arg(long)]
+    #[arg(long, catalog_bounds = (0, 16))]
     pub capability: Vec<String>,
 }
 impl Access {
@@ -607,16 +618,16 @@ pub struct DispatchInput {
 #[command(group(clap::ArgGroup::new("writer_target").args(["worktree", "branch", "worktree_branch"])))]
 pub struct Dispatch {
     /// Expand and run a named pipeline preset
-    #[arg(long, requires = "prompt_file", conflicts_with_all = ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "provider_timeout", "operation_id"])]
+    #[arg(long, catalog_requires = "prompt_file")]
     pub preset: Option<String>,
     /// Override a preset value (PATH=TOML_VALUE); quote TOML strings; repeatable
-    #[arg(long = "set", requires = "preset")]
+    #[arg(long = "set", catalog_requires = "preset")]
     pub preset_set: Vec<String>,
     /// Read preset parameters from a TOML table file; --set overrides it
-    #[arg(long = "params-file", requires = "preset")]
+    #[arg(long = "params-file", catalog_requires = "preset")]
     pub preset_params_file: Option<PathBuf>,
     /// Planner front-end: auto, on or off; the default is [domains.fabric.plan] mode
-    #[arg(long = "plan", requires = "preset", value_parser = ["auto", "on", "off"])]
+    #[arg(long = "plan", catalog_requires = "preset", value_parser = ["auto", "on", "off"])]
     pub preset_plan: Option<String>,
     /// Explain roles, limits and the expanded graph without running it
     #[arg(long)]
@@ -651,13 +662,13 @@ pub struct Dispatch {
     #[arg(long, conflicts_with_all = ["deliver_remote", "deliver_branch", "open_pr"])]
     pub deliver: Option<provenant_records::run::DeliveryMode>,
     /// Fetch and deliver this writer's final head on the host.
-    #[arg(long, requires_all = ["deliver_branch", "writer_target"])]
+    #[arg(long, catalog_requires_all = ["deliver_branch", "writer_target"])]
     pub deliver_remote: Option<String>,
     /// Branch to push the writer's head to
-    #[arg(long, requires = "deliver_remote")]
+    #[arg(long, catalog_requires = "deliver_remote")]
     pub deliver_branch: Option<String>,
     /// Create a pull request after the host verifies the pushed head.
-    #[arg(long, requires = "deliver_remote")]
+    #[arg(long, catalog_requires = "deliver_remote")]
     pub open_pr: bool,
     #[command(flatten)]
     pub route: RouteRequest,
@@ -667,10 +678,10 @@ pub struct Dispatch {
     #[command(flatten)]
     pub access: Access,
     /// Provider timeout in seconds
-    #[arg(long, default_value = "3600", default_value_if("mode", "worktree-write", "10800"), value_parser = clap::value_parser!(u64).range(1..=provenant_core::MAX_LANE_RUNTIME_SECONDS))]
+    #[arg(long, default_value = "3600", default_value_if("mode", "worktree-write", "10800"), catalog_u64_range = 1..=provenant_core::MAX_LANE_RUNTIME_SECONDS)]
     pub provider_timeout: u64,
     /// Manifest lanes or preset graph attempts to run at once (1 to 16)
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=16))]
+    #[arg(long, catalog_u64_range = 1..=16)]
     pub concurrency: Option<u64>,
     /// Override an effective harness knob for this dispatch (NAME=VALUE).
     #[arg(long = "knob")]
@@ -679,7 +690,7 @@ pub struct Dispatch {
     #[arg(long)]
     pub host: Option<String>,
     /// New writer branch; run creates an owned worktree locally or on --host
-    #[arg(long, requires_all = ["host", "base"])]
+    #[arg(long, catalog_requires_all = ["host", "base"])]
     pub branch: Option<String>,
     /// Create or reuse a clean local writer worktree owned by this lane
     #[arg(long, conflicts_with_all = ["worktree", "branch", "host", "manifest"])]
@@ -691,7 +702,7 @@ pub struct Dispatch {
     #[arg(long)]
     pub base: Option<String>,
     /// Wait for task or preset graph settlement (seconds, or a duration such as 30m)
-    #[arg(long, value_parser = duration_seconds)]
+    #[arg(long, catalog_duration())]
     pub wait: Option<u64>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -869,19 +880,19 @@ pub struct Lanes {
     #[arg(long)]
     pub all: bool,
     /// Maximum lanes per page (1 to 100)
-    #[arg(long, default_value = "50", value_parser = clap::value_parser!(u64).range(1..=100))]
+    #[arg(long, default_value = "50", catalog_u64_range = 1..=100)]
     pub limit: u64,
     /// Continue from a previous page's cursor
     #[arg(long, conflicts_with_all = ["wait", "watch"])]
     pub cursor: Option<String>,
     /// Wait for settlement (seconds, or a duration such as 30m)
-    #[arg(long, conflicts_with = "watch", value_parser = duration_seconds)]
+    #[arg(long, conflicts_with = "watch", catalog_duration())]
     pub wait: Option<u64>,
     /// Wait for any or all lanes to settle
     #[arg(
         long,
         default_value = "any",
-        requires = "wait",
+        catalog_requires = "wait",
         conflicts_with = "watch",
         value_enum
     )]
@@ -894,7 +905,7 @@ pub struct Lanes {
         default_missing_value = "14400",
         value_name = "SECONDS",
         conflicts_with_all = ["all", "states", "cursor"],
-        value_parser = clap::value_parser!(u64).range(1..=provenant_core::MAX_LANE_RUNTIME_SECONDS)
+        catalog_duration()
     )]
     pub watch: Option<u64>,
     /// Keep lanes in any of these states.
@@ -941,10 +952,10 @@ pub struct Output {
     #[arg(long, default_value = "0", conflicts_with = "tail")]
     pub offset: u64,
     /// Read the last N lines instead of an offset (above 500 is clamped to 500)
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    #[arg(long, catalog_u64_range = 1..)]
     pub tail: Option<u64>,
     /// Maximum bytes to return
-    #[arg(long, default_value = "65536", value_parser = clap::value_parser!(u64).range(1..=65536))]
+    #[arg(long, default_value = "65536", catalog_u64_range = 1..=65536)]
     pub max_bytes: u64,
     /// Print the attempt's trace and its parent chain instead of a part
     #[arg(long, conflicts_with_all = ["part", "offset", "tail", "max_bytes"])]
@@ -958,10 +969,10 @@ pub struct Cancel {
     #[arg(long, default_value = "", value_parser = operation_id, hide = true, hide_default_value = true)]
     pub operation_id: OperationId,
     /// Reason to record (up to 256 bytes)
-    #[arg(long, value_parser = reason)]
+    #[arg(long, value_parser = reason, catalog_bounds = (0, 256))]
     pub reason: Option<String>,
     /// Wait up to this many seconds for cancellation to settle
-    #[arg(long, value_parser = duration_seconds)]
+    #[arg(long, catalog_duration())]
     pub wait: Option<u64>,
 }
 #[derive(Debug, Args)]
@@ -987,7 +998,7 @@ pub struct Resume {
     #[command(flatten)]
     pub prompt: Prompt,
     /// Wait up to this many seconds for the attempt to settle
-    #[arg(long, value_parser = duration_seconds)]
+    #[arg(long, catalog_duration())]
     pub wait: Option<u64>,
 }
 #[derive(Debug, Args)]
@@ -1070,7 +1081,7 @@ pub struct Ingest {
     /// Ingest only this provider's sessions (only `claude` writes native transcripts)
     #[arg(long)]
     pub provider: Option<String>,
-    /// Ingest transcripts written, and messages stamped, from this date or timestamp, or this many seconds ago
+    /// Ingest transcripts written, and messages stamped, from this date or timestamp, or a span such as 1d ago
     #[arg(long, value_parser = since)]
     pub since: Option<jiff::Timestamp>,
 }
@@ -1085,17 +1096,17 @@ pub struct Mileage {
     /// Count only usage of this exact model; quota deltas still cover every model, so mileage is understated
     #[arg(long)]
     pub model: Option<String>,
-    /// Use readings and usage from this date or timestamp, or this many seconds ago
+    /// Use readings and usage from this date or timestamp, or a span such as 1d ago
     #[arg(long, value_parser = since)]
     pub since: Option<jiff::Timestamp>,
     /// Runs needed on each side before a capacity trend is judged
-    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(2..=10_000))]
+    #[arg(long, default_value_t = 10, catalog_u32_range = 2..=10_000)]
     pub min_runs: u32,
     /// Fall in capacity, in percent, that is flagged rather than inconclusive
-    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=99))]
+    #[arg(long, default_value_t = 20, catalog_u32_range = 1..=99)]
     pub fall_percent: u32,
     /// Days in the recent side of a capacity step change
-    #[arg(long, default_value_t = 7, value_parser = clap::value_parser!(u32).range(1..=90))]
+    #[arg(long, default_value_t = 7, catalog_u32_range = 1..=90)]
     pub recent_days: u32,
 }
 #[derive(Debug, Args)]
@@ -1103,7 +1114,7 @@ pub struct Trace {
     /// Output file (default `provenant-trace.json`)
     #[arg(long, default_value = "provenant-trace.json")]
     pub out: std::path::PathBuf,
-    /// Include attempts finished from this date or timestamp, or this many seconds ago
+    /// Include attempts finished from this date or timestamp, or a span such as 1d ago
     #[arg(long, value_parser = since)]
     pub since: Option<jiff::Timestamp>,
     /// Restrict the trace to one run.
@@ -1140,7 +1151,7 @@ pub struct Stats {
     /// Count local CLI verbs and MCP tools, including unused installed units.
     #[arg(long)]
     pub usage: bool,
-    /// Count from this date or timestamp, or this many seconds ago
+    /// Count from this date or timestamp, or a span such as 1d ago
     #[arg(long, value_parser = since)]
     pub since: Option<jiff::Timestamp>,
     /// Count up to this date or timestamp
@@ -1166,13 +1177,13 @@ pub struct PipelineOptions {
     #[arg(long)]
     pub ci_file: Option<PathBuf>,
     /// Days after a merge to attribute escaped defects
-    #[arg(long, default_value_t = 14, value_parser = clap::value_parser!(u32).range(1..=3650))]
+    #[arg(long, default_value_t = 14, catalog_u32_range = 1..=3650)]
     pub outcome_days: u32,
     /// Independent graphs and mature merges required per arm
-    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=100_000))]
+    #[arg(long, default_value_t = 20, catalog_u32_range = 1..=100_000)]
     pub min_samples: u32,
     /// Days until a suggestion expires
-    #[arg(long, default_value_t = 14, value_parser = clap::value_parser!(u32).range(1..=3650))]
+    #[arg(long, default_value_t = 14, catalog_u32_range = 1..=3650)]
     pub expiry_days: u32,
 }
 #[derive(Debug, Subcommand)]
@@ -1215,7 +1226,7 @@ pub struct Gc {
     #[arg(long)]
     pub apply: bool,
     /// Minimum idle age for standalone caches and ignored output; merged trees are immediate
-    #[arg(long, default_value = "7", value_parser = clap::value_parser!(u64).range(1..=3650))]
+    #[arg(long, default_value = "7", catalog_u64_range = 1..=3650)]
     pub idle_days: u64,
 }
 #[derive(Debug, Args)]
@@ -1227,7 +1238,7 @@ pub struct Remove {
     #[arg(long, conflicts_with = "merged")]
     pub discard: bool,
     /// Remove worktrees already merged into the integration branch
-    #[arg(long, requires_all = ["integration", "remove_scope"])]
+    #[arg(long, catalog_requires_all = ["integration", "remove_scope"])]
     pub merged: bool,
     /// Integration ref to check merges against: a branch or a remote-tracking
     /// ref such as origin/main (NAME: fetched upstream default, falling back
@@ -1235,16 +1246,16 @@ pub struct Remove {
     #[arg(long)]
     pub integration: Option<String>,
     /// Limit to this branch (repeatable)
-    #[arg(long, requires = "merged", conflicts_with = "since")]
+    #[arg(long, catalog_requires = "merged", conflicts_with = "since")]
     pub branch: Vec<String>,
     /// Limit to worktrees created since this commit
-    #[arg(long, requires = "merged")]
+    #[arg(long, catalog_requires = "merged")]
     pub since: Option<GitOid>,
 }
 #[derive(Debug, Args)]
 pub struct Page {
     /// Maximum results per page (1 to 100)
-    #[arg(long, default_value = "50", value_parser = clap::value_parser!(u64).range(1..=100))]
+    #[arg(long, default_value = "50", catalog_u64_range = 1..=100)]
     pub limit: u64,
     /// Continue from a previous page's cursor
     #[arg(long)]
@@ -1325,7 +1336,7 @@ pub enum Internal {
     },
     Supervise {
         /// Private S2 handoff values, validated and adopted only by supervisor.
-        #[arg(hide = true, num_args = 5..=6, value_parser = clap::value_parser!(u64).range(3..=2147483647))]
+        #[arg(hide = true, num_args = 5..=6, catalog_u64_range = 3..=2147483647)]
         descriptors: Vec<u64>,
     },
 }
@@ -1337,7 +1348,7 @@ pub(crate) fn absolute(value: PathBuf) -> Result<PathBuf, &'static str> {
     }
     Ok(path)
 }
-fn reason(value: &str) -> Result<String, &'static str> {
+pub(crate) fn reason(value: &str) -> Result<String, &'static str> {
     if value.len() > 256 {
         return Err("reason exceeds 256 UTF-8 bytes");
     }
@@ -1356,14 +1367,22 @@ fn timestamp(value: &str) -> Result<jiff::Timestamp, &'static str> {
         .parse()
         .map_err(|_| "expected a date or RFC3339 timestamp with an offset")
 }
-/// A positive whole number of seconds ago, a date or an RFC3339 timestamp.
+/// A positive span (seconds, s, m, h or d) ago, a date or an RFC3339 timestamp.
 pub(crate) fn since(value: &str) -> Result<jiff::Timestamp, String> {
-    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
-        let seconds = value
-            .parse::<i64>()
-            .map_err(|_| "invalid duration".to_owned())?;
+    if value
+        .bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_digit())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b's' | b'm' | b'h' | b'd'))
+    {
+        let seconds = i64::try_from(
+            span_seconds(value).ok_or("expected a positive span (N, Ns, Nm, Nh or Nd)")?,
+        )
+        .map_err(|_| "expected a positive span (N, Ns, Nm, Nh or Nd)".to_owned())?;
         if seconds <= 0 {
-            return Err("duration must be positive".into());
+            return Err("span must be positive".into());
         }
         use provenant_core::Clock;
         return provenant_os::clock::SystemClock::new()
@@ -1382,7 +1401,7 @@ mod target_tests {
     use provenant_core::{AttemptId, RunId, TaskId};
 
     #[test]
-    fn since_accepts_whole_seconds_only() {
+    fn since_accepts_spans() {
         use provenant_core::Clock;
         let clock = provenant_os::clock::SystemClock::new();
         let before = clock.wall_now().unwrap().as_timestamp();
@@ -1391,7 +1410,21 @@ mod target_tests {
         let duration = jiff::SignedDuration::from_secs(86_400);
         assert!(start >= before.checked_sub(duration).unwrap());
         assert!(start <= after.checked_sub(duration).unwrap());
-        for invalid in ["0", "24h", "5s", "1m", "2d", "7d", "-1", ""] {
+        for (value, seconds) in [
+            ("24h", 86_400),
+            ("5s", 5),
+            ("1m", 60),
+            ("2d", 172_800),
+            ("7d", 604_800),
+        ] {
+            let before = clock.wall_now().unwrap().as_timestamp();
+            let result = since(value).unwrap();
+            let after = clock.wall_now().unwrap().as_timestamp();
+            let offset = jiff::SignedDuration::from_secs(seconds);
+            assert!(result >= before.checked_sub(offset).unwrap(), "{value}");
+            assert!(result <= after.checked_sub(offset).unwrap(), "{value}");
+        }
+        for invalid in ["0", "-1", ""] {
             assert!(since(invalid).is_err(), "{invalid}");
         }
     }
@@ -1455,7 +1488,7 @@ fn operation_id(value: &str) -> Result<OperationId, String> {
     ))
     .map_err(|error| error.to_string())
 }
-fn status_wait_seconds(value: &str) -> Result<u64, &'static str> {
+pub(crate) fn status_wait_seconds(value: &str) -> Result<u64, &'static str> {
     // Zero is the parser's sentinel for the configured default, never a duration.
     if value == "configured" {
         Ok(0)
@@ -1463,38 +1496,42 @@ fn status_wait_seconds(value: &str) -> Result<u64, &'static str> {
         duration_seconds(value)
     }
 }
-fn duration_seconds(value: &str) -> Result<u64, &'static str> {
+fn span_seconds(value: &str) -> Option<u64> {
     let (digits, multiplier) = match value.as_bytes().last() {
         Some(b's') => (&value[..value.len() - 1], 1),
         Some(b'm') => (&value[..value.len() - 1], 60),
         Some(b'h') => (&value[..value.len() - 1], 3600),
+        Some(b'd') => (&value[..value.len() - 1], 86400),
         _ => (value, 1),
     };
-    digits
-        .parse::<u64>()
-        .ok()
-        .and_then(|n| n.checked_mul(multiplier))
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<u64>().ok()?.checked_mul(multiplier)
+}
+pub(crate) fn duration_seconds(value: &str) -> Result<u64, &'static str> {
+    span_seconds(value)
         .filter(|n| (1..=provenant_core::MAX_LANE_RUNTIME_SECONDS).contains(n))
-        .ok_or("wait must be 1s to 4h; run `provenant help run` for examples")
+        .ok_or("duration must be 1s to 4h; run `provenant help` for examples")
 }
 #[derive(Debug, Args)]
 pub struct Status {
     /// Wait for mixed targets (no value uses domains.wait.timeout_seconds)
-    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "configured", value_parser = status_wait_seconds, conflicts_with_all = ["all", "cursor"])]
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "configured", catalog_status_wait(), conflicts_with_all = ["all", "cursor"])]
     pub wait: Option<u64>,
     /// Observe lane:ID, graph:ID, pr:NUMBER or land:NUMBER (repeatable; land only observes)
-    #[arg(long, requires = "wait")]
+    #[arg(long, catalog_requires = "wait")]
     pub target: Vec<String>,
     /// Return on any transition or when all targets are terminal
-    #[arg(long, requires = "wait", value_enum, default_value = "any")]
+    #[arg(long, catalog_requires = "wait", value_enum, default_value = "any")]
     pub until: Condition,
     /// Stream transitions until all targets are terminal or the wait expires
-    #[arg(long, requires = "wait")]
+    #[arg(long, catalog_requires = "wait")]
     pub follow: bool,
     /// Show this run, task, attempt or graph ID, including settled records
     pub id: Option<String>,
     /// Maximum full records per page
-    #[arg(long, hide = true, default_value = "50", value_parser = clap::value_parser!(u64).range(1..=100))]
+    #[arg(long, hide = true, default_value = "50", catalog_u64_range = 1..=100)]
     pub limit: u64,
     /// Continue a full-record page from its cursor
     #[arg(long, hide = true)]
