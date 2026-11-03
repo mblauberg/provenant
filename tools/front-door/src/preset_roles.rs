@@ -172,10 +172,10 @@ impl RoleLibrary {
     pub fn add(&mut self, origin: &str, text: &str) -> Result<(), String> {
         let document: Value =
             toml_edit::de::from_str(text).map_err(|error| format!("{origin}: {error}"))?;
-        if let Some(extra) = document
-            .as_object()
-            .and_then(|map| map.keys().find(|key| *key != "roles" && *key != "local_check_policy"))
-        {
+        if let Some(extra) = document.as_object().and_then(|map| {
+            map.keys()
+                .find(|key| *key != "roles" && *key != "local_check_policy")
+        }) {
             return Err(format!("{origin}: unknown top-level key: {extra}"));
         }
         if let Some(policy) = document.get("local_check_policy") {

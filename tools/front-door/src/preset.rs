@@ -249,33 +249,6 @@ impl Layers {
         }
     }
 
-pub(crate) fn find_prompt(nodes: &Value, role: &str) -> Option<String> {
-    if let Some(items) = nodes.as_array() {
-        for node in items {
-            if let Some(found) = find_prompt(node, role) {
-                return Some(found);
-            }
-        }
-    } else if let Some(map) = nodes.as_object() {
-        if map.get("role").and_then(Value::as_str) == Some(role) {
-            if let Some(prompt) = map.get("prompt").and_then(Value::as_str) {
-                return Some(prompt.to_string());
-            }
-        }
-        for (key, val) in map {
-            if matches!(
-                key.as_str(),
-                "composite" | "loop" | "plan" | "patterns" | "nodes" | "body"
-            ) {
-                if let Some(found) = find_prompt(val, role) {
-                    return Some(found);
-                }
-            }
-        }
-    }
-    None
-}
-
     /// The typed interface of a preset, rendered for a reader. Creates no state.
     pub fn explain(&self, name: &str) -> Result<Value, String> {
         let expansion = expand(self, name, "", &[])?;
@@ -292,24 +265,22 @@ pub(crate) fn find_prompt(nodes: &Value, role: &str) -> Option<String> {
                 })
                 .cloned()
         };
-        let (policy_origin, policy_text) = if let Some(param) = expansion
-            .origins
-            .get("parameters.local_check_policy")
-        {
-            (
-                param.clone(),
-                expansion
-                    .document
-                    .pointer("/parameters/local_check_policy")
-                    .and_then(Value::as_str)
-                    .unwrap_or(LOCAL_CHECK_POLICY_PROMPT)
-                    .to_owned(),
-            )
-        } else if let Some((origin, policy)) = self.roles.policy(self.exclude_repo.get()) {
-            (origin.to_owned(), policy.to_owned())
-        } else {
-            ("bundled".into(), LOCAL_CHECK_POLICY_PROMPT.to_owned())
-        };
+        let (policy_origin, policy_text) =
+            if let Some(param) = expansion.origins.get("parameters.local_check_policy") {
+                (
+                    param.clone(),
+                    expansion
+                        .document
+                        .pointer("/parameters/local_check_policy")
+                        .and_then(Value::as_str)
+                        .unwrap_or(LOCAL_CHECK_POLICY_PROMPT)
+                        .to_owned(),
+                )
+            } else if let Some((origin, policy)) = self.roles.policy(self.exclude_repo.get()) {
+                (origin.to_owned(), policy.to_owned())
+            } else {
+                ("bundled".into(), LOCAL_CHECK_POLICY_PROMPT.to_owned())
+            };
         let parameters: Vec<Value> = config
             .get("parameters")
             .and_then(Value::as_object)
@@ -371,9 +342,12 @@ pub(crate) fn find_prompt(nodes: &Value, role: &str) -> Option<String> {
                 .and_then(|r| r.profile.get("tier").cloned())
                 .or_else(|| used.get("tier").cloned());
             let prompt = node_prompt.or_else(|| {
-                role_info
-                    .as_ref()
-                    .and_then(|r| r.profile.get("prompt").and_then(Value::as_str).map(String::from))
+                role_info.as_ref().and_then(|r| {
+                    r.profile
+                        .get("prompt")
+                        .and_then(Value::as_str)
+                        .map(String::from)
+                })
             });
             roles.push(json!({
                 "name": role_name,
@@ -1229,6 +1203,35 @@ fn interpolate(
     interpolate_inner(value, parameters, prompt, index, false)
 }
 
+/// The prompt of the first node in `nodes` that runs `role`, searching nested
+/// composites, loops and plans.
+pub(crate) fn find_prompt(nodes: &Value, role: &str) -> Option<String> {
+    if let Some(items) = nodes.as_array() {
+        for node in items {
+            if let Some(found) = find_prompt(node, role) {
+                return Some(found);
+            }
+        }
+    } else if let Some(map) = nodes.as_object() {
+        if map.get("role").and_then(Value::as_str) == Some(role) {
+            if let Some(prompt) = map.get("prompt").and_then(Value::as_str) {
+                return Some(prompt.to_string());
+            }
+        }
+        for (key, val) in map {
+            if matches!(
+                key.as_str(),
+                "composite" | "loop" | "plan" | "patterns" | "nodes" | "body"
+            ) {
+                if let Some(found) = find_prompt(val, role) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    None
+}
+
 pub(crate) const LOCAL_CHECK_POLICY_PROMPT: &str = r#"Local check policy: run the tests you add or change and the named tests covering
 changed functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or
 `cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or
@@ -1822,7 +1825,9 @@ fn build_stages(
     if let Some(map) = parameters.as_object_mut() {
         map.insert("local_check_policy".into(), json!(policy_text));
     }
-    if origins.get(&format!("{scope}parameters.local_check_policy")).is_none()
+    if origins
+        .get(&format!("{scope}parameters.local_check_policy"))
+        .is_none()
         && origins.get("parameters.local_check_policy").is_none()
     {
         origins.insert("parameters.local_check_policy".into(), policy_origin);
