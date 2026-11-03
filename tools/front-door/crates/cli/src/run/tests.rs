@@ -6074,7 +6074,7 @@ fn admission_lock_wait_respects_deadline() -> Result<(), Box<dyn std::error::Err
             ])?;
             cmd.wait = None;
 
-            let started = std::time::Instant::now();
+            let started = clock.mono_now();
             let reply = dispatch_with_workers(cmd, edge, &Free);
             assert_eq!(
                 reply.result.status,
@@ -6083,7 +6083,11 @@ fn admission_lock_wait_respects_deadline() -> Result<(), Box<dyn std::error::Err
                 reply.result.error
             );
             assert!(
-                started.elapsed() < Duration::from_secs(2),
+                clock
+                    .mono_now()
+                    .as_micros()
+                    .saturating_sub(started.as_micros())
+                    < 2_000_000,
                 "lock wait exceeded admission deadline"
             );
             holder.join().unwrap();
@@ -6158,10 +6162,16 @@ fn dispatch_restart_honours_saved_admission_wake_and_deadline()
                 ])
             };
             let workers = Counting(AtomicUsize::new(0));
-            let start = std::time::Instant::now();
+            let start = clock.mono_now();
             let reply = dispatch_with_workers(make("restart-wake")?, edge, &workers);
             assert_eq!(reply.result.status, Status::Ok, "{:?}", reply.result.error);
-            assert!(start.elapsed() >= Duration::from_millis(800));
+            assert!(
+                clock
+                    .mono_now()
+                    .as_micros()
+                    .saturating_sub(start.as_micros())
+                    >= 800_000
+            );
             let expired: OperationId = "restart-expired".parse()?;
             session.store.save_admission_window(
                 &expired,
