@@ -365,6 +365,24 @@ falsify every finding (`verifiers = 0` skips it), and the synthesis gives each
 finding one disposition: accepted, rejected or deferred, with a reason. The
 `generator-evaluator` evaluator does the same over its lens findings.
 
+A review of a `head` or `node` subject with no `size` or `review_shape`
+(`deliver`, `generator-evaluator`, `big-batch`) cannot be measured when the
+graph expands, because the commit does not exist yet. The graph (schema 2,
+with `review_base`) carries one deferred `review` node that holds a lowered
+prompt for every candidate lens. When the subject is pinned the host measures
+it, picks the shape and lenses, and adds the panel to the graph. Pass `size` or
+`review_shape` to keep a static panel. `--explain` shows the size as pending.
+
+A `fan-out` stage with `distinct_families = true` (the `distinct_families`
+parameter) labels its branches as one family group, so the scheduler prefers
+different model families across them. It is a preference only: every branch
+still runs.
+
+`--fresh` makes a preset run a new graph even when its inputs are unchanged,
+for example to rerun after a cancel. A plain rerun of the same inputs resolves
+to the same graph, so it resumes or replays; `--fresh` adds a one-off nonce to
+the graph identity. It requires `--preset`.
+
 Every `review-council` lens emits a fenced `findings` block before its single
 verdict line. The block uses `schema_version: 1`, a `findings` array, and at
 most 32 entries, one-line summaries and under 8 KiB in all; a lens with no

@@ -47,7 +47,7 @@ decision_session = { type = "string", default = "", doc = "Inbox session for the
 risk_tier = { type = "string", default = "", doc = "Risk tier that selects the review shape." }
 review_shape = { type = "string", default = "", doc = "Explicit review shape override." }
 kind = { type = "string", default = "", doc = "Change kind that scales the review panel: refactor, integration, docs. Empty uses the task kind." }
-size = { type = "string", default = "", doc = "Review size override (small, medium, large). Empty measures the worktree's current head against base when the graph expands, before the writer runs, as a proxy; pass a size when the expected scope is known." }
+size = { type = "string", default = "", doc = "Review size override (small, medium, large). Empty defers the choice: the host measures the pinned reviewed commit against base when the review starts, so the panel fits the work actually written; pass a size to fix it now." }
 risk_tags = { type = "list", default = [], doc = "Tags that trigger conditional lenses." }
 land = { type = "integer", default = 1, min = 0, max = 1, doc = "1 lands the reviewed head; 0 stops after review and leaves the pull request open." }
 land_tier = { type = "string", default = "substantial", enum = ["routine", "substantial", "crucial", "terminal"], doc = "Risk tier the host's land policy reads: by default routine and substantial land, crucial and terminal ask." }

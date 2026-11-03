@@ -3886,15 +3886,47 @@ fn graph_review_node(document: &provenant_fabric_runtime::graph::GraphDocument, 
     })
 }
 
+/// What the host learned about a deferred review's pinned subject.
+struct ReviewMeasure {
+    routing: provenant_routing::RoutingConfig,
+    directory: PathBuf,
+    subject: provenant_core::GitOid,
+    base: provenant_core::GitOid,
+    measured: provenant_routing::Measured,
+}
+
 impl BoundGraphOwner<'_> {
+    fn review_git(&self, directory: &Path, args: &[&str]) -> Result<String, String> {
+        use provenant_os::exec::{ExecOptions, Executor, Termination};
+        let git = provenant_os::git::git_executable()
+            .ok_or_else(|| "Git executable unavailable".to_owned())?;
+        let mut argv = vec![git.into_os_string()];
+        argv.extend(args.iter().map(std::ffi::OsString::from));
+        let output = self
+            .factory
+            .executor
+            .execute(ExecOptions::new(
+                &argv,
+                directory,
+                std::time::Duration::from_secs(30),
+            ))
+            .map_err(|error| error.to_string())?;
+        if output.termination != Termination::Exit(0) || output.timed_out || output.stdout.truncated
+        {
+            return Err(format!(
+                "Git failed: {}",
+                String::from_utf8_lossy(&output.stderr.bytes).trim()
+            ));
+        }
+        String::from_utf8(output.stdout.bytes).map_err(|error| error.to_string())
+    }
+
     fn measure_review(
         &self,
         node: &provenant_fabric_runtime::graph::GraphNode,
         subject: &str,
-    ) -> Result<provenant_routing::Measured, provenant_fabric_runtime::graph::ReviewResolveError>
-    {
+    ) -> Result<ReviewMeasure, provenant_fabric_runtime::graph::ReviewResolveError> {
         use provenant_fabric_runtime::graph::ReviewResolveError;
-        use provenant_os::exec::{ExecOptions, Executor, Termination};
         let spec = node
             .review
             .as_ref()
@@ -3902,11 +3934,10 @@ impl BoundGraphOwner<'_> {
         let subject = provenant_core::GitOid::parse(subject).map_err(|error| {
             ReviewResolveError::Failed(format!("invalid pinned review subject: {error}"))
         })?;
-        let subject = subject.to_string();
         let base = self
             .integration_base
             .and_then(|bases| bases.integration.or(bases.review))
-            .map_or_else(|| subject.clone(), |base| base.to_string());
+            .unwrap_or(subject);
         let directory = spec.worktree.as_deref().map_or_else(
             || self.factory.cwd.clone(),
             |path| self.factory.cwd.join(path),
@@ -3916,36 +3947,139 @@ impl BoundGraphOwner<'_> {
                 .map_err(|error| {
                     ReviewResolveError::Failed(format!("read review configuration: {error}"))
                 })?;
-        let git = provenant_os::git::git_executable()
-            .ok_or_else(|| ReviewResolveError::Failed("Git executable unavailable".into()))?;
-        let measured =
-            routing
-                .review
-                .size
-                .measure(spec.kind.as_deref(), &base, &subject, &mut |args| {
-                    let mut argv = vec![git.clone().into_os_string()];
-                    argv.extend(args.iter().map(std::ffi::OsString::from));
-                    let output = self
-                        .factory
-                        .executor
-                        .execute(ExecOptions::new(
-                            &argv,
-                            &directory,
-                            std::time::Duration::from_secs(30),
-                        ))
-                        .map_err(|error| error.to_string())?;
-                    if output.termination != Termination::Exit(0)
-                        || output.timed_out
-                        || output.stdout.truncated
-                    {
-                        return Err(format!(
-                            "Git failed: {}",
-                            String::from_utf8_lossy(&output.stderr.bytes).trim()
-                        ));
-                    }
-                    String::from_utf8(output.stdout.bytes).map_err(|error| error.to_string())
-                });
-        Ok(measured)
+        let measured = routing.review.size.measure(
+            spec.kind.as_deref(),
+            &base.to_string(),
+            &subject.to_string(),
+            &mut |args| self.review_git(&directory, args),
+        );
+        Ok(ReviewMeasure {
+            routing,
+            directory,
+            subject,
+            base,
+            measured,
+        })
+    }
+
+    /// The lens members and composite root for a resolved panel, built from the
+    /// lowered lenses the preset stored on the deferred node. Every selected
+    /// lens runs: a family preference only labels it, and a lens the panel has
+    /// no room for is refused by name rather than dropped.
+    fn review_expansion(
+        node: &provenant_fabric_runtime::graph::GraphNode,
+        measure: &ReviewMeasure,
+        panel: &provenant_routing::PanelResolution,
+        source: String,
+    ) -> Result<
+        provenant_fabric_runtime::graph::Expansion,
+        provenant_fabric_runtime::graph::ReviewResolveError,
+    > {
+        use provenant_fabric_runtime::graph::{
+            Expansion, GraphNode, ReviewResolution, ReviewResolveError,
+        };
+        let failed = |message: String| ReviewResolveError::Failed(message);
+        let spec = node
+            .review
+            .as_ref()
+            .ok_or_else(|| failed("missing review specification".into()))?;
+        let templates = node
+            .extra
+            .get("lens_templates")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| failed("deferred review carries no lens templates".into()))?;
+        let root_id = format!("{}--review", node.id);
+        let subject = measure.subject.to_string();
+        let mut members: Vec<GraphNode> = Vec::new();
+        for slot in &panel.slots {
+            let mut template = templates
+                .get(&slot.lens)
+                .cloned()
+                .ok_or_else(|| failed(format!("no lowered lens for {}", slot.lens)))?;
+            let map = template
+                .as_object_mut()
+                .ok_or_else(|| failed(format!("lens template {} is not a table", slot.lens)))?;
+            let local = map
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| failed(format!("lens template {} has no id", slot.lens)))?
+                .to_owned();
+            let effort = map.remove("effort");
+            let read_only = map.get("access").is_none_or(|access| access == "read_only");
+            let (key, route) =
+                crate::preset::tier_route(&local, &slot.tier, effort.as_ref(), read_only)
+                    .map_err(failed)?;
+            map.insert(key.into(), route);
+            map.insert(
+                "id".into(),
+                serde_json::json!(format!("{root_id}--{local}")),
+            );
+            map.insert("depends_on".into(), serde_json::json!(node.depends_on));
+            if !node.inputs.is_empty() {
+                map.insert("inputs".into(), serde_json::json!(node.inputs));
+            }
+            if !node.read_roots.is_empty() {
+                map.insert("read_roots".into(), serde_json::json!(node.read_roots));
+            }
+            map.insert(
+                "source".into(),
+                serde_json::json!({"type":"commit","commit":subject}),
+            );
+            if slot.distinct_families {
+                map.insert(
+                    "family_group".into(),
+                    serde_json::json!(crate::preset::format_family_group(slot.group_index)),
+                );
+            }
+            let member: GraphNode = serde_json::from_value(template)
+                .map_err(|error| failed(format!("lens {} does not lower: {error}", slot.lens)))?;
+            if members.iter().any(|existing| existing.id == member.id) {
+                return Err(failed(format!("lens {} is selected twice", slot.lens)));
+            }
+            members.push(member);
+        }
+        if members.is_empty() {
+            return Err(failed("the review panel selected no lenses".into()));
+        }
+        if members.len() + 1 > spec.max_nodes {
+            return Err(failed(format!(
+                "the review panel selected {} lenses; the review allows {}",
+                members.len(),
+                spec.max_nodes.saturating_sub(1)
+            )));
+        }
+        let exports: Vec<_> = members
+            .iter()
+            .map(|member| serde_json::json!({"node": member.id, "outputs": ["result", "findings"]}))
+            .collect();
+        let root: GraphNode = serde_json::from_value(serde_json::json!({
+            "id": root_id,
+            "kind": "composite",
+            "access": "read_only",
+            "depends_on": node.depends_on,
+            "composite": {
+                "min_successful": spec.min_successful,
+                "nodes": [],
+                "exports": exports,
+            },
+        }))
+        .map_err(|error| failed(format!("review composite does not lower: {error}")))?;
+        let mut nodes = vec![root];
+        nodes.extend(members);
+        Ok(Expansion {
+            review: Some(ReviewResolution {
+                subject: measure.subject,
+                base: measure.base,
+                measured_size: measure.measured.size.unwrap_or("unknown").to_owned(),
+                shape: panel.shape.clone(),
+                source,
+            }),
+            extra: Default::default(),
+            source: node.id.clone(),
+            continuation: false,
+            nodes,
+            patterns: Vec::new(),
+        })
     }
 }
 
@@ -3960,11 +4094,82 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         provenant_fabric_runtime::graph::Expansion,
         provenant_fabric_runtime::graph::ReviewResolveError,
     > {
-        let measured = self.measure_review(node, subject)?;
-        // TODO(lane D): pass the measurement and pinned inputs to resolve_panel
-        // and construct the journalled expansion once the routing API lands.
-        let _ = measured;
-        Err(provenant_fabric_runtime::graph::ReviewResolveError::Unsupported)
+        use provenant_fabric_runtime::graph::ReviewResolveError;
+        let measure = self.measure_review(node, subject)?;
+        let spec = node
+            .review
+            .as_ref()
+            .ok_or_else(|| ReviewResolveError::Failed("missing review specification".into()))?;
+        // Changed paths and test markers add lenses; a failed read only costs
+        // those additions, and the reason is recorded with the resolution.
+        let mut warnings: Vec<String> = measure.measured.warning.iter().cloned().collect();
+        let (mut paths, mut marker) = (Vec::new(), false);
+        let range = format!("{}...{}", measure.base, measure.subject);
+        if measure.base != measure.subject {
+            match self.review_git(
+                &measure.directory,
+                &["diff", "--no-renames", "--name-only", "-z", &range, "--"],
+            ) {
+                Ok(out) => {
+                    paths = out
+                        .split('\0')
+                        .filter(|path| !path.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                }
+                Err(error) => warnings.push(format!("cannot read changed paths: {error}")),
+            }
+            match self.review_git(
+                &measure.directory,
+                &["diff", "--no-ext-diff", "--unified=0", &range, "--"],
+            ) {
+                Ok(out) => marker = provenant_routing::diff_has_test_markers(&out),
+                Err(error) => warnings.push(format!("cannot scan test markers: {error}")),
+            }
+        }
+        let request = provenant_routing::ReviewRequest {
+            shape: spec.shape.clone(),
+            risk_tier: spec.risk_tier.clone(),
+            kind: spec.kind.clone(),
+            size: spec.size.clone(),
+            risk_tags: spec.risk_tags.clone(),
+            lenses: spec
+                .lenses
+                .iter()
+                .map(|lens| provenant_routing::ReviewLens {
+                    name: lens.name.clone(),
+                    when: lens.when.clone(),
+                    tier: lens.tier.clone(),
+                })
+                .collect(),
+        };
+        let panel = measure
+            .routing
+            .review
+            .resolve_panel(&request, measure.measured.size, &paths, marker)
+            .map_err(ReviewResolveError::Failed)?;
+        let mut source = format!(
+            "{}; size={}; kind={}; risk={}",
+            panel.source,
+            spec.size
+                .as_deref()
+                .or(measure.measured.size)
+                .unwrap_or("unknown"),
+            spec.kind.as_deref().unwrap_or("unknown"),
+            spec.risk_tier.as_deref().unwrap_or("unknown"),
+        );
+        if !panel.omitted.is_empty() {
+            let omitted: Vec<String> = panel
+                .omitted
+                .iter()
+                .map(|lens| format!("{} ({})", lens.lens, lens.reason))
+                .collect();
+            source.push_str(&format!("; omitted={}", omitted.join(", ")));
+        }
+        if !warnings.is_empty() {
+            source.push_str(&format!("; warnings={}", warnings.join(" | ")));
+        }
+        Self::review_expansion(node, &measure, &panel, source)
     }
 
     fn attempt_models(&mut self, attempts: &[String]) -> Result<Vec<String>, Self::Error> {

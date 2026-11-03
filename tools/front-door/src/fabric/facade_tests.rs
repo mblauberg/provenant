@@ -1951,9 +1951,77 @@ mod peer_tests {
             "review":{"shape":null,"risk_tier":null,"kind":null,"size":null,"risk_tags":[],"worktree":null,"lenses":[],"min_successful":null,"max_nodes":5}
         }))?;
         let measured = bound.measure_review(&review_node, &head)?;
-        assert_eq!(measured.size, Some("small"));
-        assert!(measured.warning.is_none(), "{measured:?}");
-        assert!(matches!(bound.resolve_review(&review_node, &head), Err(graph::ReviewResolveError::Unsupported)));
+        assert_eq!(measured.measured.size, Some("small"));
+        assert!(measured.measured.warning.is_none(), "{:?}", measured.measured);
+        // A deferred council resolves from the diff at the pinned subject: the
+        // small change is `quick`, a risk floor raises it, and a large one is `deep`.
+        let names = [
+            "correctness-spec", "tests", "design-fit-reuse", "simplicity", "conventions-readability",
+            "refactor-cleanup", "reliability", "flexibility", "security-privacy",
+            "concurrency-data-errors", "adversarial",
+        ];
+        let templates: serde_json::Map<String, serde_json::Value> = names.iter().map(|name| {
+            (name.to_string(), serde_json::json!({
+                "id": format!("lens-{name}"), "access": "read_only", "prompt": "lens",
+                "role": format!("lens.{name}"),
+            }))
+        }).collect();
+        let deferred = |risk: Option<&str>, lenses: serde_json::Value| -> Result<graph::GraphNode, Box<dyn std::error::Error>> {
+            Ok(serde_json::from_value(serde_json::json!({
+                "id":"review", "kind":"plan", "access":"read_only", "prompt":"review",
+                "depends_on":["subject"], "read_roots":["/repo/lane"],
+                "inputs":[{"node":"subject","outputs":["result"]}],
+                "review":{"shape":null,"risk_tier":risk,"kind":null,"size":null,"risk_tags":[],"worktree":null,"lenses":lenses,"min_successful":1,"max_nodes":13},
+                "lens_templates": templates,
+            }))?)
+        };
+        let small = bound.resolve_review(&deferred(None, serde_json::json!([]))?, &head)?;
+        let record = small.review.as_ref().ok_or("review resolution missing")?;
+        assert_eq!((record.shape.as_str(), record.measured_size.as_str()), ("quick", "small"));
+        assert_eq!((record.subject.to_string(), record.base), (head.clone(), base));
+        assert_eq!(small.source, "review");
+        assert_eq!(small.nodes[0].id, "review--review");
+        assert_eq!(small.nodes.len(), 2);
+        let lens = &small.nodes[1];
+        assert_eq!(lens.id, "review--review--lens-correctness-spec");
+        // A read-only alias repeats so a usage-limited first member falls back.
+        assert_eq!(lens.routes.as_ref().map(Vec::len), Some(2));
+        assert_eq!(lens.depends_on, ["subject"]);
+        assert_eq!(lens.read_roots, ["/repo/lane"]);
+        assert!(matches!(&lens.source, Some(graph::SourceBinding::Commit { commit }) if *commit == head));
+        let floored = bound.resolve_review(&deferred(Some("crucial"), serde_json::json!([]))?, &head)?;
+        let record = floored.review.as_ref().ok_or("review resolution missing")?;
+        assert_eq!((record.shape.as_str(), record.measured_size.as_str()), ("deep", "small"));
+        assert!(floored.nodes.len() > 2);
+        // Three standard-shape lenses share one family group. The label only
+        // steers routes: every lens is still a member of the panel.
+        let mut standard = deferred(None, serde_json::json!([]))?;
+        standard.review.as_mut().ok_or("review spec missing")?.shape = Some("standard".into());
+        let standard = bound.resolve_review(&standard, &head)?;
+        let members = &standard.nodes[1..];
+        assert_eq!(members.len(), 3);
+        let group = members[0].family_group.clone().ok_or("family group missing")?;
+        assert!(members.iter().all(|member| member.family_group.as_ref() == Some(&group)));
+        // An exact-model lens tier is that model on one route, with no repeat.
+        let exact = bound.resolve_review(&deferred(None, serde_json::json!([{"name":"tests","when":null,"tier":"codex/gpt-6@high"}]))?, &head)?;
+        let route = exact.nodes[1].route.as_ref().ok_or("exact route missing")?;
+        assert_eq!((route.adapter.as_deref(), route.model.as_deref(), route.effort.as_deref()), (Some("codex"), Some("gpt-6"), Some("high")));
+        // A lens with no lowered template is refused by name.
+        let mut missing = deferred(None, serde_json::json!([]))?;
+        missing.extra.insert("lens_templates".into(), serde_json::json!({}));
+        let error = bound.resolve_review(&missing, &head).err().ok_or("missing template accepted")?;
+        assert!(error.to_string().contains("correctness-spec"), "{error}");
+        for index in 0..20 {
+            std::fs::write(fixture.rig.project.join(format!("wide-{index}.txt")), "wide\n")?;
+        }
+        for args in [vec!["add", "-A"], vec!["commit", "-qm", "Wide change"]] {
+            let output = fixture.rig.execute(&git, &args, None)?;
+            assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        }
+        let wide = String::from_utf8(fixture.rig.execute(&git, &["rev-parse", "HEAD"], None)?.stdout.bytes)?.trim().to_owned();
+        let large = bound.resolve_review(&deferred(None, serde_json::json!([]))?, &wide)?;
+        let record = large.review.as_ref().ok_or("review resolution missing")?;
+        assert_eq!((record.shape.as_str(), record.measured_size.as_str()), ("deep", "large"));
         for (id, reference, expected) in [("review-base", "old-review", base_text.as_str()), ("empty-review-base", "", head.as_str())] {
             let path = fixture.rig.project.join(format!("{id}.json"));
             std::fs::write(&path, serde_json::to_vec(&serde_json::json!({

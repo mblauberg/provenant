@@ -18,6 +18,7 @@ mod panel;
 #[cfg(test)]
 #[allow(unused_imports, reason = "preset tests construct a selector result")]
 pub use panel::ShapeHint;
+pub(crate) use panel::format_family_group;
 pub use panel::{ShapeSelector, review_selector};
 
 #[derive(Default)]
@@ -26,6 +27,8 @@ pub struct Layers {
     /// final `review_shape` and `risk_tier` parameters.
     pub review: Option<ShapeSelector>,
     used_shapes: std::cell::RefCell<BTreeSet<String>>,
+    /// Bases of the deferred reviews this expansion emitted; a graph has one.
+    review_bases: std::cell::RefCell<BTreeSet<String>>,
     /// The role library: bundled roles, then user and repository `roles.toml`.
     pub roles: RoleLibrary,
     /// Named routes the routing configuration defines. `None` skips the
@@ -832,6 +835,7 @@ pub fn expand_with(
                 .map(|expansion| expansion.document["nodes"].clone())
         });
     layers.used_shapes.borrow_mut().clear();
+    layers.review_bases.borrow_mut().clear();
     layers.used_roles.borrow_mut().clear();
     layers.substitutions.borrow_mut().clear();
     layers.warnings.borrow_mut().clear();
@@ -914,7 +918,20 @@ pub fn expand_with(
     let id = format!("preset-{}", &digest[7..39]);
     check_expansion(&nodes, "", 0)?;
     check_selections(&nodes)?;
-    let mut document = json!({"schema_version":1,"graph_id":id,"context":{"preset":name,"pattern":name},"nodes":nodes});
+    // Only a graph that states a review field is schema 2; every other preset
+    // keeps its v1 document and digest.
+    let schema_version = if carries_review_field(&nodes) { 2 } else { 1 };
+    let mut document = json!({"schema_version":schema_version,"graph_id":id,"context":{"preset":name,"pattern":name},"nodes":nodes});
+    let bases = layers.review_bases.take();
+    if bases.len() > 1 {
+        return Err(format!(
+            "preset {name}: review stages disagree on the base ({}); a graph has one review base",
+            bases.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    if let Some(base) = bases.into_iter().next() {
+        document["review_base"] = json!(base);
+    }
     let parameters = flatten_parameters(
         name,
         config.get("parameters").unwrap_or(&json!({})),
@@ -998,6 +1015,23 @@ pub fn expand_with(
         warnings,
         plan,
     })
+}
+
+/// Whether any node, at any depth, uses a schema 2 review field.
+fn carries_review_field(nodes: &[Value]) -> bool {
+    fn walk(value: &Value) -> bool {
+        match value {
+            Value::Object(map) => {
+                map.contains_key("family_group")
+                    || (map.get("kind").is_some_and(|kind| kind == "plan")
+                        && map.get("review").is_some_and(Value::is_object))
+                    || map.values().any(walk)
+            }
+            Value::Array(list) => list.iter().any(walk),
+            _ => false,
+        }
+    }
+    nodes.iter().any(walk)
 }
 
 const LAND_TIERS: [&str; 4] = ["routine", "substantial", "crucial", "terminal"];
@@ -1308,6 +1342,7 @@ fn lower_leaf(
             "require_findings",
             "continues",
             "land",
+            "family_group",
         ]
         .contains(&key.as_str())
         {
@@ -1552,50 +1587,9 @@ fn lower_leaf(
                     .cloned()
                     .unwrap_or_else(|| json!("senior"))
             });
-            if route.is_array() {
-                if effort.is_some() {
-                    return Err(format!(
-                        "node {id}: route lists cannot be combined with effort"
-                    ));
-                }
-                map.insert("routes".into(), route);
-            } else {
-                let mut route = match route {
-                    Value::String(name) if !name.is_empty() => {
-                        if let Some((adapter, model)) = name.split_once('/') {
-                            let (model, embedded_effort) = model
-                                .split_once('@')
-                                .map_or((model, None), |(model, effort)| (model, Some(effort)));
-                            if adapter.is_empty() || model.is_empty() || embedded_effort == Some("")
-                            {
-                                return Err(format!("node {id}: invalid exact-model tier {name}"));
-                            }
-                            if embedded_effort.is_some() && effort.is_some() {
-                                return Err(format!(
-                                    "node {id}: exact-model tier and effort both specify effort"
-                                ));
-                            }
-                            let mut route = json!({"adapter":adapter,"model":model});
-                            if let Some(embedded_effort) = embedded_effort {
-                                route["effort"] = json!(embedded_effort);
-                            }
-                            route
-                        } else {
-                            json!({"alias":name})
-                        }
-                    }
-                    Value::Object(_) => route,
-                    _ => {
-                        return Err(format!(
-                            "node {id}: tier must be a name, route table or route list"
-                        ));
-                    }
-                };
-                if let Some(effort) = effort {
-                    route["effort"] = effort;
-                }
-                map.insert("route".into(), route);
-            }
+            let read_only = map.get("access").is_none_or(|access| access == "read_only");
+            let (key, value) = tier_route(id, &route, effort.as_ref(), read_only)?;
+            map.insert(key.into(), value);
         }
     } else {
         map.remove("tier");
@@ -1653,6 +1647,74 @@ fn lower_leaf(
         }
     }
     Ok(node)
+}
+
+/// Lower a tier (a pool name, an exact `ADAPTER/ID[@effort]`, a route table or
+/// a route list) to the `route` or `routes` entry a node carries. A read-only
+/// pool name repeats once, so a usage-limited first member falls back to the
+/// next resolution. Writers keep one entry. A route table that names neither
+/// an alias nor an adapter and model is refused rather than dropped.
+pub(crate) fn tier_route(
+    id: &str,
+    tier: &Value,
+    effort: Option<&Value>,
+    read_only: bool,
+) -> Result<(&'static str, Value), String> {
+    if tier.is_array() {
+        if effort.is_some() {
+            return Err(format!(
+                "node {id}: route lists cannot be combined with effort"
+            ));
+        }
+        return Ok(("routes", tier.clone()));
+    }
+    let mut route = match tier {
+        Value::String(name) if !name.is_empty() => {
+            if let Some((adapter, model)) = name.split_once('/') {
+                let (model, embedded_effort) = model
+                    .split_once('@')
+                    .map_or((model, None), |(model, effort)| (model, Some(effort)));
+                if adapter.is_empty() || model.is_empty() || embedded_effort == Some("") {
+                    return Err(format!("node {id}: invalid exact-model tier {name}"));
+                }
+                if embedded_effort.is_some() && effort.is_some() {
+                    return Err(format!(
+                        "node {id}: exact-model tier and effort both specify effort"
+                    ));
+                }
+                let mut route = json!({"adapter":adapter,"model":model});
+                if let Some(embedded_effort) = embedded_effort {
+                    route["effort"] = json!(embedded_effort);
+                }
+                route
+            } else {
+                json!({"alias":name})
+            }
+        }
+        Value::Object(table) => {
+            let named = |key: &str| table.get(key).is_some_and(|value| value.is_string());
+            if !named("alias") && !(named("adapter") && named("model")) {
+                return Err(format!(
+                    "node {id}: route table needs an alias, or an adapter and a model"
+                ));
+            }
+            tier.clone()
+        }
+        _ => {
+            return Err(format!(
+                "node {id}: tier must be a name, route table or route list"
+            ));
+        }
+    };
+    if let Some(effort) = effort {
+        route["effort"] = effort.clone();
+    }
+    let alias_only = route.get("alias").is_some() && route.get("model").is_none();
+    if read_only && alias_only {
+        Ok(("routes", json!([route.clone(), route])))
+    } else {
+        Ok(("route", route))
+    }
 }
 
 #[allow(
@@ -1853,6 +1915,7 @@ impl StageBuilder<'_> {
             object.remove("for_each");
             object.remove("id");
             let fallback_stage = object.remove("fallback_stage");
+            let distinct_families = object.remove("distinct_families");
             let outputs = interpolate(
                 object.get("outputs").unwrap_or(&json!(["result"])),
                 &self.parameters,
@@ -2027,28 +2090,36 @@ impl StageBuilder<'_> {
                     .as_array()
                     .filter(|entries| !entries.is_empty())
                     .ok_or("parallel must be a nonempty array")?;
-                let mut children = Vec::new();
-                let mut ends = Vec::new();
-                for (position, entry) in entries.iter().enumerate() {
-                    ends.extend(self.entry(
-                        entry,
-                        &format!("p{}", position + 1),
-                        &[],
-                        &mut children,
-                        depth + 1,
-                    )?);
+                if let Some(deferred) =
+                    self.deferred_review(&id, entries, &object, deps, &outputs, depth)?
+                {
+                    object.remove("min_successful");
+                    object.remove("exports");
+                    (deferred, true)
+                } else {
+                    let mut children = Vec::new();
+                    let mut ends = Vec::new();
+                    for (position, entry) in entries.iter().enumerate() {
+                        ends.extend(self.entry(
+                            entry,
+                            &format!("p{}", position + 1),
+                            &[],
+                            &mut children,
+                            depth + 1,
+                        )?);
+                    }
+                    let exports = object
+                        .remove("exports")
+                        .unwrap_or_else(|| selected_inputs(&ends, &json!(["result", "findings"])));
+                    let min_successful = object
+                        .remove("min_successful")
+                        .map(|value| self.minimum_successful(&value))
+                        .transpose()?;
+                    (
+                        composite(&id, children, exports, deps, &outputs, min_successful),
+                        true,
+                    )
                 }
-                let exports = object
-                    .remove("exports")
-                    .unwrap_or_else(|| selected_inputs(&ends, &json!(["result", "findings"])));
-                let min_successful = object
-                    .remove("min_successful")
-                    .map(|value| self.minimum_successful(&value))
-                    .transpose()?;
-                (
-                    composite(&id, children, exports, deps, &outputs, min_successful),
-                    true,
-                )
             } else if let Some(stages) = object.remove("stages") {
                 let mut children = Vec::new();
                 let ends = self.sequence(&stages, "", &[], &mut children, depth + 1)?;
@@ -2074,6 +2145,25 @@ impl StageBuilder<'_> {
                     false,
                 )
             };
+            // Siblings of a fan-out prefer different model families. It is a
+            // preference only: every branch still runs.
+            if let Some(flag) = distinct_families {
+                let on = interpolate(&flag, &self.parameters, self.prompt, index as usize)?;
+                match on {
+                    Value::Bool(true) if !decorate_wrapper => {
+                        if count > 1 {
+                            node["family_group"] = json!(base);
+                        }
+                    }
+                    Value::Bool(false) => {}
+                    Value::String(ref text) if text.is_empty() => {}
+                    _ => {
+                        return Err(format!(
+                            "stage {id}: distinct_families must be a boolean on a leaf stage"
+                        ));
+                    }
+                }
+            }
             if decorate_wrapper {
                 object.remove("outputs");
                 for key in object.keys() {
@@ -2632,6 +2722,19 @@ pub(crate) fn bind_run_context(
         let container = node.get("composite").is_some() || node.get("loop").is_some();
         if !container && !matches!(node["kind"].as_str(), Some("gate" | "land" | "decide")) {
             let writer = node["access"] == "worktree_write";
+            // A deferred review measures in the bound worktree unless it names one.
+            if let Some(worktree) = &request.access.worktree
+                && node.get("review").is_some_and(Value::is_object)
+                && node["review"]["worktree"]
+                    .as_str()
+                    .is_none_or(str::is_empty)
+            {
+                node["review"]["worktree"] = json!(if worktree.is_absolute() {
+                    worktree.clone()
+                } else {
+                    directory.join(worktree)
+                });
+            }
             if writer
                 && node
                     .get("worktree")
@@ -2754,6 +2857,19 @@ pub(crate) fn bind_run_context(
             .map(|oid| oid.to_string())
             .unwrap_or_else(|_| "absent".into());
         identity.extend_from_slice(format!("\nintegration-head:{head}").as_bytes());
+    }
+    // `--fresh` makes this run a new graph even when its inputs are unchanged,
+    // for example to rerun after a cancel.
+    if request.fresh {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        use provenant_core::Clock;
+        let nanos = provenant_os::clock::SystemClock::new()
+            .wall_now()
+            .map_or(0, |now| now.as_timestamp().as_nanosecond());
+        let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        identity.extend_from_slice(
+            format!("\nfresh:{nanos}:{}:{count}", std::process::id()).as_bytes(),
+        );
     }
     let digest = provenant_records::CanonicalV1::file_digest(&identity).to_string();
     let graph_id = format!("preset-{}", &digest[7..39]);

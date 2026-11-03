@@ -696,6 +696,54 @@ fn preset_wait_completes_a_retained_gate_graph_and_replays_it()
 }
 
 #[test]
+fn fresh_gives_a_rerun_a_new_graph_id_and_a_plain_rerun_the_same_one()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    let prompt = project.join("brief");
+    std::fs::write(&prompt, "look at it twice")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let graph_id = |extra: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
+        let output = fixture_cli()
+            .current_dir(&project)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["--json", "--state-dir"])
+            .arg(temp.path().join("state"))
+            .args(["run", "--preset", "fan-out", "--prompt-file"])
+            .arg(&prompt)
+            .arg("--explain")
+            .args(extra)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        Ok(value["data"]["graph"]["graph_id"]
+            .as_str()
+            .ok_or("graph id missing")?
+            .to_owned())
+    };
+    let plain = graph_id(&[])?;
+    assert_eq!(plain, graph_id(&[])?);
+    let fresh = graph_id(&["--fresh"])?;
+    assert_ne!(plain, fresh);
+    assert_ne!(fresh, graph_id(&["--fresh"])?);
+    // The flag is a preset option, like --set.
+    let output = fixture_cli()
+        .current_dir(&project)
+        .env("PROVENANT_ROOT", &root)
+        .args(["run", "--fresh", "--prompt-file"])
+        .arg(&prompt)
+        .output()?;
+    assert!(!output.status.success());
+    Ok(())
+}
+
+#[test]
 fn explain_pins_source_refs_before_hashing_without_creating_state()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
