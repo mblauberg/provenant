@@ -174,7 +174,8 @@ pub(super) fn candidates<'a>(
         for mut id in ids {
             // Settlement may have queued a successor after the selection read.
             // Keep the original receipt and wait for its current policy tail.
-            for _ in 0..9 {
+            // A policy chain holds at most POLICY_ATTEMPT_CEILING attempts.
+            for _ in 0..=provenant_run::POLICY_ATTEMPT_CEILING {
                 let lane = session.service().status_for_wait(id, &call)?;
                 if included.insert(id)
                     && (picks.label.is_none() || lane.verified_owner == Some(picks.owner))

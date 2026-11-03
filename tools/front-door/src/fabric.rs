@@ -1723,6 +1723,30 @@ impl BinaryRunOwner<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<provenant_records::run::AttemptRecord, FacadeError> {
+        // One pass lists the run, then reads each candidate's state, so a
+        // successor queued after the list read is invisible to that pass. Settlement
+        // commits a terminal state and its successor together, so a later pass that
+        // lists after the earlier pass's read and finds the same tail proves the
+        // earlier record has no successor. Return that earlier record.
+        let mut previous: Option<provenant_records::run::AttemptRecord> = None;
+        for _ in 0..=provenant_run::POLICY_ATTEMPT_CEILING {
+            let tail = self.graph_policy_tail_remote_pass(target.clone(), budget, cancel)?;
+            if let Some(earlier) = previous.take()
+                && earlier.attempt_id == tail.attempt_id
+            {
+                return Ok(earlier);
+            }
+            previous = Some(tail);
+        }
+        Err(FacadeError::StateCorrupt)
+    }
+
+    fn graph_policy_tail_remote_pass(
+        &self,
+        target: AttemptTarget,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<provenant_records::run::AttemptRecord, FacadeError> {
         let host = target.host.ok_or(FacadeError::InvalidInput)?;
         let mut current = self.snapshot(target.clone(), budget, cancel)?;
         let mut candidates = std::collections::BTreeMap::new();
