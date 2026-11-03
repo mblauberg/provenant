@@ -1,6 +1,7 @@
 # Maintaining Provenant
 
-Read [`AGENTS.md`](AGENTS.md), [`HARNESS.md`](HARNESS.md) and
+Read [`AGENTS.md`](AGENTS.md), [`GLOBAL-AGENTS.md`](GLOBAL-AGENTS.md),
+[`HARNESS.md`](HARNESS.md) and
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) before changing the harness.
 Inspect the live diff and preserve unrelated work. `HARNESS.md` owns lifecycle,
 risk, authority, orchestration, review policy and user gates;
@@ -75,7 +76,7 @@ This repository is loaded by multiple agent platforms. A convenient
 Claude-only or Codex-only change is a regression unless the approved scope is
 platform-specific.
 
-Changes to the ambient `AGENTS.md` or `HARNESS.md` apply from the next session.
+Changes to the ambient `GLOBAL-AGENTS.md` or `HARNESS.md` apply from the next session.
 A live session retains the prior constitution until restart.
 
 ## Documentation tiers
@@ -91,7 +92,7 @@ Documentation claims sit in three tiers, and the third is deliberate:
    unbound projections, skill-reference links and other links remain
    review-owned.
    `HARNESS.md` stays compact because it is read before cross-provider dispatch,
-   risk-tier, authority or memory decisions; see [`AGENTS.md`](AGENTS.md).
+   risk-tier, authority or memory decisions; see [`GLOBAL-AGENTS.md`](GLOBAL-AGENTS.md).
 3. **Unchecked prose.** Design intent and rationale carry no machine gate,
    on purpose; review keeps them honest, not tooling.
 
@@ -100,8 +101,9 @@ Documentation claims sit in three tiers, and the third is deliberate:
 These rules keep the always-loaded files small. They are review-owned; the
 Harness asset checks enforce the machine-checkable subset.
 
-1. `AGENTS.md` and `HARNESS.md` are the only ambient doctrine owners.
-   `AGENTS.md` stays minimal; `HARNESS.md` is the compact constitution for
+1. `GLOBAL-AGENTS.md` and `HARNESS.md` are the ambient doctrine sources,
+   installed as `AGENTS.md` and `HARNESS.md`.
+   `GLOBAL-AGENTS.md` stays minimal; `HARNESS.md` is the compact constitution for
    topology, lifecycle, user gates, risk, Git, routing and memory. A
    provider-bootstrap import shim, such as `CLAUDE.md`, may point only to
    those owners and adds no policy.
@@ -110,13 +112,12 @@ Harness asset checks enforce the machine-checkable subset.
    `deliver`. Ambient files name skills, then load depth only when triggered.
 3. Nothing outside an owning skill names a file under its `references/`
    directory. Cross-skill references use the skill name only.
-4. `AGENTS.md` and `HARNESS.md` contain no repository-relative `docs/`,
-   `config/` or `scripts/` paths, with one deliberate exception: the
-   `AGENTS.md` link to `docs/runbooks/shell-pitfalls.md`. Runnable commands are
-   PATH-resolved. Fabric identity derives from the working directory.
+4. `GLOBAL-AGENTS.md` and `HARNESS.md` contain no repository-relative `docs/`,
+   `config/` or `scripts/` paths. Runnable commands are PATH-resolved. Fabric
+   identity derives from the working directory.
 5. `HARNESS.md` is the sole ambient skill resolver. It states that skills
    install into each configured harness's skills directory and names no
-   harness root; `AGENTS.md` names neither an installed root nor an instance
+   harness root; `GLOBAL-AGENTS.md` names neither an installed root nor an instance
    skill directory. A named skill loads its `SKILL.md` and is
    binding, while provider-native discovery may implement resolution.
 6. Ambient files carry no dates. Git records revision provenance.

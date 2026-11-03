@@ -3,6 +3,125 @@ use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 
+#[test]
+fn fragments_cannot_inject_persisted_topology_through_extra_fields() {
+    for field in ["composite_members", "after_expansion"] {
+        let mut child = slice("injected", &[]);
+        child[field] = json!(["plan--missing"]);
+        let output = result(vec![child]);
+        let run = advance(&planner(1), &mut fixture_owner(&[&output]), &mut MemoryJournal::default()).unwrap();
+        assert!(run.checkpoint.expansions.is_empty());
+        assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+        assert!(run.checkpoint.pause_reason.as_deref().unwrap().contains("computed topology fields are reserved"));
+    }
+}
+
+#[test]
+fn raw_expansion_rejects_each_injected_topology_field() {
+    let doc = planner(2);
+    let output = result(vec![slice("child", &[])]);
+    let mut owner = fixture_owner(&[&output]);
+    owner.observations.push_back(AttemptObservation::Pending { attempt_ref: None });
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let wire = serde_json::to_value(&run.checkpoint).unwrap();
+    for field in ["composite_members", "after_expansion"] {
+        let mut tampered = wire.clone();
+        let node = &mut tampered["expansions"][0]["nodes"][0];
+        let id = node["id"].as_str().unwrap().to_owned();
+        node[field] = json!(["plan--injected"]);
+        let mut journal = MemoryJournal(Some(serde_json::from_value(tampered).unwrap()));
+        let error = advance(&doc, &mut fixture_owner(&[]), &mut journal).unwrap_err();
+        assert_eq!(error.code(), "bad_checkpoint");
+        assert!(error.to_string().contains(&id), "{error}");
+        assert!(error.to_string().contains(&format!("persisted {field} must match the approved topology")), "{error}");
+    }
+}
+
+#[test]
+fn planned_fan_out_survives_checkpoint_json_and_mixed_settlement() {
+    for (fallback, legacy) in [(false, false), (true, false), (false, true), (true, true)] {
+        let mut doc = planner(8);
+        let leaves: Vec<_> = (0..4).map(|i| json!({
+            "id": format!("lens{i}"), "access":"read_only", "prompt":"Review",
+            "route":{"alias":"senior"}, "acceptance_checks":["Review"]
+        })).collect();
+        let exports: Vec<_> = (0..4).map(|i| json!({"node":format!("lens{i}"),"outputs":["result"]})).collect();
+        let planner_result = if fallback {
+            doc.nodes[0].plan.as_mut().unwrap().fallback = Some(serde_json::from_value(json!({
+                "nodes":leaves, "exports":exports, "min_successful":1
+            })).unwrap());
+            "invalid fragment".to_owned()
+        } else {
+            doc.nodes[0].plan.as_mut().unwrap().patterns = vec![serde_json::from_value(json!({
+                "name":"lens", "nodes":[leaves[0]], "exports":[exports[0]]
+            })).unwrap()];
+            format!("```fragment\n{}\n```", json!({"schema_version":1,"nodes":[],"patterns":
+                (0..4).map(|i| json!({"id":format!("lens{i}"),"pattern":"lens"})).collect::<Vec<_>>()
+            }))
+        };
+        let mut owner = fixture_owner(&[&planner_result]);
+        owner.observations.extend((0..4).map(|_| AttemptObservation::Pending { attempt_ref: None }));
+        let mut journal = MemoryJournal::default();
+        let pending = advance(&doc, &mut owner, &mut journal).unwrap();
+        assert_eq!(pending.status, GraphStatus::Pending);
+        assert_eq!(pending.checkpoint.expansions.len(), 1);
+        assert_eq!(pending.checkpoint.nodes.iter().find(|n| n.id == "after").unwrap().state, NodeState::Pending);
+        let mut wire = serde_json::to_value(&pending.checkpoint).unwrap();
+        if !legacy {
+            let nodes = wire["expansions"][0]["nodes"].as_array().unwrap();
+            let boundary = nodes.iter().position(|node| node.get("composite").is_some()).unwrap();
+            let member = nodes.iter().position(|node| node.get("composite").is_none()).unwrap();
+            for (index, field, value) in [
+                (boundary, "composite_members", json!(["plan--tampered"])),
+                (boundary, "after_expansion", json!(["plan--tampered"])),
+                (boundary, "composite_members", json!([])),
+                (boundary, "after_expansion", json!([])),
+                (member, "composite_members", json!(["plan--tampered"])),
+                (member, "after_expansion", json!(["plan--tampered"])),
+            ] {
+                let mut tampered = wire.clone();
+                let node = &mut tampered["expansions"][0]["nodes"][index];
+                let id = node["id"].as_str().unwrap().to_owned();
+                node[field] = value;
+                journal.0 = Some(serde_json::from_value(tampered).unwrap());
+                let error = advance(&doc, &mut fixture_owner(&[]), &mut journal).unwrap_err();
+                assert_eq!(error.code(), "bad_checkpoint");
+                assert!(error.to_string().contains(&id), "{error}");
+                assert!(error.to_string().contains(&format!("persisted {field} must match the approved topology")), "{error}");
+            }
+        }
+        if legacy {
+            for node in wire["expansions"][0]["nodes"].as_array_mut().unwrap() {
+                node.as_object_mut().unwrap().remove("composite_members");
+                node.as_object_mut().unwrap().remove("after_expansion");
+            }
+        }
+        journal.0 = Some(serde_json::from_value(wire).unwrap());
+        let valid = journal.0.clone().unwrap();
+        let boundary = valid.nodes.iter().position(|n| !n.children.is_empty()).unwrap();
+        journal.0.as_mut().unwrap().nodes[boundary].children.clear();
+        let error = advance(&doc, &mut fixture_owner(&[]), &mut journal).unwrap_err();
+        assert_eq!(error.code(), "bad_checkpoint");
+        assert!(error.to_string().contains(&valid.nodes[boundary].id), "{error}");
+        assert!(error.to_string().contains("composite children must match expanded plan membership"), "{error}");
+        journal.0 = Some(valid);
+        let mut owner = FakeOwner { observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, "review passed"),
+            terminal(AttemptOutcome::OtherFailure),
+            terminal(AttemptOutcome::UsageLimited),
+            terminal(AttemptOutcome::UsageLimited),
+        ].into(), ..Default::default() };
+        let run = if legacy { resume(&doc, &mut owner, &mut journal) }
+            else { advance(&doc, &mut owner, &mut journal) }.unwrap();
+        assert_eq!(run.status, GraphStatus::Complete, "fallback={fallback}, legacy={legacy}");
+        assert!(run.checkpoint.nodes.iter().all(|n| n.state.settled()));
+        assert_eq!(run.checkpoint.nodes.iter().find(|n| n.id == "after").unwrap().state, NodeState::Blocked);
+        assert!(run.checkpoint.nodes.iter().any(|n| n.advance_error_code.as_deref() == Some("usage_limited")));
+        journal.0 = Some(serde_json::from_slice(&serde_json::to_vec(&run.checkpoint).unwrap()).unwrap());
+        assert_eq!(advance(&doc, &mut fixture_owner(&[]), &mut journal).unwrap().checkpoint, run.checkpoint);
+    }
+}
+
 fn planner(max_nodes: usize) -> GraphDocument {
     serde_json::from_value(json!({
         "schema_version":1, "graph_id":"planned", "nodes":[
@@ -258,7 +377,7 @@ fn restart_rejects_a_fallback_expansion_that_differs_from_the_spec() {
     checkpoint.expansions[0].nodes[0].prompt = "Tampered step".into();
     journal.0 = Some(checkpoint);
     let result = advance(&document, &mut fixture_owner(&[]), &mut journal);
-    assert!(matches!(result, Err(GraphError::BadCheckpoint)), "{:?}", result.map(|run| run.status));
+    assert!(matches!(result, Err(GraphError::BadCheckpoint { .. })), "{:?}", result.map(|run| run.status));
 }
 
 #[test]

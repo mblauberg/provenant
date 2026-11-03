@@ -118,9 +118,87 @@ pub struct Expansion {
     pub extra: provenant_records::ExtraFields,
     pub source: String,
     pub continuation: bool,
+    #[serde(with = "expanded_nodes")]
     pub nodes: Vec<GraphNode>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub patterns: Vec<PatternInstantiation>,
+}
+
+// Documents and untrusted fragments cannot set computed topology. Flattened
+// expansion records, however, must retain it across a journal JSON round trip.
+mod expanded_nodes {
+    use super::*;
+
+    #[derive(Serialize)]
+    struct Borrowed<'a> {
+        #[serde(flatten)]
+        node: &'a GraphNode,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        composite_members: Option<&'a Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        after_expansion: Option<&'a Vec<String>>,
+    }
+
+    #[derive(Deserialize)]
+    struct Owned {
+        #[serde(flatten)]
+        node: GraphNode,
+        #[serde(default, deserialize_with = "present_vec")]
+        composite_members: Option<Vec<String>>,
+        #[serde(default, deserialize_with = "present_vec")]
+        after_expansion: Option<Vec<String>>,
+    }
+
+    fn present_vec<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Vec<String>>, D::Error> {
+        Vec::deserialize(deserializer).map(Some)
+    }
+
+    pub(super) fn serialize<S: serde::Serializer>(
+        nodes: &[GraphNode],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        if let Some(node) = nodes.iter().find(|node| {
+            node.extra.contains_key("composite_members")
+                || node.extra.contains_key("after_expansion")
+        }) {
+            return Err(serde::ser::Error::custom(format!(
+                "node {}: computed topology fields are reserved to checkpoint expansions",
+                node.id
+            )));
+        }
+        nodes
+            .iter()
+            .map(|node| Borrowed {
+                node,
+                composite_members: (node.topology_present.0[0]
+                    || !node.composite_members.is_empty())
+                .then_some(&node.composite_members),
+                after_expansion: (node.topology_present.0[1] || !node.after_expansion.is_empty())
+                    .then_some(&node.after_expansion),
+            })
+            .collect::<Vec<_>>()
+            .serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<GraphNode>, D::Error> {
+        Ok(Vec::<Owned>::deserialize(deserializer)?
+            .into_iter()
+            .map(|wire| {
+                let mut node = wire.node;
+                node.topology_present.0 = [
+                    wire.composite_members.is_some(),
+                    wire.after_expansion.is_some(),
+                ];
+                node.composite_members = wire.composite_members.unwrap_or_default();
+                node.after_expansion = wire.after_expansion.unwrap_or_default();
+                node
+            })
+            .collect())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -320,6 +398,179 @@ pub(super) fn expand(
         append(&mut expanded, addition);
     }
     Ok(expanded)
+}
+
+/// Older journals omitted computed topology from flattened expansion nodes.
+/// Derive it from the submitted catalogue or deterministic fallback, restoring
+/// absent fields and checking persisted fields independently of progress rows.
+pub(super) fn restore_legacy_topology(
+    document: &GraphDocument,
+    extensions: &[String],
+    expansions: &mut [Expansion],
+    limits: &crate::config::GraphLimits,
+) -> Result<(), (String, &'static str)> {
+    let mut expanded = loops::expand(document, extensions, limits).map_err(|_| {
+        (
+            document.graph_id.clone(),
+            "expansion topology requires a valid base plan",
+        )
+    })?;
+    for addition in expansions {
+        // A deferred review is resolved by the host, not derived from a planner
+        // specification; its topology has always been persisted with it.
+        if expanded
+            .nodes
+            .iter()
+            .any(|node| node.id == addition.source && node.review.is_some())
+        {
+            for node in &mut addition.nodes {
+                node.topology_present.0 = [true; 2];
+            }
+            append(&mut expanded, addition);
+            continue;
+        }
+        let expected = derive_topology(document, &expanded, addition)?;
+        for (node, (members, edges)) in addition.nodes.iter_mut().zip(expected) {
+            for (present, stored, expected, invariant) in [
+                (
+                    node.topology_present.0[0],
+                    &mut node.composite_members,
+                    members,
+                    "persisted composite_members must match the approved topology",
+                ),
+                (
+                    node.topology_present.0[1],
+                    &mut node.after_expansion,
+                    edges,
+                    "persisted after_expansion must match the approved topology",
+                ),
+            ] {
+                if (present || !stored.is_empty()) && *stored != expected {
+                    return Err((node.id.clone(), invariant));
+                }
+                *stored = expected;
+            }
+            node.topology_present.0 = [true; 2];
+        }
+        append(&mut expanded, addition);
+    }
+    Ok(())
+}
+
+type NodeTopology = (Vec<String>, Vec<String>);
+
+fn derive_topology(
+    document: &GraphDocument,
+    expanded: &GraphDocument,
+    addition: &Expansion,
+) -> Result<Vec<NodeTopology>, (String, &'static str)> {
+    let mut expected = vec![(Vec::new(), Vec::new()); addition.nodes.len()];
+    let fallback = addition
+        .nodes
+        .iter()
+        .any(|node| node.id == format!("{}--fallback", addition.source));
+    if fallback
+        || !addition.patterns.is_empty()
+        || addition.nodes.iter().any(|node| node.composite.is_some())
+    {
+        let spec = expanded
+            .nodes
+            .iter()
+            .find(|node| node.id == addition.source)
+            .and_then(|node| node.plan.as_ref())
+            .ok_or_else(|| {
+                (
+                    addition.source.clone(),
+                    "composite topology requires a planner specification",
+                )
+            })?;
+        if fallback {
+            let derived = fallback_expansion(&addition.source, spec, document).map_err(|_| {
+                (
+                    addition.source.clone(),
+                    "fallback topology must be derivable from its specification",
+                )
+            })?;
+            if !matches!(
+                (serde_json::to_value(&addition.nodes), serde_json::to_value(&derived.nodes)),
+                (Ok(stored), Ok(expected)) if stored == expected
+            ) {
+                return Err((
+                    addition.source.clone(),
+                    "fallback nodes must match the submitted fallback specification",
+                ));
+            }
+            expected = derived
+                .nodes
+                .into_iter()
+                .map(|node| (node.composite_members, node.after_expansion))
+                .collect();
+        } else {
+            for instance in &addition.patterns {
+                let pattern = spec
+                    .patterns
+                    .iter()
+                    .find(|pattern| pattern.name == instance.name)
+                    .ok_or_else(|| {
+                        (
+                            instance.id.clone(),
+                            "pattern must name an approved catalogue entry",
+                        )
+                    })?;
+                let members: Vec<_> = pattern
+                    .nodes
+                    .iter()
+                    .map(|node| {
+                        node.get("id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(|id| format!("{}--{id}", instance.id))
+                            .ok_or_else(|| {
+                                (
+                                    instance.id.clone(),
+                                    "catalogue member must have a node identity",
+                                )
+                            })
+                    })
+                    .collect::<Result<_, _>>()?;
+                let mut sorted = members.clone();
+                sorted.sort();
+                if sorted != instance.nodes
+                    || members
+                        .iter()
+                        .any(|id| !addition.nodes.iter().any(|node| &node.id == id))
+                {
+                    return Err((
+                        instance.id.clone(),
+                        "pattern members must match the approved catalogue",
+                    ));
+                }
+                let index = addition
+                    .nodes
+                    .iter()
+                    .position(|node| node.id == instance.id)
+                    .ok_or_else(|| {
+                        (
+                            instance.id.clone(),
+                            "pattern must retain its composite boundary",
+                        )
+                    })?;
+                expected[index] = (members.clone(), members);
+            }
+            if let Some(node) = addition.nodes.iter().find(|node| {
+                node.composite.is_some()
+                    && !addition
+                        .patterns
+                        .iter()
+                        .any(|pattern| pattern.id == node.id)
+            }) {
+                return Err((
+                    node.id.clone(),
+                    "composite topology must derive from an approved pattern or fallback",
+                ));
+            }
+        }
+    }
+    Ok(expected)
 }
 
 pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {

@@ -577,6 +577,17 @@ mod result_tests {
     }
 
     #[test]
+    fn cancelled_graph_status_shows_reason() {
+        let mut run = graph_status_fixture();
+        run.checkpoint.cancelled = true;
+        run.checkpoint.cancel_reason = Some("requested by chair".into());
+        let run = super::graph_snapshot(run.checkpoint);
+        assert!(super::graph_human(&run).contains("Cancellation reason: requested by chair"));
+        let json = serde_json::to_value(&run).unwrap();
+        assert_eq!(json["checkpoint"]["cancel_reason"], "requested by chair");
+    }
+
+    #[test]
     fn graph_status_compact_and_json_remain_unchanged() {
         let run = graph_status_fixture();
         let ordinary = super::graph_human(&run);
@@ -1348,5 +1359,54 @@ mod result_tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(unused_imports, dead_code)] // The custom worktree driver compiles without a test harness.
+mod policy_tail_confirmation_tests {
+    use super::{FacadeError, confirm_stable_tail};
+
+    // Each pass returns (attempt, pass index), so a test can tell which pass's
+    // record came back.
+    fn scripted(tails: &[u8]) -> impl FnMut() -> Result<(u8, usize), FacadeError> + '_ {
+        let mut pass = 0;
+        move || {
+            let tail = *tails.get(pass).ok_or(FacadeError::StateCorrupt)?;
+            pass += 1;
+            Ok((tail, pass - 1))
+        }
+    }
+
+    #[test]
+    fn a_successor_queued_between_passes_is_followed() -> Result<(), Box<dyn std::error::Error>> {
+        // Pass 0 lists before successor 2 is queued and returns terminal 1;
+        // pass 1 lists after and finds 2; pass 2 confirms 2.
+        let tail = confirm_stable_tail(scripted(&[1, 2, 2]), |r| r.0)?;
+        assert_eq!(tail, (2, 1), "returns the earlier record of the agreeing pair");
+        Ok(())
+    }
+
+    #[test]
+    fn two_agreeing_passes_return_the_first_record() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(confirm_stable_tail(scripted(&[7, 7]), |r| r.0)?, (7, 0));
+        Ok(())
+    }
+
+    #[test]
+    fn a_tail_that_never_settles_fails_at_the_chain_ceiling() {
+        let ceiling = usize::try_from(provenant_run::POLICY_ATTEMPT_CEILING).unwrap_or(usize::MAX);
+        let moving: Vec<u8> = (0..=u8::try_from(ceiling + 1).unwrap_or(u8::MAX)).collect();
+        let mut calls = 0;
+        let mut inner = scripted(&moving);
+        let result = confirm_stable_tail(
+            || {
+                calls += 1;
+                inner()
+            },
+            |r| r.0,
+        );
+        assert!(matches!(result, Err(FacadeError::StateCorrupt)));
+        assert_eq!(calls, ceiling + 1);
     }
 }

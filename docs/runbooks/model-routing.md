@@ -48,7 +48,9 @@ selected; otherwise a recoverable unavailable member is preferred, and
 disabled members are excluded. If only disabled members remain, resolution
 returns their exclusions. The receipt records candidate readiness and
 exclusions. Operation ID and task index seed selection so retries repeat the
-same choice. Only OpenCode `*-free` entries are marked free. Agy Gemini Flash is a paid subscription model.
+same choice. Only OpenCode `*-free` entries are marked free; Agy Gemini Flash
+is a paid subscription model (see the
+[catalogue](../../tools/front-door/crates/routing/assets/catalogue.toml)).
 
 OpenCode quota refusals come from its structured quota and free-limit events,
 and from stderr diagnostics naming `AI.Error.QuotaExceeded` or `usage limit

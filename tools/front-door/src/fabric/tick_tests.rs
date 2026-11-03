@@ -2,9 +2,9 @@
 use super::*;
 
 #[test]
-fn tick_advances_expired_asks_and_skips_future_cancelled_and_busy_graphs()
+fn tick_advances_expired_asks_and_cancelled_graphs_and_skips_future_and_busy_graphs()
 -> Result<(), Box<dyn std::error::Error>> {
-    if host_test("fabric::peer_tests::tick_tests::tick_advances_expired_asks_and_skips_future_cancelled_and_busy_graphs")? {
+    if host_test("fabric::peer_tests::tick_tests::tick_advances_expired_asks_and_cancelled_graphs_and_skips_future_and_busy_graphs")? {
         return Ok(());
     }
     use provenant_fabric_runtime::graph::{self, GraphJournal};
@@ -58,12 +58,15 @@ fn tick_advances_expired_asks_and_skips_future_cancelled_and_busy_graphs()
     };
     let report = tick_graphs(&resolved, now, &FreeWorkers)?;
     assert!(report.errors.is_empty(), "{:?}", report.errors);
-    assert_eq!(report.advanced, 1);
+    assert_eq!(report.advanced, 2);
     let due = graph::FileJournal::read_checkpoint(&roots.state, project, "b-due")?.ok_or("missing due graph")?;
     assert_eq!(due.nodes[0].state, graph::NodeState::Succeeded);
     assert_eq!(due.asks[0].answer.as_ref().ok_or("missing default")?.source, graph::AnswerSource::Default);
     assert!(due.wake_at.is_none());
-    for id in ["a-busy", "c-future", "d-cancelled"] {
+    let cancelled = graph::FileJournal::read_checkpoint(&roots.state, project, "d-cancelled")?.ok_or("missing cancelled graph")?;
+    assert_eq!(cancelled.nodes[0].state, graph::NodeState::Skipped);
+    assert_eq!(cancelled.nodes[0].skip_reason.as_deref(), Some("graph cancelled"));
+    for id in ["a-busy", "c-future"] {
         let checkpoint = graph::FileJournal::read_checkpoint(&roots.state, project, id)?.ok_or("missing graph")?;
         assert_eq!(checkpoint.nodes[0].state, graph::NodeState::Running);
     }

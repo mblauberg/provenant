@@ -9,8 +9,8 @@ analysis, documentation and other evidence-bearing work. The objective is
 quality per user attention-hour: agents create depth and verification; users
 retain scarce judgement at consequential gates.
 
-`AGENTS.md` is the tiny bootstrap every operator sees. `HARNESS.md` is the
-compact runtime constitution. Skills load procedural depth only when triggered.
+`GLOBAL-AGENTS.md` is the global bootstrap, installed as `AGENTS.md`.
+`HARNESS.md` is the compact runtime constitution. Skills load procedural depth only when triggered.
 This document preserves the design intent so future maintainers can change the
 harness without rediscovering it from individual skills.
 
@@ -420,7 +420,7 @@ before judgement. A fluent answer without trajectory evidence is not complete.
 
 ## Design constraints for maintainers
 
-- Keep `AGENTS.md` and `HARNESS.md` small enough to load every session.
+- Keep `GLOBAL-AGENTS.md` and `HARNESS.md` small enough to load every session.
 - Put operational detail in skill references and executable checks.
 - Keep model identities in routing data, not scattered prose or shell cases.
 - Make optional providers additive and non-blocking.

@@ -80,6 +80,7 @@ fn graph_envelope_reason(
     envelope::reason(document, expansions, extensions, &bounded)
 }
 
+pub const MAX_CANCEL_REASON_BYTES: usize = 256;
 const MAX_CHECKPOINT_BYTES: u64 = 16_777_216;
 /// Every JSON member costs at least two bytes, so the byte limit binds first.
 const MAX_CHECKPOINT_MEMBERS: usize = MAX_CHECKPOINT_BYTES as usize / 2;
@@ -254,6 +255,16 @@ pub trait AttemptOwner {
         None
     }
 
+    /// Reissue an idempotent stop if a policy successor appeared during cancellation.
+    fn stop_cancelled_attempt(&mut self, _attempt: &GraphAttempt) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Read-only check: never starts or replays an attempt.
+    fn cancelled_attempt_settled(&mut self, _attempt: &GraphAttempt) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
     fn observe_or_start(
         &mut self,
         key: &AttemptKey,
@@ -288,8 +299,11 @@ pub enum GraphError<RunError: Error + 'static, JournalError: Error + 'static> {
     Refused(String),
     #[error("graph checkpoint does not match the submitted plan")]
     PlanChanged,
-    #[error("graph checkpoint is inconsistent or unsupported")]
-    BadCheckpoint,
+    #[error("graph checkpoint node {node}: {invariant}")]
+    BadCheckpoint {
+        node: String,
+        invariant: &'static str,
+    },
     #[error("cannot canonically encode the validated graph plan")]
     Canonical(#[source] CanonicalError),
     #[error("run attempt owner failed: {0}")]
@@ -307,7 +321,7 @@ impl<R: Error + 'static, J: Error + 'static> GraphError<R, J> {
             Self::Extension(_) => "invalid_extension",
             Self::Refused(_) => "graph_refused",
             Self::PlanChanged => "plan_changed",
-            Self::BadCheckpoint => "bad_checkpoint",
+            Self::BadCheckpoint { .. } => "bad_checkpoint",
             Self::Canonical(_) => "canonical",
             Self::Run(_) => "run",
             Self::Journal(_) => "journal",
@@ -640,6 +654,118 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
     journal.save(checkpoint).map_err(GraphError::Journal)
 }
 
+/// Revert cancellation-only state changes without altering attempt records.
+fn restore_cancelled_nodes(checkpoint: &mut GraphCheckpoint) -> Result<(), (String, &'static str)> {
+    let saved_wake = checkpoint.wake_at;
+    asks::refresh_wake(checkpoint);
+    if checkpoint.wake_at != saved_wake {
+        return Err((
+            String::new(),
+            "graph wake time disagrees with its pending asks",
+        ));
+    }
+    for node in &mut checkpoint.nodes {
+        match node.cancelled_from.take() {
+            Some(state @ (NodeState::Pending | NodeState::Running))
+                if checkpoint.cancelled
+                    && node.state == NodeState::Skipped
+                    && node.skip_reason.as_deref() == Some("graph cancelled") =>
+            {
+                node.state = state;
+                node.skip_reason = None;
+            }
+            None => {}
+            _ => {
+                return Err((
+                    node.id.clone(),
+                    "cancelled node can only be restored from pending or running",
+                ));
+            }
+        }
+    }
+    asks::refresh_wake(checkpoint);
+    Ok(())
+}
+
+/// Mark nodes that have no live attempts, as part of the durable cancellation fence.
+pub fn mark_cancelled_nodes_without_live_attempts(checkpoint: &mut GraphCheckpoint) -> bool {
+    if !checkpoint.cancelled {
+        return false;
+    }
+    let mut changed = false;
+    for node in &mut checkpoint.nodes {
+        if matches!(node.state, NodeState::Pending | NodeState::Running)
+            && node
+                .attempts
+                .iter()
+                .all(|attempt| attempt.state == AttemptState::Terminal)
+        {
+            node.cancelled_from = Some(node.state);
+            node.state = NodeState::Skipped;
+            node.skip_reason = Some("graph cancelled".into());
+            changed = true;
+        }
+    }
+    if changed {
+        asks::refresh_wake(checkpoint);
+    }
+    changed
+}
+
+/// Settle cancellation without admitting work; retain original states for resume.
+pub fn settle_cancelled_nodes<R: AttemptOwner, J: GraphJournal>(
+    checkpoint: &mut GraphCheckpoint,
+    owner: &mut R,
+    journal: &mut J,
+) -> Result<(), GraphError<R::Error, J::Error>> {
+    if !checkpoint.cancelled {
+        return Ok(());
+    }
+    if mark_cancelled_nodes_without_live_attempts(checkpoint) {
+        journal.save(checkpoint).map_err(GraphError::Journal)?;
+    }
+    let mut first_error = None;
+    for index in 0..checkpoint.nodes.len() {
+        let node = &checkpoint.nodes[index];
+        if node.state != NodeState::Running {
+            continue;
+        }
+        let mut settled = true;
+        for attempt in &node.attempts {
+            if attempt.state != AttemptState::Terminal {
+                match owner.cancelled_attempt_settled(attempt) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        settled = false;
+                        if let Err(error) = owner.stop_cancelled_attempt(attempt) {
+                            first_error.get_or_insert(error);
+                        }
+                    }
+                    Err(error) => {
+                        settled = false;
+                        first_error.get_or_insert(error);
+                        if let Err(error) = owner.stop_cancelled_attempt(attempt) {
+                            first_error.get_or_insert(error);
+                        }
+                    }
+                }
+            }
+        }
+        if settled {
+            let node = &mut checkpoint.nodes[index];
+            node.cancelled_from = Some(node.state);
+            node.state = NodeState::Skipped;
+            node.skip_reason = Some("graph cancelled".into());
+            asks::refresh_wake(checkpoint);
+            journal.save(checkpoint).map_err(GraphError::Journal)?;
+        }
+    }
+    match first_error {
+        Some(error) => Err(GraphError::Run(error)),
+        None => Ok(()),
+    }
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "one observation set follows internal rescheduling for this advance"
@@ -662,9 +788,18 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         graph_prompt_bytes: usize::MAX,
         ..limits.clone()
     };
-    let stored = journal
+    let mut stored = journal
         .load(&document.graph_id)
         .map_err(GraphError::Journal)?;
+    if let Some(checkpoint) = &mut stored {
+        plans::restore_legacy_topology(
+            document,
+            &checkpoint.extensions,
+            &mut checkpoint.expansions,
+            &unbounded,
+        )
+        .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
+    }
     let stored_extensions = stored.as_ref().map_or(&[][..], |c| c.extensions.as_slice());
     let (base, _) = validate_plan_with_limits(document, &unbounded)
         .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
@@ -684,9 +819,21 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     let mut checkpoint = match stored {
         Some(checkpoint) => {
             if let Some(reason) = loops::legacy(&checkpoint) {
+                if checkpoint.cancelled && !resume {
+                    let mut checkpoint = checkpoint;
+                    settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
+                    return Ok(GraphRun {
+                        status: GraphStatus::Cancelled,
+                        checkpoint,
+                        advance_error: None,
+                    });
+                }
                 return Err(GraphError::Refused(reason));
             }
-            validate_checkpoint(document, &checkpoint, &plan, &plan_digest)?;
+            let mut validation = checkpoint.clone();
+            restore_cancelled_nodes(&mut validation)
+                .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
+            validate_checkpoint(document, &validation, &plan, &plan_digest)?;
             checkpoint
         }
         None => {
@@ -715,6 +862,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 pull_request: None,
                 schema_version: 1,
                 cancelled: false,
+                cancel_reason: None,
                 integration_pin: None,
                 pause_reason: None,
                 pause_code: None,
@@ -748,6 +896,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         title: Some(node.title.as_deref().unwrap_or(&node.id).to_owned()),
                         worktree: node.worktree.clone(),
                         state: NodeState::Pending,
+                        cancelled_from: None,
+                        skip_reason: None,
                         advance_error: None,
                         advance_error_code: None,
                         launch_retry: None,
@@ -815,10 +965,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         journal.save(&checkpoint).map_err(GraphError::Journal)?;
     }
     if resume {
+        let mut resume_view = checkpoint.clone();
+        restore_cancelled_nodes(&mut resume_view)
+            .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
         if extensions.iter().any(|e| e.starts_with("loop.")) {
-            let mut prospective = checkpoint.clone();
+            let mut prospective = resume_view.clone();
             for extension in extensions.iter().filter(|e| e.starts_with("loop.")) {
-                loops::validate_resume_extension(document, &checkpoint, extension, &unbounded)
+                loops::validate_resume_extension(document, &resume_view, extension, &unbounded)
                     .map_err(GraphError::Extension)?;
                 loops::validate_resume_extension(document, &prospective, extension, &unbounded)
                     .map_err(GraphError::Extension)?;
@@ -875,6 +1028,14 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     advance_error: None,
                 });
             }
+        }
+        // Keep the cancellation fence and its displayed states durable until
+        // every extension is accepted. Reopen in the same save as those states.
+        if checkpoint.cancelled {
+            close_resolved_asks(&mut checkpoint, owner, journal)?;
+            restore_cancelled_nodes(&mut checkpoint)
+                .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
+            checkpoint.cancelled = false;
         }
         for extension in extensions {
             if !checkpoint.extensions.contains(extension) {
@@ -981,6 +1142,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         close_resolved_asks(&mut checkpoint, owner, journal)?;
         if checkpoint.cancelled {
             if !resume {
+                settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
                 return Ok(GraphRun {
                     status: GraphStatus::Cancelled,
                     checkpoint,
@@ -1207,12 +1369,18 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 let subject = checkpoint.nodes[node_index]
                     .source_commit
                     .as_deref()
-                    .ok_or(GraphError::BadCheckpoint)?;
+                    .ok_or_else(|| GraphError::BadCheckpoint {
+                        node: node.id.clone(),
+                        invariant: "deferred review node must have a source commit",
+                    })?;
                 let original = expanded
                     .nodes
                     .iter()
                     .find(|candidate| candidate.id == node.id)
-                    .ok_or(GraphError::BadCheckpoint)?;
+                    .ok_or_else(|| GraphError::BadCheckpoint {
+                        node: node.id.clone(),
+                        invariant: "deferred review node must exist in the expanded plan",
+                    })?;
                 let mut resolution_error_code = "review_resolution_failed";
                 let result = owner
                     .resolve_review(original, subject)
@@ -1338,7 +1506,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 let route = node
                     .routes
                     .get(route_index)
-                    .ok_or(GraphError::BadCheckpoint)?
+                    .ok_or_else(|| GraphError::BadCheckpoint {
+                        node: node.id.clone(),
+                        invariant: "attempt route index must name a configured route",
+                    })?
                     .clone();
                 let key = AttemptKey {
                     extra: Default::default(),
@@ -1894,10 +2065,14 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 let retry_was_pending;
                 let should_continue = {
                     let progress = &mut checkpoint.nodes[node_index];
-                    let attempt = progress
-                        .attempts
-                        .last_mut()
-                        .ok_or(GraphError::BadCheckpoint)?;
+                    let attempt =
+                        progress
+                            .attempts
+                            .last_mut()
+                            .ok_or_else(|| GraphError::BadCheckpoint {
+                                node: node.id.clone(),
+                                invariant: "an observed attempt must have a checkpoint row",
+                            })?;
                     // Any observation answers the stopped launch, so its wait
                     // is over and the checkpoint wake no longer owes it.
                     retry_was_pending = progress.launch_retry.take().is_some();

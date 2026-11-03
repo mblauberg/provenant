@@ -3490,7 +3490,8 @@ pub fn run(
             None => Vec::new(),
         };
         let mut layers = configured(globals)?;
-        layers.known_routes = Some(config.domains.routing.routes.keys().cloned().collect());
+        let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
+        layers.known_routes = Some(config.domains.routing.route_names(&catalogue));
         {
             let settings = &config.domains.fabric.plan;
             let mode = match request.preset_plan.as_deref() {

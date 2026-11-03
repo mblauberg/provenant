@@ -260,6 +260,8 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 worktree: node.worktree.clone(),
                 id: node.id.clone(),
                 state: NodeState::Succeeded,
+                cancelled_from: Some(NodeState::Running),
+                skip_reason: Some("graph cancelled".into()),
                 advance_error: Some(worst(MAX_ADVANCE_ERROR_BYTES)),
                 advance_error_code: Some("c".repeat(envelope::REFUSAL_CODE_BYTES)),
                 launch_retry: (!boundary
@@ -331,6 +333,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
         pull_request: Some(worst(OUTPUT_FIELD_BYTES)),
         integration_pin: Some("1".repeat(64)),
         cancelled: true,
+        cancel_reason: Some(worst(MAX_CANCEL_REASON_BYTES)),
         pause_reason: Some(worst(PAUSE_REASON_BYTES)),
         pause_code: Some("c".repeat(envelope::REFUSAL_CODE_BYTES)),
         unknown_usage: vec![
@@ -482,6 +485,14 @@ fn a_loop_extension_past_the_envelope_pauses_instead_of_growing() {
         &Default::default(),
     );
     assert_eq!(first.unwrap().status, GraphStatus::Paused);
+    let mut cancelled_journal = MemoryJournal(journal.0.clone());
+    cancelled_journal.0.as_mut().unwrap().cancelled = true;
+    let cancelled = advance_with_budget(&document, &mut owner, &mut cancelled_journal, &limits, &Default::default()).unwrap();
+    assert_eq!(cancelled.status, GraphStatus::Cancelled);
+    let refused = resume_with_budget(&document, &mut owner, &mut cancelled_journal, &limits, &Default::default(), &["loop.revise.rounds=25".into()]).unwrap();
+    assert_eq!(refused.status, GraphStatus::Cancelled);
+    assert!(refused.checkpoint.nodes.iter().all(|node| !matches!(node.state, NodeState::Pending | NodeState::Running)));
+    assert_eq!(cancelled_journal.0.as_ref().unwrap().nodes, refused.checkpoint.nodes);
     let run = resume_with_budget(
         &document,
         &mut owner,
