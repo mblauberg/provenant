@@ -4022,7 +4022,15 @@ fn graph_review_node(document: &provenant_fabric_runtime::graph::GraphDocument, 
 
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     fn admission_timeout_seconds(&self) -> Option<u64> {
-        Some(provenant_run::AdmissionPolicy::default().admission_seconds)
+        let configured = provenant_confinement::run_config::RunConfig::read(
+            self.factory.context.roots.state.as_path(),
+        )
+        .ok()
+        .and_then(|config| {
+            config.admission_seconds_for(&self.factory.context.identity.project.to_string())
+        });
+        let effective = provenant_run::AdmissionPolicy::resolve_timeout(None, configured);
+        Some(effective.seconds)
     }
     type Error = FacadeError;
     fn respect_ci_wake(&self) -> bool {

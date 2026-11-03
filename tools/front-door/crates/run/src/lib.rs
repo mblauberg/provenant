@@ -45,7 +45,8 @@ pub mod target_seed_gc;
 mod writer;
 
 pub use admission::{
-    AdmissionPolicy, HOST_ACTIVE, HOST_QUEUED, LaneWait, PROJECT_ACTIVE, Resources, SystemResources,
+    AdmissionPolicy, AdmissionTimeoutOrigin, AdmissionWindow, EffectiveAdmissionTimeout,
+    HOST_ACTIVE, HOST_QUEUED, LaneWait, PROJECT_ACTIVE, Resources, SystemResources,
 };
 pub use controls::{
     CancelReceipt, Reconciled, Resume, TemporaryReason, TemporaryReasonKind, UncertainReason,

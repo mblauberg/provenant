@@ -693,6 +693,9 @@ pub struct Dispatch {
     /// Wait for task or preset graph settlement (seconds, or a duration such as 30m)
     #[arg(long, value_parser = duration_seconds)]
     pub wait: Option<u64>,
+    /// Admission timeout before launch (seconds, or a duration such as 10m)
+    #[arg(long, value_parser = duration_seconds)]
+    pub admission_timeout: Option<u64>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
