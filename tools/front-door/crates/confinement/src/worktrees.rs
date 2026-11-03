@@ -482,6 +482,8 @@ pub enum WorkerState {
 pub enum TaintCause {
     /// A live process occupies the worktree.
     LiveWriter(ObservedProcess),
+    /// A live writer was observed without attributable process details.
+    UnattributedLiveWriter,
     /// A writer lock is held.
     LockContention,
     /// Census uncertainty: the root could not be proven free.
@@ -490,7 +492,7 @@ pub enum TaintCause {
 
 impl TaintCause {
     pub fn is_contention(&self) -> bool {
-        matches!(self, Self::LiveWriter(_) | Self::LockContention)
+        matches!(self, Self::LockContention)
     }
 
     pub fn is_uncertainty(&self) -> bool {
@@ -502,6 +504,7 @@ impl std::fmt::Display for TaintCause {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::LiveWriter(process) => write!(f, "live writer: process {process}"),
+            Self::UnattributedLiveWriter => write!(f, "live writer"),
             Self::LockContention => write!(f, "lock contention"),
             Self::Uncertainty(reason) => write!(f, "uncertainty: {reason}"),
         }

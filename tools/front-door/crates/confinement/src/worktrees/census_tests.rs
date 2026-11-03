@@ -2442,7 +2442,7 @@ fn wholly_unplaceable_process_taints_every_root_fail_closed() -> Result<(), Box<
 #[test]
 fn taint_causes_distinguish_contention_from_uncertainty() {
     let live = TaintCause::LiveWriter(ObservedProcess::cwd(1234, Some("worker".into())));
-    assert!(live.is_contention());
+    assert!(!live.is_contention());
     assert!(!live.is_uncertainty());
 
     let lock = TaintCause::LockContention;
@@ -2464,6 +2464,27 @@ fn taint_causes_distinguish_contention_from_uncertainty() {
         assert!(!cause.is_contention());
         assert!(cause.is_uncertainty());
     }
+}
+
+#[test]
+fn live_observer_without_process_details_preserves_unattributed_writer() {
+    struct LiveObserver;
+    impl WorkerObserver for LiveObserver {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, WorkerState::Live))
+                .collect()
+        }
+    }
+
+    let root = PathBuf::from("/worktree");
+    let (states, taints) = LiveObserver.observe_roots_with_taints(std::slice::from_ref(&root));
+    assert_eq!(states[&root], WorkerState::Live);
+    assert_eq!(taints[&root], TaintCause::UnattributedLiveWriter);
+    assert!(!taints[&root].is_contention());
+    assert_eq!(taints[&root].to_string(), "live writer");
 }
 
 #[test]
@@ -2550,7 +2571,7 @@ fn census_observation_produces_typed_taints_for_contention_and_uncertainty()
     assert_eq!(states[&free_root], WorkerState::Unknown);
 
     let live_taint = &taints[&live_root];
-    assert!(live_taint.is_contention());
+    assert!(!live_taint.is_contention());
     assert!(!live_taint.is_uncertainty());
     assert!(matches!(live_taint, TaintCause::LiveWriter(p) if p.pid == 200));
 
@@ -2711,6 +2732,7 @@ fn census_refusal_names_executable_image_evidence_kind() -> Result<(), Box<dyn E
     struct ExeCwdObserver {
         cwd: PathBuf,
         exe: PathBuf,
+        held: PathBuf,
     }
     impl CwdObserver for ExeCwdObserver {
         fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
@@ -2724,7 +2746,7 @@ fn census_refusal_names_executable_image_evidence_kind() -> Result<(), Box<dyn E
         fn occupancy(&self, pid: i64) -> provenant_os::pid::OccupancyObservation {
             if pid == 200 {
                 provenant_os::pid::OccupancyObservation {
-                    paths: vec![self.exe.clone()],
+                    paths: vec![self.held.clone()],
                     complete: true,
                     gap: None,
                 }
@@ -2768,11 +2790,20 @@ fn census_refusal_names_executable_image_evidence_kind() -> Result<(), Box<dyn E
         }
     }
 
+    #[cfg(unix)]
+    let executable_alias = {
+        let alias = base.join("executable-alias");
+        std::os::unix::fs::symlink(&exe_path, &alias)?;
+        alias
+    };
+    #[cfg(not(unix))]
+    let executable_alias = exe_path.clone();
     let observer = MockObserver {
         processes: &processes,
         cwd_obs: ExeCwdObserver {
             cwd: external_cwd,
-            exe: exe_path,
+            exe: executable_alias,
+            held: exe_path,
         },
     };
 

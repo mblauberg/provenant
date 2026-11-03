@@ -107,7 +107,7 @@ fn default_taints(
                 WorkerState::Free => return None,
                 WorkerState::Busy => TaintCause::LockContention,
                 WorkerState::Live => live(root).map_or_else(
-                    || TaintCause::LiveWriter(ObservedProcess::cwd(0, None)),
+                    || TaintCause::UnattributedLiveWriter,
                     TaintCause::LiveWriter,
                 ),
                 WorkerState::Unknown => {
@@ -688,7 +688,11 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
                             }
                         }
                     }
-                    let is_exe = cwd_observer.executable(pid).as_ref() == Some(&canonical);
+                    let is_exe = cwd_observer
+                        .executable(pid)
+                        .and_then(|path| canonical_cwd(&path))
+                        .as_ref()
+                        == Some(&canonical);
                     let kind = if is_exe {
                         ProcessEvidenceKind::ExecutableImage
                     } else {
