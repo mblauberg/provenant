@@ -1874,7 +1874,32 @@ mod peer_tests {
         drop(journal);
         let head_output = fixture.rig.execute(&git, &["rev-parse", "HEAD"], None)?;
         let head = String::from_utf8(head_output.stdout.bytes)?.trim().to_owned();
+        // A later lens admitted after the reference moved still reads the pinned
+        // review base, independently of the integration base.
+        use provenant_fabric_runtime::graph::{self, AttemptOwner};
+        let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
+            "graph_id":"pinned-base", "node_id":"later-lens", "route_index":0
+        }))?;
+        let route = serde_json::from_value(serde_json::json!({"adapter":"fixture", "model":"fixture/model"}))?;
+        let mut bound = BoundGraphOwner {
+            factory: &factory, integration_base: None, integration_branch: None,
+            network: None, exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false,
+        };
+        let actor = bound.actor();
+        bound.observe_or_start(&key, graph::NodeInput {
+            prior_attempts: &[], family_peers: &[], context: Default::default(), read_roots: &[],
+            distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
+            title: "later lens", prompt: "review", required_verdict: None, deadline_seconds: None,
+            inputs_dir: None,
+        }, &route, graph::AccessMode::ReadOnly, None, graph::Replay {
+            delivery: None, branch: None, fast_forward_only: false, stored_ref: None, launch_actor: &actor,
+        })?;
+        let operation = graph_operation("graph-attempt-operation", &key)?;
+        let operation = store.operation(&operation, &owner.call(&cancel))?.ok_or("later lens operation missing")?;
+        let request = store.request(operation.run_id, &owner.call(&cancel))?;
         let base_text = base.to_string();
+        assert_eq!(request.tasks[0].base.as_deref(), Some(base_text.as_str()));
+        assert_ne!(base_text, head);
         for (id, reference, expected) in [("review-base", "old-review", base_text.as_str()), ("empty-review-base", "", head.as_str())] {
             let path = fixture.rig.project.join(format!("{id}.json"));
             std::fs::write(&path, serde_json::to_vec(&serde_json::json!({
