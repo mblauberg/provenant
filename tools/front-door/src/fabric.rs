@@ -4300,7 +4300,14 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     &self.factory.cwd,
                     Path::new(path),
                 )
-                .map_err(run_error)?;
+                .map_err(|error| match error {
+                    provenant_run::RunError::Validation("writer needs a branch") => {
+                        FacadeError::DispatchRefused {
+                            reason: "writer needs a branch".into(),
+                        }
+                    }
+                    other => run_error(other),
+                })?;
                 if let Err(provenant_run::RunError::Validation("writer needs a branch")) =
                     provenant_run::prepare_writer(
                         &writer,
