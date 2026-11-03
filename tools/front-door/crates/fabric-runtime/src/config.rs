@@ -754,8 +754,14 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("home_hosts.{host}", "string"),
 ];
 fn boundary(error: &SectionError) -> bool {
-    (error.code == "unknown_key" && error.field.starts_with("graph."))
-        || (error.code != "retired.bundle_bytes" && boundary_existing(error))
+    if error.code == "retired.bundle_bytes" {
+        return false;
+    }
+    if error.code == "unknown_key" {
+        return error.field == "graph.limit_ceiling"
+            || error.field.starts_with("graph.limit_ceiling.");
+    }
+    boundary_existing(error)
 }
 
 pub const SECTION: DomainSection = DomainSection::new::<FabricConfig>("fabric", defaults)
@@ -1246,6 +1252,11 @@ mod tests {
             .unwrap();
         assert!(error.to_string().contains("unknown_key"), "{error}");
         assert!(error.to_string().contains("limit_ceiling"), "{error}");
+        let unknown =
+            b"schema_version = 1\n[domains.fabric.graph.limits]\nunknown_limit = 1\nnodes = 10\n";
+        let loaded =
+            provenant_config::load_with_domains(&roots, Some(&unknown[..]), &sections).unwrap();
+        assert_eq!(loaded.domains.fabric.graph.limits.nodes, 10);
         let config =
             provenant_config::load_with_domains(&roots, Some(&text[..]), &sections).unwrap();
         assert_eq!(config.domains.fabric.graph.limits.nodes, 10);

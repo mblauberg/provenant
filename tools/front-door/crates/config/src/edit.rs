@@ -95,22 +95,17 @@ fn open_state(roots: &provenant_core::Roots) -> Result<Directory, ConfigError> {
 }
 
 /// Edit the owned TOML document. `edit` sees the document and the current
-/// configuration. All changes commit or none do.
+/// configuration if available. All changes commit or none do.
 pub fn edit_config<T>(
     roots: &provenant_core::Roots,
     sections: &crate::DomainSections<T>,
     options: &EditOptions<'_>,
-    edit: impl FnOnce(&mut DocumentMut, &ResolvedConfig<T>) -> Result<(), ConfigError>,
+    edit: impl FnOnce(&mut DocumentMut, Option<&ResolvedConfig<T>>) -> Result<(), ConfigError>,
 ) -> Result<Edited<T>, ConfigError>
 where
     T: serde::de::DeserializeOwned + Serialize,
 {
-    edit_document(roots, sections, options, true, |document, current| {
-        let current = current.ok_or(ConfigError::Edit {
-            reason: "configuration unavailable",
-        })?;
-        edit(document, current)
-    })
+    edit_document(roots, sections, options, true, edit)
 }
 
 /// [`edit_config`], optionally without loading the current configuration
@@ -163,8 +158,9 @@ where
                 text.as_deref().map(|source| Cursor::new(source.as_bytes())),
                 sections,
             )
+            .ok()
         })
-        .transpose()?;
+        .flatten();
     let mut document: DocumentMut =
         text.as_deref()
             .unwrap_or(MINIMAL)

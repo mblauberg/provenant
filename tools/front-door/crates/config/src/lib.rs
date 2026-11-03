@@ -93,7 +93,7 @@ pub enum ConfigError {
     InvalidUtf8 { path: PathBuf },
     #[error("invalid TOML at {location}")]
     Syntax { location: Location },
-    #[error("{rule} at {location}; next: provenant config check")]
+    #[error("{rule} at {location}; next: delete the line or run `provenant config migrate`")]
     Schema {
         location: Location,
         rule: &'static str,
@@ -122,7 +122,9 @@ pub enum ConfigError {
     Locked,
     #[error("unknown knob {name}; close matches: {}", .close.join(", "))]
     UnknownKnob { name: String, close: Vec<String> },
-    #[error("unknown knob {name}; set {name} outside [knobs]; next: provenant config check")]
+    #[error(
+        "unknown knob {name}; set {name} outside [knobs]; next: delete the line or run `provenant config migrate`"
+    )]
     MisplacedDomainKnob { name: String, location: Location },
     #[error("invalid value for knob {name} ({rule})")]
     KnobValue { name: String, rule: &'static str },

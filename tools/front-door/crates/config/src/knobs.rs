@@ -69,15 +69,6 @@ pub enum KnobEdit<'a> {
 }
 
 impl<D> crate::ResolvedConfig<D> {
-    /// Host acceptance declaration only; never changes runtime census policy.
-    pub fn census_host_list_complete(&self) -> Result<bool, ConfigError> {
-        let name = "confinement.census_host_list_complete";
-        self.knobs
-            .get(name)
-            .and_then(|knob| knob.value.as_bool())
-            .ok_or_else(|| invalid(name, "type"))
-    }
-
     /// Host-owned process exceptions. Never read from a task/profile stamp.
     pub fn census_ignore_unreadable(
         &self,
@@ -384,12 +375,20 @@ fn apply(doc: &mut DocumentMut, edit: KnobEdit) -> Result<(), ConfigError> {
             }
         }
         KnobEdit::Unset(name) => {
-            spec(registry, name)?;
+            let bare_name = name.strip_prefix("knobs.").unwrap_or(name);
+            if let Some(item) = doc.get_mut("knobs")
+                && let Some(knobs) = item.as_table_like_mut()
+            {
+                if knobs.remove(bare_name).is_some() || knobs.remove(name).is_some() {
+                    return Ok(());
+                }
+            }
+            spec(registry, bare_name)?;
             if let Some(item) = doc.get_mut("knobs") {
                 let knobs = item
                     .as_table_like_mut()
                     .ok_or_else(|| invalid("knobs", "type"))?;
-                knobs.remove(name);
+                knobs.remove(bare_name);
             }
         }
     }

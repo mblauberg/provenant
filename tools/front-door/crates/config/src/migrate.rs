@@ -121,6 +121,34 @@ fn rewrite(document: &mut DocumentMut, now: i64) -> Result<Vec<Migration>, Confi
             keys: vec!["bundle_bytes".into()],
         });
     }
+    if let Some(profile) = document.get("profile").and_then(Item::as_str) {
+        if profile == "rigorous" {
+            document.remove("profile");
+            migrations.push(Migration {
+                location: "profile".into(),
+                action: "dropped",
+                keys: vec!["rigorous".into()],
+            });
+        }
+    }
+    if let Some(knobs) = document.get_mut("knobs").and_then(Item::as_table_like_mut) {
+        let registry = crate::knobs::registry()?;
+        let to_drop: Vec<String> = knobs
+            .iter()
+            .map(|(k, _)| k.to_owned())
+            .filter(|k| !registry.knobs.contains_key(k))
+            .collect();
+        for key in &to_drop {
+            knobs.remove(key);
+        }
+        if !to_drop.is_empty() {
+            migrations.push(Migration {
+                location: "knobs".into(),
+                action: "dropped",
+                keys: to_drop,
+            });
+        }
+    }
     let Some(routing) = document
         .get_mut("domains")
         .and_then(Item::as_table_like_mut)

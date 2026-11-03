@@ -17,39 +17,6 @@ fn roots() -> Roots {
 }
 
 #[test]
-fn census_host_list_complete_is_strict_host_only_and_defaults_false() {
-    let name = "confinement.census_host_list_complete";
-    let defaults = load::<&[u8]>(&roots(), None).unwrap();
-    assert!(!defaults.census_host_list_complete().unwrap());
-    let mut doc = toml_edit::DocumentMut::new();
-    doc["schema_version"] = toml_edit::value(1);
-    KnobEdit::Set {
-        name,
-        value: "true",
-    }
-    .apply(&mut doc)
-    .unwrap();
-    let configured = load(&roots(), Some(doc.to_string().as_bytes())).unwrap();
-    assert!(configured.census_host_list_complete().unwrap());
-    for value in ["true", "false"] {
-        assert!(
-            configured
-                .dispatch_profile(&[format!("{name}={value}")])
-                .is_err()
-        );
-    }
-    let malformed = format!("schema_version=1\n[knobs]\n'{name}'='true'\n");
-    assert!(load(&roots(), Some(malformed.as_bytes())).is_err());
-    KnobEdit::Unset(name).apply(&mut doc).unwrap();
-    assert!(
-        !load(&roots(), Some(doc.to_string().as_bytes()))
-            .unwrap()
-            .census_host_list_complete()
-            .unwrap()
-    );
-}
-
-#[test]
 fn census_ignore_knob_round_trips_and_refuses_task_overrides_or_malformed_authority() {
     let name = "confinement.census_ignore_unreadable";
     let defaults = load::<&[u8]>(&roots(), None).unwrap();
@@ -1619,6 +1586,66 @@ fn knob_edit_preserves_unknown_keys_while_applying_the_edit() {
     assert_eq!(read(&roots).unwrap().profile, Profile::Economy);
 }
 #[test]
+fn knob_edit_can_repair_invalid_profile_or_refused_knobs() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = state_roots(dir.path());
+    let path = dir.path().join("config.toml");
+
+    std::fs::write(&path, "schema_version = 1\nprofile = 'rigorous'\n").unwrap();
+    assert!(read(&roots).is_err());
+    let config = knob_edit(&roots, KnobEdit::Profile("economy")).unwrap();
+    assert_eq!(config.profile, Profile::Economy);
+    assert_eq!(read(&roots).unwrap().profile, Profile::Economy);
+
+    std::fs::write(
+        &path,
+        "schema_version = 1\n[knobs]\n'review.polish' = 'always'\n",
+    )
+    .unwrap();
+    assert!(read(&roots).is_err());
+    knob_edit(&roots, KnobEdit::Unset("review.polish")).unwrap();
+    assert!(read(&roots).is_ok());
+    assert!(
+        !std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("review.polish")
+    );
+}
+#[test]
+fn migrate_drops_rigorous_profile_and_refused_knobs() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = state_roots(dir.path());
+    let path = dir.path().join("config.toml");
+    let content = "schema_version = 1\nprofile = 'rigorous'\n[knobs]\n'review.polish' = 'always'\n'lanes.max_concurrency' = 4\n";
+    std::fs::write(&path, content).unwrap();
+    assert!(read(&roots).is_err());
+
+    let report = crate::migrate(&roots, &crate::domains::NO_DOMAINS, false).unwrap();
+    assert_eq!(report.migrations.len(), 2);
+    let profile_m = report
+        .migrations
+        .iter()
+        .find(|m| m.location == "profile")
+        .unwrap();
+    assert_eq!(profile_m.action, "dropped");
+    assert_eq!(profile_m.keys, vec!["rigorous"]);
+    let knobs_m = report
+        .migrations
+        .iter()
+        .find(|m| m.location == "knobs")
+        .unwrap();
+    assert_eq!(knobs_m.action, "dropped");
+    assert_eq!(knobs_m.keys, vec!["review.polish"]);
+
+    let loaded = read(&roots).unwrap();
+    assert_eq!(loaded.profile, Profile::Balanced);
+    assert_eq!(loaded.knobs["lanes.max_concurrency"].value, 4);
+    let after_text = std::fs::read_to_string(&path).unwrap();
+    assert!(!after_text.contains("rigorous"));
+    assert!(!after_text.contains("review.polish"));
+    assert!(after_text.contains("lanes.max_concurrency"));
+}
+#[test]
 fn set_creates_a_missing_private_state_directory() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
@@ -1782,8 +1809,7 @@ fn registered_knobs_have_production_readers() {
                 sources(&path, output);
             } else if path.extension().is_some_and(|ext| ext == "rs")
                 && path.file_name().unwrap() != "knobs.rs"
-                && (!path.file_name().unwrap().to_string_lossy().contains("test")
-                    || path.file_name().unwrap() == "census_tests.rs")
+                && !path.file_name().unwrap().to_string_lossy().contains("test")
             {
                 output.push_str(&std::fs::read_to_string(path).unwrap());
                 output.push('\n');
@@ -1800,13 +1826,25 @@ fn registered_knobs_have_production_readers() {
         }
     }
     let has_reader = |name: &str| {
-        if name == "confinement.census_host_list_complete" {
-            source.contains(".census_host_list_complete()")
+        if name == "confinement.census_ignore_unreadable" {
+            source.contains(".census_ignore_unreadable()")
         } else {
-            source.contains(&format!("\"{name}\""))
+            source.contains(&format!(".get(\"{name}\")"))
+                || source.contains(&format!("[\"{name}\"]"))
+                || source.contains(&format!(".knob(\"{name}\")"))
+                || source.contains(&format!(".knob_u64(\"{name}\")"))
+                || source.contains(&format!(".knob_bool(\"{name}\")"))
+                || source.contains(&format!(".knob_is_set(\"{name}\")"))
+                || source.contains(&format!("get(\"{name}\""))
+                || source.contains(&format!("knob(\"{name}\")"))
+                || source.contains(&format!("\"{name}\","))
+                || source.contains(&format!("\"{name}=\""))
         }
     };
     assert!(!has_reader(&["unread", "knob"].join(".")));
+    // An incidental mention in a log message or comment does not count as a reader
+    let incidental = format!("error: unread.knob is not set");
+    assert!(!has_reader("unread.knob") && !incidental.contains(".knob("));
     for name in crate::knobs::registry().unwrap().knobs.keys() {
         assert!(has_reader(name), "registered knob {name} has no reader");
     }
