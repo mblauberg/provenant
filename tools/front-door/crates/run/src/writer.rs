@@ -212,17 +212,27 @@ impl WriterLaunch {
                 repo.root_path().into(),
                 "status".into(),
                 "--porcelain".into(),
+                "-z".into(),
             ],
             None,
         )?;
-        let text = String::from_utf8_lossy(&output);
+        let mut records = output.split(|byte| *byte == 0);
         let mut paths = Vec::new();
-        for line in text.lines() {
-            if line.len() > 3 {
-                let path = line[3..].trim().trim_matches('"');
-                if !path.is_empty() {
-                    paths.push(path.to_owned());
-                }
+        while let Some(record) = records.next() {
+            if record.is_empty() {
+                break;
+            }
+            if record.len() < 4 || record[2] != b' ' {
+                return Err(RunError::Validation("invalid Git status record"));
+            }
+            paths.push(String::from_utf8_lossy(&record[3..]).into_owned());
+            // Porcelain -z puts the destination first and follows it with the source.
+            if record[..2]
+                .iter()
+                .any(|status| matches!(status, b'R' | b'C'))
+                && records.next().is_none_or(|source| source.is_empty())
+            {
+                return Err(RunError::Validation("invalid Git status rename"));
             }
         }
         Ok(paths)
@@ -1027,6 +1037,8 @@ mod cargo_setup_tests {
             Ok(String::from_utf8(output.stdout)?.trim().to_owned())
         };
         run(&["init", "-q"])?;
+        std::fs::write(project.join("old name.txt"), "tracked")?;
+        run(&["add", "old name.txt"])?;
         run(&[
             "-c",
             "user.name=Fixture",
@@ -1141,6 +1153,29 @@ mod cargo_setup_tests {
             vec!["uncommitted.txt".to_string()]
         );
         std::fs::remove_file(lane.join("uncommitted.txt"))?;
+        let lane_git = |args: &[&str]| -> std::result::Result<(), Box<dyn std::error::Error>> {
+            let output = provenant_os::fixture::git_command_at(&git)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &root)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .current_dir(&lane)
+                .args(args)
+                .output()?;
+            if !output.status.success() {
+                return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
+            }
+            Ok(())
+        };
+        lane_git(&["mv", "old name.txt", "renamed.txt"])?;
+        std::fs::write(lane.join("café.txt"), "untracked")?;
+        assert_eq!(
+            writer.uncommitted_paths(utility.git_program_path())?,
+            vec!["renamed.txt", "café.txt"]
+        );
+        lane_git(&["mv", "renamed.txt", "old name.txt"])?;
+        std::fs::remove_file(lane.join("café.txt"))?;
         writer.base = source_oid;
         let second_tree = provenant_confinement::verify_worktree(&repo, &second_lane)?;
         let mut second = WriterLaunch {
