@@ -1563,10 +1563,18 @@ impl RunStore {
             decoded.outcome = Outcome::ReviewRequired;
             decoded.reason = Some("protected changes require review".into());
         }
-        let frozen_policy_retry = self.staged_policy_retry(&record)?.is_some();
-        if frozen_policy_retry
-            && matches!(decoded.outcome, Outcome::Succeeded | Outcome::Uncommitted)
-        {
+        let frozen_policy = self.staged_policy_retry(&record)?;
+        let frozen_policy_retry = frozen_policy
+            .as_ref()
+            .is_some_and(|decision| decision.action != Some(crate::PolicyAction::Stop));
+        let frozen_refusal = frozen_policy_retry
+            || frozen_policy.as_ref().is_some_and(|decision| {
+                matches!(
+                    decision.cause,
+                    Some(crate::PolicyCause::ResultCheck | crate::PolicyCause::Unfinished)
+                )
+            });
+        if frozen_refusal && matches!(decoded.outcome, Outcome::Succeeded | Outcome::Uncommitted) {
             decoded.outcome = if cancelled {
                 Outcome::Cancelled
             } else {
@@ -1575,7 +1583,7 @@ impl RunStore {
             decoded.reason =
                 Some("result-policy recovery decision retained from interrupted settlement".into());
         }
-        if !frozen_policy_retry
+        if frozen_policy.is_none()
             && !cancelled
             && exit.stop_reason.is_none()
             && !exit.never_spawned
@@ -1595,14 +1603,20 @@ impl RunStore {
                 decoded.outcome = Outcome::Failed;
                 decoded.reason = Some(reason);
             }
-            if let Some(retry) = assessment.retry
-                && self.stage_policy_retry(&record, &retry, call)?
-                && let Some(note) = assessment.note
-            {
-                decoded.reason = Some(match decoded.reason.take() {
-                    Some(reason) => format!("{reason}; {note}"),
-                    None => note,
-                });
+            let staged = if let Some(retry) = assessment.retry {
+                self.stage_policy_retry(&record, &retry, call)?
+            } else {
+                false
+            };
+            if staged {
+                if let Some(note) = assessment.note {
+                    decoded.reason = Some(match decoded.reason.take() {
+                        Some(reason) => format!("{reason}; {note}"),
+                        None => note,
+                    });
+                }
+            } else if let Some(cause) = assessment.cause {
+                self.stage_policy_stop(&record, cause)?;
             }
         }
         // Decoding can reveal credential markers hidden by JSON escapes in

@@ -284,6 +284,8 @@ mod tests {
             Ok(ResultAssessment {
                 retry: Some(PolicyRetry {
                     schema_version: 1,
+                    cause: Some(crate::PolicyCause::Capacity),
+                    action: Some(crate::PolicyAction::Retry),
                     route: record.requested_route.clone(),
                     resume: false,
                     max_attempts: 2,
@@ -516,6 +518,8 @@ mod tests {
         store.capture_handoff(&attempt, &old, &result)?;
         let retry = PolicyRetry {
             schema_version: 1,
+            cause: Some(crate::PolicyCause::Capacity),
+            action: Some(crate::PolicyAction::Retry),
             route: old.requested_route.clone(),
             resume: false,
             max_attempts: 2,

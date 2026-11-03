@@ -34,6 +34,7 @@ pub(super) fn assess_model_result(
             });
             fallback.and_then(|fallback| fallback.model.map(|model| run::PolicyRetry {
                 schema_version: 1,
+                cause: Some(run::PolicyCause::ResultCheck), action: Some(run::PolicyAction::Retry),
                 route: run::RequestedRoute::Model { extra: Default::default(), provider: fallback.provider.unwrap_or_default(), model, effort: fallback.effort },
                 resume: false, max_attempts: 2,
                 instruction: "The previous read-only route failed its result check. Complete the original task and include concrete evidence in your final answer.".into(),
@@ -43,6 +44,7 @@ pub(super) fn assess_model_result(
             None
         };
         return Ok(run::ResultAssessment {
+            cause: Some(run::PolicyCause::ResultCheck),
             refusal: (failed_check && decoded.outcome == run::Outcome::Succeeded).then(|| {
                 "model policy result check failed: empty answer or missing expected sections".into()
             }),
@@ -65,13 +67,24 @@ pub(super) fn assess_model_result(
             .as_ref()
             .ok_or("continuation route missing")?;
         let model = route.model.clone().ok_or("continuation model missing")?;
+        let resume = route
+            .provider
+            .as_deref()
+            .and_then(provenant_records::AdapterSpec::get)
+            .is_some_and(|spec| spec.launch.resume)
+            && decoded
+                .session
+                .as_deref()
+                .or(record.session.as_deref())
+                .is_some_and(|session| !session.is_empty());
         return Ok(run::ResultAssessment {
+            cause: Some(run::PolicyCause::Unfinished),
             refusal: Some("model reported unfinished work".into()),
             retry: (policy_attempt <= u64::from(policy.lane.max_continuations.unwrap_or(0))).then(|| run::PolicyRetry {
                 schema_version: 1,
+                cause: Some(run::PolicyCause::Unfinished), action: Some(if resume { run::PolicyAction::Resume } else { run::PolicyAction::Retry }),
                 route: run::RequestedRoute::Model { extra: Default::default(), provider: route.provider.clone().unwrap_or_default(), model, effort: route.effort.clone() },
-                resume: record.applied_route.as_ref().and_then(|route| route.provider.as_deref()).and_then(provenant_records::AdapterSpec::get).is_some_and(|spec| spec.launch.resume)
-                    && decoded.session.as_deref().or(record.session.as_deref()).is_some_and(|session| !session.is_empty()), max_attempts: u64::from(policy.lane.max_continuations.unwrap_or(0)) + 1,
+                resume, max_attempts: u64::from(policy.lane.max_continuations.unwrap_or(0)) + 1,
                 instruction: "Continue the unfinished task using the handoff and existing worktree. Carry out the remaining work and verification, keep handoff.json current, and end with the updated schema v2 handoff fence.".into(),
                 not_before_unix_seconds: None,
             }),
@@ -150,11 +163,25 @@ pub(super) fn assess_settlement_retry(
     let capacity = decoded.outcome == run::Outcome::ModelUnavailable
         && decoded.reason.as_deref().is_some_and(capacity_reason);
     let quota = decoded.outcome == run::Outcome::QuotaLimited;
-    let Some(route) = record.applied_route.as_ref() else {
+    if !(capacity || quota) {
         return Default::default();
+    }
+    let typed_cause = if capacity {
+        run::PolicyCause::Capacity
+    } else {
+        run::PolicyCause::Quota
     };
-    if !(capacity || quota) || config.settlement_retries == 0 || policy_attempt >= max_attempts {
-        return Default::default();
+    let Some(route) = record.applied_route.as_ref() else {
+        return run::ResultAssessment {
+            cause: Some(typed_cause),
+            ..Default::default()
+        };
+    };
+    if config.settlement_retries == 0 || policy_attempt >= max_attempts {
+        return run::ResultAssessment {
+            cause: Some(typed_cause),
+            ..Default::default()
+        };
     }
     let writes = run::Service::has_writes(task.writer.is_some(), &task.access.write_roots);
     let applied = || {
@@ -201,7 +228,10 @@ pub(super) fn assess_settlement_retry(
         (Some(task.route.clone()), false)
     };
     let Some(route_choice) = route_choice else {
-        return Default::default();
+        return run::ResultAssessment {
+            cause: Some(typed_cause),
+            ..Default::default()
+        };
     };
     // Linear backoff with up to a quarter more, drawn from the attempt ID so
     // lanes that hit the same capacity error do not retry in step.
@@ -248,10 +278,17 @@ pub(super) fn assess_settlement_retry(
         format!(" in {backoff_seconds} s")
     };
     run::ResultAssessment {
+        cause: Some(typed_cause),
         refusal: None,
         note: Some(format!("{action}{wait} (attempt {next} of {max_attempts})")),
         retry: Some(run::PolicyRetry {
             schema_version: 1,
+            cause: Some(typed_cause),
+            action: Some(if resume {
+                run::PolicyAction::Resume
+            } else {
+                run::PolicyAction::Retry
+            }),
             route: route_choice,
             resume,
             max_attempts,
@@ -260,5 +297,89 @@ pub(super) fn assess_settlement_retry(
                 now_unix_seconds.saturating_add(i64::try_from(backoff_seconds).unwrap_or(600))
             }),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assessment_records_typed_causes() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        std::fs::create_dir_all(root.join("home"))?;
+        std::fs::create_dir_all(root.join("checkout"))?;
+        let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
+        inputs.state_dir = Some(root.join("state"));
+        let context = run::ExecutionContext {
+            state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
+            project_id: provenant_core::ProjectId::from_bytes([1; 16]),
+            actor_id: provenant_core::ActorId::from_bytes([2; 16]),
+            read_prompts: true,
+        };
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|error| error.message)?;
+        let store = run::RunStore::open(&context, &call)?;
+        let input =
+            super::super::tests::trace_run(40, AttemptId::from_bytes([41; 16]), clock.wall_now()?)?;
+        store.create(&input, &call)?;
+        let mut record = store.record(input.attempts[0].attempt_id, &call)?;
+        record.applied_route = Some(run::RouteRecord {
+            provider: Some("codex".into()),
+            model: Some("codex/gpt-6-luna".into()),
+            ..Default::default()
+        });
+        let task = &input.request.tasks[0];
+        let mut decoded = run::Decoded {
+            outcome: run::Outcome::Succeeded,
+            result: String::new(),
+            complete: true,
+            observed_route: None,
+            usage: Default::default(),
+            session: None,
+            reason: None,
+            partial_signals: Vec::new(),
+        };
+        let policy = provenant_routing::ModelPolicies::default()
+            .effective(
+                &ModelId::parse("agy/gemini-3.8-flash")?,
+                None,
+                provenant_core::WallTime::from_unix_seconds(0).unwrap(),
+            )
+            .policy;
+        assert_eq!(
+            assess_model_result(&policy, task, &record, &decoded, None, 1)?.cause,
+            Some(run::PolicyCause::ResultCheck)
+        );
+        decoded.outcome = run::Outcome::QuotaLimited;
+        let decision = assess_settlement_retry(
+            &provenant_routing::RoutingConfig::default(),
+            |_, _| false,
+            task,
+            &record,
+            &decoded,
+            1,
+            0,
+        );
+        assert_eq!(decision.cause, Some(run::PolicyCause::Quota));
+        decoded.outcome = run::Outcome::ModelUnavailable;
+        decoded.reason = Some("provider capacity: busy".into());
+        let decision = assess_settlement_retry(
+            &provenant_routing::RoutingConfig::default(),
+            |_, _| false,
+            task,
+            &record,
+            &decoded,
+            1,
+            0,
+        );
+        assert_eq!(decision.cause, Some(run::PolicyCause::Capacity));
+        assert_eq!(
+            decision.retry.unwrap().cause,
+            Some(run::PolicyCause::Capacity)
+        );
+        Ok(())
     }
 }
