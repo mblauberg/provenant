@@ -839,6 +839,7 @@ pub(super) fn render_lanes(
                 "lane_class": wait.map(|w| w.lane_class),
                 "waiting_for": waiting_for,
                 "requested_route": lane.requested_route,
+                "resolved_route": lane.resolved_route,
                 "applied_route": lane.applied_route,
                 "skipped_routes": lane.skipped_routes,
                 "account": account,

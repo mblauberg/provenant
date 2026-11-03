@@ -163,7 +163,7 @@ pub fn collect(
                     worktree_dirty_at(context, locked.verified.repo(), cancel)?,
                     WorktreeCondition::Clean | WorktreeCondition::Ignored
                 ) {
-                    return Err(WorktreeError::Dirty);
+                    return Err(WorktreeError::Dirty(String::new()));
                 }
                 let root = locked.verified.repo().root_dir();
                 let index = run_git(
@@ -986,7 +986,7 @@ fn preview_foreign(
         }
         match worktree_dirty_at(context, verified.repo(), cancel)? {
             WorktreeCondition::Clean | WorktreeCondition::Ignored => Ok(()),
-            _ => Err(WorktreeError::Dirty),
+            _ => Err(WorktreeError::Dirty(String::new())),
         }
     };
     recheck()?;
@@ -1007,7 +1007,7 @@ fn preview_foreign(
         0,
     )?;
     if !clean_after_preview(context, verified.repo(), &lane.path, &output, cancel)? {
-        return Err(WorktreeError::Dirty);
+        return Err(WorktreeError::Dirty(String::new()));
     }
     recheck()?;
     let fresh = read_worktrees(context, cancel)?;

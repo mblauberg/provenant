@@ -813,6 +813,23 @@ The default is `true`. Default-branch deletion, non-fast-forward updates and
 default-branch pushes from linked worktrees are still refused, so the Git lane
 boundary is unchanged. An unreadable config keeps the check on.
 
+## Brief read-root warnings
+
+When a run brief names an existing path outside the lane's effective read roots,
+submit and `--explain` print an advisory warning. Bare `/`, `~` and ancestors of
+effective read roots are skipped. To turn the warning off across the host or for
+one project:
+
+```toml
+[domains.run]
+brief_read_root_warnings = false
+
+[domains.run.projects."PROJECT_ID"]
+brief_read_root_warnings = false
+```
+
+The default is `true`. An unreadable config keeps the warning on.
+
 ## Routing pools
 
 Routing changes are stored per state root and apply on the next route command.

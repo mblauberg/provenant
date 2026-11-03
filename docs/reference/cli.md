@@ -2574,6 +2574,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `number` | `{"name": "number", "positional": true, "required": true}` |
 | `--head` | `{"description": "Pin a reviewed head instead of using the current PR head", "name": "head"}` |
 | `--wait` | `{"bounds": [1, 14400], "description": "Wait for this head's CI (default 1 hour; maximum 4 hours)", "name": "wait"}` |
+| `--poll` | `{"description": "Initial CI poll interval in seconds (overrides domains.pr.land.poll_seconds, default 30)", "name": "poll"}` |
+| `--explain` | `{"defaults": ["false"], "description": "Show the effective polling interval and retry budget without landing", "name": "explain", "values": ["true", "false"]}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -2590,7 +2592,9 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
       "arguments": [
         "number",
         "head",
-        "wait"
+        "wait",
+        "poll",
+        "explain"
       ],
       "multiple": true,
       "name": "Land",
@@ -3003,7 +3007,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--since` | `{"description": "Count from this date or timestamp, or this many seconds ago", "name": "since"}` |
 | `--until` | `{"description": "Count up to this date or timestamp", "name": "until"}` |
 | `--run-id` | `{"description": "Restrict usage and cost to one run", "name": "run_id"}` |
-| `--by` | `{"conflicts": ["usage"], "description": "Group supervised attempts by work context or merged pull request; attempts with no value form an &#96;unattributed&#96; group", "name": "by", "values": ["pr", "issue", "graph", "node", "pattern", "preset", "role"]}` |
+| `--by` | `{"conflicts": ["usage"], "description": "Group supervised attempts by route, work context or merged pull request; attempts with no value form an &#96;unattributed&#96; group", "name": "by", "values": ["route", "pr", "issue", "graph", "node", "pattern", "preset", "role"]}` |
 | `--detail` | `{"conflicts": ["usage"], "defaults": ["false"], "description": "Include per-attempt detail", "name": "detail", "values": ["true", "false"]}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |

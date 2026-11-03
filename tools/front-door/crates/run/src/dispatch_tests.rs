@@ -8768,3 +8768,50 @@ fn failed_fresh_preparation_leaves_no_short_alias()
     );
     Ok(())
 }
+
+/// Persist a named route's resolved effort at launch admission.
+#[test]
+fn resolved_named_route_survives_launch_admission() -> TestResult {
+    let resolved = provenant_records::ResolvedRoute {
+        extra: Default::default(),
+        adapter: "codex".into(),
+        model: "gpt-6.1-sol".into(),
+        effort: Some("high".into()),
+        catalogue_revision: "fixture".into(),
+        account_key: None,
+        host: "fixture".into(),
+        alternatives: Default::default(),
+        exclusions: vec![],
+        eligibility: provenant_records::RouteEligibility::Eligible,
+        readiness: provenant_records::RouteReadiness::unknown(),
+        confidentiality: provenant_records::RouteConfidentiality {
+            extra: Default::default(),
+            evidence_ref: "fixture".into(),
+        },
+        pool_selection: None,
+    };
+    let route = RouteRecord::from_resolved(&resolved, Some("fixture"), "named_route");
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut prepared = input();
+    prepared.request.tasks[0].route = RequestedRoute::Named {
+        extra: Default::default(),
+        name: "fixture".into(),
+        effort: None,
+    };
+    store.create(&prepared, &call)?;
+    let pending = store.record(prepared.attempts[0].attempt_id, &call)?;
+    store.mark_starting(&pending, &route, &[], &Default::default(), None, &call)?;
+    let record = store.record(prepared.attempts[0].attempt_id, &call)?;
+    assert_eq!(
+        record
+            .applied_route
+            .as_ref()
+            .and_then(|route| route.effort.as_deref()),
+        Some("high")
+    );
+    assert_eq!(record.resolved_route, record.applied_route);
+    Ok(())
+}

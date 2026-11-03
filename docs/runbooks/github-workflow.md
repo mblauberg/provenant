@@ -309,6 +309,20 @@ call errors but the PR is merged, the report is landed. With no required
 check, landing also waits 60 seconds after the newest check registers. If
 `land` reports `CI_PENDING`, rerun it with `--wait`.
 
+Landing reads pull request and check data over REST and sends a merge request
+pinned to the verified SHA. Pending checks are sampled initially after 30
+seconds, then with backoff up to four times that interval. Set the host default
+with `domains.pr.land.poll_seconds` in the state-root `config.toml`, or pass
+`--poll SECONDS` for one invocation. `land 148 --explain` shows the effective
+interval and retry budget with their sources. The `--wait` duration also bounds retries of
+GitHub rate limits; `RATE_LIMITED` reports the reset and a retry command.
+Without server timing, secondary limits wait at least a minute and back off,
+following [GitHub's rate-limit guidance](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#exceeding-the-rate-limit).
+`MERGE_NOT_ALLOWED` means GitHub refused the merge; resolve the reported
+mergeability problem and retry. `MERGE_STATE_UNKNOWN` means a merge was
+attempted but its result could not be confirmed; rerun land to confirm the
+state and finish any cleanup.
+
 Nothing after the merge changes what merged, and no step forces. A refusal is
 reported in `data.steps` with `cleanup_pending: true` and reason
 `cleanup_pending`. The merge still exits 0. Inspect `land 148 --full`, fix the
@@ -343,28 +357,26 @@ in place.
 The helpers use the current repository, or the global `--project` selection.
 `--json` includes `number`, `head` and `result` in the normal command envelope.
 After a successful merge, JSON also includes `merged: true` and text says `merged`.
-Merge passes Git's effective `user.email`, when non-empty, as
-`--author-email`. Configure the account's noreply address before an agent
-merge and verify the resulting author as below.
+Landing merges over REST with `sha=<verified head>` and `merge_method=merge`.
+GitHub uses the authenticated account's commit email; the local Git
+`user.email` does not override it. Verify the resulting author as below.
 
 ### Merge author identity
 
-For an agent-initiated merge, derive the authenticated GitHub account's noreply
-address at command time, pass it to `gh pr merge --author-email`, then verify
-the generated merge commit's recorded author. This is the forward-only
-repository practice tracked by #807.
+For an agent-initiated land, configure the authenticated GitHub account's
+commit email to the intended address in GitHub before merging. REST does not
+accept `--author-email`. After landing, inspect the generated merge commit's
+recorded author:
 
 ```sh
 pr=<number>
-author_email="$(gh api user --jq '"\(.id)+\(.login)@users.noreply.github.com"')"
-gh pr merge "$pr" --merge --author-email "$author_email"
-merge_sha="$(gh pr view "$pr" --json mergeCommit --jq '.mergeCommit.oid')"
-test "$(gh api "repos/{owner}/{repo}/commits/$merge_sha" --jq '.commit.author.email')" = "$author_email"
+merge_sha="$(gh api "repos/{owner}/{repo}/pulls/$pr" --jq '.merge_commit_sha')"
+gh api "repos/{owner}/{repo}/commits/$merge_sha" --jq '.commit.author.email'
 ```
 
-For an auto-merge, run the last two lines after GitHub has created the merge
-commit. A mismatch is a publication check failure: stop before claiming the
-merge is ready and record the generated author evidence.
+For a queued merge, inspect the author after GitHub has created the merge
+commit. An unexpected author is a publication check failure: stop before
+claiming the merge is ready and record the generated author evidence.
 
 For status-check rollup handling and false-green traps, follow the
 [shell-pitfalls runbook](shell-pitfalls.md#shell-pitfalls).

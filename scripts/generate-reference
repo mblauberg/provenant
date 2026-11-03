@@ -189,6 +189,7 @@ def mcp_reference(data, all_tools):
 HOST_SECTIONS = (
     ("host_lane_build_settings", "Host lane build settings",
      "Omit a key for its host-dependent default; -1 also selects automatic behaviour."),
+    ("host_land_settings", "Host land settings", "Omit a key for its default."),
     ("host_graph_settings", "Host graph settings", "Omit a key for its default."),
     ("host_gc_settings", "Host GC settings", "Omit a key for its default."),
     ("host_store_settings", "Host store settings", "Omit a key for its default."),

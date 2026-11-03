@@ -141,8 +141,13 @@ pub fn save_lane_owner_when_free(
     {
         return Err(WorktreeError::UnknownWriter);
     }
-    if worktree_dirty_at(context, tree.repo(), cancel)? != WorktreeCondition::Clean {
-        return Err(WorktreeError::Dirty);
+    match worktree_cleanliness_at(context, tree.repo(), cancel)? {
+        WorktreeCleanliness::Clean | WorktreeCleanliness::Ignored => {}
+        WorktreeCleanliness::Dirty(paths) => return Err(WorktreeError::Dirty(paths)),
+        WorktreeCleanliness::GitOperationInProgress => {
+            return Err(WorktreeError::GitOperationInProgress);
+        }
+        WorktreeCleanliness::Unknown => return Err(WorktreeError::UnknownWriter),
     }
     check_writer_terminal(tree.repo())?;
     save_owner(&tree, owner)

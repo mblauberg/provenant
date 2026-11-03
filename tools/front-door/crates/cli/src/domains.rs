@@ -1,5 +1,5 @@
 //! The binary edge registers the closed aggregate of landed domain owners.
-use provenant_config::{DomainSection, DomainSections};
+use provenant_config::{DomainConfig, DomainSection, DomainSections, FieldMetadata, SectionError};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -14,8 +14,50 @@ pub struct Domains {
     pub guard: provenant_confinement::guard::GuardConfig,
     #[serde(default)]
     pub run: provenant_confinement::run_config::RunConfig,
+    #[serde(default)]
+    pub pr: PrSettings,
 }
-static ENTRIES: [DomainSection; 7] = [
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PrSettings {
+    pub land: LandSettings,
+}
+pub const DEFAULT_LAND_POLL_SECONDS: u64 = 30;
+
+#[derive(Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LandSettings {
+    pub poll_seconds: u64,
+}
+impl Default for LandSettings {
+    fn default() -> Self {
+        Self {
+            poll_seconds: DEFAULT_LAND_POLL_SECONDS,
+        }
+    }
+}
+impl DomainConfig for PrSettings {
+    fn validate(&self) -> Vec<SectionError> {
+        if self.land.poll_seconds == 0 {
+            vec![SectionError {
+                field: "land.poll_seconds".into(),
+                code: "range",
+            }]
+        } else {
+            Vec::new()
+        }
+    }
+}
+const PR_SECTION: DomainSection =
+    DomainSection::new::<PrSettings>("pr", |_| "[land]\npoll_seconds = 30\n").with_fields(&[
+        FieldMetadata {
+            min: Some(1),
+            ..FieldMetadata::new("land.poll_seconds", "int")
+        },
+    ]);
+
+static ENTRIES: [DomainSection; 8] = [
     crate::wait::SECTION,
     provenant_providers::accounts::SECTION,
     provenant_quota::SECTION,
@@ -23,6 +65,7 @@ static ENTRIES: [DomainSection; 7] = [
     provenant_fabric_runtime::config::SECTION,
     provenant_confinement::guard::SECTION,
     provenant_confinement::run_config::SECTION,
+    PR_SECTION,
 ];
 pub static SECTIONS: DomainSections<Domains> = DomainSections::new(&ENTRIES);
 
@@ -117,6 +160,11 @@ mod tests {
         );
         let markers = field("domains.run.push_conflict_markers");
         assert_eq!((markers.kind, &markers.default), ("bool", &json!(true)));
+        let brief_warnings = field("domains.run.brief_read_root_warnings");
+        assert_eq!(
+            (brief_warnings.kind, &brief_warnings.default),
+            ("bool", &json!(true))
+        );
         let idle = field("gc.idle_days");
         assert_eq!(
             (idle.kind, idle.min, idle.max, &idle.default),
