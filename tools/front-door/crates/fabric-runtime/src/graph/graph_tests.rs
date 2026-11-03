@@ -229,6 +229,7 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
         routes: None,
         required_verdict: None,
         require_findings: false,
+        skip_without_findings: None,
     }
 }
 
@@ -2853,6 +2854,7 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
         routes: Some(routes.clone()),
         required_verdict: None,
         require_findings: false,
+        skip_without_findings: None,
     }]);
     let mut owner = FakeOwner {
         observations: VecDeque::from([
@@ -3122,6 +3124,7 @@ fn pending_and_unknown_keep_observing_the_same_route_without_fallback() {
             routes: Some(routes.clone()),
             required_verdict: None,
             require_findings: false,
+            skip_without_findings: None,
         }]);
         let mut owner = FakeOwner {
             observations: VecDeque::from([first, terminal(AttemptOutcome::Succeeded)]),
@@ -3432,6 +3435,7 @@ fn terminal_task_failure_does_not_try_a_fallback_route() {
         routes: Some(vec![route("first"), route("second")]),
         required_verdict: None,
         require_findings: false,
+        skip_without_findings: None,
     }]);
     let mut owner = FakeOwner {
         observations: VecDeque::from([terminal(AttemptOutcome::TaskFailed)]),

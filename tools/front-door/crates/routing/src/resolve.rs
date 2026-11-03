@@ -2221,6 +2221,38 @@ fn select_pool(
         .cloned()
         .ok_or(RoutingError::Catalogue)?;
     let mut receipt = selection_receipt(name, &classified, &draw, &route);
+    receipt.extra.insert(
+        "weight_source".into(),
+        if context.config.pools.contains_key(name) {
+            "config"
+        } else {
+            "catalogue"
+        }
+        .into(),
+    );
+    let rule = if draw.total_weight > 0 {
+        "weighted_draw"
+    } else if classified.first_zero_ready == Some(draw.index) {
+        "first_zero_weight_ready"
+    } else if classified.first_standby_ready == Some(draw.index) {
+        "first_standby_ready"
+    } else if classified.first_recoverable_unavailable == Some(draw.index) {
+        "first_recoverable_unavailable"
+    } else {
+        "first_unavailable"
+    };
+    receipt.extra.insert("selection_rule".into(), rule.into());
+    if !excluded_members.rules.is_empty() {
+        receipt.extra.insert(
+            "considered_exclusions".into(),
+            excluded_members
+                .rules
+                .iter()
+                .map(|rule| format!("source={} selector={}", rule.source.as_str(), rule.selector))
+                .collect::<Vec<_>>()
+                .into(),
+        );
+    }
     receipt.reason = reason.map(str::to_owned);
     Ok(PoolPick { route, receipt })
 }

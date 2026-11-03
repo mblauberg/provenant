@@ -15,6 +15,13 @@ There is no ledger, store or collector. Grammar is in the generated [CLI
 reference](../reference/cli.md); quota is specified in [routing](routing.md).
 Paths are relative to `tools/front-door/`.
 
+`telemetry stats --by route` groups attempts by their resolved `model@effort`,
+combining accounts for the same route. When effort is unknown the group is the
+model alone; when the model is unknown the group is unattributed. Requested
+routes do not fill missing resolved values.
+- Test: `crates/telemetry/src/tests.rs::groups_by_resolved_model_and_effort`
+- Owner: `crates/telemetry/src/`, `crates/cli/src/run/telemetry.rs`
+
 ## A report cannot touch a lane
 
 Telemetry owns no store, lock, background collection or provider operation,
@@ -365,6 +372,10 @@ to `most_constrained` with a warning and leaves config unchanged.
 - Test: `tests/quota.rs::failed_auth_refresh_shows_last_known_usage_age_and_stale_marker`;
   `::show_warns_when_display_icon_account_is_not_registered`
 - Owner: `crates/cli/src/quota.rs`
+
+`telemetry stats --detail --json` includes the recorded route decision and pool
+selection receipt for each selected terminal attempt. Older attempts can omit
+these fields.
 
 ## Not provided
 

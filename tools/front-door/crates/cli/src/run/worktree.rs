@@ -82,7 +82,7 @@ pub(super) fn own_worktree(
         cancel,
         |context| {
             use provenant_confinement::worktrees::{
-                self, WorktreeCondition, WorktreeCreate, WorktreeOrigin, WorktreeOwner, WriterState,
+                self, WorktreeCreate, WorktreeOrigin, WorktreeOwner, WriterState,
             };
             let context = &worktrees::WorktreeContext {
                 workers,
@@ -122,9 +122,6 @@ pub(super) fn own_worktree(
                     {
                         owner_refused = true;
                         return Err(worktrees::WorktreeError::UnknownWriter);
-                    }
-                    if info.dirty != WorktreeCondition::Clean {
-                        return Err(worktrees::WorktreeError::Dirty);
                     }
                     match info.writer {
                         WriterState::Free => {}

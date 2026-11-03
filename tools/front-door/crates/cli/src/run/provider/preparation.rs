@@ -1207,15 +1207,17 @@ pub(super) fn prepare_candidates(
             }
             None => None,
         };
-        let mut provider = RouteRecord {
-            provider: Some(route.adapter.clone()),
-            model: Some(format!("{}/{}", route.adapter, route.model)),
-            effort: route.effort,
-            account_label: entry.map(|e| e.label.clone()),
-            account_key: route.account_key,
-            pool_selection: route.pool_selection.clone(),
-            ..Default::default()
-        };
+        let mut provider = launch_route_record(
+            &route,
+            entry.map(|e| e.label.as_str()),
+            &task.route,
+            resume.is_some(),
+            redirected || candidate > 0,
+        );
+        provider.extra.insert(
+            "account_source".into(),
+            account_source(resume.is_some(), task.account.is_some()).into(),
+        );
         if let Some(event) = &dependency_event {
             provider
                 .extra
@@ -1292,4 +1294,116 @@ pub(super) fn check_graph_inputs_root(
         return Err(refused());
     }
     Ok(())
+}
+
+fn account_source(continuation: bool, pinned: bool) -> &'static str {
+    if continuation {
+        "continuation"
+    } else if pinned {
+        "pin"
+    } else {
+        "automatic"
+    }
+}
+
+/// Preserve the resolver's decision at the launch boundary.
+fn launch_route_record(
+    route: &ResolvedRoute,
+    account_label: Option<&str>,
+    requested: &run::RequestedRoute,
+    continuation: bool,
+    fallback: bool,
+) -> RouteRecord {
+    let source = if fallback {
+        "fallback"
+    } else if continuation {
+        "continuation"
+    } else if matches!(requested, run::RequestedRoute::Model { .. }) {
+        "pin"
+    } else if route.pool_selection.is_some() {
+        "pool"
+    } else {
+        "named_route"
+    };
+    RouteRecord::from_resolved(route, account_label, source)
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+    use provenant_routing::{
+        Catalogue, Fallback, NamedRoute, RouteChoice, RouteName, RouteRequest, RoutingConfig,
+        RoutingContext,
+    };
+
+    #[test]
+    fn alias_effort_reaches_launch_record() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(account_source(true, true), "continuation");
+        assert_eq!(account_source(false, true), "pin");
+        assert_eq!(account_source(false, false), "automatic");
+        let catalogue = Catalogue::bundled()?;
+        let mut config = RoutingConfig::default();
+        config.routes.insert(
+            "fixture".into(),
+            NamedRoute {
+                model: provenant_routing::ModelId::parse("codex/gpt-6.1-sol")?,
+                effort: Some("high".into()),
+            },
+        );
+        let context = RoutingContext {
+            policy_account_hint: None,
+            catalogue: &catalogue,
+            config: &config,
+            registry: REGISTRY,
+            availability: &[],
+            quota: &[],
+            capacity_cooldowns: &[],
+            accounts: &[],
+            quota_policies: &[],
+            readiness: None,
+            access: &[],
+            now: provenant_core::WallTime::from_micros(100_000_000)?,
+            host: "fixture",
+        };
+        let request = RouteRequest {
+            intent: Default::default(),
+            choice: RouteChoice::NamedRoute(RouteName::parse("fixture")?),
+            effort: None,
+            confidential: false,
+            fallback: Fallback::None,
+        };
+        let resolved = provenant_routing::resolve(&request, &context)?;
+        let requested = run::RequestedRoute::Named {
+            extra: Default::default(),
+            name: "fixture".into(),
+            effort: None,
+        };
+        let record = launch_route_record(&resolved, Some("work"), &requested, false, false);
+        let wire = serde_json::to_value(&record)?;
+        assert_eq!(wire["model"], "codex/gpt-6.1-sol");
+        assert_eq!(wire["effort"], "high");
+        assert_eq!(wire["account_label"], "work");
+        assert_eq!(wire["source"], "named_route");
+        let pinned = run::RequestedRoute::Model {
+            extra: Default::default(),
+            provider: "codex".into(),
+            model: "codex/gpt-6.1-sol".into(),
+            effort: Some("high".into()),
+        };
+        assert_eq!(
+            launch_route_record(&resolved, None, &pinned, false, false)
+                .source
+                .as_deref(),
+            Some("pin")
+        );
+        assert_eq!(
+            launch_route_record(&resolved, None, &requested, false, true)
+                .source
+                .as_deref(),
+            Some("fallback")
+        );
+        assert!(wire.get("prompt").is_none());
+        assert!(wire.get("credential").is_none());
+        Ok(())
+    }
 }

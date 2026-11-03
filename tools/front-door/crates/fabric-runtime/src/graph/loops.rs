@@ -478,6 +478,8 @@ fn expand_loops(
                         .find(|n| n.id == local)
                         .is_some_and(|n| n.depends_on.is_empty())
                 {
+                    child.skip_without_findings =
+                        node.skip_without_findings.or(child.skip_without_findings);
                     // The loop's own inputs merge with a body selection of
                     // the same outer node.
                     for input in &node.inputs {
