@@ -365,7 +365,14 @@ fn outputs(
                     selected.verdict = source.verdict.clone();
                     selected.verdict_error = source.verdict_error.clone();
                 }
-                OutputKind::Findings => selected.findings.extend(source.findings.clone()),
+                OutputKind::Findings => {
+                    selected
+                        .findings
+                        .extend(source.findings.iter().cloned().map(|mut finding| {
+                            finding.id = format!("{}:{}", export.node, finding.id);
+                            finding
+                        }))
+                }
                 OutputKind::Branch => selected.branch = source.branch.clone(),
                 OutputKind::Commit => selected.commit = source.commit.clone(),
                 OutputKind::Remaining => selected.remaining = source.remaining.clone(),
@@ -423,6 +430,9 @@ fn outputs(
         });
     }
     let total = selected.findings.len();
+    selected
+        .findings
+        .retain(|finding| finding.id.len() <= OUTPUT_FIELD_BYTES);
     selected.findings.truncate(MAX_FINDINGS);
     while canonical_len(&selected.findings) > FINDINGS_BYTES {
         selected.findings.pop();

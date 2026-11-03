@@ -563,6 +563,190 @@ fn a_synthesis_settles_with_a_disposition_and_reason_for_every_finding() {
     );
 }
 
+// Small: settlement uses only the in-memory graph owner.
+#[test]
+fn identity_only_dispositions_inherit_selected_findings() {
+    let mut synthesis = node("synthesis", route("first"));
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.depends_on = vec!["review".into()];
+    synthesis.inputs = vec![GraphInput {
+        extra: Default::default(),
+        node: "review".into(),
+        outputs: vec![OutputKind::Findings],
+    }];
+    for (id, state) in [("F1", NodeState::Succeeded), ("unknown", NodeState::Failed)] {
+        let text = findings_text(&format!(
+            r#"{{"id":"{id}","disposition":"rejected","reason":"falsified"}}"#
+        ));
+        let mut owner = FakeOwner {
+            observations: [
+                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+                terminal_with_result(AttemptOutcome::Succeeded, &text),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let run = advance(
+            &graph(vec![node("review", route("first")), synthesis.clone()]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
+        let progress = &run.checkpoint.nodes[1];
+        assert_eq!(progress.state, state);
+        if state == NodeState::Succeeded {
+            let finding = &progress.outputs.as_ref().unwrap().findings[0];
+            assert_eq!(finding.summary, "s");
+            assert_eq!(finding.file, "a.rs");
+            assert_eq!(finding.severity, "high");
+            assert_eq!(finding.status, "open");
+            assert_eq!(finding.reason.as_deref(), Some("falsified"));
+        } else {
+            let error = progress.advance_error.as_deref().unwrap();
+            assert!(error.contains("unknown"), "{error}");
+            assert!(error.contains("id"), "{error}");
+        }
+    }
+}
+
+// Small: composite export and downstream settlement share the real graph path.
+#[test]
+fn composite_findings_have_qualified_ids_and_unambiguous_bare_aliases() {
+    for (second_id, cited, state) in [
+        (
+            "F1",
+            vec!["reviews--a:F1", "reviews--b:F1"],
+            NodeState::Succeeded,
+        ),
+        ("F2", vec!["F1", "F2"], NodeState::Succeeded),
+        (
+            "inner:F2",
+            vec!["reviews--a:F1", "reviews--b:inner:F2"],
+            NodeState::Succeeded,
+        ),
+        ("F1", vec!["F1", "reviews--b:F1"], NodeState::Failed),
+    ] {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1, "graph_id":"qualified-findings", "nodes":[
+                {"id":"reviews", "kind":"composite", "access":"read_only", "composite":{
+                    "nodes":[
+                        {"id":"a", "access":"read_only", "prompt":"review", "route":{"alias":"senior"}},
+                        {"id":"b", "access":"read_only", "prompt":"review", "route":{"alias":"senior"}}
+                    ], "exports":[{"node":"a", "outputs":["findings"]}, {"node":"b", "outputs":["findings"]}]
+                }},
+                {"id":"synthesis", "kind":"synthesise", "access":"read_only", "prompt":"dispose", "route":{"alias":"senior"},
+                 "depends_on":["reviews"], "inputs":[{"node":"reviews", "outputs":["findings"]}],
+                 "dispositions":["accepted", "rejected", "deferred"]}
+            ]
+        })).unwrap();
+        let entries: Vec<_> = cited
+            .iter()
+            .map(|id| serde_json::json!({"id":id, "disposition":"rejected", "reason":"falsified"}))
+            .collect();
+        let text = format!(
+            "```findings\n{}\n```\nVERDICT: PASS",
+            serde_json::json!({"schema_version":1,"findings":entries})
+        );
+        let mut owner = FakeOwner {
+            observations: [
+                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+                terminal_with_result(
+                    AttemptOutcome::Succeeded,
+                    &findings_text(&entry("").replace("F1", second_id)),
+                ),
+                terminal_with_result(AttemptOutcome::Succeeded, &text),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        let composite = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "reviews")
+            .unwrap();
+        let ids: Vec<_> = composite
+            .outputs
+            .as_ref()
+            .unwrap()
+            .findings
+            .iter()
+            .map(|finding| finding.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["reviews--a:F1", &format!("reviews--b:{second_id}")]
+        );
+        let synthesis = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "synthesis")
+            .unwrap();
+        assert_eq!(synthesis.state, state);
+        if state == NodeState::Succeeded {
+            assert_eq!(
+                synthesis
+                    .outputs
+                    .as_ref()
+                    .unwrap()
+                    .findings
+                    .iter()
+                    .map(|finding| finding.id.as_str())
+                    .collect::<Vec<_>>(),
+                ids
+            );
+        } else {
+            let error = synthesis.advance_error.as_deref().unwrap();
+            assert!(
+                error.contains("F1") && error.contains("ambiguous"),
+                "{error}"
+            );
+        }
+        assert_eq!(
+            advance(&document, &mut FakeOwner::default(), &mut journal)
+                .unwrap()
+                .checkpoint,
+            run.checkpoint
+        );
+    }
+}
+
+// Small: malformed entries must retain a bounded, actionable diagnostic.
+#[test]
+fn findings_error_names_first_entry_and_field() {
+    for (entry, field) in [
+        (
+            r#"{"id":"broken","severity":42},{"id":"later"}"#.to_owned(),
+            "severity",
+        ),
+        (
+            r#"{"id":"broken","severity":"high","file":"a"}"#.to_owned(),
+            "summary",
+        ),
+        (
+            entry("").replace("null", "-1").replace("F1", "broken"),
+            "line",
+        ),
+    ] {
+        let progress = synthesis_run(&findings_text(&entry));
+        let error = progress.advance_error.as_deref().unwrap();
+        assert!(
+            error.contains("entry 1") && error.contains("broken"),
+            "{error}"
+        );
+        assert!(error.contains(field), "{error}");
+        assert!(!error.contains("later"), "{error}");
+    }
+    let progress = synthesis_run(&findings_text(&format!(
+        r#"{{"id":"{}","disposition":"rejected","reason":"unknown"}}"#,
+        "界".repeat(2000)
+    )));
+    assert!(progress.advance_error.as_ref().unwrap().len() <= MAX_ADVANCE_ERROR_BYTES);
+}
+
 #[test]
 fn a_synthesis_must_dispose_of_every_selected_upstream_finding_exactly_once() {
     let disposed = |id: &str| {
@@ -1088,7 +1272,10 @@ fn partial_composite_exports_only_successful_members_and_lists_the_unavailable()
     assert_eq!(lenses.findings.len(), 1);
     let excerpt = &lenses.result.as_ref().unwrap().excerpt;
     assert!(excerpt.starts_with("Unavailable lenses:"), "{excerpt}");
-    assert!(excerpt.contains("lens-b: the findings block is missing or invalid"));
+    assert!(
+        excerpt
+            .contains("lens-b: findings block missing or invalid: field findings: block missing")
+    );
     assert!(excerpt.contains("lens-c: adapter unavailable"));
     assert!(excerpt.contains("LENS-A-OK"));
     assert!(!excerpt.contains("LENS-B-NO-FINDINGS"));
@@ -3567,7 +3754,10 @@ fn outputs_feed_direct_dependants_and_survive_replay() {
 fn output_parsing_is_lenient_and_rendering_fails_instead_of_omitting() {
     let failed = make_outputs(Some(&capture("no findings")), None, None, None, None);
     assert!(failed.findings.is_empty());
-    assert_eq!(failed.warnings, ["findings block missing or invalid"]);
+    assert_eq!(
+        failed.warnings,
+        ["findings block missing or invalid: field findings: block missing"]
+    );
     let oversized = format!(
         "```findings\n{{\"schema_version\":1,\"findings\":[],\"extra\":\"{}\"}}\n```",
         "x".repeat(8192)
@@ -3691,7 +3881,8 @@ fn findings_and_verdict_at_the_end_of_a_large_result_are_parsed() {
         let text = format!("```findings\n{block}\n```");
         let outputs = make_outputs(Some(&capture(&text)), None, None, None, None);
         assert!(outputs.findings.is_empty());
-        assert_eq!(outputs.warnings, [FINDINGS_INVALID]);
+        assert_eq!(outputs.warnings.len(), 1);
+        assert!(outputs.warnings[0].starts_with(FINDINGS_INVALID));
     }
 }
 

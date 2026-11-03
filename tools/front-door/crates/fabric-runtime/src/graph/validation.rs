@@ -530,22 +530,21 @@ pub(super) fn route_is_bounded(route: &GraphRoute) -> bool {
 /// identity must appear exactly once.
 pub(super) fn disposition_error(
     dispositions: &[String],
-    upstream: &std::collections::BTreeSet<String>,
+    upstream: &[Finding],
     outputs: &NodeOutputs,
 ) -> Option<(&'static str, String)> {
     if dispositions.is_empty() || outputs.result.is_none() {
         return None;
     }
     let allowed = dispositions.join(", ");
-    if outputs.findings.is_empty()
-        && outputs
-            .warnings
-            .iter()
-            .any(|warning| warning == FINDINGS_INVALID)
+    if let Some(warning) = outputs
+        .warnings
+        .iter()
+        .find(|warning| warning.starts_with(FINDINGS_INVALID))
     {
         return Some((
             "disposition_findings_invalid",
-            format!("dispositions required ({allowed}): the findings block is missing or invalid"),
+            format!("dispositions required ({allowed}): {warning}"),
         ));
     }
     for finding in &outputs.findings {
@@ -574,7 +573,11 @@ pub(super) fn disposition_error(
             ));
         }
     }
-    for id in upstream {
+    for id in upstream
+        .iter()
+        .map(|finding| &finding.id)
+        .collect::<std::collections::BTreeSet<_>>()
+    {
         let count = outputs.findings.iter().filter(|f| &f.id == id).count();
         if count != 1 {
             return Some((

@@ -1685,18 +1685,17 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     _ => None,
                 };
                 // Every selected upstream finding identity needs a disposition.
-                let upstream_findings: std::collections::BTreeSet<String> =
-                    if node.dispositions.is_empty() {
-                        Default::default()
-                    } else {
-                        node.inputs
-                            .iter()
-                            .filter(|input| input.outputs.contains(&OutputKind::Findings))
-                            .filter_map(|input| positions.get(&input.node))
-                            .filter_map(|index| checkpoint.nodes[*index].outputs.as_ref())
-                            .flat_map(|outputs| outputs.findings.iter().map(|f| f.id.clone()))
-                            .collect()
-                    };
+                let upstream_findings: Vec<Finding> = if node.dispositions.is_empty() {
+                    Default::default()
+                } else {
+                    node.inputs
+                        .iter()
+                        .filter(|input| input.outputs.contains(&OutputKind::Findings))
+                        .filter_map(|input| positions.get(&input.node))
+                        .filter_map(|index| checkpoint.nodes[*index].outputs.as_ref())
+                        .flat_map(|outputs| outputs.findings.iter().cloned())
+                        .collect()
+                };
                 let mut settled_result = None;
                 let retry_was_pending;
                 let should_continue = {
@@ -1738,28 +1737,36 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             attempt.attempt_ref = attempt_ref;
                             // Provider success alone does not satisfy an explicit result contract.
                             let warned = result_warning.is_some();
-                            let mut outputs = make_outputs(
+                            let mut outputs = make_outputs_with_upstream(
                                 result.as_deref(),
                                 result_warning,
                                 result_path,
                                 branch,
                                 commit,
+                                &upstream_findings,
                             );
                             if outcome == AttemptOutcome::UsageLimited {
                                 outputs
                                     .warnings
-                                    .retain(|warning| warning != FINDINGS_INVALID);
+                                    .retain(|warning| !warning.starts_with(FINDINGS_INVALID));
                             }
                             let disposition_error = if node.require_findings
                                 && (outputs.result.is_none()
                                     || outputs
                                         .warnings
                                         .iter()
-                                        .any(|warning| warning == FINDINGS_INVALID))
+                                        .any(|warning| warning.starts_with(FINDINGS_INVALID)))
                             {
                                 Some((
                                     "findings_required",
-                                    "the findings block is missing or invalid".to_owned(),
+                                    outputs
+                                        .warnings
+                                        .iter()
+                                        .find(|warning| warning.starts_with(FINDINGS_INVALID))
+                                        .cloned()
+                                        .unwrap_or_else(|| {
+                                            "the findings block is missing or invalid".to_owned()
+                                        }),
                                 ))
                             } else {
                                 disposition_error(&node.dispositions, &upstream_findings, &outputs)
