@@ -634,7 +634,6 @@ fn read_readiness_file(
 /// provider I/O. A missing, stale, mismatched or damaged record is unknown;
 /// nothing here reads as ready unless fresh evidence says so. Routing and the
 /// route and host commands read through this.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn read_readiness(state: &Path, scope: &ReadinessScope, now: i64) -> ReadinessRead {
     if !component(&scope.adapter) || !component(&scope.account_key) {
         return ReadinessRead::unknown(ReadinessReason::InvalidEvidence);

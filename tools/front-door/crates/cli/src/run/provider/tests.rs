@@ -102,6 +102,7 @@ fn nested_result_policy_uses_a_reliable_route_without_broadening_authority()
             capacity_cooldowns: &[],
             accounts: &[],
             quota_policies: &[],
+            readiness: None,
             access: &[],
             now: provenant_core::WallTime::from_micros(0)?,
             host: "fixture",

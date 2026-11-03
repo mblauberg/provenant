@@ -723,6 +723,7 @@ impl F3Facade for BoundFacade<'_> {
                         .capabilities()
                         .submit,
                     ),
+                    readiness: None,
                 });
                 continue;
             };
@@ -733,6 +734,7 @@ impl F3Facade for BoundFacade<'_> {
                 host,
                 available: false,
                 execution: None,
+                readiness: Some(provenant_fabric_runtime::hosts::PeerReadiness::not_probed()),
             };
             let cap = fair_probe_micros(
                 budget.remaining(self.factory.clock.mono_now()).as_micros(),
@@ -759,13 +761,17 @@ impl F3Facade for BoundFacade<'_> {
                     executable,
                     seconds: ctx.config.limits.peer_seconds,
                 };
-                match transport.exchange_with_cap(
+                let probe = transport.exchange_with_cap(
                     peer,
                     &request,
                     budget,
                     cancel,
                     std::time::Duration::from_micros(cap),
-                ) {
+                );
+                health.readiness = Some(
+                    provenant_fabric_runtime::hosts::PeerReadiness::from_probe(&probe),
+                );
+                match probe {
                     Ok(PeerResponse {
                         result: PeerResult::Health { data: value, .. },
                         ..
