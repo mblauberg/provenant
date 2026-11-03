@@ -547,7 +547,7 @@ never share a worktree.
 5. A run closes only when every task and registered child is terminal.
 
 `settlement-progress.json` binds the attempt scope, pinned branch base and head,
-current phase, native process owner, retry deadline and one import attempt counter.
+current phase, native process owner, retry deadline and one import attempt counter. The last settlement error is retained in `blocking_reason` and reported by reconcile in text and JSON; advancing a phase clears it.
 Each driver holds a kernel lease for its lifetime. A concurrently live driver
 excludes a second claimant even in the same process. A claimant holding the
 lease can disregard an abandoned same-process journal owner after the existing
@@ -564,10 +564,20 @@ terminal settlement.
 | Phase | Durable effect and replay |
 | --- | --- |
 | `import` | Import the pinned head through Git's quarantined receive path. Repeating the same staging ref is harmless. |
-| `publish` | Compare-and-swap the real branch from its pinned base; the same head already published counts as success. |
+| `publish` | Compare-and-swap the real branch from its pinned base; the same head or a descendant already published counts as success, without moving the branch. |
 | `record` | Seal the result and terminal decision before acquiring the publication lock and committing the attempt, summary, operation state and event. A lock timeout leaves the exact scoped decision replayable. Retention-ref cleanup follows the transaction outside the publication lock. |
 | `release` | Verify the committed outcome and release evidence, then remove the settling reservation. Repeated release accepts the same committed attempt. |
 | `complete` | Settlement is finished; ordinary terminal cleanup may reclaim disposable scratch. Import refusals retain private Git for host recovery. |
+
+A chair can release an unsettleable writer fence with
+`provenant reconcile --abandon RUN/ATTEMPT --reason TEXT`. Ordinary reconcile
+continues retrying by default. Abandonment requires a terminal attempt,
+exclusive settlement and writer locks, and proven absence of custody. It records
+an explicit abandoned settlement outcome with the chair, time, reason and prior
+phase before releasing the reservation. It preserves the last error, provider
+output and private Git, and excludes the attempt from automatic recovery and
+retention cleanup. Repeating the command with the same reason completes an
+interrupted release; a different reason refuses to replace the evidence.
 
 Settlement permits three attempts that reach object import. Contention and
 pre-import checks do not consume this counter; resuming a later phase does not
@@ -944,7 +954,7 @@ quarantine only after import succeeds, clearing skip-worktree and
 assume-unchanged flags so an uncommitted edit remains visible. The host
 publishes the real branch with a
 compare-and-swap against the pinned launch base. Replaying the same head is
-idempotent; a competing shared ref change refuses publication. A published tip
+idempotent; a branch already containing that head also satisfies publication. A diverged shared ref refuses publication. A published tip
 must descend from the lane base or the current `origin` default branch, which
 allows rebases while refusing unrelated and orphan histories. Success,
 cancellation and failure remove `refs/provenant/import/<head>` and the lane's

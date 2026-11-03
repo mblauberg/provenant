@@ -3,7 +3,7 @@
     "pattern": "deliver",
     "preset": "deliver"
   },
-  "graph_id": "preset-c58682f4b4bce916e8b032e8afeac9f1",
+  "graph_id": "preset-95b6a347e8a827c94468d765bc632f3a",
   "nodes": [
     {
       "acceptance_checks": [
@@ -172,9 +172,14 @@
             "prompt": "You frame an immutable review subject. Do not edit files.\n\nFrame the immutable review subject for: brief\nBase (diff reference): \nSpec (acceptance criteria): \nIdentify acceptance criteria and risk areas from the pinned source commit,\nreading the spec where one is named. Do not edit files. Subsequent independent\nlenses review this exact commit against the base and the spec.\n",
             "role": "plan.review",
             "role_digest": "sha256:cc9b118bf74049c200dc2e053a9d30de01f36479c4688392153484bcf832a60c",
-            "route": {
-              "alias": "senior"
-            },
+            "routes": [
+              {
+                "alias": "senior"
+              },
+              {
+                "alias": "senior"
+              }
+            ],
             "source": {
               "node": "write",
               "type": "head"
@@ -265,9 +270,14 @@
                   "require_findings": true,
                   "role": "lens.correctness-spec",
                   "role_digest": "sha256:bf578197d0881e91746f43b0888c298a0bc6ce3a4f97293690e3b495a9138ea2",
-                  "route": {
-                    "alias": "senior"
-                  },
+                  "routes": [
+                    {
+                      "alias": "senior"
+                    },
+                    {
+                      "alias": "senior"
+                    }
+                  ],
                   "title": "lens-correctness-spec"
                 },
                 {
@@ -300,9 +310,14 @@
                   "require_findings": true,
                   "role": "lens.tests",
                   "role_digest": "sha256:1acffad6d7ba2cf1a0d514ee9310a7a39e6d077695178d7cb63c2baf19f793d0",
-                  "route": {
-                    "alias": "senior"
-                  },
+                  "routes": [
+                    {
+                      "alias": "senior"
+                    },
+                    {
+                      "alias": "senior"
+                    }
+                  ],
                   "title": "lens-tests"
                 },
                 {
@@ -325,9 +340,14 @@
                   "require_findings": true,
                   "role": "lens.design-fit-reuse",
                   "role_digest": "sha256:8106a66fd80eccc42c6f86526921fa553cd8a0164b72aaa6c38c9f93dda2ade2",
-                  "route": {
-                    "alias": "senior"
-                  },
+                  "routes": [
+                    {
+                      "alias": "senior"
+                    },
+                    {
+                      "alias": "senior"
+                    }
+                  ],
                   "title": "lens-design-fit-reuse"
                 },
                 {
@@ -350,9 +370,14 @@
                   "require_findings": true,
                   "role": "lens.simplicity",
                   "role_digest": "sha256:46d20a75ff5d5cb89b53165b558efb8205a2801263593b4365e23d20150c41b4",
-                  "route": {
-                    "alias": "senior"
-                  },
+                  "routes": [
+                    {
+                      "alias": "senior"
+                    },
+                    {
+                      "alias": "senior"
+                    }
+                  ],
                   "title": "lens-simplicity"
                 },
                 {
@@ -375,9 +400,14 @@
                   "require_findings": true,
                   "role": "lens.conventions-readability",
                   "role_digest": "sha256:2a3ed542701c73aac20e2fcf061be84dc3ffe0eb7cae60b4d26d53a38bff2416",
-                  "route": {
-                    "alias": "senior"
-                  },
+                  "routes": [
+                    {
+                      "alias": "senior"
+                    },
+                    {
+                      "alias": "senior"
+                    }
+                  ],
                   "title": "lens-conventions-readability"
                 },
                 {
@@ -400,9 +430,14 @@
                   "require_findings": true,
                   "role": "lens.refactor-cleanup",
                   "role_digest": "sha256:55978dc6912a015ecfb5af368430ebd46b9fb0631e2b76d8bcdefc2ce4b57ec0",
-                  "route": {
-                    "alias": "senior"
-                  },
+                  "routes": [
+                    {
+                      "alias": "senior"
+                    },
+                    {
+                      "alias": "senior"
+                    }
+                  ],
                   "title": "lens-refactor-cleanup"
                 },
                 {
@@ -425,9 +460,14 @@
                   "require_findings": true,
                   "role": "lens.reliability",
                   "role_digest": "sha256:3fc6619b72f1afc2023c8f3e495979675d5e6dc74b90ca18da1f172a5ddd3cae",
-                  "route": {
-                    "alias": "senior"
-                  },
+                  "routes": [
+                    {
+                      "alias": "senior"
+                    },
+                    {
+                      "alias": "senior"
+                    }
+                  ],
                   "title": "lens-reliability"
                 },
                 {
@@ -450,9 +490,14 @@
                   "require_findings": true,
                   "role": "lens.flexibility",
                   "role_digest": "sha256:50b373883f21025aee2a7052850c74685f00f1f2b1f9aa1074a112de3644724d",
-                  "route": {
-                    "alias": "senior"
-                  },
+                  "routes": [
+                    {
+                      "alias": "senior"
+                    },
+                    {
+                      "alias": "senior"
+                    }
+                  ],
                   "title": "lens-flexibility"
                 }
               ]
@@ -494,9 +539,14 @@
             "prompt": "You falsify review findings. A finding stands only if you cannot break it.\n\nVerify the lens findings for: brief\nTry to falsify every finding against the pinned commit: reproduce it, look for\nthe code or test that contradicts it, and check it against the spec. Re-emit\nevery finding verbatim with one of UPHELD, FALSIFIED or UNVERIFIABLE and your\nevidence. Add any finding the lenses missed and mark it NEW. Do not edit files.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose entries keep each finding's\nid and add \"verification\": \"upheld\", \"falsified\" or \"unverifiable\".\nCarry any listed unavailable lenses into your result.\n",
             "role": "review.verify",
             "role_digest": "sha256:fc0f5571d88891cacc2ba568ab52e671f979028b72b676d7756736cfb308cf83",
-            "route": {
-              "alias": "verifier"
-            },
+            "routes": [
+              {
+                "alias": "verifier"
+              },
+              {
+                "alias": "verifier"
+              }
+            ],
             "source": {
               "node": "subject",
               "type": "node"
@@ -527,9 +577,14 @@
             "prompt": "You reconcile review findings into one verdict with a disposition for each.\n\nReconcile independent review findings against evidence for: brief\nDo not take a majority vote. Weigh each finding by its evidence and, where a\nverifier ran, by its UPHELD or FALSIFIED mark. Give every finding exactly one\ndisposition with a one-line reason: accepted (must be fixed), rejected\n(evidence refutes it) or deferred (valid, not for this change). End with a\nfenced findings block (schema_version 1) with one entry per finding id; each\nentry carries \"id\", \"disposition\" (accepted, rejected or deferred) and \"reason\".\nCopy the upstream qualified id exactly; a bare id works only when unambiguous.\nThese three fields suffice for upstream findings; descriptive fields are inherited.\nNew findings require severity, file, summary and status as well.\nIf the verifier's findings block is missing, empty or truncated, use its prose\nUPHELD/FALSIFIED marks together with the original lens findings. Record each\nupheld finding as accepted, with a reason citing the verifier's evidence.\nA finding without a disposition is incomplete. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"member:F1\",\"disposition\":\"accepted\",\"reason\":\"Evidence supports it\"}]}\n```\nEmit one exact\nVERDICT: PASS only when no accepted finding remains and acceptance evidence is\nsatisfied, otherwise VERDICT: FAIL.\nIf the input lists unavailable lenses, state that the review is degraded and name\nthem with their reasons.\n",
             "role": "review.synthesis",
             "role_digest": "sha256:79e9bdf20379794555ac710151a7bffc6413822e013e3daef8688af1b7861fd9",
-            "route": {
-              "alias": "senior"
-            },
+            "routes": [
+              {
+                "alias": "senior"
+              },
+              {
+                "alias": "senior"
+              }
+            ],
             "source": {
               "node": "subject",
               "type": "node"

@@ -64,6 +64,22 @@ pub use plans::{
     RemainingBudgets,
 };
 
+// Reserve the existing family-separation envelope for sibling groups too.
+fn graph_envelope_reason(
+    document: &GraphDocument,
+    expansions: &[Expansion],
+    extensions: &[String],
+    plan: &PlannedGraph,
+) -> Option<String> {
+    let mut bounded = plan.clone();
+    for node in &mut bounded.nodes {
+        if node.family_group.is_some() && node.distinct_from.is_none() {
+            node.distinct_from = Some(DistinctFrom::Dependencies);
+        }
+    }
+    envelope::reason(document, expansions, extensions, &bounded)
+}
+
 pub const MAX_CANCEL_REASON_BYTES: usize = 256;
 const MAX_CHECKPOINT_BYTES: u64 = 16_777_216;
 /// Every JSON member costs at least two bytes, so the byte limit binds first.
@@ -119,8 +135,25 @@ pub trait CiStatus {
 /// is, never resubmit. Without one, the submission replays under `launch_actor`
 /// (the actor recorded before the first submit) so a changed actor cannot
 /// launch duplicate work. Provider launch and terminal publication remain run's responsibility.
+#[derive(Debug, Error)]
+pub enum ReviewResolveError {
+    #[error("review resolution is unsupported by this host")]
+    Unsupported,
+    #[error("review resolution failed: {0}")]
+    Failed(String),
+}
+
 pub trait AttemptOwner {
     type Error: Error + 'static;
+
+    /// Resolve a deferred review; hosts without support fail closed.
+    fn resolve_review(
+        &mut self,
+        _node: &GraphNode,
+        _subject: &str,
+    ) -> Result<Expansion, ReviewResolveError> {
+        Err(ReviewResolveError::Unsupported)
+    }
 
     /// Pin the integration branch at the instant this node is first admitted.
     fn integration_head(&mut self) -> Result<Option<String>, Self::Error> {
@@ -187,6 +220,11 @@ pub trait AttemptOwner {
 
     /// Model families that served these attempts. Unknown attempts are skipped.
     fn attempt_families(&mut self, _attempts: &[String]) -> Result<Vec<String>, Self::Error> {
+        Ok(Vec::new())
+    }
+
+    /// Models that served the referenced attempts, in attempt order.
+    fn attempt_models(&mut self, _attempts: &[String]) -> Result<Vec<String>, Self::Error> {
         Ok(Vec::new())
     }
 
@@ -302,6 +340,8 @@ impl<R: Error + 'static, J: Error + 'static> GraphError<R, J> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct PlannedGraph {
     #[serde(skip_serializing_if = "Option::is_none")]
+    review_base: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     context: Option<provenant_records::run::WorkContext>,
     #[serde(flatten)]
     extra: provenant_records::ExtraFields,
@@ -318,6 +358,10 @@ struct PlannedGraph {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct PlannedNode {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review: Option<ReviewSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    family_group: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     context: Option<provenant_records::run::WorkContext>,
     #[serde(flatten)]
@@ -801,7 +845,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             checkpoint
         }
         None => {
-            if let Some(reason) = envelope::reason(document, &[], &[], &plan) {
+            if let Some(reason) = graph_envelope_reason(document, &[], &[], &plan) {
                 return Err(GraphError::Invalid(reason));
             }
             let asks = may_ask(&plan);
@@ -892,7 +936,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 .filter(|e| !checkpoint.extensions.contains(e))
                 .cloned(),
         );
-        if let Some(reason) = envelope::reason(document, &checkpoint.expansions, &all, &plan) {
+        if let Some(reason) = graph_envelope_reason(document, &checkpoint.expansions, &all, &plan) {
             return Err(GraphError::Extension(reason));
         }
     }
@@ -966,7 +1010,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
             if let Some(reason) =
                 structural_limit_reason(&preview, &preview_plan, limits).or_else(|| {
-                    envelope::reason(
+                    graph_envelope_reason(
                         document,
                         &checkpoint.expansions,
                         &prospective.extensions,
@@ -1091,7 +1135,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         let structural_pause = if checkpoint.nodes.iter().all(|node| node.state.settled()) {
             None
         } else {
-            structural_limit_reason(&expanded, &plan, limits)
+            structural_limit_reason(&expanded, &plan, limits).or_else(|| {
+                let reserved = plan.nodes.iter().filter(|node| !checkpoint.expansions.iter().any(|expansion| expansion.source == node.id))
+                    .filter_map(|node| node.review.as_ref()).fold(expanded.nodes.len(), |total, review| total.saturating_add(review.max_nodes));
+                (reserved > limits.nodes).then(|| format!("limits.nodes={} reached ({reserved} including deferred review reservations); set by domains.fabric.graph.limits", limits.nodes))
+            })
         };
         if let Some(reason) = &structural_pause {
             checkpoint.pause_reason = Some(bounded(reason, PAUSE_REASON_BYTES));
@@ -1284,6 +1332,156 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 asks::refresh_wake(&mut checkpoint);
                 journal.save(&checkpoint).map_err(GraphError::Journal)?;
                 continue;
+            }
+            if node.review.is_some() {
+                if structural_pause.is_some() || checkpoint.pause_reason.is_some() {
+                    continue;
+                }
+                if checkpoint.nodes[node_index].source_commit.is_none() {
+                    let commit = match node.source.as_ref() {
+                        Some(SourceBinding::Commit { commit }) => Some(commit.clone()),
+                        Some(SourceBinding::Node { node: source }) => positions
+                            .get(source)
+                            .and_then(|index| checkpoint.nodes[*index].outputs.as_ref())
+                            .and_then(|outputs| outputs.commit.clone()),
+                        Some(SourceBinding::Head { node: writer }) => {
+                            land::chain_head(&plan, &checkpoint, &positions, &node.id, writer)
+                        }
+                        Some(SourceBinding::Integration) => {
+                            owner.integration_head().map_err(GraphError::Run)?
+                        }
+                        None => None,
+                    };
+                    if commit
+                        .as_ref()
+                        .is_none_or(|value| value.parse::<provenant_core::GitOid>().is_err())
+                    {
+                        let progress = &mut checkpoint.nodes[node_index];
+                        progress.state = NodeState::Failed;
+                        progress.advance_error_code = Some("source_commit_unavailable".into());
+                        progress.advance_error = Some(format!(
+                            "node {}: source commit unavailable or invalid",
+                            node.id
+                        ));
+                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        continue;
+                    }
+                    if matches!(node.source, Some(SourceBinding::Integration))
+                        && checkpoint.integration_pin.is_none()
+                    {
+                        checkpoint.integration_pin = commit.clone();
+                    }
+                    checkpoint.nodes[node_index].source_commit = commit;
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                }
+                let subject = checkpoint.nodes[node_index]
+                    .source_commit
+                    .as_deref()
+                    .ok_or_else(|| GraphError::BadCheckpoint {
+                        node: node.id.clone(),
+                        invariant: "deferred review node must have a source commit",
+                    })?;
+                let original = expanded
+                    .nodes
+                    .iter()
+                    .find(|candidate| candidate.id == node.id)
+                    .ok_or_else(|| GraphError::BadCheckpoint {
+                        node: node.id.clone(),
+                        invariant: "deferred review node must exist in the expanded plan",
+                    })?;
+                let mut resolution_error_code = "review_resolution_failed";
+                let result = owner
+                    .resolve_review(original, subject)
+                    .map_err(|error| {
+                        if matches!(error, ReviewResolveError::Unsupported) {
+                            resolution_error_code = "review_resolution_unsupported";
+                        }
+                        error.to_string()
+                    })
+                    .and_then(|mut addition| {
+                        for child in &mut addition.nodes {
+                            if child.composite.is_none() {
+                                child.source = Some(SourceBinding::Commit {
+                                    commit: subject.to_owned(),
+                                });
+                            }
+                        }
+                        if checkpoint
+                            .expansions
+                            .iter()
+                            .filter_map(|item| item.review.as_ref())
+                            .any(|review| {
+                                addition
+                                    .review
+                                    .as_ref()
+                                    .is_some_and(|next| review.base != next.base)
+                            })
+                        {
+                            return Err("review expansions disagree on the base".into());
+                        }
+                        plans::validate_review_addition(&expanded, &addition)?;
+                        if addition.source != node.id
+                            || addition
+                                .review
+                                .as_ref()
+                                .is_none_or(|review| review.subject.to_string() != subject)
+                        {
+                            return Err("review expansion subject or source mismatch".into());
+                        }
+                        let mut preview = expanded.clone();
+                        plans::append(&mut preview, &addition);
+                        let (next_plan, next_positions) =
+                            validate_flat_plan(&preview, &plans::generous())
+                                .map_err(str::to_owned)?;
+                        if let Some(reason) = structural_limit_reason(&preview, &next_plan, limits)
+                        {
+                            return Err(reason);
+                        }
+                        let mut additions = checkpoint.expansions.clone();
+                        additions.push(addition.clone());
+                        if let Some(reason) = graph_envelope_reason(
+                            document,
+                            &additions,
+                            &checkpoint.extensions,
+                            &next_plan,
+                        ) {
+                            return Err(reason);
+                        }
+                        Ok((addition, preview, next_plan, next_positions))
+                    });
+                match result {
+                    Ok((addition, preview, next_plan, next_positions)) => {
+                        let mut prospective = checkpoint.clone();
+                        prospective.nodes[node_index].state = NodeState::Succeeded;
+                        prospective.expansions.push(addition);
+                        loops::reconcile(&mut prospective, &next_plan);
+                        for (progress, planned) in
+                            prospective.nodes.iter_mut().zip(&next_plan.nodes)
+                        {
+                            progress.children.clone_from(&planned.composite_members);
+                        }
+                        plans::remaining(&mut prospective, &preview, limits);
+                        validate_expanded_rows(&prospective, &next_plan)?;
+                        owner
+                            .validate_expansion(&preview, &prospective)
+                            .map_err(GraphError::Run)?;
+                        journal.save(&prospective).map_err(GraphError::Journal)?;
+                        checkpoint = prospective;
+                        (expanded, plan, positions) = (preview, next_plan, next_positions);
+                        continue 'schedule;
+                    }
+                    Err(reason) => {
+                        let progress = &mut checkpoint.nodes[node_index];
+                        progress.state = NodeState::Failed;
+                        progress.advance_error_code = Some(resolution_error_code.into());
+                        progress.advance_error = Some(bounded(
+                            &format!("node {}: {reason}", node.id),
+                            MAX_ADVANCE_ERROR_BYTES,
+                        ));
+                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        continue;
+                    }
+                }
             }
             loop {
                 // A persisted launch wait defers this node until its own wake
@@ -1529,6 +1727,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         usage: None,
                     });
                     checkpoint.nodes[node_index].state = NodeState::Running;
+                    // A retry must not replay the preceding attempt's family snapshot.
+                    checkpoint.nodes[node_index].separation = None;
                     journal.save(&checkpoint).map_err(GraphError::Journal)?;
                 }
 
@@ -1587,6 +1787,20 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     distinct_attempts.dedup();
                 } else if node.distinct_from == Some(DistinctFrom::Writer) {
                     let mut current = node;
+                    // A resolved review lens is pinned to a commit, so its writer
+                    // is found through the deferred node it was expanded from.
+                    if matches!(node.source, Some(SourceBinding::Commit { .. }))
+                        && let Some(origin) = checkpoint
+                            .expansions
+                            .iter()
+                            .find(|expansion| {
+                                expansion.review.is_some()
+                                    && expansion.nodes.iter().any(|n| n.id == node.id)
+                            })
+                            .and_then(|expansion| positions.get(&expansion.source))
+                    {
+                        current = &plan.nodes[*origin];
+                    }
                     while let Some(
                         binding @ (SourceBinding::Node { node: source }
                         | SourceBinding::Head { node: source }),
@@ -1614,14 +1828,113 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         }
                     }
                 }
+                let parent = plan
+                    .nodes
+                    .iter()
+                    .find(|candidate| candidate.composite_members.contains(&node.id))
+                    .map(|candidate| &candidate.id);
+                let peer_refs: Vec<String> =
+                    node.family_group.as_ref().map_or_else(Vec::new, |group| {
+                        plan.nodes
+                            .iter()
+                            .enumerate()
+                            .filter(|(index, peer)| {
+                                let peer_parent = plan
+                                    .nodes
+                                    .iter()
+                                    .find(|candidate| {
+                                        candidate.composite_members.contains(&peer.id)
+                                    })
+                                    .map(|candidate| &candidate.id);
+                                *index != node_index
+                                    && peer.family_group.as_ref() == Some(group)
+                                    && peer_parent == parent
+                            })
+                            .flat_map(|(index, _)| checkpoint.nodes[index].attempts.iter())
+                            .filter_map(|attempt| attempt.attempt_ref.clone())
+                            .collect()
+                    });
+                let family_peers = if node.family_group.is_some()
+                    && !needs_record
+                    && checkpoint.nodes[node_index].separation.is_some()
+                {
+                    checkpoint.nodes[node_index]
+                        .separation
+                        .as_ref()
+                        .map(|value| {
+                            if value.strength == FamilyStrength::Require {
+                                value.preferred.clone()
+                            } else {
+                                value.excluded.clone()
+                            }
+                        })
+                        .unwrap_or_default()
+                } else {
+                    owner.attempt_families(&peer_refs).unwrap_or_default()
+                };
+                let mut prior_attempts = Vec::new();
+                for attempt in checkpoint.nodes[node_index]
+                    .attempts
+                    .iter()
+                    .take(route_index)
+                {
+                    let resolved = if let Some(reference) = &attempt.attempt_ref {
+                        owner
+                            .attempt_models(std::slice::from_ref(reference))
+                            .map_err(GraphError::Run)?
+                            .into_iter()
+                            .next()
+                    } else {
+                        None
+                    };
+                    if let Some(model) = resolved.or_else(|| attempt.route.model.clone()) {
+                        prior_attempts.push(model);
+                    }
+                }
+                let require_distinct = node.distinct_strength == Some(FamilyStrength::Require)
+                    && (node.family_group.is_none() || node.distinct_from.is_some());
+                if (needs_record || checkpoint.nodes[node_index].separation.is_none())
+                    && (node.distinct_from.is_some() || node.family_group.is_some())
+                {
+                    let mut excluded = owner
+                        .attempt_families(&distinct_attempts)
+                        .unwrap_or_default();
+                    let enforced = require_distinct && !excluded.is_empty();
+                    let mut record = if enforced {
+                        let mut record = separation(FamilyStrength::Require, excluded, None);
+                        record.preferred = family_peers
+                            .iter()
+                            .take(SEPARATION_FAMILIES)
+                            .map(|family| bounded(family, FAMILY_BYTES))
+                            .collect();
+                        record
+                    } else {
+                        for family in &family_peers {
+                            if !excluded.contains(family) {
+                                excluded.push(family.clone());
+                            }
+                        }
+                        let strength = if node.family_group.is_some() {
+                            FamilyStrength::Prefer
+                        } else {
+                            node.distinct_strength.unwrap_or_default()
+                        };
+                        separation(strength, excluded, None)
+                    };
+                    record.applied = None;
+                    checkpoint.nodes[node_index].separation = Some(record);
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                }
                 let continued = land::continued_branch(node, &checkpoint, &positions);
                 let observation = match owner.observe_or_start(
                     &key,
                     NodeInput {
+                        prior_attempts: &prior_attempts,
+                        family_peers: &family_peers,
                         context: node_context(&plan, node),
                         read_roots: &node.read_roots,
                         distinct_from_attempts: &distinct_attempts,
-                        require_distinct: node.distinct_strength == Some(FamilyStrength::Require),
+                        require_distinct,
                         source_commit: checkpoint.nodes[node_index].source_commit.as_deref(),
                         review_base: node
                             .extra
@@ -1703,25 +2016,50 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     }
                     None
                 };
-                let recorded_separation = match (&observation, node.distinct_from) {
-                    (AttemptObservation::Terminal { attempt_ref, .. }, Some(_)) => {
-                        let excluded = owner
-                            .attempt_families(&distinct_attempts)
-                            .unwrap_or_default();
-                        let applied = attempt_ref.as_ref().and_then(|reference| {
-                            owner
-                                .attempt_families(std::slice::from_ref(reference))
-                                .ok()
-                                .and_then(|families| families.into_iter().next())
-                        });
-                        Some(separation(
-                            node.distinct_strength.unwrap_or_default(),
-                            excluded,
-                            applied,
-                        ))
-                    }
-                    _ => None,
-                };
+                let recorded_separation =
+                    match (&observation, node.distinct_from, &node.family_group) {
+                        (AttemptObservation::Terminal { attempt_ref, .. }, distinct, group)
+                            if distinct.is_some() || group.is_some() =>
+                        {
+                            let mut excluded = owner
+                                .attempt_families(&distinct_attempts)
+                                .unwrap_or_default();
+                            let enforced = require_distinct && !excluded.is_empty();
+                            if !enforced {
+                                for family in &family_peers {
+                                    if !excluded.contains(family) {
+                                        excluded.push(family.clone());
+                                    }
+                                }
+                            }
+                            let applied = attempt_ref.as_ref().and_then(|reference| {
+                                owner
+                                    .attempt_families(std::slice::from_ref(reference))
+                                    .ok()
+                                    .and_then(|families| families.into_iter().next())
+                            });
+                            let mut record = separation(
+                                if enforced {
+                                    FamilyStrength::Require
+                                } else if node.family_group.is_some() {
+                                    FamilyStrength::Prefer
+                                } else {
+                                    node.distinct_strength.unwrap_or_default()
+                                },
+                                excluded,
+                                applied,
+                            );
+                            if enforced {
+                                record.preferred = family_peers
+                                    .iter()
+                                    .take(SEPARATION_FAMILIES)
+                                    .map(|family| bounded(family, FAMILY_BYTES))
+                                    .collect();
+                            }
+                            Some(record)
+                        }
+                        _ => None,
+                    };
                 // Every selected upstream finding identity needs a disposition.
                 let upstream_findings: Vec<Finding> = if node.dispositions.is_empty() {
                     Default::default()
@@ -1865,7 +2203,19 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                         if outcome == AttemptOutcome::UsageLimited {
                                             progress.advance_error_code =
                                                 Some("usage_limited".into());
-                                            progress.advance_error = Some("Provider quota or rate limit reached; wait for the allowance to reset or choose an eligible route.".into());
+                                            // Name the pool so the user knows which allowance ran out.
+                                            let pool = route
+                                                .alias
+                                                .as_deref()
+                                                .map_or_else(String::new, |alias| {
+                                                    format!(" for pool {alias}")
+                                                });
+                                            progress.advance_error = Some(bounded(
+                                                &format!(
+                                                    "Provider quota or rate limit reached{pool}; wait for the allowance to reset or choose an eligible route."
+                                                ),
+                                                MAX_ADVANCE_ERROR_BYTES,
+                                            ));
                                         }
                                         progress.state = NodeState::Failed;
                                         false

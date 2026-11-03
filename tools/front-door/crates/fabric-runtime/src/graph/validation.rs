@@ -1,5 +1,35 @@
 use super::*;
 
+pub(super) fn nodes_have_v2(nodes: &[GraphNode]) -> bool {
+    nodes.iter().any(|node| {
+        node.review.is_some()
+            || node.family_group.is_some()
+            || node
+                .composite
+                .as_ref()
+                .is_some_and(|spec| nodes_have_v2(&spec.nodes))
+            || node
+                .loop_body
+                .as_ref()
+                .is_some_and(|spec| nodes_have_v2(&spec.body))
+            || node
+                .plan
+                .as_ref()
+                .and_then(|spec| spec.fallback.as_ref())
+                .is_some_and(|spec| nodes_have_v2(&spec.nodes))
+    })
+}
+
+pub(super) fn validate_schema(document: &GraphDocument) -> Result<(), &'static str> {
+    let has_v2 = document.review_base.is_some() || nodes_have_v2(&document.nodes);
+    // Version 2 is a superset: it may omit every v2 field, but version 1
+    // cannot carry one.
+    if !matches!(document.schema_version, 1 | 2) || document.schema_version == 1 && has_v2 {
+        return Err("schema version");
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_access(
     access: AccessMode,
     worktree: Option<&str>,
@@ -35,6 +65,7 @@ pub(super) fn validate_plan_with_limits(
     document: &GraphDocument,
     limits: &crate::config::GraphLimits,
 ) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), String> {
+    validate_schema(document).map_err(String::from)?;
     let expanded = loops::expand(document, &[], limits)?;
     validate_flat_plan(&expanded, limits).map_err(String::from)
 }
@@ -43,7 +74,7 @@ pub(super) fn validate_flat_plan(
     document: &GraphDocument,
     limits: &crate::config::GraphLimits,
 ) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), &'static str> {
-    if document.schema_version != 1 {
+    if !matches!(document.schema_version, 1 | 2) {
         return Err("schema version");
     }
     if document
@@ -104,7 +135,24 @@ pub(super) fn validate_flat_plan(
         if node.deadline_seconds == Some(0) {
             return Err("node deadline_seconds must be positive");
         }
-        plans::validate_spec(node)?;
+        if node.review.is_some()
+            && (node.kind != Some(NodeKind::Plan)
+                || node.plan.is_some()
+                || node.access != AccessMode::ReadOnly
+                || node.source.is_none())
+        {
+            return Err("review requires a read-only plan node with a source and no plan");
+        }
+        if node
+            .review
+            .as_ref()
+            .is_some_and(|review| review.max_nodes == 0)
+        {
+            return Err("review max_nodes must be positive");
+        }
+        if node.review.is_none() {
+            plans::validate_spec(node)?;
+        }
         let is_composite = node.kind == Some(NodeKind::Composite);
         if is_composite != node.composite.is_some() {
             return Err("composite requires nodes and exports");
@@ -254,7 +302,13 @@ pub(super) fn validate_flat_plan(
         if document.delivery == Some(DeliveryMode::Pr) && node.delivery == Some(DeliveryMode::Pr) {
             return Err("graph PR is exclusive with node PRs");
         }
-        if !is_gate && !is_loop && !is_composite && !is_decide && !is_land && node.prompt.is_empty()
+        if !is_gate
+            && !is_loop
+            && !is_composite
+            && !is_decide
+            && !is_land
+            && node.review.is_none()
+            && node.prompt.is_empty()
             || plans::prompt(node).len() > limits.node_prompt_bytes
         {
             return Err("prompt size");
@@ -273,7 +327,14 @@ pub(super) fn validate_flat_plan(
         }
 
         let routes = match (&node.route, &node.routes) {
-            (None, None) if is_gate || is_loop || is_composite || is_decide || is_land => {
+            (None, None)
+                if is_gate
+                    || is_loop
+                    || is_composite
+                    || is_decide
+                    || is_land
+                    || node.review.is_some() =>
+            {
                 Vec::new()
             }
             (Some(route), None) => vec![route.clone()],
@@ -353,6 +414,8 @@ pub(super) fn validate_flat_plan(
         let mut depends_on = node.depends_on.clone();
         depends_on.sort();
         nodes.push(PlannedNode {
+            review: node.review.clone(),
+            family_group: node.family_group.clone(),
             context: node.context.clone(),
             extra: node.extra.clone(),
             composite_members: node.composite_members.clone(),
@@ -480,12 +543,13 @@ pub(super) fn validate_flat_plan(
         .collect();
     Ok((
         PlannedGraph {
+            review_base: document.review_base.clone(),
             context: document.context.clone(),
             extra: document.extra.clone(),
             integration_branch: document.integration_branch.clone(),
             delivery: document.delivery.clone(),
             decision_session: document.decision_session.clone(),
-            schema_version: 1,
+            schema_version: document.schema_version,
             graph_id: document.graph_id.clone(),
             nodes: topological_nodes,
         },
@@ -620,6 +684,7 @@ pub(super) fn separation(
             .take(SEPARATION_FAMILIES)
             .map(|family| bounded(family, FAMILY_BYTES))
             .collect(),
+        preferred: Vec::new(),
         applied: applied.map(|family| bounded(&family, FAMILY_BYTES)),
         outcome,
     }
@@ -906,6 +971,15 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                     attempt.state == AttemptState::Terminal
                         && attempt.outcome == Some(AttemptOutcome::Succeeded)
                 }) || fallback_settled(node, progress, document, checkpoint)
+                    || (node.review.is_some()
+                        && progress.source_commit.as_ref().is_some_and(|subject| {
+                            checkpoint.expansions.iter().any(|expansion| {
+                                expansion.source == node.id
+                                    && expansion.review.as_ref().is_some_and(|review| {
+                                        review.subject.to_string() == *subject
+                                    })
+                            })
+                        }))
             }
             NodeState::Failed if progress.advance_error.is_some() => last.is_none_or(|attempt| {
                 attempt.state == AttemptState::Terminal

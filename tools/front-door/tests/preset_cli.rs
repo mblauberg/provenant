@@ -696,6 +696,142 @@ fn preset_wait_completes_a_retained_gate_graph_and_replays_it()
 }
 
 #[test]
+fn fresh_gives_a_rerun_a_new_graph_id_and_a_plain_rerun_the_same_one()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    let prompt = project.join("brief");
+    std::fs::write(&prompt, "look at it twice")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let graph_id = |extra: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
+        let output = fixture_cli()
+            .current_dir(&project)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["--json", "--state-dir"])
+            .arg(temp.path().join("state"))
+            .args(["run", "--preset", "fan-out", "--prompt-file"])
+            .arg(&prompt)
+            .arg("--explain")
+            .args(extra)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        Ok(value["data"]["graph"]["graph_id"]
+            .as_str()
+            .ok_or("graph id missing")?
+            .to_owned())
+    };
+    let plain = graph_id(&[])?;
+    assert_eq!(plain, graph_id(&[])?);
+    let fresh = graph_id(&["--fresh"])?;
+    assert_ne!(plain, fresh);
+    assert_ne!(fresh, graph_id(&["--fresh"])?);
+    // The flag is a preset option, like --set.
+    let output = fixture_cli()
+        .current_dir(&project)
+        .env("PROVENANT_ROOT", &root)
+        .args(["run", "--fresh", "--prompt-file"])
+        .arg(&prompt)
+        .output()?;
+    assert!(!output.status.success());
+    Ok(())
+}
+
+#[test]
+fn fresh_rerun_after_cancel_starts_a_new_graph() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "seed",
+        ],
+    ] {
+        let output = provenant_os::fixture::git_command()
+            .current_dir(&project)
+            .args(args)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    // A gate-only preset runs no provider, so the graph exists without a launch.
+    let presets = project.join(".provenant/presets");
+    std::fs::create_dir_all(&presets)?;
+    std::fs::write(
+        presets.join("gate-only.toml"),
+        "stages = [{ id = 'accept', kind = 'gate', condition = { type = 'budget' } }]\n",
+    )?;
+    let prompt = project.join("brief");
+    std::fs::write(&prompt, "accept the bounded graph")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let raw = |args: &[&str]| -> Result<(bool, serde_json::Value), Box<dyn std::error::Error>> {
+        let output = fixture_cli()
+            .current_dir(&project)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["--json", "--state-dir"])
+            .arg(temp.path().join("state"))
+            .args(args)
+            .output()?;
+        Ok((
+            output.status.success(),
+            serde_json::from_slice(&output.stdout)?,
+        ))
+    };
+    let cli = |args: &[&str]| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let (success, value) = raw(args)?;
+        assert!(success, "{args:?}: {value}");
+        Ok(value)
+    };
+    let prompt = prompt.to_str().ok_or("prompt path")?;
+    let run = [
+        "run",
+        "--preset",
+        "gate-only",
+        "--prompt-file",
+        prompt,
+        "--wait",
+        "1s",
+    ];
+    let first = cli(&run)?;
+    let graph_id = first["data"]["graph_id"]
+        .as_str()
+        .ok_or("graph id")?
+        .to_owned();
+    let cancelled = cli(&["fabric", "graph", "cancel", &graph_id])?;
+    assert_eq!(
+        cancelled["data"]["checkpoint"]["cancelled"], true,
+        "{cancelled}"
+    );
+    // A plain rerun reattaches to the cancelled graph; --fresh starts another.
+    let (_, rerun) = raw(&run)?;
+    assert_eq!(rerun["data"]["graph_id"], graph_id.as_str(), "{rerun}");
+    assert_eq!(rerun["status"], "cancelled", "{rerun}");
+    let fresh = cli(&[&run[..], &["--fresh"]].concat())?;
+    let fresh_id = fresh["data"]["graph_id"].as_str().ok_or("fresh graph id")?;
+    assert_ne!(fresh_id, graph_id);
+    assert_eq!(fresh["data"]["graph"]["status"], "complete", "{fresh}");
+    Ok(())
+}
+
+#[test]
 fn explain_pins_source_refs_before_hashing_without_creating_state()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;

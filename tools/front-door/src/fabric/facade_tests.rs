@@ -72,7 +72,7 @@ mod peer_tests {
         }))?;
         let mut journal =
             graph::FileJournal::open(&roots.state, project, "b-good", budget, &cancel, &clock)?;
-        journal.bind(graph::GraphExecution {
+        journal.bind(graph::GraphExecution {review_base: None,
             extra: Default::default(),
             integration_base: None,
             directory: rig.project.clone(),
@@ -146,7 +146,7 @@ mod peer_tests {
             ]
         }))?;
         let mut journal = FileJournal::open(&roots.state, project, "reason-test", budget, &cancel, &factory.clock)?;
-        journal.bind(GraphExecution { extra: Default::default(), integration_base: None, directory: rig.project.clone(), document })?;
+        journal.bind(GraphExecution { extra: Default::default(), integration_base: None, review_base: None, directory: rig.project.clone(), document })?;
         journal.save(&checkpoint)?;
         drop(journal);
         let cancelled = factory.graph(GraphInput::Cancel {
@@ -455,6 +455,10 @@ mod peer_tests {
                 assert_eq!(crate::worktree_tests::support::code(&output), 0);
             }
             let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+            // A nested-lane fixture may only look up an existing binding.
+            if std::env::var_os("PROVENANT_PANEL_ROUTING_FIXTURE").is_some() {
+                provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(rig.project.join(".git"))?)?;
+            }
             let identity = Context::open(roots.clone(), &rig.home, &rig.project)?.identity;
             let clock = SystemClock;
             let cancel = CancelToken::new();
@@ -640,7 +644,7 @@ mod peer_tests {
             ("default-no-origin-head", None, &head),
         ] {
             let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({"graph_id":"review-pins", "node_id":name, "route_index":0}))?;
-            let observation = graph_owner.observe_or_start(&key, graph::NodeInput {
+            let observation = graph_owner.observe_or_start(&key, graph::NodeInput { prior_attempts: &[], family_peers: &[],
                 context: Default::default(), read_roots: &[], distinct_from_attempts: &[], require_distinct: false,
                 source_commit: Some(&head), review_base, title: name, prompt: "review",
                 required_verdict: None, deadline_seconds: None, inputs_dir: None,
@@ -700,7 +704,7 @@ mod peer_tests {
                 "title":"inspect", "prompt":"Review the slice",
                 "route":{"kind":"model", "provider":"fixture", "model":"fixture/model"},
                 "timeout_seconds":factory.context.config.limits.graph_timeout_seconds
-            }], "concurrency":1
+            }], "concurrency":1, "knobs":["routing.graph_exclude=[\"codex/gpt-6-luna\"]"]
         }))?;
         let receipt = run_owner.submit_with_access(input, budget, &cancel, Default::default())?;
         let target = receipt.targets.first().ok_or("target")?;
@@ -722,6 +726,7 @@ mod peer_tests {
         let store = run_owner.store(&cancel)?;
         for prepared in [false, true] {
             if prepared {
+                graph_owner.exclude = vec!["codex/gpt-6-luna".into()];
                 // Reserve the legacy digest without the canonical request file,
                 // as a crash between row reservation and publication would leave it.
                 let call = run_owner.call(&cancel);
@@ -743,7 +748,7 @@ mod peer_tests {
             }
             let observation = graph_owner.observe_or_start(
                 &key,
-                graph::NodeInput {
+                graph::NodeInput {prior_attempts: &[], family_peers: &[],
                     context: provenant_records::run::WorkContext {
                         graph_id: Some(key.graph_id.clone()),
                         node_id: Some(key.node_id.clone()),
@@ -988,7 +993,7 @@ mod peer_tests {
                 &cancel,
                 &clock,
             )?;
-            journal.bind(GraphExecution {
+            journal.bind(GraphExecution {review_base: None,
                 extra: Default::default(),
                 integration_base: None,
                 directory: fixture.rig.project.clone(),
@@ -1145,7 +1150,7 @@ mod peer_tests {
                 &cancel,
                 &factory.clock,
             )?;
-            journal.bind(graph::GraphExecution {
+            journal.bind(graph::GraphExecution {review_base: None,
                 extra: Default::default(),
                 integration_base: None,
                 directory: fixture.rig.project.clone(),
@@ -1256,7 +1261,7 @@ mod peer_tests {
             &cancel,
             &factory.clock,
         )?;
-        journal.bind(graph::GraphExecution {
+        journal.bind(graph::GraphExecution {review_base: None,
             extra: Default::default(),
             integration_base: None,
             directory: fixture.rig.project.clone(),
@@ -1318,7 +1323,7 @@ mod peer_tests {
             &cancel,
             &factory.clock,
         )?;
-        journal.bind(graph::GraphExecution {
+        journal.bind(graph::GraphExecution {review_base: None,
             extra: Default::default(),
             integration_base: None,
             directory: fixture.rig.project.clone(),
@@ -1458,7 +1463,7 @@ mod peer_tests {
             &cancel,
             &factory.clock,
         )?;
-        journal.bind(graph::GraphExecution {
+        journal.bind(graph::GraphExecution {review_base: None,
             extra: Default::default(),
             integration_base: None,
             directory: fixture.rig.project.clone(),
@@ -1485,6 +1490,39 @@ mod peer_tests {
             prices: None,
             tick: false,
         };
+        let prior = format!("{}/{}", factory.context.identity.host, upstream.attempt_id);
+        assert_eq!(owner.prior_models(&[prior.clone(), prior.clone()])?, ["codex/gpt-6-luna", "codex/gpt-6-luna"]);
+        assert_eq!(provenant_fabric_runtime::graph::AttemptOwner::attempt_models(&mut owner, &[prior.clone(), prior.clone()])?, ["codex/gpt-6-luna", "codex/gpt-6-luna"]);
+        // Resolve the same alias again with the host's per-node exclusion list.
+        use provenant_routing::{AccessContext, Catalogue, ExclusionRule, ExclusionSelector, ExclusionSource, Fallback, ModelId, RouteChoice, RouteName, RouteRequest, RoutingConfig, RoutingContext};
+        let catalogue = Catalogue::bundled()?;
+        let members: Vec<provenant_routing::RoutePoolMember> = serde_json::from_value(serde_json::json!([
+            {"model":"codex/gpt-6-luna", "weight":1}, {"model":"claude/claude-haiku-5-5", "weight":1}
+        ]))?;
+        let availability: Vec<_> = members.iter().map(|member| provenant_providers::AvailabilityRecord {
+            schema_version: 1, adapter: member.model.adapter().into(), executable: "/fixture/provider".into(),
+            version: "fixture".into(), fixture_ref: "fixture".into(), catalogue_revision: catalogue.revision().into(),
+            account_key: Some(format!("{}-account", member.model.adapter())), observed_models: vec![member.model.model().into()],
+            observed_unix_seconds: 80, expires_unix_seconds: 120, last_update: None,
+        }).collect();
+        let access: Vec<_> = members.iter().map(|member| AccessContext { adapter: member.model.adapter(), disclosure_ref: "fixture", confinement_ref: "fixture" }).collect();
+        let mut config = RoutingConfig::default();
+        config.pools.insert("retry-trial".into(), members.clone());
+        let context = RoutingContext { policy_account_hint: None, catalogue: &catalogue, config: &config,
+            registry: provenant_providers::REGISTRY, availability: &availability, quota: &[], capacity_cooldowns: &[], accounts: &[], quota_policies: &[], access: &access,
+            now: provenant_core::WallTime::from_micros(100_000_000)?, host: "fixture", readiness: None };
+        let request = RouteRequest { intent: Default::default(), choice: RouteChoice::NamedRoute(RouteName::parse("retry-trial")?), effort: None, confidential: false, fallback: Fallback::None };
+        let seed = (0..256).find(|seed| provenant_routing::resolve_with_seed(&request, &context, "retry", *seed)
+            .is_ok_and(|route| format!("{}/{}", route.adapter, route.model) == "codex/gpt-6-luna")).ok_or("no first draw")?;
+        let alias: graph::GraphRoute = serde_json::from_value(serde_json::json!({"alias":"retry-trial"}))?;
+        // The runtime passes the prior models it resolved from attempt records.
+        let prior_models = owner.prior_models(std::slice::from_ref(&prior))?;
+        let exclusions = owner.route_exclusions(&alias, &prior_models, false);
+        assert_eq!(exclusions, ["codex/gpt-6-luna"]);
+        assert!(owner.route_exclusions(&alias, &prior_models, true).is_empty());
+        let rules = [ExclusionRule { selector: ExclusionSelector::Model(ModelId::parse(&exclusions[0])?), source: ExclusionSource::Graph }];
+        let second = provenant_routing::resolve_for_account_with_seed_excluding(&request, &context, None, "retry", seed, &[], &rules)?;
+        assert_eq!(format!("{}/{}", second.adapter, second.model), "claude/claude-haiku-5-5");
         let run = graph::advance_with_budget(
             &document,
             &mut owner,
@@ -1506,6 +1544,286 @@ mod peer_tests {
         assert_eq!(separation.strength, graph::FamilyStrength::Require);
         assert_eq!(separation.excluded, ["openai"]);
         assert_eq!(separation.outcome, graph::SeparationOutcome::Unavailable);
+        Ok(())
+    }
+
+    #[test]
+    fn production_owner_panel_retries_across_families_and_synthesises()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // A nested lane submits without starting a real provider. Keep the
+        // environment change inside a child so other tests cannot see it.
+        const CHILD: &str = "PROVENANT_PANEL_ROUTING_FIXTURE";
+        if std::env::var_os(CHILD).is_none() {
+            use provenant_os::exec::{ExecOptions, Executor, Termination};
+            let argv = vec![std::env::current_exe()?.into_os_string(), "--exact".into(),
+                "fabric::peer_tests::production_owner_panel_retries_across_families_and_synthesises".into(), "--nocapture".into()];
+            let removed = [provenant_core::RUN_STATE_DIRECTORY_ENV, provenant_run::LANE_DEPTH_ENV,
+                provenant_run::PARENT_ATTEMPT_ENV, CHILD];
+            let mut env: Vec<_> = std::env::vars_os().filter(|(key, _)| !removed.iter().any(|name| key == name)).collect();
+            env.push((CHILD.into(), "1".into()));
+            env.push((provenant_run::LANE_DEPTH_ENV.into(), "1".into()));
+            env.push((provenant_run::PARENT_ATTEMPT_ENV.into(), AttemptId::from_bytes([99; 16]).to_string().into()));
+            let cwd = std::env::current_dir()?;
+            let mut options = ExecOptions::new(&argv, &cwd, std::time::Duration::from_secs(120));
+            options.env = Some(&env);
+            let output = SystemExecutor::new(1)?.execute(options)?;
+            assert_eq!(output.termination, Termination::Exit(0), "{}\n{}",
+                String::from_utf8_lossy(&output.stdout.bytes), String::from_utf8_lossy(&output.stderr.bytes));
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::{self, AttemptOwner};
+        use provenant_records::run::RequestedRoute;
+        use provenant_routing::{AccessContext, Catalogue, ExclusionRule, ExclusionSelector,
+            ExclusionSource, Fallback, ModelId, RouteChoice, RouteName, RouteRequest};
+        // Bundled production data has only two known families. Give two
+        // existing catalogue models fixture families, without changing the
+        // production catalogue, so writer exclusion and sibling diversity can
+        // both be observed with a fallback route available.
+        let _families = provenant_routing::fixture_family_override(&[
+            ("agy/gemini-3.8-flash", "google"),
+            ("opencode/opencode-go/glm-5.3-flash", "zhipu"),
+        ])?;
+        let fixture = SettlementFixture::resumed().map_err(|error| format!("fixture: {error}"))?;
+        use std::io::Write as _;
+        writeln!(std::fs::OpenOptions::new().append(true).open(fixture.roots.state.as_path().join("config.toml"))?,
+            "\n[domains.routing.pools]\npanel-fixture = [{{model='codex/gpt-6-luna'}},{{model='claude/claude-haiku-5-5'}},{{model='agy/gemini-3.8-flash'}},{{model='opencode/opencode-go/glm-5.3-flash'}}]")?;
+        let factory = Factory {
+            context: Context::open(fixture.roots.clone(), &fixture.rig.home, &fixture.rig.project)?,
+            project_attribution: false, clock: SystemClock, backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?, home: fixture.rig.home.clone(),
+            cwd: fixture.rig.project.clone(), assets: fixture.rig.project.clone(),
+            host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 120)?;
+        let call = provenant_run::Request { clock: &factory.clock, cancel: &cancel };
+        let head = fixture.store.record(fixture.settled.attempt_id, &call)?.head.ok_or("head")?;
+        let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":2, "graph_id":"production-panel", "nodes":[
+                {"id":"writer", "prompt":"write", "access":"worktree_write", "worktree":fixture.worktree,
+                    "route":{"adapter":"codex","model":"gpt-6-luna"}},
+                {"id":"one", "prompt":"review", "access":"read_only", "depends_on":["writer"],
+                    "source":{"type":"node","node":"writer"}, "distinct_from":"writer", "distinct_strength":"require",
+                    "family_group":"panel", "routes":[{"alias":"panel-fixture"},{"alias":"panel-fixture"}]},
+                {"id":"two", "prompt":"review", "access":"read_only", "depends_on":["writer","one"],
+                    "source":{"type":"node","node":"writer"}, "distinct_from":"writer", "distinct_strength":"require",
+                    "family_group":"panel", "routes":[{"alias":"panel-fixture"},{"alias":"panel-fixture"}]},
+                {"id":"three", "prompt":"review", "access":"read_only", "depends_on":["writer","two"],
+                    "source":{"type":"node","node":"writer"}, "distinct_from":"writer", "distinct_strength":"require",
+                    "family_group":"panel", "routes":[{"alias":"panel-fixture"},{"alias":"panel-fixture"}]},
+                {"id":"synthesis", "prompt":"synthesise", "access":"read_only", "depends_on":["one","two","three"],
+                    "route":{"adapter":"codex","model":"gpt-6-luna"}}
+            ]
+        }))?;
+        let mut journal = graph::FileJournal::open(&fixture.roots.state, fixture.settled.project_id,
+            &document.graph_id, budget, &cancel, &factory.clock).map_err(|error| format!("open journal: {error}"))?;
+        journal.bind(graph::GraphExecution { review_base: None, extra: Default::default(),
+            integration_base: None, directory: fixture.rig.project.clone(), document: document.clone() })?;
+        let mut owner = BoundGraphOwner { factory: &factory, integration_base: None, integration_branch: None,
+            network: None, exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false };
+        let catalogue = Catalogue::bundled()?;
+        let models = ["codex/gpt-6-luna", "claude/claude-haiku-5-5", "agy/gemini-3.8-flash", "opencode/opencode-go/glm-5.3-flash"];
+        let now = factory.clock.wall_now()?.unix_seconds();
+        let availability: Vec<_> = models.iter().map(|id| {
+            let (adapter, model) = id.split_once('/').ok_or("model")?;
+            Ok::<_, Box<dyn std::error::Error>>(provenant_providers::AvailabilityRecord {
+                schema_version: 1, adapter: adapter.into(), executable: "/fixture/provider".into(),
+                version: "fixture".into(), fixture_ref: "fixture".into(), catalogue_revision: catalogue.revision().into(),
+                account_key: Some(format!("{adapter}-account")), observed_models: vec![model.into()],
+                observed_unix_seconds: now, expires_unix_seconds: now + 300, last_update: None,
+            })
+        }).collect::<Result<_, _>>()?;
+        let access: Vec<_> = ["codex", "claude", "agy", "opencode"].iter().map(|adapter|
+            AccessContext { adapter, disclosure_ref: "fixture", confinement_ref: "fixture" }).collect();
+        let mut picked: std::collections::BTreeMap<String, Vec<(String, String)>> = Default::default();
+        let mut published = std::collections::BTreeSet::new();
+        let run = loop {
+            let run = graph::advance_with_budget(&document, &mut owner, &mut journal, &Default::default(), &Default::default()).map_err(|error| format!("advance: {error}"))?;
+            if run.checkpoint.successful() { break run; }
+            let mut progressed = false;
+            for node in &run.checkpoint.nodes {
+                let Some(attempt) = node.attempts.last() else { continue };
+                let Some(reference) = attempt.attempt_ref.as_ref() else { continue };
+                if !published.insert(reference.clone()) { continue; }
+                let (_, id) = reference.split_once('/').ok_or("attempt reference")?;
+                let record = fixture.store.record(id.parse()?, &call)?;
+                let operation = fixture.store.operation(&graph_operation("graph-attempt-operation", &attempt.key)?, &call)?.ok_or("operation")?;
+                let request = fixture.store.request(operation.run_id, &call)?;
+                let task = request.tasks.first().ok_or("task")?;
+                let model = match &task.route {
+                    RequestedRoute::Model { model, .. } => model.clone(),
+                    RequestedRoute::Review { name, effort, excluded_families, preferred_families, require_distinct, distinct_families, .. } => {
+                        assert!(*require_distinct && *distinct_families);
+                        assert_eq!(excluded_families, &["openai"]);
+                        let peers: Vec<_> = ["one", "two", "three"].into_iter().take_while(|id| *id != node.id)
+                            .flat_map(|id| picked.get(id).into_iter().flatten().map(|(family, _)| family.clone()))
+                            .fold(Vec::new(), |mut out, family| { if !out.contains(&family) { out.push(family); } out });
+                        assert_eq!(preferred_families, &peers);
+                        let prior: Vec<String> = task.profile.overrides.iter().find_map(|value|
+                            value.strip_prefix("routing.graph_exclude=")).map(serde_json::from_str).transpose()?.unwrap_or_default();
+                        let rules: Vec<_> = prior.iter().map(|model| Ok(ExclusionRule {
+                            selector: ExclusionSelector::Model(ModelId::parse(model)?), source: ExclusionSource::Graph,
+                        })).collect::<Result<_, provenant_routing::RoutingError>>()?;
+                        let route = RouteRequest { intent: provenant_routing::RouteIntent { workload: provenant_routing::Workload::Review, ..Default::default() }, choice: RouteChoice::NamedRoute(RouteName::parse(name)?),
+                            effort: effort.clone(), confidential: false, fallback: Fallback::None };
+                        let selected = provenant_cli::route::fixture_resolve_dispatch(&route, &fixture.roots, None,
+                            (operation.operation_id.as_str(), 0), &availability, &access, "fixture",
+                            Some((excluded_families, *require_distinct, preferred_families)), &rules)?;
+                        let model = format!("{}/{}", selected.adapter, selected.model);
+                        let family = provenant_cli::run::model_family(&model).ok_or("model family")?;
+                        assert_ne!(family, "openai");
+                        assert!(!prior.contains(&model));
+                        let eligible_unused = models.iter().find_map(|id| {
+                            let family = provenant_cli::run::model_family(id)?;
+                            (family != "openai" && !peers.contains(&family) && !prior.iter().any(|p| p == id)).then_some(family)
+                        });
+                        if eligible_unused.is_some() { assert!(!peers.contains(&family), "sibling preference ignored"); }
+                        picked.entry(node.id.clone()).or_default().push((family, model.clone()));
+                        model
+                    }
+                    route => return Err(format!("unexpected panel route: {route:?}").into()),
+                };
+                let outcome = if node.id == "one" && attempt.key.route_index == 0 { Outcome::QuotaLimited } else { Outcome::Succeeded };
+                // The provider boundary is synthetic; model selection above is
+                // the production dispatch resolver using the actual request.
+                publish_routed(&fixture.rig, &fixture.store, &record, head, outcome, &model, &call)?;
+                let applied = fixture.store.record(record.attempt_id, &call)?.applied_route.ok_or("applied route")?;
+                assert_eq!(applied.model.as_deref(), Some(model.as_str()));
+                if let Some(family) = provenant_cli::run::model_family(&model) {
+                    assert_eq!(owner.attempt_families(std::slice::from_ref(reference))?, [family]);
+                }
+                progressed = true;
+            }
+            assert!(progressed, "panel did not advance: {:#?}", run.checkpoint.nodes);
+        };
+        assert_eq!(run.checkpoint.nodes[1].attempts.len(), 2);
+        assert_eq!(run.checkpoint.nodes[1].attempts[0].outcome, Some(graph::AttemptOutcome::UsageLimited));
+        assert_ne!(picked["one"][0].0, picked["one"][1].0);
+        assert_eq!(picked.len(), 3);
+        assert_eq!(run.checkpoint.nodes[4].state, graph::NodeState::Succeeded);
+        Ok(())
+    }
+
+    #[test]
+    fn graph_owner_submits_sibling_families_as_a_preference_and_alias_retry_exclusions()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test(
+            "fabric::peer_tests::graph_owner_submits_sibling_families_as_a_preference_and_alias_retry_exclusions",
+        )? {
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::{self, AttemptOwner};
+        use provenant_records::run::RequestedRoute;
+        let fixture = SettlementFixture::resumed()?;
+        let factory = Factory {
+            context: Context::open(
+                fixture.roots.clone(),
+                &fixture.rig.home,
+                &fixture.rig.project,
+            )?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: fixture.rig.home.clone(),
+            cwd: fixture.rig.project.clone(),
+            assets: fixture.rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let mut bound = BoundGraphOwner {
+            factory: &factory,
+            integration_base: None,
+            integration_branch: None,
+            network: None,
+            exclude: Vec::new(),
+            budget,
+            cancel: &cancel,
+            prices: None,
+            tick: false,
+        };
+        let actor = bound.actor();
+        let owner = BinaryRunOwner {
+            factory: &factory,
+            allow_remote: true,
+            actor: None,
+            chair: None,
+        };
+        let store = owner.store(&cancel)?;
+        let call = owner.call(&cancel);
+        let upstream = provenant_run::Resume {
+            prior: fixture.settled.attempt_id, expected_generation: 0,
+            operation_id: "family-composition-writer".parse()?,
+            run_id: RunId::from_bytes([71; 16]), attempt_id: AttemptId::from_bytes([72; 16]),
+            prompt: "writer".into(), created_at: factory.clock.wall_now()?,
+        };
+        fixture.store.resume_fresh(&upstream, "fixture", &call)?;
+        let record = fixture.store.record(upstream.attempt_id, &call)?;
+        let head = fixture.store.record(fixture.settled.attempt_id, &call)?.head.ok_or("head")?;
+        publish_routed(&fixture.rig, &fixture.store, &record, head, Outcome::Succeeded, "codex/gpt-6-luna", &call)?;
+        let writer = format!("{}/{}", factory.context.identity.host, upstream.attempt_id);
+        let alias: graph::GraphRoute = serde_json::from_value(serde_json::json!({"alias":"junior"}))?;
+        // Submit one lens attempt through the production owner and return the
+        // route and knobs it recorded.
+        let mut submit = |node_id: &str,
+                          route_index: u16,
+                          peers: &[String],
+                          prior: &[String],
+                          require: bool, distinct: &[String]|
+         -> Result<(RequestedRoute, Vec<String>), Box<dyn std::error::Error>> {
+            let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
+                "graph_id":"sibling-lenses", "node_id":node_id, "route_index":route_index
+            }))?;
+            bound.observe_or_start(&key, graph::NodeInput { review_base: None,
+                prior_attempts: prior, family_peers: peers, context: Default::default(), read_roots: &[],
+                distinct_from_attempts: distinct, require_distinct: require, source_commit: None,
+                title: "lens", prompt: "review", required_verdict: None, deadline_seconds: None,
+                inputs_dir: None,
+            }, &alias, graph::AccessMode::ReadOnly, None, graph::Replay {
+                delivery: None, branch: None, fast_forward_only: false, stored_ref: None, launch_actor: &actor,
+            })?;
+            let operation = graph_operation("graph-attempt-operation", &key)?;
+            let operation = store.operation(&operation, &owner.call(&cancel))?.ok_or("lens operation missing")?;
+            let request = store.request(operation.run_id, &owner.call(&cancel))?;
+            let task = request.tasks.first().ok_or("task missing")?;
+            Ok((task.route.clone(), task.profile.overrides.clone()))
+        };
+        let review = |excluded: &[&str]| RequestedRoute::Review {
+            extra: Default::default(),
+            name: "junior".into(),
+            effort: None,
+            excluded_families: excluded.iter().map(|family| (*family).to_owned()).collect(),
+            distinct_families: true,
+            preferred_families: vec![],
+            require_distinct: false,
+        };
+        // The first sibling has no peers yet and takes the plain alias.
+        let (route, _) = submit("one", 0, &[], &[], false, &[])?;
+        assert_eq!(route, RequestedRoute::Named { extra: Default::default(), name: "junior".into(), effort: None });
+        // Later siblings prefer other families. A preference never refuses, so
+        // with one family available every lens still runs.
+        let peers = ["openai".to_owned(), "anthropic".to_owned()];
+        assert_eq!(submit("two", 0, &peers[..1], &[], false, &[])?.0, review(&["openai"]));
+        assert_eq!(submit("three", 0, &peers, &[], false, &[])?.0, review(&["openai", "anthropic"]));
+        // A required writer separation with no writer family to enforce still
+        // leaves sibling families as a preference.
+        assert_eq!(submit("four", 0, &peers[..1], &[], true, &[])?.0, review(&["openai"]));
+        let accepted = submit("five", 0, &peers[1..], &[], true, std::slice::from_ref(&writer))?.0;
+        assert_eq!(accepted, RequestedRoute::Review {
+            extra: Default::default(), name: "junior".into(), effort: None,
+            excluded_families: vec!["openai".into()], distinct_families: true,
+            preferred_families: vec!["anthropic".into()], require_distinct: true,
+        });
+        // An accepted operation without a checkpoint reference retains its
+        // original route even if the newly observed peers have changed.
+        assert_eq!(submit("five", 0, &[], &[], true, &[writer])?.0, accepted);
+        // An alias retry excludes the model ids the runtime resolved.
+        let (route, knobs) = submit("two", 1, &peers[..1], &["codex/first".to_owned()], false, &[])?;
+        assert_eq!(route, review(&["openai"]));
+        assert_eq!(knobs, [r#"routing.graph_exclude=["codex/first"]"#]);
         Ok(())
     }
 
@@ -1844,6 +2162,14 @@ mod peer_tests {
             .rig
             .execute(&git, &["branch", "integration"], None)?;
         assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        for args in [
+            vec!["remote", "add", "origin", fixture.rig.project.to_str().ok_or("path")?],
+            vec!["update-ref", "refs/heads/main", "HEAD"],
+            vec!["update-ref", "refs/remotes/origin/main", "HEAD"],
+        ] {
+            let output = fixture.rig.execute(&git, &args, None)?;
+            assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        }
         let factory = Factory {
             context: Context::open(
                 fixture.roots.clone(),
@@ -1865,7 +2191,7 @@ mod peer_tests {
         std::fs::write(
             &document,
             serde_json::to_vec(&serde_json::json!({
-                "schema_version":1, "graph_id":"pinned-base", "integration_branch":"integration", "delivery":"pr",
+                "schema_version":2, "graph_id":"pinned-base", "integration_branch":"integration", "review_base":"origin/main", "delivery":"pr",
                 "nodes":[{"id":"one","prompt":"reply OK","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
             }))?,
         )?;
@@ -1939,6 +2265,11 @@ mod peer_tests {
                 )?
                 .head
         );
+        let output = fixture.rig.execute(&git, &["branch", "old-review", &base.to_string()], None)?;
+        assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        std::fs::write(fixture.rig.project.join("review-size-fixture.txt"), "small change\n")?;
+        let output = fixture.rig.execute(&git, &["add", "review-size-fixture.txt"], None)?;
+        assert_eq!(crate::worktree_tests::support::code(&output), 0);
         for args in [
             vec![
                 "commit",
@@ -1947,6 +2278,8 @@ mod peer_tests {
                 "Unrelated primary checkout",
             ],
             vec!["branch", "-f", "integration", "HEAD"],
+            vec!["update-ref", "refs/heads/main", "HEAD"],
+            vec!["update-ref", "refs/remotes/origin/main", "HEAD"],
         ] {
             let output = fixture.rig.execute(&git, &args, None)?;
             assert_eq!(crate::worktree_tests::support::code(&output), 0);
@@ -1970,6 +2303,225 @@ mod peer_tests {
             &factory.clock,
         )?;
         assert_eq!(journal.integration_base(), Some(base));
+        let execution = FileJournal::execution(&fixture.roots.state, fixture.settled.project_id, "pinned-base")?.ok_or("execution missing")?;
+        assert_eq!(execution.review_base, Some(base));
+        drop(journal);
+        let head_output = fixture.rig.execute(&git, &["rev-parse", "HEAD"], None)?;
+        let head = String::from_utf8(head_output.stdout.bytes)?.trim().to_owned();
+        // A later lens admitted after the reference moved still reads the pinned
+        // review base, independently of the integration base.
+        use provenant_fabric_runtime::graph::{self, AttemptOwner};
+        let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
+            "graph_id":"pinned-base", "node_id":"later-lens", "route_index":0
+        }))?;
+        let route = serde_json::from_value(serde_json::json!({"adapter":"fixture", "model":"fixture/model"}))?;
+        let mut bound = BoundGraphOwner {
+            factory: &factory, integration_base: None, integration_branch: None,
+            network: None, exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false,
+        };
+        let actor = bound.actor();
+        bound.observe_or_start(&key, graph::NodeInput { review_base: None,
+            prior_attempts: &[], family_peers: &[], context: Default::default(), read_roots: &[],
+            distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
+            title: "later lens", prompt: "review", required_verdict: None, deadline_seconds: None,
+            inputs_dir: None,
+        }, &route, graph::AccessMode::ReadOnly, None, graph::Replay {
+            delivery: None, branch: None, fast_forward_only: false, stored_ref: None, launch_actor: &actor,
+        })?;
+        let operation = graph_operation("graph-attempt-operation", &key)?;
+        let operation = store.operation(&operation, &owner.call(&cancel))?.ok_or("later lens operation missing")?;
+        let request = store.request(operation.run_id, &owner.call(&cancel))?;
+        let base_text = base.to_string();
+        assert_eq!(request.tasks[0].base.as_deref(), Some(base_text.as_str()));
+        assert_ne!(base_text, head);
+        // A different integration base does not displace the pinned review base.
+        bound.integration_base = Some(BoundGraphBases {
+            integration: Some(provenant_core::GitOid::parse(&head)?),
+            review: Some(base),
+        });
+        let second: graph::AttemptKey = serde_json::from_value(serde_json::json!({
+            "graph_id":"pinned-base", "node_id":"second-lens", "route_index":0
+        }))?;
+        let actor = bound.actor();
+        bound.observe_or_start(&second, graph::NodeInput { review_base: None,
+            prior_attempts: &[], family_peers: &[], context: Default::default(), read_roots: &[],
+            distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
+            title: "second lens", prompt: "review", required_verdict: None, deadline_seconds: None,
+            inputs_dir: None,
+        }, &route, graph::AccessMode::ReadOnly, None, graph::Replay {
+            delivery: None, branch: None, fast_forward_only: false, stored_ref: None, launch_actor: &actor,
+        })?;
+        let operation = graph_operation("graph-attempt-operation", &second)?;
+        let operation = store.operation(&operation, &owner.call(&cancel))?.ok_or("second lens operation missing")?;
+        let request = store.request(operation.run_id, &owner.call(&cancel))?;
+        assert_eq!(request.tasks[0].base.as_deref(), Some(base_text.as_str()));
+        bound.integration_base = Some(BoundGraphBases { integration: None, review: Some(base) });
+        let review_node: graph::GraphNode = serde_json::from_value(serde_json::json!({
+            "id":"review", "access":"read_only", "prompt":"review",
+            "review":{"shape":null,"risk_tier":null,"kind":null,"size":null,"risk_tags":[],"worktree":null,"lenses":[],"min_successful":null,"max_nodes":5}
+        }))?;
+        let measured = bound.measure_review(&review_node, &head)?;
+        assert_eq!(measured.measured.size, Some("small"));
+        assert!(measured.measured.warning.is_none(), "{:?}", measured.measured);
+        // An explicit review base wins over a different integration base.
+        let head_oid = provenant_core::GitOid::parse(&head)?;
+        bound.integration_base = Some(BoundGraphBases { integration: Some(head_oid), review: Some(base) });
+        assert_eq!(bound.measure_review(&review_node, &head)?.base, base);
+        bound.integration_base = Some(BoundGraphBases { integration: None, review: Some(base) });
+        // A deferred council resolves from the diff at the pinned subject: the
+        // small change is `quick`, a risk floor raises it, and a large one is `deep`.
+        let names = [
+            "correctness-spec", "tests", "design-fit-reuse", "simplicity", "conventions-readability",
+            "refactor-cleanup", "reliability", "flexibility", "security-privacy",
+            "concurrency-data-errors", "adversarial",
+        ];
+        let templates: serde_json::Map<String, serde_json::Value> = names.iter().map(|name| {
+            (name.to_string(), serde_json::json!({
+                "id": format!("lens-{name}"), "access": "read_only", "prompt": "lens",
+                "role": format!("lens.{name}"),
+            }))
+        }).collect();
+        let deferred = |risk: Option<&str>, lenses: serde_json::Value| -> Result<graph::GraphNode, Box<dyn std::error::Error>> {
+            Ok(serde_json::from_value(serde_json::json!({
+                "id":"review", "kind":"plan", "access":"read_only", "prompt":"review",
+                "depends_on":["subject"], "read_roots":["/repo/lane"],
+                "inputs":[{"node":"subject","outputs":["result"]}],
+                "review":{"shape":null,"risk_tier":risk,"kind":null,"size":null,"risk_tags":[],"worktree":null,"lenses":lenses,"min_successful":1,"max_nodes":13},
+                "lens_templates": templates,
+            }))?)
+        };
+        let small = bound.resolve_review(&deferred(None, serde_json::json!([]))?, &head)?;
+        let record = small.review.as_ref().ok_or("review resolution missing")?;
+        assert_eq!((record.shape.as_str(), record.measured_size.as_str()), ("quick", "small"));
+        assert_eq!((record.subject.to_string(), record.base), (head.clone(), base));
+        assert_eq!(small.source, "review");
+        assert_eq!(small.nodes[0].id, "review--review");
+        assert_eq!(small.nodes.len(), 2);
+        let lens = &small.nodes[1];
+        assert_eq!(lens.id, "review--review--lens-correctness-spec");
+        // A read-only alias repeats so a usage-limited first member falls back.
+        assert_eq!(lens.routes.as_ref().map(Vec::len), Some(2));
+        assert_eq!(lens.depends_on, ["subject"]);
+        assert_eq!(lens.read_roots, ["/repo/lane"]);
+        assert!(matches!(&lens.source, Some(graph::SourceBinding::Commit { commit }) if *commit == head));
+        let floored = bound.resolve_review(&deferred(Some("crucial"), serde_json::json!([]))?, &head)?;
+        let record = floored.review.as_ref().ok_or("review resolution missing")?;
+        assert_eq!((record.shape.as_str(), record.measured_size.as_str()), ("deep", "small"));
+        assert!(floored.nodes.len() > 2);
+        // Three standard-shape lenses share one family group. The label only
+        // steers routes: every lens is still a member of the panel.
+        let mut standard = deferred(None, serde_json::json!([]))?;
+        standard.review.as_mut().ok_or("review spec missing")?.shape = Some("standard".into());
+        let standard = bound.resolve_review(&standard, &head)?;
+        let members = &standard.nodes[1..];
+        assert_eq!(members.len(), 3);
+        let group = members[0].family_group.clone().ok_or("family group missing")?;
+        assert!(members.iter().all(|member| member.family_group.as_ref() == Some(&group)));
+        // An exact-model lens tier is that model on one route, with no repeat.
+        let exact = bound.resolve_review(&deferred(None, serde_json::json!([{"name":"tests","when":null,"tier":"codex/gpt-6@high"}]))?, &head)?;
+        let route = exact.nodes[1].route.as_ref().ok_or("exact route missing")?;
+        assert_eq!((route.adapter.as_deref(), route.model.as_deref(), route.effort.as_deref()), (Some("codex"), Some("gpt-6"), Some("high")));
+        // That lens launches on that model: the owner submits an exact model
+        // route, even with sibling families to prefer against.
+        let exact_key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
+            "graph_id":"pinned-base", "node_id":exact.nodes[1].id, "route_index":0
+        }))?;
+        bound.observe_or_start(&exact_key, graph::NodeInput { review_base: None,
+            prior_attempts: &[], family_peers: &["openai".to_owned()], context: Default::default(), read_roots: &[],
+            distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
+            title: "exact lens", prompt: "review", required_verdict: None, deadline_seconds: None,
+            inputs_dir: None,
+        }, route, graph::AccessMode::ReadOnly, None, graph::Replay {
+            delivery: None, branch: None, fast_forward_only: false, stored_ref: None, launch_actor: &actor,
+        })?;
+        let operation = graph_operation("graph-attempt-operation", &exact_key)?;
+        let operation = store.operation(&operation, &owner.call(&cancel))?.ok_or("exact lens operation missing")?;
+        let request = store.request(operation.run_id, &owner.call(&cancel))?;
+        assert_eq!(request.tasks[0].route, provenant_records::run::RequestedRoute::Model {
+            extra: Default::default(), provider: "codex".into(), model: "codex/gpt-6".into(), effort: Some("high".into()),
+        });
+        // A lens with no lowered template is refused by name.
+        let mut missing = deferred(None, serde_json::json!([]))?;
+        missing.extra.insert("lens_templates".into(), serde_json::json!({}));
+        let error = bound.resolve_review(&missing, &head).err().ok_or("missing template accepted")?;
+        assert!(error.to_string().contains("correctness-spec"), "{error}");
+        for index in 0..20 {
+            std::fs::write(fixture.rig.project.join(format!("wide-{index}.txt")), "wide\n")?;
+        }
+        for args in [vec!["add", "-A"], vec!["commit", "-qm", "Wide change"]] {
+            let output = fixture.rig.execute(&git, &args, None)?;
+            assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        }
+        let wide = String::from_utf8(fixture.rig.execute(&git, &["rev-parse", "HEAD"], None)?.stdout.bytes)?.trim().to_owned();
+        let large = bound.resolve_review(&deferred(None, serde_json::json!([]))?, &wide)?;
+        let record = large.review.as_ref().ok_or("review resolution missing")?;
+        assert_eq!((record.shape.as_str(), record.measured_size.as_str()), ("deep", "large"));
+        for (id, reference, expected) in [("review-base", "old-review", base_text.as_str()), ("empty-review-base", "", head.as_str())] {
+            let path = fixture.rig.project.join(format!("{id}.json"));
+            std::fs::write(&path, serde_json::to_vec(&serde_json::json!({
+                "schema_version":2, "graph_id":id, "review_base":reference,
+                "nodes":[{"id":"lens","prompt":"review","access":"read_only", "source":{"type":"commit","commit":head}, "route":{"adapter":"fixture","model":"fixture/model"}}]
+            }))?)?;
+            let result = factory.graph(GraphInput::Run { extra: Default::default(), document: path }, budget, &cancel)?;
+            let operation = graph_operation("graph-attempt-operation", &result.checkpoint.nodes[0].attempts[0].key)?;
+            let operation = store.operation(&operation, &owner.call(&cancel))?.ok_or("operation missing")?;
+            let request = store.request(operation.run_id, &owner.call(&cancel))?;
+            assert_eq!(request.tasks[0].base.as_deref(), Some(expected));
+            assert_eq!(request.tasks[0].head.as_deref(), Some(head.as_str()));
+        }
+        // Production scheduling carries a deferred review through resolution:
+        // the graph resolves the panel at the pinned subject and submits each
+        // lens with the requested base, not a self-diff.
+        let path = fixture.rig.project.join("deferred-review.json");
+        std::fs::write(&path, serde_json::to_vec(&serde_json::json!({
+            "schema_version":2, "graph_id":"deferred-review", "review_base":"old-review",
+            "nodes":[{
+                "id":"review", "kind":"plan", "access":"read_only", "prompt":"review",
+                "source":{"type":"commit","commit":head},
+                "review":{"shape":null,"risk_tier":null,"kind":null,"size":null,"risk_tags":[],"worktree":null,"lenses":[],"min_successful":1,"max_nodes":13},
+                "lens_templates": templates,
+            }]
+        }))?)?;
+        let result = factory.graph(GraphInput::Run { extra: Default::default(), document: path }, budget, &cancel)?;
+        let resolved = result.checkpoint.expansions.iter().find_map(|expansion| expansion.review.as_ref()).ok_or_else(|| format!("review not resolved: {:#?}", result.checkpoint.nodes))?;
+        assert_eq!((resolved.subject.to_string(), resolved.base.to_string()), (head.clone(), base_text.clone()));
+        let lens = result.checkpoint.nodes.iter().find(|node| node.id == "review--review--lens-correctness-spec").ok_or("lens missing")?;
+        let operation = graph_operation("graph-attempt-operation", &lens.attempts.first().ok_or("lens not scheduled")?.key)?;
+        let operation = store.operation(&operation, &owner.call(&cancel))?.ok_or("lens operation missing")?;
+        let request = store.request(operation.run_id, &owner.call(&cancel))?;
+        assert_eq!(request.tasks[0].base.as_deref(), Some(base_text.as_str()));
+        assert_eq!(request.tasks[0].head.as_deref(), Some(head.as_str()));
+        Ok(())
+    }
+
+    #[test]
+    fn detached_writer_reports_branch_requirement() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::detached_writer_reports_branch_requirement")? { return Ok(()); }
+        let fixture = SettlementFixture::resumed()?;
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        let output = fixture.rig.execute(&git, &["-C", fixture.worktree.to_str().ok_or("path")?, "checkout", "--detach"], None)?;
+        assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        let factory = Factory { context: Context::open(fixture.roots.clone(), &fixture.rig.home, &fixture.rig.project)?, project_attribution: false, clock: SystemClock, backoff: ThreadPause, executor: SystemExecutor::new(1)?, home: fixture.rig.home.clone(), cwd: fixture.rig.project.clone(), assets: fixture.rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers };
+        let document = fixture.rig.project.join("detached-writer.json");
+        std::fs::write(&document, serde_json::to_vec(&serde_json::json!({"schema_version":1,"graph_id":"detached-writer","nodes":[{"id":"writer","prompt":"write","access":"worktree_write","worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}}]}))?)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let run = factory.graph(GraphInput::Run { extra: Default::default(), document }, budget, &cancel)?;
+        let node = &run.checkpoint.nodes[0];
+        assert!(node.advance_error.as_deref().is_some_and(|error| error.contains("writer needs a branch")), "{node:#?}");
+        let detached_factory = Factory { context: Context::open(fixture.roots.clone(), &fixture.rig.home, &fixture.worktree)?, project_attribution: false, clock: SystemClock, backoff: ThreadPause, executor: SystemExecutor::new(1)?, home: fixture.rig.home.clone(), cwd: fixture.worktree.clone(), assets: fixture.rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers };
+        let head = fixture.rig.execute(&git, &["-C", fixture.worktree.to_str().ok_or("path")?, "rev-parse", "HEAD"], None)?;
+        let head = String::from_utf8(head.stdout.bytes)?.trim().to_owned();
+        let document = fixture.worktree.join("detached-review.json");
+        std::fs::write(&document, serde_json::to_vec(&serde_json::json!({"schema_version":1,"graph_id":"detached-review","nodes":[{"id":"review","prompt":"review","access":"read_only","source":{"type":"commit","commit":head},"route":{"adapter":"fixture","model":"fixture/model"}}]}))?)?;
+        let budget = WaitBudget::cli(detached_factory.clock.mono_now(), 30)?;
+        let run = detached_factory.graph(GraphInput::Run { extra: Default::default(), document }, budget, &cancel)?;
+        let node = &run.checkpoint.nodes[0];
+        assert!(node.advance_error.is_none(), "{node:#?}");
+        let key = &node.attempts.first().ok_or("review attempt missing")?.key;
+        let operation = graph_operation("graph-attempt-operation", key)?;
+        let owner = BinaryRunOwner { factory: &detached_factory, allow_remote: true, actor: None, chair: None };
+        assert!(owner.store(&cancel)?.operation(&operation, &owner.call(&cancel))?.is_some(), "review was not submitted");
         Ok(())
     }
 

@@ -321,6 +321,23 @@ their `operation_id`.
 
 ## Bounded graphs and route fallback
 
+Graph documents accept schema versions 1 and 2. Version 2 carries deferred
+review configuration (`review` and `family_group` on nodes, and `review_base`
+on the document); a version 1 document must not carry these fields. The host
+pins `review_base` in the execution and can record review resolution in an
+expansion. Checkpoint and envelope versions remain 1. A review specification
+requires a read-only plan node with a source and no ordinary plan specification.
+Older hosts reject version 2 and require an upgrade.
+
+A deferred review resolves after its subject is pinned. The host returns a
+read-only composite expansion; the runtime validates and journals it before
+running its members. Resume replays the journal without resolving again. The
+host supplies the models of previous attempts and the families of accepted
+attempts so alias retries can avoid a refused model and grouped lenses can
+prefer different families. Family separation is best effort: every lens runs
+when a suitable route exists, and a shared family is recorded as a substitution.
+
+
 ### Pipeline presets
 
 `provenant run --preset NAME --prompt-file FILE` expands a preset into an

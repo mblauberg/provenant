@@ -3,7 +3,7 @@
     "pattern": "scope-then-run",
     "preset": "scope-then-run"
   },
-  "graph_id": "preset-13a3c83b14b39932f5b29754fe173c71",
+  "graph_id": "preset-b1ab6e8a57a04116c8c24db60884ce45",
   "nodes": [
     {
       "access": "read_only",
@@ -84,9 +84,14 @@
                           ],
                           "role": "scout.codebase",
                           "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
-                          "route": {
-                            "alias": "junior"
-                          },
+                          "routes": [
+                            {
+                              "alias": "junior"
+                            },
+                            {
+                              "alias": "junior"
+                            }
+                          ],
                           "title": "scout-1"
                         },
                         {
@@ -104,9 +109,14 @@
                           ],
                           "role": "scout.codebase",
                           "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
-                          "route": {
-                            "alias": "junior"
-                          },
+                          "routes": [
+                            {
+                              "alias": "junior"
+                            },
+                            {
+                              "alias": "junior"
+                            }
+                          ],
                           "title": "scout-2"
                         },
                         {
@@ -124,9 +134,14 @@
                           ],
                           "role": "scout.codebase",
                           "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
-                          "route": {
-                            "alias": "junior"
-                          },
+                          "routes": [
+                            {
+                              "alias": "junior"
+                            },
+                            {
+                              "alias": "junior"
+                            }
+                          ],
                           "title": "scout-3"
                         },
                         {
@@ -143,9 +158,14 @@
                           ],
                           "role": "scout.external",
                           "role_digest": "sha256:1037e572ae7b8be53967840edb7d2ca08a1cbc9dd1c85848d9b3a4eb0d839495",
-                          "route": {
-                            "alias": "web"
-                          },
+                          "routes": [
+                            {
+                              "alias": "web"
+                            },
+                            {
+                              "alias": "web"
+                            }
+                          ],
                           "title": "external"
                         }
                       ]
@@ -172,9 +192,14 @@
                     "prompt": "You reconcile research evidence into next steps.\n\nReconcile the scouts' evidence for: brief\nPreserve useful scope partitions, file references, dated external sources and\nunresolved uncertainty. Choose next implementation steps using judgement;\nretain every child's evidence.\n",
                     "role": "plan.research",
                     "role_digest": "sha256:0543c1d98c7aeabd6c1276c548ca2ac741d4f095e31397c74fb82c3323966a84",
-                    "route": {
-                      "alias": "senior"
-                    },
+                    "routes": [
+                      {
+                        "alias": "senior"
+                      },
+                      {
+                        "alias": "senior"
+                      }
+                    ],
                     "title": "synthesis"
                   }
                 ]
@@ -221,9 +246,14 @@
                 ],
                 "role": "scout.codebase",
                 "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
-                "route": {
-                  "alias": "${route}"
-                },
+                "routes": [
+                  {
+                    "alias": "${route}"
+                  },
+                  {
+                    "alias": "${route}"
+                  }
+                ],
                 "title": "scout"
               }
             ],
@@ -273,9 +303,14 @@
                 ],
                 "role": "scout.external",
                 "role_digest": "sha256:1037e572ae7b8be53967840edb7d2ca08a1cbc9dd1c85848d9b3a4eb0d839495",
-                "route": {
-                  "alias": "web"
-                },
+                "routes": [
+                  {
+                    "alias": "web"
+                  },
+                  {
+                    "alias": "web"
+                  }
+                ],
                 "title": "scout"
               }
             ],
@@ -306,9 +341,14 @@
                 "access": "read_only",
                 "id": "note",
                 "prompt": "brief\n\nNo scouting is needed because: ${reason}. Write a short note of the facts in the brief that the scoping stage can rely on and what it must still decide.",
-                "route": {
-                  "alias": "junior"
-                },
+                "routes": [
+                  {
+                    "alias": "junior"
+                  },
+                  {
+                    "alias": "junior"
+                  }
+                ],
                 "title": "note"
               }
             ],
@@ -326,9 +366,14 @@
       "prompt": "You shape the graph. You choose its parts from an allow-listed catalogue; you never write code and never widen access.\n\nShape the graph for: brief\nHost limits: at most 24 nodes and pattern instances; a lane's\nbudget_seconds is at most 3600; routes you may assign:\njunior, senior, principal (host routes: junior, senior, principal). Registered writer\nworktrees you may assign: none registered.\nDecide whether to scout at all: when the brief and the spec already answer what the scope stage needs, instantiate no-scout once and say why. Otherwise choose how many scouts to run and give each one distinct question to answer. Use codebase scouts for questions the repository can answer and, when the catalogue offers one, an external scout for questions that need documentation, upstream source or prior art. Prefer the default width unless the brief clearly needs fewer or more, and never repeat a question.\nRead the evidence from earlier stages and the repository, and look outward\nwhen a choice depends on current practice. Express the shape only as pattern\ninstances. Instances that no depends_on orders are one wave and must write\ndisjoint scopes. Explain your choices in two or three sentences before the\nfragment block.\n",
       "role": "plan.shape",
       "role_digest": "sha256:5ad13ac9c5d959f1c19a74924e0c34fdc24c5f7975a194c84a4dd5ebdb5e5e70",
-      "route": {
-        "alias": "principal"
-      },
+      "routes": [
+        {
+          "alias": "principal"
+        },
+        {
+          "alias": "principal"
+        }
+      ],
       "title": "plan"
     },
     {
@@ -349,9 +394,14 @@
       "prompt": "You reconcile research evidence into next steps.\n\nReconcile the scouts' evidence for: brief\nPreserve useful scope partitions, file references, dated external sources and\nunresolved uncertainty. Choose next implementation steps using judgement;\nretain every child's evidence.\n",
       "role": "plan.research",
       "role_digest": "sha256:0543c1d98c7aeabd6c1276c548ca2ac741d4f095e31397c74fb82c3323966a84",
-      "route": {
-        "alias": "senior"
-      },
+      "routes": [
+        {
+          "alias": "senior"
+        },
+        {
+          "alias": "senior"
+        }
+      ],
       "title": "synthesis"
     },
     {
@@ -388,9 +438,14 @@
       ],
       "role": "plan.scope",
       "role_digest": "sha256:b4b2b073b47bde0b081cf10176d7b3abb9fa51faf0e40304f2a73c753088c9ad",
-      "route": {
-        "alias": "senior"
-      },
+      "routes": [
+        {
+          "alias": "senior"
+        },
+        {
+          "alias": "senior"
+        }
+      ],
       "title": "scope"
     },
     {
@@ -463,81 +518,6 @@
           },
           {
             "access": "read_only",
-            "composite": {
-              "exports": [
-                {
-                  "node": "lens-correctness-spec",
-                  "outputs": [
-                    "result",
-                    "findings"
-                  ]
-                },
-                {
-                  "node": "lens-simplicity",
-                  "outputs": [
-                    "result",
-                    "findings"
-                  ]
-                }
-              ],
-              "nodes": [
-                {
-                  "access": "read_only",
-                  "depends_on": [],
-                  "distinct_from": "writer",
-                  "id": "lens-correctness-spec",
-                  "prompt": "Lens correctness-spec. Check the change against the spec and for logic errors.\n\nLens: correctness-spec. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: correctness against the spec\n\nCanonical questions: [review-lenses.md](../review-lenses.md), sections\n\"Correctness and failure\" and \"Verification\".\n\nCheck the change against the spec (the issue or file you were given), not\nagainst the author's account of it.\n\n- Map each acceptance criterion to code and to evidence. Name any criterion with\n  no implementation or no test.\n- State the invariants that must hold before and after each operation, then try\n  to break them with empty, duplicate, stale, malformed, partial and retried input.\n- Follow failure paths: ordering, cancellation, timeouts, re-entry, partial\n  writes and errors that are converted to success.\n- Check public API, schema and protocol compatibility against the base.\n- For refactors, check that intended behaviour and failure handling are preserved.\n",
-                  "read_roots": [
-                    "/repo/lane"
-                  ],
-                  "references": [
-                    {
-                      "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
-                      "ref": "skill:code-review/references/reviewer-context.md",
-                      "when": "always"
-                    },
-                    {
-                      "digest": "sha256:47cb46c7f819127bb60fc8d1ef3928cc848509b0cdfa358181968510ad73323a",
-                      "ref": "skill:code-review/references/lenses/correctness-spec.md",
-                      "when": "always"
-                    }
-                  ],
-                  "role": "lens.correctness-spec",
-                  "role_digest": "sha256:bf578197d0881e91746f43b0888c298a0bc6ce3a4f97293690e3b495a9138ea2",
-                  "route": {
-                    "alias": "junior"
-                  },
-                  "title": "lens-correctness-spec"
-                },
-                {
-                  "access": "read_only",
-                  "depends_on": [],
-                  "id": "lens-simplicity",
-                  "prompt": "Lens simplicity. Look for unnecessary machinery and simpler designs.\n\nLens: simplicity. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: simplicity\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Ownership and structure\" (simplicity, YAGNI, the 1,000-line cap).\n\n- What can be deleted while keeping behaviour? Name the lines.\n- Flag speculative or rigid abstraction, thin wrappers that only move\n  complexity, options nothing uses, and layers with one caller.\n- Prefer a reframe that removes concepts, branches or synchronisation points,\n  but only one local enough to validate. Do not demand redesign beyond the\n  dependency cone.\n",
-                  "read_roots": [
-                    "/repo/lane"
-                  ],
-                  "references": [
-                    {
-                      "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
-                      "ref": "skill:code-review/references/reviewer-context.md",
-                      "when": "always"
-                    },
-                    {
-                      "digest": "sha256:ad1479a3d8094bebc0ec133d6281ae45543f776a505ca64c41562c9b0efa70d7",
-                      "ref": "skill:code-review/references/lenses/simplicity.md",
-                      "when": "always"
-                    }
-                  ],
-                  "role": "lens.simplicity",
-                  "role_digest": "sha256:46d20a75ff5d5cb89b53165b558efb8205a2801263593b4365e23d20150c41b4",
-                  "route": {
-                    "alias": "junior"
-                  },
-                  "title": "lens-simplicity"
-                }
-              ]
-            },
             "depends_on": [
               "implement"
             ],
@@ -550,7 +530,20 @@
                 ]
               }
             ],
-            "kind": "composite",
+            "kind": "plan",
+            "lens_templates": {},
+            "prompt": "Resolve the review panel for the pinned subject.",
+            "review": {
+              "kind": null,
+              "lenses": [],
+              "max_nodes": 2,
+              "min_successful": null,
+              "risk_tags": [],
+              "risk_tier": null,
+              "shape": null,
+              "size": null,
+              "worktree": "/repo/lane"
+            },
             "source": {
               "node": "implement",
               "type": "node"
@@ -583,9 +576,14 @@
             ],
             "role": "review.evaluator",
             "role_digest": "sha256:0fbf01f2902e4b4fa6417287dd573e381f40366e54bfe465b5cecabc2025a3a3",
-            "route": {
-              "alias": "senior"
-            },
+            "routes": [
+              {
+                "alias": "senior"
+              },
+              {
+                "alias": "senior"
+              }
+            ],
             "source": {
               "node": "implement",
               "type": "node"
@@ -749,8 +747,6 @@
       "plan.guidance": "bundled",
       "plan.patterns": "bundled",
       "plan.replaces": "bundled",
-      "roles.lens.correctness-spec": "bundled",
-      "roles.lens.simplicity": "bundled",
       "roles.plan.research": "bundled",
       "roles.plan.scope": "bundled",
       "roles.plan.shape": "bundled",
@@ -769,46 +765,6 @@
     },
     "preset": "scope-then-run",
     "roles": {
-      "lens.correctness-spec": {
-        "digest": "sha256:bf578197d0881e91746f43b0888c298a0bc6ce3a4f97293690e3b495a9138ea2",
-        "extends": [
-          "lens.correctness-spec",
-          "lens"
-        ],
-        "origin": "bundled",
-        "references": [
-          {
-            "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
-            "ref": "skill:code-review/references/reviewer-context.md",
-            "when": "always"
-          },
-          {
-            "digest": "sha256:47cb46c7f819127bb60fc8d1ef3928cc848509b0cdfa358181968510ad73323a",
-            "ref": "skill:code-review/references/lenses/correctness-spec.md",
-            "when": "always"
-          }
-        ]
-      },
-      "lens.simplicity": {
-        "digest": "sha256:46d20a75ff5d5cb89b53165b558efb8205a2801263593b4365e23d20150c41b4",
-        "extends": [
-          "lens.simplicity",
-          "lens"
-        ],
-        "origin": "bundled",
-        "references": [
-          {
-            "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
-            "ref": "skill:code-review/references/reviewer-context.md",
-            "when": "always"
-          },
-          {
-            "digest": "sha256:ad1479a3d8094bebc0ec133d6281ae45543f776a505ca64c41562c9b0efa70d7",
-            "ref": "skill:code-review/references/lenses/simplicity.md",
-            "when": "always"
-          }
-        ]
-      },
       "plan.research": {
         "digest": "sha256:0543c1d98c7aeabd6c1276c548ca2ac741d4f095e31397c74fb82c3323966a84",
         "extends": [
@@ -902,5 +858,5 @@
     "substitutions": [],
     "warnings": []
   },
-  "schema_version": 1
+  "schema_version": 2
 }

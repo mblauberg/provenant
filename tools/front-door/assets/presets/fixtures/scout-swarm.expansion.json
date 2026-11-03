@@ -3,7 +3,7 @@
     "pattern": "scout-swarm",
     "preset": "scout-swarm"
   },
-  "graph_id": "preset-732ea5959e7545fe26847c0d22587e37",
+  "graph_id": "preset-e9c7fae9ffd909276f6623788396c262",
   "nodes": [
     {
       "access": "read_only",
@@ -61,9 +61,14 @@
             ],
             "role": "scout.codebase",
             "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
-            "route": {
-              "alias": "junior"
-            },
+            "routes": [
+              {
+                "alias": "junior"
+              },
+              {
+                "alias": "junior"
+              }
+            ],
             "title": "scout-1"
           },
           {
@@ -81,9 +86,14 @@
             ],
             "role": "scout.codebase",
             "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
-            "route": {
-              "alias": "junior"
-            },
+            "routes": [
+              {
+                "alias": "junior"
+              },
+              {
+                "alias": "junior"
+              }
+            ],
             "title": "scout-2"
           },
           {
@@ -101,9 +111,14 @@
             ],
             "role": "scout.codebase",
             "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
-            "route": {
-              "alias": "junior"
-            },
+            "routes": [
+              {
+                "alias": "junior"
+              },
+              {
+                "alias": "junior"
+              }
+            ],
             "title": "scout-3"
           },
           {
@@ -121,9 +136,14 @@
             ],
             "role": "scout.codebase",
             "role_digest": "sha256:20495a209f4878f495ff3f94b01ee4cd7bf80d1e97aaa93a700efba9f03cc15e",
-            "route": {
-              "alias": "junior"
-            },
+            "routes": [
+              {
+                "alias": "junior"
+              },
+              {
+                "alias": "junior"
+              }
+            ],
             "title": "scout-4"
           },
           {
@@ -140,9 +160,14 @@
             ],
             "role": "scout.external",
             "role_digest": "sha256:1037e572ae7b8be53967840edb7d2ca08a1cbc9dd1c85848d9b3a4eb0d839495",
-            "route": {
-              "alias": "web"
-            },
+            "routes": [
+              {
+                "alias": "web"
+              },
+              {
+                "alias": "web"
+              }
+            ],
             "title": "external"
           }
         ]
@@ -169,9 +194,14 @@
       "prompt": "You reconcile research evidence into next steps.\n\nReconcile the scouts' evidence for: brief\nPreserve useful scope partitions, file references, dated external sources and\nunresolved uncertainty. Choose next implementation steps using judgement;\nretain every child's evidence.\n",
       "role": "plan.research",
       "role_digest": "sha256:0543c1d98c7aeabd6c1276c548ca2ac741d4f095e31397c74fb82c3323966a84",
-      "route": {
-        "alias": "senior"
-      },
+      "routes": [
+        {
+          "alias": "senior"
+        },
+        {
+          "alias": "senior"
+        }
+      ],
       "title": "synthesis"
     }
   ],
