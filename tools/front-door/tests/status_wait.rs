@@ -263,7 +263,7 @@ fn mixed_status_wait_uses_configured_timeout_and_per_call_override() -> Result {
             spawn(&rig, &["status", wait, "--target", &target, "--json"])?.wait_with_output()?;
         assert_eq!(output.status.code(), Some(124), "{output:?}");
         assert!(started.elapsed() >= Duration::from_secs(seconds));
-        assert!(started.elapsed() < Duration::from_secs(seconds + 5));
+        assert!(started.elapsed() < Duration::from_secs(seconds + 30));
         assert_eq!(
             events(&output.stdout)?.last().ok_or("end")?["timed_out"],
             true

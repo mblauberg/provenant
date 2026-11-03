@@ -105,6 +105,16 @@ mod tests {
             (wait.min, wait.max, &wait.default),
             (Some(1), Some(14400), &json!(300))
         );
+        let max_targets = field("domains.wait.max_targets");
+        assert_eq!(
+            (max_targets.min, max_targets.max, &max_targets.default),
+            (Some(1), Some(1024), &json!(64))
+        );
+        let pr_read = field("domains.wait.pr_read_timeout_seconds");
+        assert_eq!(
+            (pr_read.min, pr_read.max, &pr_read.default),
+            (Some(1), Some(600), &json!(60))
+        );
         let markers = field("domains.run.push_conflict_markers");
         assert_eq!((markers.kind, &markers.default), ("bool", &json!(true)));
         let idle = field("gc.idle_days");

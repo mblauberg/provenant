@@ -8,6 +8,10 @@ pub struct Settings {
     pub timeout_seconds: u64,
     pub local_interval_ms: u64,
     pub pr_interval_ms: u64,
+    #[serde(alias = "target_cap")]
+    pub max_targets: u64,
+    #[serde(alias = "pr_timeout_seconds")]
+    pub pr_read_timeout_seconds: u64,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -15,6 +19,8 @@ impl Default for Settings {
             timeout_seconds: 300,
             local_interval_ms: 500,
             pr_interval_ms: 5000,
+            max_targets: 64,
+            pr_read_timeout_seconds: 60,
         }
     }
 }
@@ -31,6 +37,13 @@ impl DomainConfig for Settings {
             ("timeout_seconds", self.timeout_seconds, 1, 14400),
             ("local_interval_ms", self.local_interval_ms, 10, 60000),
             ("pr_interval_ms", self.pr_interval_ms, 10, 60000),
+            ("max_targets", self.max_targets, 1, 1024),
+            (
+                "pr_read_timeout_seconds",
+                self.pr_read_timeout_seconds,
+                1,
+                600,
+            ),
         ]
         .into_iter()
         .filter(|(_, value, min, max)| !(min..=max).contains(&value))
@@ -43,11 +56,37 @@ impl DomainConfig for Settings {
 }
 pub const SECTION: DomainSection = DomainSection::new::<Settings>(
     "wait",
-    |_| "timeout_seconds = 300\nlocal_interval_ms = 500\npr_interval_ms = 5000\n",
+    |_| {
+        "timeout_seconds = 300\nlocal_interval_ms = 500\npr_interval_ms = 5000\nmax_targets = 64\npr_read_timeout_seconds = 60\n"
+    },
 )
 .with_boundary_checks()
 .with_fields(&[
     FieldMetadata::int("timeout_seconds", 1, 14400),
     FieldMetadata::int("local_interval_ms", 10, 60000),
     FieldMetadata::int("pr_interval_ms", 10, 60000),
+    FieldMetadata::int("max_targets", 1, 1024),
+    FieldMetadata::int("pr_read_timeout_seconds", 1, 600),
 ]);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeout_precedence_flag_over_config_over_default() {
+        let default_settings = Settings::default();
+        assert_eq!(default_settings.timeout_seconds, 300);
+        assert_eq!(default_settings.timeout(None), 300);
+        assert_eq!(default_settings.timeout(Some(0)), 300);
+        assert_eq!(default_settings.timeout(Some(10)), 10);
+
+        let custom_settings = Settings {
+            timeout_seconds: 120,
+            ..Settings::default()
+        };
+        assert_eq!(custom_settings.timeout(None), 120);
+        assert_eq!(custom_settings.timeout(Some(0)), 120);
+        assert_eq!(custom_settings.timeout(Some(45)), 45);
+    }
+}

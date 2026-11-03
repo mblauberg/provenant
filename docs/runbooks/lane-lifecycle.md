@@ -293,7 +293,7 @@ is repeatable; explicit prefixes disambiguate lanes, graphs and PR numbers.
 when a merge is authorised.
 
 The default `--until any` returns on the first observed semantic transition,
-or immediately for a terminal target or an actionable PR/paused graph.
+or immediately for a terminal target.
 An initially running lane selection does not count its older settled attempts.
 `--until all` waits for every target to become terminal. A lane selection is
 terminal when all its attempts, including policy successors, have settled;
@@ -320,9 +320,13 @@ samples. Configure the defaults in the selected state directory's `config.toml`:
 timeout_seconds = 300
 local_interval_ms = 500
 pr_interval_ms = 5000
+max_targets = 64
+pr_read_timeout_seconds = 60
 ```
 
 `--wait=DURATION` overrides the timeout for one call (1 second to 4 hours).
-Source intervals accept 10 to 60000 milliseconds. Waiting observes graph
+Source intervals accept 10 to 60000 milliseconds. `max_targets` caps the target
+count (default 64, 1 to 1024). `pr_read_timeout_seconds` bounds individual
+GitHub PR read operations (default 60 seconds, 1 to 600). Waiting observes graph
 checkpoints; use the graph's returned resume command when continuation needs
 an explicit decision. Repeated status calls or shell sleep loops are unnecessary.

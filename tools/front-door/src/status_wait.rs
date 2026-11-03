@@ -77,6 +77,7 @@ impl Snapshot {
         target: &Target,
         edge: &provenant_cli::run::Edge<'_>,
         left: Duration,
+        pr_read_timeout: Duration,
         cancel: &CancelToken,
     ) -> std::result::Result<Self, ReadFailure> {
         match target {
@@ -139,6 +140,7 @@ impl Snapshot {
                         &Target::Lane(id.parse().map_err(str::to_owned)?),
                         edge,
                         left,
+                        pr_read_timeout,
                         cancel,
                     );
                 }
@@ -158,7 +160,7 @@ impl Snapshot {
                 let row = crate::pr::status::wait_line(
                     edge.cwd,
                     *number,
-                    left.min(Duration::from_secs(60)),
+                    left.min(pr_read_timeout),
                     Some(cancel),
                 )
                 .map_err(|e| {
@@ -246,14 +248,14 @@ fn collect(
         let previous = latest.insert(update.target.clone(), snapshot.clone());
         let changed = previous.as_ref().is_some_and(|old| old != &snapshot);
         let initial = previous.is_none();
-        if (follow && initial) || changed || (initial && snapshot.notable) {
+        if (follow && initial) || changed || (initial && snapshot.terminal) {
             out(
                 json!({"event": if initial { "snapshot" } else { "transition" }, "target": update.target,
                 "terminal": snapshot.terminal, "data": snapshot.data}),
             )?;
         }
         let all = latest.len() == count && latest.values().all(|row| row.terminal);
-        if all || (!follow && matches!(until, Condition::Any) && (changed || snapshot.notable)) {
+        if all || (!follow && matches!(until, Condition::Any) && (changed || snapshot.terminal)) {
             return Ok(true);
         }
     }
@@ -277,8 +279,11 @@ pub(crate) fn run(command: provenant_cli::Status, globals: &Globals) -> u8 {
         }
         names.sort();
         names.dedup();
-        if names.is_empty() || names.len() > 64 {
-            return Err("status --wait requires 1 to 64 targets".into());
+        if names.is_empty() || names.len() > settings.max_targets as usize {
+            return Err(format!(
+                "status --wait requires 1 to {} targets",
+                settings.max_targets
+            ));
         }
         let targets = names
             .into_iter()
@@ -292,6 +297,7 @@ pub(crate) fn run(command: provenant_cli::Status, globals: &Globals) -> u8 {
             assets: &resolved.assets,
             cwd: &resolved.project,
         };
+        let pr_read_timeout = Duration::from_secs(settings.pr_read_timeout_seconds);
         std::thread::scope(|scope| {
             for (name, target) in &targets {
                 let sender = sender.clone();
@@ -310,7 +316,7 @@ pub(crate) fn run(command: provenant_cli::Status, globals: &Globals) -> u8 {
                             break;
                         }
                         let snapshot = provenant_sqlite::with_busy_timeout(Duration::ZERO, || {
-                            Snapshot::read(target, edge, left, &stop.cancel)
+                            Snapshot::read(target, edge, left, pr_read_timeout, &stop.cancel)
                         });
                         // Keep the last good row across read failures, as pr status does.
                         if snapshot
@@ -505,5 +511,56 @@ mod tests {
             ),
             Ok(false)
         );
+    }
+    #[test]
+    fn initial_notable_snapshot_does_not_return_early_and_later_transition_does() {
+        let (tx, rx) = mpsc::channel();
+        let mut paused = update("graph:b", "paused", false);
+        if let Ok(snapshot) = &mut paused.snapshot {
+            snapshot.notable = true;
+        }
+        assert!(tx.send(paused).is_ok());
+        let mut events = Vec::new();
+        assert_eq!(
+            collect(
+                &rx,
+                1,
+                Instant::now() + Duration::from_millis(20),
+                Condition::Any,
+                false,
+                &mut |e| {
+                    events.push(e);
+                    Ok(())
+                }
+            ),
+            Ok(false)
+        );
+        assert!(events.is_empty());
+
+        let (tx2, rx2) = mpsc::channel();
+        let mut paused2 = update("graph:b", "paused", false);
+        if let Ok(snapshot) = &mut paused2.snapshot {
+            snapshot.notable = true;
+        }
+        assert!(tx2.send(paused2).is_ok());
+        assert!(tx2.send(update("graph:b", "running", false)).is_ok());
+        let mut events2 = Vec::new();
+        assert_eq!(
+            collect(
+                &rx2,
+                1,
+                Instant::now() + Duration::from_secs(1),
+                Condition::Any,
+                false,
+                &mut |e| {
+                    events2.push(e);
+                    Ok(())
+                }
+            ),
+            Ok(true)
+        );
+        assert_eq!(events2.len(), 1);
+        assert_eq!(events2[0]["target"], "graph:b");
+        assert_eq!(events2[0]["event"], "transition");
     }
 }
