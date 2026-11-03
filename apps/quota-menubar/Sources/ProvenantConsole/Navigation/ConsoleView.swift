@@ -7,14 +7,32 @@ import SwiftUI
 struct ConsoleView: View {
     @Bindable var console: ConsoleModel
 
+    @State private var initialInboxWidth: Double?
+
+    static let sidebarMinimum: CGFloat = 190
+    static let inboxMinimum: CGFloat = 220
+    static let detailMinimum: CGFloat = 270
+    static let inspectorMinimum: CGFloat = 280
+    static let windowMinimum: CGFloat = 960
+
     var body: some View {
-        NavigationSplitView {
-            SidebarView(console: console)
-                .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 300)
-        } detail: {
-            screen
-                .navigationTitle(console.destination.title)
+        columns
+        .onAppear { initialInboxWidth = InboxColumnWidth.load() }
+        .onChange(of: console.destination) { _, destination in
+            if destination == .inbox { initialInboxWidth = InboxColumnWidth.load() }
         }
+        .onKeyPress(characters: CharacterSet(charactersIn: "jkJK")) { press in
+            guard console.destination == .inbox, !console.inbox.isTypingReply, !console.inbox.searching, let character = press.characters.first else { return .ignored }
+            if character == "j" || character == "J" { console.inbox.selectNext() } else { console.inbox.selectPrevious() }
+            return .handled
+        }
+        .onKeyPress(characters: .decimalDigits) { press in
+            guard console.destination == .inbox, !console.inbox.isTypingReply, !console.inbox.searching, let request = console.inbox.selected,
+                  let number = press.characters.first?.wholeNumberValue,
+                  console.inbox.chooseOption(number: number, for: request) else { return .ignored }
+            return .handled
+        }
+
         .searchable(text: $console.searchText, isPresented: $console.searching, prompt: "Search")
         .searchScopes($console.searchScope) {
             ForEach(SearchScope.allCases) { Text($0.title).tag($0) }
@@ -22,7 +40,7 @@ struct ConsoleView: View {
         .onSubmit(of: .search) { console.submitSearch() }
         .inspector(isPresented: $console.inspectorShown) {
             AttemptInspector(console: console)
-                .inspectorColumnWidth(min: 280, ideal: 360, max: 520)
+                .inspectorColumnWidth(min: Self.inspectorMinimum, ideal: 360, max: 520)
         }
         .toolbar {
             ToolbarItem {
@@ -44,7 +62,36 @@ struct ConsoleView: View {
                     .help("Show or hide the attempt inspector (⌥⌘I)")
             }
         }
-        .frame(minWidth: 960, minHeight: 560)
+        .frame(minWidth: Self.windowMinimum, minHeight: 560)
+    }
+
+    @ViewBuilder private var columns: some View {
+        if console.destination == .inbox, let initialInboxWidth {
+            NavigationSplitView {
+                sidebar
+            } content: {
+                RequestList(model: console.inbox)
+                    .navigationSplitViewColumnWidth(min: Self.inboxMinimum, ideal: min(max(initialInboxWidth, Self.inboxMinimum), 500), max: 500)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
+                        if width >= Self.inboxMinimum && width <= 500 { InboxColumnWidth.save(width) }
+                    }
+            } detail: {
+                InboxScreen(model: console.inbox)
+                    .frame(minWidth: Self.detailMinimum)
+                    .navigationTitle(console.destination.title)
+            }
+        } else {
+            NavigationSplitView {
+                sidebar
+            } detail: {
+                screen.navigationTitle(console.destination.title)
+            }
+        }
+    }
+
+    private var sidebar: some View {
+        SidebarView(console: console)
+            .navigationSplitViewColumnWidth(min: Self.sidebarMinimum, ideal: 220, max: 300)
     }
 
     @ViewBuilder private var screen: some View {
@@ -59,3 +106,14 @@ struct ConsoleView: View {
     }
 }
 
+
+/// A remembered width is an initial preference; the native divider remains free to resize.
+enum InboxColumnWidth {
+    private static let key = "inboxColumnWidth"
+    static func load(from defaults: UserDefaults = .standard) -> Double {
+        defaults.object(forKey: key) as? Double ?? 300
+    }
+    static func save(_ width: Double, to defaults: UserDefaults = .standard) {
+        defaults.set(width, forKey: key)
+    }
+}

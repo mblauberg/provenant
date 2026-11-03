@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+@testable import ProvenantConsole
 
 /// The console and the shared client read the CLI's JSON and nothing else.
 final class SourceBoundaryTests: XCTestCase {
@@ -41,6 +42,21 @@ final class SourceBoundaryTests: XCTestCase {
                 XCTAssertFalse(file.text.contains(word), "\(file.name) nests \(word)")
             }
         }
+    }
+
+    func testColumnMinimumsFitWindow() {
+        XCTAssertLessThanOrEqual(ConsoleView.sidebarMinimum + ConsoleView.inboxMinimum + ConsoleView.detailMinimum
+                                 + ConsoleView.inspectorMinimum, ConsoleView.windowMinimum)
+    }
+
+    func testInboxColumnWidthRoundTrip() throws {
+        let suite = "InboxColumnWidthTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertEqual(InboxColumnWidth.load(from: defaults), 300)
+        InboxColumnWidth.save(410, to: defaults)
+        let reopened = try XCTUnwrap(UserDefaults(suiteName: suite))
+        XCTAssertEqual(InboxColumnWidth.load(from: reopened), 410)
     }
 
     func testShippingSourcesDoNotUseSwiftPMResourceBundles() throws {
