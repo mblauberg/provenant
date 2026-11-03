@@ -611,11 +611,14 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
 }
 
 /// Revert cancellation-only state changes without altering attempt records.
-fn restore_cancelled_nodes(checkpoint: &mut GraphCheckpoint) -> Result<(), ()> {
+fn restore_cancelled_nodes(checkpoint: &mut GraphCheckpoint) -> Result<(), (String, &'static str)> {
     let saved_wake = checkpoint.wake_at;
     asks::refresh_wake(checkpoint);
     if checkpoint.wake_at != saved_wake {
-        return Err(());
+        return Err((
+            String::new(),
+            "graph wake time disagrees with its pending asks",
+        ));
     }
     for node in &mut checkpoint.nodes {
         match node.cancelled_from.take() {
@@ -628,7 +631,12 @@ fn restore_cancelled_nodes(checkpoint: &mut GraphCheckpoint) -> Result<(), ()> {
                 node.skip_reason = None;
             }
             None => {}
-            _ => return Err(()),
+            _ => {
+                return Err((
+                    node.id.clone(),
+                    "cancelled node can only be restored from pending or running",
+                ));
+            }
         }
     }
     asks::refresh_wake(checkpoint);
@@ -779,7 +787,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 return Err(GraphError::Refused(reason));
             }
             let mut validation = checkpoint.clone();
-            restore_cancelled_nodes(&mut validation).map_err(|()| GraphError::BadCheckpoint)?;
+            restore_cancelled_nodes(&mut validation)
+                .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
             validate_checkpoint(document, &validation, &plan, &plan_digest)?;
             checkpoint
         }
@@ -913,7 +922,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     }
     if resume {
         let mut resume_view = checkpoint.clone();
-        restore_cancelled_nodes(&mut resume_view).map_err(|()| GraphError::BadCheckpoint)?;
+        restore_cancelled_nodes(&mut resume_view)
+            .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
         if extensions.iter().any(|e| e.starts_with("loop.")) {
             let mut prospective = resume_view.clone();
             for extension in extensions.iter().filter(|e| e.starts_with("loop.")) {
@@ -979,7 +989,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         // every extension is accepted. Reopen in the same save as those states.
         if checkpoint.cancelled {
             close_resolved_asks(&mut checkpoint, owner, journal)?;
-            restore_cancelled_nodes(&mut checkpoint).map_err(|()| GraphError::BadCheckpoint)?;
+            restore_cancelled_nodes(&mut checkpoint)
+                .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
             checkpoint.cancelled = false;
         }
         for extension in extensions {
