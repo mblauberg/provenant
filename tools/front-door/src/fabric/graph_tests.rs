@@ -171,6 +171,61 @@ mod graph_writer_admission_tests {
     }
 
     #[test]
+    fn real_graph_writer_retries_registry_lock_and_launches() -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_confinement::worktrees::{self, WorktreeCreate, WorkerObserver, WorkerState};
+        use provenant_fabric_runtime::graph::{self, NodeState};
+        use provenant_os::fs::{Directory, LockMode};
+        if super::peer_tests::host_test("fabric::graph_writer_admission_tests::real_graph_writer_retries_registry_lock_and_launches")? { return Ok(()); }
+        struct Free;
+        impl WorkerObserver for Free {
+            fn observe_roots(&self, roots: &[PathBuf]) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+                roots.iter().cloned().map(|root| (root, WorkerState::Free)).collect()
+            }
+        }
+        let rig = crate::worktree_tests::support::TestRig::new()?;
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        for args in [vec!["config", "user.name", "Fixture"], vec!["config", "user.email", "fixture@example.invalid"], vec!["commit", "--allow-empty", "-qm", "base"]] {
+            assert_eq!(crate::worktree_tests::support::code(&rig.execute(&git, &args, None)?), 0);
+        }
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots.clone(), &rig.home, &rig.project)?,
+            project_attribution: false, clock: SystemClock, backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
+            assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &Free,
+        };
+        let cancel = CancelToken::new();
+        let (info, registry) = worktrees::with_context(&roots, &rig.home, &rig.project, &factory.clock, &cancel, |ctx| {
+            let registry = roots.state.as_path().join("worktrees").join(ctx.binding.project_id().to_string());
+            let info = worktrees::create(&worktrees::WorktreeContext { workers: &Free, ..*ctx }, WorktreeCreate { branch: "graph-lane".into(), base: Some("HEAD".into()) }, &cancel)?;
+            Ok((info, registry))
+        })?;
+        let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1, "graph_id":"real-graph-lock", "nodes":[{
+                "id":"writer", "role":"plan", "access":"worktree_write", "worktree":info.path,
+                "source":{"type":"commit", "commit":info.head.to_string()}, "prompt":"write code",
+                "route":{"adapter":"fixture", "model":"fixture/model"}
+            }]
+        }))?;
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 60)?;
+        let mut owner = BoundGraphOwner { factory: &factory, integration_base: None, integration_branch: None, network: None, exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false };
+        let mut journal = MemoryJournal::default();
+        let directory = Directory::open_anchor(&registry)?;
+        let guard = directory.lock(std::ffi::OsStr::new("worktrees.lock"), LockMode::Exclusive, budget, &cancel, &factory.clock)?;
+        let first = advance(&document, &mut owner, &mut journal)?;
+        assert_eq!(first.checkpoint.nodes[0].state, NodeState::Running);
+        let wake = first.checkpoint.nodes[0].launch_retry.as_ref().and_then(|retry| retry.wake_at).ok_or("retry wake")?;
+        drop(guard);
+        let now = factory.clock.wall_now()?;
+        let delay = u64::try_from(wake.as_micros().saturating_sub(now.as_micros()))?;
+        factory.clock.wait_until(factory.clock.mono_now().checked_add(provenant_core::DurationMicros::from_micros(delay))?)?;
+        let second = advance(&document, &mut owner, &mut journal)?;
+        assert_ne!(second.checkpoint.nodes[0].state, NodeState::Blocked, "{:?}", second.checkpoint.nodes[0].advance_error);
+        assert!(second.checkpoint.nodes[0].attempts[0].attempt_ref.is_some(), "graph must submit the writer");
+        Ok(())
+    }
+
+    #[test]
     fn graph_writer_launch_fails_closed_on_permanent_refusals() {
         use provenant_fabric_runtime::graph::{GraphDocument, NodeState};
         let document: GraphDocument = serde_json::from_value(serde_json::json!({

@@ -244,7 +244,7 @@ mod peer_tests {
         Ok(())
     }
 
-    fn host_test(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    pub(super) fn host_test(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
         if !provenant_cli::fabric::in_lane() {
             return Ok(false);
         }

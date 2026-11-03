@@ -2658,6 +2658,120 @@ fn graph_node_reads_full_upstream_result_from_its_inputs_directory() -> Result {
     Ok(())
 }
 
+fn graph_retries_real_registry_lock_and_runs_writer() -> Result {
+    use provenant_core::Clock;
+    use provenant_os::fs::{Directory, LockMode};
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = claude_fixture()?;
+    let cleanup = rig.process_cleanup();
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let commit = rig.execute(
+        &git,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "base",
+        ],
+        None,
+    )?;
+    assert_eq!(code(&commit), 0);
+    let create = rig.command(&[
+        "worktree",
+        "create",
+        "graph-lock-writer",
+        "--base",
+        "HEAD",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&create),
+        0,
+        "{}",
+        String::from_utf8_lossy(&create.stderr.bytes)
+    );
+    let head = rig.execute(&git, &["rev-parse", "HEAD"], None)?;
+    let head = std::str::from_utf8(&head.stdout.bytes)?.trim();
+    let graph = json!({"schema_version":1,"graph_id":"real-lock-provider","nodes":[{
+        "id":"write","prompt":"reply OK","access":"worktree_write","worktree":".worktrees/graph-lock-writer",
+        "source":{"type":"commit","commit":head},
+        "route":{"adapter":"claude","model":"claude/claude-sonnet-5-5","effort":"medium","account":"pro"}
+    }]});
+    fs::write(rig.project.join("graph.json"), serde_json::to_vec(&graph)?)?;
+    let registry_root = rig.state.join("worktrees");
+    let registry = fs::read_dir(registry_root)?
+        .next()
+        .ok_or("registry")??
+        .path();
+    let directory = Directory::open_anchor(&registry)?;
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = provenant_core::CancelToken::new();
+    let lock = directory.lock(
+        std::ffi::OsStr::new("worktrees.lock"),
+        LockMode::Exclusive,
+        provenant_core::WaitBudget::cli(clock.mono_now(), 30)?,
+        &cancel,
+        &clock,
+    )?;
+    let first = rig.command(&[
+        "fabric",
+        "graph",
+        "run",
+        "--document",
+        "graph.json",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&first),
+        0,
+        "{} {}",
+        String::from_utf8_lossy(&first.stdout.bytes),
+        String::from_utf8_lossy(&first.stderr.bytes)
+    );
+    let result: Value = serde_json::from_slice(&first.stdout.bytes)?;
+    assert_eq!(
+        result["data"]["checkpoint"]["nodes"][0]["state"], "running",
+        "{result}"
+    );
+    assert!(
+        result["data"]["checkpoint"]["nodes"][0]["launch_retry"]["wake_at"].is_string(),
+        "{result}"
+    );
+    drop(lock);
+    clock.wait_until(
+        clock
+            .mono_now()
+            .checked_add(provenant_core::DurationMicros::from_micros(5_500_000))?,
+    )?;
+    let second = rig.command(&[
+        "fabric",
+        "graph",
+        "resume",
+        "--document",
+        "graph.json",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&second),
+        0,
+        "{} {}",
+        String::from_utf8_lossy(&second.stdout.bytes),
+        String::from_utf8_lossy(&second.stderr.bytes)
+    );
+    let result: Value = serde_json::from_slice(&second.stdout.bytes)?;
+    let node = &result["data"]["checkpoint"]["nodes"][0];
+    assert_ne!(node["state"], "blocked", "{result}");
+    assert_eq!(node["attempts"][0]["launched"], true, "{result}");
+    cleanup.disarm();
+    Ok(())
+}
+
 fn graph_settlement_advances_writer_and_account_routed_review() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -4426,6 +4540,7 @@ fn main() -> ExitCode {
                 "host_native_dispatch_uses_the_declared_agent_and_refuses_resume",
                 "host_native_preparation_uses_the_provider_contract",
                 "unconfigured_host_native_repair_launches_alias_fallback",
+                "graph_retries_real_registry_lock_and_runs_writer",
                 "graph_settlement_advances_writer_and_account_routed_review",
                 "graph_node_reads_full_upstream_result_from_its_inputs_directory",
                 "graph_settlement_records_a_failed_advance_for_status",
@@ -4490,6 +4605,7 @@ fn main() -> ExitCode {
                     "unconfigured_host_native_repair_launches_alias_fallback" => {
                         unconfigured_host_native_repair_launches_alias_fallback()
                     }
+                    "graph_retries_real_registry_lock_and_runs_writer" => graph_retries_real_registry_lock_and_runs_writer(),
                     "graph_settlement_advances_writer_and_account_routed_review" => {
                         graph_settlement_advances_writer_and_account_routed_review()
                     }
