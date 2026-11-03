@@ -2231,6 +2231,27 @@ mod peer_tests {
         let base_text = base.to_string();
         assert_eq!(request.tasks[0].base.as_deref(), Some(base_text.as_str()));
         assert_ne!(base_text, head);
+        // A different integration base does not displace the pinned review base.
+        bound.integration_base = Some(BoundGraphBases {
+            integration: Some(provenant_core::GitOid::parse(&head)?),
+            review: Some(base),
+        });
+        let second: graph::AttemptKey = serde_json::from_value(serde_json::json!({
+            "graph_id":"pinned-base", "node_id":"second-lens", "route_index":0
+        }))?;
+        let actor = bound.actor();
+        bound.observe_or_start(&second, graph::NodeInput {
+            prior_attempts: &[], family_peers: &[], context: Default::default(), read_roots: &[],
+            distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
+            title: "second lens", prompt: "review", required_verdict: None, deadline_seconds: None,
+            inputs_dir: None,
+        }, &route, graph::AccessMode::ReadOnly, None, graph::Replay {
+            delivery: None, branch: None, fast_forward_only: false, stored_ref: None, launch_actor: &actor,
+        })?;
+        let operation = graph_operation("graph-attempt-operation", &second)?;
+        let operation = store.operation(&operation, &owner.call(&cancel))?.ok_or("second lens operation missing")?;
+        let request = store.request(operation.run_id, &owner.call(&cancel))?;
+        assert_eq!(request.tasks[0].base.as_deref(), Some(base_text.as_str()));
         bound.integration_base = Some(BoundGraphBases { integration: None, review: Some(base) });
         let review_node: graph::GraphNode = serde_json::from_value(serde_json::json!({
             "id":"review", "access":"read_only", "prompt":"review",
@@ -2239,6 +2260,11 @@ mod peer_tests {
         let measured = bound.measure_review(&review_node, &head)?;
         assert_eq!(measured.measured.size, Some("small"));
         assert!(measured.measured.warning.is_none(), "{:?}", measured.measured);
+        // An explicit review base wins over a different integration base.
+        let head_oid = provenant_core::GitOid::parse(&head)?;
+        bound.integration_base = Some(BoundGraphBases { integration: Some(head_oid), review: Some(base) });
+        assert_eq!(bound.measure_review(&review_node, &head)?.base, base);
+        bound.integration_base = Some(BoundGraphBases { integration: None, review: Some(base) });
         // A deferred council resolves from the diff at the pinned subject: the
         // small change is `quick`, a risk floor raises it, and a large one is `deep`.
         let names = [

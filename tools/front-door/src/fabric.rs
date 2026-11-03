@@ -3945,7 +3945,7 @@ impl BoundGraphOwner<'_> {
         })?;
         let base = self
             .integration_base
-            .and_then(|bases| bases.integration.or(bases.review))
+            .and_then(|bases| bases.review.or(bases.integration))
             .unwrap_or(subject);
         let directory = spec.worktree.as_deref().map_or_else(
             || self.factory.cwd.clone(),
@@ -4636,9 +4636,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     extra: Default::default(),
                     build_heavy: false,
                     base: node.source_commit.map(|head| {
-                        self.integration_base
-                            .and_then(|bases| bases.integration)
-                            .or(review_base)
+                        // An explicit review base wins; the integration base is the default.
+                        review_base
+                            .or(self.integration_base.and_then(|bases| bases.integration))
                             .map_or_else(|| head.to_owned(), |base| base.to_string())
                     }),
                     head: node.source_commit.map(str::to_owned),
