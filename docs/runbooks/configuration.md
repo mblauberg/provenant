@@ -512,14 +512,14 @@ Go usage from this host's ledger is a partial lower bound. Enter dashboard
 percentages under the quota domain in the selected state root's `config.toml`:
 
 ```toml
-[domains.quota.calibration.go]
+[domains.quota.calibration.opencode-go]
 five_hour = 43
 seven_day = 17
 thirty_day = 59
 expires = "2026-11-04T00:00:00Z"
 ```
 
-The table key is the OpenCode account key, usually `go`. Each percentage is an
+The table key is the OpenCode account key, usually `opencode-go`. Each percentage is an
 integer from 0 to 100, and expiry is a required timestamp with a UTC offset.
 Quota and pacing use the maximum of the raw ledger and each floor until the
 expiry instant, even if a ledger window resets sooner. Set the expiry no later

@@ -99,6 +99,7 @@ pub fn record_capacity_cooldown(
         account: account.clone(),
         expected: current.cloned(),
         replacement: Some(record),
+        readiness_probe_result: None,
     }))
 }
 
@@ -170,6 +171,44 @@ impl Admission<'_> {
         })
     }
 
+    /// Whether `refusal` still holds: unexpired, and not cleared by a fresh
+    /// reading of its pool that proves headroom. The one clearing rule, shared
+    /// by admission and the readiness record.
+    pub fn refusal_holds(
+        &self,
+        adapter: &str,
+        record: Option<&AccountRecord>,
+        refusal: &Refusal,
+    ) -> Result<bool, QuotaError> {
+        let expires = refusal.expires_unix_seconds()?;
+        let snapshot = self.fresh_snapshot(adapter, record);
+        let comparable_newer = record.is_some_and(|r| r.last_error.is_none())
+            && snapshot.is_some_and(|s| {
+                s.observed_unix_seconds > refusal.observed_unix_seconds
+                    && matches!(
+                        s.status,
+                        QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
+                    )
+                    && refusal.pool.as_ref().is_some_and(|pool| {
+                        let mut windows = s
+                            .windows
+                            .iter()
+                            .filter(|w| matches_pool(adapter, &w.pool, pool))
+                            .peekable();
+                        windows.peek().is_some()
+                            && windows.all(|w| {
+                                // A lapsed reset alone cannot clear a refusal.
+                                w.used_basis_points < CLEAR_HEADROOM_BASIS_POINTS
+                                    && s.details.as_ref().is_none_or(|d| {
+                                        d.coverage.as_deref() != Some("partial")
+                                            || d.calibration_active(&w.pool, self.now_unix_seconds)
+                                    })
+                            })
+                    })
+            });
+        Ok(expires > self.now_unix_seconds && !comparable_newer)
+    }
+
     /// Whether persisted mismatch or a live provider refusal blocks `account_key`
     /// from serving `model` (the model without its adapter prefix). Expiry and
     /// clearing by a fresh, comparable reading live only here. Invalid evidence is
@@ -193,7 +232,6 @@ impl Admission<'_> {
         let free = free_pool(adapter);
         // Only the adapter's own keyless free pool spans models.
         let in_free = |pool: Option<&str>| free.is_some() && pool == free;
-        let snapshot = self.fresh_snapshot(adapter, record);
         for refusal in record
             .into_iter()
             .flat_map(|r| r.refusals.iter())
@@ -205,31 +243,7 @@ impl Admission<'_> {
                             && self.pools.iter().any(|pool| Some(pool.as_str()) == free)))
             })
         {
-            let expires = refusal.expires_unix_seconds()?;
-            let comparable_newer = record.is_some_and(|r| r.last_error.is_none())
-                && snapshot.is_some_and(|s| {
-                    s.observed_unix_seconds > refusal.observed_unix_seconds
-                        && matches!(
-                            s.status,
-                            QuotaStatus::Available
-                                | QuotaStatus::CreditOnly
-                                | QuotaStatus::Exhausted
-                        )
-                        && refusal.pool.as_ref().is_some_and(|pool| {
-                            let mut windows = s
-                                .windows
-                                .iter()
-                                .filter(|w| matches_pool(adapter, &w.pool, pool))
-                                .peekable();
-                            windows.peek().is_some()
-                                && windows.all(|w| {
-                                    // A lapsed reset alone cannot clear a refusal.
-                                    w.used_basis_points < CLEAR_HEADROOM_BASIS_POINTS
-                                })
-                        })
-                });
-            if expires > self.now_unix_seconds
-                && !comparable_newer
+            if self.refusal_holds(adapter, record, refusal)?
                 && ((in_free(refusal.pool.as_deref()) && refusal.model == model)
                     || refusal.pool.as_ref().is_none_or(|p| self.pools.contains(p)))
             {
@@ -270,26 +284,47 @@ impl Admission<'_> {
             if snapshot.status == QuotaStatus::AuthRequired {
                 return Err(QuotaError::Refused("authentication required"));
             }
-            if matches!(
+            // An unknown reading proves exhaustion only as a partial lower bound.
+            if (matches!(
                 snapshot.status,
                 QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
-            ) && snapshot.windows.iter().any(|w| {
-                (self
-                    .pools
-                    .iter()
-                    .any(|pool| matches_pool(&route.adapter, &w.pool, pool))
-                    || (go_model
-                        && ["five_hour", "seven_day", "thirty_day"].contains(&w.pool.as_str())))
-                    && w.used_basis_points >= 10000
-                    && (w
-                        .resets_unix_seconds
-                        .is_none_or(|r| r > self.now_unix_seconds)
-                        || snapshot
-                            .details
-                            .as_ref()
-                            .is_some_and(|d| d.calibration_active(&w.pool, self.now_unix_seconds)))
-            }) {
+            ) || (snapshot.status == QuotaStatus::Unknown
+                && snapshot
+                    .details
+                    .as_ref()
+                    .is_some_and(|d| d.coverage.as_deref() == Some("partial"))))
+                && snapshot.windows.iter().any(|w| {
+                    (self
+                        .pools
+                        .iter()
+                        .any(|pool| matches_pool(&route.adapter, &w.pool, pool))
+                        || (go_model
+                            && ["five_hour", "seven_day", "thirty_day"].contains(&w.pool.as_str())))
+                        && w.used_basis_points >= 10000
+                        && (w
+                            .resets_unix_seconds
+                            .is_none_or(|r| r > self.now_unix_seconds)
+                            || snapshot.details.as_ref().is_some_and(|d| {
+                                d.calibration_active(&w.pool, self.now_unix_seconds)
+                            }))
+                })
+            {
                 return Err(QuotaError::Refused("allowance exhausted"));
+            }
+            if snapshot.details.as_ref().is_some_and(|d| {
+                d.coverage.as_deref() == Some("partial")
+                    && snapshot.windows.iter().any(|w| {
+                        (self
+                            .pools
+                            .iter()
+                            .any(|pool| matches_pool(&route.adapter, &w.pool, pool))
+                            || (go_model
+                                && ["five_hour", "seven_day", "thirty_day"]
+                                    .contains(&w.pool.as_str())))
+                            && !d.calibration_active(&w.pool, self.now_unix_seconds)
+                    })
+            }) {
+                return Err(QuotaError::Refused("uncalibrated partial coverage"));
             }
         }
         Ok(())
@@ -359,6 +394,7 @@ pub fn record_refusal(
         account: account.clone(),
         expected: current.cloned(),
         replacement: Some(record),
+        readiness_probe_result: None,
     })
 }
 
@@ -589,7 +625,33 @@ mod admission_tests {
         let mut active = raw.clone();
         settings.apply_calibration(&mut active, 1000);
         assert!(check(&active, 1000).is_ok());
-        assert!(check(&active, 1100).is_ok());
+        assert!(matches!(
+            check(&active, 1100),
+            Err(QuotaError::Refused("uncalibrated partial coverage"))
+        ));
+        let mut partial = raw.clone();
+        settings.apply_calibration(&mut partial, 1100);
+        partial[0]
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .windows
+            .push(QuotaWindow {
+                pool: "five_hour".into(),
+                window_seconds: None,
+                used_basis_points: 9999,
+                resets_unix_seconds: None,
+            });
+        assert!(matches!(
+            check(&partial, 1100),
+            Err(QuotaError::Refused("uncalibrated partial coverage"))
+        ));
+        partial[0].snapshot.as_mut().unwrap().windows[0].used_basis_points = 10000;
+        partial[0].snapshot.as_mut().unwrap().status = QuotaStatus::Unknown;
+        assert!(matches!(
+            check(&partial, 1100),
+            Err(QuotaError::Refused("allowance exhausted"))
+        ));
         settings.calibration.get_mut("go").unwrap().five_hour = Some(100);
         let mut exhausted = raw.clone();
         settings.apply_calibration(&mut exhausted, 1000);
@@ -844,12 +906,26 @@ mod admission_tests {
     }
     #[test]
     fn lapsed_window_requires_headroom_to_clear_a_newer_refusal() {
-        for (used, allowed) in [(9700, false), (9600, false), (9500, false), (9499, true)] {
+        for (used, partial, calibrated_pool, expiry, allowed) in [
+            (9700, false, "pool-a", 5100, false),
+            (9600, false, "pool-a", 5100, false),
+            (9500, false, "pool-a", 5100, false),
+            (9499, false, "pool-a", 5100, true),
+            (9499, true, "pool-a", 5100, true),
+            (9499, true, "other", 5100, false),
+            (9499, true, "pool-a", 5000, false),
+        ] {
             let mut record = record(QuotaStatus::Available);
             let snapshot = record.snapshot.as_mut().unwrap();
             snapshot.observed_unix_seconds = 4990;
             snapshot.windows[0].used_basis_points = used;
             snapshot.windows[0].resets_unix_seconds = Some(1400);
+            snapshot.details = Some(crate::QuotaDetails {
+                coverage: partial.then(|| "partial".into()),
+                calibrated_windows: vec![calibrated_pool.into()],
+                calibration_expires_unix_seconds: Some(expiry),
+                ..Default::default()
+            });
             record.refusals.push(Refusal {
                 extra: Default::default(),
                 account: record.account.clone(),
@@ -858,18 +934,20 @@ mod admission_tests {
                 observed_unix_seconds: 4980,
                 resets_unix_seconds: None,
             });
+            let admission = Admission {
+                policies: crate::source::TEST_POLICIES,
+                now_unix_seconds: 5000,
+                records: std::slice::from_ref(&record),
+                pools: &["pool-a".into()],
+            };
             assert_eq!(
-                Admission {
-                    policies: crate::source::TEST_POLICIES,
-                    now_unix_seconds: 5000,
-                    records: &[record],
-                    pools: &["pool-a".into()],
-                }
-                .check(&route())
-                .is_ok(),
+                !admission
+                    .refusal_holds("claude", Some(&record), &record.refusals[0])
+                    .unwrap(),
                 allowed,
-                "used={used}"
+                "used={used}, partial={partial}, pool={calibrated_pool}, expiry={expiry}"
             );
+            assert_eq!(admission.check(&route()).is_ok(), allowed);
         }
     }
     #[test]

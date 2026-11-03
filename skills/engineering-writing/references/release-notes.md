@@ -6,7 +6,7 @@ Use when writing or editing release notes, a changelog or release fragments (tow
 
 1. **Lead with the upgrade.** Order: intro, breaking changes, behaviour changes, additions, fixes. Breaking changes hold only entries that need a user action, and each states the action. A change that needs no action is a behaviour change.
 2. **One to three sentences per entry.** Subject first (the command, flag or feature, in code font), one tense, one name per concept. State the user-visible change and its effect, not the mechanism. Failure sequences and tests belong in linked docs or the issue.
-3. **Say standing policy once.** Stability, supported platforms and upgrade-together rules live on one stable page. Each release links to it in a line.
+3. **Say standing policy once.** Stability, supported platforms and upgrade-together rules live on one stable page. Release notes do not repeat them.
 4. **Fixes name the symptom** and the new behaviour, not the root cause.
 5. **Keep user-actionable numbers** (defaults, limits, units, flags). Drop internal ones (retry counts, schema versions) unless they change what the user must do.
 6. **Leave out what no user notices:** refactors, tests, CI, contributor tooling, fixes to unreleased code, slice or phase numbers, process words.
@@ -22,7 +22,7 @@ Use when writing or editing release notes, a changelog or release fragments (tow
 
 Released 4 March 2027.
 
-What this release is about, in two sentences. Link to the stability policy.
+What this release is about, in two sentences.
 
 ## Breaking changes
 
@@ -52,7 +52,7 @@ A changelog is the exhaustive record for developers and follows Keep a Changelog
 ## Checklist
 
 - [ ] Every entry opens with its subject, runs one to three sentences and stands alone.
-- [ ] Breaking changes need an action and state it; policy is linked, not pasted.
+- [ ] Breaking changes need an action and state it; standing policy is not repeated.
 - [ ] No repeats, internal-only changes, process words, em-dashes or marketing words.
 - [ ] When rewriting: every fact and issue number survives, and merges and drops are listed.
 
