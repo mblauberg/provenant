@@ -253,7 +253,24 @@ pub(crate) fn verify_lineage(
     })
 }
 
+/// A recognised provider failure, kept separate from human diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureCause {
+    AuthRequired,
+    Provider,
+}
+
 pub trait Adapter: Sync {
+    fn failure_cause(&self, stderr: &[u8]) -> FailureCause {
+        let text = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+        if provenant_records::AdapterSpec::get(self.id())
+            .is_some_and(|spec| spec.auth_markers.iter().any(|marker| text.contains(marker)))
+        {
+            FailureCause::AuthRequired
+        } else {
+            FailureCause::Provider
+        }
+    }
     /// A recognised failure diagnostic, without untrusted stderr prose.
     fn failure_diagnostic(&self, _stderr: &[u8]) -> Option<String> {
         None

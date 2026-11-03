@@ -2042,7 +2042,8 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
                             && (route.account_key.as_deref()
                                 == Some(r.account.account_key.as_str())
                                 || (route.account_key.is_none()
-                                    && route.adapter == "opencode"
+                                    && provenant_records::AdapterSpec::get(&route.adapter)
+                                        .is_some_and(|spec| spec.allowance_prefix.is_some())
                                     && snapshot_governs(
                                         &route.adapter,
                                         &r.account.account_key,

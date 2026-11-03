@@ -3012,3 +3012,69 @@ fn a_task_may_read_only_its_own_nodes_graph_inputs() -> Result<(), Box<dyn std::
     assert!(check(Some(&mine), &inputs("g", "mine")).is_err());
     Ok(())
 }
+
+#[test]
+fn prelaunch_login_failures_keep_auth_when_availability_is_absent()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_providers::{ProviderError, accounts::Registration};
+    let entries: Vec<Registration> = ["work", "personal"].into_iter().map(|label| {
+        serde_json::from_value(serde_json::json!({"adapter": "codex", "label": label, "key": label, "directory": format!("/fixture/{label}")}))
+    }).collect::<Result<_, _>>()?;
+    let route: ResolvedRoute = serde_json::from_value(serde_json::json!({
+        "adapter": "codex", "model": "example", "catalogue_revision": "fixture",
+        "host": "fixture", "alternatives": [], "exclusions": [],
+        "confidentiality": {"evidence_ref": "fixture"}, "eligibility": "eligible",
+        "readiness": {"status": "unavailable", "reason": "unknown_availability"}
+    }))?;
+    let mut failures = std::collections::BTreeMap::new();
+    for (entry, error) in entries.iter().zip([
+        ProviderError::LoginRequired,
+        ProviderError::CredentialNotFound,
+    ]) {
+        let AccountObservationError::AuthRequired(detail) =
+            account_observation_error(entry, &error)
+        else {
+            panic!("login failure lost its type")
+        };
+        assert!(detail.contains("codex login"));
+        failures.insert((entry.adapter.clone(), entry.key.clone()), detail);
+    }
+    assert!(unavailable_auth_detail(&route, None, &entries, &failures).is_some());
+    failures.remove(&("codex".into(), "personal".into()));
+    assert!(unavailable_auth_detail(&route, None, &entries, &failures).is_none());
+    assert!(unavailable_auth_detail(&route, Some("work"), &entries, &failures).is_some());
+    assert!(matches!(
+        account_observation_error(&entries[0], &ProviderError::IdentityMismatch),
+        AccountObservationError::Other(_)
+    ));
+    Ok(())
+}
+
+#[test]
+fn absent_default_login_differs_from_directory_integrity_errors()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let missing = temp.path().join("missing-codex");
+    assert_eq!(
+        default_directory_error(&missing, "not found".into()).skip_kind(),
+        SkipKind::AuthRequired
+    );
+    assert_eq!(
+        default_directory_error(temp.path(), "permission denied".into()).skip_kind(),
+        SkipKind::Account
+    );
+    #[cfg(unix)]
+    {
+        let broken = temp.path().join("broken-link");
+        std::os::unix::fs::symlink(&missing, &broken)?;
+        assert_eq!(
+            default_directory_error(&broken, "broken link".into()).skip_kind(),
+            SkipKind::Account
+        );
+    }
+    assert_eq!(
+        AccountObservationError::VersionUnavailable("codex executable missing".into()).skip_kind(),
+        SkipKind::Unavailable
+    );
+    Ok(())
+}

@@ -196,12 +196,14 @@ pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Setting
             return Err("invalid account label".into());
         }
         let directory = provenant_os::fs::canonicalize(directory).map_err(|e| e.to_string())?;
-        if adapter == "claude" && directory != home.join(format!(".claude-{label}")) {
+        if adapter == provenant_records::Harness::Claude.spec().name
+            && directory != home.join(format!(".claude-{label}"))
+        {
             return Err(
                 "Claude registration requires its fixed ~/.claude-<label> directory".into(),
             );
         }
-        if adapter == "agy" {
+        if adapter == provenant_records::Harness::Agy.spec().name {
             check_agy_directory(&directory, home)?;
         }
         let executable = crate::run::provider_executable(adapter)?;
@@ -229,7 +231,11 @@ pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Setting
         );
         // OpenCode's local ledger has no sign-in identity.
         let (key, org_fingerprint) = match detected {
-            Err(provenant_providers::ProviderError::UnknownIdentity) if adapter == "opencode" => {
+            Err(provenant_providers::ProviderError::UnknownIdentity)
+                if provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
+                    spec.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
+                }) =>
+            {
                 (format!("{adapter}-{label}"), None)
             }
             other => other.map_err(|e| e.to_string())?,

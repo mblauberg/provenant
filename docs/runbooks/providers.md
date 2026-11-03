@@ -7,6 +7,12 @@ OpenCode) are enabled by default in every access and session mode with a launch
 form; recordings serve replay tests only. Use `provenant route list`
 to inspect the catalogue; readiness is decided at dispatch.
 
+`AdapterSpec` owns credential metadata watch files, authentication markers, login
+hints, compaction environment controls and allowance prefixes. Credential watches
+inspect metadata only. Recognised missing or expired provider logins settle as
+`auth_required`, including when every candidate is skipped before launch.
+Read-only graph nodes can then try their next declared route.
+
 ## Launch capabilities
 
 One declared table per adapter (`AdapterSpec::launch` in

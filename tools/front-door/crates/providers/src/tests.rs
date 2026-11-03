@@ -6560,3 +6560,102 @@ fn free_plan_notional_value_and_extra_directories_parse_and_validate() {
     let relative = accounts_with_plans("directories = [\"rel/dir\"]\n").unwrap();
     assert!(!relative.validate().is_empty());
 }
+
+#[test]
+fn adapter_sign_in_stderr_has_a_typed_auth_cause() {
+    let fixtures: &[(&dyn Adapter, &[u8])] = &[
+        (
+            &cursor::Cursor,
+            include_bytes!("../../../tests/fixtures/providers/cursor/auth-required.stderr"),
+        ),
+        (
+            &codex::Codex,
+            include_bytes!("../../../tests/fixtures/providers/codex/auth-required.stderr"),
+        ),
+        (
+            &opencode::OpenCode,
+            include_bytes!("../../../tests/fixtures/providers/opencode/auth-required.stderr"),
+        ),
+        (
+            &agy::Agy,
+            include_bytes!("../../../tests/fixtures/providers/agy/auth-required.stderr"),
+        ),
+    ];
+    for (adapter, stderr) in fixtures {
+        assert_eq!(
+            adapter.failure_cause(stderr),
+            FailureCause::AuthRequired,
+            "{}",
+            adapter.id()
+        );
+        for unrelated in [
+            "connection closed",
+            "tool request failed: Unauthorized",
+            "application request unauthenticated",
+            "tool request failed: invalid API key",
+            "tool documentation mentions opencode auth login",
+        ] {
+            assert_eq!(
+                adapter.failure_cause(unrelated.as_bytes()),
+                FailureCause::Provider,
+                "{}: {unrelated}",
+                adapter.id()
+            );
+        }
+    }
+}
+
+#[test]
+fn identity_probes_preserve_auth_failures_only_from_intact_captures() {
+    use provenant_os::exec::{
+        CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
+    };
+    struct SignedOut<'a>(&'a [u8], bool);
+    impl Executor for SignedOut<'_> {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            assert!(matches!(
+                options.stderr,
+                provenant_os::exec::StreamPolicy::Capture { .. }
+            ));
+            Ok(ExecOutcome {
+                termination: Termination::Exit(1),
+                stdout: Default::default(),
+                stderr: CapturedStream {
+                    bytes: self.0.to_vec(),
+                    truncated: self.1,
+                    ..Default::default()
+                },
+                timed_out: false,
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: false,
+                elapsed_micros: 0,
+            })
+        }
+    }
+    let scratch = tempfile::tempdir().unwrap();
+    for (adapter, capture) in [
+        (
+            "agy",
+            include_bytes!("../../../tests/fixtures/providers/agy/auth-required.stderr").as_slice(),
+        ),
+        ("claude", b"Not logged in".as_slice()),
+    ] {
+        for truncated in [false, true] {
+            let result = accounts::detect(
+                &SignedOut(capture, truncated),
+                adapter,
+                Path::new("/fixture/agy"),
+                scratch.path(),
+                OsStr::new("fixture"),
+                scratch.path(),
+                scratch.path(),
+            );
+            if truncated {
+                assert!(matches!(result, Err(ProviderError::UnknownIdentity)));
+            } else {
+                assert!(matches!(result, Err(ProviderError::CredentialUnavailable)));
+            }
+        }
+    }
+}

@@ -904,7 +904,7 @@ mod tests {
                 _: &str,
                 _: &run::LaunchPaths,
                 _: Option<&run::AttemptRecord>,
-            ) -> Result<run::PreparedLaunch, String> {
+            ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
                 self.0.set(task.access.network);
                 Ok(run::PreparedLaunch {
                     argv: vec!["fixture".into()],
@@ -1534,7 +1534,7 @@ mod tests {
                 _: &str,
                 _: &run::LaunchPaths,
                 _: Option<&run::AttemptRecord>,
-            ) -> Result<run::PreparedLaunch, String> {
+            ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
                 Ok(run::PreparedLaunch {
                     argv: vec!["fixture".into()],
                     environment: vec![],

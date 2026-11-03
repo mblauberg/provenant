@@ -1239,7 +1239,7 @@ impl provenant_run::Providers for WriterProvider {
         _prompt: &str,
         paths: &provenant_run::LaunchPaths,
         resume: Option<&provenant_run::AttemptRecord>,
-    ) -> std::result::Result<provenant_run::PreparedLaunch, String> {
+    ) -> std::result::Result<provenant_run::PreparedLaunch, provenant_run::PrepareRefusal> {
         if resume.is_some() {
             return Err("writer fixture does not resume".into());
         }

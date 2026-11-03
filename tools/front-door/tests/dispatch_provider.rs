@@ -2144,7 +2144,7 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
             .err()
             .ok_or("unconfigured host-native entry was accepted")?;
     assert_eq!(
-        error,
+        error.to_string(),
         "host-native absent is not configured in domains.fabric.host_native"
     );
     assert_eq!(fs::read_dir(&paths.temporary)?.count(), 0);
@@ -2282,7 +2282,7 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
             .err()
             .ok_or("host agent was silently replaced by its provider's policy fallback")?;
     assert_eq!(
-        error,
+        error.to_string(),
         "host-native requires its configured model; use graph routes for non-native fallback"
     );
     Ok(())

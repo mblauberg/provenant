@@ -233,7 +233,7 @@ impl Registry<'_> {
         paths: &run::LaunchPaths,
         resume: Option<&run::AttemptRecord>,
         wait: Option<u64>,
-    ) -> Result<run::PreparedLaunch, String> {
+    ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
         let prepared = provider::prepare(self, task, prompt, paths, resume, wait)?;
         #[cfg(feature = "fixture")]
         let prepared = {
@@ -509,7 +509,7 @@ impl run::Providers for Registry<'_> {
         prompt: &str,
         paths: &run::LaunchPaths,
         resume: Option<&run::AttemptRecord>,
-    ) -> Result<run::PreparedLaunch, String> {
+    ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
         self.prepare_with_wait(task, prompt, paths, resume, None)
     }
 
@@ -533,7 +533,8 @@ impl Registry<'_> {
         provider_state: &Path,
         host_settlement: bool,
     ) -> Result<run::Decoded, String> {
-        let is_claude = route.provider.as_deref() == Some("claude");
+        let is_claude =
+            route.provider.as_deref() == Some(provenant_records::Harness::Claude.spec().name);
         let failed = |reason: &str| run::Decoded {
             outcome: run::Outcome::Failed,
             result: String::new(),
@@ -574,7 +575,7 @@ impl Registry<'_> {
         events.extend(outcome.final_events().iter().cloned());
         // Stderr quota text is evidence only for a run the adapter did not
         // accept; a successful run may print incidental quota wording.
-        if adapter.id() == "opencode"
+        if adapter.id() == provenant_records::Harness::Opencode.spec().name
             && !matches!(outcome.status(), OutcomeStatus::Success)
             && let Some(event) = provenant_providers::opencode::stderr_quota(stderr)
         {
@@ -592,18 +593,19 @@ impl Registry<'_> {
             .and_then(|observed| observed.as_ref().err())
             .map(|error| format!("Codex rollout identity: {error}"));
         // OpenCode's stream names no model; its session record does.
-        let opencode_model = (adapter.id() == "opencode").then(|| {
-            let data = std::env::var_os("XDG_DATA_HOME")
-                .map(std::path::PathBuf::from)
-                .filter(|path| path.is_absolute())
-                .or_else(|| self.home.map(|home| home.join(".local/share")))
-                .map(|data| data.join("opencode"))
-                .ok_or(provenant_providers::ProviderError::UnknownIdentity)?;
-            let session = outcome
-                .session()
-                .ok_or(provenant_providers::ProviderError::UnknownIdentity)?;
-            provenant_providers::opencode::observe_model(&data, session)
-        });
+        let opencode_model = (adapter.id() == provenant_records::Harness::Opencode.spec().name)
+            .then(|| {
+                let data = std::env::var_os("XDG_DATA_HOME")
+                    .map(std::path::PathBuf::from)
+                    .filter(|path| path.is_absolute())
+                    .or_else(|| self.home.map(|home| home.join(".local/share")))
+                    .map(|data| data.join(provenant_records::Harness::Opencode.spec().name))
+                    .ok_or(provenant_providers::ProviderError::UnknownIdentity)?;
+                let session = outcome
+                    .session()
+                    .ok_or(provenant_providers::ProviderError::UnknownIdentity)?;
+                provenant_providers::opencode::observe_model(&data, session)
+            });
         let opencode_model = match opencode_model {
             Some(Ok(model)) => Some(model),
             Some(Err(error)) => {
@@ -616,7 +618,7 @@ impl Registry<'_> {
         let observed_model = if adapter.id() == "codex" {
             // Missing or invalid rollout evidence cannot fall back to another source.
             rollout.as_ref().map(|turn| turn.model.as_str())
-        } else if adapter.id() == "opencode" {
+        } else if adapter.id() == provenant_records::Harness::Opencode.spec().name {
             opencode_model.as_deref()
         } else {
             outcome.model()
@@ -695,7 +697,9 @@ impl Registry<'_> {
                     .insert_str(0, "[output truncated; retained tail]\n");
             }
         }
-        if (is_claude || adapter.id() == "claude") && !has_usage {
+        if (is_claude || adapter.id() == provenant_records::Harness::Claude.spec().name)
+            && !has_usage
+        {
             let has_result = stdout.split(|&b| b == b'\n').any(|line| {
                 serde_json::from_slice::<serde_json::Value>(line)
                     .is_ok_and(|event| event["type"] == "result")
@@ -706,10 +710,24 @@ impl Registry<'_> {
                 "absent: no result event".into()
             });
         }
-        let auth = events.contains(&ProviderEvent::AuthRequired);
+        let failure_cause = if events.contains(&ProviderEvent::AuthRequired) {
+            provenant_providers::FailureCause::AuthRequired
+        } else {
+            adapter.failure_cause(stderr)
+        };
+        let auth = failure_cause == provenant_providers::FailureCause::AuthRequired;
+        let provider_failed = outcome.status() == OutcomeStatus::Failed
+            && failure_cause == provenant_providers::FailureCause::Provider;
         (decoded.outcome, decoded.reason) = match outcome.status() {
             OutcomeStatus::Success => (run::Outcome::Succeeded, None),
-            OutcomeStatus::Refused if auth => (run::Outcome::AuthRequired, None),
+            _ if auth && outcome.status() != OutcomeStatus::Success => (
+                run::Outcome::AuthRequired,
+                Some(format!(
+                    "provider sign-in required; {}",
+                    provenant_records::AdapterSpec::get(adapter.id())
+                        .map_or("run provenant accounts", |spec| spec.login_hint)
+                )),
+            ),
             OutcomeStatus::Refused => (run::Outcome::Rejected, Some("provider refused".into())),
             OutcomeStatus::Failed => (run::Outcome::Failed, Some("provider failed".into())),
             OutcomeStatus::Partial => {
@@ -746,7 +764,7 @@ impl Registry<'_> {
             .find(|event| matches!(event, ProviderEvent::Denied { .. }))
         {
             if decoded.outcome == run::Outcome::Failed
-                && decoded.reason.as_deref() == Some("provider failed")
+                && provider_failed
                 && code == Some(0)
                 && !timed_out
                 && !events

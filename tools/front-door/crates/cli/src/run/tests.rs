@@ -2888,7 +2888,7 @@ fn refused_provider_continuation_keeps_a_durable_attempt() -> Result<(), Box<dyn
             _: &str,
             _: &run::LaunchPaths,
             resume: Option<&run::AttemptRecord>,
-        ) -> Result<run::PreparedLaunch, String> {
+        ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
             assert_eq!(resume.map(|prior| prior.attempt_id), self.prior);
             Err("fixture continuation refused; run provenant run".into())
         }
@@ -5552,4 +5552,68 @@ fn wait_follows_a_policy_chain_to_the_ceiling_reading_state_before_tail() {
             .all(|pair| pair[0].0 == "state" && pair[1].0 == "tail" && pair[0].1 == pair[1].1),
         "each hop reads state before its tail"
     );
+}
+
+#[test]
+fn every_adapter_sign_in_failure_settles_auth_required() -> Result<(), Box<dyn std::error::Error>> {
+    use run::Providers;
+    let fixtures: &[(&str, &[u8])] = &[
+        (
+            "cursor",
+            include_bytes!("../../../../tests/fixtures/providers/cursor/auth-required.stderr"),
+        ),
+        (
+            "codex",
+            include_bytes!("../../../../tests/fixtures/providers/codex/auth-required.stderr"),
+        ),
+        (
+            "opencode",
+            include_bytes!("../../../../tests/fixtures/providers/opencode/auth-required.stderr"),
+        ),
+        (
+            "agy",
+            include_bytes!("../../../../tests/fixtures/providers/agy/auth-required.stderr"),
+        ),
+    ];
+    let temp = tempfile::tempdir()?;
+    let mut exit = clean_exit();
+    exit.termination = Some(provenant_os::exec::Termination::Exit(1));
+    for (adapter, stderr) in fixtures {
+        let route = run::RouteRecord {
+            provider: Some((*adapter).into()),
+            model: Some(format!("{adapter}/example")),
+            ..Default::default()
+        };
+        let decoded =
+            Registry::default().decode_captures(&route, b"", stderr, &exit, temp.path(), None)?;
+        assert_eq!(decoded.outcome, run::Outcome::AuthRequired, "{adapter}");
+        assert!(
+            decoded.reason.as_deref().unwrap().contains(
+                provenant_records::AdapterSpec::get(adapter)
+                    .unwrap()
+                    .login_hint
+            )
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn successful_output_with_incidental_auth_stderr_stays_successful() {
+    let route = run::RouteRecord {
+        provider: Some("cursor".into()),
+        model: Some("cursor/example".into()),
+        ..Default::default()
+    };
+    let decoded = Registry::default()
+        .decode_captures(
+            &route,
+            include_bytes!("../../../../tests/fixtures/providers/cursor/fresh.jsonl"),
+            include_bytes!("../../../../tests/fixtures/providers/cursor/auth-required.stderr"),
+            &clean_exit(),
+            Path::new("/unused"),
+            None,
+        )
+        .unwrap();
+    assert_eq!(decoded.outcome, run::Outcome::Succeeded);
 }

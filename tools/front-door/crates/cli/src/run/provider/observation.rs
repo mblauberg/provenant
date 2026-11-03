@@ -54,6 +54,8 @@ pub(super) fn detect_failure(
 #[derive(Debug, thiserror::Error)]
 pub(super) enum AccountObservationError {
     #[error("{0}")]
+    AuthRequired(String),
+    #[error("{0}")]
     VersionUnavailable(String),
     #[error("{0}")]
     Other(String),
@@ -67,6 +69,84 @@ impl From<&str> for AccountObservationError {
     fn from(message: &str) -> Self {
         Self::Other(message.into())
     }
+}
+
+impl AccountObservationError {
+    pub(super) fn skip_kind(&self) -> SkipKind {
+        match self {
+            Self::AuthRequired(_) => SkipKind::AuthRequired,
+            Self::VersionUnavailable(_) => SkipKind::Unavailable,
+            Self::Other(_) => SkipKind::Account,
+        }
+    }
+}
+
+pub(super) fn default_directory_error(path: &Path, detail: String) -> AccountObservationError {
+    if std::fs::symlink_metadata(path)
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        AccountObservationError::AuthRequired(
+            "default Codex login is missing; run `codex login`".into(),
+        )
+    } else {
+        AccountObservationError::Other(detail)
+    }
+}
+
+pub(super) fn account_observation_error(
+    entry: &provenant_providers::accounts::Registration,
+    error: &provenant_providers::ProviderError,
+) -> AccountObservationError {
+    use provenant_providers::ProviderError;
+    if matches!(
+        error,
+        ProviderError::LoginRequired
+            | ProviderError::CredentialUnavailable
+            | ProviderError::CredentialNotFound
+            | ProviderError::CredentialExpired
+    ) {
+        AccountObservationError::AuthRequired(format!(
+            "{} account {} needs sign-in; run `{}` for this account",
+            entry.adapter,
+            entry.label,
+            AdapterSpec::get(&entry.adapter)
+                .map_or("provenant accounts list", |spec| spec.login_hint),
+        ))
+    } else {
+        AccountObservationError::Other(detect_failure(entry, error))
+    }
+}
+
+/// An absent availability row retains the login failure of every eligible account.
+pub(super) fn unavailable_auth_detail(
+    route: &ResolvedRoute,
+    selected: Option<&str>,
+    entries: &[provenant_providers::accounts::Registration],
+    failures: &std::collections::BTreeMap<(String, String), String>,
+) -> Option<String> {
+    let relevant: Vec<_> = entries
+        .iter()
+        .filter(|entry| {
+            entry.adapter == route.adapter
+                && selected
+                    .or(route.account_key.as_deref())
+                    .is_none_or(|key| key == entry.key)
+                && AdapterSpec::get(&entry.adapter)
+                    .is_none_or(|spec| spec.account_serves_model(&entry.key, &route.model))
+        })
+        .collect();
+    if relevant.is_empty() {
+        return None;
+    }
+    relevant
+        .into_iter()
+        .map(|entry| {
+            failures
+                .get(&(entry.adapter.clone(), entry.key.clone()))
+                .cloned()
+        })
+        .collect::<Option<Vec<_>>>()
+        .map(|details| details.join("; "))
 }
 
 pub(super) fn observe_account(
@@ -85,7 +165,8 @@ pub(super) fn observe_account(
     } = *probe;
     let directory = canonical(&entry.directory)?;
     if directory != entry.directory
-        || (entry.adapter == "claude" && directory != home.join(format!(".claude-{}", entry.label)))
+        || (entry.adapter == provenant_records::Harness::Claude.spec().name
+            && directory != home.join(format!(".claude-{}", entry.label)))
     {
         return Err(format!(
             "{} account {} has no fixed canonical identity directory",
@@ -109,7 +190,7 @@ pub(super) fn observe_account(
             &directory,
             executor.root(),
         )
-        .map_err(|error| detect_failure(entry, &error))?
+        .map_err(|error| account_observation_error(entry, &error))?
     };
     if detected != entry.key {
         return Err(format!(
