@@ -1,4 +1,36 @@
 #[cfg(test)]
+#[allow(unused_imports)] // Included by the custom worktree driver without a test harness.
+mod graph_writer_admission_tests {
+    use super::*;
+    use provenant_confinement::worktrees::WorktreeError;
+    use provenant_os::fs::FsError;
+    use std::{path::PathBuf, time::Duration};
+
+    #[test]
+    fn registry_lock_timeout_is_retryable_but_writer_refusals_are_not() {
+        let lock = |path: &str| WorktreeError::Filesystem(FsError::LockTimeout {
+            path: PathBuf::from(path),
+            timeout: Duration::from_secs(5),
+        });
+        assert!(matches!(
+            graph_writer_initialisation_error("head", lock("worktrees.lock")),
+            FacadeError::Busy
+        ));
+        for error in [
+            lock("writer.lock"),
+            WorktreeError::LiveWriter,
+            WorktreeError::UnknownWriter,
+            WorktreeError::Dirty(String::new()),
+        ] {
+            assert!(matches!(
+                graph_writer_initialisation_error("head", error),
+                FacadeError::DispatchRefused { .. }
+            ));
+        }
+    }
+}
+
+#[cfg(test)]
 mod graph_review_tests {
     #[test]
     fn expanded_review_roles_include_lenses_verification_and_synthesis()

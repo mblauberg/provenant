@@ -78,6 +78,25 @@ pub(crate) fn scratch_prepare_error(error: impl std::fmt::Display) -> FacadeErro
     }
 }
 
+fn graph_writer_initialisation_error(
+    commit: &str,
+    error: provenant_confinement::worktrees::WorktreeError,
+) -> FacadeError {
+    use provenant_confinement::worktrees::WorktreeError;
+    use provenant_os::fs::FsError;
+    if matches!(
+        &error,
+        WorktreeError::Filesystem(FsError::LockTimeout { path, .. })
+            if path.file_name().is_some_and(|name| name == "worktrees.lock")
+    ) {
+        FacadeError::Busy
+    } else {
+        FacadeError::DispatchRefused {
+            reason: format!("initialise graph writer at {commit}: {error}"),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum EdgeError {
     #[error(transparent)]
@@ -4422,9 +4441,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         )
                     },
                 )
-                .map_err(|error| FacadeError::DispatchRefused {
-                    reason: format!("initialise graph writer at {commit}: {error}"),
-                })?;
+                .map_err(|error| graph_writer_initialisation_error(commit, error))?;
             }
             let delivery = if let Some(mode) = replay.delivery {
                 let branch = if let Some(path) = worktree {
