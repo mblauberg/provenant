@@ -147,6 +147,29 @@ impl Anchors<'_> {
         }
     }
 
+    /// Read grants may also name a directory exactly: the profile renders it as
+    /// a literal, which lists entry names without reading any child. A link
+    /// still fails, because the entry is resolved without following it.
+    pub(super) fn verify_read_held(&self, grant: &PathGrant) -> Result<(), PermissionError> {
+        if grant.scope == PathScope::Subtree {
+            return self.verify_grant_held(grant);
+        }
+        let Some((anchor, name)) = self.exact_parent(&grant.path)? else {
+            return Ok(());
+        };
+        match anchor.directory.metadata_at(name, false) {
+            Ok(metadata) if matches!(metadata.kind, FileKind::Regular | FileKind::Directory) => {
+                Ok(())
+            }
+            Ok(_) => Err(anchor_at(
+                &grant.path,
+                "path is not a regular file or directory",
+            )),
+            Err(error) if error.is_not_found() => Ok(()),
+            Err(error) => Err(PermissionError::Filesystem(error)),
+        }
+    }
+
     pub(super) fn verify_executable(&self, grant: &PathGrant) -> Result<(), PermissionError> {
         if grant.scope != PathScope::Exact {
             return Err(PermissionError::InvalidPath(grant.path.clone()));
@@ -171,7 +194,12 @@ impl Anchors<'_> {
         }
     }
 
-    fn exact_grant_metadata(&self, path: &Path) -> Result<Option<Metadata>, PermissionError> {
+    /// The verified parent anchor and entry name of an exact grant, or `None`
+    /// when the parent does not exist and the grant therefore grants nothing.
+    fn exact_parent<'p>(
+        &self,
+        path: &'p Path,
+    ) -> Result<Option<(&AnchoredDirectory, &'p std::ffi::OsStr)>, PermissionError> {
         let parent = path
             .parent()
             .ok_or_else(|| PermissionError::InvalidPath(path.to_owned()))?;
@@ -187,6 +215,13 @@ impl Anchors<'_> {
             };
         };
         anchor.verify()?;
+        Ok(Some((anchor, name)))
+    }
+
+    fn exact_grant_metadata(&self, path: &Path) -> Result<Option<Metadata>, PermissionError> {
+        let Some((anchor, name)) = self.exact_parent(path)? else {
+            return Ok(None);
+        };
         match anchor.directory.metadata_at(name, false) {
             Ok(metadata) if metadata.kind == FileKind::Regular => Ok(Some(metadata)),
             Ok(_) => Err(anchor_at(path, "path is not a regular file")),

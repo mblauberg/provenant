@@ -307,7 +307,7 @@ fn brief_read_root_warnings_skips_root_ancestors_and_home_and_warns_on_outside_f
     // Acceptance 1: A brief containing `/` and the parent of the worktree gives no warning.
     let worktree_parent = project.parent().ok_or("worktree parent")?;
     let brief = format!(
-        "Inspect `/` and `{}` and `~` and `~/`; do not touch them.",
+        "Inspect `/` and `{}` and `~` and `~/`.",
         worktree_parent.display()
     );
     let warnings = super::brief_read_root_warnings(&brief, &project, None, &[], &home);
@@ -337,6 +337,47 @@ fn brief_read_root_warnings_skips_root_ancestors_and_home_and_warns_on_outside_f
         "explicit root ancestor warned: {warnings:?}"
     );
 
+    Ok(())
+}
+
+#[test]
+fn brief_read_root_warnings_skip_prohibited_lines_only() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let project = root.join("project");
+    let home = root.join("home");
+    let outside = root.join("outside");
+    std::fs::create_dir_all(&project)?;
+    std::fs::create_dir_all(home.join(".gemini"))?;
+    std::fs::write(&outside, "outside")?;
+    let forbidden_tmp = home.join("tmp");
+    std::fs::create_dir_all(&forbidden_tmp)?;
+
+    let brief = format!(
+        "Never touch ~/.gemini or write to {}.",
+        forbidden_tmp.display()
+    );
+    assert!(super::brief_read_root_warnings(&brief, &project, None, &[], &home).is_empty());
+
+    for phrase in [
+        "NEVER",
+        "Do Not",
+        "DON'T",
+        "Must Not",
+        "Not Allowed",
+        "FORBIDDEN",
+    ] {
+        let brief = format!("{phrase} read ~/.gemini\nRead {}", outside.display());
+        let warnings = super::brief_read_root_warnings(&brief, &project, None, &[], &home);
+        assert_eq!(warnings.len(), 1, "{phrase}: {warnings:?}");
+        assert!(warnings[0].contains(&outside.display().to_string()));
+    }
+
+    let brief = format!("Read {} whenever needed", outside.display());
+    assert_eq!(
+        super::brief_read_root_warnings(&brief, &project, None, &[], &home).len(),
+        1
+    );
     Ok(())
 }
 
