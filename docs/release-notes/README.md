@@ -68,6 +68,3 @@ Add one file per user-visible change under `next.d/`, named `<issue>-<topic>.md`
   messages. A change no user can notice needs no fragment.
 - **Links.** Paths are relative to `next.d/`. Link to a guide or ADR for depth
   instead of explaining it in the entry.
-- **Intro.** `next.d/_intro.md` is two sentences on what the release is about,
-  a one-line link to the Stability section above, and a pointer to Breaking
-  changes if the release has any. Maintainers write it last.

@@ -3,7 +3,7 @@
 #   collate-release-notes           print the notes for the next release
 #   collate-release-notes --check   validate the fragments only
 #   collate-release-notes vX.Y.Z    write docs/release-notes/vX.Y.Z.md and
-#                                   delete the fragments, keeping _intro.md
+#                                   delete the fragments
 # Each fragment is <topic>.md whose first line is one of the section headings
 # below, followed by its bullets, with no later ## heading. An optional second
 # line, "### <Area>", names one of the areas below. The collated notes render
@@ -69,13 +69,8 @@ check() {
     echo "collate-release-notes: docs/release-notes/next.md must not exist; add a fragment under $dir" >&2
     status=1
   fi
-  if [ ! -f "$dir/_intro.md" ]; then
-    echo "collate-release-notes: $dir/_intro.md is missing" >&2
-    status=1
-  fi
   for f in "$dir"/*.md; do
     [ -e "$f" ] || continue
-    [ "$f" = "$dir/_intro.md" ] && continue
     if ! awk 'NF { found = 1 } END { exit !found }' "$f"; then
       echo "collate-release-notes: $f: fragment is empty" >&2
       status=1
@@ -105,7 +100,6 @@ check() {
 section_count() {
   for f in "$dir"/*.md; do
     [ -e "$f" ] || continue
-    [ "$f" = "$dir/_intro.md" ] && continue
     [ "$(section_of "$f")" = "$1" ] || continue
     grep -c '^- ' "$f" || true
   done | awk '{ n += $1 } END { print n + 0 }'
@@ -116,7 +110,6 @@ section_count() {
 section_part() {
   for f in "$dir"/*.md; do
     [ -e "$f" ] || continue
-    [ "$f" = "$dir/_intro.md" ] && continue
     [ "$(section_of "$f")" = "$1" ] || continue
     [ "$(area_of "$f")" = "$2" ] || continue
     skip=0
@@ -135,8 +128,6 @@ collate() {
   else
     echo "# Next release"
   fi
-  echo
-  sed 's|](\.\./\.\./|](../|g' "$dir/_intro.md"
   printf '%s\n' "$sections" | while IFS= read -r heading; do
     if [ "$(section_count "$heading")" -gt 12 ]; then
       grouped=1
@@ -193,7 +184,8 @@ case "${1:-}" in
     fi
     collate "$1" >"$out"
     for f in "$dir"/*.md; do
-      [ "$f" = "$dir/_intro.md" ] || rm -- "$f"
+      [ -e "$f" ] || continue
+      rm -- "$f"
     done
     # A version cut is a chair-log milestone when this shell belongs to a
     # known session. The release cut is complete even if logging is unavailable.
