@@ -17,8 +17,7 @@ let package = Package(
         .executableTarget(
             name: "QuotaMenuBar",
             dependencies: ["ProvenantKit"],
-            path: "Sources/QuotaMenuBar",
-            resources: [.process("Resources")]
+            path: "Sources/QuotaMenuBar"
         ),
         // Design tokens and the small components every console screen shares. SwiftUI only.
         .target(name: "ProvenantDesign", path: "Sources/ProvenantDesign"),
