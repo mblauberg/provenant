@@ -647,7 +647,9 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
                         for (root, state) in &mut states {
                             if *state != WorkerState::Live {
                                 *state = WorkerState::Unknown;
-                                details.entry(root.clone()).or_insert_with(|| detail.clone());
+                                details
+                                    .entry(root.clone())
+                                    .or_insert_with(|| detail.clone());
                                 taints.entry(root.clone()).or_insert_with(|| {
                                     TaintCause::Uncertainty(UncertaintyReason::PathUnplaceable)
                                 });
@@ -686,20 +688,7 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
                             }
                         }
                     }
-                    let is_exe = cwd_observer.executable(pid).as_ref() == Some(&canonical)
-                        || (std::fs::metadata(&canonical).is_ok_and(|meta| {
-                            meta.is_file() && {
-                                #[cfg(unix)]
-                                {
-                                    use std::os::unix::fs::PermissionsExt;
-                                    meta.permissions().mode() & 0o111 != 0
-                                }
-                                #[cfg(not(unix))]
-                                {
-                                    false
-                                }
-                            }
-                        }));
+                    let is_exe = cwd_observer.executable(pid).as_ref() == Some(&canonical);
                     let kind = if is_exe {
                         ProcessEvidenceKind::ExecutableImage
                     } else {
@@ -722,7 +711,10 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
                                 kind,
                             });
                         taints.insert(root.clone(), TaintCause::LiveWriter(holder.clone()));
-                        details.insert(root, format!("process {}: {} inside root", holder.pid, holder.kind));
+                        details.insert(
+                            root,
+                            format!("process {}: {} inside root", holder.pid, holder.kind),
+                        );
                     }
                 }
             }
@@ -856,8 +848,7 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
                     );
                     let detail = process_detail(cwd_observer, pid, "cwd unreadable");
                     for (root, state) in &mut states {
-                        if *state != WorkerState::Live
-                        {
+                        if *state != WorkerState::Live {
                             *state = WorkerState::Unknown;
                             details
                                 .entry(root.clone())

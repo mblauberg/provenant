@@ -2800,14 +2800,14 @@ fn census_refusal_names_other_held_path_evidence_kind() -> Result<(), Box<dyn Er
     fs::create_dir(&root)?;
     fs::create_dir(&external_cwd)?;
 
-    // Create a non-executable file held open by a process
+    // An executable-mode file held open is not necessarily the running image.
     let log_path = root.join("logs/output.log");
     fs::create_dir_all(log_path.parent().unwrap())?;
     fs::write(&log_path, b"log stream content")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&log_path, fs::Permissions::from_mode(0o644))?;
+        fs::set_permissions(&log_path, fs::Permissions::from_mode(0o755))?;
     }
 
     let fact = |pid: i64| ProcessFact {
@@ -2852,6 +2852,9 @@ fn census_refusal_names_other_held_path_evidence_kind() -> Result<(), Box<dyn Er
                 Ok(CwdObservation::Gone)
             }
         }
+        fn executable(&self, pid: i64) -> Option<PathBuf> {
+            (pid == 200).then(|| self.cwd.join("different-image"))
+        }
         fn occupancy(&self, pid: i64) -> provenant_os::pid::OccupancyObservation {
             if pid == 200 {
                 provenant_os::pid::OccupancyObservation {
@@ -2862,9 +2865,6 @@ fn census_refusal_names_other_held_path_evidence_kind() -> Result<(), Box<dyn Er
             } else {
                 provenant_os::pid::OccupancyObservation::default()
             }
-        }
-        fn executable(&self, _pid: i64) -> Option<PathBuf> {
-            None
         }
     }
 
@@ -2926,31 +2926,74 @@ fn census_keeps_holder_and_evidence_together_across_processes() -> Result<(), Bo
     fs::write(&held, b"held")?;
     let outside = tempfile::tempdir()?;
     let fact = |pid: i64| ProcessFact {
-        identity: ProcessIdentity { boot: "boot".into(), pid, native_start: pid as u64, group_id: pid, session_id: pid },
-        parent_pid: 1, zombie: false, cpu_micros: None, command: Some(format!("process-{pid}")),
+        identity: ProcessIdentity {
+            boot: "boot".into(),
+            pid,
+            native_start: pid as u64,
+            group_id: pid,
+            session_id: pid,
+        },
+        parent_pid: 1,
+        zombie: false,
+        cpu_micros: None,
+        command: Some(format!("process-{pid}")),
     };
     let current = fact(100);
     let processes = InjectedCensus {
-        census: Census::from_observations([current.clone(), fact(200), fact(300)], [], [], true, false, 32)?,
-        cwds: BTreeMap::new(), current: current.clone(), platform_uids: BTreeMap::new(),
+        census: Census::from_observations(
+            [current.clone(), fact(200), fact(300)],
+            [],
+            [],
+            true,
+            false,
+            32,
+        )?,
+        cwds: BTreeMap::new(),
+        current: current.clone(),
+        platform_uids: BTreeMap::new(),
     };
-    struct Observer { root: PathBuf, held: PathBuf, outside: PathBuf }
+    struct Observer {
+        root: PathBuf,
+        held: PathBuf,
+        outside: PathBuf,
+    }
     impl CwdObserver for Observer {
         fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
-            Ok(CwdObservation::Path(if pid == 300 { self.root.clone() } else { self.outside.clone() }))
+            Ok(CwdObservation::Path(if pid == 300 {
+                self.root.clone()
+            } else {
+                self.outside.clone()
+            }))
         }
         fn occupancy(&self, pid: i64) -> provenant_os::pid::OccupancyObservation {
-            provenant_os::pid::OccupancyObservation { paths: if pid == 200 { vec![self.held.clone()] } else { vec![] }, complete: true, gap: None }
+            provenant_os::pid::OccupancyObservation {
+                paths: if pid == 200 {
+                    vec![self.held.clone()]
+                } else {
+                    vec![]
+                },
+                complete: true,
+                gap: None,
+            }
         }
     }
     let (_, holders, _, taints) = observe_worker_holders_with_taints_and_audit(
-        std::slice::from_ref(&root), &processes,
-        &Observer { root: root.clone(), held, outside: outside.path().to_path_buf() },
-        &current, false, &mut |_, _| {},
+        std::slice::from_ref(&root),
+        &processes,
+        &Observer {
+            root: root.clone(),
+            held,
+            outside: outside.path().to_path_buf(),
+        },
+        &current,
+        false,
+        &mut |_, _| {},
     );
     let holder = &holders[&root];
     assert_eq!(holder.pid, 200);
     assert_eq!(holder.kind, ProcessEvidenceKind::OtherHeldPath);
-    assert!(matches!(&taints[&root], TaintCause::LiveWriter(p) if p.pid == 200 && p.kind == ProcessEvidenceKind::OtherHeldPath));
+    assert!(
+        matches!(&taints[&root], TaintCause::LiveWriter(p) if p.pid == 200 && p.kind == ProcessEvidenceKind::OtherHeldPath)
+    );
     Ok(())
 }
