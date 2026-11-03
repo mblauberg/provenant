@@ -1848,6 +1848,9 @@ mod peer_tests {
         );
         let output = fixture.rig.execute(&git, &["branch", "old-review", &base.to_string()], None)?;
         assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        std::fs::write(fixture.rig.project.join("review-size-fixture.txt"), "small change\n")?;
+        let output = fixture.rig.execute(&git, &["add", "review-size-fixture.txt"], None)?;
+        assert_eq!(crate::worktree_tests::support::code(&output), 0);
         for args in [
             vec![
                 "commit",
@@ -1912,6 +1915,15 @@ mod peer_tests {
         let base_text = base.to_string();
         assert_eq!(request.tasks[0].base.as_deref(), Some(base_text.as_str()));
         assert_ne!(base_text, head);
+        bound.integration_base = Some(BoundGraphBases { integration: None, review: Some(base) });
+        let review_node: graph::GraphNode = serde_json::from_value(serde_json::json!({
+            "id":"review", "access":"read_only", "prompt":"review",
+            "review":{"shape":null,"risk_tier":null,"kind":null,"size":null,"risk_tags":[],"worktree":null,"lenses":[],"min_successful":null,"max_nodes":5}
+        }))?;
+        let measured = bound.measure_review(&review_node, &head)?;
+        assert_eq!(measured.size, Some("small"));
+        assert!(measured.warning.is_none(), "{measured:?}");
+        assert!(matches!(bound.resolve_review(&review_node, &head), Err(graph::ReviewResolveError::Unsupported)));
         for (id, reference, expected) in [("review-base", "old-review", base_text.as_str()), ("empty-review-base", "", head.as_str())] {
             let path = fixture.rig.project.join(format!("{id}.json"));
             std::fs::write(&path, serde_json::to_vec(&serde_json::json!({

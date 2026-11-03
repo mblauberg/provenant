@@ -1019,7 +1019,10 @@ pub(crate) fn tick_graphs(
                 };
                 let mut owner = BoundGraphOwner {
                     factory: &factory,
-                    integration_base: execution.integration_base,
+                    integration_base: Some(BoundGraphBases {
+                        integration: execution.integration_base,
+                        review: execution.review_base,
+                    }),
                     integration_branch: execution.document.integration_branch.clone(),
                     network: graph_network(&execution.document)?,
                     exclude: graph_exclude(&execution.document)?,
@@ -2553,9 +2556,16 @@ impl BinaryRunOwner<'_> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct BoundGraphBases {
+    integration: Option<provenant_core::GitOid>,
+    review: Option<provenant_core::GitOid>,
+}
+
 struct BoundGraphOwner<'a> {
     factory: &'a Factory,
-    integration_base: Option<provenant_core::GitOid>,
+    // Both immutable graph bases travel together through every host owner.
+    integration_base: Option<BoundGraphBases>,
     integration_branch: Option<String>,
     /// The graph's explicit network reach for every node lane, such as
     /// `run --network off` bound before automatic preset selection.
@@ -3110,7 +3120,10 @@ fn advance_graphs_after_settlement(
             )?;
             let mut owner = BoundGraphOwner {
                 factory: &factory,
-                integration_base: execution.integration_base,
+                integration_base: Some(BoundGraphBases {
+                    integration: execution.integration_base,
+                    review: execution.review_base,
+                }),
                 integration_branch: execution.document.integration_branch.clone(),
                 network: graph_network(&execution.document)?,
                 exclude: graph_exclude(&execution.document)?,
@@ -3857,8 +3870,87 @@ fn graph_review_node(document: &provenant_fabric_runtime::graph::GraphDocument, 
     })
 }
 
+impl BoundGraphOwner<'_> {
+    fn measure_review(
+        &self,
+        node: &provenant_fabric_runtime::graph::GraphNode,
+        subject: &str,
+    ) -> Result<provenant_routing::Measured, provenant_fabric_runtime::graph::ReviewResolveError>
+    {
+        use provenant_fabric_runtime::graph::ReviewResolveError;
+        use provenant_os::exec::{ExecOptions, Executor, Termination};
+        let spec = node
+            .review
+            .as_ref()
+            .ok_or_else(|| ReviewResolveError::Failed("missing review specification".into()))?;
+        let subject = provenant_core::GitOid::parse(subject).map_err(|error| {
+            ReviewResolveError::Failed(format!("invalid pinned review subject: {error}"))
+        })?;
+        let subject = subject.to_string();
+        let base = self
+            .integration_base
+            .and_then(|bases| bases.integration.or(bases.review))
+            .map_or_else(|| subject.clone(), |base| base.to_string());
+        let directory = spec.worktree.as_deref().map_or_else(
+            || self.factory.cwd.clone(),
+            |path| self.factory.cwd.join(path),
+        );
+        let routing: provenant_routing::RoutingConfig =
+            provenant_config::read_domain(self.factory.context.roots.state.as_path(), "routing")
+                .map_err(|error| {
+                    ReviewResolveError::Failed(format!("read review configuration: {error}"))
+                })?;
+        let git = provenant_os::git::git_executable()
+            .ok_or_else(|| ReviewResolveError::Failed("Git executable unavailable".into()))?;
+        let measured =
+            routing
+                .review
+                .size
+                .measure(spec.kind.as_deref(), &base, &subject, &mut |args| {
+                    let mut argv = vec![git.clone().into_os_string()];
+                    argv.extend(args.iter().map(std::ffi::OsString::from));
+                    let output = self
+                        .factory
+                        .executor
+                        .execute(ExecOptions::new(
+                            &argv,
+                            &directory,
+                            std::time::Duration::from_secs(30),
+                        ))
+                        .map_err(|error| error.to_string())?;
+                    if output.termination != Termination::Exit(0)
+                        || output.timed_out
+                        || output.stdout.truncated
+                    {
+                        return Err(format!(
+                            "Git failed: {}",
+                            String::from_utf8_lossy(&output.stderr.bytes).trim()
+                        ));
+                    }
+                    String::from_utf8(output.stdout.bytes).map_err(|error| error.to_string())
+                });
+        Ok(measured)
+    }
+}
+
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     type Error = FacadeError;
+
+    fn resolve_review(
+        &mut self,
+        node: &provenant_fabric_runtime::graph::GraphNode,
+        subject: &str,
+    ) -> Result<
+        provenant_fabric_runtime::graph::Expansion,
+        provenant_fabric_runtime::graph::ReviewResolveError,
+    > {
+        let measured = self.measure_review(node, subject)?;
+        // TODO(lane D): pass the measurement and pinned inputs to resolve_panel
+        // and construct the journalled expansion once the routing API lands.
+        let _ = measured;
+        Err(provenant_fabric_runtime::graph::ReviewResolveError::Unsupported)
+    }
+
     fn respect_ci_wake(&self) -> bool {
         self.tick
     }
@@ -4037,7 +4129,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .deliver_graph_pr(
                 &self.factory.cwd,
                 branch,
-                self.integration_base.ok_or(FacadeError::Conflict)?,
+                self.integration_base
+                    .and_then(|bases| bases.integration)
+                    .ok_or(FacadeError::Conflict)?,
                 &body,
             )
             .map_err(run_error)?;
@@ -4291,6 +4385,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     build_heavy: false,
                     base: node.source_commit.map(|head| {
                         self.integration_base
+                            .and_then(|bases| bases.integration)
                             .or(review_base)
                             .map_or_else(|| head.to_owned(), |base| base.to_string())
                     }),
@@ -5009,7 +5104,10 @@ impl Factory {
                 })?;
             let mut owner = BoundGraphOwner {
                 factory: self,
-                integration_base,
+                integration_base: Some(BoundGraphBases {
+                    integration: integration_base,
+                    review: review_base,
+                }),
                 integration_branch: document.integration_branch.clone(),
                 network: graph_network(document)?,
                 exclude: graph_exclude(document)?,
