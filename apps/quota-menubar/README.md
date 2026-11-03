@@ -45,6 +45,8 @@ No console code enters the menu target, and a source test checks that.
 
 `provenant-console` opens one window with a sidebar (Overview, Inbox, Runs, Quota, Chairs & Projects), the chosen screen, and an inspector for one attempt.
 
+Column sizing lives in `ConsoleView` alone, as constants. A screen never nests an `HSplitView` or `VSplitView` inside a column: the nested split reports a minimum derived from its content, and when the columns' minimums exceed the window's, AppKit's update-constraints pass loops and aborts the app. The Inbox list therefore has a fixed width; a source test checks the rule.
+
 | Screen | Reads | Shows |
 | --- | --- | --- |
 | Overview (⌘1) | `console overview`, joined with the open inbox | Counts, the requests that need you (blocking first, with kind), lanes in progress, and what coverage could not see |
