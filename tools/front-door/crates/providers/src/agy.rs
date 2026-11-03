@@ -247,6 +247,13 @@ fn prepare(
         None => None,
     }
     .unwrap_or_else(|| input.home.join(KEYCHAIN));
+    let user_skills = input.home.join(".gemini/skills");
+    let discover_skills = input.user_skills() && user_skills.is_dir();
+    let skill_reads = if discover_skills {
+        crate::user_skills_grants(&user_skills)
+    } else {
+        Vec::new()
+    };
     let mut argv: Vec<OsString> = [
         input.executable.as_os_str(),
         "--output-format".as_ref(),
@@ -263,6 +270,23 @@ fn prepare(
     }
     argv.push("--dangerously-skip-permissions".into());
     if access == Access::ReadOnly {
+        if discover_skills {
+            // The skill loader reports paths through the private home link.
+            argv.extend([
+                "--add-dir".into(),
+                home.join(".gemini/skills").into_os_string(),
+            ]);
+            argv.extend(["--add-dir".into(), user_skills.as_os_str().to_owned()]);
+        }
+        for grant in &skill_reads {
+            let directory = match grant.scope {
+                provenant_confinement::permissions::PathScope::Exact => {
+                    grant.path.parent().ok_or(ProviderError::InvalidPath)?
+                }
+                provenant_confinement::permissions::PathScope::Subtree => &grant.path,
+            };
+            argv.extend(["--add-dir".into(), directory.as_os_str().to_owned()]);
+        }
         // Headless mode auto-denies reads outside the workspace, which holds
         // only the working directory, so every other read root joins it.
         for root in &plan.read_roots {
@@ -297,8 +321,6 @@ fn prepare(
         }
     }
     env.push(("SHELL".into(), SHELL.into()));
-    let user_skills = input.home.join(".gemini/skills");
-    let discover_skills = input.user_skills() && user_skills.is_dir();
     let keychains = home.join("Library/Keychains");
     let mut setup = vec![
         SetupStep::CreateDir(keychains.clone()),
@@ -315,10 +337,7 @@ fn prepare(
         });
     }
     // Both lanes run system commands; only writers get the additional tools.
-    let mut runtime_reads = Vec::new();
-    if discover_skills {
-        runtime_reads.extend(crate::launch::user_skills_grants(&user_skills));
-    }
+    let mut runtime_reads = skill_reads;
     let mut tool_exec_roots = vec![
         subtree("/bin"),
         subtree("/usr/bin"),

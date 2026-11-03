@@ -2703,7 +2703,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                     .expect("isolated settings");
                 assert_eq!(argv[sources + 1], "");
                 let tools = argv.iter().position(|arg| arg == "--tools").expect("tools");
-                assert_eq!(argv[tools + 1], "Read,Grep,Glob,Bash");
+                assert_eq!(argv[tools + 1], "Read,Grep,Glob,Bash,Skill");
                 // The host's token is the only credential: no keychain or
                 // other credential path is readable. Only Provenant and its hook helpers are added.
                 assert!(
@@ -2721,7 +2721,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                     .iter()
                     .position(|arg| arg == "--allowedTools")
                     .expect("allow-list");
-                assert_eq!(argv[allowed + 1], "Bash,mcp__fabric__*");
+                assert_eq!(argv[allowed + 1], "Bash,Skill,mcp__fabric__*");
                 assert!(spec.profile.spec.authentication.is_empty());
                 assert!(spec.profile.spec.deny_keychain_access);
                 for (key, value) in [
@@ -5920,10 +5920,11 @@ fn claude_writer_shell_has_private_config_scrubbed_children_and_rust_tools()
         launch
             .argv
             .iter()
-            .any(|arg| arg == "Read,Grep,Glob,Edit,Write,Bash")
+            .any(|arg| arg == "Read,Grep,Glob,Edit,Write,Bash,Skill")
     );
     assert!(launch.argv.windows(2).any(|pair| {
-        pair[0] == "--allowedTools" && pair[1] == "Read,Grep,Glob,Edit,Write,Bash,mcp__fabric__*"
+        pair[0] == "--allowedTools"
+            && pair[1] == "Read,Grep,Glob,Edit,Write,Bash,Skill,mcp__fabric__*"
     }));
     assert!(
         launch
@@ -6611,6 +6612,11 @@ fn assert_lane_user_skills(adapter: &str) -> Result<(), Box<dyn std::error::Erro
         "opencode" => config_home.join("opencode/skills"),
         _ => unreachable!(),
     };
+    let opencode_config = config_home.join("opencode/opencode.json");
+    if adapter == "opencode" {
+        std::fs::create_dir_all(opencode_config.parent().unwrap())?;
+        std::fs::write(&opencode_config, "{}")?;
+    }
     let target = home.join(".local/share/provenant/v1/releases/digest/skill");
     std::fs::create_dir_all(&target)?;
     let resource = home.join("shared/reference.md");
@@ -6651,6 +6657,42 @@ fn assert_lane_user_skills(adapter: &str) -> Result<(), Box<dyn std::error::Erro
             input.host_var = &host_var;
             let spec = provider.prepare(input)?;
             let exposed = state == "discover";
+            if adapter == "opencode" {
+                assert!(
+                    spec.profile
+                        .spec
+                        .runtime_reads
+                        .contains(&crate::launch::exact(&opencode_config))
+                );
+                let config: serde_json::Value = serde_json::from_str(
+                    spec.env
+                        .iter()
+                        .find(|(key, _)| key == "OPENCODE_CONFIG_CONTENT")
+                        .unwrap()
+                        .1
+                        .to_str()
+                        .unwrap(),
+                )?;
+                assert_eq!(
+                    config["permission"]["read"][resource.to_str().unwrap()] == "allow",
+                    exposed
+                );
+                assert_eq!(
+                    config["permission"]["external_directory"][format!("{}/**", target.display())]
+                        == "allow",
+                    exposed
+                );
+            }
+            if adapter == "agy" && access == Access::ReadOnly {
+                for directory in [&target, resource.parent().unwrap()] {
+                    assert_eq!(
+                        spec.argv
+                            .windows(2)
+                            .any(|pair| pair[0] == "--add-dir" && pair[1] == directory.as_os_str()),
+                        exposed
+                    );
+                }
+            }
             for path in [&skills, &target, &resource] {
                 assert_eq!(
                     spec.profile

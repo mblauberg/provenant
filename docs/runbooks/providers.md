@@ -188,9 +188,12 @@ this setting controls host user skills only.
 Missing directories are skipped silently. Grants cover canonical skill
 directories and resolved symlink targets, including installed skills under
 `~/.local/share/provenant/v1/releases/<digest>/` and linked resource files.
-These grants are read-only: no skill write or execute grant is added, and no
-other host configuration is exposed. Existing worktree and credential scopes
+These grants are read-only: no skill write or execute grant is added, and they
+do not expose the containing host configuration. OpenCode retains its existing
+provider configuration reads through separate grants that exclude `skills`. Existing worktree and credential scopes
 are unchanged. Reading a skill does not change nested dispatch policy.
+Very large linked collections remain subject to the sandbox's existing limit
+of 128 runtime read grants; discovery can be turned off for affected routes.
 
 Each attempt's applied route records `user_skills` with the requested mode,
 whether it was exposed, its host directory, canonical read grants and setting

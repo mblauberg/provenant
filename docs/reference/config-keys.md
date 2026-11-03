@@ -92,6 +92,7 @@ Set these in `[domains.routing.model_policy]` in the host configuration. Omit a 
 | `defaults.lane.max_turns` | unset | Enforced most turns for a lane on this model. (turns, 1 or more). |
 | `defaults.lane.stop_early_ok` | per model | false marks a model prone to stopping early; an unfinished result then gets a bounded continuation. (true or false). |
 | `defaults.lane.max_continuations` | 2 where stop_early_ok is false | Most continuations after an unfinished result. (0 to 255). |
+| `defaults.lane.user_skills` | inherit domains.lanes.user_skills | Override host and project user skill discovery for matching routes. rules.policy.lane.user_skills uses the same values. (discover or off). |
 | `defaults.lane.read_only` | per model | true refuses write lanes on this model. (true or false). |
 | `defaults.result.check` | per model | Check the result for the required sections before accepting it. (true or false). |
 | `defaults.result.sections` | per model | Heading lines a result must contain. (exact section heading lines; empty clears). |

@@ -75,6 +75,7 @@
       "defaults.lane.max_turns": {"type": "int", "allowed": "turns, 1 or more", "default": "unset", "effect": "Enforced most turns for a lane on this model."},
       "defaults.lane.stop_early_ok": {"type": "bool", "allowed": "true or false", "default": "per model", "effect": "false marks a model prone to stopping early; an unfinished result then gets a bounded continuation."},
       "defaults.lane.max_continuations": {"type": "int", "allowed": "0 to 255", "default": "2 where stop_early_ok is false", "effect": "Most continuations after an unfinished result."},
+      "defaults.lane.user_skills": {"type": "enum", "allowed": "discover or off", "default": "inherit domains.lanes.user_skills", "effect": "Override host and project user skill discovery for matching routes. rules.policy.lane.user_skills uses the same values."},
       "defaults.lane.read_only": {"type": "bool", "allowed": "true or false", "default": "per model", "effect": "true refuses write lanes on this model."},
       "defaults.result.check": {"type": "bool", "allowed": "true or false", "default": "per model", "effect": "Check the result for the required sections before accepting it."},
       "defaults.result.sections": {"type": "string_list", "allowed": "exact section heading lines; empty clears", "default": "per model", "effect": "Heading lines a result must contain."},
