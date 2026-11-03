@@ -677,7 +677,7 @@ pub(super) fn dispatch_inner(
     );
     check_flag_capabilities_with_writes(&command, Some(edge.roots), has_writes)?;
     let configured_workers =
-        provenant_confinement::worktrees::CensusPolicyWorkers::from_roots(workers, edge.roots)
+        provenant_confinement::worktrees::CensusPolicyWorkers::for_run(workers, edge.roots)
             .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
     let workers = &configured_workers;
     // Preflight. An owned worktree is the first side effect, so every check
@@ -1056,6 +1056,7 @@ pub(super) fn dispatch_inner(
         Some(provenant_confinement::worktrees::with_context(
             edge.roots, edge.home, &writer.project, &clock, &cancel, |context| {
                 use provenant_confinement::worktrees;
+                let context = &worktrees::WorktreeContext { workers, ..*context };
                 let info = worktrees::list(context, &cancel)?.into_iter()
                     .find(|tree| tree.path == writer.worktree)
                     .ok_or(worktrees::WorktreeError::NotFound)?;
@@ -1067,6 +1068,9 @@ pub(super) fn dispatch_inner(
                             let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
                             let holder = worktrees::load_owner(&tree)?.and_then(|owner| owner.attempt_id);
                             return Err(worktrees::WorktreeError::WriterBusy { holder });
+                        }
+                        Err(worktrees::WorkerState::Live) => {
+                            return Err(worktrees::live_refusal(context.workers, &info.path));
                         }
                         Err(_) => return Err(worktrees::WorktreeError::UnknownWriter),
                     }

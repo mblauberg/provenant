@@ -69,6 +69,15 @@ pub enum KnobEdit<'a> {
 }
 
 impl<D> crate::ResolvedConfig<D> {
+    /// Whether to exclude the invoking process's ancestor chain during admission census.
+    pub fn census_exclude_ancestors(&self) -> Result<bool, ConfigError> {
+        let name = "confinement.census_exclude_ancestors";
+        self.knobs
+            .get(name)
+            .and_then(|knob| knob.value.as_bool())
+            .ok_or_else(|| invalid(name, "type"))
+    }
+
     /// Host-owned process exceptions. Never read from a task/profile stamp.
     pub fn census_ignore_unreadable(
         &self,

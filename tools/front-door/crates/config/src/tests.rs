@@ -17,6 +17,23 @@ fn roots() -> Roots {
 }
 
 #[test]
+fn census_exclude_ancestors_defaults_true_and_can_be_disabled() {
+    let name = "confinement.census_exclude_ancestors";
+    let defaults = load::<&[u8]>(&roots(), None).unwrap();
+    assert!(defaults.census_exclude_ancestors().unwrap());
+    let mut doc = toml_edit::DocumentMut::new();
+    doc["schema_version"] = toml_edit::value(1);
+    KnobEdit::Set {
+        name,
+        value: "false",
+    }
+    .apply(&mut doc)
+    .unwrap();
+    let configured = load(&roots(), Some(doc.to_string().as_bytes())).unwrap();
+    assert!(!configured.census_exclude_ancestors().unwrap());
+}
+
+#[test]
 fn census_ignore_knob_round_trips_and_refuses_task_overrides_or_malformed_authority() {
     let name = "confinement.census_ignore_unreadable";
     let defaults = load::<&[u8]>(&roots(), None).unwrap();
@@ -1852,8 +1869,9 @@ fn registered_knobs_have_production_readers() {
     }
     let source: String = source.chars().filter(|c| !c.is_whitespace()).collect();
     fn has_reader(source: &str, name: &str) -> bool {
-        if name == "confinement.census_ignore_unreadable" {
-            return source.contains(".census_ignore_unreadable()");
+        // Confinement knobs are read through typed accessors on the config.
+        if let Some(accessor) = name.strip_prefix("confinement.") {
+            return source.contains(&format!(".{accessor}()"));
         }
         [".get(", "get(", "knob(", ".knob_u64(", ".knob_is_set("]
             .iter()
