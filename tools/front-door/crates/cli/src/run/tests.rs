@@ -2206,6 +2206,235 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
 }
 
 #[test]
+fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::worktrees::{
+        self, ObservedProcess, WorkerObserver, WorkerState, WorktreeCreate, WorktreeOrigin,
+        WorktreeOwner,
+    };
+    use provenant_core::RootInputs;
+    struct LiveObserver(PathBuf);
+    impl WorkerObserver for LiveObserver {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .map(|root| (root.clone(), WorkerState::Live))
+                .collect()
+        }
+        fn live_process(&self, _root: &Path) -> Option<ObservedProcess> {
+            Some(ObservedProcess {
+                pid: 54321,
+                command: Some("foreign-writer".into()),
+                cwd: Some(self.0.clone()),
+            })
+        }
+    }
+    struct Free;
+    impl WorkerObserver for Free {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .map(|root| (root.clone(), WorkerState::Free))
+                .collect()
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let home = root.join("home");
+    let state = root.join("state");
+    let project = root.join("project");
+    std::fs::create_dir_all(&home)?;
+    std::fs::create_dir_all(&state)?;
+    std::fs::create_dir_all(&project)?;
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "base",
+        ],
+    ] {
+        provenant_os::fixture::run_git(&project, &args)?;
+    }
+    let mut inputs = RootInputs::new(home.clone(), project.clone());
+    inputs.state_dir = Some(state);
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let edge = Edge {
+        roots: &roots,
+        home: &home,
+        assets: &project,
+        cwd: &project,
+    };
+    let host = provenant_config::bind_host(&roots)?;
+    let prior_attempt = AttemptId::from_bytes([111; 16]);
+    let branch = "live-refusal-branch";
+    let (path, _) = worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+        let context = &worktrees::WorktreeContext {
+            workers: &Free,
+            ..*context
+        };
+        let info = worktrees::create(
+            context,
+            WorktreeCreate {
+                branch: branch.into(),
+                base: None,
+            },
+            &cancel,
+        )?;
+        let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
+        worktrees::save_owner(
+            &tree,
+            &WorktreeOwner {
+                attempt_id: Some(prior_attempt),
+                operation_id: Some("prior-op".parse().unwrap()),
+                branch: branch.into(),
+                base: info.head.to_string(),
+                host,
+                created_at: WallTime::from_micros(1)
+                    .map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
+                origin: WorktreeOrigin::Lane,
+                label: None,
+            },
+        )?;
+        Ok((info.path, info.head))
+    })?;
+
+    let observer = LiveObserver(path.clone());
+    let err = super::own_worktree(
+        &super::OwnedWorktree {
+            branch: branch.into(),
+            host,
+            created_at: WallTime::from_micros(2)?,
+        },
+        None,
+        &OperationId::parse("new-op")?,
+        &edge,
+        &observer,
+        |_| false,
+        &mut None,
+        &clock,
+        &cancel,
+    );
+    match err {
+        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
+            provenant_confinement::worktrees::WorktreeError::LiveProcess(proc),
+        ))) => {
+            assert_eq!(proc.pid, 54321);
+            assert_eq!(proc.command.as_deref(), Some("foreign-writer"));
+            assert_eq!(proc.cwd.as_ref(), Some(&path));
+            let msg = proc.to_string();
+            assert!(!msg.contains(&prior_attempt.to_string()));
+        }
+        other => panic!("expected LiveProcess, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
+fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::worktrees::{self, WorkerObserver, WorkerState, WorktreeCreate};
+    use provenant_core::RootInputs;
+    struct Free;
+    impl WorkerObserver for Free {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .map(|root| (root.clone(), WorkerState::Free))
+                .collect()
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let home = root.join("home");
+    let state = root.join("state");
+    let project = root.join("project");
+    std::fs::create_dir_all(&home)?;
+    std::fs::create_dir_all(&state)?;
+    std::fs::create_dir_all(&project)?;
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "base",
+        ],
+    ] {
+        provenant_os::fixture::run_git(&project, &args)?;
+    }
+    let mut inputs = RootInputs::new(home.clone(), project.clone());
+    inputs.state_dir = Some(state);
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let host = provenant_config::bind_host(&roots)?;
+    let branch = "inside-worktree-branch";
+    let (path, head) =
+        worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+            let context = &worktrees::WorktreeContext {
+                workers: &Free,
+                ..*context
+            };
+            let info = worktrees::create(
+                context,
+                WorktreeCreate {
+                    branch: branch.into(),
+                    base: None,
+                },
+                &cancel,
+            )?;
+            Ok((info.path, info.head))
+        })?;
+
+    // Admission launched from cwd inside target worktree:
+    let edge_inside = Edge {
+        roots: &roots,
+        home: &home,
+        assets: &project,
+        cwd: &path,
+    };
+    let admitted = super::own_worktree(
+        &super::OwnedWorktree {
+            branch: branch.into(),
+            host,
+            created_at: WallTime::from_micros(2)?,
+        },
+        None,
+        &OperationId::parse("inside-op")?,
+        &edge_inside,
+        &Free,
+        |_| false,
+        &mut None,
+        &clock,
+        &cancel,
+    )?;
+    assert_eq!(admitted.0.path, path);
+    assert_eq!(admitted.0.head, head);
+    Ok(())
+}
+
+#[test]
 fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
     use provenant_core::RootInputs;

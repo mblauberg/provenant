@@ -17,6 +17,23 @@ fn roots() -> Roots {
 }
 
 #[test]
+fn census_exclude_ancestors_defaults_true_and_can_be_disabled() {
+    let name = "confinement.census_exclude_ancestors";
+    let defaults = load::<&[u8]>(&roots(), None).unwrap();
+    assert!(defaults.census_exclude_ancestors().unwrap());
+    let mut doc = toml_edit::DocumentMut::new();
+    doc["schema_version"] = toml_edit::value(1);
+    KnobEdit::Set {
+        name,
+        value: "false",
+    }
+    .apply(&mut doc)
+    .unwrap();
+    let configured = load(&roots(), Some(doc.to_string().as_bytes())).unwrap();
+    assert!(!configured.census_exclude_ancestors().unwrap());
+}
+
+#[test]
 fn census_host_list_complete_is_strict_host_only_and_defaults_false() {
     let name = "confinement.census_host_list_complete";
     let defaults = load::<&[u8]>(&roots(), None).unwrap();

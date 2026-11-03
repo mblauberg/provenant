@@ -1068,6 +1068,9 @@ pub(super) fn dispatch_inner(
                             let holder = worktrees::load_owner(&tree)?.and_then(|owner| owner.attempt_id);
                             return Err(worktrees::WorktreeError::WriterBusy { holder });
                         }
+                        Err(worktrees::WorkerState::Live) => {
+                            return Err(worktrees::live_refusal(context.workers, &info.path));
+                        }
                         Err(_) => return Err(worktrees::WorktreeError::UnknownWriter),
                     }
                 }

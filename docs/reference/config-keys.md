@@ -231,6 +231,17 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `trade_off` | `"A higher count keeps a longer audit trail but a larger history file."` |
 | `type` | `"int"` |
 
+## `confinement.census_exclude_ancestors`
+
+| Field | Value |
+|---|---|
+| `default` | `true` |
+| `effect` | `"Exclude the invoking process's ancestor chain from live-writer detection at run admission. When false, only the invoking process itself is excluded, so an ancestor shell with its working directory inside the worktree is treated as a live writer."` |
+| `reader` | `"tools/front-door/crates/confinement/src/worktrees/census.rs"` |
+| `status` | `"wired"` |
+| `strict` | `true` |
+| `type` | `"bool"` |
+
 ## `confinement.census_host_list_complete`
 
 | Field | Value |

@@ -69,6 +69,15 @@ pub enum KnobEdit<'a> {
 }
 
 impl<D> crate::ResolvedConfig<D> {
+    /// Whether to exclude the invoking process's ancestor chain during admission census.
+    pub fn census_exclude_ancestors(&self) -> Result<bool, ConfigError> {
+        let name = "confinement.census_exclude_ancestors";
+        self.knobs
+            .get(name)
+            .and_then(|knob| knob.value.as_bool())
+            .ok_or_else(|| invalid(name, "type"))
+    }
+
     /// Host acceptance declaration only; never changes runtime census policy.
     pub fn census_host_list_complete(&self) -> Result<bool, ConfigError> {
         let name = "confinement.census_host_list_complete";

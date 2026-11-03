@@ -2338,4 +2338,116 @@ mod narrowing {
         );
         Ok(())
     }
+
+    #[test]
+    fn policy_workers_control_ancestor_exclusion() -> Result<(), Box<dyn Error>> {
+        use provenant_supervisor::census::{Census, CensusError, ProcessIdentity};
+        struct Processes(Census);
+        impl ProcessObserver for Processes {
+            fn boot_identity(&self) -> Result<String, CensusError> {
+                Ok("boot".into())
+            }
+            fn observe(&self, pid: i64) -> ProcessObservation {
+                match self.0.process(pid) {
+                    ProcessLookup::Present(fact) => ProcessObservation::Present(fact.clone()),
+                    _ => ProcessObservation::Absent,
+                }
+            }
+            fn census(&self, _: usize) -> Result<Census, CensusError> {
+                Ok(self.0.clone())
+            }
+        }
+        struct Cwds(BTreeMap<i64, PathBuf>);
+        impl CwdObserver for Cwds {
+            fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+                provenant_os::pid::OccupancyObservation {
+                    paths: vec![],
+                    complete: true,
+                    gap: None,
+                }
+            }
+            fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+                Ok(self
+                    .0
+                    .get(&pid)
+                    .cloned()
+                    .map(CwdObservation::Path)
+                    .unwrap_or(CwdObservation::Gone))
+            }
+        }
+        let fixture = Fixture::new()?;
+        let root = fixture.root.clone();
+        let fact = |pid, parent_pid, session_id| ProcessFact {
+            identity: ProcessIdentity {
+                boot: "boot".into(),
+                pid,
+                native_start: pid as u64,
+                group_id: session_id,
+                session_id,
+            },
+            parent_pid,
+            zombie: false,
+            cpu_micros: None,
+            command: Some("shell".into()),
+        };
+        let current = fact(100, 90, 10);
+        let parent = fact(90, 10, 10);
+        let leader = fact(10, 1, 10);
+        let facts = vec![leader, parent, current.clone()];
+        let processes = Processes(Census::from_observations(facts, [], [], true, false, 32)?);
+        let cwds = Cwds(BTreeMap::from([(90, root.clone()), (100, root.clone())]));
+
+        // With ancestor exclusion (default policy), parent shell inside root is excluded: Free.
+        let (states_with_ancestors, _, _) = observe_worker_holders(
+            std::slice::from_ref(&root),
+            &processes,
+            &cwds,
+            &current,
+            true,
+        );
+        assert_eq!(states_with_ancestors[&root], WorkerState::Free);
+
+        // Without ancestor exclusion, parent shell inside root is detected: Live.
+        let (states_no_ancestors, holders_no_ancestors, _) = observe_worker_holders(
+            std::slice::from_ref(&root),
+            &processes,
+            &cwds,
+            &current,
+            false,
+        );
+        assert_eq!(states_no_ancestors[&root], WorkerState::Live);
+        let holder = holders_no_ancestors.get(&root).unwrap();
+        assert_eq!(holder.pid, 90);
+        assert_eq!(holder.command.as_deref(), Some("shell"));
+        assert_eq!(holder.cwd.as_ref(), Some(&root));
+
+        // Foreign process inside root is still detected even with ancestor exclusion: Live.
+        let foreign = fact(200, 1, 200);
+        let facts_with_foreign = vec![fact(10, 1, 10), fact(90, 10, 10), current.clone(), foreign];
+        let processes_foreign = Processes(Census::from_observations(
+            facts_with_foreign,
+            [],
+            [],
+            true,
+            false,
+            32,
+        )?);
+        let cwds_foreign = Cwds(BTreeMap::from([
+            (90, root.clone()),
+            (100, root.clone()),
+            (200, root.clone()),
+        ]));
+        let (states_foreign, holders_foreign, _) = observe_worker_holders(
+            std::slice::from_ref(&root),
+            &processes_foreign,
+            &cwds_foreign,
+            &current,
+            true,
+        );
+        assert_eq!(states_foreign[&root], WorkerState::Live);
+        let foreign_holder = holders_foreign.get(&root).unwrap();
+        assert_eq!(foreign_holder.pid, 200);
+        assert_eq!(foreign_holder.cwd.as_ref(), Some(&root));
+        Ok(())
+    }
 }

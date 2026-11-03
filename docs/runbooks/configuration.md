@@ -133,6 +133,13 @@ same-user sleep occupant; they assert clean-Free only when this flag is true.
 With the default they print why that Free assertion was skipped. CI deliberately
 leaves the flag false while retaining its usbmuxd/platform entry.
 
+`confinement.census_exclude_ancestors` controls whether run admission excludes the
+invoking process's ancestor chain (such as the invoking shell) from live-writer detection.
+This strict boolean defaults to `true`. When set to `false`, only the invoking process
+itself is excluded, so an ancestor shell with its working directory inside the worktree
+is treated as a live writer and refused. Set it with
+`provenant config set confinement.census_exclude_ancestors false` or in `[knobs]`.
+
 Land cleanup still refuses an incomplete census and reports the first unlisted
 daemon. Its diagnostic includes pid, path, real/effective/saved uids, CS flags and, for non-platform
 images, the kernel's `CS_OPS_TEAMID` or `unavailable`. Use that information to

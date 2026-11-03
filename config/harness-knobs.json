@@ -137,6 +137,14 @@
     }
   },
   "knobs": {
+    "confinement.census_exclude_ancestors": {
+        "type": "bool",
+        "default": true,
+        "strict": true,
+        "status": "wired",
+        "reader": "tools/front-door/crates/confinement/src/worktrees/census.rs",
+        "effect": "Exclude the invoking process's ancestor chain from live-writer detection at run admission. When false, only the invoking process itself is excluded, so an ancestor shell with its working directory inside the worktree is treated as a live writer."
+    },
     "confinement.census_host_list_complete": {
         "type": "bool",
         "default": false,
