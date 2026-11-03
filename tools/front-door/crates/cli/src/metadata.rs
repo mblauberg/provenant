@@ -8,11 +8,16 @@ use std::ops::{Bound, RangeBounds};
 #[derive(Clone, Debug)]
 pub(crate) struct NumericBounds(pub (u64, u64));
 impl ArgExt for NumericBounds {}
+#[derive(Clone, Debug)]
+pub(crate) struct PublishedBounds(pub (u64, u64));
+impl ArgExt for PublishedBounds {}
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Requirements(pub Vec<String>);
 impl ArgExt for Requirements {}
 
 pub(crate) trait CatalogueArg {
+    fn catalog_bounds(self, bounds: (u64, u64)) -> Self;
+    fn catalog_u8_range(self, range: impl RangeBounds<i64>) -> Self;
     fn catalog_duration(self) -> Self;
     fn catalog_status_wait(self) -> Self;
     fn catalog_u64_range(self, range: impl RangeBounds<u64>) -> Self;
@@ -50,6 +55,14 @@ fn signed_bounds(range: &impl RangeBounds<i64>, max: u64) -> (u64, u64) {
     (min, max)
 }
 impl CatalogueArg for Arg {
+    fn catalog_bounds(self, bounds: (u64, u64)) -> Self {
+        self.add(PublishedBounds(bounds))
+    }
+    fn catalog_u8_range(self, range: impl RangeBounds<i64>) -> Self {
+        let bounds = signed_bounds(&range, u8::MAX.into());
+        self.value_parser(clap::value_parser!(u8).range(range))
+            .add(NumericBounds(bounds))
+    }
     fn catalog_duration(self) -> Self {
         self.value_parser(crate::grammar::duration_seconds)
             .add(NumericBounds((1, provenant_core::MAX_LANE_RUNTIME_SECONDS)))

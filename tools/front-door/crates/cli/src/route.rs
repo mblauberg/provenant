@@ -1,5 +1,5 @@
 //! Routing's frozen clap leaves and read-only composition/rendering edge.
-use crate::Globals;
+use crate::{Globals, metadata::CatalogueArg};
 use clap::{Args, Subcommand, ValueEnum};
 use provenant_core::{Clock, Roots, WallTime};
 use provenant_os::clock::SystemClock;
@@ -132,7 +132,7 @@ pub struct RouteSet {
     /// Exact catalogue model in ADAPTER/ID form.
     pub model: Model,
     /// Selection weight from 0 (fallback only) to 100.
-    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=100))]
+    #[arg(long, catalog_u8_range = 0..=100)]
     pub weight: Option<u8>,
     /// Default effort for this member.
     #[arg(long)]
@@ -209,7 +209,7 @@ pub struct RouteRequest {
     #[arg(long)]
     pub confidential: bool,
     /// Fallback models in ADAPTER/ID form, comma separated
-    #[arg(long, value_delimiter = ',', action = clap::ArgAction::Set)]
+    #[arg(long, value_delimiter = ',', action = clap::ArgAction::Set, catalog_bounds = (0, 2))]
     pub fallback: Vec<Model>,
     /// Keep a provider (claude), account (label, entry or ADAPTER/KEY) or
     /// exact model (ADAPTER/ID) out of a named route's pool (repeatable).

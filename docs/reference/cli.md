@@ -771,7 +771,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | Argument | Contract |
 |---|---|
 | `id` | `{"description": "Graph ID, project-local document path or document SHA-256 hash", "name": "id", "positional": true, "required": true}` |
-| `--reason` | `{"description": "Why the graph was cancelled (up to 256 bytes)", "name": "reason"}` |
+| `--reason` | `{"bounds": [0, 256], "description": "Why the graph was cancelled (up to 256 bytes)", "name": "reason"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -1926,7 +1926,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--route` | `{"description": "Named route, or ADAPTER/NAME for a model-less adapter such as command/fmt-check", "name": "route"}` |
 | `--effort` | `{"description": "Reasoning effort", "name": "effort"}` |
 | `--confidential` | `{"defaults": ["false"], "description": "Require a confidential-safe route", "name": "confidential", "values": ["true", "false"]}` |
-| `--fallback` | `{"description": "Fallback models in ADAPTER/ID form, comma separated", "name": "fallback"}` |
+| `--fallback` | `{"bounds": [0, 2], "description": "Fallback models in ADAPTER/ID form, comma separated", "name": "fallback"}` |
 | `--exclude` | `{"description": "Keep a provider (claude), account (label, entry or ADAPTER/KEY) or exact model (ADAPTER/ID) out of a named route's pool (repeatable). A pinned --model is never affected", "name": "exclude", "repeatable": true}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
@@ -1979,7 +1979,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 |---|---|
 | `pool` | `{"description": "Pool name to update or create", "name": "pool", "positional": true, "required": true}` |
 | `model` | `{"description": "Exact catalogue model in ADAPTER/ID form", "name": "model", "positional": true, "required": true}` |
-| `--weight` | `{"description": "Selection weight from 0 (fallback only) to 100", "name": "weight"}` |
+| `--weight` | `{"bounds": [0, 100], "description": "Selection weight from 0 (fallback only) to 100", "name": "weight"}` |
 | `--effort` | `{"description": "Default effort for this member", "name": "effort"}` |
 | `--efforts` | `{"description": "Allowed caller effort values, comma separated", "name": "efforts"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
@@ -2387,14 +2387,14 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--route` | `{"description": "Named route, or ADAPTER/NAME for a model-less adapter such as command/fmt-check", "name": "route"}` |
 | `--effort` | `{"description": "Reasoning effort", "name": "effort"}` |
 | `--confidential` | `{"defaults": ["false"], "description": "Require a confidential-safe route", "name": "confidential", "values": ["true", "false"]}` |
-| `--fallback` | `{"description": "Fallback models in ADAPTER/ID form, comma separated", "name": "fallback"}` |
+| `--fallback` | `{"bounds": [0, 2], "description": "Fallback models in ADAPTER/ID form, comma separated", "name": "fallback"}` |
 | `--exclude` | `{"description": "Keep a provider (claude), account (label, entry or ADAPTER/KEY) or exact model (ADAPTER/ID) out of a named route's pool (repeatable). A pinned --model is never affected", "name": "exclude", "repeatable": true}` |
 | `--account` | `{"description": "Pin a registered account (key or label) instead of resolving one", "name": "account"}` |
 | `--mode` | `{"description": "Access mode: read-only or worktree-write [default: read-only]", "name": "mode", "values": ["read-only", "worktree-write"]}` |
-| `--read-root` | `{"description": "Extra directory the lane may read (repeatable)", "name": "read_root", "repeatable": true}` |
-| `--write-root` | `{"description": "Extra directory the lane may write, outside Git metadata (repeatable)", "name": "write_root", "repeatable": true}` |
+| `--read-root` | `{"bounds": [0, 32], "description": "Extra directory the lane may read (repeatable)", "name": "read_root", "repeatable": true}` |
+| `--write-root` | `{"bounds": [0, 32], "description": "Extra directory the lane may write, outside Git metadata (repeatable)", "name": "write_root", "repeatable": true}` |
 | `--network` | `{"description": "Network access [default: on]", "name": "network", "values": ["on", "off"]}` |
-| `--capability` | `{"description": "Grant a named capability: postgres (repeatable)", "name": "capability", "repeatable": true}` |
+| `--capability` | `{"bounds": [0, 16], "description": "Grant a named capability: postgres (repeatable)", "name": "capability", "repeatable": true}` |
 | `--provider-timeout` | `{"bounds": [1, 14400], "conditional_defaults": [["read-only", "3600"], ["worktree-write", "10800"]], "defaults": ["3600"], "description": "Provider timeout in seconds", "name": "provider_timeout"}` |
 | `--concurrency` | `{"bounds": [1, 16], "description": "Manifest lanes or preset graph attempts to run at once (1 to 16)", "name": "concurrency"}` |
 | `--knob` | `{"description": "Override an effective harness knob for this dispatch (NAME=VALUE)", "name": "knobs", "repeatable": true}` |
@@ -2630,15 +2630,15 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--route` | `{"description": "Named route, or ADAPTER/NAME for a model-less adapter such as command/fmt-check", "name": "route"}` |
 | `--effort` | `{"description": "Reasoning effort", "name": "effort"}` |
 | `--confidential` | `{"defaults": ["false"], "description": "Require a confidential-safe route", "name": "confidential", "values": ["true", "false"]}` |
-| `--fallback` | `{"description": "Fallback models in ADAPTER/ID form, comma separated", "name": "fallback"}` |
+| `--fallback` | `{"bounds": [0, 2], "description": "Fallback models in ADAPTER/ID form, comma separated", "name": "fallback"}` |
 | `--exclude` | `{"description": "Keep a provider (claude), account (label, entry or ADAPTER/KEY) or exact model (ADAPTER/ID) out of a named route's pool (repeatable). A pinned --model is never affected", "name": "exclude", "repeatable": true}` |
 | `--account` | `{"description": "Pin a registered account (key or label) instead of resolving one", "name": "account"}` |
 | `--mode` | `{"description": "Access mode: read-only or worktree-write [default: read-only]", "name": "mode", "values": ["read-only", "worktree-write"]}` |
 | `--worktree` | `{"description": "Writer worktree; local run creates an owned worktree for a missing branch name", "name": "worktree"}` |
-| `--read-root` | `{"description": "Extra directory the lane may read (repeatable)", "name": "read_root", "repeatable": true}` |
-| `--write-root` | `{"description": "Extra directory the lane may write, outside Git metadata (repeatable)", "name": "write_root", "repeatable": true}` |
+| `--read-root` | `{"bounds": [0, 32], "description": "Extra directory the lane may read (repeatable)", "name": "read_root", "repeatable": true}` |
+| `--write-root` | `{"bounds": [0, 32], "description": "Extra directory the lane may write, outside Git metadata (repeatable)", "name": "write_root", "repeatable": true}` |
 | `--network` | `{"description": "Network access [default: on]", "name": "network", "values": ["on", "off"]}` |
-| `--capability` | `{"description": "Grant a named capability: postgres (repeatable)", "name": "capability", "repeatable": true}` |
+| `--capability` | `{"bounds": [0, 16], "description": "Grant a named capability: postgres (repeatable)", "name": "capability", "repeatable": true}` |
 | `--provider-timeout` | `{"bounds": [1, 14400], "conditional_defaults": [["read-only", "3600"], ["worktree-write", "10800"]], "defaults": ["3600"], "description": "Provider timeout in seconds", "name": "provider_timeout"}` |
 | `--knob` | `{"description": "Override an effective harness knob for this dispatch (NAME=VALUE)", "name": "knobs", "repeatable": true}` |
 | `--host` | `{"description": "Configured peer (label or host ID) to run the dispatch on", "name": "host"}` |
@@ -2820,7 +2820,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 |---|---|
 | `target` | `{"description": "Attempt ID or RUN[/TASK[/ATTEMPT]]", "name": "target", "positional": true, "required": true}` |
 | `--operation-id` | `{"defaults": [""], "description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id"}` |
-| `--reason` | `{"description": "Reason to record (up to 256 bytes)", "name": "reason"}` |
+| `--reason` | `{"bounds": [0, 256], "description": "Reason to record (up to 256 bytes)", "name": "reason"}` |
 | `--wait` | `{"bounds": [1, 14400], "description": "Wait up to this many seconds for cancellation to settle", "name": "wait"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |

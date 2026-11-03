@@ -874,6 +874,10 @@ fn catalog(model: &clap::Command) -> HelpCatalogue {
                         .get::<metadata::NumericBounds>()
                         .map(|bounds| bounds.0)
                         .or_else(|| {
+                            arg.get::<metadata::PublishedBounds>()
+                                .map(|bounds| bounds.0)
+                        })
+                        .or_else(|| {
                             arg.get_num_args()
                                 .filter(|range| {
                                     range.max_values() > 1 && range.max_values() < usize::MAX
@@ -1137,6 +1141,72 @@ mod tests {
                 Some(expected)
             );
         }
+    }
+    #[test]
+    fn published_non_numeric_bounds_and_weight_are_preserved() {
+        let catalogue = catalog(&expanded_model());
+        for (path, name, bounds) in [
+            ("provenant run", "fallback", (0, 2)),
+            ("provenant run", "read_root", (0, 32)),
+            ("provenant run", "write_root", (0, 32)),
+            ("provenant run", "capability", (0, 16)),
+            ("provenant cancel", "reason", (0, 256)),
+            ("provenant fabric graph cancel", "reason", (0, 256)),
+            ("provenant route set", "weight", (0, 100)),
+        ] {
+            let command = catalogue
+                .commands
+                .iter()
+                .find(|c| c.command == path)
+                .unwrap();
+            assert_eq!(
+                command
+                    .arguments
+                    .iter()
+                    .find(|a| a.name == name)
+                    .unwrap()
+                    .bounds,
+                Some(bounds),
+                "{path} {name}"
+            );
+        }
+        invalid(&[
+            "fabric",
+            "graph",
+            "cancel",
+            "graph",
+            "--reason",
+            &"é".repeat(129),
+        ]);
+        valid(&[
+            "fabric",
+            "graph",
+            "cancel",
+            "graph",
+            "--reason",
+            &"é".repeat(128),
+        ]);
+    }
+    #[test]
+    fn ranged_parsers_use_catalogue_builders() {
+        fn check(dir: &std::path::Path) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    check(&path);
+                } else if path.extension().is_some_and(|ext| ext == "rs")
+                    && path.file_name().unwrap() != "metadata.rs"
+                {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    assert!(
+                        !text.contains(concat!(".ran", "ge(")),
+                        "{} bypasses catalogue range builders",
+                        path.display()
+                    );
+                }
+            }
+        }
+        check(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
     }
     #[test]
     fn compact_help_uses_marked_commands_and_their_descriptions() {
@@ -1728,7 +1798,11 @@ mod tests {
         ]);
         valid(&["lanes", "--watch"]);
         valid(&["lanes", "--watch", "600", "--session", "chair"]);
-        valid(&["lanes", "--watch", "30m"]);
+        let invocation = valid(&["lanes", "--watch", "30m"]);
+        let Command::Lanes(lanes) = invocation.command else {
+            panic!("expected lanes")
+        };
+        assert_eq!(lanes.watch, Some(1800));
         invalid(&["lanes", "--session", "has space"]);
         invalid(&["lanes", "--session", ""]);
         invalid(&["lanes", "--session", "chair", "--all"]);

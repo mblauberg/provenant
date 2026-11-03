@@ -583,16 +583,16 @@ pub struct Access {
     #[arg(long)]
     pub worktree: Option<PathBuf>,
     /// Extra directory the lane may read (repeatable)
-    #[arg(long)]
+    #[arg(long, catalog_bounds = (0, 32))]
     pub read_root: Vec<PathBuf>,
     /// Extra directory the lane may write, outside Git metadata (repeatable)
-    #[arg(long)]
+    #[arg(long, catalog_bounds = (0, 32))]
     pub write_root: Vec<PathBuf>,
     /// Network access [default: on]
     #[arg(long, value_enum)]
     pub network: Option<Switch>,
     /// Grant a named capability: postgres (repeatable)
-    #[arg(long)]
+    #[arg(long, catalog_bounds = (0, 16))]
     pub capability: Vec<String>,
 }
 impl Access {
@@ -969,7 +969,7 @@ pub struct Cancel {
     #[arg(long, default_value = "", value_parser = operation_id, hide = true, hide_default_value = true)]
     pub operation_id: OperationId,
     /// Reason to record (up to 256 bytes)
-    #[arg(long, value_parser = reason)]
+    #[arg(long, value_parser = reason, catalog_bounds = (0, 256))]
     pub reason: Option<String>,
     /// Wait up to this many seconds for cancellation to settle
     #[arg(long, catalog_duration())]
@@ -1348,7 +1348,7 @@ pub(crate) fn absolute(value: PathBuf) -> Result<PathBuf, &'static str> {
     }
     Ok(path)
 }
-fn reason(value: &str) -> Result<String, &'static str> {
+pub(crate) fn reason(value: &str) -> Result<String, &'static str> {
     if value.len() > 256 {
         return Err("reason exceeds 256 UTF-8 bytes");
     }
@@ -1410,8 +1410,19 @@ mod target_tests {
         let duration = jiff::SignedDuration::from_secs(86_400);
         assert!(start >= before.checked_sub(duration).unwrap());
         assert!(start <= after.checked_sub(duration).unwrap());
-        for valid in ["24h", "5s", "1m", "2d", "7d"] {
-            assert!(since(valid).is_ok(), "{valid}");
+        for (value, seconds) in [
+            ("24h", 86_400),
+            ("5s", 5),
+            ("1m", 60),
+            ("2d", 172_800),
+            ("7d", 604_800),
+        ] {
+            let before = clock.wall_now().unwrap().as_timestamp();
+            let result = since(value).unwrap();
+            let after = clock.wall_now().unwrap().as_timestamp();
+            let offset = jiff::SignedDuration::from_secs(seconds);
+            assert!(result >= before.checked_sub(offset).unwrap(), "{value}");
+            assert!(result <= after.checked_sub(offset).unwrap(), "{value}");
         }
         for invalid in ["0", "-1", ""] {
             assert!(since(invalid).is_err(), "{invalid}");
