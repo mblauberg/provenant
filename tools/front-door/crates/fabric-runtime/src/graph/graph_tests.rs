@@ -54,6 +54,7 @@ struct FakeOwner {
     expansion_validations: usize,
     integration_heads: VecDeque<String>,
     source_commits: Vec<Option<String>>,
+    equal_range: bool,
     read_roots: Vec<Vec<String>>,
     distinct_from: Vec<Vec<String>>,
     require_distinct: Vec<bool>,
@@ -161,6 +162,10 @@ impl AttemptOwner for FakeOwner {
         Ok(Some("https://example.invalid/pr/1".into()))
     }
 
+    fn equal_review_range(&mut self, _: &str) -> Result<bool, Self::Error> {
+        Ok(self.equal_range)
+    }
+
     fn observe_or_start(
         &mut self,
         key: &AttemptKey,
@@ -206,6 +211,7 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
         context: None,
         extra: Default::default(),
         composite_members: Vec::new(),
+        topology_present: Default::default(),
         distinct_from: None,
         distinct_strength: None,
         dispositions: Vec::new(),
@@ -316,6 +322,10 @@ fn distinct_from_writer_passes_the_writer_attempts_to_the_owner() {
     assert!(run.checkpoint.successful());
     assert_eq!(owner.distinct_from[0], Vec::<String>::new());
     assert_eq!(owner.distinct_from[1], vec!["host/7".to_owned()]);
+    assert_eq!(
+        owner.source_commits[1].as_deref(),
+        Some("3333333333333333333333333333333333333333")
+    );
     // Without a writing source the constraint has nothing to exclude.
     let mut unsourced = node("lone", route("first"));
     unsourced.distinct_from = Some(DistinctFrom::Writer);
@@ -1828,7 +1838,7 @@ fn gate_checkpoint_rejects_attempts_inconsistent_results_and_forged_skips() {
         journal.0 = Some(corrupt);
         assert!(matches!(
             advance(&document, &mut owner, &mut journal),
-            Err(GraphError::BadCheckpoint)
+            Err(GraphError::BadCheckpoint { .. })
         ));
     }
 }
@@ -2831,6 +2841,7 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
         context: None,
         extra: Default::default(),
         composite_members: Vec::new(),
+        topology_present: Default::default(),
         distinct_from: None,
         distinct_strength: None,
         dispositions: Vec::new(),
@@ -3069,6 +3080,7 @@ fn pending_and_unknown_keep_observing_the_same_route_without_fallback() {
             context: None,
             extra: Default::default(),
             composite_members: Vec::new(),
+            topology_present: Default::default(),
             distinct_from: None,
             distinct_strength: None,
             dispositions: Vec::new(),
@@ -3407,6 +3419,7 @@ fn terminal_task_failure_does_not_try_a_fallback_route() {
         context: None,
         extra: Default::default(),
         composite_members: Vec::new(),
+        topology_present: Default::default(),
         distinct_from: None,
         distinct_strength: None,
         dispositions: Vec::new(),
@@ -4010,7 +4023,7 @@ fn foreign_output_schema_is_rejected_on_resume() {
         .schema_version = 3;
     assert!(matches!(
         advance(&document, &mut owner, &mut journal),
-        Err(GraphError::BadCheckpoint)
+        Err(GraphError::BadCheckpoint { .. })
     ));
 }
 
@@ -4129,7 +4142,7 @@ fn cap_failure_on_fallback_preserves_prior_attempt_outcome() {
             &limits,
             &Default::default()
         ),
-        Err(GraphError::BadCheckpoint)
+        Err(GraphError::BadCheckpoint { .. })
     ));
 }
 
@@ -4722,4 +4735,45 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
     }
     impl Error for Untyped {}
     assert!(!launch_retry_kind(&Untyped));
+}
+
+#[test]
+fn equal_review_range_warns_on_review_nodes() {
+    let mut review = node("review", route("review"));
+    review.role = Some("lens.correctness-spec".into());
+    let mut other = node("other", route("other"));
+    other.role = Some("scout".into());
+    let mut owner = FakeOwner {
+        equal_range: true,
+        observations: [
+            terminal_from(
+                "```findings\n{\"schema_version\":1,\"findings\":[]}\n```",
+                "host/one",
+            ),
+            terminal_from(
+                "```findings\n{\"schema_version\":1,\"findings\":[]}\n```",
+                "host/two",
+            ),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![review, other]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        run.checkpoint.nodes[0].outputs.as_ref().unwrap().warnings,
+        ["equal_base_and_head: review range is empty"]
+    );
+    assert!(
+        run.checkpoint.nodes[1]
+            .outputs
+            .as_ref()
+            .unwrap()
+            .warnings
+            .is_empty()
+    );
 }

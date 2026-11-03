@@ -918,6 +918,8 @@ mod tests {
             .to_owned())
         };
         let base = oid()?;
+        std::fs::write(temp.path().join("changed.txt"), "lane change\n")?;
+        git(&["add", "changed.txt"])?;
         git(&[
             "-c",
             "user.name=Test",
@@ -934,6 +936,19 @@ mod tests {
         let context = GitContext::capture_at(&binary, temp.path(), &base, &head)?;
         assert_eq!(context.head, head);
         assert!(String::from_utf8_lossy(&context.log.bytes).contains("reviewed"));
+        let scratch = tempfile::tempdir()?;
+        context.write_to(&Directory::open_anchor(scratch.path())?, scratch.path())?;
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(scratch.path().join("git-context.json"))?)?;
+        assert_eq!(metadata["base"], base);
+        assert_eq!(metadata["head"], head);
+        assert!(
+            std::fs::read_to_string(scratch.path().join("git-diff.stat"))?.contains("changed.txt")
+        );
+        assert!(
+            std::fs::read_to_string(scratch.path().join("git-diff-slices/index.txt"))?
+                .contains("changed.txt")
+        );
         Ok(())
     }
 
