@@ -545,6 +545,16 @@ mod result_tests {
     }
 
     #[test]
+    fn graph_status_full_shows_node_warnings() {
+        let mut run = graph_status_fixture();
+        run.checkpoint.nodes[0].outputs = Some(serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "result": null, "verdict": null, "findings": [],
+            "branch": null, "commit": null, "warnings": ["equal_base_and_head: review range is empty"]
+        })).unwrap());
+        assert!(super::graph_human::graph_human_full(&run).contains("warning: equal_base_and_head: review range is empty"));
+    }
+
+    #[test]
     fn graph_status_full_lists_checkpoint_nodes_attempts_and_errors() {
         let run = graph_status_fixture();
         let full = super::graph_human::graph_human_full(&run);

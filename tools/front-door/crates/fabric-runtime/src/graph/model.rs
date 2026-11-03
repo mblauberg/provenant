@@ -887,6 +887,7 @@ pub struct NodeInput<'a> {
     /// Refuse a route inside those families instead of substituting one.
     pub require_distinct: bool,
     pub source_commit: Option<&'a str>,
+    pub review_base: Option<&'a str>,
     pub title: &'a str,
     pub prompt: &'a str,
     pub required_verdict: Option<&'a str>,
