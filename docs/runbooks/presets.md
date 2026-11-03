@@ -347,6 +347,29 @@ define a route named `verifier` in another model family. The role settings
 attempts. The low-level `distinct_from = "writer"` only separates a node
 from its writer.
 
+### Targeted local checks policy
+
+Writer (`write.implement`), repairer (`repairer`), refactor (`refactor-principal`),
+verifier (`review.verify`) and lens roles receive the targeted local check policy
+via the `${local_check_policy}` placeholder. By default, roles run only the fast
+targeted checks needed to prove their change locally:
+- Run the tests added or modified and the named tests covering changed functions,
+  with an explicit filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or
+  `cargo test -p CRATE NAME`).
+- Use `scripts/select-affected-crate-tests` or `scripts/find-changed-tests` to help
+  select targets.
+- Run `fmt`, `clippy` for touched crates and generators for touched generated outputs.
+- Never run a whole package, `--workspace` or the full suite locally; CI gates those
+  on the pull request, and combined checks run at the batch head.
+- Reviewers reproduce one finding with one targeted test.
+
+A project can change this policy without editing role prompts by setting
+`local_check_policy = "..."` at the top level of `.provenant/roles.toml`, or via
+the `local_check_policy` preset parameter (for example,
+`--set parameters.local_check_policy="..."`). The effective source (`bundled`,
+`.provenant/roles.toml` or the parameter origin) and rendered role prompts are
+visible in `provenant preset explain <preset>`.
+
 ## Review and source subjects
 
 `review-council` runs one `lens.NAME` role per entry of the `lenses` list: correctness

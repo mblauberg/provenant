@@ -1,4 +1,4 @@
-use super::preset::{Expansion, Layers, expand};
+use super::preset::{Expansion, Layers, expand, find_prompt};
 use provenant_fabric_runtime::read_roots::ReadRoots;
 use serde_json::{Value, json};
 
@@ -1396,6 +1396,99 @@ fn tests_lens_includes_mutation_testing_only_for_crucial_or_terminal_risk() {
         assert!(
             !correctness_prompt.contains("Diff-scoped mutation evidence"),
             "correctness lens at risk tier {risk}"
+        );
+    }
+}
+
+#[test]
+fn preset_explain_big_batch_shows_targeted_checks_policy_and_origin() {
+    let layers = Layers::empty();
+    let explained = layers.explain("big-batch").unwrap();
+    let roles = explained["roles"].as_array().expect("roles list");
+    for role_name in [
+        "write.implement",
+        "repairer",
+        "refactor-principal",
+        "review.verify",
+    ] {
+        let role = roles
+            .iter()
+            .find(|r| r["name"] == role_name)
+            .unwrap_or_else(|| panic!("missing role {role_name} in roles: {roles:?}"));
+        let prompt = role["prompt"].as_str().expect("prompt string");
+        assert!(
+            prompt.contains("Local check policy: run the tests you add or change"),
+            "role {role_name} prompt missing targeted checks text: {prompt}"
+        );
+        assert!(
+            prompt.contains("scripts/select-affected-crate-tests"),
+            "role {role_name} missing affected tests script: {prompt}"
+        );
+        assert!(
+            prompt.contains("scripts/find-changed-tests"),
+            "role {role_name} missing find changed tests script: {prompt}"
+        );
+        assert_eq!(
+            role["policy_origin"], "bundled",
+            "role {role_name} policy origin"
+        );
+    }
+}
+
+#[test]
+fn preset_explain_big_batch_project_override_replaces_policy_text() {
+    let mut layers = Layers::empty();
+    layers
+        .roles
+        .add(
+            ".provenant/roles.toml",
+            "local_check_policy = 'Custom project policy: run targeted tests only.'\n",
+        )
+        .unwrap();
+    let explained = layers.explain("big-batch").unwrap();
+    let roles = explained["roles"].as_array().expect("roles list");
+    for role_name in [
+        "write.implement",
+        "repairer",
+        "refactor-principal",
+        "review.verify",
+    ] {
+        let role = roles
+            .iter()
+            .find(|r| r["name"] == role_name)
+            .unwrap_or_else(|| panic!("missing role {role_name} in roles: {roles:?}"));
+        let prompt = role["prompt"].as_str().expect("prompt string");
+        assert!(
+            prompt.contains("Custom project policy: run targeted tests only."),
+            "role {role_name} missing overridden policy: {prompt}"
+        );
+        assert_eq!(
+            role["policy_origin"], ".provenant/roles.toml",
+            "role {role_name} policy origin"
+        );
+    }
+}
+
+#[test]
+fn preset_explain_big_batch_parameter_override_replaces_policy_text() {
+    let layers = Layers::empty();
+    let expanded = expand(
+        &layers,
+        "big-batch",
+        "brief",
+        &["parameters.local_check_policy='Preset param override: run targeted.'".into()],
+    )
+    .unwrap();
+    for role_name in [
+        "write.implement",
+        "repairer",
+        "refactor-principal",
+        "review.verify",
+    ] {
+        let prompt = find_prompt(&expanded.document["nodes"], role_name).expect(role_name);
+        assert!(
+            prompt.contains("Preset param override: run targeted."),
+            "role {role_name} missing parameter overridden policy: {prompt}"
         );
     }
 }

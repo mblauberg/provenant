@@ -249,9 +249,36 @@ impl Layers {
         }
     }
 
+pub(crate) fn find_prompt(nodes: &Value, role: &str) -> Option<String> {
+    if let Some(items) = nodes.as_array() {
+        for node in items {
+            if let Some(found) = find_prompt(node, role) {
+                return Some(found);
+            }
+        }
+    } else if let Some(map) = nodes.as_object() {
+        if map.get("role").and_then(Value::as_str) == Some(role) {
+            if let Some(prompt) = map.get("prompt").and_then(Value::as_str) {
+                return Some(prompt.to_string());
+            }
+        }
+        for (key, val) in map {
+            if matches!(
+                key.as_str(),
+                "composite" | "loop" | "plan" | "patterns" | "nodes" | "body"
+            ) {
+                if let Some(found) = find_prompt(val, role) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    None
+}
+
     /// The typed interface of a preset, rendered for a reader. Creates no state.
     pub fn explain(&self, name: &str) -> Result<Value, String> {
-        expand(self, name, "", &[])?;
+        let expansion = expand(self, name, "", &[])?;
         let (config, origins) = self.resolve(name)?;
         let origin_of = |key: &str| {
             let path = format!("parameters.{key}");
@@ -265,6 +292,24 @@ impl Layers {
                 })
                 .cloned()
         };
+        let (policy_origin, policy_text) = if let Some(param) = expansion
+            .origins
+            .get("parameters.local_check_policy")
+        {
+            (
+                param.clone(),
+                expansion
+                    .document
+                    .pointer("/parameters/local_check_policy")
+                    .and_then(Value::as_str)
+                    .unwrap_or(LOCAL_CHECK_POLICY_PROMPT)
+                    .to_owned(),
+            )
+        } else if let Some((origin, policy)) = self.roles.policy(self.exclude_repo.get()) {
+            (origin.to_owned(), policy.to_owned())
+        } else {
+            ("bundled".into(), LOCAL_CHECK_POLICY_PROMPT.to_owned())
+        };
         let parameters: Vec<Value> = config
             .get("parameters")
             .and_then(Value::as_object)
@@ -277,7 +322,17 @@ impl Layers {
                     json!({"default": value})
                 };
                 entry["name"] = json!(key);
-                entry["origin"] = json!(origin_of(key));
+                if key == "local_check_policy" {
+                    entry["origin"] = json!(policy_origin.clone());
+                    if entry
+                        .get("default")
+                        .map_or(true, |v| v.as_str().map_or(false, |s| s.is_empty()))
+                    {
+                        entry["default"] = json!(policy_text.clone());
+                    }
+                } else {
+                    entry["origin"] = json!(origin_of(key));
+                }
                 entry
             })
             .collect();
@@ -302,19 +357,55 @@ impl Layers {
                 entry
             })
             .collect();
-        let roles: Vec<Value> = config
-            .get("roles")
-            .and_then(Value::as_object)
-            .into_iter()
-            .flatten()
-            .map(|(role, profile)| json!({"name": role, "tier": profile.get("tier")}))
-            .collect();
+        let mut roles: Vec<Value> = Vec::new();
+        let mut seen = BTreeSet::new();
+        for (role_name, used) in &expansion.roles {
+            seen.insert(role_name.clone());
+            let node_prompt = find_prompt(&expansion.document["nodes"], role_name);
+            let role_info = self
+                .roles
+                .resolve(role_name, config.get("roles"), self.exclude_repo.get())
+                .ok();
+            let tier = role_info
+                .as_ref()
+                .and_then(|r| r.profile.get("tier").cloned())
+                .or_else(|| used.get("tier").cloned());
+            let prompt = node_prompt.or_else(|| {
+                role_info
+                    .as_ref()
+                    .and_then(|r| r.profile.get("prompt").and_then(Value::as_str).map(String::from))
+            });
+            roles.push(json!({
+                "name": role_name,
+                "tier": tier,
+                "origin": used.get("origin").and_then(Value::as_str).unwrap_or("bundled"),
+                "prompt": prompt,
+                "policy_origin": policy_origin.clone(),
+            }));
+        }
+        if let Some(config_roles) = config.get("roles").and_then(Value::as_object) {
+            for (role_name, profile) in config_roles {
+                if !seen.contains(role_name) {
+                    roles.push(json!({
+                        "name": role_name,
+                        "tier": profile.get("tier"),
+                        "origin": "preset",
+                        "prompt": profile.get("prompt"),
+                        "policy_origin": policy_origin.clone(),
+                    }));
+                }
+            }
+        }
         Ok(json!({
             "name": name,
             "pattern": config.get("pattern"),
             "parameters": parameters,
             "stages": stages,
             "roles": roles,
+            "local_check_policy": json!({
+                "prompt": policy_text,
+                "origin": policy_origin,
+            }),
             "layers": self.entries.get(name).into_iter().flatten().map(|(origin, _)| origin).collect::<Vec<_>>(),
             "next": [
                 format!("provenant run --preset {name} --prompt-file FILE --explain"),
@@ -837,6 +928,26 @@ pub fn expand_with(
     layers.warnings.borrow_mut().clear();
     let mut repo_files = Vec::new();
     let (mut config, mut origins) = layers.resolve_inner(name, &mut Vec::new(), &mut repo_files)?;
+    if let Some((policy_origin, policy_text)) = layers.roles.policy(layers.exclude_repo.get()) {
+        if let Some(params_map) = config.get_mut("parameters").and_then(Value::as_object_mut) {
+            if let Some(local_policy) = params_map.get_mut("local_check_policy") {
+                let is_custom_override = origins
+                    .get("parameters.local_check_policy")
+                    .map_or(false, |o| o.starts_with(".provenant/presets"));
+                if !is_custom_override {
+                    if is_spec(local_policy) {
+                        local_policy["default"] = json!(policy_text);
+                    } else {
+                        *local_policy = json!(policy_text);
+                    }
+                    origins.insert(
+                        "parameters.local_check_policy".into(),
+                        policy_origin.to_owned(),
+                    );
+                }
+            }
+        }
+    }
     for (key, value) in params {
         let path = format!("parameters.{key}");
         let valid = valid_paths(&config, layers);
@@ -1118,6 +1229,14 @@ fn interpolate(
     interpolate_inner(value, parameters, prompt, index, false)
 }
 
+pub(crate) const LOCAL_CHECK_POLICY_PROMPT: &str = r#"Local check policy: run the tests you add or change and the named tests covering
+changed functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or
+`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or
+`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for
+touched crates and generators for touched generated outputs. Never run a whole
+package, `--workspace` or the full suite locally, since CI runs those on the PR;
+reviewers reproduce one finding with one targeted test."#;
+
 const MUTATION_TESTING_PROMPT: &str = r#"
 
 Diff-scoped mutation evidence (optional; crucial or terminal risk only):
@@ -1154,6 +1273,14 @@ fn interpolate_inner(
                 } else {
                     ""
                 })),
+                "local_check_policy"
+                    if parameters.get(name).is_none()
+                        || parameters
+                            .get(name)
+                            .is_some_and(|v| v.as_str().is_some_and(|s| s.is_empty())) =>
+                {
+                    Ok(json!(LOCAL_CHECK_POLICY_PROMPT))
+                }
                 _ => {
                     let mut parts = name.split('.');
                     let first = parts.next().unwrap_or_default();
@@ -1668,12 +1795,38 @@ fn build_stages(
         return Err(invalid_config(name, key, "unknown field", scope, origins));
     }
     check_pattern(name, config.get("pattern"), scope, origins)?;
-    let parameters = flatten_parameters(
+    let mut parameters = flatten_parameters(
         name,
         config.get("parameters").unwrap_or(&json!({})),
         scope,
         origins,
     )?;
+    let (policy_origin, policy_text) = if let Some(param) = parameters
+        .get("local_check_policy")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        (
+            origins
+                .get(&format!("{scope}parameters.local_check_policy"))
+                .or_else(|| origins.get("parameters.local_check_policy"))
+                .cloned()
+                .unwrap_or_else(|| "preset".into()),
+            param.to_owned(),
+        )
+    } else if let Some((origin, policy)) = layers.roles.policy(layers.exclude_repo.get()) {
+        (origin.to_owned(), policy.to_owned())
+    } else {
+        ("bundled".into(), LOCAL_CHECK_POLICY_PROMPT.to_owned())
+    };
+    if let Some(map) = parameters.as_object_mut() {
+        map.insert("local_check_policy".into(), json!(policy_text));
+    }
+    if origins.get(&format!("{scope}parameters.local_check_policy")).is_none()
+        && origins.get("parameters.local_check_policy").is_none()
+    {
+        origins.insert("parameters.local_check_policy".into(), policy_origin);
+    }
     let mut builder = StageBuilder {
         layers,
         name,

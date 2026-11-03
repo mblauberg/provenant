@@ -76,6 +76,7 @@ review_shape = { type = "string", default = "", doc = "Explicit review shape ove
 kind = { type = "string", default = "", doc = "Change kind that scales the review panel: refactor, integration, docs. Empty uses the task kind." }
 size = { type = "string", default = "", doc = "Review size override (small, medium, large). Empty measures the worktree's current head against base when the graph expands, before the writer runs, as a proxy; pass a size when the expected scope is known." }
 risk_tags = { type = "list", default = [], doc = "Tags that trigger conditional lenses." }
+local_check_policy = { type = "string", default = "", doc = "Targeted local check policy prompt injected into writer, repairer, refactor and review roles; empty uses the bundled default or .provenant/roles.toml." }
 worktrees = { type = "list", default = [], doc = "Registered writer worktrees a planner may assign to its lanes; empty leaves the choice open." }
 # One entry per lane: name, worktree, scope and spec. Supply with --params-file.
 lanes = [
@@ -98,6 +99,7 @@ ${prompt}
 Start from the council's pinned combined commit. Remove unnecessary machinery
 and improve the approved design without speculative abstraction. Run checks
 and commit. Independent principal review follows in the repair loop.
+${local_check_policy}
 """
 
 [roles.repairer]
@@ -113,4 +115,5 @@ Repair accepted batch findings for: ${prompt}
 Use the serial batch worktree advanced by the principal and earlier repairs.
 Inspect preceding review evidence, preserve scope, run targeted checks and
 commit. Reviewers will pin and review this round's changed head.
+${local_check_policy}
 """
