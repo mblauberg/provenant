@@ -3,10 +3,99 @@ use super::*;
 const DEPENDENCY_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 const DEPENDENCY_STDERR_TAIL: usize = 4096;
 
+// Resolve only PATH, leaving the rest of the daemon environment intact. The
+// login shell runs from the account home, never the writer's checkout.
+fn host_dependency_path(
+    cancel: &provenant_core::CancelToken,
+) -> Result<(std::ffi::OsString, &'static str), String> {
+    let probe = || {
+        let account = provenant_os::sys::account(provenant_os::sys::Account::Current)
+            .map_err(|error| format!("dependency_path_unavailable: {error}"))?
+            .ok_or("dependency_path_unavailable: host account is unavailable")?;
+        let shell = if account.shell.is_empty() {
+            Path::new("/bin/sh")
+        } else {
+            Path::new(&account.shell)
+        };
+        login_dependency_path(shell, Path::new(&account.home), cancel)
+    };
+    dependency_path_with_fallback(probe, std::env::var_os("PATH"), cancel)
+}
+
+pub(super) fn dependency_path_with_fallback(
+    probe: impl FnOnce() -> Result<std::ffi::OsString, String>,
+    daemon_path: Option<std::ffi::OsString>,
+    cancel: &provenant_core::CancelToken,
+) -> Result<(std::ffi::OsString, &'static str), String> {
+    match probe() {
+        Ok(path) if !cancel.is_cancelled() => Ok((path, "login_shell")),
+        _ if cancel.is_cancelled() => Err("dependency PATH probe failed (cancelled)".into()),
+        Err(error) => daemon_path
+            .map(|path| (path, "daemon_fallback"))
+            .ok_or(error),
+        Ok(_) => unreachable!(),
+    }
+}
+
+pub(super) fn login_dependency_path(
+    shell: &Path,
+    home: &Path,
+    cancel: &provenant_core::CancelToken,
+) -> Result<std::ffi::OsString, String> {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    use std::os::unix::ffi::OsStringExt;
+    let probe = || -> Result<std::ffi::OsString, String> {
+        let argv = [
+            shell.as_os_str().to_owned(),
+            "-lc".into(),
+            r#"printf '\0provenant-path\0%s\0' "$PATH""#.into(),
+        ];
+        let mut options = ExecOptions::new(&argv, home, std::time::Duration::from_secs(10));
+        options.cancel = Some(cancel);
+        options.process_group = true;
+        options.cleanup_process_group = true;
+        options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
+        options.stderr = StreamPolicy::Discard;
+        let outcome = SystemExecutor::new(1)
+            .map_err(|error| error.to_string())?
+            .execute(options)
+            .map_err(|error| error.to_string())?;
+        if outcome.termination != Termination::Exit(0)
+            || outcome.timed_out
+            || outcome.cancelled
+            || outcome.stdout.truncated
+        {
+            return Err("login-shell PATH probe failed, timed out or was cancelled".into());
+        }
+        let fields = outcome
+            .stdout
+            .bytes
+            .split(|byte| *byte == 0)
+            .collect::<Vec<_>>();
+        let path = fields
+            .windows(2)
+            .find(|pair| pair[0] == b"provenant-path")
+            .map(|pair| pair[1])
+            .ok_or("login shell did not return PATH")?;
+        Ok(std::ffi::OsString::from_vec(path.to_vec()))
+    };
+    if cancel.is_cancelled() {
+        return Err("dependency PATH probe failed (cancelled)".into());
+    }
+    let result = probe();
+    if cancel.is_cancelled() {
+        return Err("dependency PATH probe failed (cancelled)".into());
+    }
+    result.map_err(|error| format!(
+        "dependency_path_unavailable: {}: {error}; check the host login shell with `{} -lc 'printf %s \"$PATH\"'`",
+        shell.display(), shell.display()
+    ))
+}
+
 pub(super) fn prepare_writer_dependencies(
     worktree: &Path,
     enabled: bool,
-    locate: &dyn Fn(&str) -> Result<PathBuf, String>,
+    search_path: &dyn Fn() -> Result<(std::ffi::OsString, &'static str), String>,
     cancel: &provenant_core::CancelToken,
 ) -> Result<serde_json::Value, String> {
     let command = "pnpm install --frozen-lockfile";
@@ -31,7 +120,18 @@ pub(super) fn prepare_writer_dependencies(
         return Ok(skipped("already_installed"));
     }
 
-    let executable = locate("pnpm").map_err(|error| format!("{command} failed: {error}"))?;
+    let (path, path_source) = search_path()?;
+    let directories = std::env::split_paths(&path).collect::<Vec<_>>();
+    let executable = find_command_on_path("pnpm", &directories).map_err(|_| {
+        format!(
+            "dependency_tool_not_found: {command} failed: pnpm executable was not found; searched PATH={} (source: {path_source}); install pnpm on the host, check `pnpm --version` in its login shell, then retry the dispatch",
+            path.to_string_lossy()
+        )
+    })?;
+    let mut env = std::env::vars_os()
+        .filter(|(key, _)| key != "PATH")
+        .collect::<Vec<_>>();
+    env.push(("PATH".into(), path));
     let argv = [
         executable.as_os_str().to_owned(),
         "install".into(),
@@ -41,6 +141,7 @@ pub(super) fn prepare_writer_dependencies(
         .map_err(|error| format!("{command} failed: {error}"))?;
     let mut options =
         provenant_os::exec::ExecOptions::new(&argv, worktree, DEPENDENCY_INSTALL_TIMEOUT);
+    options.env = Some(&env);
     options.process_group = true;
     options.cleanup_process_group = true;
     options.cancel = Some(cancel);
@@ -86,6 +187,7 @@ pub(super) fn prepare_writer_dependencies(
     Ok(serde_json::json!({
         "command": command,
         "outcome": "installed",
+        "path_source": path_source,
         "elapsed_micros": elapsed_micros,
     }))
 }
@@ -113,7 +215,7 @@ pub(crate) fn prepare(
                 let path = std::env::var_os("PATH").ok_or("PATH is unavailable")?;
                 find_command_on_path(name, &std::env::split_paths(&path).collect::<Vec<_>>())
             }
-            _ if name == "gh" || name == "pnpm" => resolve_executable(name),
+            _ if name == "gh" => resolve_executable(name),
             Some(host) => host_executable(host, name),
             None => resolve_executable(name),
         },
@@ -1211,7 +1313,7 @@ pub(super) fn prepare_candidates(
                 Some(prepare_writer_dependencies(
                     writer.worktree.path(),
                     enabled,
-                    locate,
+                    &|| host_dependency_path(cancel),
                     cancel,
                 )?)
             }
