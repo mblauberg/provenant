@@ -4559,6 +4559,93 @@ fn covers(grant: &provenant_confinement::permissions::PathGrant, path: &std::pat
     }
 }
 
+// A write overlaps a skill path if it covers the path or starts inside it.
+fn overlaps_skill(grant: &provenant_confinement::permissions::PathGrant, path: &Path) -> bool {
+    covers(grant, path) || grant.path.starts_with(path)
+}
+
+#[test]
+fn skill_write_overlap_detects_ancestors_and_descendants() {
+    let skill = Path::new("/fixture/skills/example");
+    for grant in [
+        crate::launch::subtree("/fixture/skills"),
+        crate::launch::subtree(skill),
+        crate::launch::subtree(skill.join("nested")),
+        crate::launch::exact(skill.join("SKILL.md")),
+    ] {
+        assert!(overlaps_skill(&grant, skill), "{grant:?}");
+    }
+    assert!(!overlaps_skill(
+        &crate::launch::exact("/fixture/skills"),
+        skill
+    ));
+    assert!(!overlaps_skill(
+        &crate::launch::subtree("/fixture/other"),
+        skill
+    ));
+}
+
+/// Probe the startup scan using the launch's HOME and rendered sandbox.
+#[cfg(target_os = "macos")]
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn codex_opt_out_skill_scan_succeeds_under_confinement() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::permissions::snapshot::render;
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let host = root.join("home");
+    let state = root.join("state");
+    std::fs::create_dir_all(host.join(".agents/skills/host-skill"))?;
+    std::fs::write(
+        host.join(".agents/skills/host-skill/SKILL.md"),
+        "host skill",
+    )?;
+    std::fs::create_dir_all(state.join(".agents/skills/private-skill"))?;
+    std::fs::write(
+        state.join(".agents/skills/private-skill/SKILL.md"),
+        "fixture skill",
+    )?;
+    let plan = read_only_plan(root.to_str().unwrap(), Some("login"));
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    route.set_user_skills(false);
+    let prompt = Prompt::new("fixture".into());
+    let repo = root.join("repo");
+    let mut input = fixture_input(&route, &plan, &prompt, &repo, None);
+    input.home = &host;
+    let launch = crate::codex::Codex.prepare(input)?;
+    let profile = render(plan.permissions(), &launch.profile, &host)?;
+    let home = &launch.env.iter().find(|(key, _)| key == "HOME").unwrap().1;
+    let scan = |home: &std::ffi::OsStr| {
+        std::process::Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", &profile, "/bin/sh", "-c", "/bin/ls -1 \"$HOME/.agents/skills\" && /bin/cat \"$HOME/.agents/skills\"/*/SKILL.md"])
+            .env_clear()
+            .env("HOME", home)
+            .output()
+    };
+    let output = scan(home)?;
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    if diagnostic.contains("sandbox_apply: Operation not permitted") {
+        provenant_test_support::skip_sandbox_dependent_test(format!(
+            "skill scan unavailable under inherited sandbox: {diagnostic}"
+        ))?;
+        return Ok(());
+    }
+    assert!(output.status.success(), "private HOME scan: {diagnostic}");
+    assert!(output.stdout.ends_with(b"fixture skill"));
+    let host_output = scan(host.as_os_str())?;
+    assert!(
+        !host_output.status.success(),
+        "host skill scan must be denied"
+    );
+    let host_error = String::from_utf8_lossy(&host_output.stderr);
+    assert!(
+        host_error.contains("Operation not permitted"),
+        "{host_error}"
+    );
+    Ok(())
+}
+
 #[test]
 fn cargo_build_dir_is_pinned_to_lane_target_for_each_access() -> Result<(), ProviderError> {
     let mut route = route("codex", "fixture-model");
@@ -6719,7 +6806,7 @@ fn assert_lane_user_skills(adapter: &str) -> Result<(), Box<dyn std::error::Erro
                     .chain(std::iter::once(&plan.permissions().scratch))
                     .chain(&plan.permissions().private_state);
                 assert!(
-                    writes.into_iter().all(|grant| !covers(grant, path)),
+                    writes.into_iter().all(|grant| !overlaps_skill(grant, path)),
                     "{adapter} skill writable: {path:?}"
                 );
             }
