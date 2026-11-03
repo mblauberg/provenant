@@ -21,7 +21,12 @@ fn reexec_test_in_lane(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
         .filter(|(key, _)| !removed.contains(&key.as_os_str()))
         .collect();
     let cwd = std::env::current_dir()?;
-    let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(30));
+    let timeout = if name == "run::tests::wait_handles_a_stale_default_cursor" {
+        300
+    } else {
+        30
+    };
+    let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(timeout));
     options.env = Some(&env);
     options.stdout = StreamPolicy::Capture { limit: 65_536 };
     options.stderr = StreamPolicy::Capture { limit: 65_536 };
@@ -3416,6 +3421,45 @@ fn lane_fixture(
 }
 
 #[test]
+fn lanes_render_retry_lineage() -> Result<(), Box<dyn std::error::Error>> {
+    let now = WallTime::from_micros(100)?;
+    let failed = lane_fixture(
+        1,
+        4,
+        run::AttemptState::Terminal {
+            extra: Default::default(),
+            outcome: run::Outcome::Failed,
+            exit_code: Some(1),
+            finished_at: now,
+            reason: None,
+        },
+    )?;
+    let mut retry = lane_fixture(
+        2,
+        4,
+        run::AttemptState::Queued {
+            extra: Default::default(),
+        },
+    )?;
+    retry.retry_of = Some(failed.attempt_id);
+    let successors = [(failed.attempt_id, retry.attempt_id)]
+        .into_iter()
+        .collect();
+    let (data, human) = render_lanes_with_lineage(
+        &[failed.clone(), retry.clone()],
+        &[],
+        None,
+        Path::new("/state"),
+        None,
+        &successors,
+    );
+    assert_eq!(data["lanes"][0]["superseded_by"], json!(retry.attempt_id));
+    assert_eq!(data["lanes"][1]["retry_of"], json!(failed.attempt_id));
+    assert!(human.contains(&format!("failed → retrying ({})", retry.attempt_id)));
+    Ok(())
+}
+
+#[test]
 fn lanes_give_a_settled_lane_its_settlement_reason() -> Result<(), Box<dyn std::error::Error>> {
     let now = WallTime::from_micros(100)?;
     let failed = lane_fixture(
@@ -3603,6 +3647,166 @@ fn render_lanes_omits_account_when_unresolved() -> Result<(), Box<dyn std::error
     assert!(data["lanes"][0]["applied_route"].is_null());
     Ok(())
 }
+#[test]
+#[allow(clippy::disallowed_methods)] // Exercise the real wait and an independent settlement.
+fn wait_handles_a_stale_default_cursor() -> Result<(), Box<dyn std::error::Error>> {
+    if reexec_test_in_lane("run::tests::wait_handles_a_stale_default_cursor")? {
+        return Ok(());
+    }
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let home = root.join("home");
+    let project = root.join("checkout");
+    std::fs::create_dir_all(&home)?;
+    std::fs::create_dir_all(&project)?;
+    std::fs::create_dir_all(root.join("state"))?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(root.join("state"), std::fs::Permissions::from_mode(0o700))?;
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+    inputs.state_dir = Some(root.join("state"));
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let edge = Edge {
+        roots: &roots,
+        home: &home,
+        assets: &project,
+        cwd: &project,
+    };
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel).map_err(|e| e.message)?;
+    let session = open(&edge, &call).map_err(|e| e.message)?;
+    let make = |n: u64| -> Result<run::PreparedRun, Box<dyn std::error::Error>> {
+        let mut prepared = trace_run(1, AttemptId::from_bytes([9; 16]), clock.wall_now()?)?;
+        let mut bytes = [0; 16];
+        bytes[8..].copy_from_slice(&n.to_be_bytes());
+        prepared.run_id = RunId::from_bytes(bytes);
+        bytes[0] = 1;
+        let task = TaskId::from_bytes(bytes);
+        bytes[0] = 2;
+        prepared.operation_id = OperationId::parse(&format!("backlog-{n}"))?;
+        prepared.request.tasks[0].task_id = task;
+        prepared.attempts[0].task_id = task;
+        prepared.attempts[0].attempt_id = AttemptId::from_bytes(bytes);
+        Ok(prepared)
+    };
+    let seed = make(1)?;
+    session.store.create(&seed, &call)?;
+    session.store.withdraw(
+        seed.attempts[0].attempt_id,
+        run::AttemptState::Queued {
+            extra: Default::default(),
+        },
+        run::Outcome::Cancelled,
+        "fixture",
+        clock.wall_now()?,
+        &call,
+    )?;
+    let cursor = session
+        .store
+        .last_event_sequence(seed.attempts[0].attempt_id, &call)?;
+    session.store.ack_seen("default", cursor, &call)?;
+    let active = make(1003)?;
+    session.store.create(&active, &call)?;
+    let id = active.attempts[0].attempt_id;
+    let mut explicit = Vec::new();
+    for first in (2..=1002).step_by(64) {
+        let mut prepared = make(first)?;
+        for n in first + 1..=(first + 63).min(1002) {
+            let extra = make(n)?;
+            prepared.request.tasks.push(extra.request.tasks[0].clone());
+            prepared.attempts.extend(extra.attempts);
+        }
+        explicit.push(Target {
+            selection: None,
+            run: Some(prepared.run_id),
+            task: None,
+            attempt: None,
+        });
+        session.store.create(&prepared, &call)?;
+        for attempt in &prepared.attempts {
+            session.store.withdraw(
+                attempt.attempt_id,
+                run::AttemptState::Queued {
+                    extra: Default::default(),
+                },
+                run::Outcome::Cancelled,
+                "fixture",
+                clock.wall_now()?,
+                &call,
+            )?;
+        }
+    }
+    let error = wait::select(&session, &explicit, None, session.context.actor_id, &call)
+        .expect_err("explicit selection over the cap must fail");
+    assert!(error.message.contains("1000"));
+    assert!(error.message.contains("narrow"));
+    let context = session.context.clone();
+    let worker = std::thread::spawn(move || -> Result<(), String> {
+        std::thread::sleep(Duration::from_secs(5));
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let store = run::RunStore::open(&context, &call).map_err(|e| e.to_string())?;
+        store
+            .withdraw(
+                id,
+                run::AttemptState::Queued {
+                    extra: Default::default(),
+                },
+                run::Outcome::Cancelled,
+                "fixture",
+                clock.wall_now().map_err(|e| e.to_string())?,
+                &call,
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    });
+    let picks = Picks {
+        targets: &[],
+        owner: session.context.actor_id,
+        label: None,
+        since: None,
+    };
+    let (data, _, timed_out) = wait_command(
+        &session,
+        &picks,
+        Condition::Any,
+        Instant::now() + Duration::from_secs(30),
+        clock.wall_now()?,
+        &edge,
+    )
+    .map_err(|e| e.message)?;
+    worker.join().map_err(|_| "worker panicked")??;
+    assert!(!timed_out);
+    assert_eq!(data["settled_backlog"]["count"], 1001);
+    assert!(
+        data["lanes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|lane| lane["attempt_id"] == json!(id))
+    );
+    assert_eq!(
+        data["settled_backlog"]["newest"].as_array().unwrap().len(),
+        100
+    );
+    let (next, _, _) = wait_command(
+        &session,
+        &picks,
+        Condition::Any,
+        Instant::now() + Duration::from_secs(5),
+        clock.wall_now()?,
+        &edge,
+    )
+    .map_err(|e| e.message)?;
+    assert!(next["lanes"].as_array().unwrap().is_empty());
+    assert!(next.get("settled_backlog").is_none());
+    Ok(())
+}
+
 #[test]
 fn local_wait_observes_settlement_and_renders_pending_details()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -5515,6 +5719,47 @@ fn claude_absent_usage_names_its_reason() {
         decoded_no_usage.usage.source.as_deref(),
         Some("absent: result event has no usage")
     );
+}
+
+#[test]
+fn wait_any_follows_a_superseded_failure() -> Result<(), Box<dyn std::error::Error>> {
+    let now = WallTime::from_micros(100)?;
+    let mut failed = lane_fixture(
+        1,
+        1,
+        run::AttemptState::Terminal {
+            extra: Default::default(),
+            outcome: run::Outcome::Failed,
+            exit_code: Some(1),
+            finished_at: now,
+            reason: None,
+        },
+    )?;
+    let mut retry = lane_fixture(
+        2,
+        1,
+        run::AttemptState::Queued {
+            extra: Default::default(),
+        },
+    )?;
+    failed.superseded_by = Some(retry.attempt_id);
+    assert!(!condition_met(
+        &[failed.clone(), retry.clone()],
+        Condition::Any
+    ));
+    assert!(!condition_met(
+        std::slice::from_ref(&failed),
+        Condition::Any
+    ));
+    retry.state = run::AttemptState::Terminal {
+        extra: Default::default(),
+        outcome: run::Outcome::Succeeded,
+        exit_code: Some(0),
+        finished_at: now,
+        reason: None,
+    };
+    assert!(condition_met(&[failed, retry], Condition::Any));
+    Ok(())
 }
 
 #[test]

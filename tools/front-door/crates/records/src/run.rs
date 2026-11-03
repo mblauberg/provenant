@@ -907,6 +907,9 @@ pub struct AttemptRecord {
     pub generation: u64,
     pub delivery_id: Option<DeliveryId>,
     pub retry_of: Option<AttemptId>,
+    /// Current policy tail on peer observations; absent in durable receipts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<AttemptId>,
     pub requested_route: RequestedRoute,
     pub resolved_route: Option<RouteRecord>,
     pub applied_route: Option<RouteRecord>,

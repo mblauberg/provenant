@@ -1853,10 +1853,17 @@ impl BinaryRunOwner<'_> {
         targets
             .iter()
             .map(|target| {
-                session
+                let mut record = session
                     .service()
                     .status_for_wait(target.attempt, &call)
-                    .map_err(run_error)
+                    .map_err(run_error)?;
+                let tail = session
+                    .store
+                    .policy_tail(target.attempt, &call)
+                    .map_err(run_error)?;
+                record.superseded_by =
+                    (tail.attempt_id != target.attempt).then_some(tail.attempt_id);
+                Ok(record)
             })
             .collect()
     }
@@ -1886,7 +1893,14 @@ impl BinaryRunOwner<'_> {
                 &self.call(cancel),
             )
             .map_err(run_error)?;
-        Ok(page.lanes)
+        let mut lanes = page.lanes;
+        for lane in &mut lanes {
+            let tail = store
+                .policy_tail(lane.attempt_id, &self.call(cancel))
+                .map_err(run_error)?;
+            lane.superseded_by = (tail.attempt_id != lane.attempt_id).then_some(tail.attempt_id);
+        }
+        Ok(lanes)
     }
     /// The wait of each queued or starting lane among `targets`, for `PeerAction::LaneWaits`.
     fn waits_local(

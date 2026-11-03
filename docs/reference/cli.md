@@ -2734,7 +2734,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--all` | `{"defaults": ["false"], "description": "Show every lane, newest first", "name": "all", "values": ["true", "false"]}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "description": "Maximum lanes per page (1 to 100)", "name": "limit"}` |
 | `--cursor` | `{"conflicts": ["wait", "watch"], "description": "Continue from a previous page's cursor", "name": "cursor"}` |
-| `--wait` | `{"bounds": [1, 14400], "conflicts": ["watch"], "description": "Wait for settlement (seconds, or a duration such as 30m)", "name": "wait"}` |
+| `--wait` | `{"bounds": [1, 14400], "conflicts": ["watch"], "description": "Wait for settlement (seconds, or a duration such as 30m). An oversized unseen default backlog is summarised with its count and newest 100 lanes", "name": "wait"}` |
 | `--condition` | `{"conflicts": ["watch"], "defaults": ["any"], "description": "Wait for any or all lanes to settle", "name": "condition", "requires": ["wait"], "values": ["any", "all"]}` |
 | `--watch` | `{"conflicts": ["all", "states", "cursor"], "description": "Print one line per lane state change until every selected lane has settled or this many seconds pass (default 14400)", "name": "watch"}` |
 | `--state` | `{"conflicts": ["wait", "watch"], "description": "Keep lanes in any of these states", "name": "states", "repeatable": true, "values": ["queued", "starting", "running", "settling", "succeeded", "review_required", "failed", "rejected", "timed_out", "rate_limited", "quota_limited", "auth_required", "model_unavailable", "permission_denied", "quarantined", "lost", "uncommitted", "cancelled", "input_required"]}` |

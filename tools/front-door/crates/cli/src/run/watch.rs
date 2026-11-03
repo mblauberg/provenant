@@ -382,7 +382,12 @@ pub(super) fn watch(
                 seen.insert(lane.attempt_id, state);
             }
         }
-        let all_settled = lanes.iter().all(|lane| settled(&lane.state).0);
+        let current: Vec<_> = lanes
+            .iter()
+            .filter(|lane| lane.superseded_by.is_none())
+            .collect();
+        let all_settled = lanes.is_empty()
+            || (!current.is_empty() && current.iter().all(|lane| settled(&lane.state).0));
         let silent = silent_lane(&lanes);
         if silent.is_some() || all_settled || Instant::now() >= deadline {
             if let Some(fail) = stale.filter(|fail: &Fail| fail.kind != ErrorKind::Contention) {
@@ -400,27 +405,51 @@ pub(super) fn watch(
 
 /// `STATE RUN/TASK/ATTEMPT`, plus ` host=ID` for a peer's lane. The line never
 /// carries free text, so a peer cannot inject terminal controls into it.
+#[cfg(test)]
 pub(super) fn line(lane: &run::AttemptRecord, host: Option<HostId>) -> String {
+    line_with_successor(lane, host, None)
+}
+
+pub(super) fn line_with_successor(
+    lane: &run::AttemptRecord,
+    host: Option<HostId>,
+    successor: Option<AttemptId>,
+) -> String {
+    let mut state = state_name(&lane.state);
+    if let Some(id) = successor {
+        state.push_str(&format!(" → retrying ({id})"));
+    }
     let mut line = format!(
         "{} {}/{}/{}",
-        state_name(&lane.state),
-        lane.run_id,
-        lane.task_id,
-        lane.attempt_id
+        state, lane.run_id, lane.task_id, lane.attempt_id
     );
+    if let Some(parent) = lane.retry_of {
+        line.push_str(&format!(" retry_of={parent}"));
+    }
     if let Some(host) = host {
         line.push_str(&format!(" host={host}"));
     }
     line
 }
 /// The same event as one JSON object on one line.
+#[cfg(test)]
 pub(super) fn json_line(lane: &run::AttemptRecord, host: Option<HostId>) -> String {
+    json_line_with_successor(lane, host, None)
+}
+
+pub(super) fn json_line_with_successor(
+    lane: &run::AttemptRecord,
+    host: Option<HostId>,
+    successor: Option<AttemptId>,
+) -> String {
     json!({
         "event": "lane",
         "state": state_name(&lane.state),
         "run_id": lane.run_id,
         "task_id": lane.task_id,
         "attempt_id": lane.attempt_id,
+        "retry_of": lane.retry_of,
+        "superseded_by": successor,
         "host": host,
     })
     .to_string()
@@ -900,6 +929,21 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&json_line(&running(1), None)).unwrap();
         assert_eq!(json["event"], "lane");
         assert_eq!(json["state"], "running");
+        let mut retry = running(2);
+        let parent = running(1).attempt_id;
+        retry.retry_of = Some(parent);
+        let json: serde_json::Value = serde_json::from_str(&json_line(&retry, None)).unwrap();
+        assert_eq!(json["retry_of"], json!(parent));
+        assert!(line(&retry, None).contains(&format!("retry_of={parent}")));
+        let next = retry.attempt_id;
+        let previous = running(1);
+        let json: serde_json::Value =
+            serde_json::from_str(&json_line_with_successor(&previous, None, Some(next))).unwrap();
+        assert_eq!(json["superseded_by"], json!(next));
+        assert!(
+            line_with_successor(&previous, None, Some(next))
+                .contains(&format!("running → retrying ({next})"))
+        );
     }
 
     #[test]

@@ -619,6 +619,17 @@ pub(super) fn render_lanes(
     root: &Path,
     cooldowns: Option<(&[provenant_quota::AccountRecord], i64)>,
 ) -> (Value, String) {
+    render_lanes_with_lineage(lanes, waits, next, root, cooldowns, &Default::default())
+}
+
+pub(super) fn render_lanes_with_lineage(
+    lanes: &[run::AttemptRecord],
+    waits: &[run::LaneWait],
+    next: Option<u64>,
+    root: &Path,
+    cooldowns: Option<(&[provenant_quota::AccountRecord], i64)>,
+    successors: &std::collections::BTreeMap<AttemptId, AttemptId>,
+) -> (Value, String) {
     let mut human = String::new();
     let now_wall = SystemClock::new().wall_now().ok();
     let rows: Vec<Value> = lanes
@@ -678,6 +689,11 @@ pub(super) fn render_lanes(
             } else {
                 format!("{state} (partial)")
             };
+            let state_text = match successors.get(&lane.attempt_id) {
+                Some(id) => format!("{state_text} → retrying ({id})"),
+                None => state_text,
+            };
+            let state_text = lane.retry_of.map_or(state_text.clone(), |id| format!("{state_text} (retry of {id})"));
             // Peer records remain intact in JSON; terminal text excludes controls.
             human.push_str(&format!(
                 "{}/{}/{}{title_text} {state_text} {route_text}{account_field}{reason_text}\n",
@@ -832,6 +848,8 @@ pub(super) fn render_lanes(
                 "task_id": lane.task_id,
                 "attempt_id": lane.attempt_id,
                 "attempt_number": lane.attempt_number,
+                "retry_of": lane.retry_of,
+                "superseded_by": successors.get(&lane.attempt_id),
                 "state": state,
                 "exit_code": exit_code,
                 "reason": reason,
@@ -1171,12 +1189,14 @@ pub(super) fn lanes_inner(
     };
     let waits = session.store.lane_waits(&lanes, &call);
     let cooldowns = read_lane_cooldowns(session.context.state_root.as_path());
-    let (mut data, mut human) = render_lanes(
+    let successors = policy_successors(&session, &lanes, &call)?;
+    let (mut data, mut human) = render_lanes_with_lineage(
         &lanes,
         &waits,
         next,
         session.context.state_root.as_path(),
         lane_cooldown_view(&cooldowns),
+        &successors,
     );
     append_provider_errors(&session, &lanes, &mut data, &mut human);
     attach_handoffs(&session, &lanes, &mut data);

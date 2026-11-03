@@ -12,14 +12,19 @@ pub(super) fn settled(state: &run::AttemptState) -> (bool, bool) {
 /// Whether a lane selection satisfies a wait condition. Input required ends
 /// an all-lanes wait because it cannot progress unattended.
 pub(super) fn condition_met(lanes: &[run::AttemptRecord], condition: Condition) -> bool {
-    let states: Vec<(bool, bool)> = lanes.iter().map(|l| settled(&l.state)).collect();
-    states.is_empty()
-        || match condition {
-            Condition::Any => states.iter().any(|(done, _)| *done),
-            Condition::All => {
-                states.iter().all(|(done, _)| *done) || states.iter().any(|(_, input)| *input)
-            }
-        }
+    let states: Vec<(bool, bool)> = lanes
+        .iter()
+        .filter(|l| l.superseded_by.is_none())
+        .map(|l| settled(&l.state))
+        .collect();
+    lanes.is_empty()
+        || (!states.is_empty()
+            && match condition {
+                Condition::Any => states.iter().any(|(done, _)| *done),
+                Condition::All => {
+                    states.iter().all(|(done, _)| *done) || states.iter().any(|(_, input)| *input)
+                }
+            })
 }
 
 pub(crate) fn silent_lane(lanes: &[run::AttemptRecord]) -> Option<AttemptId> {
@@ -75,12 +80,103 @@ pub(super) fn select(
                 return Err(Fail::new(
                     Status::Invalid,
                     ErrorKind::Invalid,
-                    "selection exceeds 1000 lanes",
+                    "selection exceeds 1000 lanes; narrow it with --id",
                 ));
             }
             None => return Ok(selected),
         }
     }
+}
+
+const BACKLOG_SAMPLE: usize = 100;
+
+#[derive(Default)]
+struct Backlog {
+    count: usize,
+    latest_event: u64,
+    newest: Vec<run::AttemptRecord>,
+}
+
+impl Backlog {
+    fn add(
+        &mut self,
+        session: &Session,
+        lane: run::AttemptRecord,
+        call: &run::Request<'_>,
+    ) -> Result<(), Fail> {
+        self.count += 1;
+        self.latest_event = self
+            .latest_event
+            .max(session.store.last_event_sequence(lane.attempt_id, call)?);
+        self.newest.push(lane);
+        self.newest.sort_by_key(|lane| match lane.state {
+            run::AttemptState::Terminal { finished_at, .. } => std::cmp::Reverse(finished_at),
+            _ => unreachable!("backlog contains only settled lanes"),
+        });
+        self.newest.truncate(BACKLOG_SAMPLE);
+        Ok(())
+    }
+}
+
+/// Preserve the ordinary selection until it exceeds the cap. For a stale
+/// default cursor, keep every unsettled lane and a bounded sample of the
+/// settled backlog, while retaining the event cursor needed to acknowledge it.
+fn select_unseen(
+    session: &Session,
+    owner: ActorId,
+    seen: u64,
+    tracked: &mut std::collections::BTreeSet<AttemptId>,
+    call: &run::Request<'_>,
+) -> Result<(Vec<AttemptId>, Option<Backlog>), Fail> {
+    let mut after = 0;
+    let mut pending = Vec::new();
+    let mut backlog = None;
+    loop {
+        let mut query = lane_query(session, &[], true, 100, after, call)?;
+        query.owner = Some(owner);
+        query.unseen_after = Some(seen);
+        let page = session.service().lanes(&query, call)?;
+        for lane in page.lanes {
+            if !settled(&lane.state).0 {
+                tracked.insert(lane.attempt_id);
+            }
+            if let Some(summary) = backlog.as_mut() {
+                if settled(&lane.state).0 && !tracked.contains(&lane.attempt_id) {
+                    Backlog::add(summary, session, lane, call)?;
+                } else {
+                    pending.push(lane);
+                }
+            } else {
+                pending.push(lane);
+                if pending.len() > 1000 {
+                    let mut summary = Backlog::default();
+                    let mut open = Vec::new();
+                    for lane in pending.drain(..) {
+                        if settled(&lane.state).0 && !tracked.contains(&lane.attempt_id) {
+                            summary.add(session, lane, call)?;
+                        } else {
+                            open.push(lane);
+                        }
+                    }
+                    pending = open;
+                    backlog = Some(summary);
+                }
+            }
+            if backlog.is_some() && pending.len() > 1000 {
+                return Err(Fail::new(
+                    Status::Invalid,
+                    ErrorKind::Invalid,
+                    "selection exceeds 1000 unsettled lanes; narrow it with --id",
+                ));
+            }
+        }
+        match page.next {
+            Some(next) => after = next,
+            None => break,
+        }
+    }
+    let ids = pending.into_iter().map(|lane| lane.attempt_id).collect();
+    Ok((ids, backlog))
 }
 
 /// The seen-cursor key for a default wait selection.
@@ -153,6 +249,16 @@ pub(super) fn candidates<'a>(
     picks: &'a Picks<'a>,
     seen: Option<u64>,
 ) -> impl FnMut(Duration) -> Result<Vec<run::AttemptRecord>, Fail> + 'a {
+    candidates_with_backlog(session, picks, seen, None, None)
+}
+
+fn candidates_with_backlog<'a>(
+    session: &'a Session,
+    picks: &'a Picks<'a>,
+    seen: Option<u64>,
+    backlog: Option<&'a std::cell::RefCell<Option<Backlog>>>,
+    tracked: Option<&'a std::cell::RefCell<std::collections::BTreeSet<AttemptId>>>,
+) -> impl FnMut(Duration) -> Result<Vec<run::AttemptRecord>, Fail> + 'a {
     move |_| {
         let clock = SystemClock::new();
         let cancel = CancelToken::new();
@@ -167,7 +273,20 @@ pub(super) fn candidates<'a>(
             Some(since) if picks.targets.is_empty() => {
                 select_since(session, picks.owner, since, &call)?
             }
-            _ => select(session, picks.targets, seen, picks.owner, &call)?,
+            _ => match (picks.targets.is_empty(), seen, backlog, tracked) {
+                (true, Some(cursor), Some(backlog), Some(tracked)) => {
+                    let (ids, summary) = select_unseen(
+                        session,
+                        picks.owner,
+                        cursor,
+                        &mut tracked.borrow_mut(),
+                        &call,
+                    )?;
+                    *backlog.borrow_mut() = summary;
+                    ids
+                }
+                _ => select(session, picks.targets, seen, picks.owner, &call)?,
+            },
         };
         let mut lanes = Vec::with_capacity(ids.len());
         let mut included = std::collections::BTreeSet::new();
@@ -187,6 +306,10 @@ pub(super) fn candidates<'a>(
                 },
                 |id| Ok(session.store.policy_tail(id, &call)?.attempt_id),
             )?;
+        }
+        for lane in &mut lanes {
+            let tail = session.store.policy_tail(lane.attempt_id, &call)?;
+            lane.superseded_by = (tail.attempt_id != lane.attempt_id).then_some(tail.attempt_id);
         }
         let waits = session.store.lane_waits(&lanes, &call);
         apply_lane_wait_suppression(&mut lanes, &waits);
@@ -216,6 +339,22 @@ pub(super) fn follow_policy_tail<K: Copy + PartialEq, E>(
 
 pub(super) const LOCAL_POLL: Duration = Duration::from_millis(500);
 
+/// Resolve the sealed policy tail for each displayed receipt.
+pub(super) fn policy_successors(
+    session: &Session,
+    lanes: &[run::AttemptRecord],
+    call: &run::Request<'_>,
+) -> Result<std::collections::BTreeMap<AttemptId, AttemptId>, Fail> {
+    let mut successors = std::collections::BTreeMap::new();
+    for lane in lanes {
+        let tail = session.store.policy_tail(lane.attempt_id, call)?;
+        if tail.attempt_id != lane.attempt_id {
+            successors.insert(lane.attempt_id, tail.attempt_id);
+        }
+    }
+    Ok(successors)
+}
+
 /// The lanes a wait or watch ended on, each unstarted one with what it waits for.
 pub(super) fn render_settled(
     session: &Session,
@@ -231,12 +370,18 @@ pub(super) fn render_settled(
             cancel: &cancel,
         },
     );
-    let (mut data, mut human) = render_lanes(
+    let call = run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let successors = policy_successors(session, lanes, &call)?;
+    let (mut data, mut human) = render_lanes_with_lineage(
         lanes,
         &waits,
         None,
         session.context.state_root.as_path(),
         cooldowns,
+        &successors,
     );
     append_provider_errors(session, lanes, &mut data, &mut human);
     attach_handoffs(session, lanes, &mut data);
@@ -377,6 +522,8 @@ pub(super) fn wait_command(
     let key = selection_key(picks.label);
     let cursor = picks.targets.is_empty() && picks.since.is_none();
     let mut seen = None;
+    let backlog = std::cell::RefCell::new(None);
+    let tracked = std::cell::RefCell::new(std::collections::BTreeSet::new());
     let waited = watch::wait(
         |remaining| {
             let cursor_value = if cursor {
@@ -393,7 +540,9 @@ pub(super) fn wait_command(
             } else {
                 None
             };
-            candidates(session, picks, cursor_value)(remaining)
+            candidates_with_backlog(session, picks, cursor_value, Some(&backlog), Some(&tracked))(
+                remaining,
+            )
         },
         watch::Scope {
             entered,
@@ -412,7 +561,10 @@ pub(super) fn wait_command(
                 clock: &clock,
                 cancel: &cancel,
             };
-            let mut latest = 0;
+            let mut latest = backlog
+                .borrow()
+                .as_ref()
+                .map_or(0, |summary| summary.latest_event);
             for lane in waited.lanes.iter().filter(|l| settled(&l.state).0) {
                 latest = latest.max(session.store.last_event_sequence(lane.attempt_id, &entry)?);
             }
@@ -425,7 +577,21 @@ pub(super) fn wait_command(
             waited.met = false;
         }
     }
-    waited_reply(session, waited)
+    let (mut data, mut human, timed_out) = waited_reply(session, waited)?;
+    if let Some(summary) = backlog.into_inner() {
+        let (sample, sample_human) = render_settled(session, &summary.newest, None)?;
+        data["settled_backlog"] = json!({
+            "count": summary.count,
+            "newest": sample["lanes"],
+        });
+        human.push_str(&format!(
+            "settled backlog: {} lanes; showing newest {}\n",
+            summary.count,
+            summary.newest.len()
+        ));
+        human.push_str(&sample_human);
+    }
+    Ok((data, human, timed_out))
 }
 
 /// One line per call, already newline-terminated, for a watch to stream.
@@ -480,10 +646,15 @@ pub(super) fn watch_command(
         Duration::from_secs(seconds),
         LOCAL_POLL,
         &mut |lane| {
+            let tail = session
+                .store
+                .policy_tail(lane.attempt_id, &entry)?
+                .attempt_id;
+            let successor = (tail != lane.attempt_id).then_some(tail);
             let text = if json {
-                watch::json_line(lane, None)
+                watch::json_line_with_successor(lane, None, successor)
             } else {
-                watch::line(lane, None)
+                watch::line_with_successor(lane, None, successor)
             };
             emit(&format!("{text}\n"))
         },

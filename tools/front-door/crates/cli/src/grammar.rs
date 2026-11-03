@@ -874,7 +874,8 @@ pub struct Lanes {
     /// Continue from a previous page's cursor
     #[arg(long, conflicts_with_all = ["wait", "watch"])]
     pub cursor: Option<String>,
-    /// Wait for settlement (seconds, or a duration such as 30m)
+    /// Wait for settlement (seconds, or a duration such as 30m). An oversized
+    /// unseen default backlog is summarised with its count and newest 100 lanes.
     #[arg(long, conflicts_with = "watch", value_parser = duration_seconds)]
     pub wait: Option<u64>,
     /// Wait for any or all lanes to settle
