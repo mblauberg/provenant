@@ -4521,6 +4521,8 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     })
                     .transpose()?
                     .or_else(|| self.integration_base.map(|base| base.to_string()))
+                    // Preserve the prior fallback without requiring origin/HEAD.
+                    .or_else(|| node.source_commit.map(str::to_owned))
             } else {
                 node.source_commit.map(|head| {
                     self.integration_base

@@ -609,6 +609,7 @@ mod peer_tests {
         use provenant_fabric_runtime::graph::{self, AttemptOwner};
         let rig = crate::worktree_tests::repository()?;
         let git = |args: &[&str]| crate::worktree_tests::git(&rig, args);
+        assert!(git(&["for-each-ref", "--format=%(refname)", "refs/remotes/origin/HEAD"])?.is_empty());
         let base = git(&["rev-parse", "HEAD"])?;
         std::fs::write(rig.project.join("lane-change"), "change")?;
         git(&["add", "lane-change"])?;
@@ -632,23 +633,28 @@ mod peer_tests {
         let owner = BinaryRunOwner { factory: &factory, allow_remote: true, actor: None, chair: None };
         let store = owner.store(&cancel)?;
         let call = owner.call(&cancel);
-        for (name, review_base) in [("lens", &base), ("evaluate", &base), ("equal", &head)] {
+        for (name, review_base, expected_base) in [
+            ("lens", Some(base.as_str()), &base),
+            ("evaluate", Some(base.as_str()), &base),
+            ("equal", Some(head.as_str()), &head),
+            ("default-no-origin-head", None, &head),
+        ] {
             let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({"graph_id":"review-pins", "node_id":name, "route_index":0}))?;
             let observation = graph_owner.observe_or_start(&key, graph::NodeInput {
                 context: Default::default(), read_roots: &[], distinct_from_attempts: &[], require_distinct: false,
-                source_commit: Some(&head), review_base: Some(review_base), title: name, prompt: "review",
+                source_commit: Some(&head), review_base, title: name, prompt: "review",
                 required_verdict: None, deadline_seconds: None, inputs_dir: None,
             }, &route, graph::AccessMode::ReadOnly, None, graph::Replay {
                 delivery: None, branch: None, fast_forward_only: false, stored_ref: None, launch_actor: &actor,
             })?;
             let operation = store.operation(&graph_operation("graph-attempt-operation", &key)?, &call)?.ok_or("missing operation")?;
             let request = store.request(operation.run_id, &call)?;
-            assert_eq!(request.tasks[0].base.as_deref(), Some(review_base.as_str()));
+            assert_eq!(request.tasks[0].base.as_deref(), Some(expected_base.as_str()));
             assert_eq!(request.tasks[0].head.as_deref(), Some(head.as_str()));
             let reference = match observation {
                 graph::AttemptObservation::Pending { attempt_ref } | graph::AttemptObservation::Unknown { attempt_ref } | graph::AttemptObservation::Terminal { attempt_ref, .. } => attempt_ref.ok_or("missing attempt reference")?,
             };
-            assert_eq!(graph_owner.equal_review_range(&reference)?, name == "equal");
+            assert_eq!(graph_owner.equal_review_range(&reference)?, expected_base == &head);
         }
         Ok(())
     }
