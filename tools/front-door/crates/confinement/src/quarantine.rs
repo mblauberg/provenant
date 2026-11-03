@@ -418,6 +418,14 @@ struct UnaccountedSnapshot {
 }
 
 #[derive(Debug, Serialize)]
+struct ArchivedCommittedPath {
+    path: PathWire,
+    mode: Option<String>,
+    digest: Option<FileDigest>,
+    blob: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 struct EvidenceManifest {
     schema_version: u64,
     scope: Scope,
@@ -425,6 +433,8 @@ struct EvidenceManifest {
     start_head: GitOid,
     comparison_base: GitOid,
     observed_head: GitOid,
+    worktree_head: GitOid,
+    committed_paths: Vec<ArchivedCommittedPath>,
     start_index: IndexFingerprint,
     observed_index: IndexFingerprint,
     status_digest: FileDigest,
@@ -948,7 +958,7 @@ fn quarantine_instruction_changes(
         git.read(GitRead::Diff {
             base: comparison_base,
             head: writer_head,
-            paths: own_paths,
+            paths: own_paths.clone(),
         })?
         .stdout
         .bytes
@@ -1005,6 +1015,42 @@ fn quarantine_instruction_changes(
         Err(error) => return Err(error.into()),
     }
     let blobs = quarantine_dir.open_verified_directory(OsStr::new("blobs"))?;
+    // Committed evidence belongs to the pinned writer tree. Live fingerprints
+    // and disk blobs below are observations of worktree_head, which may have
+    // advanced to another writer since publication.
+    let mut committed_paths = Vec::new();
+    for (index, path) in own_paths.iter().enumerate() {
+        let tree = git.read(GitRead::TreeEntries {
+            oid: writer_head,
+            prefix: path.clone(),
+        })?;
+        let entries = parse_tree_entries(&tree.stdout.bytes)?;
+        let entry = entries.iter().find(|entry| entry.path == *path);
+        let (mode, digest, blob) = if let Some(entry) = entry {
+            let bytes = git
+                .read(GitRead::RawObject {
+                    kind: GitObjectKind::Blob,
+                    oid: entry.oid,
+                })?
+                .stdout
+                .bytes;
+            let name = format!("committed-{index:08}");
+            put_bounded(&blobs, OsStr::new(&name), &bytes, &mut archive_bytes)?;
+            (
+                Some(entry.mode.clone()),
+                Some(CanonicalV1::file_digest(&bytes)),
+                Some(name),
+            )
+        } else {
+            (None, None, None)
+        };
+        committed_paths.push(ArchivedCommittedPath {
+            path: wire_path(path)?,
+            mode,
+            digest,
+            blob,
+        });
+    }
     for (index, file) in snapshot.files.iter().enumerate() {
         let prefix = format!("{index:08}");
         let before_name = format!("{prefix}.before");
@@ -1099,6 +1145,8 @@ fn quarantine_instruction_changes(
         start_head: snapshot.head,
         comparison_base,
         observed_head: writer_head,
+        worktree_head: head_before,
+        committed_paths,
         start_index: snapshot.index,
         observed_index: index_before,
         status_digest: CanonicalV1::file_digest(&status.stdout.bytes),
@@ -1873,6 +1921,61 @@ mod custody_integration_tests {
             fixture.budget()?,
             token,
         ))
+    }
+
+    #[test]
+    fn pinned_writer_tree_is_archived_separately_from_later_overlapping_worktree()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        seed_protected(&fixture)?;
+        fixture.run(&["checkout", "-b", "evidence-fixture"])?;
+        let base = fixture.head()?;
+        let token = CancelToken::new();
+        let git = evidence_git(&fixture, &token)?;
+        let archive = archive_dir(&fixture, "overlap-archive")?;
+        let snapshot = git.snapshot_instructions(scope(), &protected()?, &archive)?;
+        let recovery = acquire_absent_recovery(&fixture, scope(), base)?;
+        fs::write(fixture.root.join("AGENTS.md"), b"first writer\n")?;
+        fixture.run(&["add", "AGENTS.md"])?;
+        fixture.run(&["commit", "-m", "first writer"])?;
+        let writer = fixture.head()?;
+        fs::write(fixture.root.join("AGENTS.md"), b"later writer\n")?;
+        fixture.run(&["add", "AGENTS.md"])?;
+        fixture.run(&["commit", "-m", "later writer"])?;
+        let later = fixture.head()?;
+        assert!(matches!(
+            git.quarantine_instructions_at(
+                &recovery,
+                &snapshot,
+                base,
+                writer,
+                &archive,
+                &ReviewExempt::none()
+            )?,
+            QuarantineOutcome::ReviewRequired { .. }
+        ));
+        let root = fixture._temp.path().join("overlap-archive");
+        let evidence: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.join("evidence.json"))?)?;
+        assert_eq!(evidence["observed_head"], writer.to_string());
+        assert_eq!(evidence["worktree_head"], later.to_string());
+        let committed = evidence["committed_paths"]
+            .as_array()
+            .ok_or("committed paths")?;
+        let item = committed
+            .iter()
+            .find(|item| item["path"]["path"] == "AGENTS.md")
+            .ok_or("committed policy")?;
+        let blob = item["blob"].as_str().ok_or("committed blob")?;
+        assert_eq!(fs::read(root.join("blobs").join(blob))?, b"first writer\n");
+        assert_eq!(
+            item["digest"],
+            serde_json::to_value(provenant_records::CanonicalV1::file_digest(
+                b"first writer\n"
+            ))?
+        );
+        assert_eq!(fs::read(fixture.root.join("AGENTS.md"))?, b"later writer\n");
+        Ok(())
     }
 
     #[test]

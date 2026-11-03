@@ -263,7 +263,8 @@ pub(crate) fn publish_branch(
     }
     // receive-pack has checked the graph. Git's CAS protects concurrent host
     // updates, including when a lane rebases or merges its private branch.
-    if current == base {
+    {
+        let target = if current == base { head } else { current };
         command(
             git,
             repo.common_git_dir(),
@@ -274,7 +275,7 @@ pub(crate) fn publish_branch(
                 "-m",
                 "provenant: verified lane objects",
                 branch,
-                &head.to_string(),
+                &target.to_string(),
                 &current.to_string(),
             ]),
             None,
