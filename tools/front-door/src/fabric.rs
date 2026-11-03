@@ -4021,6 +4021,9 @@ fn graph_review_node(document: &provenant_fabric_runtime::graph::GraphDocument, 
 }
 
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
+    fn admission_timeout_seconds(&self) -> Option<u64> {
+        Some(provenant_run::AdmissionPolicy::default().admission_seconds)
+    }
     type Error = FacadeError;
     fn respect_ci_wake(&self) -> bool {
         self.tick

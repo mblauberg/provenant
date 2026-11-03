@@ -4380,6 +4380,7 @@ struct ErrorLauncher {
     stored_refs: Vec<Option<String>>,
     now: Option<provenant_core::WallTime>,
     now_after_error: Option<provenant_core::WallTime>,
+    admission_seconds: Option<u64>,
 }
 
 impl AttemptOwner for ErrorLauncher {
@@ -4390,6 +4391,9 @@ impl AttemptOwner for ErrorLauncher {
     }
     fn wall_now(&self) -> Option<provenant_core::WallTime> {
         self.now
+    }
+    fn admission_timeout_seconds(&self) -> Option<u64> {
+        Some(self.admission_seconds.unwrap_or(3600))
     }
     fn observe_or_start(
         &mut self,
@@ -4450,6 +4454,7 @@ fn transient_launch_error_waits_and_retries_the_same_attempt_once_due() {
     assert!(attempt.attempt_ref.is_none());
     let retry = progress.launch_retry.as_ref().expect("persisted wait");
     assert_eq!(retry.failures, 1);
+    assert_eq!(retry.deadline, Some(at(3600)));
     assert_eq!(retry.wake_at, Some(at(5)));
     assert!(
         retry
@@ -4553,6 +4558,8 @@ fn a_host_git_limit_reason_reaches_the_graph_retry_and_the_blocked_node() {
         owner.now = Some(at(now));
         advance(&document, &mut owner, &mut journal).unwrap();
     }
+    owner.now = Some(at(3600));
+    advance(&document, &mut owner, &mut journal).unwrap();
     let progress = &journal.0.as_ref().unwrap().nodes[0];
     assert_eq!(progress.state, NodeState::Blocked);
     let text = progress.advance_error.as_deref().unwrap();
@@ -4560,7 +4567,7 @@ fn a_host_git_limit_reason_reaches_the_graph_retry_and_the_blocked_node() {
 }
 
 #[test]
-fn launch_errors_past_the_retry_limit_block_the_node() {
+fn launch_errors_retry_until_the_persisted_deadline() {
     let document = graph(vec![node("one", route("first"))]);
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
@@ -4579,9 +4586,16 @@ fn launch_errors_past_the_retry_limit_block_the_node() {
         assert_eq!(retry.failures, failures);
         assert_eq!(retry.wake_at, wake);
     }
-    // The fourth bounded retry is spent, so the node is blocked, not
-    // silently stopped.
+    // The fourth failure remains retryable; the persisted window does not
+    // reset when the journal is reloaded on the next advance.
     owner.now = Some(at(38));
+    advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(
+        retry_of(journal.0.as_ref().unwrap()).deadline,
+        Some(at(3600))
+    );
+    assert_eq!(retry_of(journal.0.as_ref().unwrap()).failures, 4);
+    owner.now = Some(at(3600));
     advance(&document, &mut owner, &mut journal).unwrap();
     let checkpoint = journal.0.as_ref().unwrap();
     let progress = &checkpoint.nodes[0];
@@ -4601,10 +4615,67 @@ fn launch_errors_past_the_retry_limit_block_the_node() {
     assert_eq!(owner.calls.len(), 4);
 
     // A blocked node never launches again.
-    owner.now = Some(at(39));
+    owner.now = Some(at(3601));
     let stopped = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(stopped.checkpoint.nodes[0].state, NodeState::Blocked);
     assert_eq!(owner.calls.len(), 4);
+}
+
+#[test]
+fn launch_succeeds_after_more_than_three_transient_failures() {
+    let document = graph(vec![node("one", route("first"))]);
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: busy_times(4),
+        observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    for now in [0, 6, 17, 38] {
+        owner.now = Some(at(now));
+        let waiting = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(waiting.checkpoint.nodes[0].state, NodeState::Running);
+        assert_eq!(waiting.checkpoint.nodes[0].attempts.len(), 1);
+        assert_eq!(retry_of(&waiting.checkpoint).deadline, Some(at(3600)));
+    }
+    owner.now = Some(at(79));
+    let done = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(done.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(done.checkpoint.nodes[0].attempts.len(), 1);
+    assert!(owner.calls.iter().all(|key| key == &owner.calls[0]));
+    assert_eq!(owner.calls.len(), 5);
+}
+
+#[test]
+fn launch_wake_is_capped_by_the_original_deadline() {
+    let document = graph(vec![node("one", route("first"))]);
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        admission_seconds: Some(3),
+        errors: busy_times(1),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    advance(&document, &mut owner, &mut journal).unwrap();
+    let retry = retry_of(journal.0.as_ref().unwrap());
+    assert_eq!(retry.deadline, Some(at(3)));
+    assert_eq!(retry.wake_at, Some(at(3)));
+    // A new policy on restart cannot extend the saved window.
+    owner.admission_seconds = Some(3600);
+    owner.now = Some(at(3));
+    let ended = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(ended.checkpoint.nodes[0].state, NodeState::Blocked);
+    assert_eq!(owner.calls.len(), 1);
+}
+
+#[test]
+fn launch_with_an_admission_window_requires_a_wall_clock() {
+    let document = graph(vec![node("one", route("first"))]);
+    let mut owner = ErrorLauncher::default();
+    let mut journal = MemoryJournal::default();
+    let error = advance(&document, &mut owner, &mut journal).unwrap_err();
+    assert!(error.to_string().contains("no wall clock"));
+    assert!(owner.calls.is_empty());
 }
 
 #[test]
