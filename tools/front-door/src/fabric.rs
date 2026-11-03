@@ -4249,14 +4249,16 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             // A crash can leave an accepted operation without a checkpoint
             // reference. Preserve its immutable labels, including legacy None.
             let mut prepared_without_request = false;
+            let mut accepted_knobs = None;
             let context = match &operation {
                 Some(operation) => match store.request(operation.run_id, &call) {
-                    Ok(request) => request
-                        .tasks
-                        .first()
-                        .ok_or(FacadeError::StateCorrupt)?
-                        .context
-                        .clone(),
+                    Ok(request) => {
+                        let task = request.tasks.first().ok_or(FacadeError::StateCorrupt)?;
+                        if accepted {
+                            accepted_knobs = Some(task.profile.overrides.clone());
+                        }
+                        task.context.clone()
+                    }
                     Err(provenant_run::RunError::NotFound)
                         if operation.state == provenant_run::OperationState::Prepared =>
                     {
@@ -4455,7 +4457,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     new_worktree: None,
                 }],
                 concurrency: Some(1),
-                knobs: if exclude.is_empty() {
+                knobs: if let Some(knobs) = accepted_knobs {
+                    knobs
+                } else if exclude.is_empty() {
                     vec![]
                 } else {
                     vec![format!(

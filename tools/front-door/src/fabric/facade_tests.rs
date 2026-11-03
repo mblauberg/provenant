@@ -598,7 +598,7 @@ mod peer_tests {
                 "title":"inspect", "prompt":"Review the slice",
                 "route":{"kind":"model", "provider":"fixture", "model":"fixture/model"},
                 "timeout_seconds":factory.context.config.limits.graph_timeout_seconds
-            }], "concurrency":1
+            }], "concurrency":1, "knobs":["routing.graph_exclude=[\"codex/gpt-6-luna\"]"]
         }))?;
         let receipt = run_owner.submit_with_access(input, budget, &cancel, Default::default())?;
         let target = receipt.targets.first().ok_or("target")?;
@@ -620,6 +620,7 @@ mod peer_tests {
         let store = run_owner.store(&cancel)?;
         for prepared in [false, true] {
             if prepared {
+                graph_owner.exclude = vec!["codex/gpt-6-luna".into()];
                 // Reserve the legacy digest without the canonical request file,
                 // as a crash between row reservation and publication would leave it.
                 let call = run_owner.call(&cancel);
