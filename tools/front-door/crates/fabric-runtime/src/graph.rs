@@ -250,8 +250,11 @@ pub enum GraphError<RunError: Error + 'static, JournalError: Error + 'static> {
     Refused(String),
     #[error("graph checkpoint does not match the submitted plan")]
     PlanChanged,
-    #[error("graph checkpoint is inconsistent or unsupported")]
-    BadCheckpoint,
+    #[error("graph checkpoint node {node}: {invariant}")]
+    BadCheckpoint {
+        node: String,
+        invariant: &'static str,
+    },
     #[error("cannot canonically encode the validated graph plan")]
     Canonical(#[source] CanonicalError),
     #[error("run attempt owner failed: {0}")]
@@ -269,7 +272,7 @@ impl<R: Error + 'static, J: Error + 'static> GraphError<R, J> {
             Self::Extension(_) => "invalid_extension",
             Self::Refused(_) => "graph_refused",
             Self::PlanChanged => "plan_changed",
-            Self::BadCheckpoint => "bad_checkpoint",
+            Self::BadCheckpoint { .. } => "bad_checkpoint",
             Self::Canonical(_) => "canonical",
             Self::Run(_) => "run",
             Self::Journal(_) => "journal",
@@ -618,9 +621,18 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         graph_prompt_bytes: usize::MAX,
         ..limits.clone()
     };
-    let stored = journal
+    let mut stored = journal
         .load(&document.graph_id)
         .map_err(GraphError::Journal)?;
+    if let Some(checkpoint) = &mut stored {
+        plans::restore_legacy_topology(
+            document,
+            &checkpoint.extensions,
+            &mut checkpoint.expansions,
+            &unbounded,
+        )
+        .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
+    }
     let stored_extensions = stored.as_ref().map_or(&[][..], |c| c.extensions.as_slice());
     let (base, _) = validate_plan_with_limits(document, &unbounded)
         .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
@@ -1146,7 +1158,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 let route = node
                     .routes
                     .get(route_index)
-                    .ok_or(GraphError::BadCheckpoint)?
+                    .ok_or_else(|| GraphError::BadCheckpoint {
+                        node: node.id.clone(),
+                        invariant: "attempt route index must name a configured route",
+                    })?
                     .clone();
                 let key = AttemptKey {
                     extra: Default::default(),
@@ -1562,10 +1577,14 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 let retry_was_pending;
                 let should_continue = {
                     let progress = &mut checkpoint.nodes[node_index];
-                    let attempt = progress
-                        .attempts
-                        .last_mut()
-                        .ok_or(GraphError::BadCheckpoint)?;
+                    let attempt =
+                        progress
+                            .attempts
+                            .last_mut()
+                            .ok_or_else(|| GraphError::BadCheckpoint {
+                                node: node.id.clone(),
+                                invariant: "an observed attempt must have a checkpoint row",
+                            })?;
                     // Any observation answers the stopped launch, so its wait
                     // is over and the checkpoint wake no longer owes it.
                     retry_was_pending = progress.launch_retry.take().is_some();

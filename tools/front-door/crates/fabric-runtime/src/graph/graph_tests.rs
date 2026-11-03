@@ -1819,7 +1819,7 @@ fn gate_checkpoint_rejects_attempts_inconsistent_results_and_forged_skips() {
         journal.0 = Some(corrupt);
         assert!(matches!(
             advance(&document, &mut owner, &mut journal),
-            Err(GraphError::BadCheckpoint)
+            Err(GraphError::BadCheckpoint { .. })
         ));
     }
 }
@@ -3974,7 +3974,7 @@ fn foreign_output_schema_is_rejected_on_resume() {
         .schema_version = 3;
     assert!(matches!(
         advance(&document, &mut owner, &mut journal),
-        Err(GraphError::BadCheckpoint)
+        Err(GraphError::BadCheckpoint { .. })
     ));
 }
 
@@ -4093,7 +4093,7 @@ fn cap_failure_on_fallback_preserves_prior_attempt_outcome() {
             &limits,
             &Default::default()
         ),
-        Err(GraphError::BadCheckpoint)
+        Err(GraphError::BadCheckpoint { .. })
     ));
 }
 
