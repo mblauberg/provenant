@@ -1411,10 +1411,23 @@ fn preset_explain_big_batch_shows_targeted_checks_policy_and_origin() {
         "review.verify",
     ] {
         let prompt = explained["prompts"][role_name].as_str().expect(role_name);
-        assert!(
-            prompt.contains("Local check policy: run the tests you add or change"),
-            "role {role_name} prompt missing targeted checks text: {prompt}"
-        );
+        // Each prescribed limit is asserted on its own, so dropping any one
+        // of them from the bundled policy fails here, not only in goldens.
+        let flat = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+        for clause in [
+            "Local check policy: run the tests you add or change",
+            "the named tests covering changed functions, with a filter",
+            "cargo nextest run -p CRATE -E 'test(NAME)'",
+            "Run fmt, clippy for touched crates and generators for touched generated outputs",
+            "Never run a whole package, `--workspace` or the full suite locally",
+            "since CI runs those on the PR",
+            "reviewers reproduce one finding with one targeted test",
+        ] {
+            assert!(
+                flat.contains(clause),
+                "role {role_name} prompt missing policy clause {clause:?}: {prompt}"
+            );
+        }
         assert!(
             prompt.contains("scripts/select-affected-crate-tests"),
             "role {role_name} missing affected tests script: {prompt}"
