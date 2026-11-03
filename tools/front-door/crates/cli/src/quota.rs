@@ -583,6 +583,141 @@ fn signal_quota(state: &Path) {
     provenant_os::changes::hint(state, &[provenant_core::changes::Scope::Quota]);
 }
 
+fn open_readiness_account(state: &Path, key: &str) -> Result<Option<Directory>, EdgeError> {
+    let root = match Directory::open_anchor(state) {
+        Ok(root) => root,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut dir = root;
+    for name in [READINESS_DIRECTORY, key] {
+        dir = match dir.open_verified_directory(OsStr::new(name)) {
+            Ok(next) => next,
+            Err(error) if error.is_not_found() => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        check_private(&dir)?;
+    }
+    Ok(Some(dir))
+}
+
+fn read_readiness_file(
+    account_dir: &Directory,
+    adapter: &str,
+    key: &str,
+) -> Result<Option<ReadinessFile>, EdgeError> {
+    let name = format!("{adapter}.json");
+    let reader = match account_dir.open_read(OsStr::new(&name)) {
+        Ok(reader) => reader,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let meta = reader.metadata()?;
+    if meta.mode & 0o777 != 0o600 || meta.uid != provenant_os::fs::effective_uid() {
+        return Err(EdgeError::Permissions);
+    }
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_RECORD_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| EdgeError::Read {
+            path: PathBuf::from(key).join(&name),
+            source,
+        })?;
+    if bytes.len() as u64 > MAX_RECORD_BYTES {
+        return Err(QuotaError::Invalid("readiness bound").into());
+    }
+    Ok(Some(ReadinessFile::decode(&bytes, adapter, key)?))
+}
+
+/// The readiness of one route, read without locks, directory creation or
+/// provider I/O. A missing, stale, mismatched or damaged record is unknown;
+/// nothing here reads as ready unless fresh evidence says so. Routing and the
+/// route and host commands read through this.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn read_readiness(state: &Path, scope: &ReadinessScope, now: i64) -> ReadinessRead {
+    if !component(&scope.adapter) || !component(&scope.account_key) {
+        return ReadinessRead::unknown(ReadinessReason::InvalidEvidence);
+    }
+    let read = open_readiness_account(state, &scope.account_key).and_then(|dir| {
+        dir.map_or(Ok(None), |dir| {
+            read_readiness_file(&dir, &scope.adapter, &scope.account_key)
+        })
+    });
+    match read {
+        Ok(Some(file)) => file.get(scope, now),
+        Ok(None) => ReadinessRead::absent(),
+        Err(_) => ReadinessRead::unknown(ReadinessReason::InvalidEvidence),
+    }
+}
+
+/// Publish this host's readiness for the account just written, under the
+/// quota lock the caller holds. Quota is the only writer: provider refusals
+/// in the account record become unavailable observations, and clear when the
+/// record stops holding them. A dropped account loses its file.
+fn sync_readiness(state: &Path, intent: &UpdateIntent, now: i64) -> Result<(), EdgeError> {
+    let (adapter, key) = (&intent.account.adapter, &intent.account.account_key);
+    let name = format!("{adapter}.json");
+    let existing = open_readiness_account(state, key)?;
+    let current = match &existing {
+        Some(dir) => match read_readiness_file(dir, adapter, key) {
+            Ok(file) => file,
+            // A damaged file is rebuilt from the account record.
+            Err(EdgeError::Quota(_)) => None,
+            Err(error) => return Err(error),
+        },
+        None => None,
+    };
+    let mut file = current.clone().unwrap_or_default();
+    if let Some(record) = &intent.replacement {
+        // Default policies date the clearing reading; a custom probe interval
+        // only moves when a fresh reading stops counting as fresh.
+        let policies = provenant_providers::quota_policies(provenant_providers::REGISTRY);
+        let admission = Admission {
+            policies: &policies,
+            now_unix_seconds: now,
+            records: std::slice::from_ref(record),
+            pools: &[],
+        };
+        file.sync_refusals(record, LOCAL_HOST, &admission)?;
+    } else {
+        file.records.clear();
+    }
+    if file.records.is_empty() {
+        if let Some(dir) = existing {
+            match dir.unlink(OsStr::new(&name)) {
+                Ok(()) => dir.sync()?,
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error.into()),
+            }
+            drop(dir);
+            let root = Directory::open_anchor(state)?;
+            let readiness = root.open_verified_directory(OsStr::new(READINESS_DIRECTORY))?;
+            let _ = readiness.rmdir(OsStr::new(key));
+            let _ = readiness.sync();
+        }
+        return Ok(());
+    }
+    if current.as_ref() == Some(&file) {
+        return Ok(());
+    }
+    let bytes = serde_json::to_vec(&file)?;
+    if bytes.len() as u64 > MAX_RECORD_BYTES {
+        return Err(QuotaError::Invalid("readiness bound").into());
+    }
+    let root = private(state)?;
+    let readiness = child(&root, OsStr::new(READINESS_DIRECTORY))?;
+    let account_dir = child(&readiness, OsStr::new(key))?;
+    durable(provenant_os::fs::Directory::atomic_write_with_permissions(
+        &account_dir,
+        OsStr::new(&name),
+        ".readiness",
+        &bytes,
+        0o600,
+        PublishMode::Replace,
+    )?)
+}
+
 fn write_intent(
     dir: &Directory,
     state: &Path,
@@ -627,6 +762,9 @@ fn write_intent(
             }
         }
     }
+    // Readiness is derived from what was just committed. A failure leaves it
+    // unknown, which routing treats as unproven, never as ready.
+    let _ = sync_readiness(state, intent, SystemClock::new().unix_seconds());
     signal_quota(state);
     Ok(())
 }
@@ -2623,6 +2761,124 @@ mod tests {
                 assert!(json.get("display_icon_warning").is_none());
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn refusal_publishes_scoped_readiness_outside_quota_and_fresh_evidence_clears_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+        let state = temp.path();
+        let now = SystemClock::new().unix_seconds();
+        let scope = |adapter: &str, key: &str, route: &str| ReadinessScope {
+            host: LOCAL_HOST.into(),
+            adapter: adapter.into(),
+            account_key: key.into(),
+            route: route.into(),
+        };
+        let pool = scope("claude", "key", "pool");
+        // No file reads as unknown, never ready.
+        assert_eq!(read_readiness(state, &pool, now), ReadinessRead::absent());
+
+        let refuse = |pool: Option<&str>, model: &str| {
+            persist_provider_refusal(
+                state,
+                &provenant_records::run::RouteRecord {
+                    provider: Some("claude".into()),
+                    model: Some(model.into()),
+                    account_key: Some("key".into()),
+                    account_label: Some("work".into()),
+                    ..Default::default()
+                },
+                pool,
+                now - 100,
+                Some(now + 600),
+            )
+        };
+        refuse(Some("pool"), "claude/one")?;
+        refuse(None, "claude/two")?;
+        let held = read_readiness(state, &pool, now);
+        assert_eq!(held.state, ReadinessState::Unavailable);
+        assert_eq!(held.reason, Some(ReadinessReason::ProviderRefusal));
+        assert_eq!(held.reset_unix_seconds, Some(now + 600));
+        // The pool refusal covers its pool, the model refusal only its model,
+        // and neither covers another pool or another account.
+        let state_of = |s: &ReadinessScope| read_readiness(state, s, now).state;
+        assert_eq!(
+            state_of(&scope("claude", "key", "claude/two")),
+            ReadinessState::Unavailable
+        );
+        assert_eq!(
+            state_of(&scope("claude", "key", "claude/one")),
+            ReadinessState::Unknown
+        );
+        assert_eq!(
+            state_of(&scope("claude", "key", "other")),
+            ReadinessState::Unknown
+        );
+        assert_eq!(
+            state_of(&scope("claude", "second", "pool")),
+            ReadinessState::Unknown
+        );
+        // Readiness is its own tree: quota/ keeps only the account snapshot.
+        let account_dir = state.join("quota").join("key");
+        assert_eq!(std::fs::read_dir(&account_dir)?.count(), 1);
+        assert!(state.join("readiness/key/claude.json").is_file());
+        assert_eq!(read_cache_at(state)?.len(), 1);
+        // A reset time passing does not turn the refusal into ready.
+        assert_eq!(
+            read_readiness(state, &pool, now + 600).state,
+            ReadinessState::Unknown
+        );
+
+        // A fresh reading with headroom in the pool clears that refusal only.
+        let mut records = read_cache_at(state)?;
+        let current = records[0].clone();
+        let mut next = current.clone();
+        next.revision += 1;
+        next.snapshot = Some(QuotaSnapshot {
+            schema_version: 1,
+            account: next.account.clone(),
+            revision: 0,
+            status: QuotaStatus::Available,
+            observed_unix_seconds: now - 10,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            details: None,
+            windows: vec![QuotaWindow {
+                pool: "pool".into(),
+                window_seconds: None,
+                used_basis_points: 1000,
+                resets_unix_seconds: None,
+            }],
+        });
+        let dir = child(&private(state)?, OsStr::new("quota"))?;
+        let account = current.account.clone();
+        write_intent(
+            &dir,
+            state,
+            &UpdateIntent {
+                account,
+                expected: Some(current),
+                replacement: Some(next),
+            },
+            &mut records,
+        )?;
+        assert_eq!(state_of(&pool), ReadinessState::Unknown);
+        assert_eq!(
+            state_of(&scope("claude", "key", "claude/two")),
+            ReadinessState::Unavailable
+        );
+        // Forgetting the account removes its readiness file.
+        let drop = UpdateIntent {
+            account: records[0].account.clone(),
+            expected: Some(records[0].clone()),
+            replacement: None,
+        };
+        write_intent(&dir, state, &drop, &mut records)?;
+        assert!(!state.join("readiness/key").exists());
         Ok(())
     }
 

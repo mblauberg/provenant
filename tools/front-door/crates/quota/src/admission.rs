@@ -170,6 +170,44 @@ impl Admission<'_> {
         })
     }
 
+    /// Whether `refusal` still holds: unexpired, and not cleared by a fresh
+    /// reading of its pool that proves headroom. The one clearing rule, shared
+    /// by admission and the readiness record.
+    pub fn refusal_holds(
+        &self,
+        adapter: &str,
+        record: Option<&AccountRecord>,
+        refusal: &Refusal,
+    ) -> Result<bool, QuotaError> {
+        let expires = refusal.expires_unix_seconds()?;
+        let snapshot = self.fresh_snapshot(adapter, record);
+        let comparable_newer = record.is_some_and(|r| r.last_error.is_none())
+            && snapshot.is_some_and(|s| {
+                s.observed_unix_seconds > refusal.observed_unix_seconds
+                    && matches!(
+                        s.status,
+                        QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
+                    )
+                    && refusal.pool.as_ref().is_some_and(|pool| {
+                        let mut windows = s
+                            .windows
+                            .iter()
+                            .filter(|w| matches_pool(adapter, &w.pool, pool))
+                            .peekable();
+                        windows.peek().is_some()
+                            && windows.all(|w| {
+                                // A lapsed reset alone cannot clear a refusal.
+                                w.used_basis_points < CLEAR_HEADROOM_BASIS_POINTS
+                                    && s.details.as_ref().is_none_or(|d| {
+                                        d.coverage.as_deref() != Some("partial")
+                                            || d.calibration_active(&w.pool, self.now_unix_seconds)
+                                    })
+                            })
+                    })
+            });
+        Ok(expires > self.now_unix_seconds && !comparable_newer)
+    }
+
     /// Whether persisted mismatch or a live provider refusal blocks `account_key`
     /// from serving `model` (the model without its adapter prefix). Expiry and
     /// clearing by a fresh, comparable reading live only here. Invalid evidence is
@@ -193,7 +231,6 @@ impl Admission<'_> {
         let free = free_pool(adapter);
         // Only the adapter's own keyless free pool spans models.
         let in_free = |pool: Option<&str>| free.is_some() && pool == free;
-        let snapshot = self.fresh_snapshot(adapter, record);
         for refusal in record
             .into_iter()
             .flat_map(|r| r.refusals.iter())
@@ -205,38 +242,7 @@ impl Admission<'_> {
                             && self.pools.iter().any(|pool| Some(pool.as_str()) == free)))
             })
         {
-            let expires = refusal.expires_unix_seconds()?;
-            let comparable_newer = record.is_some_and(|r| r.last_error.is_none())
-                && snapshot.is_some_and(|s| {
-                    s.observed_unix_seconds > refusal.observed_unix_seconds
-                        && matches!(
-                            s.status,
-                            QuotaStatus::Available
-                                | QuotaStatus::CreditOnly
-                                | QuotaStatus::Exhausted
-                        )
-                        && refusal.pool.as_ref().is_some_and(|pool| {
-                            let mut windows = s
-                                .windows
-                                .iter()
-                                .filter(|w| matches_pool(adapter, &w.pool, pool))
-                                .peekable();
-                            windows.peek().is_some()
-                                && windows.all(|w| {
-                                    // A lapsed reset alone cannot clear a refusal.
-                                    w.used_basis_points < CLEAR_HEADROOM_BASIS_POINTS
-                                        && s.details.as_ref().is_none_or(|d| {
-                                            d.coverage.as_deref() != Some("partial")
-                                                || d.calibration_active(
-                                                    &w.pool,
-                                                    self.now_unix_seconds,
-                                                )
-                                        })
-                                })
-                        })
-                });
-            if expires > self.now_unix_seconds
-                && !comparable_newer
+            if self.refusal_holds(adapter, record, refusal)?
                 && ((in_free(refusal.pool.as_deref()) && refusal.model == model)
                     || refusal.pool.as_ref().is_none_or(|p| self.pools.contains(p)))
             {
@@ -277,28 +283,31 @@ impl Admission<'_> {
             if snapshot.status == QuotaStatus::AuthRequired {
                 return Err(QuotaError::Refused("authentication required"));
             }
-            if matches!(
+            // An unknown reading proves exhaustion only as a partial lower bound.
+            if (matches!(
                 snapshot.status,
-                QuotaStatus::Available
-                    | QuotaStatus::CreditOnly
-                    | QuotaStatus::Exhausted
-                    | QuotaStatus::Unknown
-            ) && snapshot.windows.iter().any(|w| {
-                (self
-                    .pools
-                    .iter()
-                    .any(|pool| matches_pool(&route.adapter, &w.pool, pool))
-                    || (go_model
-                        && ["five_hour", "seven_day", "thirty_day"].contains(&w.pool.as_str())))
-                    && w.used_basis_points >= 10000
-                    && (w
-                        .resets_unix_seconds
-                        .is_none_or(|r| r > self.now_unix_seconds)
-                        || snapshot
-                            .details
-                            .as_ref()
-                            .is_some_and(|d| d.calibration_active(&w.pool, self.now_unix_seconds)))
-            }) {
+                QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
+            ) || (snapshot.status == QuotaStatus::Unknown
+                && snapshot
+                    .details
+                    .as_ref()
+                    .is_some_and(|d| d.coverage.as_deref() == Some("partial"))))
+                && snapshot.windows.iter().any(|w| {
+                    (self
+                        .pools
+                        .iter()
+                        .any(|pool| matches_pool(&route.adapter, &w.pool, pool))
+                        || (go_model
+                            && ["five_hour", "seven_day", "thirty_day"].contains(&w.pool.as_str())))
+                        && w.used_basis_points >= 10000
+                        && (w
+                            .resets_unix_seconds
+                            .is_none_or(|r| r > self.now_unix_seconds)
+                            || snapshot.details.as_ref().is_some_and(|d| {
+                                d.calibration_active(&w.pool, self.now_unix_seconds)
+                            }))
+                })
+            {
                 return Err(QuotaError::Refused("allowance exhausted"));
             }
             if snapshot.details.as_ref().is_some_and(|d| {

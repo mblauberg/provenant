@@ -112,7 +112,8 @@ impl ReadinessRead {
     pub fn absent() -> Self {
         Self::unknown(ReadinessReason::NotProbed)
     }
-    fn unknown(reason: ReadinessReason) -> Self {
+    /// Unknown, for the given reason.
+    pub fn unknown(reason: ReadinessReason) -> Self {
         Self {
             state: ReadinessState::Unknown,
             reason: Some(reason),
@@ -242,17 +243,18 @@ impl ReadinessFile {
         self.records.retain(|r| r.scope != *scope);
     }
 
-    /// Make this host's provider-refusal observations exactly the live
-    /// refusals of `account`: a refusal is published when recorded and
-    /// cleared when the account record no longer holds it, so quota's own
-    /// clearing rules decide both. A pool refusal covers only that pool, and
+    /// Make this host's provider-refusal observations exactly the refusals
+    /// that still hold for `account`: published when recorded, and cleared by
+    /// the rule admission uses (expiry, or a fresh reading of the pool that
+    /// proves headroom). A pool refusal covers only that pool, and
     /// a refusal without a pool only its model. Other observations stay.
     pub fn sync_refusals(
         &mut self,
         account: &crate::AccountRecord,
         host: &str,
-        now: i64,
+        admission: &crate::Admission<'_>,
     ) -> Result<(), QuotaError> {
+        let now = admission.now_unix_seconds;
         self.records.retain(|r| {
             r.expires_unix_seconds > now
                 && !(r.scope.host == host
@@ -261,10 +263,10 @@ impl ReadinessFile {
         });
         let mut published: Vec<RouteReadiness> = Vec::new();
         for refusal in &account.refusals {
-            let expires = refusal.expires_unix_seconds()?;
-            if expires <= now {
+            if !admission.refusal_holds(&account.account.adapter, Some(account), refusal)? {
                 continue;
             }
+            let expires = refusal.expires_unix_seconds()?;
             let scope = ReadinessScope {
                 host: host.into(),
                 adapter: account.account.adapter.clone(),
@@ -365,15 +367,23 @@ mod tests {
     }
     fn account() -> crate::AccountScope {
         crate::AccountScope {
-            adapter: "codex".into(),
+            adapter: "claude".into(),
             account_key: "key".into(),
             label: "label".into(),
+        }
+    }
+    fn at(record: &crate::AccountRecord, now: i64) -> crate::Admission<'_> {
+        crate::Admission {
+            policies: crate::source::TEST_POLICIES,
+            now_unix_seconds: now,
+            records: std::slice::from_ref(record),
+            pools: &[],
         }
     }
     fn route(route: &str) -> ReadinessScope {
         ReadinessScope {
             host: LOCAL_HOST.into(),
-            adapter: "codex".into(),
+            adapter: "claude".into(),
             account_key: "key".into(),
             route: route.into(),
         }
@@ -384,14 +394,15 @@ mod tests {
         let mut file = ReadinessFile::default();
         let mut record = crate::AccountRecord::empty(account());
         // Nothing recorded reads as unknown, never ready.
-        assert_eq!(file.get(&route("codex/m"), 150), ReadinessRead::absent());
+        assert_eq!(file.get(&route("claude/m"), 150), ReadinessRead::absent());
         record.refusals = vec![
             refused(Some("pool"), "m", Some(500)),
             refused(None, "other", None),
         ];
-        file.sync_refusals(&record, LOCAL_HOST, 150).unwrap();
+        file.sync_refusals(&record, LOCAL_HOST, &at(&record, 150))
+            .unwrap();
         let bytes = serde_json::to_vec(&file).unwrap();
-        file = ReadinessFile::decode(&bytes, "codex", "key").unwrap();
+        file = ReadinessFile::decode(&bytes, "claude", "key").unwrap();
         // A pool refusal covers its pool only; a model refusal only its model.
         let pool = file.get(&route("pool"), 150);
         assert_eq!(pool.state, ReadinessState::Unavailable);
@@ -399,11 +410,11 @@ mod tests {
         assert_eq!(pool.reset_unix_seconds, Some(500));
         assert!(!pool.project().is_unknown());
         assert_eq!(
-            file.get(&route("codex/m"), 150).state,
+            file.get(&route("claude/m"), 150).state,
             ReadinessState::Unknown
         );
         assert_eq!(
-            file.get(&route("codex/other"), 150).expires_unix_seconds,
+            file.get(&route("claude/other"), 150).expires_unix_seconds,
             Some(3700)
         );
         // Expiry reads as unknown and the reset alone never makes it ready.
@@ -414,12 +425,28 @@ mod tests {
         let mut elsewhere = route("pool");
         elsewhere.account_key = "other".into();
         assert_eq!(file.get(&elsewhere, 150).state, ReadinessState::Unknown);
-        // Fresh evidence clears the refusal in the account record; so here.
-        record.refusals.remove(0);
-        file.sync_refusals(&record, LOCAL_HOST, 150).unwrap();
-        assert_eq!(file.get(&route("pool"), 150).state, ReadinessState::Unknown);
+        // A fresh reading with headroom in the pool clears only that pool.
+        record.snapshot = Some(crate::QuotaSnapshot {
+            schema_version: 1,
+            account: account(),
+            revision: 0,
+            status: crate::QuotaStatus::Available,
+            observed_unix_seconds: 190,
+            source_ref: "fixture".into(),
+            authority_ref: None,
+            details: None,
+            windows: vec![crate::QuotaWindow {
+                window_seconds: None,
+                pool: "pool".into(),
+                used_basis_points: 1000,
+                resets_unix_seconds: Some(900),
+            }],
+        });
+        file.sync_refusals(&record, LOCAL_HOST, &at(&record, 200))
+            .unwrap();
+        assert_eq!(file.get(&route("pool"), 200).state, ReadinessState::Unknown);
         assert_eq!(
-            file.get(&route("codex/other"), 150).state,
+            file.get(&route("claude/other"), 200).state,
             ReadinessState::Unavailable
         );
         // An account-wide observation covers every route of the account.
@@ -427,14 +454,14 @@ mod tests {
         wide.scope.route = ACCOUNT_ROUTE.into();
         wide.reason = Some(ReadinessReason::Exhausted);
         file.publish(wide, 150).unwrap();
-        let covered = file.get(&route("codex/any"), 150);
+        let covered = file.get(&route("claude/any"), 150);
         assert_eq!(covered.reason, Some(ReadinessReason::Exhausted));
         file.clear(&route(ACCOUNT_ROUTE));
         assert_eq!(
-            file.get(&route("codex/any"), 150).state,
+            file.get(&route("claude/any"), 150).state,
             ReadinessState::Unknown
         );
         // The file refuses another account's records.
-        assert!(ReadinessFile::decode(&bytes, "codex", "other").is_err());
+        assert!(ReadinessFile::decode(&bytes, "claude", "other").is_err());
     }
 }
