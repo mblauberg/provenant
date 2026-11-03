@@ -792,7 +792,7 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
             }
             let merged = view["state"] == "MERGED";
             if merged && dir.join("rate-after-merge").exists() {
-                writeln!(io::stdout(), "HTTP/2 403\r\nretry-after: 30\r\nx-ratelimit-reset: 4102444800\r\n\r\n{{}}")?;
+                writeln!(io::stdout(), "HTTP/2 403\r\nx-ratelimit-remaining: 0\r\nx-ratelimit-reset: 4102444800\r\n\r\n{{}}")?;
                 writeln!(io::stderr(), "API rate limit exceeded")?;
                 return Ok(1);
             }
