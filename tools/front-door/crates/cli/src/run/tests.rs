@@ -3455,7 +3455,20 @@ fn lanes_render_retry_lineage() -> Result<(), Box<dyn std::error::Error>> {
     );
     assert_eq!(data["lanes"][0]["superseded_by"], json!(retry.attempt_id));
     assert_eq!(data["lanes"][1]["retry_of"], json!(failed.attempt_id));
-    assert!(human.contains(&format!("failed → retrying ({})", retry.attempt_id)));
+    assert_eq!(
+        human,
+        format!(
+            "{}/{}/{} failed → retrying ({}) unresolved\n{}/{}/{} queued (retry of {}) unresolved\n",
+            failed.run_id,
+            failed.task_id,
+            failed.attempt_id,
+            retry.attempt_id,
+            retry.run_id,
+            retry.task_id,
+            retry.attempt_id,
+            failed.attempt_id,
+        )
+    );
     Ok(())
 }
 
