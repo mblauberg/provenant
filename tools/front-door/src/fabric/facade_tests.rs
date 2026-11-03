@@ -276,6 +276,9 @@ pub(crate) mod peer_tests {
         let mut options = ExecOptions::new(&argv, &cwd, std::time::Duration::from_secs(30));
         options.env = Some(&environment);
         let output = SystemExecutor::new(1)?.execute(options)?;
+        // Keep native-backend skip evidence visible through host isolation.
+        use std::io::Write;
+        std::io::stderr().lock().write_all(&output.stderr.bytes)?;
         assert_eq!(
             output.termination,
             Termination::Exit(0),
@@ -2592,6 +2595,9 @@ pub(crate) mod peer_tests {
 
     pub(crate) fn writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source()
     -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source")? {
+            return Ok(());
+        }
         use provenant_fabric_runtime::graph::{self, AttemptOwner};
         struct Seed(String);
         impl AttemptOwner for Seed {
