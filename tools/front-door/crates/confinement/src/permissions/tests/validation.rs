@@ -666,16 +666,17 @@ fn directory_discovery_keeps_literal_scope_and_refuses_symlinks()
             assert!(denied_probe(&outcome), "{outcome:?}");
             assert!(outcome.stdout.bytes.is_empty());
         }
-        // The regular-file path must still reject directories, even when
-        // the same literal is also requested for discovery.
+        // An exact runtime read may also name a real directory: it stays a
+        // literal (entry names only), never a subtree of its children.
         profile
             .spec
             .runtime_reads
             .push(profile.spec.discovery_reads[0].clone());
-        assert!(matches!(
-            compile_sbpl(&plan, &profile, &anchors),
-            Err(PermissionError::AnchorMismatchAt { .. })
-        ));
+        let listed = compile_sbpl(&plan, &profile, &anchors)?;
+        let listed = std::str::from_utf8(&listed.profile)?;
+        let literal = profile.spec.discovery_reads[0].path.display();
+        assert!(listed.contains(&format!("(literal \"{literal}\")")));
+        assert!(!listed.contains(&format!("(subpath \"{literal}\")")));
         profile.spec.runtime_reads.pop();
         let path = &profile.spec.discovery_reads[0].path;
         let moved = project.join("moved-config");

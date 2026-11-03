@@ -310,7 +310,9 @@ pub fn decide(
         PlanMode::Auto => {
             let size = if catalogue.get("by_size").and_then(Value::as_bool) == Some(true) {
                 with_builder(layers, name, config, origins, brief, |builder| {
-                    Ok(builder.shape_hint()?.and_then(|hint| hint.size))
+                    Ok(builder
+                        .shape_hint(builder.defers_review_size())?
+                        .and_then(|hint| hint.size))
                 })?
             } else {
                 None

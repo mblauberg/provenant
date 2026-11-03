@@ -2703,7 +2703,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                     .expect("isolated settings");
                 assert_eq!(argv[sources + 1], "");
                 let tools = argv.iter().position(|arg| arg == "--tools").expect("tools");
-                assert_eq!(argv[tools + 1], "Read,Grep,Glob,Bash");
+                assert_eq!(argv[tools + 1], "Read,Grep,Glob,Bash,Skill");
                 // The host's token is the only credential: no keychain or
                 // other credential path is readable. Only Provenant and its hook helpers are added.
                 assert!(
@@ -2721,7 +2721,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                     .iter()
                     .position(|arg| arg == "--allowedTools")
                     .expect("allow-list");
-                assert_eq!(argv[allowed + 1], "Bash,mcp__fabric__*");
+                assert_eq!(argv[allowed + 1], "Bash,Skill,mcp__fabric__*");
                 assert!(spec.profile.spec.authentication.is_empty());
                 assert!(spec.profile.spec.deny_keychain_access);
                 for (key, value) in [
@@ -3197,12 +3197,12 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
             let data_home = Path::new(env("XDG_DATA_HOME").expect("data home"));
             assert!(!config_home.starts_with("/fixture/state"));
             assert!(!data_home.starts_with("/fixture/state"));
-            if config_home.join("opencode").is_dir() {
+            if config_home.join("opencode/skills").is_dir() {
                 assert!(
                     spec.profile
                         .spec
                         .runtime_reads
-                        .contains(&crate::launch::subtree(config_home.join("opencode")))
+                        .contains(&crate::launch::subtree(config_home.join("opencode/skills")))
                 );
             }
             assert!(
@@ -4557,6 +4557,93 @@ fn covers(grant: &provenant_confinement::permissions::PathGrant, path: &std::pat
         PathScope::Exact => grant.path == path,
         PathScope::Subtree => path.starts_with(&grant.path),
     }
+}
+
+// A write overlaps a skill path if it covers the path or starts inside it.
+fn overlaps_skill(grant: &provenant_confinement::permissions::PathGrant, path: &Path) -> bool {
+    covers(grant, path) || grant.path.starts_with(path)
+}
+
+#[test]
+fn skill_write_overlap_detects_ancestors_and_descendants() {
+    let skill = Path::new("/fixture/skills/example");
+    for grant in [
+        crate::launch::subtree("/fixture/skills"),
+        crate::launch::subtree(skill),
+        crate::launch::subtree(skill.join("nested")),
+        crate::launch::exact(skill.join("SKILL.md")),
+    ] {
+        assert!(overlaps_skill(&grant, skill), "{grant:?}");
+    }
+    assert!(!overlaps_skill(
+        &crate::launch::exact("/fixture/skills"),
+        skill
+    ));
+    assert!(!overlaps_skill(
+        &crate::launch::subtree("/fixture/other"),
+        skill
+    ));
+}
+
+/// Probe the startup scan using the launch's HOME and rendered sandbox.
+#[cfg(target_os = "macos")]
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn codex_opt_out_skill_scan_succeeds_under_confinement() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::permissions::snapshot::render;
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let host = root.join("home");
+    let state = root.join("state");
+    std::fs::create_dir_all(host.join(".agents/skills/host-skill"))?;
+    std::fs::write(
+        host.join(".agents/skills/host-skill/SKILL.md"),
+        "host skill",
+    )?;
+    std::fs::create_dir_all(state.join(".agents/skills/private-skill"))?;
+    std::fs::write(
+        state.join(".agents/skills/private-skill/SKILL.md"),
+        "fixture skill",
+    )?;
+    let plan = read_only_plan(root.to_str().unwrap(), Some("login"));
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    route.set_user_skills(false);
+    let prompt = Prompt::new("fixture".into());
+    let repo = root.join("repo");
+    let mut input = fixture_input(&route, &plan, &prompt, &repo, None);
+    input.home = &host;
+    let launch = crate::codex::Codex.prepare(input)?;
+    let profile = render(plan.permissions(), &launch.profile, &host)?;
+    let home = &launch.env.iter().find(|(key, _)| key == "HOME").unwrap().1;
+    let scan = |home: &std::ffi::OsStr| {
+        std::process::Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", &profile, "/bin/sh", "-c", "/bin/ls -1 \"$HOME/.agents/skills\" && /bin/cat \"$HOME/.agents/skills\"/*/SKILL.md"])
+            .env_clear()
+            .env("HOME", home)
+            .output()
+    };
+    let output = scan(home)?;
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    if diagnostic.contains("sandbox_apply: Operation not permitted") {
+        provenant_test_support::skip_sandbox_dependent_test(format!(
+            "skill scan unavailable under inherited sandbox: {diagnostic}"
+        ))?;
+        return Ok(());
+    }
+    assert!(output.status.success(), "private HOME scan: {diagnostic}");
+    assert!(output.stdout.ends_with(b"fixture skill"));
+    let host_output = scan(host.as_os_str())?;
+    assert!(
+        !host_output.status.success(),
+        "host skill scan must be denied"
+    );
+    let host_error = String::from_utf8_lossy(&host_output.stderr);
+    assert!(
+        host_error.contains("Operation not permitted"),
+        "{host_error}"
+    );
+    Ok(())
 }
 
 #[test]
@@ -5920,10 +6007,11 @@ fn claude_writer_shell_has_private_config_scrubbed_children_and_rust_tools()
         launch
             .argv
             .iter()
-            .any(|arg| arg == "Read,Grep,Glob,Edit,Write,Bash")
+            .any(|arg| arg == "Read,Grep,Glob,Edit,Write,Bash,Skill")
     );
     assert!(launch.argv.windows(2).any(|pair| {
-        pair[0] == "--allowedTools" && pair[1] == "Read,Grep,Glob,Edit,Write,Bash,mcp__fabric__*"
+        pair[0] == "--allowedTools"
+            && pair[1] == "Read,Grep,Glob,Edit,Write,Bash,Skill,mcp__fabric__*"
     }));
     assert!(
         launch
@@ -6559,4 +6647,290 @@ fn free_plan_notional_value_and_extra_directories_parse_and_validate() {
     assert!(ok.validate().is_empty());
     let relative = accounts_with_plans("directories = [\"rel/dir\"]\n").unwrap();
     assert!(!relative.validate().is_empty());
+}
+
+#[test]
+fn user_skills_grants_resolve_linked_roots_resources_and_cycles()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().canonicalize()?;
+    let root = home.join("installed");
+    let target = home.join("releases/digest/skill");
+    let resource = home.join("shared/reference.md");
+    std::fs::create_dir_all(&root)?;
+    std::fs::create_dir_all(&target)?;
+    std::fs::create_dir_all(resource.parent().unwrap())?;
+    std::fs::write(&resource, "reference")?;
+    std::os::unix::fs::symlink(&root, home.join("skills"))?;
+    std::os::unix::fs::symlink(&target, root.join("skill"))?;
+    let deep = target.join("a/b/c/d/e/f/g");
+    std::fs::create_dir_all(&deep)?;
+    std::os::unix::fs::symlink(&resource, deep.join("reference.md"))?;
+    std::os::unix::fs::symlink(&root, target.join("cycle"))?;
+    std::os::unix::fs::symlink(home.join("absent"), root.join("broken"))?;
+    let grants = crate::user_skills_grants(&home.join("skills"));
+    assert_eq!(grants.len(), 3);
+    assert!(grants.contains(&crate::launch::subtree(&root)));
+    assert!(grants.contains(&crate::launch::subtree(&target)));
+    assert!(grants.contains(&crate::launch::exact(&resource)));
+    for grant in &grants {
+        let anchor = match grant.scope {
+            provenant_confinement::permissions::PathScope::Subtree => grant.path.as_path(),
+            provenant_confinement::permissions::PathScope::Exact => grant.path.parent().unwrap(),
+        };
+        provenant_confinement::permissions::AnchoredDirectory::open_canonical(anchor)?;
+    }
+    assert!(crate::user_skills_grants(&home.join("absent")).is_empty());
+    Ok(())
+}
+
+fn assert_lane_user_skills(adapter: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().canonicalize()?;
+    // Exercise OpenCode's host-selected XDG location, not the fallback only.
+    let config_home = home.join("xdg-config");
+    let host_var =
+        |key: &str| (key == "XDG_CONFIG_HOME").then(|| config_home.clone().into_os_string());
+    let skills = match adapter {
+        "claude" => home.join(".claude/skills"),
+        "codex" => home.join(".agents/skills"),
+        "agy" => home.join(".gemini/skills"),
+        "cursor" => home.join(".cursor/skills"),
+        "opencode" => config_home.join("opencode/skills"),
+        _ => unreachable!(),
+    };
+    let opencode_config = config_home.join("opencode/opencode.json");
+    if adapter == "opencode" {
+        std::fs::create_dir_all(opencode_config.parent().unwrap())?;
+        std::fs::write(&opencode_config, "{}")?;
+    }
+    let target = home.join(".local/share/provenant/v1/releases/digest/skill");
+    std::fs::create_dir_all(&target)?;
+    let resource = home.join("shared/reference.md");
+    std::fs::create_dir_all(resource.parent().unwrap())?;
+    std::fs::write(&resource, "fixture reference")?;
+    std::os::unix::fs::symlink(&resource, target.join("reference.md"))?;
+    let prompt = Prompt::new("fixture".into());
+    let token = fixture_token();
+    let authentication = match adapter {
+        "codex" | "cursor" => Some("login"),
+        "agy" => Some("keychain"),
+        _ => None,
+    };
+    let provider = REGISTRY
+        .iter()
+        .find(|entry| entry.adapter.id() == adapter)
+        .unwrap()
+        .adapter;
+    for access in [Access::ReadOnly, Access::WorktreeWrite] {
+        for state in ["missing", "discover", "off"] {
+            let enabled = state != "off";
+            if state == "discover" {
+                std::fs::create_dir_all(&skills)?;
+                std::os::unix::fs::symlink(&target, skills.join("skill"))?;
+            }
+            let plan = fixture_access_plan(access, authentication, false);
+            let mut route = route(adapter, "fixture-model");
+            route.account_key = None;
+            route.set_user_skills(enabled);
+            let mut input = fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                Path::new("/fixture/repo"),
+                Some(&token),
+            );
+            input.home = &home;
+            input.host_var = &host_var;
+            let spec = provider.prepare(input)?;
+            let exposed = state == "discover";
+            if adapter == "opencode" {
+                assert!(
+                    spec.profile
+                        .spec
+                        .runtime_reads
+                        .contains(&crate::launch::exact(&opencode_config))
+                );
+                let config: serde_json::Value = serde_json::from_str(
+                    spec.env
+                        .iter()
+                        .find(|(key, _)| key == "OPENCODE_CONFIG_CONTENT")
+                        .unwrap()
+                        .1
+                        .to_str()
+                        .unwrap(),
+                )?;
+                assert_eq!(
+                    config["permission"]["read"][resource.to_str().unwrap()] == "allow",
+                    exposed
+                );
+                assert_eq!(
+                    config["permission"]["external_directory"][format!("{}/**", target.display())]
+                        == "allow",
+                    exposed
+                );
+            }
+            if adapter == "agy" && access == Access::ReadOnly {
+                for directory in [&target, resource.parent().unwrap()] {
+                    assert_eq!(
+                        spec.argv
+                            .windows(2)
+                            .any(|pair| pair[0] == "--add-dir" && pair[1] == directory.as_os_str()),
+                        exposed
+                    );
+                }
+            }
+            for path in [&skills, &target, &resource] {
+                assert_eq!(
+                    spec.profile
+                        .spec
+                        .runtime_reads
+                        .iter()
+                        .any(|grant| covers(grant, path)),
+                    exposed,
+                    "{adapter} {access:?} {state}: {path:?}"
+                );
+                let writes = spec
+                    .profile
+                    .spec
+                    .tool_writes
+                    .iter()
+                    .chain(&spec.profile.spec.state_writes)
+                    .chain(
+                        spec.profile
+                            .spec
+                            .authentication
+                            .iter()
+                            .flat_map(|auth| &auth.in_place_writes),
+                    )
+                    .chain(std::iter::once(&plan.permissions().scratch))
+                    .chain(&plan.permissions().private_state);
+                assert!(
+                    writes.into_iter().all(|grant| !overlaps_skill(grant, path)),
+                    "{adapter} skill writable: {path:?}"
+                );
+            }
+            // Only the skills subtree is added, never the containing host config.
+            assert!(
+                !spec
+                    .profile
+                    .spec
+                    .runtime_reads
+                    .contains(&crate::launch::subtree(skills.parent().unwrap()))
+            );
+            let linked = spec.setup.iter().any(|step| {
+                matches!(step,
+                SetupStep::Symlink { target, .. } if target == &skills)
+            });
+            if adapter == "agy" || (adapter == "claude" && access == Access::WorktreeWrite) {
+                assert_eq!(linked, exposed, "{adapter} {access:?} {state}");
+            }
+            if adapter == "claude" {
+                assert!(
+                    !spec
+                        .argv
+                        .iter()
+                        .any(|arg| arg == "--disable-slash-commands")
+                );
+                assert!(
+                    spec.argv
+                        .iter()
+                        .any(|arg| arg.to_string_lossy().contains("Skill"))
+                );
+                if exposed {
+                    assert!(spec.argv.windows(2).any(|pair| pair[0] == "--add-dir"
+                        && pair[1] == resource.parent().unwrap().as_os_str()));
+                    assert!(!spec.argv.iter().any(|arg| arg == resource.as_os_str()));
+                }
+            }
+            if adapter == "codex" && !enabled {
+                assert!(
+                    spec.env
+                        .iter()
+                        .any(|(key, value)| key == "HOME" && value == "/fixture/state")
+                );
+            }
+            if state == "off" {
+                std::fs::remove_file(skills.join("skill"))?;
+                std::fs::remove_dir(&skills)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+macro_rules! user_skills_adapter_test {
+    ($name:ident, $adapter:literal) => {
+        #[test]
+        fn $name() -> Result<(), Box<dyn std::error::Error>> {
+            assert_lane_user_skills($adapter)
+        }
+    };
+}
+user_skills_adapter_test!(
+    claude_user_skills_are_read_only_optional_and_missing_safe,
+    "claude"
+);
+user_skills_adapter_test!(
+    codex_user_skills_are_read_only_optional_and_missing_safe,
+    "codex"
+);
+user_skills_adapter_test!(
+    agy_user_skills_are_read_only_optional_and_missing_safe,
+    "agy"
+);
+user_skills_adapter_test!(
+    opencode_user_skills_are_read_only_optional_and_missing_safe,
+    "opencode"
+);
+user_skills_adapter_test!(
+    cursor_user_skills_are_read_only_optional_and_missing_safe,
+    "cursor"
+);
+
+#[test]
+fn claude_user_skills_use_private_placement_for_registered_readers()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().canonicalize()?;
+    let skills = home.join(".claude/skills");
+    std::fs::create_dir_all(&skills)?;
+    let account_dir = home.join("accounts/claude");
+    let key = identity::fingerprint("fixture@example.test").unwrap();
+    let account = identity::RegisteredAccount::new("claude", &key, account_dir.clone())?;
+    let token = fixture_token().for_account(&key, &account_dir);
+    let plan = fixture_access_plan(Access::ReadOnly, None, false);
+    let prompt = Prompt::new("fixture".into());
+    let mut route = route("claude", "fixture-model");
+    route.account_key = Some(key);
+    let mut input = fixture_input(
+        &route,
+        &plan,
+        &prompt,
+        Path::new("/fixture/repo"),
+        Some(&token),
+    );
+    input.home = &home;
+    input.account = Some(&account);
+    let spec = crate::claude::Claude.prepare(input)?;
+    assert!(
+        spec.env
+            .iter()
+            .any(|(key, value)| key == "CLAUDE_CONFIG_DIR"
+                && value == "/fixture/state/claude-config")
+    );
+    assert!(
+        spec.setup
+            .iter()
+            .any(|step| matches!(step, SetupStep::Symlink { link, target }
+        if link == Path::new("/fixture/state/claude-config/skills") && target == &skills))
+    );
+    assert!(
+        spec.profile
+            .spec
+            .runtime_reads
+            .iter()
+            .all(|grant| !covers(grant, &account_dir))
+    );
+    Ok(())
 }

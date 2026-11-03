@@ -252,6 +252,11 @@ fn preset_role_titles_keep_user_and_inherited_overrides() {
     assert_eq!(expanded.document["nodes"][0]["title"], "User question 1");
 }
 
+/// A node's primary route: read-only aliases repeat as `routes`, others keep `route`.
+fn route(node: &serde_json::Value) -> &serde_json::Value {
+    node.get("route").unwrap_or_else(|| &node["routes"][0])
+}
+
 fn nodes(name: &str) -> serde_json::Value {
     expand(&Layers::empty(), name, "brief", &[])
         .unwrap()
@@ -272,6 +277,7 @@ stages = [{ id = "map", role = "scout" }, { id = "fix", role = "implementer" }]
 worktree = "/repo/lane"
 [roles.scout]
 tier = "junior"
+fallback_tier = "junior"
 title = "Map the call sites"
 prompt = "Find call sites for ${prompt}"
 read_roots = ["/repo/other"]
@@ -286,9 +292,21 @@ prompt = "Implement ${prompt}"
 "#,
         )
         .unwrap();
+    layers.known_routes = Some(["senior".to_owned()].into());
     let expanded = expand(&layers, "roles", "the change", &[]).unwrap();
     let leaves = &expanded.document["nodes"];
-    assert_eq!(leaves[0]["route"], json!({"alias":"junior"}));
+    let exact = expand(
+        &layers,
+        "roles",
+        "the change",
+        &["map.tier='codex/gpt-6@high'".into()],
+    )
+    .unwrap();
+    assert_eq!(
+        *route(&exact.document["nodes"][0]),
+        json!({"adapter":"codex","model":"gpt-6","effort":"high"})
+    );
+    assert_eq!(*route(&leaves[0]), json!({"alias":"junior"}));
     assert_eq!(leaves[0]["title"], "Map the call sites");
     assert_eq!(leaves[0]["prompt"], "Find call sites for the change");
     assert_eq!(leaves[0]["access"], "read_only");
@@ -350,7 +368,7 @@ kind = "synthesise"
     assert_eq!(nodes[0]["kind"], "composite");
     let scouts = &nodes[0]["composite"]["nodes"];
     assert_eq!(scouts.as_array().unwrap().len(), 3);
-    assert_eq!(scouts[0]["route"]["alias"], "junior");
+    assert_eq!(route(&scouts[0])["alias"], "junior");
     assert_eq!(scouts[0]["prompt"], "Scope 1: map");
     assert_eq!(scouts[1]["prompt"], "Scope 2: map");
     assert_eq!(scouts[2]["kind"], "composite");
@@ -859,29 +877,29 @@ fn bundled_expansions_match_golden_graphs() {
     assert_eq!(
         nodes("single"),
         json!([
-            {"id":"task", "title":"task", "access":"read_only", "prompt":"brief", "route":{"alias":"senior"}, "depends_on":[]}
+            {"id":"task", "title":"task", "access":"read_only", "prompt":"brief", "routes":[{"alias":"senior"},{"alias":"senior"}], "depends_on":[]}
         ])
     );
     assert_eq!(
         nodes("chain"),
         json!([
-            {"id":"first", "title":"first", "access":"read_only", "prompt":"brief", "route":{"alias":"senior"}, "depends_on":[]},
-            {"id":"second", "title":"second", "access":"read_only", "prompt":"brief", "route":{"alias":"senior"}, "depends_on":["first"], "inputs":[{"node":"first","outputs":["result"]}]}
+            {"id":"first", "title":"first", "access":"read_only", "prompt":"brief", "routes":[{"alias":"senior"},{"alias":"senior"}], "depends_on":[]},
+            {"id":"second", "title":"second", "access":"read_only", "prompt":"brief", "routes":[{"alias":"senior"},{"alias":"senior"}], "depends_on":["first"], "inputs":[{"node":"first","outputs":["result"]}]}
         ])
     );
     assert_eq!(
         nodes("fan-out"),
         json!([
-            {"id":"branch-1", "title":"branch-1", "access":"read_only", "prompt":"brief", "route":{"alias":"senior"}, "depends_on":[]},
-            {"id":"branch-2", "title":"branch-2", "access":"read_only", "prompt":"brief", "route":{"alias":"senior"}, "depends_on":[]}
+            {"id":"branch-1", "title":"branch-1", "access":"read_only", "prompt":"brief", "routes":[{"alias":"senior"},{"alias":"senior"}], "depends_on":[]},
+            {"id":"branch-2", "title":"branch-2", "access":"read_only", "prompt":"brief", "routes":[{"alias":"senior"},{"alias":"senior"}], "depends_on":[]}
         ])
     );
     assert_eq!(
         nodes("fan-out-synthesise"),
         json!([
-            {"id":"branch-1", "title":"branch-1", "access":"read_only", "prompt":"brief", "route":{"alias":"senior"}, "depends_on":[]},
-            {"id":"branch-2", "title":"branch-2", "access":"read_only", "prompt":"brief", "route":{"alias":"senior"}, "depends_on":[]},
-            {"id":"synthesis", "title":"synthesis", "kind":"synthesise", "access":"read_only", "prompt":"brief", "route":{"alias":"senior"}, "depends_on":["branch-1","branch-2"], "inputs":[{"node":"branch-1","outputs":["result"]},{"node":"branch-2","outputs":["result"]}]}
+            {"id":"branch-1", "title":"branch-1", "access":"read_only", "prompt":"brief", "routes":[{"alias":"senior"},{"alias":"senior"}], "depends_on":[]},
+            {"id":"branch-2", "title":"branch-2", "access":"read_only", "prompt":"brief", "routes":[{"alias":"senior"},{"alias":"senior"}], "depends_on":[]},
+            {"id":"synthesis", "title":"synthesis", "kind":"synthesise", "access":"read_only", "prompt":"brief", "routes":[{"alias":"senior"},{"alias":"senior"}], "depends_on":["branch-1","branch-2"], "inputs":[{"node":"branch-1","outputs":["result"]},{"node":"branch-2","outputs":["result"]}]}
         ])
     );
     for name in ["single", "chain", "fan-out", "fan-out-synthesise"] {
@@ -950,7 +968,7 @@ fn layering_composition_and_refusals() {
         &["parameters.route=\"fast\"".into()],
     )
     .unwrap();
-    assert_eq!(result.document["nodes"][0]["route"]["alias"], "fast");
+    assert_eq!(route(&result.document["nodes"][0])["alias"], "fast");
     assert_eq!(result.origins["parameters.route"], "--set");
     layers
         .insert(
@@ -962,18 +980,18 @@ fn layering_composition_and_refusals() {
     let result = expand(&layers, "chain", "brief", &[]).unwrap();
     assert_eq!(result.document["nodes"][0]["id"], "first");
     assert_eq!(
-        result.document["nodes"][0]["composite"]["nodes"][0]["route"]["alias"],
+        route(&result.document["nodes"][0]["composite"]["nodes"][0])["alias"],
         "utility"
     );
     let result = expand(&layers, "chain", "brief", &["first.route='fast'".into()]).unwrap();
     assert_eq!(
-        result.document["nodes"][0]["composite"]["nodes"][0]["route"]["alias"],
+        route(&result.document["nodes"][0]["composite"]["nodes"][0])["alias"],
         "fast"
     );
     assert_eq!(result.origins["first.route"], "--set");
     // A leaf stage takes its own fields by stage id.
     let result = expand(&layers, "chain", "brief", &["second.tier='junior'".into()]).unwrap();
-    assert_eq!(result.document["nodes"][1]["route"]["alias"], "junior");
+    assert_eq!(route(&result.document["nodes"][1])["alias"], "junior");
     assert!(
         expand(&layers, "single", "brief", &["parameters.nope=1".into()])
             .unwrap_err()
@@ -1888,7 +1906,7 @@ fn lens_tiers_come_from_the_review_shape_unless_overridden() {
         .as_array()
         .unwrap();
     assert_eq!(nodes.len(), 3);
-    assert!(nodes.iter().all(|node| node["route"]["alias"] == "junior"));
+    assert!(nodes.iter().all(|node| route(node)["alias"] == "junior"));
     let document = council(
         &[
             "parameters.worktree='/repo/lane'",
@@ -1901,7 +1919,24 @@ fn lens_tiers_come_from_the_review_shape_unless_overridden() {
     let nodes = document["nodes"][1]["composite"]["nodes"]
         .as_array()
         .unwrap();
-    assert_eq!(nodes[0]["route"]["alias"], "principal");
+    assert_eq!(route(&nodes[0])["alias"], "principal");
+    for (tier, expected) in [
+        (
+            "'codex/gpt-6@high'",
+            json!({"adapter":"codex","model":"gpt-6","effort":"high"}),
+        ),
+        (
+            "{alias='senior',effort='high'}",
+            json!({"alias":"senior","effort":"high"}),
+        ),
+    ] {
+        let lenses = format!("parameters.lenses=[{{name='tests',tier={tier},when=''}}]");
+        let document = council(&["parameters.worktree='/repo/lane'", &lenses], true).unwrap();
+        assert_eq!(
+            *route(&document["nodes"][1]["composite"]["nodes"][0]),
+            expected
+        );
+    }
 }
 
 fn lens_count(document: &serde_json::Value, council: &str) -> usize {
@@ -2211,15 +2246,12 @@ fn the_external_scout_falls_back_and_records_a_substitution_without_a_web_route(
     layers.known_routes = Some(["senior".to_owned()].into());
     let expanded = expand(&layers, "scout-swarm", "brief", &[]).unwrap();
     let scout = node(&expanded.document, "external");
-    assert_eq!(scout["route"]["alias"], "junior");
+    assert_eq!(route(scout)["alias"], "junior");
     assert_eq!(expanded.substitutions.len(), 1);
     assert_eq!(expanded.substitutions[0]["requested"], "web");
     layers.known_routes = Some(["web".to_owned()].into());
     let expanded = expand(&layers, "scout-swarm", "brief", &[]).unwrap();
-    assert_eq!(
-        node(&expanded.document, "external")["route"]["alias"],
-        "web"
-    );
+    assert_eq!(route(node(&expanded.document, "external"))["alias"], "web");
     assert!(expanded.substitutions.is_empty());
     let prompt = node(&expanded.document, "external")["prompt"]
         .as_str()
@@ -2271,7 +2303,7 @@ fn review_council_verifies_between_the_lenses_and_the_synthesis() {
     let verify = node(&expanded.document, "verify");
     assert_eq!(verify["distinct_from"], "dependencies");
     assert_eq!(verify["source"], json!({"type": "node", "node": "subject"}));
-    assert_eq!(verify["route"]["alias"], "verifier");
+    assert_eq!(route(verify)["alias"], "verifier");
     assert_eq!(verify["depends_on"], json!(["lenses", "subject"]));
     let synthesis = node(&expanded.document, "synthesis");
     assert_eq!(synthesis["depends_on"], json!(["verify", "subject"]));
@@ -2321,10 +2353,7 @@ fn the_verifier_route_falls_back_to_senior_when_undefined() {
         &["parameters.worktree='/repo/lane'".into()],
     )
     .unwrap();
-    assert_eq!(
-        node(&expanded.document, "verify")["route"]["alias"],
-        "senior"
-    );
+    assert_eq!(route(node(&expanded.document, "verify"))["alias"], "senior");
     assert_eq!(expanded.substitutions[0]["node"], "verify");
 }
 
@@ -2337,13 +2366,36 @@ fn generator_evaluator_ends_with_an_evaluator_over_the_lens_list() {
         &[
             "parameters.worktree='/repo/lane'".into(),
             "parameters.evaluator='principal'".into(),
+            "parameters.base='main'".into(),
         ],
     )
     .unwrap();
     let evaluate = node(&expanded.document, "evaluate");
     assert_eq!(evaluate["kind"], "synthesise");
-    assert_eq!(evaluate["route"]["alias"], "principal");
+    assert_eq!(route(evaluate)["alias"], "principal");
     assert_eq!(evaluate["source"]["node"], "implement");
+    assert_eq!(evaluate["review_base"], "main");
+    let document: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(expanded.document.clone()).unwrap();
+    let graph = document
+        .expanded(&provenant_fabric_runtime::config::GraphLimits::default())
+        .unwrap();
+    let lenses: Vec<_> = graph
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.role
+                .as_deref()
+                .is_some_and(|role| role.starts_with("lens."))
+        })
+        .collect();
+    assert!(!lenses.is_empty());
+    for lens in lenses {
+        assert_eq!(lens.extra.get("review_base"), Some(&json!("main")));
+        assert!(
+            matches!(&lens.source, Some(provenant_fabric_runtime::graph::SourceBinding::Node { node }) if node == "implement")
+        );
+    }
     assert!(
         evaluate["prompt"]
             .as_str()
@@ -2506,7 +2558,7 @@ fn stage_ids_address_set_paths_on_leaves_and_presets() {
         &["synthesis.tier='principal'".into()],
     )
     .unwrap();
-    assert_eq!(result.document["nodes"][2]["route"]["alias"], "principal");
+    assert_eq!(route(&result.document["nodes"][2])["alias"], "principal");
     // Default ids address unnamed stages by position.
     let mut layers = Layers::empty();
     layers
@@ -2518,7 +2570,7 @@ fn stage_ids_address_set_paths_on_leaves_and_presets() {
         .unwrap();
     let result = expand(&layers, "pair", "brief", &["s2.route='fast'".into()]).unwrap();
     assert_eq!(
-        result.document["nodes"][1]["composite"]["nodes"][0]["route"]["alias"],
+        route(&result.document["nodes"][1]["composite"]["nodes"][0])["alias"],
         "fast"
     );
     let error = expand(&layers, "pair", "brief", &["s1.id='x'".into()]).unwrap_err();
@@ -2595,6 +2647,7 @@ fn every_catalogue_preset_has_a_pattern_and_an_explanation() {
     assert_eq!(
         explained["parameters"],
         json!([
+            {"name":"distinct_families","type":"boolean","default":false,"doc":"Prefer different model families across the branches. A preference only: every branch still runs.","origin":"bundled"},
             {"name":"route","type":"string","default":"senior","doc":"Routing pool for every branch.","origin":"bundled"},
             {"name":"width","type":"integer","default":2,"min":1,"max":32,"doc":"Number of parallel branches.","origin":"bundled"}
         ])
@@ -3027,7 +3080,7 @@ fn previous_round_selections_resolve_against_the_loop_body() {
 
 mod planner_front_end {
     use super::super::preset::{Layers, expand_with, find_prompt, planner};
-    use super::shapes;
+    use super::{route, shapes};
     use provenant_fabric_runtime::config::{PlanAuto, PlanMode};
     use serde_json::{Value, json};
 
@@ -3093,7 +3146,7 @@ mod planner_front_end {
         assert_eq!(plan["kind"], "plan");
         assert_eq!(plan["role"], "plan.shape");
         assert_eq!(plan["access"], "read_only");
-        assert_eq!(plan["route"]["alias"], "principal");
+        assert_eq!(route(plan)["alias"], "principal");
         assert_eq!(plan["depends_on"], json!(["scout"]));
         assert_eq!(plan["plan"]["patterns_only"], true);
         assert_eq!(plan["plan"]["disjoint_waves"], true);
@@ -3222,7 +3275,7 @@ mod planner_front_end {
             assert_eq!(pattern_names(&fan), ["worker"], "{name}");
             let worker = pattern(&fan, "worker");
             assert_eq!(worker["parameters"]["route"]["default"], "senior");
-            assert_eq!(worker["nodes"][0]["route"]["alias"], "${route}");
+            assert_eq!(route(&worker["nodes"][0])["alias"], "${route}");
         }
         let synth = run(&on, "fan-out-synthesise", "brief", Vec::new());
         assert_eq!(ids(&synth), ["plan", "synthesis"]);
@@ -3369,7 +3422,7 @@ mod planner_front_end {
         let leg = pattern(&planned, "lens-correctness-spec");
         assert_eq!(leg["nodes"][0]["role"], "lens.correctness-spec");
         assert_eq!(leg["nodes"][0]["source"]["type"], "commit");
-        assert_eq!(leg["nodes"][0]["route"]["alias"], "${tier}");
+        assert_eq!(route(&leg["nodes"][0])["alias"], "${tier}");
         assert_eq!(leg["parameters"]["tier"]["default"], "junior");
         assert!(
             leg["parameters"]["tier"]["enum"]
@@ -4276,8 +4329,11 @@ fn deliver_forwards_size_and_kind_into_the_review_panel() {
     );
 }
 
+/// A review of a head or node subject with no size or shape cannot be measured
+/// until the subject is pinned, so expansion emits one deferred node for the
+/// host to resolve and measures nothing itself.
 #[test]
-fn an_unmeasurable_review_degrades_to_a_warning_and_expansion_succeeds() {
+fn a_head_subject_review_defers_its_size_to_the_pinned_commit() {
     let layers = real_selector("/nonexistent");
     let expanded = expand(
         &layers,
@@ -4289,15 +4345,194 @@ fn an_unmeasurable_review_degrades_to_a_warning_and_expansion_succeeds() {
         ],
     )
     .unwrap();
-    assert_eq!(review_lens_count(&expanded.document), 3);
+    let document = &expanded.document;
+    assert_eq!(document["schema_version"], 2);
+    assert_eq!(document["review_base"], "main");
+    // No expansion-time git read: nothing to degrade, nothing to warn about.
+    assert!(expanded.warnings.is_empty(), "{:?}", expanded.warnings);
+    let review = &document["nodes"][2]["composite"]["nodes"];
+    let lenses = &review[1];
+    assert_eq!(lenses["id"], "lenses");
+    assert_eq!(lenses["kind"], "plan");
+    assert_eq!(lenses["review"]["worktree"], "/repo/w");
+    assert_eq!(lenses["review"]["max_nodes"], 12);
+    assert_eq!(lenses["depends_on"], json!(["subject"]));
+    assert_eq!(lenses["read_roots"], json!(["/repo/w"]));
+    assert!(lenses.get("composite").is_none());
+    let templates = lenses["lens_templates"].as_object().unwrap();
+    assert!(templates.contains_key("correctness-spec") && templates.contains_key("adversarial"));
+    let template = &templates["tests"];
+    assert_eq!(template["access"], "read_only");
+    assert_eq!(template["role"], "lens.tests");
+    for stripped in ["route", "routes", "depends_on", "inputs", "read_roots"] {
+        assert!(template.get(stripped).is_none(), "{stripped}");
+    }
+    // The writer keeps one route; read-only members repeat their alias.
+    assert!(document["nodes"][0].get("routes").is_none());
+    assert_eq!(document["nodes"][0]["route"]["alias"], "senior");
+    assert_eq!(review[0]["routes"].as_array().unwrap().len(), 2);
+    let verify = &review[2];
+    assert_eq!(verify["id"], "verify");
+    let document: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(document.clone()).unwrap();
+    assert_eq!(document.review_base.as_deref(), Some("main"));
+}
+
+#[test]
+fn explicit_size_shape_and_commit_subjects_keep_the_static_v1_panel() {
+    let layers = real_selector("/nonexistent");
+    let deliver = |extra: &str| {
+        expand(
+            &layers,
+            "deliver",
+            "brief",
+            &["parameters.worktree='/repo/w'".into(), extra.into()],
+        )
+        .unwrap()
+        .document
+    };
+    for extra in ["parameters.size='small'", "parameters.review_shape='quick'"] {
+        let document = deliver(extra);
+        assert_eq!(document["schema_version"], 1, "{extra}");
+        assert!(document.get("review_base").is_none(), "{extra}");
+        assert!(document["nodes"][2]["composite"]["nodes"][1]["composite"].is_object());
+    }
+    // The default council reviews a commit, which is already pinned.
+    let document = expand(
+        &layers,
+        "review-council",
+        "brief",
+        &["parameters.worktree='/repo/w'".into()],
+    )
+    .unwrap()
+    .document;
+    assert_eq!(document["schema_version"], 1);
+    assert!(document["nodes"][1]["composite"].is_object());
+    // A preset that never reviews stays on v1 with no review fields.
+    for name in ["single", "chain", "fan-out", "scout-swarm"] {
+        let document = expand(&Layers::empty(), name, "brief", &[])
+            .unwrap()
+            .document;
+        assert_eq!(document["schema_version"], 1, "{name}");
+    }
+}
+
+#[test]
+fn reviews_that_disagree_on_the_base_are_refused() {
+    let mut layers = real_selector("/nonexistent");
+    layers
+        .insert(
+            "repo",
+            "two-reviews",
+            r#"
+stages = [
+  { id = "a", role = "writer" },
+  { id = "first", preset = "review-council", depends_on = ["a"], parameters = { subject = { type = "head", node = "a" }, worktree = "/repo/w", base = "main" } },
+  { id = "second", preset = "review-council", depends_on = ["a"], parameters = { subject = { type = "head", node = "a" }, worktree = "/repo/w", base = "release" } },
+]
+[parameters]
+worktree = { type = "string", default = "/repo/w" }
+[roles.writer]
+tier = "senior"
+access = "worktree_write"
+worktree = "${worktree}"
+write_scope = ["src"]
+"#,
+        )
+        .unwrap();
+    let error = expand(&layers, "two-reviews", "brief", &[]).unwrap_err();
+    assert!(error.contains("disagree on the base"), "{error}");
+}
+
+#[test]
+fn read_only_aliases_repeat_while_exact_models_and_writers_stay_single() {
+    let tiers = |bad: bool| {
+        let mut layers = Layers::empty();
+        layers
+            .insert(
+                "repo",
+                "tiers",
+                &format!(
+                    r#"
+stages = [
+  {{ id = "look", role = "scout" }},
+  {{ id = "pin", role = "scout-exact" }},
+  {{ id = "edit", role = "writer" }},
+  {{ id = "table", role = "scout-table" }},
+]
+[parameters]
+worktree = "/repo/lane"
+[roles.scout]
+tier = "junior"
+[roles.scout-exact]
+tier = "codex/gpt-6@high"
+[roles.scout-table]
+tier = {{ {} }}
+[roles.writer]
+tier = "senior"
+access = "worktree_write"
+worktree = "${{worktree}}"
+write_scope = ["src"]
+"#,
+                    if bad {
+                        "effort = \"high\""
+                    } else {
+                        "alias = \"senior\", effort = \"high\""
+                    }
+                ),
+            )
+            .unwrap();
+        layers.known_routes = Some(["senior".to_owned()].into());
+        expand(&layers, "tiers", "brief", &[])
+    };
+    let error = tiers(true).unwrap_err();
     assert!(
-        expanded
-            .warnings
-            .iter()
-            .any(|w| w.contains("cannot measure review size") && w.contains("size unknown")),
-        "{:?}",
-        expanded.warnings
+        error.contains("route table needs an alias, or an adapter and a model"),
+        "{error}"
     );
+    let nodes = tiers(false).unwrap().document["nodes"].clone();
+    assert_eq!(
+        nodes[0]["routes"],
+        json!([{"alias":"junior"}, {"alias":"junior"}])
+    );
+    assert_eq!(
+        nodes[1]["route"],
+        json!({"adapter":"codex","model":"gpt-6","effort":"high"})
+    );
+    assert!(nodes[1].get("routes").is_none());
+    assert_eq!(nodes[2]["route"], json!({"alias":"senior"}));
+    assert!(nodes[2].get("routes").is_none());
+    // A kept route table repeats like any other read-only alias.
+    assert_eq!(
+        nodes[3]["routes"],
+        json!([{"alias":"senior","effort":"high"}, {"alias":"senior","effort":"high"}])
+    );
+}
+
+#[test]
+fn distinct_families_labels_the_siblings_of_a_fan_out() {
+    let family = |extra: &[&str]| {
+        let overrides: Vec<String> = extra.iter().map(|s| (*s).to_owned()).collect();
+        expand(&Layers::empty(), "fan-out", "brief", &overrides)
+            .unwrap()
+            .document
+    };
+    let off = family(&[]);
+    assert_eq!(off["schema_version"], 1);
+    assert!(off["nodes"][0].get("family_group").is_none());
+    let on = family(&["parameters.distinct_families=true", "parameters.width=3"]);
+    assert_eq!(on["schema_version"], 2);
+    let groups: Vec<_> = on["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["family_group"].clone())
+        .collect();
+    assert_eq!(groups.len(), 3);
+    assert!(groups[0].is_string() && groups.iter().all(|group| *group == groups[0]));
+    // A single branch has no sibling to separate from.
+    let single = family(&["parameters.distinct_families=true", "parameters.width=1"]);
+    assert!(single["nodes"][0].get("family_group").is_none());
 }
 
 #[test]
@@ -4314,6 +4549,65 @@ fn an_unknown_size_override_is_refused() {
     )
     .unwrap_err();
     assert!(error.contains("unknown review size"), "{error}");
+}
+
+/// A council over a pinned commit expands statically, yet it still records the
+/// requested base so the host submits a real diff rather than a self-diff.
+#[test]
+fn a_static_commit_council_records_the_requested_base() {
+    let layers = real_selector("/nonexistent");
+    let document = expand(
+        &layers,
+        "review-council",
+        "brief",
+        &[
+            "parameters.worktree='/repo/w'".into(),
+            "parameters.base='origin/main'".into(),
+        ],
+    )
+    .unwrap()
+    .document;
+    assert!(document["nodes"][1]["composite"].is_object());
+    assert_eq!(document["review_base"], "origin/main");
+}
+
+/// The lenses of a generator-evaluator judge what the writer commits, so the
+/// panel is resolved after the writer runs even though the preset's own subject
+/// is a commit.
+#[test]
+fn a_generator_review_defers_its_size_until_the_writer_has_run() {
+    let layers = real_selector("/nonexistent");
+    let document = expand(
+        &layers,
+        "generator-evaluator",
+        "brief",
+        &["parameters.worktree='/repo/lane'".into()],
+    )
+    .unwrap()
+    .document;
+    assert_eq!(document["schema_version"], 2);
+    let lens = document["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == "lens")
+        .unwrap();
+    assert_eq!(lens["kind"], "plan");
+    assert_eq!(lens["source"]["type"], "node");
+    assert_eq!(lens["source"]["node"], "implement");
+    assert!(lens["lens_templates"].is_object());
+    let sized = expand(
+        &layers,
+        "generator-evaluator",
+        "brief",
+        &[
+            "parameters.worktree='/repo/lane'".into(),
+            "parameters.size='small'".into(),
+        ],
+    )
+    .unwrap()
+    .document;
+    assert_eq!(sized["schema_version"], 1);
 }
 
 #[test]
@@ -4432,164 +4726,164 @@ fn preset_file_spec_reaches_review_nodes_and_warns_when_missing() {
     let brief = find_prompt(&fallback.document["nodes"], "lens.correctness-spec").unwrap();
     assert!(brief.contains("wrong project spec"));
     assert!(brief.contains(&project.join(".agent-run/spec.md").display().to_string()));
-}
 
-#[cfg(unix)]
-#[test]
-fn preset_file_spec_falls_back_after_read_error_and_names_all_candidates() {
-    let temp = tempfile::tempdir().unwrap();
-    let project = temp.path().join("project");
-    let writer = temp.path().join("writer");
-    std::fs::create_dir_all(project.join(".agent-run")).unwrap();
-    // Opening a directory succeeds on Unix, but reading it as a file fails.
-    std::fs::create_dir_all(writer.join(".agent-run/spec.md")).unwrap();
-    let project_spec = project.join(".agent-run/spec.md");
-    std::fs::write(&project_spec, "project acceptance criteria").unwrap();
-    let mut layers = Layers::empty();
-    layers.project_dir = Some(project.clone());
-    let expand_spec = || {
-        super::preset::expand_with(
-            &layers,
-            "generator-evaluator",
-            "brief",
-            &[
-                ("worktree".into(), json!(writer)),
-                ("spec".into(), json!(".agent-run/spec.md")),
-            ],
-            &[],
-        )
-        .unwrap()
-    };
-    let expanded = expand_spec();
-    assert!(
-        find_prompt(&expanded.document["nodes"], "lens.correctness-spec")
+    #[cfg(unix)]
+    #[test]
+    fn preset_file_spec_falls_back_after_read_error_and_names_all_candidates() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let writer = temp.path().join("writer");
+        std::fs::create_dir_all(project.join(".agent-run")).unwrap();
+        // Opening a directory succeeds on Unix, but reading it as a file fails.
+        std::fs::create_dir_all(writer.join(".agent-run/spec.md")).unwrap();
+        let project_spec = project.join(".agent-run/spec.md");
+        std::fs::write(&project_spec, "project acceptance criteria").unwrap();
+        let mut layers = Layers::empty();
+        layers.project_dir = Some(project.clone());
+        let expand_spec = || {
+            super::preset::expand_with(
+                &layers,
+                "generator-evaluator",
+                "brief",
+                &[
+                    ("worktree".into(), json!(writer)),
+                    ("spec".into(), json!(".agent-run/spec.md")),
+                ],
+                &[],
+            )
             .unwrap()
-            .contains("project acceptance criteria")
-    );
-    assert!(!expanded.warnings.iter().any(|w| w.contains("spec file")));
-    std::fs::remove_file(&project_spec).unwrap();
-    let missing = expand_spec();
-    let warning = missing
-        .warnings
-        .iter()
-        .find(|w| w.contains("spec file"))
-        .unwrap();
-    assert!(
-        warning.contains(&writer.join(".agent-run/spec.md").display().to_string()),
-        "{warning}"
-    );
-    assert!(
-        warning.contains(&project_spec.display().to_string()),
-        "{warning}"
-    );
-}
-
-#[test]
-fn preset_file_spec_resolves_relative_writer_from_launch_and_falls_back_to_main() {
-    let temp = tempfile::tempdir().unwrap();
-    let main = temp.path().join("main");
-    let linked = temp.path().join("linked");
-    let writer = temp.path().join("writer");
-    std::fs::create_dir(&main).unwrap();
-    let git = |args: &[&str]| {
-        let output = provenant_os::fixture::git_command()
-            .current_dir(&main)
-            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
-            .args(args)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{args:?}: {output:?}");
-    };
-    git(&["init", "-q", "-b", "main"]);
-    git(&["commit", "-q", "--allow-empty", "-m", "root"]);
-    git(&[
-        "worktree",
-        "add",
-        "-q",
-        "-b",
-        "linked",
-        linked.to_str().unwrap(),
-    ]);
-    let launch = linked.join("subdir");
-    std::fs::create_dir_all(&launch).unwrap();
-    std::fs::create_dir_all(writer.join(".agent-run")).unwrap();
-    std::fs::create_dir_all(main.join(".agent-run")).unwrap();
-    std::fs::write(writer.join(".agent-run/spec.md"), "writer criteria").unwrap();
-    std::fs::write(main.join(".agent-run/spec.md"), "main criteria").unwrap();
-    git(&["add", "-f", ".agent-run/spec.md"]);
-    git(&["commit", "-q", "-m", "main spec"]);
-    let mut layers = Layers::empty();
-    layers.project_dir = Some(linked.clone());
-    layers.launch_dir = Some(launch);
-    let expand_spec = || {
-        super::preset::expand_with(
-            &layers,
-            "generator-evaluator",
-            "brief",
-            &[
-                ("worktree".into(), json!("../../writer")),
-                ("spec".into(), json!(".agent-run/spec.md")),
-            ],
-            &[],
-        )
-        .unwrap()
-    };
-    let expanded = expand_spec();
-    assert!(
-        find_prompt(&expanded.document["nodes"], "lens.correctness-spec")
-            .unwrap()
-            .contains("writer criteria")
-    );
-    std::fs::remove_file(writer.join(".agent-run/spec.md")).unwrap();
-    let expanded = expand_spec();
-    assert!(
-        find_prompt(&expanded.document["nodes"], "lens.correctness-spec")
-            .unwrap()
-            .contains("main criteria")
-    );
-    std::fs::remove_file(main.join(".agent-run/spec.md")).unwrap();
-    let missing = expand_spec();
-    let warning = missing
-        .warnings
-        .iter()
-        .find(|w| w.contains("spec file"))
-        .unwrap();
-    for candidate in [
-        linked.join("subdir/../../writer/.agent-run/spec.md"),
-        linked.join(".agent-run/spec.md"),
-        super::preset::project_worktrees(&linked)[0].join(".agent-run/spec.md"),
-    ] {
+        };
+        let expanded = expand_spec();
         assert!(
-            warning.contains(&candidate.display().to_string()),
+            find_prompt(&expanded.document["nodes"], "lens.correctness-spec")
+                .unwrap()
+                .contains("project acceptance criteria")
+        );
+        assert!(!expanded.warnings.iter().any(|w| w.contains("spec file")));
+        std::fs::remove_file(&project_spec).unwrap();
+        let missing = expand_spec();
+        let warning = missing
+            .warnings
+            .iter()
+            .find(|w| w.contains("spec file"))
+            .unwrap();
+        assert!(
+            warning.contains(&writer.join(".agent-run/spec.md").display().to_string()),
+            "{warning}"
+        );
+        assert!(
+            warning.contains(&project_spec.display().to_string()),
             "{warning}"
         );
     }
-}
 
-#[test]
-fn file_spec_expansion_golden() {
-    let mut layers = Layers::empty();
-    layers.project_dir = Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    let mut expanded = expand(
-        &layers,
-        "generator-evaluator",
-        "brief",
-        &["parameters.spec='assets/presets/fixtures/review-spec.md'".into()],
-    )
-    .unwrap();
-    expanded.document["graph_id"] = json!("<graph-id>");
-    let mut actual = serde_json::to_string_pretty(&expanded.document)
-        .unwrap()
-        .replace(env!("CARGO_MANIFEST_DIR"), "<project>");
-    actual.push('\n');
-    let path = layers
-        .project_dir
-        .unwrap()
-        .join("assets/presets/fixtures/generator-evaluator-file-spec.expansion.json");
-    if std::env::var_os("UPDATE_GOLDEN").is_some() {
-        std::fs::write(&path, &actual).unwrap();
+    #[test]
+    fn preset_file_spec_resolves_relative_writer_from_launch_and_falls_back_to_main() {
+        let temp = tempfile::tempdir().unwrap();
+        let main = temp.path().join("main");
+        let linked = temp.path().join("linked");
+        let writer = temp.path().join("writer");
+        std::fs::create_dir(&main).unwrap();
+        let git = |args: &[&str]| {
+            let output = provenant_os::fixture::git_command()
+                .current_dir(&main)
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{args:?}: {output:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked",
+            linked.to_str().unwrap(),
+        ]);
+        let launch = linked.join("subdir");
+        std::fs::create_dir_all(&launch).unwrap();
+        std::fs::create_dir_all(writer.join(".agent-run")).unwrap();
+        std::fs::create_dir_all(main.join(".agent-run")).unwrap();
+        std::fs::write(writer.join(".agent-run/spec.md"), "writer criteria").unwrap();
+        std::fs::write(main.join(".agent-run/spec.md"), "main criteria").unwrap();
+        git(&["add", "-f", ".agent-run/spec.md"]);
+        git(&["commit", "-q", "-m", "main spec"]);
+        let mut layers = Layers::empty();
+        layers.project_dir = Some(linked.clone());
+        layers.launch_dir = Some(launch);
+        let expand_spec = || {
+            super::preset::expand_with(
+                &layers,
+                "generator-evaluator",
+                "brief",
+                &[
+                    ("worktree".into(), json!("../../writer")),
+                    ("spec".into(), json!(".agent-run/spec.md")),
+                ],
+                &[],
+            )
+            .unwrap()
+        };
+        let expanded = expand_spec();
+        assert!(
+            find_prompt(&expanded.document["nodes"], "lens.correctness-spec")
+                .unwrap()
+                .contains("writer criteria")
+        );
+        std::fs::remove_file(writer.join(".agent-run/spec.md")).unwrap();
+        let expanded = expand_spec();
+        assert!(
+            find_prompt(&expanded.document["nodes"], "lens.correctness-spec")
+                .unwrap()
+                .contains("main criteria")
+        );
+        std::fs::remove_file(main.join(".agent-run/spec.md")).unwrap();
+        let missing = expand_spec();
+        let warning = missing
+            .warnings
+            .iter()
+            .find(|w| w.contains("spec file"))
+            .unwrap();
+        for candidate in [
+            linked.join("subdir/../../writer/.agent-run/spec.md"),
+            linked.join(".agent-run/spec.md"),
+            super::preset::project_worktrees(&linked)[0].join(".agent-run/spec.md"),
+        ] {
+            assert!(
+                warning.contains(&candidate.display().to_string()),
+                "{warning}"
+            );
+        }
     }
-    assert_eq!(actual, std::fs::read_to_string(path).unwrap_or_default());
+
+    #[test]
+    fn file_spec_expansion_golden() {
+        let mut layers = Layers::empty();
+        layers.project_dir = Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+        let mut expanded = expand(
+            &layers,
+            "generator-evaluator",
+            "brief",
+            &["parameters.spec='assets/presets/fixtures/review-spec.md'".into()],
+        )
+        .unwrap();
+        expanded.document["graph_id"] = json!("<graph-id>");
+        let mut actual = serde_json::to_string_pretty(&expanded.document)
+            .unwrap()
+            .replace(env!("CARGO_MANIFEST_DIR"), "<project>");
+        actual.push('\n');
+        let path = layers
+            .project_dir
+            .unwrap()
+            .join("assets/presets/fixtures/generator-evaluator-file-spec.expansion.json");
+        if std::env::var_os("UPDATE_GOLDEN").is_some() {
+            std::fs::write(&path, &actual).unwrap();
+        }
+        assert_eq!(actual, std::fs::read_to_string(path).unwrap_or_default());
+    }
 }

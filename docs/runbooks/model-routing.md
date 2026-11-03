@@ -155,6 +155,17 @@ count must be between 1 and 32, and a non-empty `lenses` array must have one
 identifier per reviewer. Pools and selected shape names must exist. A shape may
 dispatch at most 64 reviewers.
 
+`distinct_families` is a preference. Reviewers in one group are labelled with a
+shared `family_group`, and the scheduler picks routes outside the families their
+siblings already use. When the pool has too few families it reuses one and
+records the substitution; it never drops a lens or fails the review. Running
+every selected lens is required, and model-family spread is best effort.
+
+A lens tier is a pool name, an exact `ADAPTER/ID[@effort]` model or a route
+table. Panel resolution keeps a tier as given and fills only an empty one from
+the shape. A lens with its own tier takes no shape slot and joins no family
+group.
+
 The default size bands measure added plus removed lines, changed files and
 crate roots in the diff from the merge base of the base ref to the subject.
 Small is at most 150 lines, 3 files and 1 crate; medium is at most 1,000 lines,
@@ -163,9 +174,20 @@ under `domains.routing.review.size`; each small limit must not exceed its medium
 limit. The risk tier sets a floor. Integration heads select deep and are not
 measured. An empty diff leaves the size unknown; a diff that cannot be measured
 also leaves it unknown and reports git's error as a warning. Either way,
-selection falls back to risk, kind and the default shape. Preset graphs such
-as `deliver` measure when they expand, before the writer runs, so they size
-from the worktree's existing diff; pass `size` when the expected scope is known.
+selection falls back to risk, kind and the default shape. A preset review of a
+`head` or `node` subject, such as `deliver`'s, with no `size` or `review_shape`
+is deferred: the graph carries one `review` node and the host measures the
+pinned reviewed commit against `base` when that review starts, so the panel fits
+the work actually written. The host journals the measured size, the shape and
+the lenses it chose with the expansion, and a replay never measures again. Pass
+`size` or `review_shape` to fix the panel when the graph expands. A graph has
+one review base, so deferred reviews that name different bases are refused.
+
+A read-only node on a pool name lists its alias twice, so a first attempt that
+hits a usage limit falls back to a different model of the same pool; the retry
+excludes the model already tried. An exact model, a route table with an adapter
+and model, and any writer keep a single route. A route table without an alias,
+or without an adapter and a model, is refused by name.
 
 Lenses fill a shape's slots in the order given by `review.lenses.order`, without
 repeats. The standard shape has three slots: `correctness-spec`, `tests`, then one

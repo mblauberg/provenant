@@ -3,7 +3,7 @@
     "pattern": "review-council",
     "preset": "review-council"
   },
-  "graph_id": "preset-f973230be5d07d7a70cf1937a8944ce2",
+  "graph_id": "preset-22b0f5f15cce60d26c803cac53c55fe0",
   "nodes": [
     {
       "access": "read_only",
@@ -15,9 +15,14 @@
       ],
       "role": "plan.review",
       "role_digest": "sha256:cc9b118bf74049c200dc2e053a9d30de01f36479c4688392153484bcf832a60c",
-      "route": {
-        "alias": "senior"
-      },
+      "routes": [
+        {
+          "alias": "senior"
+        },
+        {
+          "alias": "senior"
+        }
+      ],
       "source": {
         "commit": "HEAD",
         "type": "commit"
@@ -103,9 +108,14 @@
                     "require_findings": true,
                     "role": "lens.correctness-spec",
                     "role_digest": "sha256:bf578197d0881e91746f43b0888c298a0bc6ce3a4f97293690e3b495a9138ea2",
-                    "route": {
-                      "alias": "junior"
-                    },
+                    "routes": [
+                      {
+                        "alias": "junior"
+                      },
+                      {
+                        "alias": "junior"
+                      }
+                    ],
                     "title": "lens-correctness-spec"
                   },
                   {
@@ -141,9 +151,14 @@
                     "require_findings": true,
                     "role": "lens.tests",
                     "role_digest": "sha256:1acffad6d7ba2cf1a0d514ee9310a7a39e6d077695178d7cb63c2baf19f793d0",
-                    "route": {
-                      "alias": "junior"
-                    },
+                    "routes": [
+                      {
+                        "alias": "junior"
+                      },
+                      {
+                        "alias": "junior"
+                      }
+                    ],
                     "title": "lens-tests"
                   },
                   {
@@ -169,9 +184,14 @@
                     "require_findings": true,
                     "role": "lens.design-fit-reuse",
                     "role_digest": "sha256:8106a66fd80eccc42c6f86526921fa553cd8a0164b72aaa6c38c9f93dda2ade2",
-                    "route": {
-                      "alias": "junior"
-                    },
+                    "routes": [
+                      {
+                        "alias": "junior"
+                      },
+                      {
+                        "alias": "junior"
+                      }
+                    ],
                     "title": "lens-design-fit-reuse"
                   }
                 ]
@@ -246,9 +266,14 @@
                 "require_findings": true,
                 "role": "lens.correctness-spec",
                 "role_digest": "sha256:bf578197d0881e91746f43b0888c298a0bc6ce3a4f97293690e3b495a9138ea2",
-                "route": {
-                  "alias": "${tier}"
-                },
+                "routes": [
+                  {
+                    "alias": "${tier}"
+                  },
+                  {
+                    "alias": "${tier}"
+                  }
+                ],
                 "source": {
                   "commit": "HEAD",
                   "type": "commit"
@@ -317,9 +342,14 @@
                 "require_findings": true,
                 "role": "lens.tests",
                 "role_digest": "sha256:1acffad6d7ba2cf1a0d514ee9310a7a39e6d077695178d7cb63c2baf19f793d0",
-                "route": {
-                  "alias": "${tier}"
-                },
+                "routes": [
+                  {
+                    "alias": "${tier}"
+                  },
+                  {
+                    "alias": "${tier}"
+                  }
+                ],
                 "source": {
                   "commit": "HEAD",
                   "type": "commit"
@@ -378,9 +408,14 @@
                 "require_findings": true,
                 "role": "lens.design-fit-reuse",
                 "role_digest": "sha256:8106a66fd80eccc42c6f86526921fa553cd8a0164b72aaa6c38c9f93dda2ade2",
-                "route": {
-                  "alias": "${tier}"
-                },
+                "routes": [
+                  {
+                    "alias": "${tier}"
+                  },
+                  {
+                    "alias": "${tier}"
+                  }
+                ],
                 "source": {
                   "commit": "HEAD",
                   "type": "commit"
@@ -408,9 +443,14 @@
       "prompt": "You shape the graph. You choose its parts from an allow-listed catalogue; you never write code and never widen access.\n\nShape the graph for: brief\nHost limits: at most 24 nodes and pattern instances; a lane's\nbudget_seconds is at most 3600; routes you may assign:\njunior, senior, principal (host routes: junior, senior, principal). Registered writer\nworktrees you may assign: none registered.\nEach catalogue pattern is one lens the review panel allows for this subject. Instantiate the lenses the change needs, at most once each, and choose a tier for each: a lower tier for mechanical checks, a higher one where a miss would be costly. Always include the correctness lens. You cannot add a lens the catalogue does not list.\nRead the evidence from earlier stages and the repository, and look outward\nwhen a choice depends on current practice. Express the shape only as pattern\ninstances. Instances that no depends_on orders are one wave and must write\ndisjoint scopes. Explain your choices in two or three sentences before the\nfragment block.\n",
       "role": "plan.shape",
       "role_digest": "sha256:5ad13ac9c5d959f1c19a74924e0c34fdc24c5f7975a194c84a4dd5ebdb5e5e70",
-      "route": {
-        "alias": "principal"
-      },
+      "routes": [
+        {
+          "alias": "principal"
+        },
+        {
+          "alias": "principal"
+        }
+      ],
       "title": "plan"
     },
     {
@@ -435,9 +475,14 @@
       ],
       "role": "review.verify",
       "role_digest": "sha256:fc0f5571d88891cacc2ba568ab52e671f979028b72b676d7756736cfb308cf83",
-      "route": {
-        "alias": "verifier"
-      },
+      "routes": [
+        {
+          "alias": "verifier"
+        },
+        {
+          "alias": "verifier"
+        }
+      ],
       "source": {
         "node": "subject",
         "type": "node"
@@ -471,9 +516,14 @@
       ],
       "role": "review.synthesis",
       "role_digest": "sha256:8295dd0bc5ed682b02aafdb53f43d98d7b4da96e4718d652626cea0a84dfcb51",
-      "route": {
-        "alias": "senior"
-      },
+      "routes": [
+        {
+          "alias": "senior"
+        },
+        {
+          "alias": "senior"
+        }
+      ],
       "source": {
         "node": "subject",
         "type": "node"
