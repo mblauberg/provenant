@@ -1228,10 +1228,28 @@ pub(crate) fn execute(
                             format!("merge may have completed; {}", failure.message),
                         ));
                     }
-                    if let Some(merge_error) = merge_error
-                        && !merge_error.is::<super::TimedOut>()
-                    {
-                        return Err(merge_error);
+                    // Only a response GitHub refused outright proves no merge;
+                    // any other merge error leaves the outcome unknown.
+                    if let Some(merge_error) = merge_error {
+                        if merge_error
+                            .downcast_ref::<super::wait::Failure>()
+                            .is_some_and(|failure| {
+                                matches!(
+                                    failure.code,
+                                    "HEAD_MOVED" | "MERGE_NOT_ALLOWED" | "RATE_LIMITED"
+                                )
+                            })
+                        {
+                            return Err(merge_error);
+                        }
+                        if !merge_error.is::<super::TimedOut>() {
+                            return Err(super::wait::failure(
+                                "MERGE_STATE_UNKNOWN",
+                                format!(
+                                    "merge may have completed; the merge request failed ({merge_error}) and the pull request state cannot be confirmed: {error}"
+                                ),
+                            ));
+                        }
                     }
                     return Err(super::wait::failure(
                         "MERGE_STATE_UNKNOWN",

@@ -334,16 +334,17 @@ fn rate_delay(headers: &str, fallback: Duration) -> (Duration, String) {
         }
     }
     // A secondary limit can include the unrelated primary window's headers.
-    // When primary tokens remain, retry the secondary limit after a minute
-    // rather than waiting for that primary window to reset.
-    let reset = reset.filter(|_| remaining.is_none_or(|tokens| tokens == 0));
+    // Only an exhausted primary window (remaining exactly 0) makes its reset
+    // the retry time; otherwise retry after a minute rather than waiting for
+    // that window to reset.
+    let reset = reset.filter(|_| remaining == Some(0));
     let fallback = fallback.max(Duration::from_secs(60));
     let delay = retry
         .map(Duration::from_secs)
         .or_else(|| reset.map(|at| Duration::from_secs(at.saturating_sub(now).max(0) as u64)))
         .unwrap_or(fallback);
-    let at = reset
-        .unwrap_or_else(|| now.saturating_add(i64::try_from(delay.as_secs()).unwrap_or(i64::MAX)));
+    // Report the time the chosen delay ends, whichever header chose it.
+    let at = now.saturating_add(i64::try_from(delay.as_secs()).unwrap_or(i64::MAX));
     let label = if reset.is_none() && retry.is_none() {
         "unknown".to_owned()
     } else {
@@ -658,10 +659,26 @@ mod tests {
             "unexpected gh arguments: api --include repos/owner/repo/pulls/7",
             ""
         ));
-        let (delay, reset) =
-            rate_delay("X-RateLimit-Reset: 4102444800\r\n", Duration::from_secs(1));
+        let (delay, reset) = rate_delay(
+            "X-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 4102444800\r\n",
+            Duration::from_secs(1),
+        );
         assert!(delay > Duration::from_secs(60));
         assert!(reset.starts_with("2100-01-01"), "{reset}");
+        // Without an explicit zero remaining count the reset belongs to an
+        // unrelated primary window and must not set the wait.
+        let (delay, reset) =
+            rate_delay("X-RateLimit-Reset: 4102444800\r\n", Duration::from_secs(1));
+        assert_eq!(delay, Duration::from_secs(60));
+        assert_eq!(reset, "unknown");
+        // Retry-After chooses the delay, so the reported time follows it, not
+        // the later primary reset.
+        let (delay, reset) = rate_delay(
+            "Retry-After: 17\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 4102444800\r\n",
+            Duration::from_secs(1),
+        );
+        assert_eq!(delay, Duration::from_secs(17));
+        assert!(!reset.starts_with("2100"), "{reset}");
         let (delay, _) = rate_delay("Retry-After: 17\r\n", Duration::from_secs(1));
         assert_eq!(delay, Duration::from_secs(17));
         let (delay, reset) = rate_delay(

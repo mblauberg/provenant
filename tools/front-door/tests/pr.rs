@@ -152,6 +152,25 @@ fn land_reports_landed_when_the_merge_call_errors_after_taking_effect() -> Resul
     Ok(())
 }
 
+fn land_reports_unknown_when_a_failed_merge_cannot_be_confirmed() -> Result {
+    // A merge error that is not a refusal may still have taken effect, so an
+    // unconfirmable state must not be reported as a plain merge failure.
+    let rig = self::rig()?;
+    fs::write(rig.project.join("merge-fail"), "")?;
+    fs::write(rig.project.join("read-fail-after-merge"), "")?;
+    let output = rig.command(&["land", "1668", "--head", HEAD, "--wait=5s", "--json"])?;
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(report["error"]["code"], "MERGE_STATE_UNKNOWN", "{report}");
+    // A refusal proves nothing merged, so it keeps its own code.
+    let rig = self::rig()?;
+    fs::write(rig.project.join("merge-conflict"), "")?;
+    fs::write(rig.project.join("read-fail-after-merge"), "")?;
+    let output = rig.command(&["land", "1668", "--head", HEAD, "--wait=5s", "--json"])?;
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(report["error"]["code"], "HEAD_MOVED", "{report}");
+    Ok(())
+}
+
 fn land_reports_unknown_when_the_merge_exhausts_the_wait_budget() -> Result {
     let rig = self::rig()?;
     fs::write(rig.project.join("merge-delay"), "")?;
@@ -740,6 +759,10 @@ fn fake_gh(args: &[String]) -> Result<u8> {
     let normalised = call.replace("api --include ", "api ");
     match normalised.as_str() {
         "api repos/{owner}/{repo}/pulls/1668" => {
+            if Path::new("read-fail-after-merge").exists() && Path::new("merge-args").exists() {
+                writeln!(io::stderr(), "HTTP 502 Bad Gateway")?;
+                return Ok(1);
+            }
             let head_value: serde_json::Value = serde_json::from_slice(&fs::read("head.json")?)?;
             let next = if Path::new("head-seq").exists() {
                 let seq = fs::read_to_string("head-seq")?;
@@ -907,13 +930,15 @@ fn fake_gh(args: &[String]) -> Result<u8> {
                 }
             }
             if Path::new("rate-once").exists() || Path::new("rate-always").exists() {
-                let (status, delay) = if Path::new("rate-once").exists() {
+                // A secondary limit sends Retry-After; an exhausted primary
+                // window sends a zero remaining count and its reset instead.
+                let headers = if Path::new("rate-once").exists() {
                     fs::remove_file("rate-once")?;
-                    (429, 0)
+                    "HTTP/2 429\r\nRetry-After: 0\r\nX-RateLimit-Reset: 4102444800"
                 } else {
-                    (403, 30)
+                    "HTTP/2 403\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 4102444800"
                 };
-                writeln!(io::stdout(), "HTTP/2 {status}\r\nRetry-After: {delay}\r\nX-RateLimit-Reset: 4102444800\r\n\r\n{{}}")?;
+                writeln!(io::stdout(), "{headers}\r\n\r\n{{}}")?;
                 writeln!(io::stderr(), "API rate limit exceeded")?;
                 return Ok(1);
             }
@@ -1042,6 +1067,10 @@ fn main() -> ExitCode {
             (
                 "land_reports_unknown_when_the_merge_exhausts_the_wait_budget",
                 land_reports_unknown_when_the_merge_exhausts_the_wait_budget,
+            ),
+            (
+                "land_reports_unknown_when_a_failed_merge_cannot_be_confirmed",
+                land_reports_unknown_when_a_failed_merge_cannot_be_confirmed,
             ),
             (
                 "land_guards_head_and_uses_rest_merge",
