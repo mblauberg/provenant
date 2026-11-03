@@ -1,5 +1,9 @@
 # Route readiness
 
+Owner: `crates/quota` (record, freshness, publication), `crates/cli/src/quota.rs`
+(persistence and the edge read)
+Anchor: `crates/quota/src/readiness.rs`, `crates/cli/src/quota.rs`, `tests/quota.rs`
+
 Quota owns one readiness record per host, adapter, account and canonical model
 or verified pool. It records a schema version, state (ready, unavailable or
 unknown), typed reason, observation and expiry times, optional reset time and a
