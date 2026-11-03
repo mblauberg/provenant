@@ -1635,6 +1635,17 @@
             },
             "op": {
               "const": "cancel"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [

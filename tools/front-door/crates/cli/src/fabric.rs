@@ -85,6 +85,9 @@ pub enum Graph {
     Cancel {
         /// Graph ID, project-local document path or document SHA-256 hash
         id: String,
+        /// Why the graph was cancelled (up to 256 bytes)
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Resume a task graph from its document
     Resume {

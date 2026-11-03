@@ -587,6 +587,8 @@ pub struct GraphCheckpoint {
     #[serde(default)]
     pub cancelled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pause_reason: Option<String>,
     /// Stable cause of the pause, independent of its displayed explanation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -674,6 +676,11 @@ pub struct NodeProgress {
     pub worktree: Option<String>,
     pub id: String,
     pub state: NodeState,
+    /// State to restore when a cancelled graph is resumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancelled_from: Option<NodeState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
     /// An actionable admission or settlement failure, retained for status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advance_error: Option<String>,

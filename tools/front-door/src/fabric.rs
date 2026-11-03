@@ -28,6 +28,27 @@ include!("fabric/facade_tests.rs");
 include!("fabric/graph_tests.rs");
 
 use provenant_cli::fabric::Context;
+
+/// Repeat a list-then-read tail lookup until two consecutive passes name the
+/// same attempt, and return the earlier pass's record. The later pass listed
+/// after the earlier one read its state, so agreement proves no successor had
+/// been committed with that state. Bounded by the policy chain ceiling.
+fn confirm_stable_tail<R, K: PartialEq>(
+    mut pass: impl FnMut() -> Result<R, FacadeError>,
+    id: impl Fn(&R) -> K,
+) -> Result<R, FacadeError> {
+    let mut previous: Option<R> = None;
+    for _ in 0..=provenant_run::POLICY_ATTEMPT_CEILING {
+        let tail = pass()?;
+        if let Some(earlier) = previous.take()
+            && id(&earlier) == id(&tail)
+        {
+            return Ok(earlier);
+        }
+        previous = Some(tail);
+    }
+    Err(FacadeError::StateCorrupt)
+}
 use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::{CancelToken, Clock, WaitBudget};
 use provenant_fabric_mcp::{
@@ -1076,7 +1097,17 @@ fn graph_wake_due(
     checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
     now: provenant_core::WallTime,
 ) -> bool {
-    !checkpoint.cancelled && checkpoint.wake_at.is_some_and(|deadline| now >= deadline)
+    if checkpoint.cancelled {
+        checkpoint.nodes.iter().any(|node| {
+            matches!(
+                node.state,
+                provenant_fabric_runtime::graph::NodeState::Pending
+                    | provenant_fabric_runtime::graph::NodeState::Running
+            )
+        })
+    } else {
+        checkpoint.wake_at.is_some_and(|deadline| now >= deadline)
+    }
 }
 fn landing_error(error: &(dyn std::error::Error + 'static)) -> FacadeError {
     use provenant_fabric_runtime::git_transport::GitTransportError as E;
@@ -1668,6 +1699,143 @@ impl BinaryRunOwner<'_> {
             )
             .map_err(run_error)
     }
+    /// Read the current policy successor on its owning host without launching work.
+    fn graph_policy_tail(
+        &self,
+        target: AttemptTarget,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<provenant_records::run::AttemptRecord, FacadeError> {
+        let host = target.host.unwrap_or(self.factory.context.identity.host);
+        if host != self.factory.context.identity.host {
+            if !self.allow_remote {
+                return Err(FacadeError::ConfinementRefused);
+            }
+            return self.graph_policy_tail_remote(target, budget, cancel);
+        }
+        let store = self.store(cancel)?;
+        let call = self.call(cancel);
+        let service = provenant_run::Service::new(&store);
+        let mut tail = store
+            .policy_tail(target.attempt, &call)
+            .map_err(run_error)?
+            .attempt_id;
+        // Settlement terminates an attempt and queues its successor in one
+        // transaction, so it can land between the tail lookup and the status
+        // read. Accept a status only while its attempt is still the tail; a
+        // terminal predecessor must never stand in for a live successor.
+        loop {
+            let record = service.status(tail, &call).map_err(run_error)?;
+            let current = store
+                .policy_tail(target.attempt, &call)
+                .map_err(run_error)?
+                .attempt_id;
+            if current == tail {
+                return Ok(record);
+            }
+            tail = current;
+        }
+    }
+
+    /// Peers expose the host-authored chain through list and status.
+    fn graph_policy_tail_remote(
+        &self,
+        target: AttemptTarget,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<provenant_records::run::AttemptRecord, FacadeError> {
+        // One pass lists the run, then reads each candidate's state, so a
+        // successor queued after the list read is invisible to that pass. Settlement
+        // commits a terminal state and its successor together, so a later pass that
+        // lists after the earlier pass's read and finds the same tail proves the
+        // earlier record has no successor. Return that earlier record.
+        confirm_stable_tail(
+            || self.graph_policy_tail_remote_pass(target.clone(), budget, cancel),
+            |record| record.attempt_id,
+        )
+    }
+
+    fn graph_policy_tail_remote_pass(
+        &self,
+        target: AttemptTarget,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<provenant_records::run::AttemptRecord, FacadeError> {
+        let host = target.host.ok_or(FacadeError::InvalidInput)?;
+        let mut current = self.snapshot(target.clone(), budget, cancel)?;
+        let mut candidates = std::collections::BTreeMap::new();
+        let mut after = None;
+        let mut seen = std::collections::BTreeSet::new();
+        loop {
+            let result = self.peer(
+                host,
+                PeerAction::Run {
+                    extra: Default::default(),
+                    input: RunInput::List {
+                        extra: Default::default(),
+                        after: after.clone(),
+                        limit: 100,
+                    },
+                },
+                budget,
+                cancel,
+            )?;
+            let PeerResult::Run { data, .. } = result else {
+                return Err(FacadeError::StateCorrupt);
+            };
+            let RunResult::List { page, .. } = *data else {
+                return Err(FacadeError::StateCorrupt);
+            };
+            let mut reached = false;
+            for item in page.items {
+                if item.attempt_id == target.attempt {
+                    reached = true;
+                    break;
+                }
+                if item.run_id == current.run_id && item.task_id == current.task_id {
+                    let candidate = self.snapshot(
+                        AttemptTarget {
+                            extra: Default::default(),
+                            host: Some(host),
+                            attempt: item.attempt_id,
+                        },
+                        budget,
+                        cancel,
+                    )?;
+                    if candidates
+                        .insert(candidate.attempt_number, candidate)
+                        .is_some()
+                    {
+                        return Err(FacadeError::StateCorrupt);
+                    }
+                }
+            }
+            if reached {
+                break;
+            }
+            let next = page.next_after.ok_or(FacadeError::StateCorrupt)?;
+            if !seen.insert(next.attempt) {
+                return Err(FacadeError::StateCorrupt);
+            }
+            after = Some(next);
+        }
+        for _ in 0..provenant_run::POLICY_ATTEMPT_CEILING {
+            let Some(next) = candidates.remove(&current.attempt_number.saturating_add(1)) else {
+                return Ok(current);
+            };
+            if next.retry_of != Some(current.attempt_id)
+                || !matches!(
+                    next.continuation.as_deref(),
+                    Some("policy_continuation" | "policy_fallback")
+                )
+            {
+                return Ok(current);
+            }
+            current = next;
+        }
+        Err(FacadeError::StateCorrupt)
+    }
+
     fn snapshots_local(
         &self,
         targets: &[AttemptTarget],
@@ -4069,6 +4237,88 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         ))
     }
 
+    fn stop_cancelled_attempt(
+        &mut self,
+        attempt: &provenant_fabric_runtime::graph::GraphAttempt,
+    ) -> Result<(), Self::Error> {
+        let mut owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: true,
+            actor: None,
+            chair: None,
+        };
+        self.factory
+            .cancel_graph_attempt(&mut owner, attempt, self.budget, self.cancel)
+    }
+
+    fn cancelled_attempt_settled(
+        &mut self,
+        attempt: &provenant_fabric_runtime::graph::GraphAttempt,
+    ) -> Result<bool, Self::Error> {
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: true,
+            actor: Some(
+                attempt
+                    .launch_actor
+                    .parse()
+                    .map_err(|_| FacadeError::StateCorrupt)?,
+            ),
+            chair: None,
+        };
+        if let Some(reference) = attempt.attempt_ref.as_deref() {
+            let (host, id) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+            let host = host.parse().map_err(|_| FacadeError::StateCorrupt)?;
+            let target = AttemptTarget {
+                extra: Default::default(),
+                host: Some(host),
+                attempt: id.parse().map_err(|_| FacadeError::StateCorrupt)?,
+            };
+            let record = owner.graph_policy_tail(target, self.budget, self.cancel)?;
+            return Ok(matches!(
+                record.state,
+                provenant_records::run::AttemptState::Terminal { .. }
+            ) && record.custody_pending == Some(false));
+        }
+        let operation = graph_operation("graph-attempt-operation", &attempt.key)?;
+        let store = owner.store(self.cancel)?;
+        let call = owner.call(self.cancel);
+        match store.operation(&operation, &call).map_err(run_error)? {
+            None => Ok(true),
+            Some(operation) => {
+                use provenant_run::{AttemptFilter, AttemptReader};
+                if !store
+                    .pending_attempts(operation.run_id, &call)
+                    .map_err(run_error)?
+                    .is_empty()
+                {
+                    return Ok(false);
+                }
+                let attempts = store
+                    .attempts(
+                        AttemptFilter {
+                            run_id: Some(operation.run_id),
+                            task_id: None,
+                        },
+                        &call,
+                    )
+                    .map_err(run_error)?;
+                let mut found = false;
+                for fact in attempts {
+                    let fact = fact.map_err(run_error)?;
+                    let record = store.record(fact.attempt_id, &call).map_err(run_error)?;
+                    found = true;
+                    if !store.custody_released(&record, &call).map_err(run_error)? {
+                        return Ok(false);
+                    }
+                }
+                // A prepared operation with no attempt never admitted work;
+                // an unknown launch without evidence must remain unresolved.
+                Ok(found || operation.state == provenant_run::OperationState::Prepared)
+            }
+        }
+    }
+
     fn observe_or_start(
         &mut self,
         key: &provenant_fabric_runtime::graph::AttemptKey,
@@ -4670,9 +4920,10 @@ impl Factory {
                 extra,
                 id: self.resolve_graph(&id)?.0,
             },
-            GraphInput::Cancel { extra, id } => GraphInput::Cancel {
+            GraphInput::Cancel { extra, id, reason } => GraphInput::Cancel {
                 extra,
                 id: self.resolve_graph(&id)?.0,
+                reason,
             },
             input => input,
         };
@@ -4814,6 +5065,7 @@ impl Factory {
                     pull_request: None,
                     integration_pin: None,
                     cancelled: false,
+                    cancel_reason: None,
                     pause_reason: None,
                     pause_code: None,
                     unknown_usage: Vec::new(),
@@ -4983,9 +5235,15 @@ impl Factory {
             .load(id)
             .map_err(graph_journal_error)?
             .ok_or(FacadeError::NotFound)?;
-        if matches!(input, GraphInput::Cancel { .. }) {
+        if let GraphInput::Cancel { reason, .. } = input {
             // Persist the admission fence before asking the run owner to stop live attempts.
+            if !checkpoint.cancelled || reason.is_some() {
+                checkpoint.cancel_reason = reason;
+            }
             checkpoint.cancelled = true;
+            provenant_fabric_runtime::graph::mark_cancelled_nodes_without_live_attempts(
+                &mut checkpoint,
+            );
             journal.save(&checkpoint).map_err(graph_journal_error)?;
             let mut owner = BinaryRunOwner {
                 factory: self,
@@ -5018,6 +5276,15 @@ impl Factory {
                 prices: None,
                 tick: false,
             };
+            if provenant_fabric_runtime::graph::settle_cancelled_nodes(
+                &mut checkpoint,
+                &mut graph_owner,
+                &mut journal,
+            )
+            .is_err()
+            {
+                first_error.get_or_insert_with(|| FacadeError::io("settle cancelled graph nodes"));
+            }
             if provenant_fabric_runtime::graph::close_resolved_asks(
                 &mut checkpoint,
                 &mut graph_owner,
@@ -5110,7 +5377,12 @@ impl Factory {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<(), FacadeError> {
-        let operation_id = graph_operation("graph-cancel", &attempt.key)?;
+        owner.actor = Some(
+            attempt
+                .launch_actor
+                .parse()
+                .map_err(|_| FacadeError::StateCorrupt)?,
+        );
         let targets = match attempt.attempt_ref.as_deref() {
             Some(reference) => {
                 let (host, attempt_id) =
@@ -5141,18 +5413,33 @@ impl Factory {
                 }
             }
         };
-        for target in targets {
-            owner.run(
+        let mut first_error = None;
+        for mut target in targets {
+            match owner.graph_policy_tail(target.clone(), budget, cancel) {
+                Ok(tail) => target.attempt = tail.attempt_id,
+                Err(error) => {
+                    // Still ask the known attempt to stop if tail lookup fails.
+                    first_error.get_or_insert(error);
+                }
+            }
+            let operation_id =
+                graph_operation(&format!("graph-cancel-{}", target.attempt), &attempt.key)?;
+            if let Err(error) = owner.run(
                 RunInput::Cancel {
                     extra: Default::default(),
                     target,
-                    operation_id: operation_id.clone(),
+                    operation_id,
                 },
                 budget,
                 cancel,
-            )?;
+            ) {
+                first_error.get_or_insert(error);
+            }
         }
-        Ok(())
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 }
 fn graph_operation(
@@ -5197,11 +5484,12 @@ pub fn graph(
                 id,
             },
         ),
-        Graph::Cancel { id } => (
+        Graph::Cancel { id, reason } => (
             "fabric graph cancel",
             GraphInput::Cancel {
                 extra: Default::default(),
                 id,
+                reason,
             },
         ),
         Graph::Resume { document, extend } => (

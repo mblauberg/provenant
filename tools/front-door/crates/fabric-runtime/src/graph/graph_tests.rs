@@ -36,6 +36,8 @@ impl GraphJournal for MemoryJournal {
 #[derive(Default)]
 struct FakeOwner {
     deliveries: usize,
+    cancelled_attempt_settled: bool,
+    cancellation_stops: usize,
     delivery_modes: Vec<Option<provenant_records::run::DeliveryMode>>,
     fast_forward_only: Vec<bool>,
     observations: VecDeque<AttemptObservation>,
@@ -79,6 +81,13 @@ fn reply(option: Option<&str>, text: Option<&str>) -> AskReply {
 impl AttemptOwner for FakeOwner {
     type Error = NoObservation;
 
+    fn stop_cancelled_attempt(&mut self, _attempt: &GraphAttempt) -> Result<(), Self::Error> {
+        self.cancellation_stops += 1;
+        Ok(())
+    }
+    fn cancelled_attempt_settled(&mut self, _attempt: &GraphAttempt) -> Result<bool, Self::Error> {
+        Ok(self.cancelled_attempt_settled)
+    }
     fn actor(&self) -> String {
         self.actor.clone()
     }
@@ -3314,12 +3323,15 @@ fn checkpoint_attempts_require_launch_evidence_and_actor() {
 
 #[test]
 fn cancelled_graph_admits_no_work_and_resume_reuses_the_attempt_key() {
-    let document = graph(vec![node("node", route("route"))]);
+    let mut child = node("child", route("route"));
+    child.depends_on.push("node".into());
+    let document = graph(vec![node("node", route("route")), child]);
     let mut owner = FakeOwner {
         observations: VecDeque::from([
             AttemptObservation::Pending {
                 attempt_ref: Some("host/attempt".into()),
             },
+            terminal(AttemptOutcome::Succeeded),
             terminal(AttemptOutcome::Succeeded),
         ]),
         ..FakeOwner::default()
@@ -3329,6 +3341,30 @@ fn cancelled_graph_admits_no_work_and_resume_reuses_the_attempt_key() {
     journal.0.as_mut().unwrap().cancelled = true;
     let stopped = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(stopped.status, GraphStatus::Cancelled);
+    assert_eq!(stopped.checkpoint.nodes[0].state, NodeState::Running);
+    assert_eq!(stopped.checkpoint.nodes[1].state, NodeState::Skipped);
+    assert_eq!(
+        stopped.checkpoint.nodes[1].skip_reason.as_deref(),
+        Some("graph cancelled")
+    );
+    assert_eq!(owner.calls.len(), 1);
+    assert_eq!(owner.cancellation_stops, 1);
+    owner.cancelled_attempt_settled = true;
+    let settled = advance(&document, &mut owner, &mut journal).unwrap();
+    assert!(
+        settled
+            .checkpoint
+            .nodes
+            .iter()
+            .all(|node| node.state == NodeState::Skipped)
+    );
+    assert!(
+        settled
+            .checkpoint
+            .nodes
+            .iter()
+            .all(|node| node.skip_reason.as_deref() == Some("graph cancelled"))
+    );
     assert_eq!(owner.calls.len(), 1);
     let completed = resume(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(completed.status, GraphStatus::Complete);
@@ -3336,7 +3372,7 @@ fn cancelled_graph_admits_no_work_and_resume_reuses_the_attempt_key() {
     // The resumed observation sees the stored reference instead of resubmitting.
     assert_eq!(
         owner.stored_refs,
-        vec![None, Some("host/attempt".to_owned())]
+        vec![None, Some("host/attempt".to_owned()), None]
     );
     assert_eq!(
         pending.checkpoint.nodes[0].attempts[0].key,

@@ -571,6 +571,8 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 worktree: n.worktree.clone(),
                 id: n.id.clone(),
                 state: NodeState::Pending,
+                cancelled_from: None,
+                skip_reason: None,
                 advance_error: None,
                 advance_error_code: None,
                 launch_retry: None,
