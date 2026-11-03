@@ -3011,8 +3011,13 @@ mod tests {
             );
             assert_eq!(found[1], (good, Reconciled::Queued));
             if failure != "blocked" {
-                assert!(matches!(&found[0].1, Reconciled::Uncertain { reason }
-                    if reason.to_string().starts_with("queued; settlement progress")));
+                // Recovery reads settlement progress before it decides, so the
+                // unreadable journal is the reason rather than a queued outcome.
+                assert!(
+                    matches!(&found[0].1, Reconciled::Uncertain { reason }
+                        if reason.to_string().contains("settlement progress update failed")),
+                    "{failure}: {found:?}"
+                );
             }
         }
         Ok(())

@@ -2959,6 +2959,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | Argument | Contract |
 |---|---|
 | `--id` | `{"bounds": [0, 100], "description": "Reconcile only this run (repeatable)", "name": "id", "repeatable": true}` |
+| `--abandon` | `{"conflicts": ["id"], "description": "Abandon settlement of this writer attempt, preserving its evidence", "name": "abandon"}` |
+| `--reason` | `{"bounds": [0, 256], "description": "Why the chair is abandoning settlement", "name": "reason"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -2968,7 +2970,9 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
   "groups": [
     {
       "arguments": [
-        "id"
+        "id",
+        "abandon",
+        "reason"
       ],
       "multiple": true,
       "name": "Reconcile",
