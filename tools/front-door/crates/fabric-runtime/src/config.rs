@@ -1099,6 +1099,18 @@ mod tests {
             serde_json::from_str(include_str!("../../../../../config/harness-knobs.json")).unwrap();
         let limits = serde_json::to_value(GraphLimits::default()).unwrap();
         let entries = limits.as_object().unwrap();
+        let documented_limits = registry["host_graph_settings"]["settings"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|name| name.starts_with("limits."))
+            .count();
+        assert_eq!(entries.len(), documented_limits, "registry limit coverage");
+        assert_eq!(
+            entries.len(),
+            asset["graph"]["limits"].as_table().unwrap().len(),
+            "asset limit coverage"
+        );
         for (name, value) in entries {
             let asset_value = asset["graph"]["limits"][name].as_integer().unwrap();
             assert_eq!(value.as_u64().unwrap(), asset_value as u64, "asset {name}");
