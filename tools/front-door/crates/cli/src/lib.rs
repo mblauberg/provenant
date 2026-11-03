@@ -21,10 +21,12 @@ mod grammar;
 pub mod inbox;
 pub mod install;
 pub mod limits;
+mod metadata;
 pub mod mileage;
 pub mod pr_body;
 pub mod provider_updates;
 mod render;
+use crate::metadata::CatalogueArg;
 use clap::{Arg, ArgAction, ArgGroup, CommandFactory, FromArgMatches};
 pub use grammar::*;
 use provenant_records::{HelpArgument, HelpCatalogue, HelpCommand, HelpErrorCode, HelpGroup};
@@ -508,26 +510,23 @@ pub fn command_model() -> clap::Command {
 // descriptions come from the same command model as the parser and catalogue.
 fn core_help(model: &clap::Command) -> String {
     let mut text = String::from("Provenant: run work, inspect progress and land changes.\n\n");
-    for (name, example) in [
-        ("run", "provenant run --prompt-file brief.md --route senior"),
-        ("status", "provenant status"),
-        ("land", "provenant land 1947 --wait"),
-        ("quota", "provenant quota"),
-        (
-            "ask",
-            "provenant ask --file request.json --session SESSION --json",
-        ),
-        ("inbox", "provenant inbox --json"),
-        ("answer", "provenant help answer"),
-        ("install", "provenant install"),
-    ] {
-        if let Some(command) = model.find_subcommand(name) {
-            let about = command
-                .get_about()
-                .map(ToString::to_string)
-                .unwrap_or_default();
-            text.push_str(&format!("  {name:<8}  {about}\n            {example}\n"));
-        }
+    let mut commands: Vec<_> = model
+        .get_subcommands()
+        .filter_map(|command| {
+            command
+                .get::<metadata::CoreCommand>()
+                .map(|marker| (marker, command))
+        })
+        .collect();
+    commands.sort_by_key(|(marker, _)| marker.0);
+    for (marker, command) in commands {
+        let name = command.get_name();
+        let example = marker.1;
+        let about = command
+            .get_about()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        text.push_str(&format!("  {name:<8}  {about}\n            {example}\n"));
     }
     text.push_str("  --full    Complete human detail; --json keeps machine output\n  help --all  All commands and advanced options\n              provenant help --all\n");
     text
@@ -598,12 +597,15 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
                     ])
                 });
         }
+        if path == "provenant dispatch" {
+            command = command.mut_arg("concurrency", |arg| arg.catalog_requires("manifest"));
+        }
         if path == "provenant run" {
             command = command
                 .mut_arg("worktree", |arg| arg.help("Bind an existing preset writer worktree; single tasks can create an owned worktree for a missing branch name"))
                 .mut_arg("wait", |arg| arg.default_value("240"))
                 .mut_arg("branch", |arg| {
-                    arg.requires(clap::builder::Resettable::Reset)
+                    arg.catalog_clear_requires()
                         .help("Create or reuse an owned writer worktree for this branch, locally or on --host")
                 });
         }
@@ -648,18 +650,8 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
         }
         if !advanced
             && parent == "provenant"
-            && !matches!(
-                command.get_name(),
-                "run"
-                    | "status"
-                    | "land"
-                    | "quota"
-                    | "ask"
-                    | "inbox"
-                    | "answer"
-                    | "install"
-                    | "help"
-            )
+            && command.get::<metadata::CoreCommand>().is_none()
+            && command.get_name() != "help"
         {
             command = command.hide(true);
         }
@@ -879,10 +871,15 @@ fn catalog(model: &clap::Command) -> HelpCatalogue {
                 HelpArgument {
                     description: arg.get_help().map(ToString::to_string),
                     bounds: arg
-                        .get_num_args()
-                        .filter(|range| range.max_values() > 1 && range.max_values() < usize::MAX)
-                        .map(|range| (range.min_values() as u64, range.max_values() as u64))
-                        .or_else(|| bounds(&path, &name)),
+                        .get::<metadata::NumericBounds>()
+                        .map(|bounds| bounds.0)
+                        .or_else(|| {
+                            arg.get_num_args()
+                                .filter(|range| {
+                                    range.max_values() > 1 && range.max_values() < usize::MAX
+                                })
+                                .map(|range| (range.min_values() as u64, range.max_values() as u64))
+                        }),
                     conditional_defaults: if name == "provider_timeout" {
                         vec![
                             ("read-only".into(), "3600".into()),
@@ -891,7 +888,10 @@ fn catalog(model: &clap::Command) -> HelpCatalogue {
                     } else {
                         Vec::new()
                     },
-                    requires: requirements(&path, &name),
+                    requires: arg
+                        .get::<metadata::Requirements>()
+                        .map(|value| value.0.clone())
+                        .unwrap_or_default(),
                     name,
                     long: arg.get_long().map(str::to_owned),
                     positional: arg.is_positional(),
@@ -1059,58 +1059,97 @@ fn constraints(path: &str) -> Vec<String> {
     };
     values.iter().map(|value| (*value).into()).collect()
 }
-fn bounds(path: &str, name: &str) -> Option<(u64, u64)> {
-    match name {
-        "wait" | "provider_timeout" => Some((1, provenant_core::MAX_LANE_RUNTIME_SECONDS)),
-        "limit" => Some((1, 100)),
-        "concurrency" => Some((1, 16)),
-        "max_bytes" => Some((1, 65536)),
-        "read_root" | "write_root" => Some((0, 32)),
-        "capability" => Some((0, 16)),
-        "fallback" => Some((0, 2)),
-        "id" | "branch"
-            if path.ends_with("lanes")
-                || path.ends_with("reconcile")
-                || path.ends_with("remove") =>
-        {
-            Some((0, 100))
-        }
-        "reason" => Some((0, 256)),
-        _ => None,
-    }
-}
-fn requirements(path: &str, name: &str) -> Vec<String> {
-    let names: &[&str] = match (path, name) {
-        (_, "condition") => &["wait"],
-        ("provenant status", "target" | "until" | "follow") => &["wait"],
-        ("provenant run" | "provenant dispatch", "preset") => &["prompt_file"],
-        (
-            "provenant run" | "provenant dispatch",
-            "preset_set" | "preset_params_file" | "preset_plan",
-        ) => &["preset"],
-        ("provenant run" | "provenant dispatch", "deliver_remote") => {
-            &["deliver_branch", "writer_target"]
-        }
-        ("provenant run" | "provenant dispatch", "deliver_branch" | "open_pr") => {
-            &["deliver_remote"]
-        }
-        ("provenant dispatch", "branch") => &["host", "base"],
-        ("provenant dispatch", "concurrency") => &["manifest"],
-        ("provenant chair log append", "operation_id") => &["issued_at"],
-        ("provenant chair log append", "issued_at") => &["operation_id"],
-        ("provenant check release", "base") => &["head"],
-        ("provenant check release", "head") => &["base"],
-        ("provenant worktree remove", "merged") => &["integration", "remove_scope"],
-        ("provenant worktree remove", "branch" | "since") => &["merged"],
-        _ => &[],
-    };
-    names.iter().map(|v| (*v).into()).collect()
-}
 
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
     use super::*;
+    #[test]
+    fn catalogue_numeric_bounds_match_parser_ranges() {
+        let model = expanded_model();
+        for entry in catalog(&model).commands {
+            let command = entry
+                .command
+                .split_whitespace()
+                .skip(1)
+                .fold(&model, |command, name| {
+                    command.find_subcommand(name).unwrap()
+                });
+            for argument in entry.arguments {
+                let arg = command
+                    .get_arguments()
+                    .find(|arg| arg.get_id().as_str() == argument.name)
+                    .unwrap();
+                let Some(bounds) = arg.get::<metadata::NumericBounds>() else {
+                    continue;
+                };
+                let (min, max) = bounds.0;
+                assert_eq!(
+                    argument.bounds,
+                    Some((min, max)),
+                    "{} {}",
+                    entry.command,
+                    argument.name
+                );
+                let accepts = |value: u64| {
+                    clap::Command::new("probe")
+                        .arg(Arg::new("value").value_parser(arg.get_value_parser().clone()))
+                        .try_get_matches_from(["probe", &value.to_string()])
+                        .is_ok()
+                };
+                assert!(
+                    accepts(min),
+                    "{} {} minimum {min}",
+                    entry.command,
+                    argument.name
+                );
+                assert!(
+                    accepts(max),
+                    "{} {} maximum {max}",
+                    entry.command,
+                    argument.name
+                );
+                if let Some(below) = min.checked_sub(1) {
+                    assert!(!accepts(below));
+                }
+                if let Some(above) = max.checked_add(1) {
+                    assert!(!accepts(above));
+                }
+            }
+        }
+        for (path, expected) in [
+            ("provenant config history", (1, 500)),
+            ("provenant quota history", (1, 100_000)),
+        ] {
+            let catalogue = catalog(&model);
+            let command = catalogue
+                .commands
+                .iter()
+                .find(|entry| entry.command == path)
+                .unwrap();
+            assert_eq!(
+                command
+                    .arguments
+                    .iter()
+                    .find(|arg| arg.name == "limit")
+                    .unwrap()
+                    .bounds,
+                Some(expected)
+            );
+        }
+    }
+    #[test]
+    fn compact_help_uses_marked_commands_and_their_descriptions() {
+        let model = command_model();
+        let text = core_help(&model);
+        for command in model.get_subcommands() {
+            if let Some(marker) = command.get::<metadata::CoreCommand>() {
+                assert!(!command.is_hide_set());
+                assert!(text.contains(&command.get_about().unwrap().to_string()));
+                assert!(text.contains(marker.1));
+            }
+        }
+    }
     #[test]
     fn preset_compatibility_table_matches_clap_conflicts() {
         let model = expanded_model();
@@ -1453,6 +1492,15 @@ mod tests {
         for flag in ["--wait", "--watch"] {
             let ParseOutcome::Invalid { error, .. } = parsed(&["lanes", flag, "5h"]) else {
                 panic!("expected duration error");
+            };
+            assert!(error.to_string().contains(flag), "{error}");
+        }
+        for (args, flag) in [
+            (vec!["lanes", "--since", "0d"], "--since"),
+            (vec!["quota", "history", "--until", "0d"], "--until"),
+        ] {
+            let ParseOutcome::Invalid { error, .. } = parsed(&args) else {
+                panic!("expected span error");
             };
             assert!(error.to_string().contains(flag), "{error}");
         }

@@ -95,7 +95,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
-| `--root` | `{"description": "PID of the supervised command inside this lane", "name": "root", "required": true}` |
+| `--root` | `{"bounds": [1, 2147483647], "description": "PID of the supervised command inside this lane", "name": "root", "required": true}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -191,8 +191,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `id` | `{"name": "id", "positional": true, "required": true}` |
 | `--host` | `{"description": "Owner host label or host ID", "name": "host"}` |
 | `--state` | `{"name": "state", "required": true, "values": ["withdrawn", "superseded", "expired"]}` |
-| `--reason` | `{"bounds": [0, 256], "name": "reason", "required": true}` |
-| `--expect-revision` | `{"name": "expect_revision", "required": true}` |
+| `--reason` | `{"name": "reason", "required": true}` |
+| `--expect-revision` | `{"bounds": [1, 18446744073709551615], "name": "expect_revision", "required": true}` |
 | `--operation-id` | `{"name": "operation_id"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
@@ -262,7 +262,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--option` | `{"name": "option"}` |
 | `--text-stdin` | `{"defaults": ["false"], "description": "Read piped answer text (at most 4 KiB; input must finish within 5 seconds)", "name": "text_stdin", "values": ["true", "false"]}` |
 | `--text-file` | `{"conflicts": ["text_stdin"], "description": "Read a UTF-8 reply composed in a file (at most 4 KiB)", "name": "text_file"}` |
-| `--expect-revision` | `{"name": "expect_revision", "required": true}` |
+| `--expect-revision` | `{"bounds": [1, 18446744073709551615], "name": "expect_revision", "required": true}` |
 | `--channel` | `{"name": "channel", "required": true, "values": ["chat", "console", "phone_remote", "cli", "unknown"]}` |
 | `--operation-id` | `{"name": "operation_id"}` |
 | `--project-key` | `{"description": "With --all-projects and a remote --host: the project key (as in a listed request's project_key) that selects the local project to route through", "name": "project_key"}` |
@@ -559,8 +559,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
-| `--since` | `{"description": "Only entries since this RFC3339 time or this many seconds ago", "name": "since"}` |
-| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "description": "Maximum entries (1 to 500)", "name": "limit"}` |
+| `--since` | `{"description": "Only entries since this RFC3339 time or a span such as 1d ago", "name": "since"}` |
+| `--limit` | `{"bounds": [1, 500], "defaults": ["50"], "description": "Maximum entries (1 to 500)", "name": "limit"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -771,7 +771,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | Argument | Contract |
 |---|---|
 | `id` | `{"description": "Graph ID, project-local document path or document SHA-256 hash", "name": "id", "positional": true, "required": true}` |
-| `--reason` | `{"bounds": [0, 256], "description": "Why the graph was cancelled (up to 256 bytes)", "name": "reason"}` |
+| `--reason` | `{"description": "Why the graph was cancelled (up to 256 bytes)", "name": "reason"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -870,7 +870,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
-| `--after` | `{"description": "Return entries after this sequence number", "name": "after"}` |
+| `--after` | `{"bounds": [0, 9223372036854775807], "description": "Return entries after this sequence number", "name": "after"}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["100"], "description": "Maximum entries (1 to 100)", "name": "limit"}` |
 | `--session` | `{"description": "Exact chair session whose mailbox to read, instead of this agent's", "name": "session"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
@@ -903,7 +903,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
-| `through` | `{"description": "Last sequence number to mark read", "name": "through", "positional": true, "required": true}` |
+| `through` | `{"bounds": [0, 9223372036854775807], "description": "Last sequence number to mark read", "name": "through", "positional": true, "required": true}` |
 | `--session` | `{"description": "Exact chair session whose mailbox to mark, instead of this agent's", "name": "session"}` |
 | `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
@@ -1009,7 +1009,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | Argument | Contract |
 |---|---|
 | `id` | `{"description": "Task ID", "name": "id", "positional": true, "required": true}` |
-| `--lease-seconds` | `{"defaults": ["300"], "description": "Lease duration in seconds (1 to 3600)", "name": "lease_seconds"}` |
+| `--lease-seconds` | `{"bounds": [1, 3600], "defaults": ["300"], "description": "Lease duration in seconds (1 to 3600)", "name": "lease_seconds"}` |
 | `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
@@ -1049,7 +1049,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | Argument | Contract |
 |---|---|
 | `id` | `{"description": "Task ID", "name": "id", "positional": true, "required": true}` |
-| `--generation` | `{"description": "Fence generation", "name": "generation", "required": true}` |
+| `--generation` | `{"bounds": [1, 18446744073709551615], "description": "Fence generation", "name": "generation", "required": true}` |
 | `--token` | `{"description": "Fence token (32 lowercase hex digits)", "name": "token", "required": true}` |
 | `--objective` | `{"name": "objective", "required": true}` |
 | `--note` | `{"name": "note"}` |
@@ -1099,7 +1099,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | Argument | Contract |
 |---|---|
 | `id` | `{"description": "Task ID", "name": "id", "positional": true, "required": true}` |
-| `--generation` | `{"description": "Fence generation", "name": "generation", "required": true}` |
+| `--generation` | `{"bounds": [1, 18446744073709551615], "description": "Fence generation", "name": "generation", "required": true}` |
 | `--token` | `{"description": "Fence token (32 lowercase hex digits)", "name": "token", "required": true}` |
 | `--state` | `{"defaults": ["done"], "description": "Final state", "name": "state", "values": ["done", "cancelled"]}` |
 | `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
@@ -1148,7 +1148,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | Argument | Contract |
 |---|---|
 | `id` | `{"description": "Task ID", "name": "id", "positional": true, "required": true}` |
-| `--generation` | `{"description": "Fence generation", "name": "generation", "required": true}` |
+| `--generation` | `{"bounds": [1, 18446744073709551615], "description": "Fence generation", "name": "generation", "required": true}` |
 | `--token` | `{"description": "Fence token (32 lowercase hex digits)", "name": "token", "required": true}` |
 | `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
@@ -1208,7 +1208,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
-| `--after` | `{"description": "Return entries after this sequence number", "name": "after"}` |
+| `--after` | `{"bounds": [0, 9223372036854775807], "description": "Return entries after this sequence number", "name": "after"}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["100"], "description": "Maximum entries (1 to 100)", "name": "limit"}` |
 | `--wait` | `{"bounds": [1, 14400], "description": "Wait up to this many seconds for new entries", "name": "wait"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
@@ -1288,7 +1288,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--issue` | `{"description": "Claim an issue by key", "name": "issue"}` |
 | `--path` | `{"description": "Claim this path (repeatable)", "name": "path", "repeatable": true}` |
 | `--worktree` | `{"description": "Claim this worktree", "name": "worktree"}` |
-| `--lease-seconds` | `{"defaults": ["300"], "description": "Lease duration in seconds (1 to 3600)", "name": "lease_seconds"}` |
+| `--lease-seconds` | `{"bounds": [1, 3600], "defaults": ["300"], "description": "Lease duration in seconds (1 to 3600)", "name": "lease_seconds"}` |
 | `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
@@ -1338,9 +1338,9 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | Argument | Contract |
 |---|---|
 | `id` | `{"description": "Claim ID", "name": "id", "positional": true, "required": true}` |
-| `--generation` | `{"description": "Fence generation", "name": "generation", "required": true}` |
+| `--generation` | `{"bounds": [1, 18446744073709551615], "description": "Fence generation", "name": "generation", "required": true}` |
 | `--token` | `{"description": "Fence token (32 lowercase hex digits)", "name": "token", "required": true}` |
-| `--lease-seconds` | `{"defaults": ["300"], "description": "Lease duration in seconds (1 to 3600)", "name": "lease_seconds"}` |
+| `--lease-seconds` | `{"bounds": [1, 3600], "defaults": ["300"], "description": "Lease duration in seconds (1 to 3600)", "name": "lease_seconds"}` |
 | `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
@@ -1395,7 +1395,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | Argument | Contract |
 |---|---|
 | `id` | `{"description": "Claim ID", "name": "id", "positional": true, "required": true}` |
-| `--generation` | `{"description": "Fence generation", "name": "generation", "required": true}` |
+| `--generation` | `{"bounds": [1, 18446744073709551615], "description": "Fence generation", "name": "generation", "required": true}` |
 | `--token` | `{"description": "Fence token (32 lowercase hex digits)", "name": "token", "required": true}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
@@ -1428,7 +1428,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | Argument | Contract |
 |---|---|
 | `id` | `{"description": "Claim ID", "name": "id", "positional": true, "required": true}` |
-| `--generation` | `{"description": "Fence generation", "name": "generation", "required": true}` |
+| `--generation` | `{"bounds": [1, 18446744073709551615], "description": "Fence generation", "name": "generation", "required": true}` |
 | `--token` | `{"description": "Fence token (32 lowercase hex digits)", "name": "token", "required": true}` |
 | `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
@@ -1516,7 +1516,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 |---|---|
 | `--reference` | `{"description": "Git reference being landed", "name": "reference", "required": true}` |
 | `--id` | `{"description": "Landing lease ID", "name": "id", "required": true}` |
-| `--generation` | `{"description": "Lease generation", "name": "generation", "required": true}` |
+| `--generation` | `{"bounds": [1, 18446744073709551615], "description": "Lease generation", "name": "generation", "required": true}` |
 | `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
@@ -1558,8 +1558,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | Argument | Contract |
 |---|---|
 | `--reference` | `{"description": "Git reference being landed", "name": "reference", "required": true}` |
-| `--id` | `{"bounds": [0, 100], "description": "Landing lease ID", "name": "id", "required": true}` |
-| `--generation` | `{"description": "Lease generation", "name": "generation", "required": true}` |
+| `--id` | `{"description": "Landing lease ID", "name": "id", "required": true}` |
+| `--generation` | `{"bounds": [1, 18446744073709551615], "description": "Lease generation", "name": "generation", "required": true}` |
 | `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
@@ -1603,7 +1603,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--reference` | `{"name": "reference", "required": true}` |
 | `--expected` | `{"description": "Commit the reference must currently point to", "name": "expected", "required": true}` |
 | `--candidate` | `{"description": "Commit to land", "name": "candidate", "required": true}` |
-| `--lease-seconds` | `{"defaults": ["300"], "description": "Lease duration in seconds (1 to 3600)", "name": "lease_seconds"}` |
+| `--lease-seconds` | `{"bounds": [1, 3600], "defaults": ["300"], "description": "Lease duration in seconds (1 to 3600)", "name": "lease_seconds"}` |
 | `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
@@ -1644,8 +1644,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 |---|---|
 | `--reference` | `{"description": "Git reference being landed", "name": "reference", "required": true}` |
 | `--id` | `{"description": "Landing lease ID", "name": "id", "required": true}` |
-| `--generation` | `{"description": "Lease generation", "name": "generation", "required": true}` |
-| `--lease-seconds` | `{"defaults": ["300"], "description": "Lease duration in seconds (1 to 3600)", "name": "lease_seconds"}` |
+| `--generation` | `{"bounds": [1, 18446744073709551615], "description": "Lease generation", "name": "generation", "required": true}` |
+| `--lease-seconds` | `{"bounds": [1, 3600], "defaults": ["300"], "description": "Lease duration in seconds (1 to 3600)", "name": "lease_seconds"}` |
 | `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
@@ -1696,7 +1696,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 |---|---|
 | `--reference` | `{"description": "Git reference being landed", "name": "reference", "required": true}` |
 | `--id` | `{"description": "Landing lease ID", "name": "id", "required": true}` |
-| `--generation` | `{"description": "Lease generation", "name": "generation", "required": true}` |
+| `--generation` | `{"bounds": [1, 18446744073709551615], "description": "Lease generation", "name": "generation", "required": true}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -1724,7 +1724,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 |---|---|
 | `--reference` | `{"description": "Git reference being landed", "name": "reference", "required": true}` |
 | `--id` | `{"description": "Landing lease ID", "name": "id", "required": true}` |
-| `--generation` | `{"description": "Lease generation", "name": "generation", "required": true}` |
+| `--generation` | `{"bounds": [1, 18446744073709551615], "description": "Lease generation", "name": "generation", "required": true}` |
 | `--operation-id` | `{"description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id", "required": true}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
@@ -1926,7 +1926,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--route` | `{"description": "Named route, or ADAPTER/NAME for a model-less adapter such as command/fmt-check", "name": "route"}` |
 | `--effort` | `{"description": "Reasoning effort", "name": "effort"}` |
 | `--confidential` | `{"defaults": ["false"], "description": "Require a confidential-safe route", "name": "confidential", "values": ["true", "false"]}` |
-| `--fallback` | `{"bounds": [0, 2], "description": "Fallback models in ADAPTER/ID form, comma separated", "name": "fallback"}` |
+| `--fallback` | `{"description": "Fallback models in ADAPTER/ID form, comma separated", "name": "fallback"}` |
 | `--exclude` | `{"description": "Keep a provider (claude), account (label, entry or ADAPTER/KEY) or exact model (ADAPTER/ID) out of a named route's pool (repeatable). A pinned --model is never affected", "name": "exclude", "repeatable": true}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
@@ -2387,14 +2387,14 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--route` | `{"description": "Named route, or ADAPTER/NAME for a model-less adapter such as command/fmt-check", "name": "route"}` |
 | `--effort` | `{"description": "Reasoning effort", "name": "effort"}` |
 | `--confidential` | `{"defaults": ["false"], "description": "Require a confidential-safe route", "name": "confidential", "values": ["true", "false"]}` |
-| `--fallback` | `{"bounds": [0, 2], "description": "Fallback models in ADAPTER/ID form, comma separated", "name": "fallback"}` |
+| `--fallback` | `{"description": "Fallback models in ADAPTER/ID form, comma separated", "name": "fallback"}` |
 | `--exclude` | `{"description": "Keep a provider (claude), account (label, entry or ADAPTER/KEY) or exact model (ADAPTER/ID) out of a named route's pool (repeatable). A pinned --model is never affected", "name": "exclude", "repeatable": true}` |
 | `--account` | `{"description": "Pin a registered account (key or label) instead of resolving one", "name": "account"}` |
 | `--mode` | `{"description": "Access mode: read-only or worktree-write [default: read-only]", "name": "mode", "values": ["read-only", "worktree-write"]}` |
-| `--read-root` | `{"bounds": [0, 32], "description": "Extra directory the lane may read (repeatable)", "name": "read_root", "repeatable": true}` |
-| `--write-root` | `{"bounds": [0, 32], "description": "Extra directory the lane may write, outside Git metadata (repeatable)", "name": "write_root", "repeatable": true}` |
+| `--read-root` | `{"description": "Extra directory the lane may read (repeatable)", "name": "read_root", "repeatable": true}` |
+| `--write-root` | `{"description": "Extra directory the lane may write, outside Git metadata (repeatable)", "name": "write_root", "repeatable": true}` |
 | `--network` | `{"description": "Network access [default: on]", "name": "network", "values": ["on", "off"]}` |
-| `--capability` | `{"bounds": [0, 16], "description": "Grant a named capability: postgres (repeatable)", "name": "capability", "repeatable": true}` |
+| `--capability` | `{"description": "Grant a named capability: postgres (repeatable)", "name": "capability", "repeatable": true}` |
 | `--provider-timeout` | `{"bounds": [1, 14400], "conditional_defaults": [["read-only", "3600"], ["worktree-write", "10800"]], "defaults": ["3600"], "description": "Provider timeout in seconds", "name": "provider_timeout"}` |
 | `--concurrency` | `{"bounds": [1, 16], "description": "Manifest lanes or preset graph attempts to run at once (1 to 16)", "name": "concurrency"}` |
 | `--knob` | `{"description": "Override an effective harness knob for this dispatch (NAME=VALUE)", "name": "knobs", "repeatable": true}` |
@@ -2571,10 +2571,10 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
-| `number` | `{"name": "number", "positional": true, "required": true}` |
+| `number` | `{"bounds": [1, 18446744073709551615], "name": "number", "positional": true, "required": true}` |
 | `--head` | `{"description": "Pin a reviewed head instead of using the current PR head", "name": "head"}` |
 | `--wait` | `{"bounds": [1, 14400], "description": "Wait for this head's CI (default 1 hour; maximum 4 hours)", "name": "wait"}` |
-| `--poll` | `{"description": "Initial CI poll interval in seconds (overrides domains.pr.land.poll_seconds, default 30)", "name": "poll"}` |
+| `--poll` | `{"bounds": [1, 18446744073709551615], "description": "Initial CI poll interval in seconds (overrides domains.pr.land.poll_seconds, default 30)", "name": "poll"}` |
 | `--explain` | `{"defaults": ["false"], "description": "Show the effective polling interval and retry budget without landing", "name": "explain", "values": ["true", "false"]}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
@@ -2630,17 +2630,16 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--route` | `{"description": "Named route, or ADAPTER/NAME for a model-less adapter such as command/fmt-check", "name": "route"}` |
 | `--effort` | `{"description": "Reasoning effort", "name": "effort"}` |
 | `--confidential` | `{"defaults": ["false"], "description": "Require a confidential-safe route", "name": "confidential", "values": ["true", "false"]}` |
-| `--fallback` | `{"bounds": [0, 2], "description": "Fallback models in ADAPTER/ID form, comma separated", "name": "fallback"}` |
+| `--fallback` | `{"description": "Fallback models in ADAPTER/ID form, comma separated", "name": "fallback"}` |
 | `--exclude` | `{"description": "Keep a provider (claude), account (label, entry or ADAPTER/KEY) or exact model (ADAPTER/ID) out of a named route's pool (repeatable). A pinned --model is never affected", "name": "exclude", "repeatable": true}` |
 | `--account` | `{"description": "Pin a registered account (key or label) instead of resolving one", "name": "account"}` |
 | `--mode` | `{"description": "Access mode: read-only or worktree-write [default: read-only]", "name": "mode", "values": ["read-only", "worktree-write"]}` |
 | `--worktree` | `{"description": "Writer worktree; local run creates an owned worktree for a missing branch name", "name": "worktree"}` |
-| `--read-root` | `{"bounds": [0, 32], "description": "Extra directory the lane may read (repeatable)", "name": "read_root", "repeatable": true}` |
-| `--write-root` | `{"bounds": [0, 32], "description": "Extra directory the lane may write, outside Git metadata (repeatable)", "name": "write_root", "repeatable": true}` |
+| `--read-root` | `{"description": "Extra directory the lane may read (repeatable)", "name": "read_root", "repeatable": true}` |
+| `--write-root` | `{"description": "Extra directory the lane may write, outside Git metadata (repeatable)", "name": "write_root", "repeatable": true}` |
 | `--network` | `{"description": "Network access [default: on]", "name": "network", "values": ["on", "off"]}` |
-| `--capability` | `{"bounds": [0, 16], "description": "Grant a named capability: postgres (repeatable)", "name": "capability", "repeatable": true}` |
+| `--capability` | `{"description": "Grant a named capability: postgres (repeatable)", "name": "capability", "repeatable": true}` |
 | `--provider-timeout` | `{"bounds": [1, 14400], "conditional_defaults": [["read-only", "3600"], ["worktree-write", "10800"]], "defaults": ["3600"], "description": "Provider timeout in seconds", "name": "provider_timeout"}` |
-| `--concurrency` | `{"bounds": [1, 16], "description": "Manifest lanes or preset graph attempts to run at once (1 to 16)", "name": "concurrency", "requires": ["manifest"]}` |
 | `--knob` | `{"description": "Override an effective harness knob for this dispatch (NAME=VALUE)", "name": "knobs", "repeatable": true}` |
 | `--host` | `{"description": "Configured peer (label or host ID) to run the dispatch on", "name": "host"}` |
 | `--branch` | `{"description": "New writer branch; run creates an owned worktree locally or on --host", "name": "branch", "requires": ["host", "base"]}` |
@@ -2651,6 +2650,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "deliver_remote", "deliver_branch", "open_pr", "write_root", "capability", "knobs", "task_id", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "provider_timeout", "operation_id"], "description": "Expand and run a named pipeline preset", "name": "preset", "requires": ["prompt_file"]}` |
 | `--model` | `{"conflicts": ["route"], "description": "Exact model in ADAPTER/ID form", "name": "model"}` |
 | `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "capability"], "description": "Dispatch the tasks in this manifest file", "name": "manifest"}` |
+| `--concurrency` | `{"bounds": [1, 16], "description": "Manifest lanes or preset graph attempts to run at once (1 to 16)", "name": "concurrency", "requires": ["manifest"]}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -2728,7 +2728,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
-| `--id` | `{"bounds": [0, 100], "description": "Show this attempt ID or RUN[/TASK[/ATTEMPT]] (repeatable)", "name": "id", "repeatable": true}` |
+| `--id` | `{"description": "Show this attempt ID or RUN[/TASK[/ATTEMPT]] (repeatable)", "name": "id", "repeatable": true}` |
 | `--host` | `{"conflicts": ["id", "cursor"], "description": "List, wait on or watch a configured peer's own lanes, by label or host ID", "name": "host"}` |
 | `--session` | `{"conflicts": ["all"], "description": "Keep lanes submitted by this session (its agent label)", "name": "session"}` |
 | `--all` | `{"defaults": ["false"], "description": "Show every lane, newest first", "name": "all", "values": ["true", "false"]}` |
@@ -2736,7 +2736,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--cursor` | `{"conflicts": ["wait", "watch"], "description": "Continue from a previous page's cursor", "name": "cursor"}` |
 | `--wait` | `{"bounds": [1, 14400], "conflicts": ["watch"], "description": "Wait for settlement (seconds, or a duration such as 30m)", "name": "wait"}` |
 | `--condition` | `{"conflicts": ["watch"], "defaults": ["any"], "description": "Wait for any or all lanes to settle", "name": "condition", "requires": ["wait"], "values": ["any", "all"]}` |
-| `--watch` | `{"conflicts": ["all", "states", "cursor"], "description": "Print one line per lane state change until every selected lane has settled or this many seconds pass (default 14400)", "name": "watch"}` |
+| `--watch` | `{"bounds": [1, 14400], "conflicts": ["all", "states", "cursor"], "description": "Print one line per lane state change until every selected lane has settled or this many seconds pass (default 14400)", "name": "watch"}` |
 | `--state` | `{"conflicts": ["wait", "watch"], "description": "Keep lanes in any of these states", "name": "states", "repeatable": true, "values": ["queued", "starting", "running", "settling", "succeeded", "review_required", "failed", "rejected", "timed_out", "rate_limited", "quota_limited", "auth_required", "model_unavailable", "permission_denied", "quarantined", "lost", "uncommitted", "cancelled", "input_required"]}` |
 | `--since` | `{"description": "Keep lanes queued within this many seconds, or since an RFC3339 time. With --wait or --watch, count lanes that settled since then", "name": "since"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
@@ -2778,7 +2778,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--to` | `{"conflicts": ["path", "trace"], "description": "Write the selected range to FILE, replacing it, instead of printing it", "name": "to"}` |
 | `--path` | `{"conflicts": ["to", "trace", "offset", "tail", "max_bytes"], "defaults": ["false"], "description": "Print the attempt's artifact path for this part instead of its content", "name": "path", "values": ["true", "false"]}` |
 | `--offset` | `{"conflicts": ["tail"], "defaults": ["0"], "description": "Byte offset to start from", "name": "offset"}` |
-| `--tail` | `{"description": "Read the last N lines instead of an offset (above 500 is clamped to 500)", "name": "tail"}` |
+| `--tail` | `{"bounds": [1, 18446744073709551615], "description": "Read the last N lines instead of an offset (above 500 is clamped to 500)", "name": "tail"}` |
 | `--max-bytes` | `{"bounds": [1, 65536], "defaults": ["65536"], "description": "Maximum bytes to return", "name": "max_bytes"}` |
 | `--trace` | `{"conflicts": ["part", "offset", "tail", "max_bytes"], "defaults": ["false"], "description": "Print the attempt's trace and its parent chain instead of a part", "name": "trace", "values": ["true", "false"]}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
@@ -2820,7 +2820,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 |---|---|
 | `target` | `{"description": "Attempt ID or RUN[/TASK[/ATTEMPT]]", "name": "target", "positional": true, "required": true}` |
 | `--operation-id` | `{"defaults": [""], "description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id"}` |
-| `--reason` | `{"bounds": [0, 256], "description": "Reason to record (up to 256 bytes)", "name": "reason"}` |
+| `--reason` | `{"description": "Reason to record (up to 256 bytes)", "name": "reason"}` |
 | `--wait` | `{"bounds": [1, 14400], "description": "Wait up to this many seconds for cancellation to settle", "name": "wait"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
@@ -2958,7 +2958,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
-| `--id` | `{"bounds": [0, 100], "description": "Reconcile only this run (repeatable)", "name": "id", "repeatable": true}` |
+| `--id` | `{"description": "Reconcile only this run (repeatable)", "name": "id", "repeatable": true}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -2999,12 +2999,12 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--suggest` | `{"conflicts": ["usage", "claude_subagents", "by"], "defaults": ["false"], "description": "Include advisory expiring suggestions from offline pipeline evidence", "name": "suggest", "values": ["true", "false"]}` |
 | `--main-ref` | `{"defaults": ["main"], "description": "Local main-line ref to analyse; no fetch is performed", "name": "main_ref"}` |
 | `--ci-file` | `{"description": "Recorded gh main-branch run list JSON; absent means CI not_measured", "name": "ci_file"}` |
-| `--outcome-days` | `{"defaults": ["14"], "description": "Days after a merge to attribute escaped defects", "name": "outcome_days"}` |
-| `--min-samples` | `{"defaults": ["20"], "description": "Independent graphs and mature merges required per arm", "name": "min_samples"}` |
-| `--expiry-days` | `{"defaults": ["14"], "description": "Days until a suggestion expires", "name": "expiry_days"}` |
+| `--outcome-days` | `{"bounds": [1, 3650], "defaults": ["14"], "description": "Days after a merge to attribute escaped defects", "name": "outcome_days"}` |
+| `--min-samples` | `{"bounds": [1, 100000], "defaults": ["20"], "description": "Independent graphs and mature merges required per arm", "name": "min_samples"}` |
+| `--expiry-days` | `{"bounds": [1, 3650], "defaults": ["14"], "description": "Days until a suggestion expires", "name": "expiry_days"}` |
 | `--claude-subagents` | `{"conflicts": ["usage", "since", "until", "run_id", "by"], "description": "Report native Claude subagents from one session's subagents directory instead of supervised attempts", "name": "claude_subagents"}` |
 | `--usage` | `{"defaults": ["false"], "description": "Count local CLI verbs and MCP tools, including unused installed units", "name": "usage", "values": ["true", "false"]}` |
-| `--since` | `{"description": "Count from this date or timestamp, or this many seconds ago", "name": "since"}` |
+| `--since` | `{"description": "Count from this date or timestamp, or a span such as 1d ago", "name": "since"}` |
 | `--until` | `{"description": "Count up to this date or timestamp", "name": "until"}` |
 | `--run-id` | `{"description": "Restrict usage and cost to one run", "name": "run_id"}` |
 | `--by` | `{"conflicts": ["usage"], "description": "Group supervised attempts by route, work context or merged pull request; attempts with no value form an &#96;unattributed&#96; group", "name": "by", "values": ["route", "pr", "issue", "graph", "node", "pattern", "preset", "role"]}` |
@@ -3047,7 +3047,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | Argument | Contract |
 |---|---|
 | `--out` | `{"defaults": ["provenant-trace.json"], "description": "Output file (default &#96;provenant-trace.json&#96;)", "name": "out"}` |
-| `--since` | `{"description": "Include attempts finished from this date or timestamp, or this many seconds ago", "name": "since"}` |
+| `--since` | `{"description": "Include attempts finished from this date or timestamp, or a span such as 1d ago", "name": "since"}` |
 | `--run` | `{"description": "Restrict the trace to one run", "name": "run"}` |
 | `--peers` | `{"defaults": ["false"], "description": "Also read the attempts of runs placed on peers, one SSH status read per peer", "name": "peers", "values": ["true", "false"]}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
@@ -3128,7 +3128,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | Argument | Contract |
 |---|---|
 | `--provider` | `{"description": "Ingest only this provider's sessions (only &#96;claude&#96; writes native transcripts)", "name": "provider"}` |
-| `--since` | `{"description": "Ingest transcripts written, and messages stamped, from this date or timestamp, or this many seconds ago", "name": "since"}` |
+| `--since` | `{"description": "Ingest transcripts written, and messages stamped, from this date or timestamp, or a span such as 1d ago", "name": "since"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -3156,10 +3156,10 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--account` | `{"description": "Account label or key", "name": "account"}` |
 | `--window` | `{"description": "Quota window, such as five_hour or weekly (default every window)", "name": "window"}` |
 | `--model` | `{"description": "Count only usage of this exact model; quota deltas still cover every model, so mileage is understated", "name": "model"}` |
-| `--since` | `{"description": "Use readings and usage from this date or timestamp, or this many seconds ago", "name": "since"}` |
-| `--min-runs` | `{"defaults": ["10"], "description": "Runs needed on each side before a capacity trend is judged", "name": "min_runs"}` |
-| `--fall-percent` | `{"defaults": ["20"], "description": "Fall in capacity, in percent, that is flagged rather than inconclusive", "name": "fall_percent"}` |
-| `--recent-days` | `{"defaults": ["7"], "description": "Days in the recent side of a capacity step change", "name": "recent_days"}` |
+| `--since` | `{"description": "Use readings and usage from this date or timestamp, or a span such as 1d ago", "name": "since"}` |
+| `--min-runs` | `{"bounds": [2, 10000], "defaults": ["10"], "description": "Runs needed on each side before a capacity trend is judged", "name": "min_runs"}` |
+| `--fall-percent` | `{"bounds": [1, 99], "defaults": ["20"], "description": "Fall in capacity, in percent, that is flagged rather than inconclusive", "name": "fall_percent"}` |
+| `--recent-days` | `{"bounds": [1, 90], "defaults": ["7"], "description": "Days in the recent side of a capacity step change", "name": "recent_days"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -3205,9 +3205,9 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `id` | `{"description": "Experiment name from domains.fabric.pipelines.experiment", "name": "id", "positional": true, "required": true}` |
 | `--main-ref` | `{"defaults": ["main"], "description": "Local main-line ref to analyse; no fetch is performed", "name": "main_ref"}` |
 | `--ci-file` | `{"description": "Recorded gh main-branch run list JSON; absent means CI not_measured", "name": "ci_file"}` |
-| `--outcome-days` | `{"defaults": ["14"], "description": "Days after a merge to attribute escaped defects", "name": "outcome_days"}` |
-| `--min-samples` | `{"defaults": ["20"], "description": "Independent graphs and mature merges required per arm", "name": "min_samples"}` |
-| `--expiry-days` | `{"defaults": ["14"], "description": "Days until a suggestion expires", "name": "expiry_days"}` |
+| `--outcome-days` | `{"bounds": [1, 3650], "defaults": ["14"], "description": "Days after a merge to attribute escaped defects", "name": "outcome_days"}` |
+| `--min-samples` | `{"bounds": [1, 100000], "defaults": ["20"], "description": "Independent graphs and mature merges required per arm", "name": "min_samples"}` |
+| `--expiry-days` | `{"bounds": [1, 3650], "defaults": ["14"], "description": "Days until a suggestion expires", "name": "expiry_days"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -3287,7 +3287,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | Argument | Contract |
 |---|---|
 | `--adapter` | `{"description": "Restrict to this adapter", "name": "adapter"}` |
-| `--days` | `{"defaults": ["7"], "description": "Days to include, as a rolling window back from now", "name": "days"}` |
+| `--days` | `{"bounds": [1, 365], "defaults": ["7"], "description": "Days to include, as a rolling window back from now", "name": "days"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -3320,7 +3320,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--account` | `{"description": "Account label or key", "name": "account"}` |
 | `--since` | `{"description": "Earliest reading", "name": "since"}` |
 | `--until` | `{"description": "Latest reading", "name": "until"}` |
-| `--limit` | `{"bounds": [1, 100], "defaults": ["1000"], "description": "Most readings to return", "name": "limit"}` |
+| `--limit` | `{"bounds": [1, 100000], "defaults": ["1000"], "description": "Most readings to return", "name": "limit"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -3442,8 +3442,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
-| `--max-depth` | `{"defaults": ["8"], "description": "Maximum store depth, including the host store", "name": "max_depth"}` |
-| `--max-nodes` | `{"defaults": ["100"], "description": "Maximum attempts to include", "name": "max_nodes"}` |
+| `--max-depth` | `{"bounds": [1, 16], "defaults": ["8"], "description": "Maximum store depth, including the host store", "name": "max_depth"}` |
+| `--max-nodes` | `{"bounds": [1, 100], "defaults": ["100"], "description": "Maximum attempts to include", "name": "max_nodes"}` |
 | `--detail` | `{"defaults": ["false"], "description": "Include complete run and attempt records", "name": "detail", "values": ["true", "false"]}` |
 | `--hosts` | `{"description": "Include configured peers: all or a comma-separated list of labels", "name": "hosts"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
@@ -3681,7 +3681,7 @@ Search is local only; peers are not searched. Only the first match per artifact 
 |---|---|
 | `viewer` | `{"name": "viewer", "positional": true, "required": true}` |
 | `id` | `{"name": "id", "positional": true, "required": true}` |
-| `--seen-revision` | `{"description": "Revision actually viewed, or omit for unread", "name": "seen_revision"}` |
+| `--seen-revision` | `{"bounds": [1, 18446744073709551615], "description": "Revision actually viewed, or omit for unread", "name": "seen_revision"}` |
 | `--snoozed-until` | `{"description": "Snooze until this UTC timestamp", "name": "snoozed_until"}` |
 | `--dismissed` | `{"defaults": ["false"], "description": "Hide this item for this viewer", "name": "dismissed", "values": ["true", "false"]}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
@@ -3713,7 +3713,7 @@ Search is local only; peers are not searched. Only the first match per artifact 
 |---|---|
 | `viewer` | `{"name": "viewer", "positional": true, "required": true}` |
 | `session` | `{"name": "session", "positional": true, "required": true}` |
-| `--to` | `{"name": "to"}` |
+| `--to` | `{"bounds": [1, 18446744073709551615], "name": "to"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -3741,7 +3741,7 @@ Search is local only; peers are not searched. Only the first match per artifact 
 |---|---|
 | `viewer` | `{"name": "viewer", "positional": true, "required": true}` |
 | `session` | `{"name": "session", "positional": true, "required": true}` |
-| `--revision` | `{"name": "revision", "required": true}` |
+| `--revision` | `{"bounds": [1, 18446744073709551615], "name": "revision", "required": true}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -3831,8 +3831,8 @@ Search is local only; peers are not searched. Only the first match per artifact 
 | Argument | Contract |
 |---|---|
 | `session` | `{"description": "Chair session ID", "name": "session", "positional": true, "required": true}` |
-| `--from` | `{"description": "Earlier summary revision", "name": "from", "required": true}` |
-| `--to` | `{"description": "Later summary revision (defaults to current)", "name": "to"}` |
+| `--from` | `{"bounds": [1, 18446744073709551615], "description": "Earlier summary revision", "name": "from", "required": true}` |
+| `--to` | `{"bounds": [1, 18446744073709551615], "description": "Later summary revision (defaults to current)", "name": "to"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -4089,7 +4089,7 @@ Search is local only; peers are not searched. Only the first match per artifact 
 | `--discard` | `{"conflicts": ["merged"], "defaults": ["false"], "description": "With NAME: also delete the branch when it is not merged (clean worktree only)", "name": "discard", "values": ["true", "false"]}` |
 | `--merged` | `{"defaults": ["false"], "description": "Remove worktrees already merged into the integration branch", "name": "merged", "requires": ["integration", "remove_scope"], "values": ["true", "false"]}` |
 | `--integration` | `{"description": "Integration ref to check merges against: a branch or a remote-tracking ref such as origin/main (NAME: fetched upstream default, falling back to the primary's branch when unavailable)", "name": "integration"}` |
-| `--branch` | `{"bounds": [0, 100], "conflicts": ["since"], "description": "Limit to this branch (repeatable)", "name": "branch", "repeatable": true, "requires": ["merged"]}` |
+| `--branch` | `{"conflicts": ["since"], "description": "Limit to this branch (repeatable)", "name": "branch", "repeatable": true, "requires": ["merged"]}` |
 | `--since` | `{"description": "Limit to worktrees created since this commit", "name": "since", "requires": ["merged"]}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
@@ -4143,7 +4143,7 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `number` | `{"name": "number", "positional": true, "required": true}` |
+| `number` | `{"bounds": [1, 18446744073709551615], "name": "number", "positional": true, "required": true}` |
 | `--bind` | `{"defaults": ["false"], "description": "Retry host binding to the observed PR branch and head; close ended bindings", "name": "bind", "values": ["true", "false"]}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
@@ -4169,7 +4169,7 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `number` | `{"name": "number", "positional": true, "required": true}` |
+| `number` | `{"bounds": [1, 18446744073709551615], "name": "number", "positional": true, "required": true}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -4196,7 +4196,7 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 | `--from-attempt` | `{"description": "The writer attempt that made the change", "name": "from_attempt", "required": true}` |
 | `--review` | `{"description": "An independent review attempt (repeatable); the attempt's delivery receipt supplies them when omitted", "name": "review", "repeatable": true}` |
 | `--summary-file` | `{"description": "Markdown for the summary section; its first line titles the pull request", "name": "summary_file", "required": true}` |
-| `--issue` | `{"description": "Issue the pull request closes (repeatable)", "name": "issue", "repeatable": true}` |
+| `--issue` | `{"bounds": [1, 18446744073709551615], "description": "Issue the pull request closes (repeatable)", "name": "issue", "repeatable": true}` |
 | `--branch` | `{"description": "Branch to open from; the attempt's delivered branch when omitted", "name": "branch"}` |
 | `--base` | `{"description": "Branch to merge into; the repository default when omitted", "name": "base"}` |
 | `--draft` | `{"defaults": ["false"], "description": "Open as a draft", "name": "draft", "values": ["true", "false"]}` |
@@ -4231,7 +4231,7 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 
 | Argument | Contract |
 |---|---|
-| `numbers` | `{"description": "Pull requests to report; this account's open ones when omitted", "name": "numbers", "positional": true, "repeatable": true}` |
+| `numbers` | `{"bounds": [1, 18446744073709551615], "description": "Pull requests to report; this account's open ones when omitted", "name": "numbers", "positional": true, "repeatable": true}` |
 | `--wait` | `{"bounds": [1, 14400], "description": "Block until the snapshot changes (default 5 minutes; maximum 4 hours)", "name": "wait"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
@@ -4266,7 +4266,7 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 | `--free-floor` | `{"description": "Keep at least this much free space (20G, or plain GiB)", "name": "free_floor"}` |
 | `--dry-run` | `{"conflicts": ["apply"], "defaults": ["false"], "description": "Report what would be removed without deleting anything", "name": "dry_run", "values": ["true", "false"]}` |
 | `--apply` | `{"defaults": ["false"], "description": "Also delete merged worktrees and ignored declared output (otherwise previewed)", "name": "apply", "values": ["true", "false"]}` |
-| `--idle-days` | `{"defaults": ["7"], "description": "Minimum idle age for standalone caches and ignored output; merged trees are immediate", "name": "idle_days"}` |
+| `--idle-days` | `{"bounds": [1, 3650], "defaults": ["7"], "description": "Minimum idle age for standalone caches and ignored output; merged trees are immediate", "name": "idle_days"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -4573,7 +4573,7 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 | Argument | Contract |
 |---|---|
 | `session_id` | `{"description": "Session ID", "name": "session_id", "positional": true, "required": true}` |
-| `--rev` | `{"description": "Show this retained revision's text instead of the current one", "name": "rev"}` |
+| `--rev` | `{"bounds": [1, 18446744073709551615], "description": "Show this retained revision's text instead of the current one", "name": "rev"}` |
 | `--revisions` | `{"conflicts": ["rev"], "defaults": ["false"], "description": "List the retained revisions with their parents and hashes", "name": "revisions", "values": ["true", "false"]}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
@@ -4601,7 +4601,7 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 | Argument | Contract |
 |---|---|
 | `session_id` | `{"description": "Session ID", "name": "session_id", "positional": true, "required": true}` |
-| `rev` | `{"description": "Revision to compare with the current checkpoint", "name": "rev", "positional": true, "required": true}` |
+| `rev` | `{"bounds": [1, 18446744073709551615], "description": "Revision to compare with the current checkpoint", "name": "rev", "positional": true, "required": true}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 

@@ -1,5 +1,6 @@
 //! Check composition and stateless, evidence-bound pagination.
 use crate::grammar::{Page, Rules, absolute};
+use crate::metadata::CatalogueArg;
 use clap::{Subcommand, builder::TypedValueParser};
 use provenant_confinement::utility::run_release_read_utility;
 use provenant_confinement::{GitRead, ReadOnlyRepo, UtilityBudget, UtilityRuntime};
@@ -34,10 +35,10 @@ pub enum Check {
     /// Check a release range for blocking findings
     Release {
         /// Base commit of the range
-        #[arg(long, requires = "head")]
+        #[arg(long, catalog_requires = "head")]
         base: Option<GitOid>,
         /// Head commit of the range
-        #[arg(long, requires = "base")]
+        #[arg(long, catalog_requires = "base")]
         head: Option<GitOid>,
         #[command(flatten)]
         page: Page,
