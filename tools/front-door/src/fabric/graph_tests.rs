@@ -19,6 +19,9 @@ mod graph_writer_admission_tests {
         for error in [
             lock("writer.lock"),
             WorktreeError::LiveWriter,
+            WorktreeError::WriterBusy {
+                holder: Some(provenant_core::AttemptId::from_bytes([7; 16])),
+            },
             WorktreeError::UnknownWriter,
             WorktreeError::Dirty(String::new()),
         ] {
