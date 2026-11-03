@@ -1554,6 +1554,7 @@ fn composite_rejects_ambiguous_exports_and_blocks_on_child_failure() {
         run.checkpoint.nodes.last().unwrap().state,
         NodeState::Blocked
     );
+    assert_eq!(run.checkpoint.nodes.last().unwrap().advance_error, None);
     assert!(!run.checkpoint.successful());
     assert_eq!(
         advance(&document, &mut FakeOwner::default(), &mut journal)

@@ -2434,8 +2434,12 @@ fn attribute_blocker(
     checkpoint: &mut GraphCheckpoint,
     positions: &std::collections::BTreeMap<String, usize>,
 ) -> bool {
-    // Gates record their outcome as gate evidence and never carry an advance error.
-    if node.condition.is_some() || checkpoint.nodes[node_index].advance_error.is_some() {
+    // These nodes have their own settlement and checkpoint evidence rules.
+    if node.condition.is_some()
+        || node.composite.is_some()
+        || node.land.is_some()
+        || checkpoint.nodes[node_index].advance_error.is_some()
+    {
         return false;
     }
     let blocker = node
