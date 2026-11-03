@@ -574,7 +574,10 @@ fn identity_only_dispositions_inherit_selected_findings() {
         node: "review".into(),
         outputs: vec![OutputKind::Findings],
     }];
-    for (id, state) in [("F1", NodeState::Succeeded), ("unknown", NodeState::Failed)] {
+    for (id, state) in [
+        ("F1", NodeState::Succeeded),
+        ("missing-F9", NodeState::Failed),
+    ] {
         let text = findings_text(&format!(
             r#"{{"id":"{id}","disposition":"rejected","reason":"falsified"}}"#
         ));
@@ -603,8 +606,10 @@ fn identity_only_dispositions_inherit_selected_findings() {
             assert_eq!(finding.reason.as_deref(), Some("falsified"));
         } else {
             let error = progress.advance_error.as_deref().unwrap();
-            assert!(error.contains("unknown"), "{error}");
-            assert!(error.contains("id"), "{error}");
+            assert!(
+                error.contains("(missing-F9) field id: unknown upstream identity"),
+                "{error}"
+            );
         }
     }
 }

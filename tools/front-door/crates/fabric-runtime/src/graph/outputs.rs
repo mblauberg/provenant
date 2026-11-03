@@ -229,25 +229,26 @@ fn parse_findings(block: &str, upstream: &[Finding]) -> Result<Vec<Finding>, Str
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| fail("id", "expected string"))?
             .to_owned();
-        // Selection removes repeated inputs from the same source. An alias
-        // must be unique across exact identities and colon-delimited suffixes.
-        let matches: Vec<_> = upstream
-            .iter()
-            .filter(|finding| {
-                finding.id == id
-                    || finding
-                        .id
-                        .strip_suffix(&id)
-                        .is_some_and(|prefix| prefix.ends_with(':'))
-            })
-            .collect();
-        if matches.len() > 1 {
-            return Err(fail(
-                "id",
-                "ambiguous upstream identity; use the qualified id",
-            ));
-        }
-        if let Some(source) = matches.first() {
+        // Prefer an exact identity; only aliases require a unique suffix.
+        let source = if let Some(exact) = upstream.iter().find(|finding| finding.id == id) {
+            Some(exact)
+        } else {
+            let mut matches = upstream.iter().filter(|finding| {
+                finding
+                    .id
+                    .strip_suffix(&id)
+                    .is_some_and(|prefix| prefix.ends_with(':'))
+            });
+            let source = matches.next();
+            if matches.next().is_some() {
+                return Err(fail(
+                    "id",
+                    "ambiguous upstream identity; use the qualified id",
+                ));
+            }
+            source
+        };
+        if let Some(source) = source {
             let inherited = serde_json::to_value(source)
                 .map_err(|_| fail("id", "cannot encode upstream finding"))?;
             for (field, value) in inherited
@@ -549,6 +550,24 @@ pub(super) fn render_files(entries: &[MaterialisedInput]) -> String {
 #[cfg(test)]
 mod alias_tests {
     use super::*;
+
+    #[test]
+    fn exact_identity_takes_precedence_over_suffix_alias() {
+        let finding = |id: &str, summary: &str| {
+            serde_json::from_value::<Finding>(serde_json::json!({
+                "id": id, "severity": "high", "file": "a.rs", "summary": summary, "status": "open"
+            }))
+            .unwrap()
+        };
+        let block = r#"{"schema_version":1,"findings":[{"id":"F1","disposition":"rejected","reason":"no"}]}"#;
+        let result = parse_findings(
+            block,
+            &[finding("lens-a:F1", "suffix"), finding("F1", "exact")],
+        )
+        .unwrap();
+        assert_eq!(result[0].id, "F1");
+        assert_eq!(result[0].summary, "exact");
+    }
 
     #[test]
     fn qualified_alias_requires_a_unique_colon_delimited_suffix() {
