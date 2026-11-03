@@ -547,7 +547,6 @@ fn prepare(
         input.executable.as_os_str(),
         "-p".as_ref(),
         "--strict-mcp-config".as_ref(),
-        "--disable-slash-commands".as_ref(),
         "--permission-prompts".as_ref(),
         "none".as_ref(),
         "--output-format".as_ref(),
@@ -564,8 +563,8 @@ fn prepare(
     let shell = access == Access::WorktreeWrite;
     let web = plan.network == NetworkAccess::Open;
     let (mode, tools) = match access {
-        Access::ReadOnly => ("dontAsk", "Read,Grep,Glob,Bash"),
-        Access::WorktreeWrite => ("default", "Read,Grep,Glob,Edit,Write,Bash"),
+        Access::ReadOnly => ("dontAsk", "Read,Grep,Glob,Bash,Skill"),
+        Access::WorktreeWrite => ("default", "Read,Grep,Glob,Edit,Write,Bash,Skill"),
     };
     let tools = if web {
         format!("{tools},WebFetch,WebSearch")
@@ -611,9 +610,9 @@ fn prepare(
     let scratch = &plan.scratch.path;
     // Scrub mode forces default permissions, regardless of --permission-mode.
     let allowed_tools = if shell {
-        "Read,Grep,Glob,Edit,Write,Bash,mcp__fabric__*"
+        "Read,Grep,Glob,Edit,Write,Bash,Skill,mcp__fabric__*"
     } else {
-        "Bash,mcp__fabric__*"
+        "Bash,Skill,mcp__fabric__*"
     };
     let allowed_tools = if web {
         format!("{allowed_tools},WebFetch,WebSearch")
@@ -643,7 +642,9 @@ fn prepare(
     if !shell {
         setup.push(SetupStep::CreateDir(transcript_dir.clone()));
     }
-    if shell {
+    let user_skills = input.home.join(".claude/skills");
+    let discover_skills = input.user_skills() && user_skills.is_dir();
+    if shell || (discover_skills && input.account.is_some()) {
         let config = plan
             .private_state
             .as_ref()
@@ -651,11 +652,32 @@ fn prepare(
             .path
             .join("claude-config");
         env.push(("CLAUDE_CONFIG_DIR".into(), config.clone().into_os_string()));
-        setup.push(SetupStep::CreateDir(config));
+        setup.push(SetupStep::CreateDir(config.clone()));
+        if discover_skills {
+            setup.push(SetupStep::Symlink {
+                link: config.join("skills"),
+                target: user_skills.clone(),
+            });
+        }
     } else if input.account.is_some() {
         env.push(("CLAUDE_CONFIG_DIR".into(), config_dir.into_os_string()));
     }
     let mut runtime_reads = vec![subtree(package)];
+    if discover_skills {
+        let grants = crate::launch::user_skills_grants(&user_skills);
+        for grant in &grants {
+            // Claude's workspace arguments accept directories only. The
+            // outer profile still grants linked files exactly, never siblings.
+            let directory = match grant.scope {
+                provenant_confinement::permissions::PathScope::Exact => {
+                    grant.path.parent().ok_or(ProviderError::InvalidPath)?
+                }
+                provenant_confinement::permissions::PathScope::Subtree => &grant.path,
+            };
+            argv.extend(["--add-dir".into(), directory.as_os_str().to_owned()]);
+        }
+        runtime_reads.extend(grants);
+    }
     let mut tool_exec_roots = ["/bin", "/usr/bin", "/usr/libexec"].map(subtree).to_vec();
     let tool_writes = Vec::new();
     env.extend([

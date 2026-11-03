@@ -4003,6 +4003,37 @@ fn graph_review_node(document: &provenant_fabric_runtime::graph::GraphDocument, 
 
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     type Error = FacadeError;
+    fn equal_review_range(&mut self, reference: &str) -> Result<bool, Self::Error> {
+        let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+        if host != self.factory.context.identity.host.to_string() {
+            return Ok(false);
+        }
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: true,
+            actor: None,
+            chair: None,
+        };
+        let store = owner.store(self.cancel)?;
+        let call = owner.call(self.cancel);
+        let record = store
+            .record(
+                attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+                &call,
+            )
+            .map_err(run_error)?;
+        let request = store.request(record.run_id, &call).map_err(run_error)?;
+        let task = request
+            .tasks
+            .iter()
+            .find(|task| task.task_id == record.task_id)
+            .ok_or(FacadeError::StateCorrupt)?;
+        Ok(task
+            .base
+            .as_ref()
+            .zip(task.head.as_ref())
+            .is_some_and(|(base, head)| base == head))
+    }
     fn respect_ci_wake(&self) -> bool {
         self.tick
     }
@@ -4466,6 +4497,38 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             } else {
                 None
             };
+            let base = if accepted {
+                store
+                    .request(
+                        operation.as_ref().ok_or(FacadeError::StateCorrupt)?.run_id,
+                        &call,
+                    )
+                    .map_err(run_error)?
+                    .tasks
+                    .first()
+                    .ok_or(FacadeError::StateCorrupt)?
+                    .base_ref
+                    .clone()
+            } else if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
+                && node.source_commit.is_some()
+            {
+                node.review_base
+                    .map(|base| {
+                        let git =
+                            provenant_os::git::git_executable().ok_or(FacadeError::InvalidInput)?;
+                        provenant_run::resolve_git_base(&git, &self.factory.cwd, base)
+                            .map_err(run_error)
+                    })
+                    .transpose()?
+                    .or_else(|| self.integration_base.map(|base| base.to_string()))
+                    // Preserve the prior fallback without requiring origin/HEAD.
+                    .or_else(|| node.source_commit.map(str::to_owned))
+            } else {
+                node.source_commit.map(|head| {
+                    self.integration_base
+                        .map_or_else(|| head.to_owned(), |base| base.to_string())
+                })
+            };
             let input = SubmitInput::Submit {
                 extra: Default::default(),
                 operation_id,
@@ -4473,10 +4536,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     context,
                     extra: Default::default(),
                     build_heavy: false,
-                    base: node.source_commit.map(|head| {
-                        self.integration_base
-                            .map_or_else(|| head.to_owned(), |base| base.to_string())
-                    }),
+                    base,
                     head: node.source_commit.map(str::to_owned),
                     account: route.account.clone(),
                     access,

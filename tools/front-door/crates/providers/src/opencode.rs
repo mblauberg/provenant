@@ -122,14 +122,50 @@ fn prepare(
             .to_str()
             .ok_or(ProviderError::InvalidPath)?
     );
+    let user_skills = crate::user_skills_directory("opencode", input.home, input.host_var)
+        .filter(|_| input.user_skills());
+    let skill_reads = user_skills
+        .as_ref()
+        .map(|path| crate::user_skills_grants(path))
+        .unwrap_or_default();
     let mut permission = serde_json::json!({
         "edit": edit,
         "bash": edit,
         "webfetch": "deny",
     });
+    let mut external = serde_json::Map::new();
+    let mut reads = serde_json::Map::new();
     if input.git_context {
-        permission["external_directory"] = serde_json::json!({scratch.clone(): "allow"});
-        permission["read"] = serde_json::json!({scratch: "allow"});
+        external.insert(scratch.clone(), "allow".into());
+        reads.insert(scratch, "allow".into());
+    }
+    if let Some(skills) = &user_skills {
+        // Keep native paths usable even when the skills root is itself a link.
+        let pattern = format!("{}/**", skills.display());
+        external.insert(pattern.clone(), "allow".into());
+        reads.insert(pattern, "allow".into());
+    }
+    for grant in &skill_reads {
+        let directory = match grant.scope {
+            provenant_confinement::permissions::PathScope::Exact => {
+                grant.path.parent().ok_or(ProviderError::InvalidPath)?
+            }
+            provenant_confinement::permissions::PathScope::Subtree => &grant.path,
+        };
+        external.insert(format!("{}/**", directory.display()), "allow".into());
+        let path = match grant.scope {
+            provenant_confinement::permissions::PathScope::Exact => {
+                grant.path.display().to_string()
+            }
+            provenant_confinement::permissions::PathScope::Subtree => {
+                format!("{}/**", grant.path.display())
+            }
+        };
+        reads.insert(path, "allow".into());
+    }
+    if !external.is_empty() {
+        permission["external_directory"] = external.into();
+        permission["read"] = reads.into();
     }
     let config = serde_json::json!({
         "autoupdate": false,
@@ -176,10 +212,27 @@ fn prepare(
     if access == Access::WorktreeWrite {
         runtime_reads.extend(crate::launch::git_global_files(&config_home));
     }
+    // Preserve the existing provider configuration without making skills
+    // readable when discovery is off. Do not follow unrelated config links.
     let config_dir = config_home.join("opencode");
-    if config_dir.is_dir() {
-        runtime_reads.push(subtree(config_dir));
+    if let Ok(config_dir) = std::fs::canonicalize(&config_dir)
+        && let Ok(entries) = std::fs::read_dir(&config_dir)
+    {
+        runtime_reads.push(exact(&config_dir));
+        for entry in entries.flatten() {
+            if entry.file_name() == "skills" {
+                continue;
+            }
+            if let Ok(kind) = entry.file_type() {
+                if kind.is_dir() {
+                    runtime_reads.push(subtree(entry.path()));
+                } else if kind.is_file() {
+                    runtime_reads.push(exact(entry.path()));
+                }
+            }
+        }
     }
+    runtime_reads.extend(skill_reads);
     // Keep the account store readable but outside all writable state grants.
     let mut state_writes = ["opencode.db", "opencode.db-shm", "opencode.db-wal"]
         .map(|name| exact(data.join(name)))

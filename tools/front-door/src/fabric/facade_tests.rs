@@ -604,6 +604,62 @@ mod peer_tests {
     }
 
     #[test]
+    fn graph_review_launch_submits_pinned_source_and_base() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::graph_review_launch_submits_pinned_source_and_base")? { return Ok(()); }
+        use provenant_fabric_runtime::graph::{self, AttemptOwner};
+        let rig = crate::worktree_tests::repository()?;
+        let git = |args: &[&str]| crate::worktree_tests::git(&rig, args);
+        assert!(git(&["for-each-ref", "--format=%(refname)", "refs/remotes/origin/HEAD"])?.is_empty());
+        let base = git(&["rev-parse", "HEAD"])?;
+        std::fs::write(rig.project.join("lane-change"), "change")?;
+        git(&["add", "lane-change"])?;
+        git(&["commit", "-qm", "lane"])?;
+        let head = git(&["rev-parse", "HEAD"])?;
+        git(&["checkout", "-q", "--detach", &base])?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project)?,
+            project_attribution: false, clock: SystemClock, backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
+            assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let mut graph_owner = BoundGraphOwner { factory: &factory, integration_base: None,
+            integration_branch: None, network: None, exclude: Vec::new(), budget, cancel: &cancel,
+            prices: None, tick: false };
+        let actor = graph_owner.actor();
+        let route = serde_json::from_value(serde_json::json!({"adapter":"fixture", "model":"fixture/model"}))?;
+        let owner = BinaryRunOwner { factory: &factory, allow_remote: true, actor: None, chair: None };
+        let store = owner.store(&cancel)?;
+        let call = owner.call(&cancel);
+        for (name, review_base, expected_base) in [
+            ("lens", Some(base.as_str()), &base),
+            ("evaluate", Some(base.as_str()), &base),
+            ("equal", Some(head.as_str()), &head),
+            ("default-no-origin-head", None, &head),
+        ] {
+            let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({"graph_id":"review-pins", "node_id":name, "route_index":0}))?;
+            let observation = graph_owner.observe_or_start(&key, graph::NodeInput {
+                context: Default::default(), read_roots: &[], distinct_from_attempts: &[], require_distinct: false,
+                source_commit: Some(&head), review_base, title: name, prompt: "review",
+                required_verdict: None, deadline_seconds: None, inputs_dir: None,
+            }, &route, graph::AccessMode::ReadOnly, None, graph::Replay {
+                delivery: None, branch: None, fast_forward_only: false, stored_ref: None, launch_actor: &actor,
+            })?;
+            let operation = store.operation(&graph_operation("graph-attempt-operation", &key)?, &call)?.ok_or("missing operation")?;
+            let request = store.request(operation.run_id, &call)?;
+            assert_eq!(request.tasks[0].base.as_deref(), Some(expected_base.as_str()));
+            assert_eq!(request.tasks[0].head.as_deref(), Some(head.as_str()));
+            let reference = match observation {
+                graph::AttemptObservation::Pending { attempt_ref } | graph::AttemptObservation::Unknown { attempt_ref } | graph::AttemptObservation::Terminal { attempt_ref, .. } => attempt_ref.ok_or("missing attempt reference")?,
+            };
+            assert_eq!(graph_owner.equal_review_range(&reference)?, expected_base == &head);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn graph_replay_preserves_legacy_context_without_a_checkpoint_reference()
     -> Result<(), Box<dyn std::error::Error>> {
         if host_test(
@@ -698,6 +754,7 @@ mod peer_tests {
                     distinct_from_attempts: &[],
                     require_distinct: false,
                     source_commit: None,
+                    review_base: None,
                     title: "inspect",
                     prompt: "Review the slice",
                     required_verdict: None,
