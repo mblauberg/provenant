@@ -597,13 +597,11 @@ error_kinds! {
     HostClock => "HOST_CLOCK", "Startup spacing cannot be judged: the monotonic clock or boot identity is unreadable.";
     WriterRefLocked => "WRITER_REF_LOCKED", "A writer Git ref lock already exists.";
     ObjectImportLimit => "OBJECT_IMPORT_LIMIT", "A lane's Git object import exceeded its limits.";
-    AccountNotRegistered => "ACCOUNT_NOT_REGISTERED", "The account is not registered with Provenant.";
 }
 impl From<&RunError> for ErrorKind {
     fn from(error: &RunError) -> Self {
         match error {
             RunError::Input { kind, .. } => *kind,
-            RunError::AccountNotRegistered(_) => Self::AccountNotRegistered,
             RunError::InvalidTaskTitle(_) | RunError::AttemptReservationRetained => Self::Invalid,
             RunError::WorktreeMissing(_) => Self::WorktreeMissing,
             RunError::WorktreeUnregistered(_) => Self::WorktreeUnregistered,

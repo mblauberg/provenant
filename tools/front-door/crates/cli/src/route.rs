@@ -2408,11 +2408,9 @@ pub fn run(
                 }
                 EdgeError::Config(_) | EdgeError::PacingConfig(_) => (Outcome::Invalid, "CONFIG"),
                 EdgeError::AccountProfile { kind, .. } => match kind {
-                    AccountProfileError::Unknown => (Outcome::Invalid, "UNKNOWN_ACCOUNT"),
-                    AccountProfileError::Ambiguous => (Outcome::Invalid, "ACCOUNT_AMBIGUOUS"),
-                    AccountProfileError::Duplicate => {
-                        (Outcome::Invalid, "MULTIPLE_PACING_PROFILES")
-                    }
+                    AccountProfileError::Unknown
+                    | AccountProfileError::Ambiguous
+                    | AccountProfileError::Duplicate => (Outcome::Invalid, "CONFIG"),
                 },
                 _ => (Outcome::Error, "IO"),
             };

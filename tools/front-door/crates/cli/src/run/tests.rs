@@ -1211,6 +1211,13 @@ fn host_delivery_limit_keeps_its_text_as_typed_io_detail() {
         assert_eq!(detail.code(), "io");
         assert_eq!(detail.to_string(), text);
     }
+    let failure = super::Fail::from(provenant_run::RunError::Delivery(
+        provenant_records::run::WriterDeliveryStage::Prepare,
+    ));
+    assert_eq!(
+        failure.detail.expect("stage detail").to_string(),
+        failure.message
+    );
 }
 
 #[test]

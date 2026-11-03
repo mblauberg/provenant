@@ -365,9 +365,6 @@ fn error_class(error: &InstallError) -> (Outcome, &'static str) {
             (Outcome::Error, "INSTALL_ERROR")
         }
         InstallError::Config(_) => (Outcome::Invalid, "INSTALL_INVALID"),
-        InstallError::InvalidConfig(code) if code.contains("is never synced") => {
-            (Outcome::Invalid, "ACCOUNT_NEVER_SYNCED")
-        }
         InstallError::Path(_)
         | InstallError::Manifest(_)
         | InstallError::Platform

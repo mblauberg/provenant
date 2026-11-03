@@ -1493,8 +1493,7 @@ fn kind_error(kind: provenant_run::ErrorKind) -> FacadeError {
         | E::ParentAttempt
         | E::Invalid
         | E::WorktreeRequired
-        | E::WorktreeNotApplicable
-        | E::AccountNotRegistered => FacadeError::InvalidInput,
+        | E::WorktreeNotApplicable => FacadeError::InvalidInput,
         E::WorktreeMissing => FacadeError::WorktreeMissing,
         E::NotFound => FacadeError::NotFound,
         E::Conflict => FacadeError::Conflict,

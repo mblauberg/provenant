@@ -881,7 +881,10 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
         let out = rig.execute(binary, &resume, Some(b"more"))?;
         let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
         assert_eq!(code(&out), 1, "{value}");
-        assert_eq!(value["error"]["code"], "ACCOUNT_NOT_REGISTERED", "{value}");
+        assert_eq!(
+            value["error"]["code"], "CONTINUATION_UNSUPPORTED",
+            "{value}"
+        );
         assert!(
             value["error"]["message"].as_str().is_some_and(
                 |message| message.contains("account fixture-account is not registered")

@@ -638,10 +638,6 @@ fn each_refusal_has_its_own_stable_code() {
             RunError::ObjectImportLimit("fixture"),
             "OBJECT_IMPORT_LIMIT",
         ),
-        (
-            RunError::AccountNotRegistered("fixture".into()),
-            "ACCOUNT_NOT_REGISTERED",
-        ),
     ] {
         assert_eq!(error.code(), code, "{error:?}");
     }

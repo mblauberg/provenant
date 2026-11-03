@@ -2189,3 +2189,100 @@ fn preset_run_followed_by_provenant_run_on_same_bound_worktree_succeeds()
 
     Ok(())
 }
+
+#[test]
+fn preset_refuses_readable_state_directories_with_chmod_repair()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    let state = temp.path().join("state with 'quotes'");
+    let home = temp.path().join("home");
+    std::fs::create_dir(&project)?;
+    std::fs::create_dir(&state)?;
+    std::fs::write(
+        state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='1B'\n",
+    )?;
+    std::fs::create_dir(&home)?;
+    let git = provenant_os::fixture::git_command()
+        .current_dir(&project)
+        .args(["init", "-q"])
+        .output()?;
+    assert!(git.status.success(), "{git:?}");
+    let commit = provenant_os::fixture::git_command()
+        .current_dir(&project)
+        .args([
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "initial",
+        ])
+        .output()?;
+    assert!(commit.status.success(), "{commit:?}");
+    let presets = project.join(".provenant/presets");
+    std::fs::create_dir_all(&presets)?;
+    std::fs::write(
+        presets.join("gate-only.toml"),
+        "stages = [{ id = 'accept', kind = 'gate', condition = { type = 'budget' } }]\n",
+    )?;
+    let prompt = temp.path().join("brief");
+    std::fs::write(&prompt, "accept the bounded graph")?;
+    let run = || -> std::io::Result<std::process::Output> {
+        fixture_cli()
+            .current_dir(&project)
+            .env("HOME", &home)
+            .env(
+                "PROVENANT_ROOT",
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+            )
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["--json", "--state-dir"])
+            .arg(&state)
+            .args(["run", "--preset", "gate-only", "--prompt-file"])
+            .arg(&prompt)
+            .args(["--wait", "10s"])
+            .output()
+    };
+    for path in [&state, &state.join("tmp")] {
+        std::fs::create_dir_all(path)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+        let output = run()?;
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        assert!(!output.status.success(), "{value}");
+        let message = value["error"]["message"].as_str().ok_or("message")?;
+        assert!(
+            message.contains(&std::fs::canonicalize(path)?.display().to_string()),
+            "{value}"
+        );
+        assert!(
+            message.contains("0755") && message.contains("other users can read"),
+            "{value}"
+        );
+        let repair = value["error"]["repair"].as_str().ok_or("chmod repair")?;
+        assert!(repair.contains("chmod 700"), "{value}");
+        // Execute the suggested command to cover paths with spaces and quotes.
+        let repaired = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(
+                repair
+                    .strip_prefix("run ")
+                    .ok_or("repair prefix")?
+                    .strip_suffix(" and retry")
+                    .ok_or("repair suffix")?,
+            )
+            .status()?;
+        assert!(repaired.success());
+    }
+    let output = run()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    Ok(())
+}
