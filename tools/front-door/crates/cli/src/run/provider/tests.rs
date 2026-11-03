@@ -2022,6 +2022,42 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         "refusal must list uncommitted predecessor edits: {error_text}"
     );
 
+    // Inject a Git that works for ancestry but refuses status. Exercise both
+    // the brief path and the mismatch path: neither may hide missing evidence.
+    let status_git = base.join("status-git");
+    std::fs::write(
+        &status_git,
+        format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = status ]; then echo forced-status-failure >&2; exit 73; fi\ndone\nexec '{}' \"$@\"\n",
+            git.display()
+        ),
+    )?;
+    std::fs::set_permissions(&status_git, std::fs::Permissions::from_mode(0o700))?;
+    let host = run::HostLaunchContext::from_environment(&state, &project, status_git);
+    let failing_registry = Registry {
+        host: Some(&host),
+        ..registry
+    };
+    for candidate in [&task, &bad_task] {
+        let error = prepare_with(
+            &failing_registry,
+            candidate,
+            prompt,
+            &paths,
+            None,
+            |_| Ok(executable.clone()),
+            None,
+        )
+        .err()
+        .ok_or("status failure must refuse preparation")?;
+        assert!(
+            error
+                .to_string()
+                .contains("cannot inspect uncommitted predecessor edits"),
+            "status failure must be explicit: {error}"
+        );
+    }
+
     Ok(())
 }
 

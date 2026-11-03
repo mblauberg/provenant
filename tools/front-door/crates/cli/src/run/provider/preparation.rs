@@ -379,6 +379,15 @@ pub(super) fn prepare_candidates(
         Some(writer) => writer.worktree.path().to_owned(),
         None => canonical(registry.cwd.ok_or("working directory is unavailable")?)?,
     };
+    // Status is evidence for both the brief and a source refusal. Failure to
+    // collect it must never masquerade as a clean predecessor worktree.
+    let uncommitted = if let (Some(writer), Some(_)) = (&writer, &task.source_head) {
+        writer
+            .uncommitted_paths(&git)
+            .map_err(|error| format!("cannot inspect uncommitted predecessor edits: {error}"))?
+    } else {
+        Vec::new()
+    };
     if let Some(writer) = &writer {
         if let Some(source_head) = task.source_head.as_deref() {
             let predecessor = task
@@ -391,7 +400,6 @@ pub(super) fn prepare_candidates(
                 .parse()
                 .map_err(|_| "invalid pinned writer source")?;
             if let Err(error) = writer.require_continuation_source(&git, source, predecessor) {
-                let uncommitted = writer.uncommitted_paths(&git).unwrap_or_default();
                 if uncommitted.is_empty() {
                     return Err(error.to_string().into());
                 } else {
@@ -409,21 +417,16 @@ pub(super) fn prepare_candidates(
         }
     }
     let prompt_text_buf;
-    let prompt_text = if let (Some(writer), Some(_)) = (&writer, &task.source_head) {
-        let paths = writer.uncommitted_paths(&git).unwrap_or_default();
-        if !paths.is_empty() {
-            prompt_text_buf = format!(
-                "{prompt_text}\n\nUncommitted predecessor edits in worktree:\n{}",
-                paths
-                    .iter()
-                    .map(|p| format!("- {p}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            );
-            &prompt_text_buf
-        } else {
-            prompt_text
-        }
+    let prompt_text = if !uncommitted.is_empty() {
+        prompt_text_buf = format!(
+            "{prompt_text}\n\nUncommitted predecessor edits in worktree:\n{}",
+            uncommitted
+                .iter()
+                .map(|p| format!("- {p}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        &prompt_text_buf
     } else {
         prompt_text
     };
