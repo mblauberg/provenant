@@ -1,5 +1,5 @@
 ## Fixes
-### Lanes and runs
+### Lanes and settlement
 
 - A lane that ends without a final handoff now settles as `review_required` instead of `succeeded`, and `provenant output` says why: "no handoff: the lane ended without reporting results" (#2707).
 - A graph repair node is skipped, not launched, when the CI check it recovers from reported no failing checks (#2707).
