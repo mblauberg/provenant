@@ -662,6 +662,12 @@ fn pace_snapshot_factor(
         .iter()
         .filter(|w| selected_window(w, profile, adapter, model_pool))
         .filter_map(|window| {
+            if snapshot.details.as_ref().is_some_and(|details| {
+                details.coverage.as_deref() == Some("partial")
+                    && !details.calibration_active(&window.pool, now)
+            }) {
+                return None;
+            }
             let duration = window.window_seconds?;
             if duration == 0 {
                 return None;

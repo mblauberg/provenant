@@ -1439,6 +1439,41 @@ fn cooling_free_route_falls_back_to_another_junior_member() -> Result<(), Box<dy
 }
 
 #[test]
+fn usage_limited_free_route_falls_back_to_another_junior_member()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let records = opencode_accounts();
+    let access = opencode_access();
+    let scope = provenant_quota::AccountScope {
+        adapter: "opencode".into(),
+        account_key: "zen".into(),
+        label: "test".into(),
+    };
+    let refused = [provenant_quota::record_refusal(
+        None,
+        &scope,
+        "opencode/opencode/deepseek-v4.1-flash-free",
+        Some("opencode-free"),
+        90,
+        None,
+    )?
+    .replacement
+    .ok_or("record")?];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    ctx.accounts = &refused;
+    let mut query = request("codex/gpt-6-luna")?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("junior")?);
+    for route in junior_draws(&query, &ctx)? {
+        assert!(!catalogue.is_free_model(&picked_model(&route)?));
+        assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+    }
+    Ok(())
+}
+
+#[test]
 fn alternatives_are_bounded_distinct_and_keep_the_callers_order()
 -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
@@ -3551,7 +3586,7 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
         window.resets_unix_seconds = Some(99);
     }
     for (observation, expected_factor) in [
-        (duplicate(&raw), 7516),
+        (duplicate(&raw), 10_000),
         (calibrated, 4100),
         (apply(&higher_ledger), 3000),
         (passed_reset, 4100),
