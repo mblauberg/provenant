@@ -1569,10 +1569,9 @@ impl RunStore {
             .is_some_and(|decision| decision.action != Some(crate::PolicyAction::Stop));
         let frozen_refusal = frozen_policy_retry
             || frozen_policy.as_ref().is_some_and(|decision| {
-                matches!(
-                    decision.cause,
-                    Some(crate::PolicyCause::ResultCheck | crate::PolicyCause::Unfinished)
-                )
+                decision.cause == Some(crate::PolicyCause::Unfinished)
+                    || (decision.cause == Some(crate::PolicyCause::ResultCheck)
+                        && decoded.outcome == Outcome::Succeeded)
             });
         if frozen_refusal && matches!(decoded.outcome, Outcome::Succeeded | Outcome::Uncommitted) {
             decoded.outcome = if cancelled {

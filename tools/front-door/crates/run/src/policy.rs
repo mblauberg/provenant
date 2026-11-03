@@ -684,6 +684,22 @@ mod tests {
         let mut publication = publication();
         publication.outcome = Outcome::Failed;
         publication.reason = Some("empty restricted result".into());
+        // Fail after the terminal update and successor insert to prove both
+        // roll back together while the typed sealed decision survives replay.
+        store.db.execute_batch("CREATE TRIGGER reject_policy_event BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'fixture transaction failure'); END;")?;
+        assert!(
+            store
+                .publish_terminal(id, 1, &publication, &exit(), &call)
+                .is_err()
+        );
+        assert_eq!(store.record(id, &call)?, old);
+        assert_eq!(store.pending_attempts(input.run_id, &call)?.len(), 1);
+        assert_eq!(store.policy_tail(id, &call)?.attempt_id, id);
+        let sealed = store.staged_policy_retry(&old)?.unwrap();
+        assert_eq!((sealed.cause, sealed.action), (retry.cause, retry.action));
+        store
+            .db
+            .execute_batch("DROP TRIGGER reject_policy_event;")?;
         let terminal = store.publish_terminal(id, 1, &publication, &exit(), &call)?;
         assert!(matches!(
             terminal.state,

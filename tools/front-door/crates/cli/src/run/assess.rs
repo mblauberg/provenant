@@ -1,5 +1,16 @@
 use super::*;
 
+// Shared with settlement assessment so the composition wrapper cannot lose a
+// stop cause when the model assessment has neither a refusal nor a successor.
+fn failed_result_check(policy: &provenant_routing::ModelPolicy, decoded: &run::Decoded) -> bool {
+    policy.result.check == Some(true)
+        && matches!(
+            decoded.outcome,
+            run::Outcome::Succeeded | run::Outcome::Failed | run::Outcome::Uncommitted
+        )
+        && !policy.result_valid(&decoded.result)
+}
+
 pub(super) fn assess_model_result(
     policy: &provenant_routing::ModelPolicy,
     task: &run::TaskRequest,
@@ -8,14 +19,7 @@ pub(super) fn assess_model_result(
     handoff: Option<&provenant_records::handoff::Handoff>,
     policy_attempt: u64,
 ) -> Result<run::ResultAssessment, String> {
-    let failed_check = !policy.result_valid(&decoded.result);
-    if policy.result.check == Some(true)
-        && matches!(
-            decoded.outcome,
-            run::Outcome::Succeeded | run::Outcome::Failed | run::Outcome::Uncommitted
-        )
-        && (failed_check || decoded.outcome == run::Outcome::Failed)
-    {
+    if failed_result_check(policy, decoded) {
         let retry = if !run::Service::has_writes(task.writer.is_some(), &task.access.write_roots)
             && record.continuation.as_deref() != Some("policy_fallback")
         {
@@ -45,7 +49,7 @@ pub(super) fn assess_model_result(
         };
         return Ok(run::ResultAssessment {
             cause: Some(run::PolicyCause::ResultCheck),
-            refusal: (failed_check && decoded.outcome == run::Outcome::Succeeded).then(|| {
+            refusal: (decoded.outcome == run::Outcome::Succeeded).then(|| {
                 "model policy result check failed: empty answer or missing expected sections".into()
             }),
             retry,
@@ -164,7 +168,19 @@ pub(super) fn assess_settlement_retry(
         && decoded.reason.as_deref().is_some_and(capacity_reason);
     let quota = decoded.outcome == run::Outcome::QuotaLimited;
     if !(capacity || quota) {
-        return Default::default();
+        let cause = record.applied_route.as_ref().and_then(|route| {
+            let model = ModelId::parse(route.model.as_deref()?).ok()?;
+            let now = WallTime::from_unix_seconds(now_unix_seconds).ok()?;
+            let policy = config
+                .model_policy
+                .effective(&model, route.account_key.as_deref(), now)
+                .policy;
+            failed_result_check(&policy, decoded).then_some(run::PolicyCause::ResultCheck)
+        });
+        return run::ResultAssessment {
+            cause,
+            ..Default::default()
+        };
     }
     let typed_cause = if capacity {
         run::PolicyCause::Capacity
@@ -353,6 +369,55 @@ mod tests {
             assess_model_result(&policy, task, &record, &decoded, None, 1)?.cause,
             Some(run::PolicyCause::ResultCheck)
         );
+        // Exercise the composition wrapper after the fallback has been consumed.
+        // It used to discard a stop cause when no successor remained.
+        record.continuation = Some("policy_fallback".into());
+        record.applied_route.as_mut().unwrap().model = Some("agy/gemini-3.8-flash".into());
+        for outcome in [run::Outcome::Failed, run::Outcome::Uncommitted] {
+            decoded.outcome = outcome;
+            let assessment = run::Providers::assess_result(
+                &Registry::default(),
+                task,
+                &record,
+                &decoded,
+                None,
+                None,
+                1,
+            )?;
+            assert_eq!(assessment.cause, Some(run::PolicyCause::ResultCheck));
+            assert!(assessment.retry.is_none());
+            assert!(assessment.refusal.is_none());
+        }
+        // A provider failure with a valid answer did not fail a result check.
+        decoded.outcome = run::Outcome::Failed;
+        decoded.result = "A complete answer with concrete verification evidence.".into();
+        assert!(policy.result_valid(&decoded.result));
+        let assessment = run::Providers::assess_result(
+            &Registry::default(),
+            task,
+            &record,
+            &decoded,
+            None,
+            None,
+            1,
+        )?;
+        assert!(assessment.cause.is_none());
+        assert!(assessment.retry.is_none());
+        let mut unfinished_policy = policy.clone();
+        unfinished_policy.result.check = Some(false);
+        unfinished_policy.lane.stop_early_ok = Some(false);
+        decoded.outcome = run::Outcome::Uncommitted;
+        let handoff = provenant_records::handoff::Handoff::from_json(br#"{"schema_version":2,"status":"stopped_early","note":"Work remains","remaining":["Verify"],"decisions":[],"verify":[]}"#)?;
+        let assessment = assess_model_result(
+            &unfinished_policy,
+            task,
+            &record,
+            &decoded,
+            Some(&handoff),
+            1,
+        )?;
+        assert_eq!(assessment.cause, Some(run::PolicyCause::Unfinished));
+        assert!(assessment.refusal.is_some());
         decoded.outcome = run::Outcome::QuotaLimited;
         let decision = assess_settlement_retry(
             &provenant_routing::RoutingConfig::default(),
