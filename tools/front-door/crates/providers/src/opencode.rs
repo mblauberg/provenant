@@ -212,8 +212,9 @@ fn prepare(
         // `rg` from PATH, then from its cache bin ($XDG_CACHE_HOME/opencode/bin),
         // and installs it there when absent. The lane sets XDG_CACHE_HOME to
         // its private state, whose grant already covers the read, so grant
-        // exactly that binary for execution. No shell is enabled.
+        // exactly that binary for execution, alongside system grep. No shell is enabled.
         tool_exec_roots.push(exact(private.join("cache/opencode/bin/rg")));
+        tool_exec_roots.push(exact("/usr/bin/grep"));
     }
     env.extend([
         ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
@@ -996,7 +997,7 @@ mod tests {
     }
 
     #[test]
-    fn read_only_search_grants_only_ripgrep_in_the_lane_cache() {
+    fn read_only_search_grants_cached_ripgrep_and_system_grep() {
         use provenant_confinement::permissions::{PathGrant, PathScope};
         use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
 
@@ -1056,7 +1057,10 @@ mod tests {
             spec.profile.spec.process_executables,
             [exact(input.executable), exact(input.provenant.git)]
         );
-        assert_eq!(spec.profile.spec.tool_exec_roots, std::slice::from_ref(&rg));
+        assert_eq!(
+            spec.profile.spec.tool_exec_roots,
+            [rg.clone(), exact("/usr/bin/grep")]
+        );
         // No shell toolchain leaks into a read-only lane.
         let path: Vec<_> = std::env::split_paths(&env("PATH").expect("PATH")).collect();
         assert!(!path.contains(&input.home.join(".cargo/bin")), "{path:?}");
@@ -1076,6 +1080,54 @@ mod tests {
         );
         // The private state grant is the read access ripgrep needs.
         assert!(profile.contains("(allow file-read* (subpath \"/fixture/provider-state\"))"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn read_only_search_runs_in_native_profile() -> Result<(), Box<dyn std::error::Error>> {
+        let rg = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join("rg"))
+            .find(|path| path.is_file())
+            .ok_or("rg is required for the native search test")?;
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let cached = root.join("state/cache/opencode/bin/rg");
+        std::fs::create_dir_all(cached.parent().unwrap())?;
+        std::fs::copy(rg, &cached)?;
+        let plan = crate::tests::read_only_plan(root.to_str().unwrap(), None);
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        let input = crate::tests::fixture_input(&route, &plan, &prompt, &root, None);
+        let spec = prepare(
+            &input,
+            Access::ReadOnly,
+            Session::Fresh,
+            OpenCode.stream(None)?,
+        )?;
+        let profile = provenant_confinement::permissions::snapshot::render(
+            plan.permissions(),
+            &spec.profile,
+            input.home,
+        )?;
+        for program in [cached.as_path(), std::path::Path::new("/usr/bin/grep")] {
+            let output = std::process::Command::new("/usr/bin/sandbox-exec")
+                .args(["-p", &profile])
+                .arg(program)
+                .arg("--version")
+                .output()?;
+            let diagnostic = String::from_utf8_lossy(&output.stderr);
+            if diagnostic.contains("sandbox_apply: Operation not permitted") {
+                provenant_test_support::skip_sandbox_dependent_test(diagnostic.to_string())?;
+                return Ok(());
+            }
+            assert!(
+                output.status.success(),
+                "{}: {diagnostic}",
+                program.display()
+            );
+        }
+        Ok(())
     }
 
     #[test]

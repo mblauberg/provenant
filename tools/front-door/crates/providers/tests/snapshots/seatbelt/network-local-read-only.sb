@@ -86,6 +86,7 @@
 (allow process-exec (literal "/fixture/git/bin/git"))
 (allow process-exec (literal "/fixture/git/bin/git"))
 (allow process-exec (literal "/fixture/provider-state/cache/opencode/bin/rg"))
+(allow process-exec (literal "/usr/bin/grep"))
 (allow process-fork)
 (allow file-read* (literal "/fixture/home/.local/share/opencode/opencode.db"))
 (allow file-write* (literal "/fixture/home/.local/share/opencode/opencode.db"))

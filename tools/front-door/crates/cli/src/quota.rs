@@ -1747,14 +1747,23 @@ fn pool_usage(snapshot: &provenant_quota::QuotaSnapshot) -> Vec<(&str, u64)> {
 /// `gemini exhausted, claude 40%`. A pool is exhausted when any of its windows is.
 fn pool_states(snapshot: &provenant_quota::QuotaSnapshot) -> Option<String> {
     let pools = pool_usage(snapshot);
-    (pools.len() > 1).then(|| {
+    let partial = snapshot
+        .details
+        .as_ref()
+        .is_some_and(|d| d.coverage.as_deref() == Some("partial"));
+    (pools.len() > 1 || (partial && !pools.is_empty())).then(|| {
         pools
             .iter()
             .map(|(pool, used)| {
                 if *used >= 10_000 {
                     format!("{} exhausted", pool.escape_debug())
                 } else {
-                    format!("{} {}%", pool.escape_debug(), used / 100)
+                    format!(
+                        "{} {}{}%",
+                        pool.escape_debug(),
+                        if partial { ">=" } else { "" },
+                        used / 100
+                    )
                 }
             })
             .collect::<Vec<_>>()
@@ -1818,6 +1827,11 @@ fn quota_summary_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> crat
             .iter()
             .filter(|row| {
                 !matches!(row.status, QuotaStatus::Available | QuotaStatus::CreditOnly)
+                    || row
+                        .snapshot
+                        .as_ref()
+                        .and_then(|s| s.details.as_ref())
+                        .is_some_and(|details| details.coverage.as_deref() == Some("partial"))
                     || !row.refusals.is_empty()
                     || row
                         .snapshot
@@ -3246,6 +3260,14 @@ mod tests {
             "/report.json".into(),
         )?;
         let human = quota_human(&report);
+        let snapshot = report.accounts[0].snapshot.as_ref().unwrap();
+        assert!(pool_states(snapshot).unwrap().contains("five_hour >=43%"));
+        assert!(
+            quota_summary(&report)
+                .lines
+                .iter()
+                .any(|line| line.contains("five_hour >=43%"))
+        );
         assert!(
             human.contains("source: local-ledger; coverage: partial (lower bound, this host only)"),
             "{human}"
