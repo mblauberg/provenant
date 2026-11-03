@@ -1333,10 +1333,6 @@ fn read_spec_context(layers: &Layers, parameters: &Value) -> Option<String> {
         .project_dir
         .clone()
         .or_else(|| std::env::current_dir().ok())?;
-    // Default project selection may be a subdirectory of a checkout.
-    let project =
-        provenant_os::git::repository_path(&project, provenant_os::git::RepositoryPath::Toplevel)
-            .unwrap_or(project);
     let worktree = parameters
         .get("worktree")
         .and_then(Value::as_str)
@@ -3463,7 +3459,14 @@ pub fn run(
             None => Vec::new(),
         };
         let mut layers = configured(globals)?;
-        layers.project_dir = Some(directory.clone());
+        // Default project selection may be a subdirectory of a checkout.
+        layers.project_dir = Some(
+            provenant_os::git::repository_path(
+                &directory,
+                provenant_os::git::RepositoryPath::Toplevel,
+            )
+            .unwrap_or_else(|_| directory.clone()),
+        );
         layers.default_worktree = request.access.worktree.clone();
         let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
         layers.known_routes = Some(config.domains.routing.route_names(&catalogue));
