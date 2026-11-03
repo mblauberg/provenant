@@ -228,6 +228,12 @@ pub(super) fn stats_inner(
         context.project_id,
     )?;
     let partial = partial_signal_counts(&selected, store.as_ref(), &call)?;
+    let decision_ids = command.detail.then(|| {
+        selected
+            .iter()
+            .map(|fact| fact.attempt_id)
+            .collect::<Vec<_>>()
+    });
     let cache_kpis = cache_kpi_rows(
         &selected,
         &config.domains,
@@ -310,6 +316,7 @@ pub(super) fn stats_inner(
         None
     };
     let by_name = match by {
+        Some(crate::StatsBy::Route) => "route",
         Some(crate::StatsBy::Pr) => "pr",
         Some(crate::StatsBy::Issue) => "issue",
         Some(crate::StatsBy::Graph) => "graph",
@@ -330,6 +337,7 @@ pub(super) fn stats_inner(
         provenant_telemetry::stats_by_external_key(facts, &prices, window, labels)
     } else if let Some(by) = by {
         let key = match by {
+            crate::StatsBy::Route => provenant_telemetry::ContextKey::Route,
             crate::StatsBy::Issue => provenant_telemetry::ContextKey::Issue,
             crate::StatsBy::Graph => provenant_telemetry::ContextKey::GraphId,
             crate::StatsBy::Node => provenant_telemetry::ContextKey::NodeId,
@@ -393,6 +401,22 @@ pub(super) fn stats_inner(
     ));
     let mut data = serde_json::to_value(&report)
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+    if let Some(ids) = decision_ids {
+        let mut decisions = Vec::new();
+        if let Some(store) = store.as_ref() {
+            for id in ids {
+                let record = store.record(id, &call)?;
+                if let Some(route) = record.resolved_route {
+                    decisions.push(route_decision(id, &route));
+                }
+            }
+        }
+        human.push_str(&format!(
+            "route decisions: {} attempts; inspect receipts with --json\n",
+            decisions.len()
+        ));
+        data["route_decisions"] = json!(decisions);
+    }
     data["cache_read_share"] = cache_kpis;
     data["cache_read_share"]["overall"] = json!(total_share);
     let plan_value = plan_value_rows(&report, &config.domains.accounts, edge)?;
@@ -695,4 +719,45 @@ pub(super) fn pipeline_node_model(facts: &[provenant_records::AttemptFact]) -> O
     (models.len() == 1)
         .then(|| models.into_iter().next())
         .flatten()
+}
+
+/// Project only decision evidence into per-attempt telemetry.
+fn route_decision(id: provenant_core::AttemptId, route: &run::RouteRecord) -> Value {
+    json!({
+        "attempt_id": id,
+        "model": route.model,
+        "effort": route.effort,
+        "account_label": route.account_label,
+        "source": route.source,
+        "account_source": route.extra.get("account_source"),
+        "pool_selection": route.pool_selection,
+    })
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+
+    #[test]
+    fn detail_projects_only_route_decision_fields() -> Result<(), Box<dyn std::error::Error>> {
+        let mut route = run::RouteRecord {
+            model: Some("codex/example".into()),
+            effort: Some("high".into()),
+            source: Some("pool".into()),
+            pool_selection: Some(serde_json::from_value(json!({
+                "pool": "fixture", "candidates": [], "roll": 0, "total_weight": 0, "pick": "codex/example"
+            }))?),
+            ..Default::default()
+        };
+        route
+            .extra
+            .insert("unrelated".into(), "fixture-marker".into());
+        route.account_key = Some("fixture-account-key".into());
+        let value = route_decision(provenant_core::AttemptId::from_bytes([1; 16]), &route);
+        assert_eq!(value["pool_selection"]["pool"], "fixture");
+        let text = serde_json::to_string(&value)?;
+        assert!(!text.contains("fixture-marker"));
+        assert!(!text.contains("fixture-account-key"));
+        Ok(())
+    }
 }

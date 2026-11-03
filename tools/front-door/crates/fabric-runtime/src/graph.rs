@@ -358,6 +358,8 @@ struct PlannedNode {
     required_verdict: Option<String>,
     #[serde(skip_serializing_if = "model::is_false")]
     require_findings: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skip_without_findings: Option<bool>,
 }
 
 /// Node labels override graph defaults. Scheduler identity comes from the plan.
@@ -1827,6 +1829,18 @@ fn may_ask(plan: &PlannedGraph) -> bool {
             .any(|n| n.loop_body.is_some() || n.decide.is_some() || n.land.is_some())
 }
 
+impl PlannedNode {
+    /// Whether this recovery node is skipped when `gate` failed with no
+    /// findings: its own setting, else whether it takes the gate's findings.
+    fn skips_without_findings(&self, gate: &str) -> bool {
+        self.skip_without_findings.unwrap_or_else(|| {
+            self.inputs
+                .iter()
+                .any(|input| input.node == gate && input.outputs.contains(&OutputKind::Findings))
+        })
+    }
+}
+
 /// A failure target must declare its gate as a dependency. Other dependants
 /// follow the success edge; inactive paths propagate a skipped state.
 fn dependency_state(
@@ -1865,6 +1879,20 @@ fn dependency_state(
                     .is_some_and(|round| &round.loop_id == target)
         });
         match checkpoint.nodes[index].state {
+            // A failed CI gate that reported no failing check leaves a node
+            // that consumes its findings nothing to act on, so it is skipped,
+            // not launched. Other recovery nodes (notify, diagnose) still run.
+            NodeState::Failed
+                if recovery
+                    && node.skips_without_findings(&plan.nodes[index].id)
+                    && matches!(plan.nodes[index].condition, Some(GateCondition::Ci { .. }))
+                    && checkpoint.nodes[index]
+                        .outputs
+                        .as_ref()
+                        .is_some_and(|outputs| outputs.findings.is_empty()) =>
+            {
+                skipped = true
+            }
             NodeState::Failed if recovery => {}
             NodeState::Failed if plan.nodes[index].on_fail.is_some() => skipped = true,
             NodeState::Failed | NodeState::Blocked => return Some(NodeState::Blocked),

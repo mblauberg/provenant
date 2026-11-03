@@ -274,7 +274,7 @@ pub struct RouteGroup {
     pub route: RouteFact,
     pub totals: Totals,
 }
-/// A single work-context dimension for attribution. Missing values form a group.
+/// A single attribution dimension. Missing values form a group.
 #[derive(Clone, Copy, Debug)]
 pub enum ContextKey {
     WorkItem,
@@ -288,6 +288,8 @@ pub enum ContextKey {
     RoleDigest,
     ExperimentArm,
     SelectionSource,
+    /// Resolved model and effort, independent of account and work context.
+    Route,
 }
 impl ContextKey {
     fn value(self, context: &provenant_records::run::WorkContext) -> &Option<String> {
@@ -301,6 +303,7 @@ impl ContextKey {
             Self::RoleDigest => &context.role_digest,
             Self::ExperimentArm => &context.experiment_arm,
             Self::SelectionSource => &context.selection_source,
+            Self::Route => unreachable!("route is not a work-context field"),
         }
     }
 }
@@ -705,7 +708,7 @@ pub fn stats_with_chair(
     stats_inner(facts, chairs, prices, window, None, None)
 }
 
-/// Reduce attempts by one work-context dimension as well as the usual totals.
+/// Reduce attempts by one attribution dimension as well as the usual totals.
 pub fn stats_by_context(
     facts: impl IntoIterator<Item = AttemptFact>,
     prices: &PriceTable,
@@ -820,9 +823,16 @@ fn stats_inner(
         let group_values = context_key
             .map(|dimension| {
                 vec![(
-                    fact.context
-                        .as_ref()
-                        .and_then(|context| dimension.value(context).clone()),
+                    match dimension {
+                        ContextKey::Route => key.model.as_ref().map(|model| match &key.effort {
+                            Some(effort) => format!("{model}@{effort}"),
+                            None => model.clone(),
+                        }),
+                        _ => fact
+                            .context
+                            .as_ref()
+                            .and_then(|context| dimension.value(context).clone()),
+                    },
                     None,
                 )]
             })
@@ -890,10 +900,10 @@ fn stats_inner(
                 None
             };
             for (index, (value, weight)) in values.into_iter().enumerate() {
-                if value
-                    .as_ref()
-                    .is_some_and(|value| value.trim().is_empty() || value.len() > 256)
-                {
+                if value.as_ref().is_some_and(|value| {
+                    value.trim().is_empty()
+                        || (value.len() > 256 && !matches!(context_key, Some(ContextKey::Route)))
+                }) {
                     return Err(TelemetryError::InvalidFact("external group key"));
                 }
                 let size = value.as_ref().map_or(0, String::len);

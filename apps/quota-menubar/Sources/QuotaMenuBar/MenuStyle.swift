@@ -14,6 +14,11 @@ enum MenuStyle {
     static let captionFont = NSFont.systemFont(ofSize: 11)
     /// The narrowest title column, so the menu keeps its width as times and figures change.
     static let minimumColumn: CGFloat = 250
+    /// The widest title column, so free text such as a refusal or provider message never stretches the menu; longer
+    /// subtitles truncate. Override with `defaults write <bundle> menuColumnMaximum <points>`.
+    static var maximumColumn: CGFloat {
+        CGFloat(UserDefaults.standard.object(forKey: "menuColumnMaximum") as? Double ?? 360)
+    }
     /// Space kept between a title and its figure.
     static let figureGap: CGFloat = 20
 
@@ -26,7 +31,7 @@ enum MenuStyle {
             max(width(head(spec)) + (spec.value.map { figureGap + width(NSAttributedString(string: $0, attributes: [.font: figureFont])) } ?? 0),
                 spec.subtitle.map { width(NSAttributedString(string: $0, attributes: [.font: subtitleFont])) } ?? 0)
         }.max() ?? 0
-        return max(minimumColumn, ceil(widest))
+        return min(max(minimumColumn, maximumColumn), max(minimumColumn, ceil(widest)))
     }
 
     /// The title, its secondary detail and, after a right-aligned tab, its figure. Nil for a plain title, which

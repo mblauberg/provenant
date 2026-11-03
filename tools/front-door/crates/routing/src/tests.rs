@@ -1118,8 +1118,25 @@ fn table_driven_weighted_pools_record_effort_readiness_roll_and_seed()
         let route = result?;
         let receipt = serde_json::to_value(&route)?["pool_selection"].clone();
         assert_eq!(receipt["pool"], "trial", "{}", case.name);
+        assert_eq!(receipt["weight_source"], "config");
+        assert_eq!(
+            receipt["selection_rule"],
+            if case.name == "weight zero fallback" {
+                "first_zero_weight_ready"
+            } else {
+                "weighted_draw"
+            },
+            "{}",
+            case.name
+        );
         let candidate_rows = receipt["candidates"].as_array().ok_or("candidates")?;
         assert_eq!(candidate_rows.len(), 3);
+        assert!(
+            candidate_rows
+                .iter()
+                .filter_map(|candidate| candidate["pacing_detail"].as_str())
+                .all(|detail| detail.contains("source=") && detail.contains("policy="))
+        );
         assert_eq!(
             candidate_rows
                 .iter()
@@ -4584,9 +4601,40 @@ fn provider_account_and_model_selectors_remove_only_their_members()
         key: "codex-key".into(),
     });
     assert_eq!(
-        trial_picks(&catalogue, &shared, &[account])?,
+        trial_picks(&catalogue, &shared, std::slice::from_ref(&account))?,
         ["claude", "codex"]
     );
+    let config = RoutingConfig::default();
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &shared;
+    let mut query = request("codex/test")?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
+    let route = resolve_for_account_with_seed_excluding(
+        &query,
+        &ctx,
+        None,
+        "exclusion",
+        0,
+        &[],
+        &[account],
+    )?;
+    let receipt = serde_json::to_value(route.pool_selection.ok_or("receipt")?)?;
+    assert_eq!(
+        receipt["considered_exclusions"][0],
+        "source=flag selector=account codex/codex-key"
+    );
+    assert!(
+        receipt["candidates"]
+            .as_array()
+            .ok_or("candidates")?
+            .iter()
+            .any(|candidate| candidate["model"]
+                .as_str()
+                .is_some_and(|model| model.starts_with("codex/"))
+                && candidate["exclusion"].is_null())
+    );
+    assert!(!receipt.to_string().contains("prompt"));
+    assert!(!receipt.to_string().contains("credential"));
     let codex = catalogue.pools["trial"][1].model.clone();
     let model = rule(ExclusionSelector::Model(codex));
     assert_eq!(trial_picks(&catalogue, &records, &[model])?, ["claude"]);

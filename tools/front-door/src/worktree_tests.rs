@@ -879,7 +879,7 @@ fn writer_terminal_refuses_sequencer_state() -> Result {
     let terminal = await_terminal(&store, attempt, &call)?;
     assert_terminal_outcome(&terminal, provenant_run::Outcome::ReviewRequired)?;
     assert!(
-        matches!(terminal.state, provenant_run::AttemptState::Terminal { reason: Some(reason), .. } if reason == "protected changes require review; partial finish (handoff_missing)")
+        matches!(terminal.state, provenant_run::AttemptState::Terminal { reason: Some(reason), .. } if reason == "protected changes require review; handoff declared done but settlement was not successful")
     );
     assert_eq!(
         git(&rig, &["-C", path_text, "rev-parse", "HEAD"])?,
@@ -1432,7 +1432,7 @@ fn assert_terminal_outcome(
     let provenant_run::AttemptState::Terminal { outcome, .. } = &record.state else {
         return Err("writer attempt was not terminal".into());
     };
-    assert_eq!(*outcome, expected);
+    assert_eq!(*outcome, expected, "{:?}", record.state);
     Ok(())
 }
 
@@ -1534,12 +1534,15 @@ pub(crate) fn provider(args: &[OsString]) -> Result {
         _ => return Err("unknown writer provider fixture mode".into()),
     }
     fs::write(worktree.join("writer-edited"), "writer fixture completed")?;
+    // The answer reports a handoff; the assistant message repeats it so the
+    // decoder ties the answering model to the final result.
+    let answer = "writer fixture completed\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"writer fixture\"}\n```";
     let stdout = std::io::stdout();
     let mut output = stdout.lock();
     for event in [
         serde_json::json!({"type":"system","subtype":"init","session_id":"writer-fixture-session"}),
-        serde_json::json!({"type":"assistant","message":{"model":"test-model","role":"assistant","content":[{"type":"text","text":"writer fixture completed"}]},"session_id":"writer-fixture-session"}),
-        serde_json::json!({"type":"result","session_id":"writer-fixture-session","subtype":"success","is_error":false,"result":"writer fixture completed"}),
+        serde_json::json!({"type":"assistant","message":{"model":"test-model","role":"assistant","content":[{"type":"text","text":answer}]},"session_id":"writer-fixture-session"}),
+        serde_json::json!({"type":"result","session_id":"writer-fixture-session","subtype":"success","is_error":false,"result":answer}),
     ] {
         serde_json::to_writer(&mut output, &event)?;
         output.write_all(b"\n")?;

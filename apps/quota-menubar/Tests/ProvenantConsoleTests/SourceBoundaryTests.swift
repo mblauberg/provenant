@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+@testable import ProvenantConsole
 
 /// The console and the shared client read the CLI's JSON and nothing else.
 final class SourceBoundaryTests: XCTestCase {
@@ -41,6 +42,33 @@ final class SourceBoundaryTests: XCTestCase {
                 XCTAssertFalse(file.text.contains(word), "\(file.name) nests \(word)")
             }
         }
+    }
+
+    func testColumnMinimumsFitWindow() {
+        XCTAssertLessThanOrEqual(ConsoleView.sidebarMinimum + ConsoleView.inboxMinimum + ConsoleView.detailMinimum
+                                 + ConsoleView.inspectorMinimum, ConsoleView.windowMinimum)
+    }
+
+    func testInboxColumnWidthRoundTrip() throws {
+        let suite = "InboxColumnWidthTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertEqual(InboxColumnWidth.load(from: defaults), 300)
+        InboxColumnWidth.save(410, to: defaults)
+        let reopened = try XCTUnwrap(UserDefaults(suiteName: suite))
+        XCTAssertEqual(InboxColumnWidth.load(from: reopened), 410)
+    }
+
+    func testInboxColumnMaximumIsAnOverridableDefault() throws {
+        let suite = "InboxColumnMaximumTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertEqual(InboxColumnWidth.maximum(from: defaults), InboxColumnWidth.defaultMaximum)
+        defaults.set(900.0, forKey: "inboxColumnMaximum")
+        XCTAssertEqual(InboxColumnWidth.maximum(from: defaults), 900)
+        XCTAssertEqual(InboxColumnWidth.clamped(1200, minimum: 220, maximum: 900), 900)
+        XCTAssertEqual(InboxColumnWidth.clamped(100, minimum: 220, maximum: 900), 220)
+        XCTAssertEqual(InboxColumnWidth.clamped(500, minimum: 220, maximum: 100), 220)
     }
 
     func testShippingSourcesDoNotUseSwiftPMResourceBundles() throws {
