@@ -3820,7 +3820,42 @@ fn agy_account_probe_logs_under_the_host_probe_root() {
     )
     .unwrap();
     assert!(key.starts_with("agy-google-"));
-    assert_eq!(std::fs::read_dir(&host_root).unwrap().count(), 0);
+    // Only the non-secret identity cache survives; the log and private probe
+    // directory are still removed before detection returns.
+    let entries: Vec<_> = std::fs::read_dir(&host_root)
+        .unwrap()
+        .map(|e| e.unwrap())
+        .collect();
+    assert_eq!(entries.len(), 1);
+    assert!(
+        entries[0]
+            .file_name()
+            .to_string_lossy()
+            .starts_with("agy-identity-")
+    );
+    assert_eq!(
+        crate::agy::cached_identity(
+            &host_root,
+            Path::new("/home/test"),
+            provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new()),
+        )
+        .as_deref(),
+        Some(key.as_str())
+    );
+    // A second dispatch identity lookup consumes that unexpired observation.
+    assert_eq!(
+        crate::accounts::detect(
+            &provenant_os::exec::SystemExecutor::new(1).unwrap(),
+            "agy",
+            Path::new("/does-not-exist/agy"),
+            Path::new("/home/test"),
+            OsStr::new("test"),
+            Path::new("/home/test"),
+            &host_root,
+        )
+        .unwrap(),
+        key
+    );
 }
 
 #[test]

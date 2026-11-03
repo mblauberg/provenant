@@ -536,7 +536,7 @@ fn live_quota(
 ) -> Result<provenant_providers::quota_live::LiveQuota, Box<dyn std::error::Error>> {
     let accounts = account_settings(&resolved.roots)?;
     Ok(provenant_providers::quota_live::LiveQuota::new(
-        resolved.roots.state.as_path(),
+        &resolved.roots,
         &resolved.home,
         &accounts,
     )?)

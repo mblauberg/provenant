@@ -70,6 +70,7 @@ fn runnable(program: &str) -> bool {
     std::env::var_os("PATH")
         .is_some_and(|path| std::env::split_paths(&path).any(|dir| executable(&dir.join(program))))
 }
+#[derive(Clone)]
 struct Account {
     scope: AccountScope,
     identity_dir: PathBuf,
@@ -78,10 +79,12 @@ struct Account {
 pub struct LiveQuota {
     home: PathBuf,
     state: PathBuf,
-    accounts: Vec<Account>,
+    roots: Option<provenant_core::Roots>,
+    accounts: RefCell<Vec<Account>>,
     refresh_expired: bool,
     claude_default: RefCell<Option<claude::Identity>>,
     readiness_failure: RefCell<Option<provenant_quota::ReadinessReason>>,
+    last_reconcile_error: RefCell<Option<String>>,
     clock: SystemClock,
     /// Stands in for the system executor so tests can see each probe's command.
     #[cfg(test)]
@@ -128,8 +131,12 @@ fn signin_key(adapter: &str, dir: &Path) -> Option<String> {
 
 impl LiveQuota {
     /// Probes for the registered accounts, with private probe directories
-    /// under the `state` root and `home` as each probe's `HOME`.
-    pub fn new(state: &Path, home: &Path, settings: &Settings) -> Result<Self, QuotaError> {
+    /// under the host state root and `home` as each probe's `HOME`.
+    pub fn new(
+        roots: &provenant_core::Roots,
+        home: &Path,
+        settings: &Settings,
+    ) -> Result<Self, QuotaError> {
         let mut accounts = Vec::new();
         for registration in settings.with_derived_accounts().entries.values() {
             let dir = &registration.directory;
@@ -164,15 +171,20 @@ impl LiveQuota {
         }
         Ok(Self {
             home: home.to_owned(),
-            state: state.to_owned(),
-            accounts,
+            state: roots.state.as_path().to_owned(),
+            roots: Some(roots.clone()),
+            accounts: RefCell::new(accounts),
             refresh_expired: true,
             claude_default: RefCell::new(None),
             readiness_failure: RefCell::new(None),
+            last_reconcile_error: RefCell::new(None),
             clock: SystemClock::new(),
             #[cfg(test)]
             executor: None,
         })
+    }
+    pub fn last_reconcile_error(&self) -> Option<String> {
+        self.last_reconcile_error.borrow().clone()
     }
     fn now(&self) -> i64 {
         self.clock.unix_seconds()
@@ -361,7 +373,12 @@ fn clean(out: &ExecOutcome) -> bool {
 }
 impl QuotaEffects for LiveQuota {
     fn accounts(&self) -> Result<Vec<AccountScope>, QuotaError> {
-        Ok(self.accounts.iter().map(|a| a.scope.clone()).collect())
+        Ok(self
+            .accounts
+            .borrow()
+            .iter()
+            .map(|a| a.scope.clone())
+            .collect())
     }
     fn capture(
         &self,
@@ -371,8 +388,10 @@ impl QuotaEffects for LiveQuota {
         *self.readiness_failure.borrow_mut() = None;
         let account = self
             .accounts
+            .borrow()
             .iter()
             .find(|a| a.scope == plan.account)
+            .cloned()
             .ok_or(ProbeFailure::Auth)?;
         let deadline = plan.input.deadline_unix_seconds;
         let check_identity = || {
@@ -403,10 +422,10 @@ impl QuotaEffects for LiveQuota {
             ..QuotaDetails::default()
         };
         let payload = match account.scope.adapter.as_str() {
-            "claude" => self.claude(account, previous, deadline, &mut details)?,
-            "codex" => self.codex(account, deadline)?,
-            "cursor" => self.cursor(account, deadline)?,
-            "agy" => self.agy(account, deadline, &mut details)?,
+            "claude" => self.claude(&account, previous, deadline, &mut details)?,
+            "codex" => self.codex(&account, deadline)?,
+            "cursor" => self.cursor(&account, deadline)?,
+            "agy" => self.agy(&account, deadline, &mut details)?,
             "opencode" if account.scope.account_key == "zen" => {
                 details.note = Some(
                     "Observed free-limit refusals only; allowance and daily reset unknown".into(),
@@ -522,6 +541,7 @@ impl LiveQuota {
             deadline,
         )
     }
+    #[allow(clippy::print_stderr)]
     fn agy(
         &self,
         account: &Account,
@@ -531,6 +551,9 @@ impl LiveQuota {
         // An isolated agy account is signed in under its own directory as
         // `HOME`. A missing keychain has its own failure, never auth, and the
         // probe re-checks it around the spawn.
+        // Never let a failed quota probe leave an earlier dispatch identity cached.
+        crate::agy::forget_identity(&self.state, &account.identity_dir);
+        let stamp_before = crate::agy::keychain_stamp(&account.identity_dir);
         let probe_home =
             crate::agy::ProbeHome::select(&account.identity_dir, &self.home).map_err(|error| {
                 match error {
@@ -560,29 +583,55 @@ impl LiveQuota {
             crate::agy::REGISTRATION.quota.probe_seconds,
         )?;
         let signed_in = payload.get("status").and_then(Value::as_str) == Some("SUCCESS");
-        let actual = agy_signed_in_account(&account.scope.account_key, signed_in, read(&log).ok())?;
+        let actual = agy_signed_in_account(signed_in, read(&log).ok())?;
+        let key = format!("agy-{actual}");
+        crate::agy::remember_identity(
+            &self.state,
+            &account.identity_dir,
+            &key,
+            self.now(),
+            stamp_before,
+        );
+        if key != account.scope.account_key {
+            if let Some(roots) = &self.roots {
+                // Failure to save never makes the stale identity routable. A
+                // later quota probe retries under the normal mismatch backoff.
+                match crate::accounts::reconcile_agy(
+                    roots,
+                    &account.identity_dir,
+                    &account.scope.account_key,
+                    &key,
+                ) {
+                    Ok(true) => {
+                        for registered in self.accounts.borrow_mut().iter_mut() {
+                            if registered.scope == account.scope {
+                                registered.scope.account_key.clone_from(&key);
+                            }
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        *self.last_reconcile_error.borrow_mut() = Some(error.to_string());
+                        eprintln!("provenant: failed to reconcile agy account switch: {error}");
+                    }
+                }
+            }
+            return Err(ProbeFailure::AccountMismatch);
+        }
         details.fingerprint = Some(actual);
         Ok(payload)
     }
 }
-/// The signed-in agy fingerprint, or why the probe cannot trust it. A sign-out
-/// or unreadable identity needs a login; a readable identity that is not the
-/// registered key is a different account, repaired by registering it. The
-/// identity itself is never part of the failure.
-fn agy_signed_in_account(
-    registered_key: &str,
-    signed_in: bool,
-    log: Option<Vec<u8>>,
-) -> Result<String, ProbeFailure> {
+/// The signed-in agy fingerprint, or why the probe cannot trust it. Sign-out
+/// and unreadable identity need a login. The caller reconciles a changed key;
+/// the identity itself is never part of the failure.
+fn agy_signed_in_account(signed_in: bool, log: Option<Vec<u8>>) -> Result<String, ProbeFailure> {
     if !signed_in {
         return Err(ProbeFailure::Auth);
     }
     let actual = log
         .and_then(|bytes| agy_fingerprint(&bytes))
         .ok_or(ProbeFailure::Auth)?;
-    if registered_key != format!("agy-{actual}") {
-        return Err(ProbeFailure::AccountMismatch);
-    }
     Ok(actual)
 }
 /// Explicit Claude registrations only. No auth stores, identity probes or
@@ -623,10 +672,12 @@ mod tests {
         LiveQuota {
             home: home.to_owned(),
             state,
-            accounts: Vec::new(),
+            roots: None,
+            accounts: RefCell::new(Vec::new()),
             refresh_expired: false,
             claude_default: RefCell::new(None),
             readiness_failure: RefCell::new(None),
+            last_reconcile_error: RefCell::new(None),
             clock: SystemClock::new(),
             executor: None,
         }
@@ -646,25 +697,279 @@ mod tests {
     fn agy_account_switch_is_distinct_from_sign_out() {
         let log =
             |email: &str| format!("OAuth: authenticated successfully as {email}\n").into_bytes();
-        let registered = format!("agy-{}", agy_fingerprint(&log("old@example.com")).unwrap());
-        assert!(agy_signed_in_account(&registered, true, Some(log("old@example.com"))).is_ok());
-        assert_eq!(
-            agy_signed_in_account(&registered, true, Some(log("new@example.com"))),
-            Err(ProbeFailure::AccountMismatch)
-        );
+        let old = agy_signed_in_account(true, Some(log("old@example.com"))).unwrap();
+        let new = agy_signed_in_account(true, Some(log("new@example.com"))).unwrap();
+        assert_ne!(old, new);
         // Signed out, or no identity in the log: still a login problem.
         assert_eq!(
-            agy_signed_in_account(&registered, false, Some(log("old@example.com"))),
+            agy_signed_in_account(false, Some(log("old@example.com"))),
             Err(ProbeFailure::Auth)
         );
         assert_eq!(
-            agy_signed_in_account(&registered, true, Some(b"no identity".to_vec())),
+            agy_signed_in_account(true, Some(b"no identity".to_vec())),
             Err(ProbeFailure::Auth)
         );
+        assert_eq!(agy_signed_in_account(true, None), Err(ProbeFailure::Auth));
+    }
+
+    #[test]
+    fn agy_identity_refuses_to_cache_when_keychain_changes_during_probe() {
+        struct ChangingKeychain {
+            inner: AgyUsage,
+            keychain: PathBuf,
+        }
+        impl Executor for ChangingKeychain {
+            fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                let outcome = self.inner.execute(options)?;
+                // Modify in place: the inode guard still passes, but the stamp must not.
+                fs::write(&self.keychain, "signed in as a different account").unwrap();
+                Ok(outcome)
+            }
+        }
+        for quota_probe in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let home = root.path().join("home");
+            let state = root.path().join("state");
+            let keychain = home.join("Library/Keychains/login.keychain-db");
+            fs::create_dir_all(&state).unwrap();
+            fs::create_dir_all(keychain.parent().unwrap()).unwrap();
+            fs::write(&keychain, "initial").unwrap();
+            let stamp = crate::agy::keychain_stamp(&home);
+            let homes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let executor = ChangingKeychain {
+                inner: AgyUsage {
+                    sign_ins: vec![(home.clone(), "fixture@example.test")],
+                    homes: homes.clone(),
+                },
+                keychain,
+            };
+            let key = format!(
+                "agy-{}",
+                agy_fingerprint(b"OAuth: authenticated successfully as fixture@example.test\n")
+                    .unwrap()
+            );
+            let mut live = quota(&home, state.clone());
+            if quota_probe {
+                live.executor = Some(Box::new(executor));
+                let account = Account {
+                    scope: AccountScope {
+                        adapter: "agy".into(),
+                        account_key: key,
+                        label: "test".into(),
+                    },
+                    identity_dir: home.clone(),
+                    options: Value::Null,
+                };
+                live.agy(&account, live.now() + 60, &mut QuotaDetails::default())
+                    .unwrap();
+            } else {
+                assert_eq!(
+                    crate::accounts::detect(
+                        &executor,
+                        "agy",
+                        Path::new("agy"),
+                        &home,
+                        std::ffi::OsStr::new("test"),
+                        &home,
+                        &state,
+                    )
+                    .unwrap(),
+                    key
+                );
+            }
+            assert_eq!(homes.lock().unwrap().len(), 1);
+            assert_ne!(crate::agy::keychain_stamp(&home), stamp);
+            assert!(
+                crate::agy::cached_identity(&state, &home, live.now()).is_none(),
+                "probe cached a pre-switch identity (quota_probe={quota_probe})"
+            );
+        }
+    }
+
+    #[test]
+    fn agy_switch_rebinds_registration_and_excludes_the_stale_key() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let state = root.path().join("state");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&state).unwrap();
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), root.path().join("repo"));
+        inputs.state_dir = Some(state.clone());
+        let roots = inputs
+            .resolve(&provenant_os::fs::SystemPathResolver)
+            .unwrap();
+        let key = |email: &str| {
+            format!(
+                "agy-{}",
+                agy_fingerprint(
+                    format!("OAuth: authenticated successfully as {email}\n").as_bytes()
+                )
+                .unwrap()
+            )
+        };
+        let old = key("old@example.test");
+        let new = key("new@example.test");
+        let config = format!(
+            "schema_version=1\n[domains.other]\nuntouched=true\n[domains.accounts.entries.agy-work]\nadapter='agy'\nlabel='work'\nkey='{old}'\ndirectory='{}'\npriority=7\n",
+            home.display()
+        );
+        fs::write(state.join("config.toml"), &config).unwrap();
+        let settings: Settings = provenant_config::read_domain(&state, "accounts").unwrap();
+        let mut live = LiveQuota::new(&roots, &home, &settings).unwrap();
+        let homes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let fake = |email| {
+            Box::new(AgyUsage {
+                sign_ins: vec![(home.clone(), email)],
+                homes: homes.clone(),
+            })
+        };
+        live.executor = Some(fake("old@example.test"));
+        let account = live.accounts.borrow()[0].clone();
+        live.agy(&account, live.now() + 60, &mut QuotaDetails::default())
+            .unwrap();
+        live.executor = Some(fake("new@example.test"));
+        let outcome = live
+            .agy(&account, live.now() + 60, &mut QuotaDetails::default())
+            .map(|_| unreachable!());
+        assert_eq!(outcome, Err(ProbeFailure::AccountMismatch));
+        let now = live.now();
+        let mut stale = AccountRecord::empty(account.scope.clone());
+        stale.last_attempt_unix_seconds = Some(now);
+        stale.claim = Some(provenant_quota::RefreshClaim {
+            token: "switch".into(),
+            deadline_unix_seconds: now + provenant_quota::schedule::TICK_BUDGET_SECONDS,
+        });
+        let stale = provenant_quota::schedule::complete(&stale, "switch", now, outcome, None)
+            .unwrap()
+            .replacement
+            .unwrap();
+        let admission = provenant_quota::Admission {
+            policies: &[],
+            records: std::slice::from_ref(&stale),
+            pools: &[],
+            now_unix_seconds: now,
+        };
         assert_eq!(
-            agy_signed_in_account(&registered, true, None),
-            Err(ProbeFailure::Auth)
+            admission.account_block("agy", &old, "model").unwrap(),
+            Some(provenant_quota::AccountBlock::Mismatch)
         );
+        assert!(
+            admission
+                .account_block("agy", &new, "model")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(live.accounts().unwrap()[0].account_key, new);
+        let saved: Settings = provenant_config::read_domain(&state, "accounts").unwrap();
+        assert_eq!(saved.entries["agy-work"].key, new);
+        assert_eq!(saved.entries["agy-work"].priority, Some(7));
+        // A delayed probe cannot overwrite a newer manual registration.
+        assert!(
+            !crate::accounts::reconcile_agy(&roots, &home, &old, &key("third@example.test"))
+                .unwrap()
+        );
+        let unchanged: Settings = provenant_config::read_domain(&state, "accounts").unwrap();
+        assert_eq!(unchanged.entries["agy-work"].key, new);
+        assert!(
+            fs::read_to_string(state.join("config.toml"))
+                .unwrap()
+                .contains("untouched=true")
+        );
+        let next = LiveQuota::new(&roots, &home, &saved).unwrap();
+        assert_eq!(next.accounts().unwrap()[0].account_key, new);
+        assert_eq!(
+            crate::agy::cached_identity(&state, &home, live.now()),
+            Some(new)
+        );
+        assert_eq!(homes.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn agy_switch_surfaces_rebind_error_when_new_key_already_registered() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let other = root.path().join("other");
+        let state = root.path().join("state");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        fs::create_dir_all(&state).unwrap();
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), root.path().join("repo"));
+        inputs.state_dir = Some(state.clone());
+        let roots = inputs
+            .resolve(&provenant_os::fs::SystemPathResolver)
+            .unwrap();
+        let key = |email: &str| {
+            format!(
+                "agy-{}",
+                agy_fingerprint(
+                    format!("OAuth: authenticated successfully as {email}\n").as_bytes()
+                )
+                .unwrap()
+            )
+        };
+        let old = key("old@example.test");
+        let new = key("new@example.test");
+        let config = format!(
+            "schema_version=1\n[domains.accounts.entries.agy-work]\nadapter='agy'\nlabel='work'\nkey='{old}'\ndirectory='{}'\n[domains.accounts.entries.agy-other]\nadapter='agy'\nlabel='other'\nkey='{new}'\ndirectory='{}'\n",
+            home.display(),
+            other.display()
+        );
+        fs::write(state.join("config.toml"), &config).unwrap();
+        let settings: Settings = provenant_config::read_domain(&state, "accounts").unwrap();
+        let mut live = LiveQuota::new(&roots, &home, &settings).unwrap();
+        let homes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let fake = |email| {
+            Box::new(AgyUsage {
+                sign_ins: vec![(home.clone(), email)],
+                homes: homes.clone(),
+            })
+        };
+        live.executor = Some(fake("new@example.test"));
+        let account = live
+            .accounts
+            .borrow()
+            .iter()
+            .find(|a| a.scope.account_key == old)
+            .unwrap()
+            .clone();
+        let outcome = live
+            .agy(&account, live.now() + 60, &mut QuotaDetails::default())
+            .map(|_| unreachable!());
+        assert_eq!(outcome, Err(ProbeFailure::AccountMismatch));
+        let error = live
+            .last_reconcile_error()
+            .expect("rebind error must be recorded");
+        assert!(
+            error.contains("agy identity is already registered; run `provenant accounts list`"),
+            "{error}"
+        );
+        // Stale key remains excluded from admission
+        let now = live.now();
+        let mut stale = AccountRecord::empty(account.scope.clone());
+        stale.last_attempt_unix_seconds = Some(now);
+        stale.claim = Some(provenant_quota::RefreshClaim {
+            token: "refused-rebind".into(),
+            deadline_unix_seconds: now + provenant_quota::schedule::TICK_BUDGET_SECONDS,
+        });
+        let stale =
+            provenant_quota::schedule::complete(&stale, "refused-rebind", now, outcome, None)
+                .unwrap()
+                .replacement
+                .unwrap();
+        let admission = provenant_quota::Admission {
+            policies: &[],
+            records: std::slice::from_ref(&stale),
+            pools: &[],
+            now_unix_seconds: now,
+        };
+        assert_eq!(
+            admission.account_block("agy", &old, "model").unwrap(),
+            Some(provenant_quota::AccountBlock::Mismatch)
+        );
+        // Config was not rewritten with duplicate key
+        let saved: Settings = provenant_config::read_domain(&state, "accounts").unwrap();
+        assert_eq!(saved.entries["agy-work"].key, old);
+        assert_eq!(saved.entries["agy-other"].key, new);
     }
 
     /// A fake `agy` that signs in as one Google account per `HOME`, recording
@@ -1017,12 +1322,13 @@ mod zen_tests {
             }}
         }))
         .unwrap();
-        let live = LiveQuota::new(
-            Path::new("/fixture/state"),
-            Path::new("/fixture/home"),
-            &settings,
-        )
-        .unwrap();
+        let mut inputs =
+            provenant_core::RootInputs::new("/fixture/home".into(), "/fixture/repo".into());
+        inputs.state_dir = Some("/fixture/state".into());
+        let roots = inputs
+            .resolve(&provenant_os::fs::SystemPathResolver)
+            .unwrap();
+        let live = LiveQuota::new(&roots, Path::new("/fixture/home"), &settings).unwrap();
         let accounts = live.accounts().unwrap();
         assert_eq!(accounts.len(), 2);
         assert!(accounts.iter().any(|scope| scope.account_key == "go"));

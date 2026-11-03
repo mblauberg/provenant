@@ -126,6 +126,50 @@ impl Settings {
         settings
     }
 }
+/// Rebind only the registration whose key and directory the quota probe used.
+/// The config editor serialises this with manual registration. Labels and all
+/// user policy stay in place; the old quota record remains a routing exclusion.
+pub(crate) fn reconcile_agy(
+    roots: &provenant_core::Roots,
+    directory: &Path,
+    previous: &str,
+    actual: &str,
+) -> Result<bool, provenant_config::ConfigError> {
+    #[derive(Deserialize, Serialize)]
+    struct Domains {
+        accounts: Settings,
+    }
+    const SECTIONS: provenant_config::DomainSections<Domains> =
+        provenant_config::DomainSections::new(&[SECTION]);
+    let mut changed = false;
+    provenant_config::edit_config(
+        roots,
+        &SECTIONS,
+        &provenant_config::EditOptions::new("agy-account-switch"),
+        |doc, current| {
+            if current
+                .domains
+                .accounts
+                .entries
+                .values()
+                .any(|entry| entry.adapter == "agy" && entry.key == actual)
+            {
+                return Err(provenant_config::ConfigError::Refused(
+                    "agy identity is already registered; run `provenant accounts list`".into(),
+                ));
+            }
+            for (id, entry) in &current.domains.accounts.entries {
+                if entry.adapter == "agy" && entry.key == previous && entry.directory == directory {
+                    doc["domains"]["accounts"]["entries"][id]["key"] = toml_edit::value(actual);
+                    changed = true;
+                }
+            }
+            Ok(())
+        },
+    )?;
+    Ok(changed)
+}
+
 const NOT_ALLOWED: &str =
     "a per-account `settings` key is not in `shared_settings.keys`; add it there first";
 impl Settings {
@@ -391,15 +435,23 @@ pub fn detect_with_org(
         // here rather than probed under the shared login.
         let probe_home = crate::agy::ProbeHome::select(directory, home)?;
         let guarded = probe_home.guard(executor);
-        return detect_agy(
+        use provenant_core::Clock;
+        let now = provenant_os::clock::SystemClock::new().unix_seconds();
+        if let Some(key) = crate::agy::cached_identity(probe_root, directory, now) {
+            return Ok((key, None));
+        }
+        crate::agy::forget_identity(probe_root, directory);
+        let stamp_before = crate::agy::keychain_stamp(directory);
+        let key = detect_agy(
             &guarded,
             executable,
             probe_home.path(),
             user,
             cwd,
             probe_root,
-        )
-        .map(|key| (key, None));
+        )?;
+        crate::agy::remember_identity(probe_root, directory, &key, now, stamp_before);
+        return Ok((key, None));
     }
     if adapter == "codex" {
         let bytes = read_following(

@@ -656,6 +656,15 @@ fn agy_account_whose_isolated_keychain_vanished_is_refused()
 
     // Registered with its own keychain, the account observes under its own HOME.
     assert_eq!(observe()?.account_key.as_deref(), Some(key.as_str()));
+    // An unexpired identity probe still checks the routed registration. A
+    // stale routed key must never launch as the currently signed-in account.
+    let mut stale = entry.clone();
+    stale.key = "agy-google-000000000000".into();
+    let mismatch = observe_account(&stale, Path::new("/fixture/agy"), &probe, "r", 101)
+        .expect_err("cached fingerprint must reject the stale routed key")
+        .to_string();
+    assert!(mismatch.contains("changed identity"), "{mismatch}");
+    assert_eq!(agy.probed_homes.lock().unwrap().len(), 1);
     // With the keychain gone, the probe must not sign in as the first account.
     std::fs::remove_file(&keychain)?;
     let error = observe()
