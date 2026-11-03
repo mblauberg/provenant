@@ -949,6 +949,7 @@ pub struct NodeInput<'a> {
     /// remain a preference even when writer separation is enforced.
     pub require_distinct: bool,
     pub source_commit: Option<&'a str>,
+    pub review_base: Option<&'a str>,
     pub title: &'a str,
     pub prompt: &'a str,
     pub required_verdict: Option<&'a str>,

@@ -1421,6 +1421,15 @@ fn lower_leaf(
         }
     }
     map.insert("id".into(), json!(id));
+    // Carry the preset's diff reference to read-only graph nodes.
+    if map.get("access").and_then(Value::as_str) == Some("read_only")
+        && let Some(base) = parameters
+            .get("base")
+            .and_then(Value::as_str)
+            .filter(|base| !base.is_empty())
+    {
+        map.insert("review_base".into(), json!(base));
+    }
     // An empty land session, such as an unset decision session, means unset.
     if let Some(land) = map.get_mut("land").and_then(Value::as_object_mut)
         && land.get("session").is_some_and(|session| session == "")

@@ -813,3 +813,11 @@ exhausted bounded loop pauses for a chair decision; a synthesis does not
 override failed acceptance evidence. Confinement, writer exclusion, immutable
 sources and acceptance checks remain deterministic while the models choose
 how to carry out each assigned role.
+
+Generator-evaluator lenses and the evaluator review the implement node's settled
+commit. Their host-written Git context compares that pinned commit with the
+preset's `base`. When `base` is empty, the review uses the graph's pinned
+integration base if available, otherwise the source commit itself, preserving
+launches in repositories without `origin/HEAD`. Set `base` to the intended
+comparison commit for a nonempty range. An `equal_base_and_head` node warning
+means that comparison has no commit range to review.

@@ -263,6 +263,21 @@ impl LaneAccess {
     }
 }
 
+/// Whether a lane discovers the host's user skills read-only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserSkillsMode {
+    #[default]
+    Discover,
+    Off,
+}
+
+impl UserSkillsMode {
+    pub fn is_discover(&self) -> bool {
+        matches!(self, Self::Discover)
+    }
+}
+
 /// Canonical repository and linked worktree selected at the submission edge.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WriterRequest {
@@ -997,6 +1012,11 @@ pub struct AttemptRecord {
     /// all unknown.
     #[serde(default)]
     pub trace: crate::Trace,
+}
+impl AttemptRecord {
+    pub fn user_skills(&self) -> Option<&serde_json::Value> {
+        self.applied_route.as_ref()?.extra.get("user_skills")
+    }
 }
 /// A live-only value that is deliberately absent from durable identity and
 /// equality. It can decorate a record read without making two reads of that

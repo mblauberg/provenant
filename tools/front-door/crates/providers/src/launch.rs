@@ -88,6 +88,12 @@ pub struct PrepareInput<'a> {
     pub provenant: crate::LaneRuntime<'a>,
 }
 
+impl PrepareInput<'_> {
+    pub fn user_skills(&self) -> bool {
+        self.route.user_skills()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Access {
@@ -671,6 +677,72 @@ pub(crate) fn subtree(path: impl Into<PathBuf>) -> PathGrant {
         path: path.into(),
         scope: PathScope::Subtree,
     }
+}
+
+/// The native user skills location, without exposing the rest of host config.
+pub fn user_skills_directory(
+    adapter: &str,
+    home: &Path,
+    host_var: &dyn Fn(&str) -> Option<OsString>,
+) -> Option<PathBuf> {
+    let path = match adapter {
+        "claude" => home.join(".claude/skills"),
+        "codex" => home.join(".agents/skills"),
+        "agy" => home.join(".gemini/skills"),
+        "cursor" => home.join(".cursor/skills"),
+        "opencode" => host_var("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| home.join(".config"))
+            .join("opencode/skills"),
+        _ => return None,
+    };
+    path.is_dir().then_some(path)
+}
+
+/// Canonical read-only grants, including linked skill resources. Directory
+/// identities bound traversal even when links form cycles; files need exact
+/// grants because a subtree grant requires a directory anchor.
+pub fn user_skills_grants(skills_dir: &Path) -> Vec<PathGrant> {
+    let Ok(root) = std::fs::canonicalize(skills_dir) else {
+        return Vec::new();
+    };
+    if !root.is_dir() {
+        return Vec::new();
+    }
+    let mut grants = vec![subtree(&root)];
+    let mut pending = vec![root.clone()];
+    let mut visited = std::collections::BTreeSet::new();
+    let mut targets = std::collections::BTreeSet::new();
+    while let Some(directory) = pending.pop() {
+        if !visited.insert(directory.clone()) {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(target) = std::fs::canonicalize(&path) else {
+                continue;
+            };
+            let is_dir = target.is_dir();
+            if entry.file_type().is_ok_and(|ft| ft.is_symlink())
+                && !target.starts_with(&root)
+                && targets.insert(target.clone())
+            {
+                grants.push(if is_dir {
+                    subtree(&target)
+                } else {
+                    exact(&target)
+                });
+            }
+            if is_dir {
+                pending.push(target);
+            }
+        }
+    }
+    grants
 }
 
 /// Lowercase RFC 4122 version 4 spelling of caller randomness.

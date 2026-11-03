@@ -54,6 +54,7 @@ struct FakeOwner {
     expansion_validations: usize,
     integration_heads: VecDeque<String>,
     source_commits: Vec<Option<String>>,
+    equal_range: bool,
     read_roots: Vec<Vec<String>>,
     distinct_from: Vec<Vec<String>>,
     family_peers: Vec<Vec<String>>,
@@ -181,6 +182,10 @@ impl AttemptOwner for FakeOwner {
     ) -> Result<Option<String>, Self::Error> {
         self.deliveries += 1;
         Ok(Some("https://example.invalid/pr/1".into()))
+    }
+
+    fn equal_review_range(&mut self, _: &str) -> Result<bool, Self::Error> {
+        Ok(self.equal_range)
     }
 
     fn observe_or_start(
@@ -355,6 +360,10 @@ fn distinct_from_writer_passes_the_writer_attempts_to_the_owner() {
     assert!(run.checkpoint.successful());
     assert_eq!(owner.distinct_from[0], Vec::<String>::new());
     assert_eq!(owner.distinct_from[1], vec!["host/7".to_owned()]);
+    assert_eq!(
+        owner.source_commits[1].as_deref(),
+        Some("3333333333333333333333333333333333333333")
+    );
     // Without a writing source the constraint has nothing to exclude.
     let mut unsourced = node("lone", route("first"));
     unsourced.distinct_from = Some(DistinctFrom::Writer);
@@ -5408,4 +5417,45 @@ fn a_deferred_review_lens_keeps_the_writer_for_family_separation() {
     document.schema_version = 2;
     advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
     assert_eq!(owner.distinct_from.last(), Some(&vec!["host/7".to_owned()]));
+}
+
+#[test]
+fn equal_review_range_warns_on_review_nodes() {
+    let mut review = node("review", route("review"));
+    review.role = Some("lens.correctness-spec".into());
+    let mut other = node("other", route("other"));
+    other.role = Some("scout".into());
+    let mut owner = FakeOwner {
+        equal_range: true,
+        observations: [
+            terminal_from(
+                "```findings\n{\"schema_version\":1,\"findings\":[]}\n```",
+                "host/one",
+            ),
+            terminal_from(
+                "```findings\n{\"schema_version\":1,\"findings\":[]}\n```",
+                "host/two",
+            ),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![review, other]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        run.checkpoint.nodes[0].outputs.as_ref().unwrap().warnings,
+        ["equal_base_and_head: review range is empty"]
+    );
+    assert!(
+        run.checkpoint.nodes[1]
+            .outputs
+            .as_ref()
+            .unwrap()
+            .warnings
+            .is_empty()
+    );
 }
