@@ -606,20 +606,43 @@ fn run_base_consistency_on_existing_branch() -> Result {
             &base_a,
             "--wait",
             "1s",
+            "--json",
         ],
         Some(b"fixture prompt"),
     )?;
-    let accepted_text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out_accepted.stdout.bytes),
-        String::from_utf8_lossy(&out_accepted.stderr.bytes)
+    assert_eq!(code(&out_accepted), 1, "{out_accepted:?}");
+    let accepted: serde_json::Value = serde_json::from_slice(&out_accepted.stdout.bytes)?;
+    assert_eq!(accepted["command"], "run");
+    assert!(accepted["error"].is_null(), "unexpected error: {accepted}");
+    let run_id = accepted["data"]["run_id"]
+        .as_str()
+        .ok_or("expected run_id in accepted run")?;
+    let lane = &accepted["data"]["lanes"][0];
+    let attempt_id = lane["attempt_id"]
+        .as_str()
+        .ok_or("expected attempt_id in accepted lane")?;
+    assert_eq!(
+        accepted["data"]["worktree"]["branch"].as_str(),
+        Some("feat/test-base")
     );
+    // Stable admission outcome: created attempt directory and request receipt exist
+    let attempt_dir = rig
+        .state
+        .join("runs")
+        .join(run_id)
+        .join("attempts")
+        .join(attempt_id);
     assert!(
-        !accepted_text.contains("does not contain base"),
-        "{accepted_text}"
+        attempt_dir.is_dir(),
+        "expected attempt directory at {}",
+        attempt_dir.display()
     );
-    assert!(!accepted_text.contains("BRANCH_EXISTS"), "{accepted_text}");
-    assert!(accepted_text.contains("feat/test-base"), "{accepted_text}");
+    let request_file = rig.state.join("runs").join(run_id).join("request.json");
+    assert!(
+        request_file.is_file(),
+        "expected request receipt at {}",
+        request_file.display()
+    );
 
     // 2. Existing branch that does NOT contain base_b is refused, with both commits named
     let out_refused = rig.execute(

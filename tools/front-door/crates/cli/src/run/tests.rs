@@ -2346,8 +2346,55 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
 #[test]
 fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_confinement::worktrees::{self, WorkerObserver, WorkerState, WorktreeCreate};
+    use provenant_confinement::worktrees::{
+        self, CensusPolicyWorkers, ObservedProcess, WorkerObserver, WorkerState, WorktreeCreate,
+    };
     use provenant_core::RootInputs;
+    struct ControlledObserver {
+        target: PathBuf,
+    }
+    impl WorkerObserver for ControlledObserver {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .map(|root| {
+                    (
+                        root.clone(),
+                        if root == &self.target {
+                            WorkerState::Live
+                        } else {
+                            WorkerState::Free
+                        },
+                    )
+                })
+                .collect()
+        }
+
+        fn observe_roots_for_land(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .map(|root| (root.clone(), WorkerState::Free))
+                .collect()
+        }
+
+        fn live_process(&self, root: &Path) -> Option<ObservedProcess> {
+            (root == self.target).then(|| ObservedProcess {
+                pid: 24680,
+                command: Some("ancestor-shell".into()),
+                cwd: Some(self.target.clone()),
+            })
+        }
+
+        fn live_process_for_land(&self, _root: &Path) -> Option<ObservedProcess> {
+            None
+        }
+    }
     struct Free;
     impl WorkerObserver for Free {
         fn observe_roots(
@@ -2414,6 +2461,41 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
         assets: &project,
         cwd: &path,
     };
+    let observer = ControlledObserver {
+        target: path.clone(),
+    };
+
+    // Ordinary policy without run ancestor exclusion refuses admission because
+    // the inside process is observed live:
+    let ordinary = CensusPolicyWorkers::from_roots(&observer, &roots)?;
+    let refused = super::own_worktree(
+        &super::OwnedWorktree {
+            branch: branch.into(),
+            host,
+            created_at: WallTime::from_micros(2)?,
+        },
+        None,
+        &OperationId::parse("inside-op-refused")?,
+        &edge_inside,
+        &ordinary,
+        |_| false,
+        &mut None,
+        &clock,
+        &cancel,
+    );
+    match refused {
+        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
+            provenant_confinement::worktrees::WorktreeError::LiveProcess(proc),
+        ))) => {
+            assert_eq!(proc.pid, 24680);
+            assert_eq!(proc.command.as_deref(), Some("ancestor-shell"));
+            assert_eq!(proc.cwd.as_ref(), Some(&path));
+        }
+        other => panic!("expected LiveProcess refusal without ancestor exclusion, got {other:?}"),
+    }
+
+    // Real run policy applies ancestor exclusion, so admission succeeds:
+    let run_policy = CensusPolicyWorkers::for_run(&observer, &roots)?;
     let admitted = super::own_worktree(
         &super::OwnedWorktree {
             branch: branch.into(),
@@ -2423,7 +2505,7 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
         None,
         &OperationId::parse("inside-op")?,
         &edge_inside,
-        &Free,
+        &run_policy,
         |_| false,
         &mut None,
         &clock,
