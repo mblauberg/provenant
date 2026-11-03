@@ -4235,7 +4235,7 @@ impl BoundGraphOwner<'_> {
             "access": "read_only",
             "depends_on": node.depends_on,
             "composite": {
-                "min_successful": spec.min_successful,
+                "min_successful": spec.min_successful.map(|n| if n == 0 { members.len().saturating_sub(1).max(1) } else { n }),
                 "nodes": [],
                 "exports": exports,
             },
@@ -5168,6 +5168,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                             // A route refused before launch leaves the next route free to try.
                             Outcome::ModelUnavailable => AttemptOutcome::AdapterUnavailable,
                             Outcome::Rejected if !launched => AttemptOutcome::AdapterUnavailable,
+                            Outcome::ReviewRequired
+                                if attempt.partial_signals.as_slice() == [provenant_records::run::PartialSignal::DeclaredStop] =>
+                            {
+                                AttemptOutcome::DeclaredStop
+                            }
                             Outcome::Failed => AttemptOutcome::TaskFailed,
                             // Uncommitted edits need the chair, so the node fails without fallback.
                             Outcome::Uncommitted => AttemptOutcome::OtherFailure,

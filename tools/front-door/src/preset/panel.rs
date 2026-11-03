@@ -671,13 +671,23 @@ impl StageBuilder<'_> {
             risk_tags,
             worktree: text("worktree"),
             lenses,
-            min_successful: self
-                .parameters
-                .get("min_reviews")
-                .map(|value| self.minimum_successful(value))
-                .transpose()?
-                .map(|count| usize::try_from(count).map_err(|_| "min_reviews is too large"))
-                .transpose()?,
+            min_successful: if let Some(value) = self.parameters.get("min_lenses") {
+                Some(
+                    usize::try_from(
+                        value
+                            .as_u64()
+                            .ok_or("min_lenses must be a non-negative integer")?,
+                    )
+                    .map_err(|_| "min_lenses is too large")?,
+                )
+            } else {
+                self.parameters
+                    .get("min_reviews")
+                    .map(|value| self.minimum_successful(value))
+                    .transpose()?
+                    .map(|count| usize::try_from(count).map_err(|_| "min_reviews is too large"))
+                    .transpose()?
+            },
             max_nodes: names.len().saturating_add(1).max(2),
         })
     }

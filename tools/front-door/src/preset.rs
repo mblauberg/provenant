@@ -2318,7 +2318,21 @@ impl StageBuilder<'_> {
                         .unwrap_or_else(|| selected_inputs(&ends, &json!(["result", "findings"])));
                     let min_successful = object
                         .remove("min_successful")
-                        .map(|value| self.minimum_successful(&value))
+                        .map(|value| {
+                            if value.as_str() == Some("${min_lenses}") {
+                                let requested =
+                                    interpolate(&value, &self.parameters, self.prompt, 1)?
+                                        .as_u64()
+                                        .ok_or("min_lenses must be a non-negative integer")?;
+                                Ok(if requested == 0 {
+                                    ends.len().saturating_sub(1).max(1) as u64
+                                } else {
+                                    requested
+                                })
+                            } else {
+                                self.minimum_successful(&value)
+                            }
+                        })
                         .transpose()?;
                     (
                         composite(&id, children, exports, deps, &outputs, min_successful),
