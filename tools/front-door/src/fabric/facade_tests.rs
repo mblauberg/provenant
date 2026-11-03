@@ -1382,6 +1382,8 @@ mod peer_tests {
             prices: None,
             tick: false,
         };
+        let prior = format!("{}/{}", factory.context.identity.host, upstream.attempt_id);
+        assert_eq!(owner.prior_models(&[prior.clone(), prior])?, ["codex/gpt-6-luna"]);
         let run = graph::advance_with_budget(
             &document,
             &mut owner,
@@ -1741,6 +1743,14 @@ mod peer_tests {
             .rig
             .execute(&git, &["branch", "integration"], None)?;
         assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        for args in [
+            vec!["remote", "add", "origin", fixture.rig.project.to_str().ok_or("path")?],
+            vec!["update-ref", "refs/heads/main", "HEAD"],
+            vec!["update-ref", "refs/remotes/origin/main", "HEAD"],
+        ] {
+            let output = fixture.rig.execute(&git, &args, None)?;
+            assert_eq!(crate::worktree_tests::support::code(&output), 0);
+        }
         let factory = Factory {
             context: Context::open(
                 fixture.roots.clone(),
@@ -1762,7 +1772,7 @@ mod peer_tests {
         std::fs::write(
             &document,
             serde_json::to_vec(&serde_json::json!({
-                "schema_version":2, "graph_id":"pinned-base", "integration_branch":"integration", "review_base":"integration", "delivery":"pr",
+                "schema_version":2, "graph_id":"pinned-base", "integration_branch":"integration", "review_base":"origin/main", "delivery":"pr",
                 "nodes":[{"id":"one","prompt":"reply OK","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
             }))?,
         )?;
@@ -1846,6 +1856,8 @@ mod peer_tests {
                 "Unrelated primary checkout",
             ],
             vec!["branch", "-f", "integration", "HEAD"],
+            vec!["update-ref", "refs/heads/main", "HEAD"],
+            vec!["update-ref", "refs/remotes/origin/main", "HEAD"],
         ] {
             let output = fixture.rig.execute(&git, &args, None)?;
             assert_eq!(crate::worktree_tests::support::code(&output), 0);
