@@ -278,6 +278,9 @@ pub struct UpdateIntent {
     pub account: AccountScope,
     pub expected: Option<AccountRecord>,
     pub replacement: Option<AccountRecord>,
+    /// Probe result metadata stays in the in-memory write intent, never the
+    /// v1 quota account JSON. `Some(None)` means a successful probe cleared it.
+    pub readiness_probe_result: Option<Option<crate::ReadinessReason>>,
 }
 impl UpdateIntent {
     pub fn check(&self, current: Option<&AccountRecord>) -> Result<(), QuotaError> {
@@ -410,6 +413,23 @@ mod tests {
                 .validate()
                 .is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn readiness_failure_metadata_never_enters_the_v1_account_json()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut record = AccountRecord::empty(AccountScope {
+            adapter: "agy".into(),
+            account_key: "opaque".into(),
+            label: "work".into(),
+        });
+        record.last_error = Some(ProbeFailure::Network);
+        let bytes = serde_json::to_vec(&record)?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        assert!(value.get("readiness_probe_result").is_none());
+        let decoded = AccountRecord::decode(&bytes)?;
+        assert_eq!(decoded, record);
         Ok(())
     }
 

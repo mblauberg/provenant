@@ -81,6 +81,7 @@ pub struct LiveQuota {
     accounts: Vec<Account>,
     refresh_expired: bool,
     claude_default: RefCell<Option<claude::Identity>>,
+    readiness_failure: RefCell<Option<provenant_quota::ReadinessReason>>,
     clock: SystemClock,
     /// Stands in for the system executor so tests can see each probe's command.
     #[cfg(test)]
@@ -167,6 +168,7 @@ impl LiveQuota {
             accounts,
             refresh_expired: true,
             claude_default: RefCell::new(None),
+            readiness_failure: RefCell::new(None),
             clock: SystemClock::new(),
             #[cfg(test)]
             executor: None,
@@ -251,9 +253,23 @@ impl LiveQuota {
         options.stdout = StreamPolicy::Capture { limit: LIMIT };
         options.stderr = StreamPolicy::Discard;
         options.stop_on_output_limit = true;
-        executor
-            .execute(options)
-            .map_err(|error| command_error(program, error))
+        match executor.execute(options) {
+            Ok(outcome) => {
+                if outcome.timed_out {
+                    *self.readiness_failure.borrow_mut() =
+                        Some(provenant_quota::ReadinessReason::ProbeTimeout);
+                }
+                Ok(outcome)
+            }
+            Err(error) => {
+                let failure = command_error(program, error);
+                *self.readiness_failure.borrow_mut() = Some(match failure {
+                    ProbeFailure::MissingCli => provenant_quota::ReadinessReason::MissingExecutable,
+                    _ => provenant_quota::ReadinessReason::CommandFailure,
+                });
+                Err(failure)
+            }
+        }
     }
     fn json_command(
         &self,
@@ -355,6 +371,7 @@ impl QuotaEffects for LiveQuota {
         plan: &QuotaProbePlan,
         previous: Option<&AccountRecord>,
     ) -> Result<ProbeCapture, ProbeFailure> {
+        *self.readiness_failure.borrow_mut() = None;
         let account = self
             .accounts
             .iter()
@@ -419,6 +436,20 @@ impl QuotaEffects for LiveQuota {
             exit_code: Some(0),
             overflowed: false,
         })
+    }
+
+    fn readiness_reason(&self, failure: ProbeFailure) -> provenant_quota::ReadinessReason {
+        match failure {
+            ProbeFailure::MissingCli | ProbeFailure::Disabled => {
+                provenant_quota::ReadinessReason::MissingExecutable
+            }
+            ProbeFailure::Auth => provenant_quota::ReadinessReason::SignedOut,
+            ProbeFailure::AccountMismatch => provenant_quota::ReadinessReason::AccountMismatch,
+            _ => self
+                .readiness_failure
+                .borrow()
+                .unwrap_or(provenant_quota::ReadinessReason::CommandFailure),
+        }
     }
 }
 impl LiveQuota {
@@ -603,6 +634,7 @@ mod tests {
             accounts: Vec::new(),
             refresh_expired: false,
             claude_default: RefCell::new(None),
+            readiness_failure: RefCell::new(None),
             clock: SystemClock::new(),
             executor: None,
         }
@@ -907,6 +939,56 @@ mod tests {
         ] {
             assert_eq!(command_error("/bin/sh", failure), ProbeFailure::Network);
         }
+
+        let quota = LiveQuota {
+            home: std::env::temp_dir(),
+            state: std::env::temp_dir(),
+            accounts: Vec::new(),
+            refresh_expired: false,
+            claude_default: RefCell::new(None),
+            readiness_failure: RefCell::new(None),
+            clock: SystemClock::new(),
+            #[cfg(test)]
+            executor: None,
+        };
+        let reason = |failure| quota.readiness_reason(failure);
+        assert_eq!(
+            reason(ProbeFailure::MissingCli),
+            provenant_quota::ReadinessReason::MissingExecutable
+        );
+        assert_eq!(
+            provenant_quota::schedule::backoff(ProbeFailure::MissingCli, 1, None),
+            86_400
+        );
+        *quota.readiness_failure.borrow_mut() =
+            Some(provenant_quota::ReadinessReason::ProbeTimeout);
+        assert_eq!(
+            reason(ProbeFailure::Network),
+            provenant_quota::ReadinessReason::ProbeTimeout
+        );
+        assert_eq!(
+            provenant_quota::schedule::backoff(ProbeFailure::Network, 1, None),
+            15
+        );
+        *quota.readiness_failure.borrow_mut() =
+            Some(provenant_quota::ReadinessReason::CommandFailure);
+        assert_eq!(
+            reason(ProbeFailure::Network),
+            provenant_quota::ReadinessReason::CommandFailure
+        );
+        assert_eq!(
+            provenant_quota::schedule::backoff(ProbeFailure::Network, 1, None),
+            15
+        );
+        *quota.readiness_failure.borrow_mut() = None;
+        assert_eq!(
+            reason(ProbeFailure::Auth),
+            provenant_quota::ReadinessReason::SignedOut
+        );
+        assert_eq!(
+            provenant_quota::schedule::backoff(ProbeFailure::Auth, 1, None),
+            900
+        );
     }
 
     #[test]

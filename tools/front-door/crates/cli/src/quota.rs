@@ -500,6 +500,7 @@ pub(crate) fn persist_provider_success(
         account: next.account.clone(),
         expected: current,
         replacement: Some(next),
+        readiness_probe_result: None,
     };
     write_intent(&directory, state_root, &intent, &mut records)?;
 
@@ -679,6 +680,13 @@ fn sync_readiness(state: &Path, intent: &UpdateIntent, now: i64) -> Result<(), E
             pools: &[],
         };
         file.sync_refusals(record, LOCAL_HOST, &admission)?;
+        if let Some(reason) = intent.readiness_probe_result {
+            let interval = policies
+                .iter()
+                .find(|policy| policy.adapter == adapter)
+                .map_or(300, |policy| policy.timer_seconds);
+            file.sync_probe_result(record, LOCAL_HOST, now, interval, reason)?;
+        }
     } else {
         file.records.clear();
     }
@@ -965,6 +973,7 @@ fn refresh_auth_metadata(
                 account: next.account.clone(),
                 expected: current,
                 replacement: Some(next),
+                readiness_probe_result: None,
             },
             records,
         )?;
@@ -1164,7 +1173,7 @@ fn execute(
             .iter()
             .filter_map(|r| r.quota_source)
             .find(|s| s.adapter_id() == account.adapter);
-        let outcome = match source {
+        let (outcome, readiness_reason) = match source {
             Some(source) => {
                 let probe_deadline = schedule::probe_deadline(plan.deadline_unix_seconds, at)?;
                 let input = QuotaProbeInput {
@@ -1173,17 +1182,28 @@ fn execute(
                     authority_ref: Some("configured-local-quota".into()),
                 };
                 match source.probe(account, &input) {
-                    Ok(probe) => effects
-                        .capture(&probe, current.as_ref())
-                        .and_then(|capture| {
-                            source
-                                .decode(&probe, &capture)
-                                .map_err(|_| ProbeFailure::Malformed)
-                        }),
-                    Err(_) => Err(ProbeFailure::Disabled),
+                    Ok(probe) => match effects.capture(&probe, current.as_ref()) {
+                        Ok(capture) => match source.decode(&probe, &capture) {
+                            Ok(snapshot) => (Ok(snapshot), Some(None)),
+                            Err(_) => (
+                                Err(ProbeFailure::Malformed),
+                                Some(Some(ReadinessReason::CommandFailure)),
+                            ),
+                        },
+                        Err(failure) => {
+                            (Err(failure), Some(Some(effects.readiness_reason(failure))))
+                        }
+                    },
+                    Err(_) => (
+                        Err(ProbeFailure::Disabled),
+                        Some(Some(ReadinessReason::MissingExecutable)),
+                    ),
                 }
             }
-            None => Err(ProbeFailure::Disabled),
+            None => (
+                Err(ProbeFailure::Disabled),
+                Some(Some(ReadinessReason::MissingExecutable)),
+            ),
         };
         let finished = clock
             .wall_now()
@@ -1198,7 +1218,8 @@ fn execute(
             })
         {
             match schedule::complete(reserved, &token, finished, outcome, None) {
-                Ok(complete) => {
+                Ok(mut complete) => {
+                    complete.readiness_probe_result = readiness_reason;
                     write_intent(&dir, roots.state.as_path(), &complete, &mut records)?;
                     // Best effort: a history fault never fails the refresh.
                     if let Some(snapshot) = complete
@@ -2405,6 +2426,7 @@ mod tests {
                 account,
                 expected: None,
                 replacement: Some(record),
+                readiness_probe_result: None,
             },
             &mut Vec::new(),
         )?;
@@ -2482,6 +2504,7 @@ mod tests {
                 account: account.clone(),
                 expected: None,
                 replacement: Some(record),
+                readiness_probe_result: None,
             },
             &mut records,
         )?;
@@ -2547,6 +2570,7 @@ mod tests {
                 account: account.clone(),
                 expected: Some(records[0].clone()),
                 replacement: Some(reserved.clone()),
+                readiness_probe_result: None,
             },
             &mut records,
         )?;
@@ -2560,6 +2584,7 @@ mod tests {
                 account: account.clone(),
                 expected: Some(records[0].clone()),
                 replacement: Some(failed),
+                readiness_probe_result: None,
             },
             &mut records,
         )?;
@@ -2637,6 +2662,7 @@ mod tests {
                     account,
                     expected: None,
                     replacement: Some(record),
+                    readiness_probe_result: None,
                 },
                 &mut records,
             )?;
@@ -2862,6 +2888,7 @@ mod tests {
                 account,
                 expected: Some(current),
                 replacement: Some(next),
+                readiness_probe_result: None,
             },
             &mut records,
         )?;
@@ -2875,9 +2902,79 @@ mod tests {
             account: records[0].account.clone(),
             expected: Some(records[0].clone()),
             replacement: None,
+            readiness_probe_result: None,
         };
         write_intent(&dir, state, &drop, &mut records)?;
         assert!(!state.join("readiness/key").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn probe_failure_readiness_is_account_wide_and_a_fresh_success_clears_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+        let state = temp.path();
+        let dir = child(&private(state)?, OsStr::new("quota"))?;
+        let account = AccountScope {
+            adapter: "agy".into(),
+            account_key: "work".into(),
+            label: "work".into(),
+        };
+        let mut records = Vec::new();
+        let mut initial = AccountRecord::empty(account.clone());
+        initial.revision = 1;
+        write_intent(
+            &dir,
+            state,
+            &UpdateIntent {
+                account: account.clone(),
+                expected: None,
+                replacement: Some(initial),
+                readiness_probe_result: None,
+            },
+            &mut records,
+        )?;
+
+        let current = records[0].clone();
+        let mut failed = current.clone();
+        failed.revision += 1;
+        failed.last_error = Some(ProbeFailure::Network);
+        let failure = UpdateIntent {
+            account: account.clone(),
+            expected: Some(current),
+            replacement: Some(failed),
+            readiness_probe_result: Some(Some(ReadinessReason::ProbeTimeout)),
+        };
+        write_intent(&dir, state, &failure, &mut records)?;
+        let route = ReadinessScope {
+            host: LOCAL_HOST.into(),
+            adapter: "agy".into(),
+            account_key: "work".into(),
+            route: "agy/model".into(),
+        };
+        let held = read_readiness(state, &route, SystemClock::new().unix_seconds());
+        assert_eq!(held.state, ReadinessState::Unavailable);
+        assert_eq!(held.reason, Some(ReadinessReason::ProbeTimeout));
+
+        let current = records[0].clone();
+        let mut succeeded = current.clone();
+        succeeded.revision += 1;
+        succeeded.last_error = None;
+        let success = UpdateIntent {
+            account,
+            expected: Some(current),
+            replacement: Some(succeeded),
+            readiness_probe_result: Some(None),
+        };
+        write_intent(&dir, state, &success, &mut records)?;
+        assert_eq!(
+            read_readiness(state, &route, SystemClock::new().unix_seconds()).state,
+            ReadinessState::Unknown
+        );
+        let bytes = std::fs::read(state.join("quota/work/agy.json"))?;
+        assert_eq!(AccountRecord::decode(&bytes)?, records[0]);
         Ok(())
     }
 
@@ -2899,6 +2996,7 @@ mod tests {
             account: account.clone(),
             expected: None,
             replacement: Some(initial),
+            readiness_probe_result: None,
         };
         write_intent(&dir, temp.path(), &add, &mut records)?;
         // The state root is explicit, so a directory not named quota still signals.
@@ -2910,6 +3008,7 @@ mod tests {
             account: account.clone(),
             expected: Some(records[0].clone()),
             replacement: None,
+            readiness_probe_result: None,
         };
         write_intent(&dir, temp.path(), &drop_intent, &mut records)?;
         assert_eq!(records.len(), 0);
