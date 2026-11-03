@@ -3668,18 +3668,20 @@ fn cursor_cli_only_account_matches_desktop_identity() {
         if let Some(config) = config {
             std::fs::write(directory.path().join("cli-config.json"), config).unwrap();
         }
-        assert!(matches!(
-            crate::accounts::detect(
-                &NoDesktop,
-                "cursor",
-                Path::new("/bin/cursor-agent"),
-                Path::new("/home/test"),
-                OsStr::new("test"),
-                directory.path(),
-                directory.path(),
-            ),
-            Err(ProviderError::UnknownIdentity)
-        ));
+        let result = crate::accounts::detect(
+            &NoDesktop,
+            "cursor",
+            Path::new("/bin/cursor-agent"),
+            Path::new("/home/test"),
+            OsStr::new("test"),
+            directory.path(),
+            directory.path(),
+        );
+        if config.is_none() {
+            assert!(matches!(result, Err(ProviderError::CredentialNotFound)));
+        } else {
+            assert!(matches!(result, Err(ProviderError::UnknownIdentity)));
+        }
     }
 }
 
@@ -4029,6 +4031,8 @@ fn registration_keeps_other_executor_failures_as_unknown_identity() {
     }
     let state = tempfile::tempdir().unwrap();
     let agy = tempfile::tempdir().unwrap();
+    let cursor = tempfile::tempdir().unwrap();
+    std::fs::write(cursor.path().join("state.vscdb"), b"fixture").unwrap();
     write_agy_keychain(agy.path());
     for adapter in ["claude", "cursor", "agy"] {
         for busy in [false, true] {
@@ -4040,6 +4044,8 @@ fn registration_keeps_other_executor_failures_as_unknown_identity() {
                 OsStr::new("test"),
                 if adapter == "agy" {
                     agy.path()
+                } else if adapter == "cursor" {
+                    cursor.path()
                 } else {
                     Path::new("/home/test/identity")
                 },

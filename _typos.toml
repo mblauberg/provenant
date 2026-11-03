@@ -163,6 +163,9 @@ specializations = "specializations"
 
 [type.rust.extend-identifiers]
 # HTTP header and Anthropic usage response field.
+"Unauthorized" = "Unauthorized"
+# CLI grammar attribute.
+"catalog_u64_range" = "catalog_u64_range"
 "Authorization" = "Authorization"
 "utilization" = "utilization"
 "Catalog" = "Catalog"

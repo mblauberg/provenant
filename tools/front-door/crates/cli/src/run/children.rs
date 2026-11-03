@@ -165,7 +165,7 @@ impl Holder for HostHolder<'_> {
                 .applied_route
                 .as_ref()
                 .and_then(|route| route.provider.as_deref())
-                == Some("opencode"),
+                == Some(provenant_records::Harness::Opencode.spec().name),
             std::sync::atomic::Ordering::Relaxed,
         );
         if context.launch.is_none() {

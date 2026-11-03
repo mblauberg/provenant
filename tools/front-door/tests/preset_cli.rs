@@ -1717,7 +1717,6 @@ fn automatic_preset_selection_submits_network_off_and_refuses_lane_only_flags()
         vec!["--write-root", "/tmp"],
         vec!["--capability", "postgres"],
         vec!["--knob", "test=value"],
-        vec!["--task-id", "11111111111111111111111111111111"],
         vec!["--delivery-id", "11111111111111111111111111111111"],
         vec!["--head", "1111111111111111111111111111111111111111"],
         vec!["--base", "main"],

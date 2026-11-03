@@ -428,6 +428,37 @@ pub fn detect_with_org(
     directory: &Path,
     probe_root: &Path,
 ) -> Result<(String, Option<String>), ProviderError> {
+    detect_with_org_inner(
+        executor, adapter, executable, home, user, directory, probe_root, true,
+    )
+}
+
+/// Registration must observe the current identity, even when a recent probe is cached.
+pub fn detect_for_registration(
+    executor: &dyn Executor,
+    adapter: &str,
+    executable: &Path,
+    home: &Path,
+    user: &OsStr,
+    directory: &Path,
+    probe_root: &Path,
+) -> Result<(String, Option<String>), ProviderError> {
+    detect_with_org_inner(
+        executor, adapter, executable, home, user, directory, probe_root, false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn detect_with_org_inner(
+    executor: &dyn Executor,
+    adapter: &str,
+    executable: &Path,
+    home: &Path,
+    user: &OsStr,
+    directory: &Path,
+    probe_root: &Path,
+    use_cache: bool,
+) -> Result<(String, Option<String>), ProviderError> {
     let cwd = Path::new(crate::claude::PROBE_CWD);
     if adapter == "agy" {
         // An isolated account is signed in under its own directory as `HOME`.
@@ -437,7 +468,7 @@ pub fn detect_with_org(
         let guarded = probe_home.guard(executor);
         use provenant_core::Clock;
         let now = provenant_os::clock::SystemClock::new().unix_seconds();
-        if let Some(key) = crate::agy::cached_identity(probe_root, directory, now) {
+        if use_cache && let Some(key) = crate::agy::cached_identity(probe_root, directory, now) {
             return Ok((key, None));
         }
         crate::agy::forget_identity(probe_root, directory);

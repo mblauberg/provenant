@@ -220,7 +220,7 @@ pub fn execute(command: &Accounts, roots: &Roots, home: &Path) -> Result<Setting
             .map_err(|e| e.to_string())?
             .ok_or("current user identity is unavailable")?
             .name;
-        let detected = provenant_providers::accounts::detect_with_org(
+        let detected = provenant_providers::accounts::detect_for_registration(
             &executor,
             adapter,
             &executable,
