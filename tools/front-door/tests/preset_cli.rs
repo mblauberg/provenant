@@ -1967,3 +1967,149 @@ fn plan_flag_decides_and_explains_the_planner_front_end() -> Result<(), Box<dyn 
     assert!(plain.contains("plan: auto -> "), "{plain}");
     Ok(())
 }
+
+#[test]
+fn preset_run_followed_by_provenant_run_on_same_bound_worktree_succeeds()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    let state = temp.path().join("state");
+    std::fs::create_dir(&project)?;
+    std::fs::create_dir(&state)?;
+    let git = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
+        let output = provenant_os::fixture::git_command()
+            .current_dir(&project)
+            .args(args)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    };
+    git(&["init", "-q"])?;
+    std::fs::write(
+        project.join(".gitignore"),
+        ".worktrees/\n.provenant/\ntarget/\n",
+    )?;
+    git(&["add", ".gitignore"])?;
+    git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "commit",
+        "-qm",
+        "initial",
+    ])?;
+    git(&["branch", "bound-lane"])?;
+    let worktree = project.join(".worktrees/bound-lane");
+    std::fs::create_dir_all(worktree.parent().ok_or("worktree parent")?)?;
+    git(&[
+        "worktree",
+        "add",
+        worktree.to_str().ok_or("worktree path")?,
+        "bound-lane",
+    ])?;
+
+    let presets = project.join(".provenant/presets");
+    std::fs::create_dir_all(&presets)?;
+    std::fs::write(
+        presets.join("gate-only.toml"),
+        "stages = [{ id = 'accept', kind = 'gate', condition = { type = 'budget' } }]\n[parameters]\nworktree = ''\n",
+    )?;
+    let prompt = project.join("brief");
+    std::fs::write(&prompt, "accept the bounded graph")?;
+
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let run_cli = |args: &[&str]| -> std::io::Result<std::process::Output> {
+        fixture_cli()
+            .current_dir(&project)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["--json", "--state-dir"])
+            .arg(&state)
+            .args(args)
+            .output()
+    };
+
+    // First: run a preset bound to the worktree.
+    let preset_run = run_cli(&[
+        "run",
+        "--preset",
+        "gate-only",
+        "--prompt-file",
+        prompt.to_str().unwrap(),
+        "--set",
+        &format!("parameters.worktree='{}'", worktree.display()),
+        "--wait",
+        "1s",
+    ])?;
+    assert!(
+        preset_run.status.success(),
+        "preset run failed: stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&preset_run.stdout),
+        String::from_utf8_lossy(&preset_run.stderr)
+    );
+
+    // The bound worktree has ignored files written into scratch,
+    // and potentially target/ build files.
+    std::fs::create_dir_all(worktree.join("target/debug"))?;
+    std::fs::write(worktree.join("target/debug/output.bin"), "bin")?;
+    std::fs::create_dir_all(worktree.join(".provenant/scratch/graphs"))?;
+    std::fs::write(worktree.join(".provenant/scratch/graphs/graph.json"), "{}")?;
+
+    // Second: provenant run on the same bound worktree succeeds despite ignored files.
+    let run_again = run_cli(&[
+        "run",
+        "--preset",
+        "gate-only",
+        "--prompt-file",
+        prompt.to_str().unwrap(),
+        "--set",
+        &format!("parameters.worktree='{}'", worktree.display()),
+        "--wait",
+        "1s",
+    ])?;
+    assert!(
+        run_again.status.success(),
+        "second run failed: stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run_again.stdout),
+        String::from_utf8_lossy(&run_again.stderr)
+    );
+
+    // Also verify running from within the bound worktree directory succeeds.
+    let worktree_presets = worktree.join(".provenant/presets");
+    std::fs::create_dir_all(&worktree_presets)?;
+    std::fs::copy(
+        presets.join("gate-only.toml"),
+        worktree_presets.join("gate-only.toml"),
+    )?;
+    let run_in_worktree = fixture_cli()
+        .current_dir(&worktree)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .args(["--json", "--state-dir"])
+        .arg(&state)
+        .args([
+            "run",
+            "--preset",
+            "gate-only",
+            "--prompt-file",
+            prompt.to_str().unwrap(),
+            "--set",
+            &format!("parameters.worktree='{}'", worktree.display()),
+            "--wait",
+            "1s",
+        ])
+        .output()?;
+    assert!(
+        run_in_worktree.status.success(),
+        "run inside bound worktree failed: stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run_in_worktree.stdout),
+        String::from_utf8_lossy(&run_in_worktree.stderr)
+    );
+
+    Ok(())
+}

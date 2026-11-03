@@ -43,15 +43,53 @@ pub(super) fn initialised_gitlink(root: &Path, path: &[u8]) -> Result<bool, Work
     }
 }
 
-pub(super) fn worktree_dirty_at(
+const DIRTY_PATHS_LISTED: usize = 12;
+
+pub(super) fn dirty_paths_summary(paths: &[StatusPath]) -> String {
+    let raw: Vec<&[u8]> = paths.iter().map(|path| path.path.as_slice()).collect();
+    dirty_paths_summary_bytes(&raw)
+}
+
+fn dirty_paths_summary_bytes(paths: &[&[u8]]) -> String {
+    if paths.is_empty() {
+        return String::new();
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut unique = Vec::new();
+    for path in paths {
+        let lossy = String::from_utf8_lossy(path).into_owned();
+        if seen.insert(lossy.clone()) {
+            unique.push(lossy);
+        }
+    }
+    let listed: Vec<_> = unique.iter().take(DIRTY_PATHS_LISTED).cloned().collect();
+    let more = unique.len().saturating_sub(DIRTY_PATHS_LISTED);
+    let mut summary = listed.join(", ");
+    if more > 0 {
+        summary.push_str(&format!(" and {more} more"));
+    }
+    summary.truncate(summary.floor_char_boundary(1024));
+    summary
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum WorktreeCleanliness {
+    Clean,
+    Ignored,
+    Dirty(String),
+    GitOperationInProgress,
+    Unknown,
+}
+
+pub(super) fn worktree_cleanliness_at(
     context: &WorktreeContext<'_>,
     repo: &VerifiedRepo,
     cancel: &CancelToken,
-) -> Result<WorktreeCondition, WorktreeError> {
+) -> Result<WorktreeCleanliness, WorktreeError> {
     match check_writer_terminal(repo) {
         Ok(()) => {}
         Err(WorktreeError::GitOperationInProgress) => {
-            return Ok(WorktreeCondition::GitOperationInProgress);
+            return Ok(WorktreeCleanliness::GitOperationInProgress);
         }
         Err(error) => return Err(error),
     }
@@ -62,31 +100,49 @@ pub(super) fn worktree_dirty_at(
         cancel,
     )?;
     if exit_code(&index)? != 0 {
-        return Ok(WorktreeCondition::Unknown);
+        return Ok(WorktreeCleanliness::Unknown);
     }
     for entry in
         parse_index_entries(&index.stdout.bytes).map_err(|_| WorktreeError::InvalidOutput)?
     {
         let entry = entry.map_err(|_| WorktreeError::InvalidOutput)?;
         if entry.mode == 0o160000 && initialised_gitlink(repo.root_path(), entry.path)? {
-            return Ok(WorktreeCondition::Unknown);
+            return Ok(WorktreeCleanliness::Unknown);
         }
     }
     let outcome = run_git(context, repo, GitRead::StatusIncludingIgnored, cancel)?;
     if exit_code(&outcome)? != 0 {
-        return Ok(WorktreeCondition::Unknown);
+        return Ok(WorktreeCleanliness::Unknown);
     }
     let records =
         parse_porcelain_v2_z(&outcome.stdout.bytes).map_err(|_| WorktreeError::InvalidOutput)?;
-    Ok(if records.is_empty() {
-        WorktreeCondition::Clean
-    } else if records
-        .iter()
-        .all(|record| record.kind == StatusKind::Ignored)
-    {
-        WorktreeCondition::Ignored
+    if records.is_empty() {
+        return Ok(WorktreeCleanliness::Clean);
+    }
+    let dirty_records: Vec<_> = records
+        .into_iter()
+        .filter(|record| record.kind != StatusKind::Ignored)
+        .collect();
+    if dirty_records.is_empty() {
+        Ok(WorktreeCleanliness::Ignored)
     } else {
-        WorktreeCondition::Dirty
+        Ok(WorktreeCleanliness::Dirty(dirty_paths_summary(
+            &dirty_records,
+        )))
+    }
+}
+
+pub(super) fn worktree_dirty_at(
+    context: &WorktreeContext<'_>,
+    repo: &VerifiedRepo,
+    cancel: &CancelToken,
+) -> Result<WorktreeCondition, WorktreeError> {
+    Ok(match worktree_cleanliness_at(context, repo, cancel)? {
+        WorktreeCleanliness::Clean => WorktreeCondition::Clean,
+        WorktreeCleanliness::Ignored => WorktreeCondition::Ignored,
+        WorktreeCleanliness::Dirty(_) => WorktreeCondition::Dirty,
+        WorktreeCleanliness::GitOperationInProgress => WorktreeCondition::GitOperationInProgress,
+        WorktreeCleanliness::Unknown => WorktreeCondition::Unknown,
     })
 }
 
@@ -298,4 +354,29 @@ pub fn cache_writer_guard(
             FsError::LockTimeout { .. } => WorkerState::Busy,
             _ => WorkerState::Unknown,
         })
+}
+
+#[cfg(test)]
+mod dirty_tests {
+    use super::*;
+
+    #[test]
+    fn summary_lists_dirty_paths_and_counts_the_rest() {
+        assert_eq!(dirty_paths_summary_bytes(&[]), "");
+        let one = dirty_paths_summary_bytes(&[b"a.rs", b"b/c.rs"]);
+        assert_eq!(one, "a.rs, b/c.rs");
+        let dedup = dirty_paths_summary_bytes(&[b"a.rs", b"a.rs", b"b.rs"]);
+        assert_eq!(dedup, "a.rs, b.rs");
+        let many: Vec<Vec<u8>> = (0..15).map(|n| format!("f{n}").into_bytes()).collect();
+        let many_refs: Vec<&[u8]> = many.iter().map(Vec::as_slice).collect();
+        let summary = dirty_paths_summary_bytes(&many_refs);
+        assert!(
+            summary.contains("f11") && !summary.contains("f12"),
+            "{summary}"
+        );
+        assert!(summary.ends_with(" and 3 more"), "{summary}");
+        let long = vec![b'x'; 4000];
+        let long_summary = dirty_paths_summary_bytes(&[&long]);
+        assert!(long_summary.len() <= 1024);
+    }
 }

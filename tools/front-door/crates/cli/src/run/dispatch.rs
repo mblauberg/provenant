@@ -336,7 +336,7 @@ pub(super) fn dispatch_with_workers(
                     if info.dirty != worktrees::WorktreeCondition::Clean
                         || info.writer != worktrees::WriterState::Free
                     {
-                        return Err(worktrees::WorktreeError::Dirty);
+                        return Err(worktrees::WorktreeError::Dirty(String::new()));
                     }
                     let tree = provenant_confinement::verify_worktree(context.repo, &path)?;
                     if worktrees::load_owner(&tree)?.is_none_or(|owner| {
