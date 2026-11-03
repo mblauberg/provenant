@@ -1739,6 +1739,7 @@ mod retry_pin_tests {
             effort: None,
             excluded_families: Vec::new(),
             distinct_families: false,
+            preferred_families: vec![],
             require_distinct: false,
         };
         let model = |provider: &str| RequestedRoute::Model {

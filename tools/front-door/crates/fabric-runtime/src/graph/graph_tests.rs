@@ -734,7 +734,7 @@ fn panel_with_one_usage_limited_member_reaches_synthesis() {
 }
 
 #[test]
-fn required_writer_separation_records_only_the_enforced_families() {
+fn required_writer_separation_records_enforced_and_preferred_families() {
     let mut write = node("write", route("first"));
     write.access = AccessMode::WorktreeWrite;
     write.worktree = Some(".worktrees/write".into());
@@ -772,11 +772,132 @@ fn required_writer_separation_records_only_the_enforced_families() {
     assert!(run.checkpoint.successful(), "{:#?}", run.checkpoint.nodes);
     assert_eq!(owner.family_peers[2], ["anthropic"]);
     assert!(owner.require_distinct[2]);
-    // The host enforces the writer family alone, so the journal says so.
+    // The writer exclusion is mandatory and sibling diversity is preferred.
     let separation = run.checkpoint.nodes[2].separation.as_ref().unwrap();
     assert_eq!(separation.strength, FamilyStrength::Require);
     assert_eq!(separation.excluded, ["openai"]);
+    assert_eq!(separation.preferred, ["anthropic"]);
     assert_eq!(separation.outcome, SeparationOutcome::Separated);
+}
+
+#[test]
+fn pending_lens_journals_required_writer_and_sibling_preference() {
+    let mut writer = node("write", route("first"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some(".worktrees/write".into());
+    let mut lenses = Vec::new();
+    for id in ["one", "two"] {
+        let mut lens = node(id, route("first"));
+        lens.source = Some(SourceBinding::Node {
+            node: "write".into(),
+        });
+        lens.depends_on = vec!["write".into()];
+        lens.distinct_from = Some(DistinctFrom::Writer);
+        lens.distinct_strength = Some(FamilyStrength::Require);
+        lens.family_group = Some("panel".into());
+        lenses.push(lens);
+    }
+    let mut document = graph(vec![writer, lenses.remove(0), lenses.remove(0)]);
+    document.schema_version = 2;
+    let mut writer_done = done_as("h/1");
+    if let AttemptObservation::Terminal { commit, .. } = &mut writer_done {
+        *commit = Some("3".repeat(40));
+    }
+    let mut owner = FakeOwner {
+        observations: [
+            writer_done,
+            done_as("h/2"),
+            AttemptObservation::Pending {
+                attempt_ref: Some("h/3".into()),
+            },
+        ]
+        .into(),
+        families: [
+            ("h/1".into(), "openai".into()),
+            ("h/2".into(), "anthropic".into()),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let separation = run.checkpoint.nodes[2].separation.as_ref().unwrap();
+    assert_eq!(separation.strength, FamilyStrength::Require);
+    assert_eq!(separation.excluded, ["openai"]);
+    assert_eq!(separation.preferred, ["anthropic"]);
+    assert_eq!(
+        journal.0.as_ref().unwrap().nodes[2].separation.as_ref(),
+        Some(separation)
+    );
+}
+
+#[test]
+fn retry_start_clears_previous_family_snapshot_before_saving() {
+    #[derive(Default)]
+    struct History(Vec<GraphCheckpoint>);
+    impl GraphJournal for History {
+        type Error = Infallible;
+        fn load(&mut self, graph_id: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+            Ok(self
+                .0
+                .last()
+                .filter(|row| row.graph_id == graph_id)
+                .cloned())
+        }
+        fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+            self.0.push(checkpoint.clone());
+            Ok(())
+        }
+    }
+    let mut writer = node("write", route("first"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some(".worktrees/write".into());
+    let mut lens = node("lens", route("first"));
+    lens.route = None;
+    lens.routes = Some(vec![route("first"), route("second")]);
+    lens.source = Some(SourceBinding::Node {
+        node: "write".into(),
+    });
+    lens.depends_on = vec!["write".into()];
+    lens.distinct_from = Some(DistinctFrom::Writer);
+    lens.distinct_strength = Some(FamilyStrength::Require);
+    lens.family_group = Some("panel".into());
+    let mut document = graph(vec![writer, lens]);
+    document.schema_version = 2;
+    let mut writer_done = done_as("h/1");
+    if let AttemptObservation::Terminal { commit, .. } = &mut writer_done {
+        *commit = Some("3".repeat(40));
+    }
+    let mut limited = done_as("h/2");
+    if let AttemptObservation::Terminal { outcome, .. } = &mut limited {
+        *outcome = AttemptOutcome::UsageLimited;
+    }
+    let mut owner = FakeOwner {
+        observations: [writer_done, limited, done_as("h/3")].into(),
+        families: [
+            ("h/1".into(), "openai".into()),
+            ("h/2".into(), "anthropic".into()),
+            ("h/3".into(), "google".into()),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = History::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert!(run.checkpoint.successful());
+    let retry = journal
+        .0
+        .iter()
+        .find_map(|row| {
+            let lens = &row.nodes[1];
+            (lens.attempts.len() == 2 && lens.attempts[1].state == AttemptState::Starting)
+                .then_some(lens)
+        })
+        .unwrap();
+    assert!(
+        retry.separation.is_none(),
+        "retry inherited a stale separation"
+    );
 }
 
 #[test]

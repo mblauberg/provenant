@@ -1489,6 +1489,18 @@ mod peer_tests {
             chair: None,
         };
         let store = owner.store(&cancel)?;
+        let call = owner.call(&cancel);
+        let upstream = provenant_run::Resume {
+            prior: fixture.settled.attempt_id, expected_generation: 0,
+            operation_id: "family-composition-writer".parse()?,
+            run_id: RunId::from_bytes([71; 16]), attempt_id: AttemptId::from_bytes([72; 16]),
+            prompt: "writer".into(), created_at: factory.clock.wall_now()?,
+        };
+        fixture.store.resume_fresh(&upstream, "fixture", &call)?;
+        let record = fixture.store.record(upstream.attempt_id, &call)?;
+        let head = fixture.store.record(fixture.settled.attempt_id, &call)?.head.ok_or("head")?;
+        publish_routed(&fixture.rig, &fixture.store, &record, head, Outcome::Succeeded, "codex/gpt-6-luna", &call)?;
+        let writer = format!("{}/{}", factory.context.identity.host, upstream.attempt_id);
         let alias: graph::GraphRoute = serde_json::from_value(serde_json::json!({"alias":"junior"}))?;
         // Submit one lens attempt through the production owner and return the
         // route and knobs it recorded.
@@ -1496,14 +1508,14 @@ mod peer_tests {
                           route_index: u16,
                           peers: &[String],
                           prior: &[String],
-                          require: bool|
+                          require: bool, distinct: &[String]|
          -> Result<(RequestedRoute, Vec<String>), Box<dyn std::error::Error>> {
             let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
                 "graph_id":"sibling-lenses", "node_id":node_id, "route_index":route_index
             }))?;
             bound.observe_or_start(&key, graph::NodeInput {
                 prior_attempts: prior, family_peers: peers, context: Default::default(), read_roots: &[],
-                distinct_from_attempts: &[], require_distinct: require, source_commit: None,
+                distinct_from_attempts: distinct, require_distinct: require, source_commit: None,
                 title: "lens", prompt: "review", required_verdict: None, deadline_seconds: None,
                 inputs_dir: None,
             }, &alias, graph::AccessMode::ReadOnly, None, graph::Replay {
@@ -1521,21 +1533,27 @@ mod peer_tests {
             effort: None,
             excluded_families: excluded.iter().map(|family| (*family).to_owned()).collect(),
             distinct_families: true,
+            preferred_families: vec![],
             require_distinct: false,
         };
         // The first sibling has no peers yet and takes the plain alias.
-        let (route, _) = submit("one", 0, &[], &[], false)?;
+        let (route, _) = submit("one", 0, &[], &[], false, &[])?;
         assert_eq!(route, RequestedRoute::Named { extra: Default::default(), name: "junior".into(), effort: None });
         // Later siblings prefer other families. A preference never refuses, so
         // with one family available every lens still runs.
         let peers = ["openai".to_owned(), "anthropic".to_owned()];
-        assert_eq!(submit("two", 0, &peers[..1], &[], false)?.0, review(&["openai"]));
-        assert_eq!(submit("three", 0, &peers, &[], false)?.0, review(&["openai", "anthropic"]));
+        assert_eq!(submit("two", 0, &peers[..1], &[], false, &[])?.0, review(&["openai"]));
+        assert_eq!(submit("three", 0, &peers, &[], false, &[])?.0, review(&["openai", "anthropic"]));
         // A required writer separation with no writer family to enforce still
         // leaves sibling families as a preference.
-        assert_eq!(submit("four", 0, &peers[..1], &[], true)?.0, review(&["openai"]));
+        assert_eq!(submit("four", 0, &peers[..1], &[], true, &[])?.0, review(&["openai"]));
+        assert_eq!(submit("five", 0, &peers[1..], &[], true, &[writer])?.0, RequestedRoute::Review {
+            extra: Default::default(), name: "junior".into(), effort: None,
+            excluded_families: vec!["openai".into()], distinct_families: true,
+            preferred_families: vec!["anthropic".into()], require_distinct: true,
+        });
         // An alias retry excludes the model ids the runtime resolved.
-        let (route, knobs) = submit("two", 1, &peers[..1], &["codex/first".to_owned()], false)?;
+        let (route, knobs) = submit("two", 1, &peers[..1], &["codex/first".to_owned()], false, &[])?;
         assert_eq!(route, review(&["openai"]));
         assert_eq!(knobs, [r#"routing.graph_exclude=["codex/first"]"#]);
         Ok(())

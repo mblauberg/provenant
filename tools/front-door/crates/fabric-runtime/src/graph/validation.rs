@@ -675,6 +675,7 @@ pub(super) fn separation(
             .take(SEPARATION_FAMILIES)
             .map(|family| bounded(family, FAMILY_BYTES))
             .collect(),
+        preferred: Vec::new(),
         applied: applied.map(|family| bounded(&family, FAMILY_BYTES)),
         outcome,
     }

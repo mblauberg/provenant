@@ -579,6 +579,7 @@ fn review_task(slot: &ReviewSlot, head: &str, brief: &str, families: Vec<String>
             effort: None,
             distinct_families: slot.distinct,
             excluded_families: if slot.distinct { families } else { vec![] },
+            preferred_families: vec![],
             require_distinct: false,
         },
         account: None,

@@ -228,10 +228,11 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                     reason: Some(worst(OUTPUT_FIELD_BYTES)),
                     on_fail: node.on_fail.clone(),
                 }),
-                separation: node.distinct_from.map(|_| FamilySeparation {
+                separation: (node.distinct_from.is_some() || node.family_group.is_some()).then(|| FamilySeparation {
                     extra: Default::default(),
                     strength: FamilyStrength::Require,
                     excluded: vec![worst(FAMILY_BYTES); SEPARATION_FAMILIES],
+                    preferred: vec![worst(FAMILY_BYTES); SEPARATION_FAMILIES],
                     applied: Some(worst(FAMILY_BYTES)),
                     outcome: SeparationOutcome::Unavailable,
                 }),

@@ -1110,13 +1110,13 @@ pub(crate) fn resolve_dispatch(
     availability: &[AvailabilityRecord],
     access: &[AccessContext<'_>],
     host: &str,
-    excluded_families: Option<(&[String], bool)>,
+    excluded_families: Option<(&[String], bool, &[String])>,
     rules: &[provenant_routing::ExclusionRule],
 ) -> Result<provenant_records::ResolvedRoute, DispatchError> {
     let catalogue = Catalogue::bundled()?;
-    let (excluded_families, required) = match excluded_families {
-        Some((families, required)) => (Some(families), required),
-        None => (None, false),
+    let (excluded_families, required, preferred) = match excluded_families {
+        Some((families, required, preferred)) => (Some(families), required, preferred),
+        None => (None, false, &[][..]),
     };
     let excluded: Vec<ModelId> = catalogue
         .models()
@@ -1127,6 +1127,17 @@ pub(crate) fn resolve_dispatch(
         })
         .map(|model| model.model.clone())
         .collect();
+    let preferred_excluded: Vec<ModelId> = catalogue
+        .models()
+        .iter()
+        .filter(|model| review_family_excluded(model.family.as_deref(), preferred))
+        .map(|model| model.model.clone())
+        .collect();
+    let combined: Vec<ModelId> = excluded
+        .iter()
+        .chain(&preferred_excluded)
+        .cloned()
+        .collect();
     let selected = resolve_dispatch_excluding(
         request,
         roots,
@@ -1135,7 +1146,7 @@ pub(crate) fn resolve_dispatch(
         availability,
         access,
         host,
-        &excluded,
+        &combined,
         rules,
     );
     // The unused families have no member to take: none is eligible, or the one
@@ -1145,11 +1156,34 @@ pub(crate) fn resolve_dispatch(
     let exhausted = match &selected {
         Err(EdgeError::Routing(error)) => error.code() == "no_eligible_pool_member",
         Ok(route) => {
-            !excluded.is_empty()
+            !combined.is_empty()
                 && matches!(
                     &route.readiness,
                     RouteReadiness::Unavailable { reason, .. } if reason.is_account_block()
                 )
+        }
+        Err(_) => false,
+    };
+    let selected = if exhausted && !preferred_excluded.is_empty() {
+        resolve_dispatch_excluding(
+            request,
+            roots,
+            account,
+            seed,
+            availability,
+            access,
+            host,
+            &excluded,
+            rules,
+        )
+    } else {
+        selected
+    };
+    let exhausted = match &selected {
+        Err(EdgeError::Routing(error)) => error.code() == "no_eligible_pool_member",
+        Ok(route) => {
+            !excluded.is_empty()
+                && matches!(&route.readiness, RouteReadiness::Unavailable { reason, .. } if reason.is_account_block())
         }
         Err(_) => false,
     };
@@ -3666,7 +3700,7 @@ mod route_tests {
                 &availability,
                 &access,
                 "fixture",
-                Some((excluded, false)),
+                Some((excluded, false, &[])),
                 &[],
             )
         };
@@ -3694,7 +3728,7 @@ mod route_tests {
             &availability,
             &access,
             "fixture",
-            Some((&all, true)),
+            Some((&all, true, &[])),
             &[],
         )
         .err()
@@ -3703,6 +3737,23 @@ mod route_tests {
             refused,
             super::DispatchError::FamilySeparation(..)
         ));
+        // A sibling preference can relax while the writer exclusion remains hard.
+        let composed = super::resolve_dispatch(
+            &request,
+            &roots,
+            None,
+            ("fixture", 0),
+            &availability,
+            &access,
+            "fixture",
+            Some((
+                std::slice::from_ref(&family),
+                true,
+                std::slice::from_ref(&other),
+            )),
+            &[],
+        )?;
+        assert_eq!(composed.adapter, second.adapter);
         // The next family's provider is excluded: a required separation reports
         // none, and an optional one never substitutes the excluded provider.
         let rules = [provenant_routing::ExclusionRule {
@@ -3718,7 +3769,7 @@ mod route_tests {
                 &availability,
                 &access,
                 "fixture",
-                Some((std::slice::from_ref(&family), required)),
+                Some((std::slice::from_ref(&family), required, &[])),
                 &rules,
             )
         };
@@ -3744,7 +3795,7 @@ mod route_tests {
             &availability[..1],
             &access,
             "fixture",
-            Some((&["openai".into()], false)),
+            Some((&["openai".into()], false, &[])),
             &[],
         )?;
         assert_eq!(deferred.adapter, "claude");
@@ -3851,7 +3902,7 @@ mod route_tests {
                 &self.availability,
                 &self.access,
                 "fixture",
-                Some((&used, required)),
+                Some((&used, required, &[])),
                 &[],
             )
         }
@@ -3938,7 +3989,7 @@ mod route_tests {
             &fixture.availability,
             &fixture.access,
             "fixture",
-            Some((&used, true)),
+            Some((&used, true, &[])),
             &rules,
         )
         .unwrap_err();

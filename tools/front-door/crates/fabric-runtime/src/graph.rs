@@ -1546,6 +1546,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         usage: None,
                     });
                     checkpoint.nodes[node_index].state = NodeState::Running;
+                    // A retry must not replay the preceding attempt's family snapshot.
+                    checkpoint.nodes[node_index].separation = None;
                     journal.save(&checkpoint).map_err(GraphError::Journal)?;
                 }
 
@@ -1664,16 +1666,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     checkpoint.nodes[node_index]
                         .separation
                         .as_ref()
-                        .map(|value| value.excluded.clone())
+                        .map(|value| {
+                            if value.strength == FamilyStrength::Require {
+                                value.preferred.clone()
+                            } else {
+                                value.excluded.clone()
+                            }
+                        })
                         .unwrap_or_default()
                 } else {
-                    let peers = owner.attempt_families(&peer_refs).unwrap_or_default();
-                    if node.family_group.is_some() {
-                        checkpoint.nodes[node_index].separation =
-                            Some(separation(FamilyStrength::Prefer, peers.clone(), None));
-                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
-                    }
-                    peers
+                    owner.attempt_families(&peer_refs).unwrap_or_default()
                 };
                 let mut prior_attempts = Vec::new();
                 for attempt in checkpoint.nodes[node_index]
@@ -1696,6 +1698,38 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 }
                 let require_distinct = node.distinct_strength == Some(FamilyStrength::Require)
                     && (node.family_group.is_none() || node.distinct_from.is_some());
+                if (needs_record || checkpoint.nodes[node_index].separation.is_none())
+                    && (node.distinct_from.is_some() || node.family_group.is_some())
+                {
+                    let mut excluded = owner
+                        .attempt_families(&distinct_attempts)
+                        .unwrap_or_default();
+                    let enforced = require_distinct && !excluded.is_empty();
+                    let mut record = if enforced {
+                        let mut record = separation(FamilyStrength::Require, excluded, None);
+                        record.preferred = family_peers
+                            .iter()
+                            .take(SEPARATION_FAMILIES)
+                            .map(|family| bounded(family, FAMILY_BYTES))
+                            .collect();
+                        record
+                    } else {
+                        for family in &family_peers {
+                            if !excluded.contains(family) {
+                                excluded.push(family.clone());
+                            }
+                        }
+                        let strength = if node.family_group.is_some() {
+                            FamilyStrength::Prefer
+                        } else {
+                            node.distinct_strength.unwrap_or_default()
+                        };
+                        separation(strength, excluded, None)
+                    };
+                    record.applied = None;
+                    checkpoint.nodes[node_index].separation = Some(record);
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                }
                 let continued = land::continued_branch(node, &checkpoint, &positions);
                 let observation = match owner.observe_or_start(
                     &key,
@@ -1791,9 +1825,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             let mut excluded = owner
                                 .attempt_families(&distinct_attempts)
                                 .unwrap_or_default();
-                            // A required writer separation is the route's only
-                            // constraint; otherwise sibling families join the
-                            // preference, as the host routed them.
                             let enforced = require_distinct && !excluded.is_empty();
                             if !enforced {
                                 for family in &family_peers {
@@ -1808,7 +1839,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     .ok()
                                     .and_then(|families| families.into_iter().next())
                             });
-                            Some(separation(
+                            let mut record = separation(
                                 if enforced {
                                     FamilyStrength::Require
                                 } else if node.family_group.is_some() {
@@ -1818,7 +1849,15 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 },
                                 excluded,
                                 applied,
-                            ))
+                            );
+                            if enforced {
+                                record.preferred = family_peers
+                                    .iter()
+                                    .take(SEPARATION_FAMILIES)
+                                    .map(|family| bounded(family, FAMILY_BYTES))
+                                    .collect();
+                            }
+                            Some(record)
                         }
                         _ => None,
                     };

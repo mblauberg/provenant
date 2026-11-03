@@ -4461,12 +4461,14 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             // reference. Preserve its immutable labels, including legacy None.
             let mut prepared_without_request = false;
             let mut accepted_knobs = None;
+            let mut accepted_route = None;
             let context = match &operation {
                 Some(operation) => match store.request(operation.run_id, &call) {
                     Ok(request) => {
                         let task = request.tasks.first().ok_or(FacadeError::StateCorrupt)?;
                         if accepted {
                             accepted_knobs = Some(task.profile.overrides.clone());
+                            accepted_route = Some(task.route.clone());
                         }
                         task.context.clone()
                     }
@@ -4605,16 +4607,18 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             } else {
                 None
             };
-            // Sibling lens families are only a preference: a required writer
-            // separation is enforced alone, and otherwise siblings join the
-            // avoided families so one available family still runs every lens.
+            // Writer separation is mandatory; sibling diversity remains a preference.
             let enforced = node.require_distinct && !excluded_families.is_empty();
             let mut avoided_families = excluded_families;
-            if !enforced {
-                for family in node.family_peers {
-                    if !avoided_families.contains(family) {
-                        avoided_families.push(family.clone());
-                    }
+            let mut preferred_families = Vec::new();
+            for family in node.family_peers {
+                let target = if enforced {
+                    &mut preferred_families
+                } else {
+                    &mut avoided_families
+                };
+                if !target.contains(family) {
+                    target.push(family.clone());
                 }
             }
             let exclude = self.route_exclusions(route, node.prior_attempts, accepted);
@@ -4637,7 +4641,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     worktree: worktree.map(str::to_owned),
                     prompt: node.prompt.into(),
                     title: Some(node.title.to_owned()),
-                    route: match &route.model {
+                    route: accepted_route.unwrap_or(match &route.model {
                         None if route.name.is_some() => {
                             provenant_records::run::RequestedRoute::Adapter {
                                 extra: Default::default(),
@@ -4662,6 +4666,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                                 effort: route.effort.clone(),
                                 excluded_families: avoided_families,
                                 distinct_families: true,
+                                preferred_families,
                                 require_distinct: enforced,
                             }
                         }
@@ -4670,7 +4675,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                             name: route.alias.clone().ok_or(FacadeError::InvalidInput)?,
                             effort: route.effort.clone(),
                         },
-                    },
+                    }),
                     timeout_seconds: node
                         .deadline_seconds
                         .unwrap_or(self.factory.context.config.limits.graph_timeout_seconds)

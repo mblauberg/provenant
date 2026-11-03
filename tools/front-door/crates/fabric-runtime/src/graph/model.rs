@@ -117,6 +117,9 @@ pub struct FamilySeparation {
     pub strength: FamilyStrength,
     /// Families that served the upstream attempts.
     pub excluded: Vec<String>,
+    /// Sibling families avoided when possible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preferred: Vec<String>,
     /// Family of the attempt that settled, when it launched.
     pub applied: Option<String>,
     pub outcome: SeparationOutcome,
@@ -917,8 +920,7 @@ pub struct NodeInput<'a> {
     /// Attempts of the source writer whose model families must be avoided.
     pub distinct_from_attempts: &'a [String],
     /// Refuse a route inside distinct_from_attempts' families. family_peers
-    /// are never required: an enforced writer separation is the route's only
-    /// family constraint, and otherwise peers join the preferred exclusions.
+    /// remain a preference even when writer separation is enforced.
     pub require_distinct: bool,
     pub source_commit: Option<&'a str>,
     pub title: &'a str,

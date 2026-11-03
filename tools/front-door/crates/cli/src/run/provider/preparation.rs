@@ -652,8 +652,13 @@ pub(super) fn prepare_candidates(
                 excluded_families,
                 distinct_families: true,
                 require_distinct,
+                preferred_families,
                 ..
-            } => Some((excluded_families.as_slice(), *require_distinct)),
+            } => Some((
+                excluded_families.as_slice(),
+                *require_distinct,
+                preferred_families.as_slice(),
+            )),
             _ => None,
         },
         &rules,
