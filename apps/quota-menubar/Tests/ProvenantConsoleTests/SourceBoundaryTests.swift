@@ -33,6 +33,16 @@ final class SourceBoundaryTests: XCTestCase {
         }
     }
 
+    func testShippingSourcesDoNotUseSwiftPMResourceBundles() throws {
+        for target in ["ProvenantKit", "ProvenantDesign", "ProvenantConsole", "QuotaMenuBar"] {
+            let files = try swiftFiles(in: target)
+            XCTAssertFalse(files.isEmpty)
+            for file in files {
+                XCTAssertFalse(file.text.contains("Bundle.module"), "\(target)/\(file.name) uses Bundle.module")
+            }
+        }
+    }
+
     func testMenuTargetHoldsNoConsoleCode() throws {
         for file in try swiftFiles(in: "QuotaMenuBar") {
             for word in ["import ProvenantConsole", "import Charts", "InboxClient", "InboxModel"] {

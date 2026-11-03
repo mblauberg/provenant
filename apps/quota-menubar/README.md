@@ -39,7 +39,7 @@ The package has five targets:
 - `ProvenantConsole` is a separate process for the window and needs macOS 26; on an older system it prints a message and exits.
 - `ProvenantTestSupport` holds the recorded CLI output (`Tests/ProvenantTestSupport/Fixtures`, as bundle resources) and the one `Replay` both test targets use to stand in for the CLI.
 
-No console code enters the menu target, and a source test checks that.
+No console code enters the menu target, and shipping targets do not use SwiftPM resource bundles. Source tests check both boundaries. The menu agent embeds its brand glyph so it works after the app is moved.
 
 ## Console
 

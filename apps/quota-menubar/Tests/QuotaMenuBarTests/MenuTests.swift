@@ -3,6 +3,23 @@ import XCTest
 import ProvenantKit
 
 final class MenuTests: XCTestCase {
+    func testBrandGlyphLoadsAsTemplate() {
+        XCTAssertTrue(Brand.glyph.isValid)
+        XCTAssertTrue(Brand.glyph.isTemplate)
+        XCTAssertEqual(Brand.glyph.size.width, 36)
+        XCTAssertEqual(Brand.glyph.size.height, 36)
+        XCTAssertEqual(Brand.statusGlyph.size.width, 16)
+        XCTAssertEqual(Brand.statusGlyph.size.height, 16)
+    }
+
+    func testEmbeddedGlyphMatchesTheBrandAsset() throws {
+        let asset = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appending(path: "assets/brand/provenant-glyph.svg")
+        let canonical = try String(contentsOf: asset, encoding: .utf8)
+        XCTAssertEqual(Brand.svg, canonical.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
     private func fixture() throws -> QuotaReport {
         let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().appending(path: "Fixtures/current.json")
