@@ -994,6 +994,50 @@ fn route_group_key_length_boundaries() {
 }
 
 #[test]
+fn route_context_group_counts_toward_shared_one_mib_key_budget() {
+    let route_with_model_bytes = |bytes| {
+        let mut input = fact(1, Some(0));
+        input.resolved_route = Some(RouteFact {
+            provider: None,
+            model: Some("m".repeat(bytes)),
+            effort: None,
+            account_label: None,
+        });
+        input
+    };
+    // Each model is counted once for the route and once for the context group.
+    let exactly_one_mib = route_with_model_bytes(crate::MAX_KEY_BYTES / 2);
+    assert!(
+        stats_by_context(
+            [exactly_one_mib],
+            &prices(Some(1)),
+            Window::default(),
+            ContextKey::Route
+        )
+        .is_ok()
+    );
+    let two_bytes_over_one_mib = route_with_model_bytes(crate::MAX_KEY_BYTES / 2 + 1);
+    assert!(
+        stats(
+            [two_bytes_over_one_mib.clone()],
+            &prices(Some(1)),
+            Window::default()
+        )
+        .is_ok()
+    );
+    assert_eq!(
+        stats_by_context(
+            [two_bytes_over_one_mib],
+            &prices(Some(1)),
+            Window::default(),
+            ContextKey::Route
+        )
+        .unwrap_err(),
+        TelemetryError::TooLarge("1 MiB of group keys")
+    );
+}
+
+#[test]
 fn groups_by_context_including_missing() {
     let mut first = fact(1, Some(10));
     first.context = Some(provenant_records::run::WorkContext {

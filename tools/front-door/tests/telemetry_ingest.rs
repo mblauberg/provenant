@@ -3,7 +3,7 @@
 mod support;
 use serde_json::{Value, json};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use support::{Result, TestRig, code, register_account};
 
@@ -195,4 +195,70 @@ fn submitted_graph_node_is_grouped_by_node_and_pattern() -> Result {
     assert_group(&rig, "pattern", "council", Some("attributed-graph"))?;
     assert_group(&rig, "preset", "example", Some("attributed-graph"))?;
     Ok(())
+}
+
+fn route_stats_golden(actual: &str) -> Result {
+    let rest = actual
+        .strip_prefix("scope: project ")
+        .ok_or("scope prefix")?;
+    let (project, rest) = rest.split_once(',').ok_or("scope project delimiter")?;
+    assert!(
+        !project.is_empty() && !project.contains('\n'),
+        "invalid scope project"
+    );
+    let actual = format!("scope: project <project-id>,{rest}");
+    let actual = format!("{}\n", actual.trim_end());
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/telemetry-stats-by-route.txt");
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        fs::write(&path, &actual)?;
+    }
+    let expected = fs::read_to_string(&path).unwrap_or_default();
+    assert_eq!(actual, expected, "rerun with UPDATE_GOLDEN=1 to refresh");
+    Ok(())
+}
+
+#[test]
+fn route_stats_human_output_matches_golden() -> Result {
+    let rig = rig()?;
+    let manifest = rig.project.join("tasks.json");
+    fs::write(
+        &manifest,
+        serde_json::to_vec(&json!({
+            "schema_version": 1, "tasks": [{"prompt": "fixture", "route": {
+                "kind": "model", "provider": "codex", "model": "gpt-6-luna"}}]
+        }))?,
+    )?;
+    let output = rig.command(&[
+        "dispatch",
+        "--manifest",
+        manifest.to_str().ok_or("manifest")?,
+        "--operation-id",
+        "route-golden",
+        "--json",
+    ])?;
+    let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert!(value["data"]["run_id"].is_string(), "{value}");
+    // Seed a settled receipt into the locally rejected attempt, without launching a provider.
+    let db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
+    db.execute_batch("DROP TRIGGER immutable_terminal_update")?;
+    let bytes: Vec<u8> = db.query_row("SELECT record FROM attempts", [], |row| row.get(0))?;
+    let mut record: Value = serde_json::from_slice(&bytes)?;
+    record["resolved_route"] =
+        json!({"provider":"codex", "model":"codex/gpt-6-luna", "effort":"low"});
+    record["usage"]["uncached_input"] = json!(1000);
+    record["usage"]["output_excluding_reasoning"] = json!(200);
+    assert_eq!(
+        db.execute(
+            "UPDATE attempts SET record=?1",
+            [serde_json::to_vec(&record)?]
+        )?,
+        1
+    );
+    drop(db);
+    let output = rig.command(&["telemetry", "stats", "--by", "route"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let human = String::from_utf8(output.stdout.bytes)?;
+    assert!(human.contains("codex/gpt-6-luna@low"), "{human}");
+    route_stats_golden(&human)
 }
