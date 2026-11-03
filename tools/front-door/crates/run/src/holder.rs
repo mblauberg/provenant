@@ -641,6 +641,9 @@ impl RunStore {
                         },
                     )
                 });
+            if let Err(error) = &imported {
+                driver.record_failure(&error.to_string())?;
+            }
             match imported {
                 Ok(_) => {
                     self.record_effect(
@@ -1225,6 +1228,11 @@ impl RunStore {
                     },
                 )
             };
+            if let Err(error) = &check
+                && let Some(driver) = &mut settlement
+            {
+                driver.record_failure(&error.to_string())?;
+            }
             let last_failure = check.as_ref().err().map(ToString::to_string);
             match crate::artifacts::subdir(attempt, std::ffi::OsStr::new("quarantine"), false) {
                 Ok(archive) => {
@@ -2516,13 +2524,31 @@ mod writer_recovery_tests {
     #[test]
     fn settlement_import_fault_seals_retains_fence_and_resumes_without_provider()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        for mode in [
+        settlement_fault_modes(&[
             "normal",
             "orphan",
             "release_boundary",
             "manifest_conflict",
             "archived_fault",
-        ] {
+        ])
+    }
+
+    #[test]
+    fn settlement_publish_advanced_branch_clears_fence()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        settlement_fault_modes(&["publish_advanced"])
+    }
+
+    #[test]
+    fn settlement_publish_diverged_branch_reports_error()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        settlement_fault_modes(&["publish_diverged"])
+    }
+
+    fn settlement_fault_modes(
+        modes: &[&str],
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for &mode in modes {
             use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
             use std::ffi::OsStr;
             let fixture = PrepareFixture::new()?;
@@ -2562,6 +2588,22 @@ mod writer_recovery_tests {
                 launch.branch.as_str(),
                 launch.base,
             )?;
+            let mut published_head = None;
+            if mode.starts_with("publish_") {
+                fixture.commit(&fixture.writer.worktree, "Lane head")?;
+                let head = crate::objects::resolve_ref(
+                    &git,
+                    launch.worktree.repo(),
+                    launch.branch.as_str(),
+                )?;
+                published_head = Some(head);
+                std::fs::write(
+                    candidate.join("git-common/refs/heads/lane"),
+                    format!("{head}\n"),
+                )?;
+                fixture.lane_git(&["reset", "--hard", &launch.base.to_string()])?;
+                fixture.commit(&fixture.writer.worktree, "Competing branch")?;
+            }
             let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
             let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
                 directory,
@@ -2763,6 +2805,81 @@ mod writer_recovery_tests {
                     .is_err(),
                 "retained reservation excludes competing writer"
             );
+            let mut advanced_tip = None;
+            if let Some(head) = published_head {
+                let journal: serde_json::Value = crate::db::decode(
+                    &attempt.read_stable(OsStr::new("settlement-progress.json"), RECORD_LIMIT)?,
+                )?;
+                assert_eq!(journal["phase"], "publish");
+                assert_eq!(
+                    journal["blocking_reason"],
+                    "invalid run record: lane Git import failed"
+                );
+                let queued = store.queue_reconcile_with(run.run_id, &call, |_, _| Ok(()))?;
+                let json = serde_json::to_value(&queued)?;
+                assert!(
+                    json.to_string().contains("lane Git import failed"),
+                    "{json}"
+                );
+                if mode == "publish_diverged" {
+                    assert!(!store.writer_fences()?.is_empty());
+                    assert!(
+                        crate::objects::publish_branch(
+                            &git,
+                            launch.worktree.repo(),
+                            launch.branch.as_str(),
+                            launch.base,
+                            head
+                        )
+                        .is_err()
+                    );
+                    // Reproduce an attempt retained before errors were journalled.
+                    let name = OsStr::new("settlement-progress.json");
+                    let mut journal: serde_json::Value =
+                        crate::db::decode(&attempt.read_stable(name, RECORD_LIMIT)?)?;
+                    journal["blocking_reason"] = serde_json::Value::Null;
+                    journal["retry_after_ms"] = 0.into();
+                    attempt
+                        .atomic_write(
+                            name,
+                            ".retry-fixture-",
+                            &crate::db::bytes(&journal)?,
+                            provenant_os::fs::PublishMode::Replace,
+                        )?
+                        .require_durable()?;
+                    store.finish(id, &attempt, &observed, &providers, &call)?;
+                    let found = store.reconcile_with_observer(
+                        run.run_id,
+                        &providers,
+                        &call,
+                        &provenant_supervisor::census::SystemProcessObserver,
+                    )?;
+                    let json = serde_json::to_value(&found)?;
+                    assert!(
+                        json.to_string().contains("lane Git import failed"),
+                        "{json}"
+                    );
+                    let journal: serde_json::Value =
+                        crate::db::decode(&attempt.read_stable(name, RECORD_LIMIT)?)?;
+                    assert_eq!(
+                        journal["blocking_reason"],
+                        "invalid run record: lane Git import failed"
+                    );
+                    continue;
+                }
+                fixture.lane_git(&["reset", "--hard", &head.to_string()])?;
+                std::fs::write(
+                    fixture.writer.worktree.join("later.txt"),
+                    "later lane contents\n",
+                )?;
+                fixture.lane_git(&["add", "later.txt"])?;
+                fixture.commit(&fixture.writer.worktree, "Later lane")?;
+                advanced_tip = Some(crate::objects::resolve_ref(
+                    &git,
+                    launch.worktree.repo(),
+                    launch.branch.as_str(),
+                )?);
+            }
             if mode == "archived_fault" {
                 // A retryable import failure keeps its fence even though a
                 // manifest already exists; clear it so the retry can seal.
@@ -2829,6 +2946,33 @@ mod writer_recovery_tests {
                 completed.settlement_receipts.unwrap().git_import,
                 EffectDisposition::Done
             ));
+            if let Some(tip) = advanced_tip {
+                assert_eq!(
+                    crate::objects::resolve_ref(
+                        &git,
+                        launch.worktree.repo(),
+                        launch.branch.as_str()
+                    )?,
+                    tip
+                );
+                assert!(
+                    crate::objects::resolve_ref(
+                        &git,
+                        launch.worktree.repo(),
+                        &format!("refs/provenant/import/{}", published_head.unwrap())
+                    )
+                    .is_err()
+                );
+                let journal: serde_json::Value = crate::db::decode(
+                    &attempt.read_stable(OsStr::new("settlement-progress.json"), RECORD_LIMIT)?,
+                )?;
+                assert_eq!(
+                    std::fs::read_to_string(fixture.writer.worktree.join("later.txt"))?,
+                    "later lane contents\n"
+                );
+                assert_eq!(journal["phase"], "complete");
+                assert!(journal["blocking_reason"].is_null());
+            }
             assert!(store.writer_fences()?.is_empty());
         }
         Ok(())
