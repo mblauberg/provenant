@@ -45,7 +45,7 @@ No console code enters the menu target, and shipping targets do not use SwiftPM 
 
 `provenant-console` opens one window with a sidebar (Overview, Inbox, Runs, Quota, Chairs & Projects), the chosen screen, and an inspector for one attempt.
 
-Column sizing lives in `ConsoleView` alone, as constants. A screen never nests an `HSplitView` or `VSplitView` inside a column: the nested split reports a minimum derived from its content, and when the columns' minimums exceed the window's, AppKit's update-constraints pass loops and aborts the app. The Inbox list therefore has a fixed width; a source test checks the rule.
+Column sizing lives in `ConsoleView` alone, as constants. A screen never nests an `HSplitView` or `VSplitView` inside a column: the nested split reports a minimum derived from its content, and when the columns' minimums exceed the window's, AppKit's update-constraints pass loops and aborts the app. The Inbox list is a native content column with a draggable divider; its last width is remembered as an initial preference. Tests check the split-view rule and that the column minimums fit the window minimum.
 
 | Screen | Reads | Shows |
 | --- | --- | --- |
