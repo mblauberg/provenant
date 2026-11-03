@@ -82,6 +82,11 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
             human.push_str(&format!(" source={head}"));
         }
         human.push('\n');
+        if full && let Some(outputs) = &node.outputs {
+            for warning in &outputs.warnings {
+                human.push_str(&format!("    warning: {}\n", bounded_reason(warning)));
+            }
+        }
     }
     if let Some(error) = &run.advance_error {
         human.push_str(&format!("Advance error: {error}\n"));

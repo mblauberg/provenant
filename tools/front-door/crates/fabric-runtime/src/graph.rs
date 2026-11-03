@@ -80,8 +80,8 @@ const COMPOSITE_EXCERPT_BYTES: usize = 65_536;
 /// most a null `line` per finding.
 const FINDINGS_BYTES: usize = 9_216;
 const WARNING_BYTES: usize = 512;
-/// `make_outputs` records at most three warnings and a writer handoff one more.
-const MAX_WARNINGS: usize = 4;
+/// Output parsing, writer handoff and an empty review range can each add warnings.
+const MAX_WARNINGS: usize = 5;
 /// Usage failure and unknown-cost reasons.
 const NOTE_BYTES: usize = 512;
 const PAUSE_REASON_BYTES: usize = 4_096;
@@ -224,6 +224,11 @@ pub trait AttemptOwner {
 
     /// Read-only check: never starts or replays an attempt.
     fn cancelled_attempt_settled(&mut self, _attempt: &GraphAttempt) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
+    /// Whether the immutable task reviewed an empty commit range.
+    fn equal_review_range(&mut self, _attempt_ref: &str) -> Result<bool, Self::Error> {
         Ok(false)
     }
 
@@ -1615,6 +1620,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         distinct_from_attempts: &distinct_attempts,
                         require_distinct: node.distinct_strength == Some(FamilyStrength::Require),
                         source_commit: checkpoint.nodes[node_index].source_commit.as_deref(),
+                        review_base: node
+                            .extra
+                            .get("review_base")
+                            .and_then(serde_json::Value::as_str),
                         title: node.title.as_deref().unwrap_or(&node.id),
                         prompt: &prompt,
                         required_verdict: node.required_verdict.as_deref(),
@@ -1775,6 +1784,21 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 branch,
                                 commit,
                             );
+                            if node.access == AccessMode::ReadOnly
+                                && node.role.as_deref().is_some_and(|role| {
+                                    role == "lens"
+                                        || role.starts_with("lens.")
+                                        || role.starts_with("review.")
+                                })
+                                && let Some(reference) = attempt.attempt_ref.as_deref()
+                                && owner
+                                    .equal_review_range(reference)
+                                    .map_err(GraphError::Run)?
+                            {
+                                outputs
+                                    .warnings
+                                    .push("equal_base_and_head: review range is empty".into());
+                            }
                             if outcome == AttemptOutcome::UsageLimited {
                                 outputs
                                     .warnings
