@@ -5566,240 +5566,289 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
     use provenant_os::fs::{Directory, LockMode, PublishMode};
     use provenant_supervisor::custody::{self, Scope};
     use std::ffi::OsStr;
-    let fixture = linked_fixture()?;
-    with_edge(
-        &fixture.root,
-        &fixture.project,
-        |edge| -> Result<(), Box<dyn std::error::Error>> {
-            let clock = SystemClock::new();
-            let cancel = CancelToken::new();
-            let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
-            let session = open(edge, &call).map_err(|fail| fail.message)?;
-            let mut input = trace_run(30, AttemptId::from_bytes([9; 16]), clock.wall_now()?)?;
-            input.request.parent_attempt = None;
-            input.request.lane_depth = None;
-            input.request.tasks[0].writer = Some(run::WriterRequest {
-                extra: Default::default(),
-                project: fixture.project.clone(),
-                worktree: fixture.tree.clone(),
-            });
-            session.store.create(&input, &call)?;
-            let id = input.attempts[0].attempt_id;
-            let record =
-                session
+    for import_done in [false, true] {
+        let reason = if import_done {
+            "r".repeat(4096)
+        } else {
+            "worktree rebuilt by chair".into()
+        };
+        let phase = if import_done { "release" } else { "publish" };
+        let blocker = if import_done {
+            "release evidence missing"
+        } else {
+            "lane Git import failed"
+        };
+        let fixture = linked_fixture()?;
+        with_edge(
+            &fixture.root,
+            &fixture.project,
+            |edge| -> Result<(), Box<dyn std::error::Error>> {
+                let clock = SystemClock::new();
+                let cancel = CancelToken::new();
+                let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+                let session = open(edge, &call).map_err(|fail| fail.message)?;
+                let mut input = trace_run(30, AttemptId::from_bytes([9; 16]), clock.wall_now()?)?;
+                input.request.parent_attempt = None;
+                input.request.lane_depth = None;
+                input.request.tasks[0].writer = Some(run::WriterRequest {
+                    extra: Default::default(),
+                    project: fixture.project.clone(),
+                    worktree: fixture.tree.clone(),
+                });
+                session.store.create(&input, &call)?;
+                let id = input.attempts[0].attempt_id;
+                let record = session.store.mark_starting_for_fixture(
+                    id,
+                    &run::RouteRecord::default(),
+                    &call,
+                )?;
+                let scope = Scope {
+                    run: input.run_id,
+                    attempt: id,
+                    generation: record.generation,
+                };
+                let attempt_path = edge
+                    .roots
+                    .state
+                    .as_path()
+                    .join(format!("runs/{}/attempts/{id}", input.run_id));
+                let attempt = Directory::open_anchor(&attempt_path)?;
+                let slot_path = edge.roots.state.as_path().join(format!(
+                    "worktrees/{}/abandon-fixture",
+                    session.context.project_id
+                ));
+                std::fs::create_dir_all(&slot_path)?;
+                let lease = provenant_supervisor::fixture::acquire_writer(
+                    Directory::open_anchor(&slot_path)?,
+                    scope,
+                    call.lock_budget(),
+                    &cancel,
+                    &clock,
+                )?;
+                let recovery = provenant_supervisor::fixture::bind_writer_attempt(lease, &attempt)?
+                    .into_recovery()?;
+                let fence = session
                     .store
-                    .mark_starting_for_fixture(id, &run::RouteRecord::default(), &call)?;
-            let scope = Scope {
-                run: input.run_id,
-                attempt: id,
-                generation: record.generation,
-            };
-            let attempt_path = edge
-                .roots
-                .state
-                .as_path()
-                .join(format!("runs/{}/attempts/{id}", input.run_id));
-            let attempt = Directory::open_anchor(&attempt_path)?;
-            let slot_path = edge.roots.state.as_path().join(format!(
-                "worktrees/{}/abandon-fixture",
-                session.context.project_id
-            ));
-            std::fs::create_dir_all(&slot_path)?;
-            let lease = provenant_supervisor::fixture::acquire_writer(
-                Directory::open_anchor(&slot_path)?,
-                scope,
-                call.lock_budget(),
-                &cancel,
-                &clock,
-            )?;
-            let recovery = provenant_supervisor::fixture::bind_writer_attempt(lease, &attempt)?
-                .into_recovery()?;
-            let fence = session
-                .store
-                .writer_fences()?
-                .into_iter()
-                .find(|f| f.scope == scope)
-                .ok_or("fence")?;
-            let evidence =
-                Directory::open_anchor(fence.reservation.parent().ok_or("reservation parent")?)?;
-            evidence
-                .atomic_write(
-                    OsStr::new("import-retained.json"),
-                    ".test-",
-                    &serde_json::to_vec(&json!({"schema_version":1,"scope":scope}))?,
-                    PublishMode::NoReplace,
-                )?
-                .require_durable()?;
-            let exit = ExitObservation {
-                scope,
-                terminal_observed: true,
-                settlement_evidence: custody::SettlementEvidence::DarwinCensusAndCustodyLease,
-                ..clean_exit()
-            };
-            let mut exit_json = serde_json::to_value(&exit)?;
-            exit_json["schema_version"] = 1.into();
-            attempt
-                .atomic_write(
-                    OsStr::new("process-exit.json"),
-                    ".test-",
-                    &serde_json::to_vec(&exit_json)?,
-                    PublishMode::NoReplace,
-                )?
-                .require_durable()?;
-            session.store.publish_terminal(
-                id,
-                session.store.record(id, &call)?.revision,
-                &run::TerminalPublication {
-                    outcome: run::Outcome::Unsettled,
-                    finished_at: clock.wall_now()?,
-                    started_at: None,
-                    provider_ms: None,
-                    reason: Some("publish refused".into()),
-                    result: "retained provider evidence",
-                    complete: true,
-                    redacted: false,
-                    resolved_route: None,
-                    applied_route: None,
-                    observed_route: None,
-                    usage: Default::default(),
-                    session: None,
-                    partial_signals: vec![],
-                },
-                &exit,
-                &call,
-            )?;
-            attempt.atomic_write(OsStr::new("settlement-progress.json"), ".test-", &serde_json::to_vec(&json!({
-            "schema_version":1, "scope":scope, "phase":"publish", "attempts":1,
-            "head":null, "base":null, "owner":null, "blocking_reason":"lane Git import failed"
-        }))?, PublishMode::Replace)?.require_durable()?;
-            std::fs::create_dir_all(attempt_path.join("tmp/candidate-0/git-common"))?;
-            std::fs::write(
-                attempt_path.join("tmp/candidate-0/git-common/evidence"),
-                "private objects",
-            )?;
-            let parse = |args: &[&str]| -> Result<Reconcile, Box<dyn std::error::Error>> {
-                let crate::ParseOutcome::Invocation(inv) =
-                    crate::parse(args.iter().map(std::ffi::OsString::from))
-                else {
-                    return Err("parse reconcile".into());
+                    .writer_fences()?
+                    .into_iter()
+                    .find(|f| f.scope == scope)
+                    .ok_or("fence")?;
+                let evidence = Directory::open_anchor(
+                    fence.reservation.parent().ok_or("reservation parent")?,
+                )?;
+                evidence
+                    .atomic_write(
+                        OsStr::new("import-retained.json"),
+                        ".test-",
+                        &serde_json::to_vec(&json!({"schema_version":1,"scope":scope}))?,
+                        PublishMode::NoReplace,
+                    )?
+                    .require_durable()?;
+                let exit = ExitObservation {
+                    scope,
+                    terminal_observed: true,
+                    settlement_evidence: custody::SettlementEvidence::DarwinCensusAndCustodyLease,
+                    ..clean_exit()
                 };
-                let crate::Command::Reconcile(command) = inv.command else {
-                    return Err("reconcile command".into());
+                let mut exit_json = serde_json::to_value(&exit)?;
+                exit_json["schema_version"] = 1.into();
+                attempt
+                    .atomic_write(
+                        OsStr::new("process-exit.json"),
+                        ".test-",
+                        &serde_json::to_vec(&exit_json)?,
+                        PublishMode::NoReplace,
+                    )?
+                    .require_durable()?;
+                session.store.publish_terminal(
+                    id,
+                    session.store.record(id, &call)?.revision,
+                    &run::TerminalPublication {
+                        outcome: run::Outcome::Unsettled,
+                        finished_at: clock.wall_now()?,
+                        started_at: None,
+                        provider_ms: None,
+                        reason: Some("publish refused".into()),
+                        result: "retained provider evidence",
+                        complete: true,
+                        redacted: false,
+                        resolved_route: None,
+                        applied_route: None,
+                        observed_route: None,
+                        usage: Default::default(),
+                        session: None,
+                        partial_signals: vec![],
+                    },
+                    &exit,
+                    &call,
+                )?;
+                let import = if import_done {
+                    run::EffectDisposition::Done
+                } else {
+                    run::EffectDisposition::Failed {
+                        reason: blocker.into(),
+                        retryable: true,
+                    }
                 };
-                Ok(command)
-            };
-            let driver =
-                attempt.try_lock(OsStr::new("settlement-driver.lock"), LockMode::Exclusive)?;
-            let run_id = input.run_id.to_string();
-            let reported = reconcile(parse(&["reconcile", "--id", &run_id, "--json"])?, edge);
-            let json = serde_json::to_value(&reported.result)?;
-            assert_eq!(
-                json["data"]["runs"][0]["attempts"][0]["found"]["phase"],
-                "publish"
-            );
-            assert_eq!(
-                json["data"]["runs"][0]["attempts"][0]["found"]["blocking_reason"],
-                "lane Git import failed"
-            );
-            assert!(reported.human.contains("lane Git import failed"));
-            let selection = format!("{run_id}/{id}");
-            assert!(parse(&["reconcile", "--abandon", &selection]).is_err());
-            assert!(parse(&["reconcile", "--reason", "missing attempt"]).is_err());
-            assert!(
-                parse(&[
+                session.store.record_effect(
+                    id,
+                    scope.generation,
+                    run::SettlementEffect::GitImport,
+                    import.clone(),
+                    &call,
+                )?;
+                attempt
+                    .atomic_write(
+                        OsStr::new("settlement-progress.json"),
+                        ".test-",
+                        &serde_json::to_vec(&json!({
+                            "schema_version":1, "scope":scope, "phase":phase, "attempts":1,
+                            "head":null, "base":null, "owner":null, "blocking_reason":blocker
+                        }))?,
+                        PublishMode::Replace,
+                    )?
+                    .require_durable()?;
+                std::fs::create_dir_all(attempt_path.join("tmp/candidate-0/git-common"))?;
+                std::fs::write(
+                    attempt_path.join("tmp/candidate-0/git-common/evidence"),
+                    "private objects",
+                )?;
+                let parse = |args: &[&str]| -> Result<Reconcile, Box<dyn std::error::Error>> {
+                    let crate::ParseOutcome::Invocation(inv) =
+                        crate::parse(args.iter().map(std::ffi::OsString::from))
+                    else {
+                        return Err("parse reconcile".into());
+                    };
+                    let crate::Command::Reconcile(command) = inv.command else {
+                        return Err("reconcile command".into());
+                    };
+                    Ok(command)
+                };
+                let driver =
+                    attempt.try_lock(OsStr::new("settlement-driver.lock"), LockMode::Exclusive)?;
+                let run_id = input.run_id.to_string();
+                let reported = reconcile(parse(&["reconcile", "--id", &run_id, "--json"])?, edge);
+                let json = serde_json::to_value(&reported.result)?;
+                if !import_done {
+                    assert_eq!(
+                        json["data"]["runs"][0]["attempts"][0]["found"]["phase"],
+                        "publish"
+                    );
+                    assert_eq!(
+                        json["data"]["runs"][0]["attempts"][0]["found"]["blocking_reason"],
+                        "lane Git import failed"
+                    );
+                    assert!(reported.human.contains("lane Git import failed"));
+                }
+                let selection = format!("{run_id}/{id}");
+                assert!(parse(&["reconcile", "--abandon", &selection]).is_err());
+                assert!(parse(&["reconcile", "--reason", "missing attempt"]).is_err());
+                assert!(
+                    parse(&[
+                        "reconcile",
+                        "--id",
+                        &run_id,
+                        "--abandon",
+                        &selection,
+                        "--reason",
+                        "ambiguous action"
+                    ])
+                    .is_err()
+                );
+                let args = [
                     "reconcile",
-                    "--id",
-                    &run_id,
                     "--abandon",
                     &selection,
                     "--reason",
-                    "ambiguous action"
-                ])
-                .is_err()
-            );
-            let args = [
-                "reconcile",
-                "--abandon",
-                &selection,
-                "--reason",
-                "worktree rebuilt by chair",
-                "--json",
-            ];
-            assert_ne!(
-                reconcile(parse(&args)?, edge).result.status,
-                Status::Ok,
-                "live driver excludes abandonment"
-            );
-            drop(driver);
-            assert_ne!(
-                reconcile(parse(&args)?, edge).result.status,
-                Status::Ok,
-                "held writer lock excludes abandonment"
-            );
-            drop(recovery);
-            let abandoned = reconcile(parse(&args)?, edge);
-            assert_eq!(
-                abandoned.result.status,
-                Status::Ok,
-                "{:?}",
-                abandoned.result.error
-            );
-            assert_eq!(abandoned.result.data["found"]["state"], "abandoned");
-            assert_eq!(
-                abandoned.result.data["found"]["reason"],
-                "worktree rebuilt by chair"
-            );
-            assert!(session.store.writer_fences()?.is_empty());
-            let journal: Value = serde_json::from_slice(&std::fs::read(
-                attempt_path.join("settlement-progress.json"),
-            )?)?;
-            assert_eq!(
-                journal["abandonment"]["actor"],
-                session.context.actor_id.to_string()
-            );
-            assert_eq!(journal["abandonment"]["phase"], "publish");
-            assert_eq!(journal["blocking_reason"], "lane Git import failed");
-            assert_eq!(
-                reconcile(parse(&args)?, edge).result.status,
-                Status::Ok,
-                "same reason is idempotent"
-            );
-            reconcile(parse(&["reconcile", "--id", &run_id, "--json"])?, edge);
-            assert!(
-                attempt_path
-                    .join("tmp/candidate-0/git-common/evidence")
-                    .is_file()
-            );
-            let different = [
-                "reconcile",
-                "--abandon",
-                &selection,
-                "--reason",
-                "different explanation",
-                "--json",
-            ];
-            assert_ne!(
-                reconcile(parse(&different)?, edge).result.status,
-                Status::Ok,
-                "recorded reason cannot be replaced"
-            );
-            let state = Directory::open_anchor(edge.roots.state.as_path())?;
-            let later = WallTime::from_micros(clock.wall_now()?.as_micros() + 90 * 86_400_000_000)?;
-            let collected = session
-                .store
-                .gc_provider_state(&state, 7, later, false, &call)?;
-            assert!(collected.attempt_tmp.is_empty());
-            assert!(
-                attempt_path
-                    .join("tmp/candidate-0/git-common/evidence")
-                    .is_file()
-            );
-            assert_eq!(
-                std::fs::read_to_string(attempt_path.join("result.md"))?,
-                "retained provider evidence"
-            );
-            Ok(())
-        },
-    )??;
+                    reason.as_str(),
+                    "--json",
+                ];
+                assert_ne!(
+                    reconcile(parse(&args)?, edge).result.status,
+                    Status::Ok,
+                    "live driver excludes abandonment"
+                );
+                drop(driver);
+                assert_ne!(
+                    reconcile(parse(&args)?, edge).result.status,
+                    Status::Ok,
+                    "held writer lock excludes abandonment"
+                );
+                drop(recovery);
+                let abandoned = reconcile(parse(&args)?, edge);
+                assert_eq!(
+                    abandoned.result.status,
+                    Status::Ok,
+                    "{:?}",
+                    abandoned.result.error
+                );
+                assert_eq!(abandoned.result.data["found"]["state"], "abandoned");
+                assert_eq!(abandoned.result.data["found"]["reason"], reason);
+                assert!(session.store.writer_fences()?.is_empty());
+                session
+                    .store
+                    .reconcile_for_fixture(input.run_id, &Registry::default(), &call)?;
+                assert_eq!(
+                    session
+                        .store
+                        .record(id, &call)?
+                        .settlement_receipts
+                        .unwrap()
+                        .git_import,
+                    import
+                );
+                let journal: Value = serde_json::from_slice(&std::fs::read(
+                    attempt_path.join("settlement-progress.json"),
+                )?)?;
+                assert_eq!(
+                    journal["abandonment"]["actor"],
+                    session.context.actor_id.to_string()
+                );
+                assert_eq!(journal["abandonment"]["phase"], phase);
+                assert_eq!(journal["blocking_reason"], blocker);
+                assert_eq!(
+                    reconcile(parse(&args)?, edge).result.status,
+                    Status::Ok,
+                    "same reason is idempotent"
+                );
+                reconcile(parse(&["reconcile", "--id", &run_id, "--json"])?, edge);
+                assert!(
+                    attempt_path
+                        .join("tmp/candidate-0/git-common/evidence")
+                        .is_file()
+                );
+                let different = [
+                    "reconcile",
+                    "--abandon",
+                    &selection,
+                    "--reason",
+                    "different explanation",
+                    "--json",
+                ];
+                assert_ne!(
+                    reconcile(parse(&different)?, edge).result.status,
+                    Status::Ok,
+                    "recorded reason cannot be replaced"
+                );
+                let state = Directory::open_anchor(edge.roots.state.as_path())?;
+                let later =
+                    WallTime::from_micros(clock.wall_now()?.as_micros() + 90 * 86_400_000_000)?;
+                let collected = session
+                    .store
+                    .gc_provider_state(&state, 7, later, false, &call)?;
+                assert!(collected.attempt_tmp.is_empty());
+                assert!(
+                    attempt_path
+                        .join("tmp/candidate-0/git-common/evidence")
+                        .is_file()
+                );
+                assert_eq!(
+                    std::fs::read_to_string(attempt_path.join("result.md"))?,
+                    "retained provider evidence"
+                );
+                Ok(())
+            },
+        )??;
+    }
     Ok(())
 }

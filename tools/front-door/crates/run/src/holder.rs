@@ -641,6 +641,9 @@ impl RunStore {
                         },
                     )
                 });
+            if let Err(error) = &imported {
+                driver.record_failure(&error.to_string())?;
+            }
             match imported {
                 Ok(_) => {
                     self.record_effect(
@@ -2829,6 +2832,38 @@ mod writer_recovery_tests {
                             head
                         )
                         .is_err()
+                    );
+                    // Reproduce an attempt retained before errors were journalled.
+                    let name = OsStr::new("settlement-progress.json");
+                    let mut journal: serde_json::Value =
+                        crate::db::decode(&attempt.read_stable(name, RECORD_LIMIT)?)?;
+                    journal["blocking_reason"] = serde_json::Value::Null;
+                    journal["retry_after_ms"] = 0.into();
+                    attempt
+                        .atomic_write(
+                            name,
+                            ".retry-fixture-",
+                            &crate::db::bytes(&journal)?,
+                            provenant_os::fs::PublishMode::Replace,
+                        )?
+                        .require_durable()?;
+                    store.finish(id, &attempt, &observed, &providers, &call)?;
+                    let found = store.reconcile_with_observer(
+                        run.run_id,
+                        &providers,
+                        &call,
+                        &provenant_supervisor::census::SystemProcessObserver,
+                    )?;
+                    let json = serde_json::to_value(&found)?;
+                    assert!(
+                        json.to_string().contains("lane Git import failed"),
+                        "{json}"
+                    );
+                    let journal: serde_json::Value =
+                        crate::db::decode(&attempt.read_stable(name, RECORD_LIMIT)?)?;
+                    assert_eq!(
+                        journal["blocking_reason"],
+                        "invalid run record: lane Git import failed"
                     );
                     continue;
                 }

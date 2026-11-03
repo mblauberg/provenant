@@ -84,6 +84,9 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<bool> {
         let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+        if crate::settlement::abandoned(&attempt, Self::scope(record))?.is_some() {
+            return Ok(true);
+        }
         if crate::holder::object_import_refused(&attempt, Self::scope(record))?.is_some() {
             return Ok(true);
         }
@@ -860,6 +863,15 @@ impl RunStore {
         recovery: Option<&provenant_supervisor::custody::Recovery>,
         call: &Request<'_>,
     ) {
+        let Ok(attempt_dir) = self.attempt_dir(record.run_id, record.attempt_id, false) else {
+            return;
+        };
+        if !matches!(
+            crate::settlement::abandoned(&attempt_dir, Self::scope(record)),
+            Ok(None)
+        ) {
+            return;
+        }
         if !self.import_release_permitted(record, call).unwrap_or(false) {
             let _ = self.set_temporary_retained(record.attempt_id, true, call);
             return;
@@ -874,32 +886,24 @@ impl RunStore {
         }
         // The terminal record retains tmp before cleanup; clear that hint only
         // after removal succeeds.
-        if let Ok(attempt_dir) = self.attempt_dir(record.run_id, record.attempt_id, false) {
-            if !matches!(
-                crate::settlement::abandoned(&attempt_dir, Self::scope(record)),
-                Ok(None)
-            ) {
+        // A resource refusal has no graph certificate. Keep all private
+        // evidence until its retained writer reservation is recovered.
+        match crate::holder::object_import_refused(&attempt_dir, Self::scope(record)) {
+            Ok(None) => {}
+            Ok(Some(_)) | Err(_) => {
+                let _ = self.set_temporary_retained(record.attempt_id, true, call);
                 return;
             }
-            // A resource refusal has no graph certificate. Keep all private
-            // evidence until its retained writer reservation is recovered.
-            match crate::holder::object_import_refused(&attempt_dir, Self::scope(record)) {
-                Ok(None) => {}
-                Ok(Some(_)) | Err(_) => {
-                    let _ = self.set_temporary_retained(record.attempt_id, true, call);
-                    return;
-                }
-            }
-            let _ = crate::retention::prune_caches(
-                &attempt_dir,
-                record,
-                false,
-                &mut ProviderStateGc::default(),
-            );
-            let _ = self.set_temporary_retained(record.attempt_id, true, call);
-            if remove_temporary_best_effort(&attempt_dir).is_ok() {
-                let _ = self.set_temporary_retained(record.attempt_id, false, call);
-            }
+        }
+        let _ = crate::retention::prune_caches(
+            &attempt_dir,
+            record,
+            false,
+            &mut ProviderStateGc::default(),
+        );
+        let _ = self.set_temporary_retained(record.attempt_id, true, call);
+        if remove_temporary_best_effort(&attempt_dir).is_ok() {
+            let _ = self.set_temporary_retained(record.attempt_id, false, call);
         }
     }
     /// Seal result and terminal intent, then commit the attempt, run summary,

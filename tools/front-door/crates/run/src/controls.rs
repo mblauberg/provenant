@@ -2348,10 +2348,16 @@ impl RunStore {
         let progress = (|| {
             let scope = Self::scope(&self.record(id, call)?);
             let directory = self.attempt_dir(run, id, false)?;
-            if let Reconciled::Uncertain { reason } = &state {
-                crate::settlement::blocked(&directory, scope, &reason.to_string(), call.clock)
-            } else {
-                crate::settlement::clear_blocked(&directory, scope)
+            match &state {
+                Reconciled::Uncertain { reason } => {
+                    crate::settlement::blocked(&directory, scope, &reason.to_string(), call.clock)
+                }
+                Reconciled::Settling {
+                    blocking_reason: Some(_),
+                    ..
+                }
+                | Reconciled::Abandoned { .. } => Ok(()),
+                _ => crate::settlement::clear_blocked(&directory, scope),
             }
         })();
         if let Err(error) = progress {

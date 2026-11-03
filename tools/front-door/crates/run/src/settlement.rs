@@ -1904,16 +1904,6 @@ impl crate::RunStore {
                 write(&attempt, &journal)?;
             }
         }
-        self.record_effect(
-            id,
-            record.generation,
-            crate::SettlementEffect::GitImport,
-            crate::EffectDisposition::Failed {
-                reason: format!("settlement abandoned: {reason}"),
-                retryable: false,
-            },
-            call,
-        )?;
         if let Some(recovery) = recovery {
             recovery
                 .release_lost()
