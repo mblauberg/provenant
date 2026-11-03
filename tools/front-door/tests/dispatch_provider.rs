@@ -3479,7 +3479,7 @@ fn agy_denied_command_reaches_result_and_terminal_reason() -> Result {
     }
     // A valid successful answer wins even when stderr contains a denial notice.
     let success = br###"{"event":"init","conversation_id":"fixture-session","init":{"model":"gemini-3.8-flash"}}
-{"event":"result","result":{"conversation_id":"fixture-session","status":"SUCCESS","response":"## Findings\nVerified.\n## Evidence\nChecked the claim.","error":null,"usage":{"input_tokens":0,"output_tokens":0}}}"###;
+{"event":"result","result":{"conversation_id":"fixture-session","status":"SUCCESS","response":"## Findings\nVerified.\n## Evidence\nChecked the claim.\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"verified\"}\n```","error":null,"usage":{"input_tokens":0,"output_tokens":0}}}"###;
     let (rig, terminal) = persisted_attempt(
         "agy",
         "agy/gemini-3.8-flash",
@@ -3498,9 +3498,12 @@ fn agy_denied_command_reaches_result_and_terminal_reason() -> Result {
     let output = rig.command(&["output", &terminal.attempt_id.to_string(), "--json"])?;
     assert_eq!(code(&output), 0, "{:?}", output.stderr.bytes);
     let output: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert_eq!(
-        output["data"]["bytes"]["data"],
-        "## Findings\nVerified.\n## Evidence\nChecked the claim."
+    let result = output["data"]["bytes"]["data"]
+        .as_str()
+        .ok_or("result bytes")?;
+    assert!(
+        result.starts_with("## Findings\nVerified.\n## Evidence\nChecked the claim."),
+        "{output}"
     );
     Ok(())
 }
