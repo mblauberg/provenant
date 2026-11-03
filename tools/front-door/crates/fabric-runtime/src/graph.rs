@@ -351,6 +351,8 @@ struct PlannedNode {
     deadline_seconds: Option<u64>,
     prompt: String,
     depends_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "model::is_false")]
+    advisory: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     inputs: Vec<GraphInput>,
     routes: Vec<GraphRoute>,
@@ -1680,7 +1682,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     progress.state = NodeState::Failed;
                                     false
                                 }
-                                AttemptOutcome::TaskFailed | AttemptOutcome::OtherFailure => {
+                                AttemptOutcome::TaskFailed
+                                | AttemptOutcome::OtherFailure
+                                | AttemptOutcome::ReviewRequired => {
                                     progress.state = NodeState::Failed;
                                     false
                                 }
@@ -1860,7 +1864,10 @@ fn dependency_state(
     }
     for parent in &node.after_expansion {
         let progress = &checkpoint.nodes[positions[parent]];
-        if !checkpoint.node_successful(progress) {
+        if !checkpoint.node_successful(progress)
+            && !(plan.nodes[positions[parent]].advisory
+                && matches!(progress.state, NodeState::Failed | NodeState::Blocked))
+        {
             return Some(NodeState::Blocked);
         }
     }
@@ -1879,6 +1886,7 @@ fn dependency_state(
                     .is_some_and(|round| &round.loop_id == target)
         });
         match checkpoint.nodes[index].state {
+            NodeState::Failed | NodeState::Blocked if plan.nodes[index].advisory => {}
             // A failed CI gate that reported no failing check leaves a node
             // that consumes its findings nothing to act on, so it is skipped,
             // not launched. Other recovery nodes (notify, diagnose) still run.

@@ -24,7 +24,11 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
             node.state == provenant_fabric_runtime::graph::NodeState::Running
                 && ci.state == provenant_fabric_runtime::graph::CiState::Pending
         });
-        if !full && (members.contains(&node.id) || node.round.is_some()) && waiting_ci.is_none() {
+        if !full
+            && (members.contains(&node.id) || node.round.is_some())
+            && waiting_ci.is_none()
+            && node.state != provenant_fabric_runtime::graph::NodeState::Failed
+        {
             continue;
         }
         human.push_str(&format!("  {}: {:?}", node.id, node.state));
@@ -47,12 +51,21 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
                     " attempt={}",
                     attempt.attempt_ref.as_deref().unwrap_or("none")
                 ));
+                if let Some(outcome) = attempt.outcome {
+                    human.push_str(&format!(" outcome={outcome:?}"));
+                }
             } else {
                 human.push_str(" route=none attempt=none");
             }
             if let Some(error) = &node.advance_error {
                 human.push_str(&format!(" error={error}"));
             }
+        }
+        if !full
+            && node.state == provenant_fabric_runtime::graph::NodeState::Failed
+            && let Some(outcome) = node.attempts.last().and_then(|attempt| attempt.outcome)
+        {
+            human.push_str(&format!(" outcome={outcome:?}"));
         }
         if let Some(ci) = waiting_ci {
             human.push_str(&format!(
@@ -120,6 +133,15 @@ pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
                         text(node, "id").unwrap_or_default(),
                         text(node, "state").unwrap_or_else(|| "unknown".into()),
                         text(node, "advance_error").or_else(|| {
+                            if text(node, "state").as_deref() == Some("failed")
+                                && let Some(outcome) = node
+                                    .get("attempts")
+                                    .and_then(serde_json::Value::as_array)
+                                    .and_then(|attempts| attempts.last())
+                                    .and_then(|attempt| text(attempt, "outcome"))
+                            {
+                                return Some(outcome);
+                            }
                             let ci = node.get("ci")?;
                             if text(node, "state").as_deref() != Some("running")
                                 || text(ci, "state").as_deref() != Some("pending")

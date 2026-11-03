@@ -15,6 +15,7 @@ pub enum AttemptOutcome {
     Succeeded,
     TaskFailed,
     OtherFailure,
+    ReviewRequired,
     AuthRequired,
     UsageLimited,
     AdapterUnavailable,

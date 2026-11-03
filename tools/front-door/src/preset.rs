@@ -1377,6 +1377,7 @@ fn lower_leaf(
             "purpose",
             "dispositions",
             "require_findings",
+            "advisory",
             "continues",
             "land",
         ]
@@ -2135,6 +2136,7 @@ impl StageBuilder<'_> {
                         "read_roots",
                         "inputs",
                         "depends_on",
+                        "advisory",
                     ]
                     .contains(&key.as_str())
                     {
@@ -2148,7 +2150,7 @@ impl StageBuilder<'_> {
                     node["title"] =
                         interpolate(title, &self.parameters, self.prompt, index as usize)?;
                 }
-                for key in ["source", "read_roots", "inputs"] {
+                for key in ["source", "read_roots", "inputs", "advisory"] {
                     if let Some(value) = object.get(key) {
                         node[key] =
                             interpolate(value, &self.parameters, self.prompt, index as usize)?;

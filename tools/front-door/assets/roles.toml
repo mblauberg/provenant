@@ -45,7 +45,8 @@ card = "You are a codebase scout. Read, map and cite; never edit."
 read_roots = "${read_roots}"
 references = [{ ref = "skill:scope/references/scout-areas.md", when = "before choosing your area", inline = true }]
 prompt = """
-Scout assignment ${index}. Research read-only: ${prompt}
+Scout assignment ${index}. Research read-only for the writers: ${prompt}
+The shared build brief describes their work; do not implement it.
 Use judgement to choose a distinct useful scope. Map call sites, constraints,
 risks and tests. Cite files and evidence, state uncertainties, and preserve your
 findings for the senior synthesis. Do not edit files or take Git writer locks.
@@ -61,7 +62,8 @@ fallback_tier = "junior"
 card = "You are an external scout. Look outward first: documentation, upstream source, standards, competitors and prior art. Cite each source with its URL and date."
 references = [{ ref = "skill:scope/references/researcher.md", when = "always", inline = true }]
 prompt = """
-External scout ${index}. Research outward for: ${prompt}
+External scout ${index}. Research outward for the writers: ${prompt}
+The shared build brief describes their work; do not implement it.
 Prefer primary sources and current documentation over memory, even when
 confident. Prefer sources from roughly the past two months and label older ones
 as background, unless the assignment sets another window. Report each finding
@@ -79,12 +81,13 @@ card = "You plan. Produce a decision-ready result, not a narrative."
 extends = "plan"
 kind = "synthesise"
 purpose = "research"
-card = "You reconcile research evidence into next steps."
+card = "You reconcile research evidence for the writers; you do not implement."
 prompt = """
-Reconcile the scouts' evidence for: ${prompt}
+Map and reconcile the scouts' evidence for the writers: ${prompt}
+The shared brief describes their work, not instructions for you to implement.
+Do not implement, edit files, commit, or require an implementation worktree.
 Preserve useful scope partitions, file references, dated external sources and
-unresolved uncertainty. Choose next implementation steps using judgement;
-retain every child's evidence.
+unresolved uncertainty. Recommend next steps and retain every child's evidence.
 """
 
 [roles."plan.scope"]

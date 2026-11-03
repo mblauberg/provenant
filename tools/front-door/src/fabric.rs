@@ -4436,6 +4436,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                             Outcome::ModelUnavailable => AttemptOutcome::AdapterUnavailable,
                             Outcome::Rejected if !launched => AttemptOutcome::AdapterUnavailable,
                             Outcome::Failed => AttemptOutcome::TaskFailed,
+                            Outcome::ReviewRequired => AttemptOutcome::ReviewRequired,
                             // Uncommitted edits need the chair, so the node fails without fallback.
                             Outcome::Uncommitted => AttemptOutcome::OtherFailure,
                             _ => AttemptOutcome::OtherFailure,

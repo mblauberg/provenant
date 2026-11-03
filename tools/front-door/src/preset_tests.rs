@@ -4159,3 +4159,25 @@ fn an_unknown_size_override_is_refused() {
     .unwrap_err();
     assert!(error.contains("unknown review size"), "{error}");
 }
+
+#[test]
+fn big_batch_without_scout_matches_golden() {
+    let expanded = super::preset::expand_with(
+        &Layers::empty(),
+        "big-batch",
+        "brief",
+        &[("scout".into(), json!(0))],
+        &[],
+    )
+    .unwrap();
+    let nodes = expanded.document["nodes"].as_array().unwrap();
+    assert!(!nodes.iter().any(|node| node["id"] == "scout"));
+    let mut actual = serde_json::to_string_pretty(&expanded.document).unwrap();
+    actual.push('\n');
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("assets/presets/fixtures/big-batch.no-scout.json");
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        std::fs::write(&path, &actual).unwrap();
+    }
+    assert_eq!(actual, std::fs::read_to_string(path).unwrap_or_default());
+}
