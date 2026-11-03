@@ -2526,6 +2526,10 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
+| `--wait` | `{"bounds": [1, 14400], "conflicts": ["all", "cursor"], "description": "Wait for mixed targets (no value uses domains.wait.timeout_seconds)", "name": "wait"}` |
+| `--target` | `{"description": "Observe lane:ID, graph:ID, pr:NUMBER or land:NUMBER (repeatable; land only observes)", "name": "target", "repeatable": true, "requires": ["wait"]}` |
+| `--until` | `{"defaults": ["any"], "description": "Return on any transition or when all targets are terminal", "name": "until", "requires": ["wait"], "values": ["any", "all"]}` |
+| `--follow` | `{"defaults": ["false"], "description": "Stream transitions until all targets are terminal or the wait expires", "name": "follow", "requires": ["wait"], "values": ["true", "false"]}` |
 | `id` | `{"description": "Show this run, task, attempt or graph ID, including settled records", "name": "id", "positional": true}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "description": "Maximum full records per page", "name": "limit"}` |
 | `--cursor` | `{"description": "Continue a full-record page from its cursor", "name": "cursor"}` |
@@ -2535,10 +2539,19 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 ```json
 {
-  "description": "Show active and recent lanes, newest first",
+  "constraints": [
+    "wait requires 1 to 64 targets via ID or repeated --target; no duration uses domains.wait.timeout_seconds",
+    "with --wait, --json emits newline-delimited snapshot/transition events and a final end event; timeout exits 124",
+    "follow waits for all targets to be terminal; land targets only observe their PR"
+  ],
+  "description": "Show lanes or wait on lanes, graphs and PRs",
   "groups": [
     {
       "arguments": [
+        "wait",
+        "target",
+        "until",
+        "follow",
         "id",
         "limit",
         "cursor",

@@ -51,6 +51,7 @@ mod provider_retention;
 mod release_smoke;
 mod roots;
 mod settlement;
+mod status_wait;
 mod target_seed_build;
 mod usage;
 #[cfg(test)]
@@ -1038,6 +1039,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Review(cmd) => run_edge(&inv.leaf, globals, |edge| {
             provenant_cli::run::review(cmd, edge)
         }),
+        Command::Status(cmd) if cmd.wait.is_some() => status_wait::run(cmd, globals),
         Command::Status(cmd) => run_edge(&inv.leaf, globals, |edge| {
             provenant_cli::run::status(cmd, globals.json, edge)
         }),
