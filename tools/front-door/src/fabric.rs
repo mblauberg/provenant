@@ -4349,6 +4349,30 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         }
     }
 
+    fn launch_accepted(
+        &mut self,
+        attempt: &provenant_fabric_runtime::graph::GraphAttempt,
+    ) -> Result<bool, Self::Error> {
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: true,
+            actor: Some(
+                attempt
+                    .launch_actor
+                    .parse()
+                    .map_err(|_| FacadeError::StateCorrupt)?,
+            ),
+            chair: None,
+        };
+        let operation_id = graph_operation("graph-attempt-operation", &attempt.key)?;
+        let store = owner.store(self.cancel)?;
+        let call = owner.call(self.cancel);
+        Ok(store
+            .operation(&operation_id, &call)
+            .map_err(run_error)?
+            .is_some_and(|operation| operation.state != provenant_run::OperationState::Prepared))
+    }
+
     fn observe_or_start(
         &mut self,
         key: &provenant_fabric_runtime::graph::AttemptKey,

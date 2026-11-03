@@ -229,6 +229,12 @@ pub trait AttemptOwner {
         Ok(false)
     }
 
+    /// Whether a launch already crossed run's acceptance boundary. This is
+    /// read-only and must not submit a new operation.
+    fn launch_accepted(&mut self, _attempt: &GraphAttempt) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
     fn observe_or_start(
         &mut self,
         key: &AttemptKey,
@@ -1327,23 +1333,30 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         .zip(launch_clock)
                         .is_some_and(|(end, now)| now >= end)
                 {
-                    let reason = retry.reason.clone().unwrap_or_default();
-                    let progress = &mut checkpoint.nodes[node_index];
-                    progress.advance_error_code = Some("launch_retry_exhausted".into());
-                    progress.advance_error = Some(format!(
-                        "node {}: the launch failed: {}; {}",
-                        progress.id,
-                        reason,
-                        launch_remedy(
-                            &crate::coordination::facade::FacadeError::Busy,
-                            &checkpoint.graph_id
-                        )
-                    ));
-                    progress.state = NodeState::Blocked;
-                    progress.launch_retry = None;
-                    asks::refresh_wake(&mut checkpoint);
-                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
-                    break;
+                    let accepted = match checkpoint.nodes[node_index].attempts.last() {
+                        Some(attempt) if attempt.attempt_ref.is_some() => true,
+                        Some(attempt) => owner.launch_accepted(attempt).map_err(GraphError::Run)?,
+                        None => false,
+                    };
+                    if !accepted {
+                        let reason = retry.reason.clone().unwrap_or_default();
+                        let progress = &mut checkpoint.nodes[node_index];
+                        progress.advance_error_code = Some("launch_retry_exhausted".into());
+                        progress.advance_error = Some(format!(
+                            "node {}: the launch failed: {}; {}",
+                            progress.id,
+                            reason,
+                            launch_remedy(
+                                &crate::coordination::facade::FacadeError::Busy,
+                                &checkpoint.graph_id
+                            )
+                        ));
+                        progress.state = NodeState::Blocked;
+                        progress.launch_retry = None;
+                        asks::refresh_wake(&mut checkpoint);
+                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        break;
+                    }
                 }
                 let progress = &checkpoint.nodes[node_index];
                 let route_index = match progress.attempts.last() {

@@ -4381,6 +4381,7 @@ struct ErrorLauncher {
     now: Option<provenant_core::WallTime>,
     now_after_error: Option<provenant_core::WallTime>,
     admission_seconds: Option<u64>,
+    accepted: bool,
 }
 
 impl AttemptOwner for ErrorLauncher {
@@ -4394,6 +4395,9 @@ impl AttemptOwner for ErrorLauncher {
     }
     fn admission_timeout_seconds(&self) -> Option<u64> {
         Some(self.admission_seconds.unwrap_or(3600))
+    }
+    fn launch_accepted(&mut self, _attempt: &GraphAttempt) -> Result<bool, Self::Error> {
+        Ok(self.accepted)
     }
     fn observe_or_start(
         &mut self,
@@ -4619,6 +4623,25 @@ fn launch_errors_retry_until_the_persisted_deadline() {
     let stopped = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(stopped.checkpoint.nodes[0].state, NodeState::Blocked);
     assert_eq!(owner.calls.len(), 4);
+}
+
+#[test]
+fn expired_launch_replays_an_accepted_operation() {
+    let document = graph(vec![node("one", route("first"))]);
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: busy_times(1),
+        observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    advance(&document, &mut owner, &mut journal).unwrap();
+    owner.accepted = true;
+    owner.now = Some(at(3600));
+    let result = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(result.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(owner.calls[0], owner.calls[1]);
 }
 
 #[test]
