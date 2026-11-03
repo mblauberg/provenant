@@ -92,6 +92,7 @@ tools/front-door/crates/confinement/src/permissions/tests/validation.rs release.
 tools/front-door/crates/confinement/src/permissions/tests/validation.rs release.home-path fdd29e7a42563aa7
 tools/front-door/crates/confinement/src/redact.rs release.github-token 39d590f85ded88a7
 tools/front-door/crates/confinement/src/run_config.rs release.home-path 0abb516b363aef53
+tools/front-door/crates/confinement/src/run_config.rs release.home-path 1c334efbfd0a675b
 tools/front-door/crates/confinement/src/run_config.rs release.home-path 550000a675a9612e
 tools/front-door/crates/confinement/src/run_config.rs release.home-path ac9ef5a83399de24
 tools/front-door/crates/confinement/src/run_config.rs release.home-path e87a60379b5d52fb
