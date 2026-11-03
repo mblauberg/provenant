@@ -2916,3 +2916,41 @@ fn census_refusal_names_other_held_path_evidence_kind() -> Result<(), Box<dyn Er
     );
     Ok(())
 }
+
+#[test]
+fn census_keeps_holder_and_evidence_together_across_processes() -> Result<(), Box<dyn Error>> {
+    use provenant_supervisor::census::{Census, ProcessIdentity};
+    let temp = tempfile::tempdir()?;
+    let root = canonicalize(temp.path())?;
+    let held = root.join("held");
+    fs::write(&held, b"held")?;
+    let outside = tempfile::tempdir()?;
+    let fact = |pid: i64| ProcessFact {
+        identity: ProcessIdentity { boot: "boot".into(), pid, native_start: pid as u64, group_id: pid, session_id: pid },
+        parent_pid: 1, zombie: false, cpu_micros: None, command: Some(format!("process-{pid}")),
+    };
+    let current = fact(100);
+    let processes = InjectedCensus {
+        census: Census::from_observations([current.clone(), fact(200), fact(300)], [], [], true, false, 32)?,
+        cwds: BTreeMap::new(), current: current.clone(), platform_uids: BTreeMap::new(),
+    };
+    struct Observer { root: PathBuf, held: PathBuf, outside: PathBuf }
+    impl CwdObserver for Observer {
+        fn cwd(&self, pid: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            Ok(CwdObservation::Path(if pid == 300 { self.root.clone() } else { self.outside.clone() }))
+        }
+        fn occupancy(&self, pid: i64) -> provenant_os::pid::OccupancyObservation {
+            provenant_os::pid::OccupancyObservation { paths: if pid == 200 { vec![self.held.clone()] } else { vec![] }, complete: true, gap: None }
+        }
+    }
+    let (_, holders, _, taints) = observe_worker_holders_with_taints_and_audit(
+        std::slice::from_ref(&root), &processes,
+        &Observer { root: root.clone(), held, outside: outside.path().to_path_buf() },
+        &current, false, &mut |_, _| {},
+    );
+    let holder = &holders[&root];
+    assert_eq!(holder.pid, 200);
+    assert_eq!(holder.kind, ProcessEvidenceKind::OtherHeldPath);
+    assert!(matches!(&taints[&root], TaintCause::LiveWriter(p) if p.pid == 200 && p.kind == ProcessEvidenceKind::OtherHeldPath));
+    Ok(())
+}

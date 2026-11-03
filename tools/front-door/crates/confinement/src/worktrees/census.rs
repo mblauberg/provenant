@@ -709,7 +709,8 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
                         let holder = holders
                             .entry(root.clone())
                             .and_modify(|h| {
-                                if h.kind == ProcessEvidenceKind::OtherHeldPath
+                                if h.pid == pid
+                                    && h.kind == ProcessEvidenceKind::OtherHeldPath
                                     && kind == ProcessEvidenceKind::ExecutableImage
                                 {
                                     h.kind = ProcessEvidenceKind::ExecutableImage;
@@ -721,7 +722,7 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
                                 kind,
                             });
                         taints.insert(root.clone(), TaintCause::LiveWriter(holder.clone()));
-                        details.insert(root, format!("process {pid}: {kind} inside root"));
+                        details.insert(root, format!("process {}: {} inside root", holder.pid, holder.kind));
                     }
                 }
             }
@@ -836,7 +837,9 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
                         let holder = holders
                             .entry(root.clone())
                             .and_modify(|h| {
-                                h.kind = ProcessEvidenceKind::WorkingDirectory;
+                                if h.pid == pid {
+                                    h.kind = ProcessEvidenceKind::WorkingDirectory;
+                                }
                             })
                             .or_insert_with(|| ObservedProcess {
                                 pid,
