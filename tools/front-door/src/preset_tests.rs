@@ -4332,6 +4332,90 @@ fn preset_file_spec_falls_back_after_read_error_and_names_all_candidates() {
 }
 
 #[test]
+fn preset_file_spec_resolves_relative_writer_from_launch_and_falls_back_to_main() {
+    let temp = tempfile::tempdir().unwrap();
+    let main = temp.path().join("main");
+    let linked = temp.path().join("linked");
+    let writer = temp.path().join("writer");
+    std::fs::create_dir(&main).unwrap();
+    let git = |args: &[&str]| {
+        let output = provenant_os::fixture::git_command()
+            .current_dir(&main)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?}: {output:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+    git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "linked",
+        linked.to_str().unwrap(),
+    ]);
+    let launch = linked.join("subdir");
+    std::fs::create_dir_all(&launch).unwrap();
+    std::fs::create_dir_all(writer.join(".agent-run")).unwrap();
+    std::fs::create_dir_all(main.join(".agent-run")).unwrap();
+    std::fs::write(writer.join(".agent-run/spec.md"), "writer criteria").unwrap();
+    std::fs::write(main.join(".agent-run/spec.md"), "main criteria").unwrap();
+    git(&["add", "-f", ".agent-run/spec.md"]);
+    git(&["commit", "-q", "-m", "main spec"]);
+    let mut layers = Layers::empty();
+    layers.project_dir = Some(linked.clone());
+    layers.launch_dir = Some(launch);
+    let expand_spec = || {
+        super::preset::expand_with(
+            &layers,
+            "generator-evaluator",
+            "brief",
+            &[
+                ("worktree".into(), json!("../../writer")),
+                ("spec".into(), json!(".agent-run/spec.md")),
+            ],
+            &[],
+        )
+        .unwrap()
+    };
+    let expanded = expand_spec();
+    assert!(
+        find_prompt(&expanded.document["nodes"], "lens.correctness-spec")
+            .unwrap()
+            .contains("writer criteria")
+    );
+    std::fs::remove_file(writer.join(".agent-run/spec.md")).unwrap();
+    let expanded = expand_spec();
+    assert!(
+        find_prompt(&expanded.document["nodes"], "lens.correctness-spec")
+            .unwrap()
+            .contains("main criteria")
+    );
+    std::fs::remove_file(main.join(".agent-run/spec.md")).unwrap();
+    let missing = expand_spec();
+    let warning = missing
+        .warnings
+        .iter()
+        .find(|w| w.contains("spec file"))
+        .unwrap();
+    for candidate in [
+        linked.join("subdir/../../writer/.agent-run/spec.md"),
+        linked.join(".agent-run/spec.md"),
+        super::preset::project_worktrees(&linked)[0].join(".agent-run/spec.md"),
+    ] {
+        assert!(
+            warning.contains(&candidate.display().to_string()),
+            "{warning}"
+        );
+    }
+}
+
+#[test]
 fn file_spec_expansion_golden() {
     let mut layers = Layers::empty();
     layers.project_dir = Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));

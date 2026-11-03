@@ -27,6 +27,8 @@ pub struct Layers {
     /// final `review_shape` and `risk_tier` parameters.
     pub review: Option<ShapeSelector>,
     pub project_dir: Option<PathBuf>,
+    /// Launch directory, used to resolve relative worktree bindings.
+    pub launch_dir: Option<PathBuf>,
     pub default_worktree: Option<PathBuf>,
     used_shapes: std::cell::RefCell<BTreeSet<String>>,
     /// The role library: bundled roles, then user and repository `roles.toml`.
@@ -1340,10 +1342,18 @@ fn read_spec_context(layers: &Layers, parameters: &Value) -> Option<String> {
         .map(PathBuf::from)
         .or_else(|| layers.default_worktree.clone());
     let path = Path::new(spec);
-    let candidates = worktree
+    let launch = layers.launch_dir.as_deref().unwrap_or(&project);
+    let mut candidates: Vec<_> = worktree
         .into_iter()
-        .map(|w| project.join(w).join(path))
-        .chain(std::iter::once(project.join(path)));
+        .map(|w| launch.join(w).join(path))
+        .chain(std::iter::once(project.join(path)))
+        .collect();
+    if let Some(main) = project_worktrees(&project).first() {
+        let candidate = main.join(path);
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
     let mut errors = Vec::new();
     for candidate in candidates {
         let error = match std::fs::File::open(&candidate) {
@@ -3460,6 +3470,7 @@ pub fn run(
             None => Vec::new(),
         };
         let mut layers = configured(globals)?;
+        layers.launch_dir = Some(directory.clone());
         // Default project selection may be a subdirectory of a checkout.
         layers.project_dir = Some(
             provenant_os::git::repository_path(
