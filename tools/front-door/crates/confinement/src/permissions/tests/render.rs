@@ -131,6 +131,10 @@ fn read_only_profile_reads_verified_git_and_only_writes_project_exceptions()
         "default_toolchain = 'fixture'",
     )?;
     std::fs::write(home.join(".cargo/credentials.toml"), "fixture-secret")?;
+    // A provider may list a configuration directory without reading its
+    // children, as OpenCode does for its XDG config directory.
+    let listed = home.join(".config/fixture");
+    std::fs::create_dir_all(&listed)?;
     let subtree = |path| PathGrant {
         path,
         scope: PathScope::Subtree,
@@ -147,6 +151,10 @@ fn read_only_profile_reads_verified_git_and_only_writes_project_exceptions()
                 subtree(home.join(".rustup/toolchains")),
                 PathGrant {
                     path: home.join(".rustup/settings.toml"),
+                    scope: PathScope::Exact,
+                },
+                PathGrant {
+                    path: listed.clone(),
                     scope: PathScope::Exact,
                 },
             ],
@@ -233,6 +241,18 @@ fn read_only_profile_reads_verified_git_and_only_writes_project_exceptions()
     )));
     assert!(!source.contains("(deny file-write* (regex #"));
     assert!(source.contains(&crate::plan::read_only::exclusion_regex()));
+    assert!(source.contains(&format!("(literal \"{}\")", listed.display())));
+    assert!(!source.contains(&format!("(subpath \"{}\")", listed.display())));
+    // The listed entry is resolved without following links.
+    std::fs::rename(&listed, home.join(".config/elsewhere"))?;
+    std::os::unix::fs::symlink(home.join(".config/elsewhere"), &listed)?;
+    assert!(
+        MacOsSandboxBackend { ready: true }
+            .compile(plan.permissions(), &profile, &anchors)
+            .is_err()
+    );
+    std::fs::remove_file(&listed)?;
+    std::fs::rename(home.join(".config/elsewhere"), &listed)?;
     // A component swapped for a symlink after resolution cannot be compiled.
     std::fs::rename(root.join(".agent-run"), root.join("moved"))?;
     std::os::unix::fs::symlink(root.join("moved"), root.join(".agent-run"))?;
