@@ -165,6 +165,7 @@ pub fn reserve(
         account: stored_account,
         expected: current.cloned(),
         replacement: Some(record),
+        readiness_probe_result: None,
     })
 }
 pub fn complete(
@@ -227,6 +228,7 @@ pub fn complete(
         account: current.account.clone(),
         expected: Some(current.clone()),
         replacement: Some(next),
+        readiness_probe_result: None,
     })
 }
 /// `None` is unknown detection, never an authoritative empty account list.
@@ -293,6 +295,7 @@ pub fn plan_tick_with_settings(
                 account: record.account.clone(),
                 expected: Some(record.clone()),
                 replacement: None,
+                readiness_probe_result: None,
             });
         }
     }
@@ -873,6 +876,8 @@ mod tests {
         assert_eq!(backoff(ProbeFailure::MissingCli, 1, None), 86400);
         assert_eq!(backoff(ProbeFailure::ProbeDirectory, 1, None), 120);
         assert_eq!(backoff(ProbeFailure::Disabled, 1, None), 86400);
+        assert_eq!(backoff(ProbeFailure::Network, 1, None), 15);
+        assert_eq!(backoff(ProbeFailure::Auth, 1, None), 900);
         for failure in [
             ProbeFailure::Network,
             ProbeFailure::RateLimited,

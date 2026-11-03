@@ -99,6 +99,7 @@ pub fn record_capacity_cooldown(
         account: account.clone(),
         expected: current.cloned(),
         replacement: Some(record),
+        readiness_probe_result: None,
     }))
 }
 
@@ -393,6 +394,7 @@ pub fn record_refusal(
         account: account.clone(),
         expected: current.cloned(),
         replacement: Some(record),
+        readiness_probe_result: None,
     })
 }
 

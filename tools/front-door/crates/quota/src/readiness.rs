@@ -299,6 +299,43 @@ impl ReadinessFile {
         self.check_bound()
     }
 
+    /// Replace the account-wide probe observation after a completed attempt.
+    /// A fresh success clears the previous failure observation.
+    pub fn sync_probe_result(
+        &mut self,
+        account: &crate::AccountRecord,
+        host: &str,
+        now: i64,
+        interval_seconds: u64,
+        reason: Option<ReadinessReason>,
+    ) -> Result<(), QuotaError> {
+        self.records.retain(|record| {
+            !(record.scope.host == host
+                && record.scope.route == ACCOUNT_ROUTE
+                && record.evidence_ref.as_deref() == Some("quota-probe"))
+        });
+        if let Some(reason) = reason {
+            let interval = i64::try_from(interval_seconds).unwrap_or(i64::MAX);
+            let expires = now.saturating_add(interval.max(1));
+            self.records.push(RouteReadiness {
+                schema_version: SCHEMA_VERSION,
+                scope: ReadinessScope {
+                    host: host.into(),
+                    adapter: account.account.adapter.clone(),
+                    account_key: account.account.account_key.clone(),
+                    route: ACCOUNT_ROUTE.into(),
+                },
+                state: ReadinessState::Unavailable,
+                reason: Some(reason),
+                observed_unix_seconds: now,
+                expires_unix_seconds: expires,
+                reset_unix_seconds: None,
+                evidence_ref: Some("quota-probe".into()),
+            });
+        }
+        self.check_bound()
+    }
+
     fn check_bound(&self) -> Result<(), QuotaError> {
         if self.records.len() > MAX_READINESS_RECORDS {
             return Err(QuotaError::Invalid("readiness bounds"));
