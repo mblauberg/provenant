@@ -1694,12 +1694,26 @@ impl BinaryRunOwner<'_> {
         }
         let store = self.store(cancel)?;
         let call = self.call(cancel);
-        let tail = store
+        let service = provenant_run::Service::new(&store);
+        let mut tail = store
             .policy_tail(target.attempt, &call)
-            .map_err(run_error)?;
-        provenant_run::Service::new(&store)
-            .status(tail.attempt_id, &call)
-            .map_err(run_error)
+            .map_err(run_error)?
+            .attempt_id;
+        // Settlement terminates an attempt and queues its successor in one
+        // transaction, so it can land between the tail lookup and the status
+        // read. Accept a status only while its attempt is still the tail; a
+        // terminal predecessor must never stand in for a live successor.
+        loop {
+            let record = service.status(tail, &call).map_err(run_error)?;
+            let current = store
+                .policy_tail(target.attempt, &call)
+                .map_err(run_error)?
+                .attempt_id;
+            if current == tail {
+                return Ok(record);
+            }
+            tail = current;
+        }
     }
 
     /// Peers expose the host-authored chain through list and status.
