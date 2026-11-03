@@ -1337,6 +1337,22 @@ fn darwin_executable_path(pid: i32) -> Option<std::path::PathBuf> {
     darwin_executable_lookup(pid).ok()
 }
 
+pub(crate) fn executable_path(pid: i32) -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        darwin_executable_path(pid)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 /// proc_pidpath reports ENOENT for a process whose executable file has been
 /// deleted (macOS has no "(deleted)" marker). Like a deleted Linux image it
 /// belongs to no existing root and is judged by cwd and descriptors.
