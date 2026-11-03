@@ -1123,8 +1123,8 @@ impl WriterAdvisoryOverride {
     }
 }
 
-/// Only the bundled asset constructs a catalogue. A caller cannot deserialize or
-/// change family/effort rows while retaining an existing revision.
+/// Production catalogues come from the bundled asset. A caller cannot deserialize
+/// or change family/effort rows while retaining an existing revision.
 #[derive(Debug, Clone, Serialize)]
 pub struct Catalogue {
     pub(crate) schema_version: u64,
@@ -1145,10 +1145,58 @@ struct CatalogueAsset {
     #[serde(default)]
     pacing: BTreeMap<String, PacingPolicy>,
 }
+// The fixture feature provides an isolated catalogue for integration tests. It
+// never changes the process-wide bundled catalogue or production behaviour.
+#[cfg(feature = "fixture")]
+thread_local! {
+    static FIXTURE_CATALOGUE: std::cell::RefCell<Option<Catalogue>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Restores the calling thread's catalogue after an integration fixture.
+#[cfg(feature = "fixture")]
+pub struct FixtureFamilyOverride {
+    previous: Option<Catalogue>,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[cfg(feature = "fixture")]
+impl Drop for FixtureFamilyOverride {
+    fn drop(&mut self) {
+        FIXTURE_CATALOGUE.with(|slot| *slot.borrow_mut() = self.previous.take());
+    }
+}
+
+/// Override existing model families only for the current fixture thread.
+#[cfg(feature = "fixture")]
+pub fn fixture_family_override(
+    families: &[(&str, &str)],
+) -> Result<FixtureFamilyOverride, RoutingError> {
+    let mut catalogue = Catalogue::bundled()?;
+    catalogue.revision.push_str("-fixture");
+    for (model, family) in families {
+        let id = ModelId::parse(model)?;
+        let entry = catalogue
+            .models
+            .iter_mut()
+            .find(|entry| entry.model == id)
+            .ok_or(RoutingError::Catalogue)?;
+        entry.family = Some((*family).to_owned());
+    }
+    let previous = FIXTURE_CATALOGUE.with(|slot| slot.borrow_mut().replace(catalogue));
+    Ok(FixtureFamilyOverride {
+        previous,
+        _thread: std::marker::PhantomData,
+    })
+}
+
 impl Catalogue {
     /// The bundled catalogue, parsed and validated once per process. Routing
     /// resolves it for every lane, so rebuilding it dominated a multi-lane run.
     pub fn bundled() -> Result<Self, RoutingError> {
+        #[cfg(feature = "fixture")]
+        if let Some(catalogue) = FIXTURE_CATALOGUE.with(|slot| slot.borrow().clone()) {
+            return Ok(catalogue);
+        }
         static BUNDLED: std::sync::OnceLock<Catalogue> = std::sync::OnceLock::new();
         if let Some(catalogue) = BUNDLED.get() {
             return Ok(catalogue.clone());

@@ -409,6 +409,10 @@ mod peer_tests {
                 assert_eq!(crate::worktree_tests::support::code(&output), 0);
             }
             let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+            // A nested-lane fixture may only look up an existing binding.
+            if std::env::var_os("PROVENANT_PANEL_ROUTING_FIXTURE").is_some() {
+                provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(rig.project.join(".git"))?)?;
+            }
             let identity = Context::open(roots.clone(), &rig.home, &rig.project)?.identity;
             let clock = SystemClock;
             let cancel = CancelToken::new();
@@ -1441,6 +1445,163 @@ mod peer_tests {
     }
 
     #[test]
+    fn production_owner_panel_retries_across_families_and_synthesises()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // A nested lane submits without starting a real provider. Keep the
+        // environment change inside a child so other tests cannot see it.
+        const CHILD: &str = "PROVENANT_PANEL_ROUTING_FIXTURE";
+        if std::env::var_os(CHILD).is_none() {
+            use provenant_os::exec::{ExecOptions, Executor, Termination};
+            let argv = vec![std::env::current_exe()?.into_os_string(), "--exact".into(),
+                "fabric::peer_tests::production_owner_panel_retries_across_families_and_synthesises".into(), "--nocapture".into()];
+            let removed = [provenant_core::RUN_STATE_DIRECTORY_ENV, provenant_run::LANE_DEPTH_ENV,
+                provenant_run::PARENT_ATTEMPT_ENV, CHILD];
+            let mut env: Vec<_> = std::env::vars_os().filter(|(key, _)| !removed.iter().any(|name| key == name)).collect();
+            env.push((CHILD.into(), "1".into()));
+            env.push((provenant_run::LANE_DEPTH_ENV.into(), "1".into()));
+            env.push((provenant_run::PARENT_ATTEMPT_ENV.into(), AttemptId::from_bytes([99; 16]).to_string().into()));
+            let cwd = std::env::current_dir()?;
+            let mut options = ExecOptions::new(&argv, &cwd, std::time::Duration::from_secs(120));
+            options.env = Some(&env);
+            let output = SystemExecutor::new(1)?.execute(options)?;
+            assert_eq!(output.termination, Termination::Exit(0), "{}\n{}",
+                String::from_utf8_lossy(&output.stdout.bytes), String::from_utf8_lossy(&output.stderr.bytes));
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::{self, AttemptOwner};
+        use provenant_records::run::RequestedRoute;
+        use provenant_routing::{AccessContext, Catalogue, ExclusionRule, ExclusionSelector,
+            ExclusionSource, Fallback, ModelId, RouteChoice, RouteName, RouteRequest};
+        // Bundled production data has only two known families. Give two
+        // existing catalogue models fixture families, without changing the
+        // production catalogue, so writer exclusion and sibling diversity can
+        // both be observed with a fallback route available.
+        let _families = provenant_routing::fixture_family_override(&[
+            ("agy/gemini-3.8-flash", "google"),
+            ("opencode/opencode-go/glm-5.3-flash", "zhipu"),
+        ])?;
+        let fixture = SettlementFixture::resumed().map_err(|error| format!("fixture: {error}"))?;
+        use std::io::Write as _;
+        writeln!(std::fs::OpenOptions::new().append(true).open(fixture.roots.state.as_path().join("config.toml"))?,
+            "\n[domains.routing.pools]\npanel-fixture = [{{model='codex/gpt-6-luna'}},{{model='claude/claude-haiku-5-5'}},{{model='agy/gemini-3.8-flash'}},{{model='opencode/opencode-go/glm-5.3-flash'}}]")?;
+        let factory = Factory {
+            context: Context::open(fixture.roots.clone(), &fixture.rig.home, &fixture.rig.project)?,
+            project_attribution: false, clock: SystemClock, backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?, home: fixture.rig.home.clone(),
+            cwd: fixture.rig.project.clone(), assets: fixture.rig.project.clone(),
+            host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 120)?;
+        let call = provenant_run::Request { clock: &factory.clock, cancel: &cancel };
+        let head = fixture.store.record(fixture.settled.attempt_id, &call)?.head.ok_or("head")?;
+        let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":2, "graph_id":"production-panel", "nodes":[
+                {"id":"writer", "prompt":"write", "access":"worktree_write", "worktree":fixture.worktree,
+                    "route":{"adapter":"codex","model":"gpt-6-luna"}},
+                {"id":"one", "prompt":"review", "access":"read_only", "depends_on":["writer"],
+                    "source":{"type":"node","node":"writer"}, "distinct_from":"writer", "distinct_strength":"require",
+                    "family_group":"panel", "routes":[{"alias":"panel-fixture"},{"alias":"panel-fixture"}]},
+                {"id":"two", "prompt":"review", "access":"read_only", "depends_on":["writer","one"],
+                    "source":{"type":"node","node":"writer"}, "distinct_from":"writer", "distinct_strength":"require",
+                    "family_group":"panel", "routes":[{"alias":"panel-fixture"},{"alias":"panel-fixture"}]},
+                {"id":"three", "prompt":"review", "access":"read_only", "depends_on":["writer","two"],
+                    "source":{"type":"node","node":"writer"}, "distinct_from":"writer", "distinct_strength":"require",
+                    "family_group":"panel", "routes":[{"alias":"panel-fixture"},{"alias":"panel-fixture"}]},
+                {"id":"synthesis", "prompt":"synthesise", "access":"read_only", "depends_on":["one","two","three"],
+                    "route":{"adapter":"codex","model":"gpt-6-luna"}}
+            ]
+        }))?;
+        let mut journal = graph::FileJournal::open(&fixture.roots.state, fixture.settled.project_id,
+            &document.graph_id, budget, &cancel, &factory.clock).map_err(|error| format!("open journal: {error}"))?;
+        journal.bind(graph::GraphExecution { review_base: None, extra: Default::default(),
+            integration_base: None, directory: fixture.rig.project.clone(), document: document.clone() })?;
+        let mut owner = BoundGraphOwner { factory: &factory, integration_base: None, integration_branch: None,
+            network: None, exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false };
+        let catalogue = Catalogue::bundled()?;
+        let models = ["codex/gpt-6-luna", "claude/claude-haiku-5-5", "agy/gemini-3.8-flash", "opencode/opencode-go/glm-5.3-flash"];
+        let now = factory.clock.wall_now()?.unix_seconds();
+        let availability: Vec<_> = models.iter().map(|id| {
+            let (adapter, model) = id.split_once('/').ok_or("model")?;
+            Ok::<_, Box<dyn std::error::Error>>(provenant_providers::AvailabilityRecord {
+                schema_version: 1, adapter: adapter.into(), executable: "/fixture/provider".into(),
+                version: "fixture".into(), fixture_ref: "fixture".into(), catalogue_revision: catalogue.revision().into(),
+                account_key: Some(format!("{adapter}-account")), observed_models: vec![model.into()],
+                observed_unix_seconds: now, expires_unix_seconds: now + 300, last_update: None,
+            })
+        }).collect::<Result<_, _>>()?;
+        let access: Vec<_> = ["codex", "claude", "agy", "opencode"].iter().map(|adapter|
+            AccessContext { adapter, disclosure_ref: "fixture", confinement_ref: "fixture" }).collect();
+        let mut picked: std::collections::BTreeMap<String, Vec<(String, String)>> = Default::default();
+        let mut published = std::collections::BTreeSet::new();
+        let run = loop {
+            let run = graph::advance_with_budget(&document, &mut owner, &mut journal, &Default::default(), &Default::default()).map_err(|error| format!("advance: {error}"))?;
+            if run.checkpoint.successful() { break run; }
+            let mut progressed = false;
+            for node in &run.checkpoint.nodes {
+                let Some(attempt) = node.attempts.last() else { continue };
+                let Some(reference) = attempt.attempt_ref.as_ref() else { continue };
+                if !published.insert(reference.clone()) { continue; }
+                let (_, id) = reference.split_once('/').ok_or("attempt reference")?;
+                let record = fixture.store.record(id.parse()?, &call)?;
+                let operation = fixture.store.operation(&graph_operation("graph-attempt-operation", &attempt.key)?, &call)?.ok_or("operation")?;
+                let request = fixture.store.request(operation.run_id, &call)?;
+                let task = request.tasks.first().ok_or("task")?;
+                let model = match &task.route {
+                    RequestedRoute::Model { model, .. } => model.clone(),
+                    RequestedRoute::Review { name, effort, excluded_families, preferred_families, require_distinct, distinct_families, .. } => {
+                        assert!(*require_distinct && *distinct_families);
+                        assert_eq!(excluded_families, &["openai"]);
+                        let peers: Vec<_> = ["one", "two", "three"].into_iter().take_while(|id| *id != node.id)
+                            .flat_map(|id| picked.get(id).into_iter().flatten().map(|(family, _)| family.clone()))
+                            .fold(Vec::new(), |mut out, family| { if !out.contains(&family) { out.push(family); } out });
+                        assert_eq!(preferred_families, &peers);
+                        let prior: Vec<String> = task.profile.overrides.iter().find_map(|value|
+                            value.strip_prefix("routing.graph_exclude=")).map(serde_json::from_str).transpose()?.unwrap_or_default();
+                        let rules: Vec<_> = prior.iter().map(|model| Ok(ExclusionRule {
+                            selector: ExclusionSelector::Model(ModelId::parse(model)?), source: ExclusionSource::Graph,
+                        })).collect::<Result<_, provenant_routing::RoutingError>>()?;
+                        let route = RouteRequest { intent: provenant_routing::RouteIntent { workload: provenant_routing::Workload::Review, ..Default::default() }, choice: RouteChoice::NamedRoute(RouteName::parse(name)?),
+                            effort: effort.clone(), confidential: false, fallback: Fallback::None };
+                        let selected = provenant_cli::route::fixture_resolve_dispatch(&route, &fixture.roots, None,
+                            (operation.operation_id.as_str(), 0), &availability, &access, "fixture",
+                            Some((excluded_families, *require_distinct, preferred_families)), &rules)?;
+                        let model = format!("{}/{}", selected.adapter, selected.model);
+                        let family = provenant_cli::run::model_family(&model).ok_or("model family")?;
+                        assert_ne!(family, "openai");
+                        assert!(!prior.contains(&model));
+                        let eligible_unused = models.iter().find_map(|id| {
+                            let family = provenant_cli::run::model_family(id)?;
+                            (family != "openai" && !peers.contains(&family) && !prior.iter().any(|p| p == id)).then_some(family)
+                        });
+                        if eligible_unused.is_some() { assert!(!peers.contains(&family), "sibling preference ignored"); }
+                        picked.entry(node.id.clone()).or_default().push((family, model.clone()));
+                        model
+                    }
+                    route => return Err(format!("unexpected panel route: {route:?}").into()),
+                };
+                let outcome = if node.id == "one" && attempt.key.route_index == 0 { Outcome::QuotaLimited } else { Outcome::Succeeded };
+                // The provider boundary is synthetic; model selection above is
+                // the production dispatch resolver using the actual request.
+                publish_routed(&fixture.rig, &fixture.store, &record, head, outcome, &model, &call)?;
+                let applied = fixture.store.record(record.attempt_id, &call)?.applied_route.ok_or("applied route")?;
+                assert_eq!(applied.model.as_deref(), Some(model.as_str()));
+                if let Some(family) = provenant_cli::run::model_family(&model) {
+                    assert_eq!(owner.attempt_families(std::slice::from_ref(reference))?, [family]);
+                }
+                progressed = true;
+            }
+            assert!(progressed, "panel did not advance: {:#?}", run.checkpoint.nodes);
+        };
+        assert_eq!(run.checkpoint.nodes[1].attempts.len(), 2);
+        assert_eq!(run.checkpoint.nodes[1].attempts[0].outcome, Some(graph::AttemptOutcome::UsageLimited));
+        assert_ne!(picked["one"][0].0, picked["one"][1].0);
+        assert_eq!(picked.len(), 3);
+        assert_eq!(run.checkpoint.nodes[4].state, graph::NodeState::Succeeded);
+        Ok(())
+    }
+
+    #[test]
     fn graph_owner_submits_sibling_families_as_a_preference_and_alias_retry_exclusions()
     -> Result<(), Box<dyn std::error::Error>> {
         if host_test(
@@ -1547,11 +1708,15 @@ mod peer_tests {
         // A required writer separation with no writer family to enforce still
         // leaves sibling families as a preference.
         assert_eq!(submit("four", 0, &peers[..1], &[], true, &[])?.0, review(&["openai"]));
-        assert_eq!(submit("five", 0, &peers[1..], &[], true, &[writer])?.0, RequestedRoute::Review {
+        let accepted = submit("five", 0, &peers[1..], &[], true, std::slice::from_ref(&writer))?.0;
+        assert_eq!(accepted, RequestedRoute::Review {
             extra: Default::default(), name: "junior".into(), effort: None,
             excluded_families: vec!["openai".into()], distinct_families: true,
             preferred_families: vec!["anthropic".into()], require_distinct: true,
         });
+        // An accepted operation without a checkpoint reference retains its
+        // original route even if the newly observed peers have changed.
+        assert_eq!(submit("five", 0, &[], &[], true, &[writer])?.0, accepted);
         // An alias retry excludes the model ids the runtime resolved.
         let (route, knobs) = submit("two", 1, &peers[..1], &["codex/first".to_owned()], false, &[])?;
         assert_eq!(route, review(&["openai"]));

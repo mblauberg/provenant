@@ -1165,7 +1165,7 @@ pub(crate) fn resolve_dispatch(
         Err(_) => false,
     };
     let selected = if exhausted && !preferred_excluded.is_empty() {
-        resolve_dispatch_excluding(
+        let relaxed = resolve_dispatch_excluding(
             request,
             roots,
             account,
@@ -1175,7 +1175,15 @@ pub(crate) fn resolve_dispatch(
             host,
             &excluded,
             rules,
-        )
+        );
+        match (relaxed, selected) {
+            // Keep the preferred-stage route when relaxing would only trade one
+            // unavailable route for another.
+            (Ok(route), Ok(spent)) if !matches!(route.readiness, RouteReadiness::Ready { .. }) => {
+                Ok(spent)
+            }
+            (relaxed, _) => relaxed,
+        }
     } else {
         selected
     };
@@ -1214,6 +1222,34 @@ pub(crate) fn resolve_dispatch(
     } else {
         selected.map_err(DispatchError::from)
     }
+}
+
+/// Resolve a dispatch using synthetic availability and catalogue fixtures.
+#[cfg(feature = "fixture")]
+#[allow(clippy::too_many_arguments)]
+pub fn fixture_resolve_dispatch(
+    request: &provenant_routing::RouteRequest,
+    roots: &Roots,
+    account: Option<&str>,
+    seed: (&str, u64),
+    availability: &[AvailabilityRecord],
+    access: &[AccessContext<'_>],
+    host: &str,
+    excluded_families: Option<(&[String], bool, &[String])>,
+    rules: &[provenant_routing::ExclusionRule],
+) -> Result<provenant_records::ResolvedRoute, String> {
+    resolve_dispatch(
+        request,
+        roots,
+        account,
+        seed,
+        availability,
+        access,
+        host,
+        excluded_families,
+        rules,
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn review_family_excluded(family: Option<&str>, families: &[String]) -> bool {
@@ -4076,6 +4112,33 @@ mod route_tests {
             fixture.resolve(true),
             Err(super::DispatchError::FamilySeparation(..))
         ));
+        // Relaxing the sibling preference must not exchange one refused
+        // route for another unavailable route.
+        crate::quota::persist_provider_refusal(
+            fixture.roots.state.as_path(),
+            &provenant_records::run::RouteRecord {
+                provider: Some("codex".into()),
+                model: Some("codex/gpt-6-luna".into()),
+                account_key: Some("codex-account".into()),
+                account_label: Some("codex-account".into()),
+                ..Default::default()
+            },
+            None,
+            fixture.now,
+            Some(fixture.now + 3_600),
+        )?;
+        let selected = super::resolve_dispatch(
+            &fixture.request,
+            &fixture.roots,
+            None,
+            ("fixture", 0),
+            &fixture.availability,
+            &fixture.access,
+            "fixture",
+            Some((&[], false, &["openai".into()])),
+            &[],
+        )?;
+        assert_eq!(selected.adapter, "claude");
         Ok(())
     }
 
