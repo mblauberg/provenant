@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Domains {
+    #[serde(default)]
+    pub wait: crate::wait::Settings,
     pub accounts: provenant_providers::accounts::Settings,
     pub quota: provenant_quota::Settings,
     pub routing: provenant_routing::RoutingConfig,
@@ -13,7 +15,8 @@ pub struct Domains {
     #[serde(default)]
     pub run: provenant_confinement::run_config::RunConfig,
 }
-static ENTRIES: [DomainSection; 6] = [
+static ENTRIES: [DomainSection; 7] = [
+    crate::wait::SECTION,
     provenant_providers::accounts::SECTION,
     provenant_quota::SECTION,
     provenant_routing::SECTION,
@@ -96,6 +99,21 @@ mod tests {
         assert_eq!(
             (history.kind, history.min, history.max, &history.default),
             ("int", Some(65_536), Some(134_217_728), &json!(4_194_304))
+        );
+        let wait = field("domains.wait.timeout_seconds");
+        assert_eq!(
+            (wait.min, wait.max, &wait.default),
+            (Some(1), Some(14400), &json!(300))
+        );
+        let max_targets = field("domains.wait.max_targets");
+        assert_eq!(
+            (max_targets.min, max_targets.max, &max_targets.default),
+            (Some(1), Some(1024), &json!(64))
+        );
+        let pr_read = field("domains.wait.pr_read_timeout_seconds");
+        assert_eq!(
+            (pr_read.min, pr_read.max, &pr_read.default),
+            (Some(1), Some(600), &json!(60))
         );
         let markers = field("domains.run.push_conflict_markers");
         assert_eq!((markers.kind, &markers.default), ("bool", &json!(true)));

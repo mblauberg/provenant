@@ -77,9 +77,20 @@ fn execute_with(
     watch: bool,
     stdin: Option<&[u8]>,
 ) -> Result<ExecOutcome> {
+    execute_cancellable(project, argv, timeout, watch, stdin, None)
+}
+fn execute_cancellable(
+    project: &Path,
+    argv: &[&str],
+    timeout: Duration,
+    watch: bool,
+    stdin: Option<&[u8]>,
+    cancel: Option<&provenant_core::CancelToken>,
+) -> Result<ExecOutcome> {
     let argv: Vec<OsString> = argv.iter().map(OsString::from).collect();
     let mut options = ExecOptions::new(&argv, project, timeout);
     options.stdin = stdin;
+    options.cancel = cancel;
     options.stdout = StreamPolicy::Capture { limit: 1024 * 1024 };
     options.stderr = StreamPolicy::Capture { limit: 64 * 1024 };
     // Discard repeated progress so long CI runs cannot fill capture.
