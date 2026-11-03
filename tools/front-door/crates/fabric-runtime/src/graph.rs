@@ -2195,7 +2195,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 && !outputs
                                     .warnings
                                     .iter()
-                                    .any(|warning| warning == FINDINGS_INVALID)
+                                    .any(|warning| warning.starts_with(FINDINGS_INVALID))
                                 && disposition_error.is_none();
                             let outcome = if outcome == AttemptOutcome::DeclaredStop
                                 && review_result
