@@ -3799,6 +3799,23 @@ impl BoundGraphOwner<'_> {
         Ok(models)
     }
 
+    fn route_exclusions(
+        &self,
+        route: &provenant_fabric_runtime::graph::GraphRoute,
+        prior_attempts: &[String],
+        accepted: bool,
+    ) -> Result<Vec<String>, FacadeError> {
+        let mut exclude = self.exclude.clone();
+        if !accepted && route.alias.is_some() {
+            for model in self.prior_models(prior_attempts)? {
+                if !exclude.contains(&model) {
+                    exclude.push(model);
+                }
+            }
+        }
+        Ok(exclude)
+    }
+
     /// Model families that served the writer attempts a reviewer must differ from.
     fn writer_families(&self, attempts: &[String]) -> Result<Vec<String>, FacadeError> {
         if attempts.is_empty() {
@@ -4368,14 +4385,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             } else {
                 None
             };
-            let mut exclude = self.exclude.clone();
-            if !accepted && route.alias.is_some() {
-                for model in self.prior_models(node.prior_attempts)? {
-                    if !exclude.contains(&model) {
-                        exclude.push(model);
-                    }
-                }
-            }
+            let exclude = self.route_exclusions(route, node.prior_attempts, accepted)?;
             let input = SubmitInput::Submit {
                 extra: Default::default(),
                 operation_id,

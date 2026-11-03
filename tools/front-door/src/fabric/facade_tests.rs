@@ -1383,7 +1383,35 @@ mod peer_tests {
             tick: false,
         };
         let prior = format!("{}/{}", factory.context.identity.host, upstream.attempt_id);
-        assert_eq!(owner.prior_models(&[prior.clone(), prior])?, ["codex/gpt-6-luna"]);
+        assert_eq!(owner.prior_models(&[prior.clone(), prior.clone()])?, ["codex/gpt-6-luna"]);
+        // Resolve the same alias again with the host's per-node exclusion list.
+        use provenant_routing::{AccessContext, Catalogue, ExclusionRule, ExclusionSelector, ExclusionSource, Fallback, ModelId, RouteChoice, RouteName, RouteRequest, RoutingConfig, RoutingContext};
+        let catalogue = Catalogue::bundled()?;
+        let members: Vec<provenant_routing::RoutePoolMember> = serde_json::from_value(serde_json::json!([
+            {"model":"codex/gpt-6-luna", "weight":1}, {"model":"claude/claude-haiku-5-5", "weight":1}
+        ]))?;
+        let availability: Vec<_> = members.iter().map(|member| provenant_providers::AvailabilityRecord {
+            schema_version: 1, adapter: member.model.adapter().into(), executable: "/fixture/provider".into(),
+            version: "fixture".into(), fixture_ref: "fixture".into(), catalogue_revision: catalogue.revision().into(),
+            account_key: Some(format!("{}-account", member.model.adapter())), observed_models: vec![member.model.model().into()],
+            observed_unix_seconds: 80, expires_unix_seconds: 120, last_update: None,
+        }).collect();
+        let access: Vec<_> = members.iter().map(|member| AccessContext { adapter: member.model.adapter(), disclosure_ref: "fixture", confinement_ref: "fixture" }).collect();
+        let mut config = RoutingConfig::default();
+        config.pools.insert("retry-trial".into(), members.clone());
+        let context = RoutingContext { policy_account_hint: None, catalogue: &catalogue, config: &config,
+            registry: provenant_providers::REGISTRY, availability: &availability, quota: &[], capacity_cooldowns: &[], accounts: &[], quota_policies: &[], access: &access,
+            now: provenant_core::WallTime::from_micros(100_000_000)?, host: "fixture" };
+        let request = RouteRequest { intent: Default::default(), choice: RouteChoice::NamedRoute(RouteName::parse("retry-trial")?), effort: None, confidential: false, fallback: Fallback::None };
+        let seed = (0..256).find(|seed| provenant_routing::resolve_with_seed(&request, &context, "retry", *seed)
+            .is_ok_and(|route| format!("{}/{}", route.adapter, route.model) == "codex/gpt-6-luna")).ok_or("no first draw")?;
+        let alias: graph::GraphRoute = serde_json::from_value(serde_json::json!({"alias":"retry-trial"}))?;
+        let exclusions = owner.route_exclusions(&alias, std::slice::from_ref(&prior), false)?;
+        assert_eq!(exclusions, ["codex/gpt-6-luna"]);
+        assert!(owner.route_exclusions(&alias, &[prior], true)?.is_empty());
+        let rules = [ExclusionRule { selector: ExclusionSelector::Model(ModelId::parse(&exclusions[0])?), source: ExclusionSource::Graph }];
+        let second = provenant_routing::resolve_for_account_with_seed_excluding(&request, &context, None, "retry", seed, &[], &rules)?;
+        assert_eq!(format!("{}/{}", second.adapter, second.model), "claude/claude-haiku-5-5");
         let run = graph::advance_with_budget(
             &document,
             &mut owner,
