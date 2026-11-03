@@ -1783,6 +1783,237 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
 }
 
 #[test]
+fn writer_continuation_preserves_uncommitted_edits_and_reports_them_in_brief()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::{UtilityBudget, UtilityRuntime, worktrees};
+    use provenant_core::{
+        AttemptId, CancelToken, Clock, Digest, OperationId, RunId, TaskId, WaitBudget,
+    };
+    use provenant_os::clock::SystemClock;
+    use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+    use std::{
+        os::unix::fs::{DirBuilderExt, PermissionsExt},
+        time::Duration,
+    };
+
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let home = base.join("home");
+    let state = base.join("state");
+    let project = base.join("repo");
+    let assets = base.join("release");
+    let git_home = base.join("git-home");
+    for path in [&home, &state, &project, &assets, &git_home] {
+        std::fs::DirBuilder::new().mode(0o700).create(path)?;
+    }
+    let executor = SystemExecutor::new(1)?;
+    let git = init_fixture_repository(&executor, &project, &git_home)?;
+    let roots = provenant_core::RootInputs {
+        state_dir: Some(state.clone()),
+        ..provenant_core::RootInputs::new(home.clone(), project.clone())
+    }
+    .resolve(&provenant_os::fs::SystemPathResolver)?;
+    let utility = UtilityRuntime::new(&git, &git_home)?;
+    let cancel = CancelToken::new();
+    let budget = UtilityBudget::bounded(Duration::from_secs(5))?;
+    let repo = utility.open_repo(&executor, &project, budget, &cancel)?;
+    let binding = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(repo.common_git_dir())?,
+    )?;
+    let worktree_state = state
+        .join("worktrees")
+        .join(binding.project_id().to_string());
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&worktree_state)?;
+    let project_state = provenant_os::fs::Directory::open_anchor(&worktree_state)?;
+    let clock = SystemClock::new();
+    worktrees::create(
+        &worktrees::WorktreeContext {
+            home: &home,
+            repo: &repo,
+            binding: &binding,
+            project_state: &project_state,
+            executor: &executor,
+            utility: &utility,
+            workers: &worktrees::SystemWorkerObserver,
+            clock: &clock,
+            utility_budget: budget,
+            mutation_budget: budget,
+            lock_budget: WaitBudget::cli(clock.mono_now(), 5)?,
+        },
+        worktrees::WorktreeCreate {
+            branch: "writer".into(),
+            base: Some("HEAD".into()),
+        },
+        &cancel,
+    )?;
+    let executable = assets.join("cursor/bin/agent");
+    std::fs::create_dir_all(executable.parent().ok_or("provider bin")?)?;
+    std::fs::write(&executable, b"#!/bin/sh\nprintf 'fixture-cursor 1.0\\n'\n")?;
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+
+    let worktree = project.join(".worktrees/writer");
+    let source_head = run::resolve_git_base(&git, &project, "HEAD")?;
+
+    let run_git = |args: &[&str], cwd: &std::path::Path| {
+        let argv: Vec<_> = std::iter::once(git.as_os_str().to_owned())
+            .chain(args.iter().map(Into::into))
+            .collect();
+        let env = [
+            ("HOME".into(), git_home.as_os_str().to_owned()),
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ];
+        let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(5));
+        options.env = Some(&env);
+        executor.execute(options)
+    };
+    std::fs::write(worktree.join("committed.txt"), "predecessor work")?;
+    run_git(&["add", "committed.txt"], &worktree)?;
+    let commit_res = run_git(
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-m",
+            "predecessor commit",
+        ],
+        &worktree,
+    )?;
+    assert_eq!(commit_res.termination, Termination::Exit(0));
+    let predecessor_head = run::resolve_git_base(&git, &worktree, "HEAD")?;
+    assert_ne!(source_head, predecessor_head);
+
+    std::fs::write(
+        worktree.join("uncommitted_leftover.txt"),
+        "uncommitted dirty edit",
+    )?;
+
+    let run_id = RunId::from_bytes([20; 16]);
+    let attempt_id = AttemptId::from_bytes([21; 16]);
+    let attempt = state.join(format!("runs/{run_id}/attempts/{attempt_id}"));
+    let paths = run::LaunchPaths {
+        attempt_id,
+        operation_id: OperationId::parse("writer-continuation-dirty")?,
+        task_index: 0,
+        lane_depth: 1,
+        run_id,
+        deadline_unix_ms: u64::MAX,
+        scratch: attempt.join("scratch"),
+        provider_state: attempt.join("provider-state"),
+        temporary: attempt.join("tmp"),
+        temporary_alias: None,
+    };
+    for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)?;
+    }
+
+    let prompt = "Fix remaining issues in continuation";
+    let task = run::TaskRequest {
+        context: None,
+        extra: Default::default(),
+        build_heavy: false,
+        title: None,
+        base: Some(source_head.clone()),
+        head: Some(predecessor_head.clone()),
+        source_head: Some(source_head.clone()),
+        base_ref: None,
+        task_id: TaskId::from_bytes([22; 16]),
+        profile: Default::default(),
+        prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
+        route: run::RequestedRoute::Model {
+            extra: Default::default(),
+            provider: "cursor".into(),
+            model: "cursor/gpt-5.3-codex-low".into(),
+            effort: None,
+        },
+        account: None,
+        fallback: vec![],
+        authority_digest: Digest::from_bytes([23; 32]),
+        writer: Some(run::WriterRequest {
+            extra: Default::default(),
+            project: project.clone(),
+            worktree: worktree.clone(),
+        }),
+        deliver: None,
+        provider_timeout_seconds: 20,
+        delivery_id: None,
+        access: Default::default(),
+    };
+
+    let registry = Registry {
+        roots: Some(&roots),
+        home: Some(&home),
+        assets: Some(&assets),
+        cwd: Some(&project),
+        state_root: Some(&state),
+        project_id: Some(binding.project_id()),
+        cancel: Some(&cancel),
+        host: None,
+    };
+
+    let launch = prepare_with(
+        &registry,
+        &task,
+        prompt,
+        &paths,
+        None,
+        |_| Ok(executable.clone()),
+        None,
+    )?;
+
+    // A dirty worktree continues without being reset
+    assert!(worktree.join("uncommitted_leftover.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("uncommitted_leftover.txt"))?,
+        "uncommitted dirty edit"
+    );
+
+    // Spilled prompt contains uncommitted predecessor edits
+    let spilled = attempt.join("prompt.md");
+    let prompt_content = if spilled.exists() {
+        std::fs::read_to_string(&spilled)?
+    } else {
+        launch.argv.last().unwrap().to_str().unwrap().to_string()
+    };
+    assert!(
+        prompt_content
+            .contains("Uncommitted predecessor edits in worktree:\n- uncommitted_leftover.txt"),
+        "brief must report uncommitted predecessor edits: {prompt_content}"
+    );
+
+    // If continuation check refuses, uncommitted edits are named in the refusal message
+    let mut bad_task = task.clone();
+    bad_task.source_head = Some("0".repeat(40));
+    let error = prepare_with(
+        &registry,
+        &bad_task,
+        prompt,
+        &paths,
+        None,
+        |_| Ok(executable.clone()),
+        None,
+    )
+    .err()
+    .ok_or("mismatched continuation should refuse")?;
+    let error_text = error.to_string();
+    assert!(
+        error_text.contains("uncommitted predecessor edits: uncommitted_leftover.txt"),
+        "refusal must list uncommitted predecessor edits: {error_text}"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::permissions::{NetworkAccess, PlanPermissions};

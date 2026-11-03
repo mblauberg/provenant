@@ -390,15 +390,43 @@ pub(super) fn prepare_candidates(
             let source = source_head
                 .parse()
                 .map_err(|_| "invalid pinned writer source")?;
-            writer
-                .require_continuation_source(&git, source, predecessor)
-                .map_err(|error| error.to_string())?;
+            if let Err(error) = writer.require_continuation_source(&git, source, predecessor) {
+                let uncommitted = writer.uncommitted_paths(&git).unwrap_or_default();
+                if uncommitted.is_empty() {
+                    return Err(error.to_string().into());
+                } else {
+                    return Err(format!(
+                        "{error}; uncommitted predecessor edits: {}",
+                        uncommitted.join(", ")
+                    )
+                    .into());
+                }
+            }
         } else if let Some(head) = task.head.as_deref() {
             writer
                 .require_source(head.parse().map_err(|_| "invalid pinned writer source")?)
                 .map_err(|error| error.to_string())?;
         }
     }
+    let prompt_text_buf;
+    let prompt_text = if let (Some(writer), Some(_)) = (&writer, &task.source_head) {
+        let paths = writer.uncommitted_paths(&git).unwrap_or_default();
+        if !paths.is_empty() {
+            prompt_text_buf = format!(
+                "{prompt_text}\n\nUncommitted predecessor edits in worktree:\n{}",
+                paths
+                    .iter()
+                    .map(|p| format!("- {p}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+            &prompt_text_buf
+        } else {
+            prompt_text
+        }
+    } else {
+        prompt_text
+    };
     // Publishing is opt-in (`lanes.publish`): it hands the lane the GitHub
     // credential. Missing gh tools or configuration leave the
     // writer able to do local work without publishing credential access.

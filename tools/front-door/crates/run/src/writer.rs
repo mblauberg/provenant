@@ -199,6 +199,34 @@ impl WriterLaunch {
         }
         Ok(())
     }
+
+    /// List paths with uncommitted predecessor edits in the writer worktree.
+    pub fn uncommitted_paths(&self, git: &Path) -> Result<Vec<String>> {
+        let repo = self.worktree.repo();
+        let output = crate::objects::command(
+            git,
+            repo.private_git_dir(),
+            repo.root_path(),
+            &[
+                "--work-tree".into(),
+                repo.root_path().into(),
+                "status".into(),
+                "--porcelain".into(),
+            ],
+            None,
+        )?;
+        let text = String::from_utf8_lossy(&output);
+        let mut paths = Vec::new();
+        for line in text.lines() {
+            if line.len() > 3 {
+                let path = line[3..].trim().trim_matches('"');
+                if !path.is_empty() {
+                    paths.push(path.to_owned());
+                }
+            }
+        }
+        Ok(paths)
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1103,6 +1131,16 @@ mod cargo_setup_tests {
         let base_message = base_mismatch.to_string();
         assert!(base_message.contains(&source_oid.to_string()));
         assert!(base_message.contains(&child_oid.to_string()));
+        assert_eq!(
+            writer.uncommitted_paths(utility.git_program_path())?,
+            Vec::<String>::new()
+        );
+        std::fs::write(lane.join("uncommitted.txt"), "leftover edit")?;
+        assert_eq!(
+            writer.uncommitted_paths(utility.git_program_path())?,
+            vec!["uncommitted.txt".to_string()]
+        );
+        std::fs::remove_file(lane.join("uncommitted.txt"))?;
         writer.base = source_oid;
         let second_tree = provenant_confinement::verify_worktree(&repo, &second_lane)?;
         let mut second = WriterLaunch {
