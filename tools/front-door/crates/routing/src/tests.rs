@@ -4977,7 +4977,7 @@ fn readiness_states_and_expiry_decide_selection() -> Result<(), Box<dyn std::err
             RouteExclusionReason::MissingExecutable,
         ),
         (Why::AccountMismatch, RouteExclusionReason::AccountMismatch),
-        (Why::Exhausted, RouteExclusionReason::Exhausted),
+        (Why::Exhausted, RouteExclusionReason::ProviderRefused),
         (Why::ProviderRefusal, RouteExclusionReason::ProviderRefused),
         (
             Why::CommandFailure,
