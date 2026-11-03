@@ -2800,14 +2800,14 @@ fn concurrency_knob_controls_admission_unless_dispatch_is_explicit() -> Result {
     std::fs::create_dir_all(&rig.state)?;
     std::fs::write(
         rig.state.join("config.toml"),
-        "schema_version=1\nprofile='rigorous'\n[gc]\nfree_floor='1B'\n[knobs]\n'lanes.max_concurrency'=3\n",
+        "schema_version=1\nprofile='economy'\n[gc]\nfree_floor='1B'\n[knobs]\n'lanes.max_concurrency'=3\n",
     )?;
     for (operation, explicit, knobs, expected) in [
         ("config-capacity", None, vec![], 3),
         (
             "dispatch-capacity",
             None,
-            vec!["lanes.max_concurrency=2", "review.extra_reviewers=2"],
+            vec!["lanes.max_concurrency=2", "lanes.silence_seconds=120"],
             2,
         ),
         (
@@ -2831,11 +2831,11 @@ fn concurrency_knob_controls_admission_unless_dispatch_is_explicit() -> Result {
         assert_eq!(serde_json::to_value(&task.profile)?, attempt["profile"]);
         assert_eq!(task.profile.overrides, knobs);
         assert_eq!(
-            task.profile.knobs["review.extra_reviewers"],
+            task.profile.knobs["lanes.silence_seconds"],
             if operation == "dispatch-capacity" {
-                2
+                120
             } else {
-                1
+                1800
             }
         );
     }

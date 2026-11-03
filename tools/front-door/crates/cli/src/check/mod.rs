@@ -463,6 +463,11 @@ pub fn config_page(
                 location.line,
                 "configuration violates the typed TOML schema".to_owned(),
             ),
+            ConfigError::MisplacedDomainKnob { name, location } => (
+                "config.schema",
+                location.line,
+                format!("set {name} outside [knobs]"),
+            ),
             ConfigError::Domain {
                 location, source, ..
             } => {

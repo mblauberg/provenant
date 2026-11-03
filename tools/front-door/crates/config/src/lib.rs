@@ -15,8 +15,9 @@ mod history;
 mod migrate;
 mod schema;
 pub use gc::{
-    ForeignWorktrees, GcSettings, LaneBuildSettings, MemoryPressureThreshold, ProjectGcSettings,
-    STORE_BUSY_TIMEOUT_CEILING_MS, StoreSettings, deserialize_auto, parse_cache_size,
+    ForeignWorktrees, GcSettings, LaneBuildSettings, MemoryPressureThreshold,
+    PROJECT_WRITER_LANES_CEILING, ProjectGcSettings, STORE_BUSY_TIMEOUT_CEILING_MS, StoreSettings,
+    WRITER_LANES_CEILING, deserialize_auto, parse_cache_size,
 };
 pub use github_policy::GithubPolicy;
 mod harness;
@@ -92,7 +93,7 @@ pub enum ConfigError {
     InvalidUtf8 { path: PathBuf },
     #[error("invalid TOML at {location}")]
     Syntax { location: Location },
-    #[error("{rule} at {location}")]
+    #[error("{rule} at {location}; next: provenant config check")]
     Schema {
         location: Location,
         rule: &'static str,
@@ -103,7 +104,7 @@ pub enum ConfigError {
     UnsupportedVersion { location: Location },
     #[error("config exceeds collection bounds at {location}")]
     CollectionLimit { location: Location },
-    #[error("invalid domain configuration at {location}: {source}{rejected}{}", retired_repair(.source))]
+    #[error("invalid domain configuration at {location}: {source}{rejected}{}; next: provenant config check", retired_repair(.source))]
     Domain {
         location: Location,
         #[source]
@@ -121,6 +122,8 @@ pub enum ConfigError {
     Locked,
     #[error("unknown knob {name}; close matches: {}", .close.join(", "))]
     UnknownKnob { name: String, close: Vec<String> },
+    #[error("unknown knob {name}; set {name} outside [knobs]; next: provenant config check")]
+    MisplacedDomainKnob { name: String, location: Location },
     #[error("invalid value for knob {name} ({rule})")]
     KnobValue { name: String, rule: &'static str },
     #[error("knob registry or config text is malformed")]

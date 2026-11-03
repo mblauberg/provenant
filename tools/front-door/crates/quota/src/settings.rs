@@ -86,11 +86,13 @@ pub fn valid_icon(icon: &str) -> bool {
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)))
 }
+pub const DEFAULT_WALL_BUDGET_SECONDS: u64 = 55;
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             max_parallel: 3,
-            wall_budget_seconds: 55,
+            wall_budget_seconds: DEFAULT_WALL_BUDGET_SECONDS,
             polling_intervals: BTreeMap::new(),
             display: Display::default(),
             calibration: BTreeMap::new(),

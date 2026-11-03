@@ -8,14 +8,12 @@ pub enum Profile {
     #[default]
     Balanced,
     Economy,
-    Rigorous,
 }
 impl Profile {
     pub(crate) fn from_name(name: &str) -> Option<Self> {
         match name {
             "balanced" => Some(Self::Balanced),
             "economy" => Some(Self::Economy),
-            "rigorous" => Some(Self::Rigorous),
             _ => None,
         }
     }
@@ -24,7 +22,6 @@ impl Profile {
         match self {
             Self::Balanced => "balanced",
             Self::Economy => "economy",
-            Self::Rigorous => "rigorous",
         }
     }
 }

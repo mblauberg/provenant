@@ -1967,3 +1967,20 @@ fn plan_flag_decides_and_explains_the_planner_front_end() -> Result<(), Box<dyn 
     assert!(plain.contains("plan: auto -> "), "{plain}");
     Ok(())
 }
+
+#[test]
+fn default_config_expands_big_batch() -> Result<(), Box<dyn std::error::Error>> {
+    let text = explain_text(
+        "big-batch",
+        &[
+            "--plan",
+            "off",
+            "--set",
+            "parameters.batch_worktree=\"{project}\"",
+            "--set",
+            "parameters.worktrees=[\"{project}\"]",
+        ],
+    )?;
+    assert!(text.contains("big-batch"), "{text}");
+    Ok(())
+}

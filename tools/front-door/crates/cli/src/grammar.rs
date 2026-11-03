@@ -522,7 +522,7 @@ pub enum Config {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Set `profile` (balanced, economy or rigorous) or a registry knob such
+    /// Set `profile` (balanced or economy) or a registry knob such
     /// as `lanes.max_concurrency`.
     Set {
         /// Setting name, such as `profile`

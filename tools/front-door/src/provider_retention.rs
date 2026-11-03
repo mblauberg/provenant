@@ -26,14 +26,19 @@ pub(crate) fn collect_with_logs(
     collect_retention(roots, home, assets, days, logs_days, dry_run, false, None)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn collect_pressure(
     projects: Option<&[ProjectId]>,
     roots: &Roots,
     home: &Path,
     assets: &Path,
+    days: u64,
+    logs_days: u64,
     dry_run: bool,
 ) -> ProviderStateGc {
-    collect_retention(roots, home, assets, 7, 30, dry_run, true, projects)
+    collect_retention(
+        roots, home, assets, days, logs_days, dry_run, true, projects,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -123,12 +128,21 @@ fn collect_store(
                 match projects {
                     Some(projects) => store.gc_temporary_for_projects(
                         &directory,
+                        days,
+                        logs_days,
                         clock.wall_now()?,
                         dry_run,
                         projects,
                         &call,
                     )?,
-                    None => store.gc_temporary(&directory, clock.wall_now()?, dry_run, &call)?,
+                    None => store.gc_temporary(
+                        &directory,
+                        days,
+                        logs_days,
+                        clock.wall_now()?,
+                        dry_run,
+                        &call,
+                    )?,
                 }
             } else {
                 store.gc_provider_state_with_logs(
@@ -229,6 +243,33 @@ pub(crate) fn provider_state_gc_sweeps_children_and_refuses_replaced_roots()
                 "provider_timeout_seconds":20, "delivery_id":null }]
         }))?,
     }, &call)?;
+    let reaction = provenant_run::Reaction {
+        schema_version: 1,
+        attempt,
+        run,
+        project: context.project_id,
+        sender: context.actor_id,
+        notice: "fixture".into(),
+        writer: false,
+        finished_micros: clock.wall_now()?.as_micros() - 10 * 86_400 * 1_000_000,
+        pr_ids: Vec::new(),
+        issue_ids: Vec::new(),
+        graph: false,
+        resolved: false,
+        chair: None,
+        session: None,
+        graph_done: true,
+        notice_done: true,
+        log_done: true,
+    };
+    store.owe_reaction(&reaction, &call)?;
+    store.save_reaction(&reaction, &call)?;
+    let kept = collect_pressure(None, &roots, &home, &assets, 7, 20, false);
+    assert!(kept.errors.is_empty(), "{:?}", kept.errors);
+    assert!(store.reaction(attempt, &call)?.is_some());
+    let expired = collect_pressure(None, &roots, &home, &assets, 7, 5, false);
+    assert!(expired.errors.is_empty(), "{:?}", expired.errors);
+    assert!(store.reaction(attempt, &call)?.is_none());
     let candidate = child_path.join(format!(
         "runs/{run}/attempts/{attempt}/provider-state/candidate-0"
     ));

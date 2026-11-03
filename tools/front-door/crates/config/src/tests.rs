@@ -372,7 +372,6 @@ fn sample_defaults(profile: Profile) -> &'static str {
     match profile {
         Profile::Balanced => "limit = 8\nenabled = true\n",
         Profile::Economy => "limit = 4\nenabled = true\n",
-        Profile::Rigorous => "limit = 8\nenabled = false\n",
     }
 }
 const SAMPLE: DomainSection = DomainSection::new::<Sample>("sample", sample_defaults);
@@ -414,11 +413,7 @@ fn partial_inline_domain_override_keeps_selected_preset_defaults_and_leaf_origin
 
 #[test]
 fn each_profile_selects_the_domain_owned_asset() {
-    for (profile, limit, enabled) in [
-        ("balanced", 8, true),
-        ("economy", 4, true),
-        ("rigorous", 8, false),
-    ] {
+    for (profile, limit, enabled) in [("balanced", 8, true), ("economy", 4, true)] {
         let text = format!("schema_version=1\nprofile='{profile}'");
         let snapshot = load_with_domains(&roots(), Some(text.as_bytes()), &DOMAINS).unwrap();
         assert_eq!(snapshot.domains.sample, Sample { limit, enabled });
@@ -439,6 +434,7 @@ fn config_warns_on_optional_input_but_refuses_syntax_and_versions_without_echoin
         ("schema_version=true", "type"),
         ("schema_version=1.0", "type"),
         ("schema_version=1\nprofile='private-sentinel'", "range"),
+        ("schema_version=1\nprofile='rigorous'", "range"),
         ("schema_version=1\nprofile=4", "type"),
         (
             "schema_version=1\nprofile='economy'\nprofile='balanced'",
@@ -453,6 +449,10 @@ fn config_warns_on_optional_input_but_refuses_syntax_and_versions_without_echoin
         ("schema_version=1\n[domains.unknown]", "unknown_key"),
         ("schema_version=1\n[task_classes]", "unknown_key"),
         ("schema_version=1\n[knobs]\n'effort.shift'=1", "unknown_key"),
+        (
+            "schema_version=1\n[knobs]\n'review.polish'='always'",
+            "unknown_key",
+        ),
         ("schema_version=18446744073709551616", "syntax"),
         ("schema_version=1\n[domains]\nx=inf", "unknown_key"),
         ("schema_version=1\n[domains]\nx=2026-01-01", "unknown_key"),
@@ -463,7 +463,9 @@ fn config_warns_on_optional_input_but_refuses_syntax_and_versions_without_echoin
         ),
     ] {
         let loaded = load(&roots(), Some(text.as_bytes()));
-        if matches!(refusal, "missing" | "version" | "syntax")
+        if (text.contains("profile='") && refusal == "range")
+            || (text.contains("[knobs]") && refusal == "unknown_key")
+            || matches!(refusal, "missing" | "version" | "syntax")
             || (text.starts_with("schema_version=")
                 && !text.starts_with("schema_version=1\n")
                 && refusal == "type")
@@ -681,20 +683,20 @@ fn show_and_check_are_read_only_and_preserve_hard_schema_errors() {
     std::fs::create_dir(fixture.roots.state.as_path()).unwrap();
     assert_eq!(read(&fixture.roots).unwrap().profile, Profile::Balanced);
     assert!(!fixture.config().exists());
-    let original = b"# User-owned; preserve exactly.\nschema_version=1\nprofile='rigorous'\n";
+    let original = b"# User-owned; preserve exactly.\nschema_version=1\nprofile='economy'\n";
     std::fs::write(fixture.config(), original).unwrap();
     assert_eq!(
         inspect_config(&fixture.roots, &domains::NO_DOMAINS)
             .unwrap()
             .check
             .profile,
-        Profile::Rigorous
+        Profile::Economy
     );
     assert_eq!(
         config_show(&fixture.roots, &domains::NO_DOMAINS)
             .unwrap()
             .profile,
-        Profile::Rigorous
+        Profile::Economy
     );
     assert_eq!(std::fs::read(fixture.config()).unwrap(), original);
     assert_eq!(
@@ -1459,31 +1461,24 @@ fn set_knob_is_written_atomically_and_shown_with_its_source() {
     let path = dir.path().join("config.toml");
     std::fs::write(
         &path,
-        "schema_version = 1 # keep\nknobs = { \"review.extra_reviewers\" = 1 } # inline\n",
+        "schema_version = 1 # keep\nknobs = { \"lanes.max_concurrency\" = 1 } # inline\n",
     )
     .unwrap();
     let shown = knob_edit(
         &roots,
         KnobEdit::Set {
-            name: "review.extra_reviewers",
+            name: "lanes.max_concurrency",
             value: "2",
         },
     )
     .unwrap();
     assert!(std::fs::read_to_string(&path).unwrap().contains("# inline"));
-    assert_eq!(shown.knobs["review.extra_reviewers"].value, 2);
+    assert_eq!(shown.knobs["lanes.max_concurrency"].value, 2);
     assert_eq!(read(&roots).unwrap(), shown);
-    knob_edit(&roots, KnobEdit::Unset("review.extra_reviewers")).unwrap();
+    knob_edit(&roots, KnobEdit::Unset("lanes.max_concurrency")).unwrap();
     assert_eq!(
-        read(&roots).unwrap().knobs["review.extra_reviewers"].source,
+        read(&roots).unwrap().knobs["lanes.max_concurrency"].source,
         KnobSource::Default
-    );
-    knob_edit(&roots, KnobEdit::Profile("rigorous")).unwrap();
-    let rigorous = read(&roots).unwrap();
-    let knob = &rigorous.knobs["review.extra_reviewers"];
-    assert_eq!(
-        (knob.value.as_i64(), knob.source),
-        (Some(1), KnobSource::Profile)
     );
     knob_edit(&roots, KnobEdit::Profile("economy")).unwrap();
     knob_edit(
@@ -1503,7 +1498,6 @@ fn set_knob_is_written_atomically_and_shown_with_its_source() {
         (knob.value.as_i64(), knob.source),
         (Some(2), KnobSource::Override)
     );
-    assert_eq!(shown.knobs["review.polish"].source, KnobSource::Profile);
     knob_edit(&roots, KnobEdit::Unset("lanes.max_concurrency")).unwrap();
     let shown = read(&roots).unwrap();
     assert_eq!(
@@ -1605,7 +1599,7 @@ fn set_rejects_out_of_range_values_and_unknown_knobs() {
     }
     // The advisory knobs moved into the orchestrate skill's prose.
     assert!(matches!(
-        set("effort.shift", "1"),
+        set("review.polish", "always"),
         Err(ConfigError::UnknownKnob { .. })
     ));
     assert!(!dir.path().join("config.toml").exists());
@@ -1617,12 +1611,12 @@ fn knob_edit_preserves_unknown_keys_while_applying_the_edit() {
     let path = dir.path().join("config.toml");
     let invalid = "schema_version = 1\nunknown = 1\n";
     std::fs::write(&path, invalid).unwrap();
-    let config = knob_edit(&roots, KnobEdit::Profile("rigorous")).unwrap();
-    assert_eq!(config.profile, Profile::Rigorous);
+    let config = knob_edit(&roots, KnobEdit::Profile("economy")).unwrap();
+    assert_eq!(config.profile, Profile::Economy);
     assert_warning(&config, "unknown_key");
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains("unknown = 1"));
-    assert_eq!(read(&roots).unwrap().profile, Profile::Rigorous);
+    assert_eq!(read(&roots).unwrap().profile, Profile::Economy);
 }
 #[test]
 fn set_creates_a_missing_private_state_directory() {
@@ -1630,12 +1624,12 @@ fn set_creates_a_missing_private_state_directory() {
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("state");
     let roots = state_roots(&state);
-    knob_edit(&roots, KnobEdit::Profile("rigorous")).unwrap();
+    knob_edit(&roots, KnobEdit::Profile("economy")).unwrap();
     assert_eq!(
         std::fs::metadata(&state).unwrap().permissions().mode() & 0o777,
         0o700
     );
-    assert_eq!(read(&roots).unwrap().profile, Profile::Rigorous);
+    assert_eq!(read(&roots).unwrap().profile, Profile::Economy);
 }
 
 #[test]
@@ -1777,4 +1771,55 @@ fn owner_marked_tables_replace_defaults_and_allow_empty_overrides() {
             load_with_domains(&roots(), Some(text.as_bytes()), &REPLACE_TABLE_DOMAINS).unwrap();
         assert_eq!(config.domains.routing.rules, expected);
     }
+}
+
+#[test]
+fn registered_knobs_have_production_readers() {
+    fn sources(path: &std::path::Path, output: &mut String) {
+        for entry in std::fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                sources(&path, output);
+            } else if path.extension().is_some_and(|ext| ext == "rs")
+                && path.file_name().unwrap() != "knobs.rs"
+                && (!path.file_name().unwrap().to_string_lossy().contains("test")
+                    || path.file_name().unwrap() == "census_tests.rs")
+            {
+                output.push_str(&std::fs::read_to_string(path).unwrap());
+                output.push('\n');
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut source = String::new();
+    sources(&root.join("src"), &mut source);
+    for entry in std::fs::read_dir(root.join("crates")).unwrap() {
+        let src = entry.unwrap().path().join("src");
+        if src.is_dir() {
+            sources(&src, &mut source);
+        }
+    }
+    let has_reader = |name: &str| {
+        if name == "confinement.census_host_list_complete" {
+            source.contains(".census_host_list_complete()")
+        } else {
+            source.contains(&format!("\"{name}\""))
+        }
+    };
+    assert!(!has_reader(&["unread", "knob"].join(".")));
+    for name in crate::knobs::registry().unwrap().knobs.keys() {
+        assert!(has_reader(name), "registered knob {name} has no reader");
+    }
+}
+
+#[test]
+fn misplaced_domain_knob_points_to_its_domain_key() {
+    let error = load(
+        &roots(),
+        Some(&b"schema_version=1\n[knobs]\n'domains.routing.capacity_cooldown_seconds'=30"[..]),
+    )
+    .unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("domains.routing.capacity_cooldown_seconds"));
+    assert!(message.contains("outside [knobs]"));
 }

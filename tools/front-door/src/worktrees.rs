@@ -1146,6 +1146,8 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             &roots,
             &home,
             &assets,
+            config.retention.provider_state_days,
+            config.retention.logs_days,
             command.dry_run,
         )
     } else {

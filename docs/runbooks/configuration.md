@@ -9,16 +9,16 @@ Use `--state-dir /absolute/path` to select an isolated root. Change the
 profile or a knob with `provenant config set profile economy` or
 `provenant config set lanes.max_concurrency 4`; `config unset KNOB` reverts it.
 
-Profiles are `balanced`, `economy` and `rigorous`. Override a knob for one run
+Profiles are `balanced` and `economy`. Override a knob for one run
 with `provenant run --knob NAME=VALUE` (the terminal path; agents use
 `fabric_run` (`op: submit`)'s `knobs`).
 
 ## Precedence and stamps
 
-The header requires `schema_version = 1`. `profile` selects `balanced`,
-`economy` or `rigorous`, and a missing file selects defaults. Unknown keys
-and invalid optional values warn and use defaults; invalid optional rows are
-isolated so valid rows still apply. Effective values retain their source in
+The header requires `schema_version = 1`. `profile` selects `balanced` or
+`economy`, and a missing file selects defaults. Unknown knobs are refused;
+other unknown keys and invalid optional values warn and use defaults; invalid
+optional rows are isolated so valid rows still apply. Effective values retain their source in
 `config show`. Each warning names the offending key, so an invalid value
 inside a table drops only that value and its valid siblings still apply. A
 model policy rule or pacing override whose selector or schedule is malformed

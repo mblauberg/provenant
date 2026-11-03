@@ -616,7 +616,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 ```json
 {
-  "description": "Set `profile` (balanced, economy or rigorous) or a registry knob such as `lanes.max_concurrency`",
+  "description": "Set `profile` (balanced or economy) or a registry knob such as `lanes.max_concurrency`",
   "groups": [
     {
       "arguments": [
