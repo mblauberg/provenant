@@ -365,10 +365,14 @@ targeted checks needed to prove their change locally:
 
 A project can change this policy without editing role prompts by setting
 `local_check_policy = "..."` at the top level of `.provenant/roles.toml`, or via
-the `local_check_policy` preset parameter (for example,
-`--set parameters.local_check_policy="..."`). The effective source (`bundled`,
-`.provenant/roles.toml` or the parameter origin) and rendered role prompts are
-visible in `provenant preset explain <preset>`.
+a non-empty `local_check_policy` preset parameter (for example,
+`--set 'parameters.local_check_policy="..."'`). The effective source (`bundled`,
+`roles.toml` layer or the parameter origin) and rendered role prompts are
+visible in `provenant preset explain <preset>` under `local_check_policy` and
+`prompts`. An empty parameter uses the layered roles-library policy: bundled,
+then user, then project. Like `risk_tier` and `subject`, the policy is an ambient
+parameter inherited by nested presets that declare it, including big-batch,
+generator-evaluator, deliver, scope-then-run and review-council.
 
 ## Review and source subjects
 
