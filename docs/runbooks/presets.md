@@ -385,8 +385,13 @@ correctness against the spec and simplicity by default. Every lens prompt
 carries the same context. The reviewer has read access to the whole
 repository, treats the diff stat and slices as navigation aids rather than the
 scope, reads callers, existing utilities and architecture, and reviews against
-the `spec` (an issue number or file) and the `base` (the diff reference). The
-subject node states both. Prompts live in
+the `spec` (an issue number or file) and the `base` (the diff reference). File
+specs resolve first in the bound writer worktree, then in the project root. Each
+review brief includes the file path, SHA-256 of the full file and an excerpt
+(default 16,384 bytes); set `parameters.spec_max_bytes` from 1 to 65,536 to
+change the cap. Missing or unreadable files produce a named warning in explain
+and at launch. Issue numbers are passed through unchanged. The subject node
+states both. Prompts live in
 `skills/code-review/references/lenses/`. After the lenses a verifier tries to
 falsify every finding (`verifiers = 0` skips it), and the synthesis gives each
 finding one disposition: accepted, rejected or deferred, with a reason. The

@@ -2189,3 +2189,62 @@ fn preset_run_followed_by_provenant_run_on_same_bound_worktree_succeeds()
 
     Ok(())
 }
+
+#[test]
+fn preset_missing_spec_warns_in_explain_and_launch() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    std::fs::create_dir(temp.path().join("home"))?;
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "initial",
+        ],
+    ] {
+        assert!(
+            provenant_os::fixture::git_command()
+                .current_dir(&project)
+                .args(args)
+                .status()?
+                .success()
+        );
+    }
+    let prompt = temp.path().join("brief");
+    std::fs::write(&prompt, "review")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for explain in [true, false] {
+        let mut command = fixture_cli();
+        command
+            .current_dir(&project)
+            .env("HOME", temp.path().join("home"))
+            .env("PATH", "/usr/bin:/bin")
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .arg("--state-dir")
+            .arg(temp.path().join("state"))
+            .args(["run", "--preset", "review-council", "--prompt-file"])
+            .arg(&prompt)
+            .args(["--set", "parameters.spec='.agent-run/missing.md'"]);
+        if explain {
+            command.arg("--explain");
+        } else {
+            command.args(["--wait", "1s"]);
+        }
+        let output = command.output()?;
+        let stderr = String::from_utf8(output.stderr)?;
+        assert!(
+            stderr.contains("spec file '.agent-run/missing.md' could not be read"),
+            "explain={explain}: {stderr} / {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+    Ok(())
+}

@@ -3982,6 +3982,22 @@ mod planner_front_end {
     }
 
     #[test]
+    fn planned_review_lenses_receive_file_spec() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("spec.md"), "planned acceptance criteria").unwrap();
+        let mut layers = layers(PlanMode::On, None);
+        layers.project_dir = Some(temp.path().to_path_buf());
+        let expansion = run(
+            &layers,
+            "review-council",
+            "brief",
+            vec![("spec".into(), json!("spec.md"))],
+        );
+        let brief = find_prompt(&expansion.document["nodes"], "lens.correctness-spec").unwrap();
+        assert!(brief.contains("planned acceptance criteria"), "{brief}");
+    }
+
+    #[test]
     fn planned_research_and_review_match_their_golden_graphs() {
         let council = vec![("worktree".to_owned(), json!("/repo/lane"))];
         let roots = vec![("read_roots".to_owned(), json!(["/repo/extra"]))];
@@ -4158,4 +4174,132 @@ fn an_unknown_size_override_is_refused() {
     )
     .unwrap_err();
     assert!(error.contains("unknown review size"), "{error}");
+}
+
+#[test]
+fn preset_file_spec_reaches_review_nodes_and_warns_when_missing() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let writer = temp.path().join("writer");
+    std::fs::create_dir_all(project.join(".agent-run")).unwrap();
+    std::fs::create_dir_all(writer.join(".agent-run")).unwrap();
+    std::fs::write(project.join(".agent-run/spec.md"), "wrong project spec").unwrap();
+    std::fs::write(
+        writer.join(".agent-run/spec.md"),
+        "writer acceptance criteria",
+    )
+    .unwrap();
+    let mut layers = Layers::empty();
+    layers.project_dir = Some(project.clone());
+    for preset in ["generator-evaluator", "review-council"] {
+        let expanded = super::preset::expand_with(
+            &layers,
+            preset,
+            "brief",
+            &[
+                ("worktree".into(), json!(writer)),
+                ("spec".into(), json!(".agent-run/spec.md")),
+                ("spec_max_bytes".into(), json!(16)),
+            ],
+            &[],
+        )
+        .unwrap();
+        let document: provenant_fabric_runtime::graph::GraphDocument =
+            serde_json::from_value(expanded.document.clone()).unwrap();
+        let _ = document;
+        for role in if preset == "generator-evaluator" {
+            vec![
+                "lens.correctness-spec",
+                "lens.simplicity",
+                "review.evaluator",
+            ]
+        } else {
+            vec![
+                "plan.review",
+                "lens.correctness-spec",
+                "review.verify",
+                "review.synthesis",
+            ]
+        } {
+            let brief = find_prompt(&expanded.document["nodes"], role).unwrap();
+            assert!(brief.contains("writer acceptanc"), "{role}: {brief}");
+            assert!(
+                brief.contains("Spec file: .agent-run/spec.md (sha256:"),
+                "{role}"
+            );
+            assert!(
+                brief.contains("2e4b7d401613f23b5002dfe69d8e2b02606c5982fc2a53941d2ea8b0aa05e4d0")
+            );
+            assert!(!brief.contains("wrong project spec"));
+        }
+        let missing = super::preset::expand_with(
+            &layers,
+            preset,
+            "brief",
+            &[
+                ("worktree".into(), json!(writer)),
+                ("spec".into(), json!(".agent-run/missing.md")),
+            ],
+            &[],
+        )
+        .unwrap();
+        assert!(
+            missing
+                .warnings
+                .iter()
+                .any(|w| w.contains("spec file '.agent-run/missing.md'"))
+        );
+        assert_eq!(
+            missing.document["provenance"]["warnings"],
+            json!(missing.warnings)
+        );
+        let issue = expand(
+            &layers,
+            preset,
+            "brief",
+            &["parameters.spec='#2785'".into()],
+        )
+        .unwrap();
+        assert!(!issue.warnings.iter().any(|w| w.contains("spec file")));
+    }
+    std::fs::remove_file(writer.join(".agent-run/spec.md")).unwrap();
+    let fallback = super::preset::expand_with(
+        &layers,
+        "generator-evaluator",
+        "brief",
+        &[
+            ("worktree".into(), json!(writer)),
+            ("spec".into(), json!(".agent-run/spec.md")),
+        ],
+        &[],
+    )
+    .unwrap();
+    assert!(
+        find_prompt(&fallback.document["nodes"], "lens.correctness-spec")
+            .unwrap()
+            .contains("wrong project spec")
+    );
+}
+
+#[test]
+fn file_spec_expansion_golden() {
+    let mut layers = Layers::empty();
+    layers.project_dir = Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    let expanded = expand(
+        &layers,
+        "generator-evaluator",
+        "brief",
+        &["parameters.spec='assets/presets/fixtures/review-spec.md'".into()],
+    )
+    .unwrap();
+    let mut actual = serde_json::to_string_pretty(&expanded.document).unwrap();
+    actual.push('\n');
+    let path = layers
+        .project_dir
+        .unwrap()
+        .join("assets/presets/fixtures/generator-evaluator-file-spec.expansion.json");
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        std::fs::write(&path, &actual).unwrap();
+    }
+    assert_eq!(actual, std::fs::read_to_string(path).unwrap_or_default());
 }
