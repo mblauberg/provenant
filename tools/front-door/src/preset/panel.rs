@@ -505,18 +505,16 @@ impl StageBuilder<'_> {
         // Static and deferred review stages alike record the requested base.
         if self.layers.review.is_some()
             && matches!(entries, [entry] if super::list_is_lenses(entry.get("for_each")))
-        {
-            if let Some(base) = self
+            && let Some(base) = self
                 .parameters
                 .get("base")
                 .and_then(Value::as_str)
                 .filter(|base| !base.is_empty())
-            {
-                self.layers
-                    .review_bases
-                    .borrow_mut()
-                    .insert(base.to_owned());
-            }
+        {
+            self.layers
+                .review_bases
+                .borrow_mut()
+                .insert(base.to_owned());
         }
         if !self.review_is_deferred(entries, object, nodes) {
             return Ok(None);

@@ -1610,16 +1610,15 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     let mut current = node;
                     // A resolved review lens is pinned to a commit, so its writer
                     // is found through the deferred node it was expanded from.
-                    if matches!(node.source, Some(SourceBinding::Commit { .. })) {
-                        if let Some(origin) = checkpoint
+                    if matches!(node.source, Some(SourceBinding::Commit { .. }))
+                        && let Some(origin) = checkpoint
                             .expansions
                             .iter()
                             .filter(|expansion| expansion.review.is_some())
                             .find(|expansion| expansion.nodes.iter().any(|n| n.id == node.id))
                             .and_then(|expansion| positions.get(&expansion.source))
-                        {
-                            current = &plan.nodes[*origin];
-                        }
+                    {
+                        current = &plan.nodes[*origin];
                     }
                     while let Some(
                         binding @ (SourceBinding::Node { node: source }
