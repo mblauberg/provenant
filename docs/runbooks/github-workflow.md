@@ -100,7 +100,8 @@ handled.
 2. Link a pull request with `Closes #N` only when merge leaves no user or
    external-action gate. Otherwise use `References #N` and keep the issue open.
 3. Set `In review` while exact-head checks and independent review run. A new
-   commit invalidates that exact-head evidence and it must be rerun.
+   head needs CI; apply the review ladder head-move rules, with A and B in
+   shadow until enforced and current exact-head landing gates retained.
    At acceptance, the reviewer checks spec drift and records any mismatch for
    resolution; this judgement is advisory, not an automatic gate.
 4. If machine gates pass but a user gate remains, set `Awaiting user`.
@@ -242,8 +243,7 @@ Merge authority is repo-based. Review pressure follows the
 recorded-blocker fallback when cross-family review is unavailable. This
 repository is a personal harness, not production: by user directive, repository auto-merge is enabled
 and agents merge directly. An agent merges a pull request once it has passed
-its tier's review pressure (routine: chair plus objective checks; substantial+
-uses the canonical ladder on the exact head) and
+its tier's planned independent review coverage and
 `ci-status` is green on the exact head, without waiting for the user. `gh pr
 merge --auto` may be queued once those gates are met.
 
@@ -382,8 +382,9 @@ For status-check rollup handling and false-green traps, follow the
 [shell-pitfalls runbook](shell-pitfalls.md#shell-pitfalls).
 
 The user review/merge gate applies only when the agent is stuck: split review
-verdicts it cannot settle with primary-source evidence, an exhausted repair
-budget, or a decision outside its granted authority. Standing user gates are:
+verdicts it cannot settle with primary-source evidence, or a decision outside
+its granted authority. An exhausted repair budget triggers the ladder's
+principal scoping, not an owner wait within approved scope. Standing user gates are:
 forced branch deletion, deletion of a branch that is not merged, history
 rewrites, credential or connector setup, pushes to shared branches outside
 authorised merges, and risk-tier downgrades. Deleting a *merged* branch's own
@@ -394,9 +395,8 @@ The live `Protect main` ruleset sets `strict_required_status_checks_policy: fals
 so branch protection does not require the head to be up to date with `main`.
 `ci-status` gates the exact head only. Concurrent pull requests that touch the
 same files should still land as a serialised merge train: merge one, update the
-next onto the new `main`, rerun the exact-head checks and independent review (an
-update-merge is a new commit and invalidates prior exact-head evidence), then
-merge it.
+next onto the new `main`, rerun exact-head checks and apply the ladder
+head-move rules, keeping A and B in shadow until enforced, then merge it.
 
 ### Rust build cache
 
@@ -439,21 +439,10 @@ the matrix and which single axis changed the outcome.
 
 ### Dependabot patch-only auto-merge
 
-One standing exception to tier review pressure:
-[`dependabot-automerge.yml`](../../.github/workflows/dependabot-automerge.yml)
-(issue #155) queues `gh pr merge --auto` unattended for Dependabot updates
-when all of the following hold:
-
-- the PR author is `dependabot[bot]` and the head branch lives in this
-  repository (not a fork);
-- `dependabot/fetch-metadata` reports the update type as
-  `version-update:semver-patch` (minor and major updates wait for maintainer
-  review); and
-- Dependabot is configured for GitHub Actions and the Rust workspace's Cargo
-  dependencies; the former npm package exclusions do not apply.
-
-The queued merge still lands only after `ci-status` reports green; that gate is
-the whole review pressure for these PRs.
+The existing [`dependabot-automerge.yml`](../../.github/workflows/dependabot-automerge.yml)
+can queue eligible patch updates with `ci-status` as its only gate. This runtime
+exception does not establish the review ladder's coverage. Supply the required
+review before landing; the workflow needs a follow-up change to enforce it.
 
 ### After merge
 

@@ -51,9 +51,9 @@ already-approved non-software outcome through to acceptance. Then follow the
 chain.
 
 **Routine fast path.** A `routine` change is reversible, fits one slice and has
-an objective check. It needs no run record, separate scope pass or sub-agent
-unless fanning out saves attention: act, run the check and review your own
-result once. Escalate to the full chain when the work needs new authority,
+an objective check. It needs no run record or separate scope pass: act, run
+the check and obtain the independent review required by the ladder. Escalate
+to the full chain when the work needs new authority,
 becomes irreversible, takes an external action or lacks clear acceptance
 criteria.
 
@@ -134,42 +134,69 @@ found.
 
 ## Review ladder
 
-The tier sets the minimum review count; change size and kind set lens
-coverage. Use a scaled panel by default, and give integration-branch heads
-the full mixed panel, including refactor and cleanup, reliability and flexibility.
+Use `review-council --plan on` by default. The planner reads the pinned diff,
+acceptance criteria, dependency boundaries, reversibility and oracle strength;
+the plan records the panel, reviewer count, lenses, scope, route tiers, budget
+and rationale. The chair checks it against these floors and supplies missing
+coverage. Unknown paths are at least
+`substantial`; uncertainty about a protected surface is `crucial`.
 
-| Tier | Minimum review |
+| Floor | Required coverage |
 |---|---|
-| `routine` | The chair plus objective checks. |
-| `substantial` | Adds one independent review from a provider family other than the author's when one is available, otherwise a same-family review through a different lens. |
-| `crucial` | At least two independent reviews in total, with distinct lenses, from two families other than the author's when two are available. With only one other family available, one review comes from it and the other is a same-family review through a different lens. |
-| `terminal` | Adds an adversarial lens to `crucial` coverage, and the user's explicit acceptance before merge. |
+| Security and credentials; lane Git, credentials, object integrity and authority gates | `crucial`; correctness and security or the relevant boundary lens |
+| CI, build, release and review policy | `crucial`; correctness and tests or operations |
+| Public contracts, including CLI, configuration and graph schemas | `substantial`; correctness and contract |
 
-A lens is a named question, such as correctness against the acceptance
-criteria, data and concurrency, security, or operations. Each review records
-who reviewed, from which family and through which lens. When any leg is
-skipped or unavailable, whether through a provider limit, an outage, a missing
-capability or configuration, or another cause, the review records the reason.
-A blocked cross-family leg is replaced by an independent same-family reviewer
-through a different lens. The required number of independent reviews does not
-change, and another pass by the same reviewer never counts as one.
-For `substantial` and higher work, each counted reviewer's model tier, meaning
-the routing pool (`junior`, `senior` or `principal`) of the resolved route
-actually used rather than the model name, is at or above the author's. A family
-that offers only a weaker tier is unavailable for
-that leg: its junior pass may add claims but never fills the leg, and the
-same-family replacement above applies.
+Inspect both sides of renames. Changed tests require a tests lens. The planner
+may raise these floors, never lower them. A lens is a named question; choose
+other lenses for the actual risks, including concurrency, data and design.
+Review integration heads with the full mixed panel before landing.
 
-A project may set its own ladder in its contributing guide. That ladder governs
-the project's work so long as each tier keeps at least the independence above.
-The chair decides when to review and how to group reviews: small or low-risk
-changes may be reviewed together once they have merged into a batch, but risky
-changes are reviewed on their own head first. Evidence decides claims, never a
-majority vote.
+| Tier | Minimum independent reviewers |
+|---|---|
+| `routine` | 1, with correctness and relevant checks. |
+| `substantial` | 2, with correctness and the dominant risk. |
+| `crucial` | 2 or more, covering every triggered lens. |
+| `terminal` | 3 or more, including an adversarial reviewer, plus explicit owner acceptance. |
 
-A verdict covers the diff it read. A later commit needs review only of its own
-delta, such as a repair or a conflict resolution; a clean merge of the base
-needs none. CI is different: the head that merges must be green.
+Prefer reviewers outside every author and repairer family; at `crucial` use two
+non-author families when available. Record actual `adapter/model@effort`,
+family, lens, scope, unavailable legs, reasons, evidence, expiry and substitutions.
+Use distinct
+actors in fresh contexts; a repeat reviewer never adds to the count. If a
+required family is unavailable, substitute an independent same-family reviewer
+through a different lens without reducing the count. Counted reviewers at
+`substantial` and above meet or exceed the highest author tier. Unknown
+provenance leaves coverage incomplete. Evidence decides claims, not votes.
+
+A verdict covers the diff it read. A later commit needs review of its delta,
+including repairs and conflict resolutions; a clean base merge needs only CI.
+Classify head moves in shadow until tooling enforces these paths; retain current
+exact-head landing gates in the meantime:
+
+- A: approval would carry over a proven clean `main` merge-in. The new head has
+  exactly two parents, reviewed head first and base-side commit second; the
+  reviewed base is an ancestor of that commit, which is an ancestor of fetched
+  `main`. `git merge-tree --write-tree` must succeed and produce exactly the
+  new head's tree, and the preceding receipt must remain valid and unrevoked.
+- B: a descendant changing one text file by at most 20 cumulative added and
+  deleted lines since the full panel, with no protected path, rename, binary,
+  mode, symlink, submodule, dependency or configuration change, would get one
+  independent delta reviewer, who reads the delta, callers and prior findings. Count author deltas cumulatively; proven base-only
+  imports do not consume the limit. Incomplete statistics fail this class.
+- C: all other moves get a full re-plan; expanding risk or scope also requires
+  re-planning. Candidate CI covers the landing head in every class.
+
+During shadowing, record the classification and compare it with a full review;
+do not use A or B to bypass current exact-head requirements.
+
+A writer distinct from the reviewers repairs accepted findings. Re-review the delta through the
+lenses that raised them, checking closure and relevant tests. After three repair
+cycles, or a concrete design concern, a read-only principal scopes a redesign
+with root constraint, options, trade-offs, migration implications, a smallest
+viable slice and acceptance evidence. A redesign within approved
+scope proceeds and the owner is notified asynchronously; changed scope or a
+one-way door waits for the owner. Review grants no release authority.
 
 ## Load depth only when triggered
 
