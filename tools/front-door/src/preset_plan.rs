@@ -511,6 +511,23 @@ pub fn apply(
         planner["read_roots"] = roots;
     }
     stages[position] = planner;
+    // Explicit references to the replaced stage must follow its planner too.
+    for stage in stages.iter_mut().skip(position + 1) {
+        if let Some(deps) = stage.get_mut("depends_on").and_then(Value::as_array_mut) {
+            for dep in deps {
+                if dep.as_str() == Some(replaces.as_str()) {
+                    *dep = json!("plan");
+                }
+            }
+        }
+        if let Some(inputs) = stage.get_mut("inputs").and_then(Value::as_array_mut) {
+            for input in inputs {
+                if input.get("node").and_then(Value::as_str) == Some(replaces.as_str()) {
+                    input["node"] = json!("plan");
+                }
+            }
+        }
+    }
     // Stages the planned fragment needs after it, for example the synthesis
     // that reconciles the evidence the static stage reconciled in itself.
     if let Some(after) = catalogue.get("after") {

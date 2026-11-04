@@ -257,7 +257,7 @@ fn fixture() -> Result {
         io::stdout().write_all(frames.as_bytes())?;
         return Ok(());
     }
-    if args.get(1).is_some_and(|v| v == "-p") {
+    if args.iter().skip(1).any(|v| v == "-p") {
         let dir = PathBuf::from(std::env::var_os("CLAUDE_CONFIG_DIR").ok_or("CLAUDE_CONFIG_DIR")?);
         // Shell lanes get a private config directory; others use the account's.
         assert!(matches!(
@@ -301,7 +301,68 @@ fn fixture() -> Result {
             std::env::var("CLAUDE_CODE_AUTO_COMPACT_WINDOW")?.as_str(),
             "275000"
         );
-        let answer = if prompt.contains("fixture large result") {
+        let answer = if prompt.contains("fixture-council-overcap") {
+            if prompt.contains("Verify the lens findings for:")
+                || prompt.contains("Reconcile independent review findings against evidence for:")
+            {
+                assert!(prompt.contains("composite findings truncated:"));
+                let entries: Vec<_> = prompt
+                    .lines()
+                    .filter_map(|line| {
+                        let (label, rest) = line.strip_prefix("- lenses--")?.split_once(": ")?;
+                        let (path, _) = rest.split_once(" (")?;
+                        Some((label.to_owned(), PathBuf::from(path)))
+                    })
+                    .collect();
+                assert!(entries.len() >= 4, "{prompt}");
+                let mut count = 0;
+                let mut dispositions = String::new();
+                let mut structured = Vec::new();
+                for (label, path) in entries {
+                    let data = fs::read_to_string(path)?;
+                    let block = data
+                        .split_once("```findings\n")
+                        .ok_or("findings block")?
+                        .1
+                        .split_once("```")
+                        .ok_or("findings end")?
+                        .0;
+                    let value: Value = serde_json::from_str(block)?;
+                    for finding in value["findings"].as_array().ok_or("findings array")? {
+                        let id = format!(
+                            "lenses--{label}:{}",
+                            finding["id"].as_str().ok_or("finding id")?
+                        );
+                        let status = if prompt.contains("Verify the lens findings for:") {
+                            "falsified"
+                        } else {
+                            "rejected"
+                        };
+                        dispositions.push_str(&format!(
+                            "{id}: rejected; evidence refutes it\nDISPOSITION {}\n",
+                            json!({"id":id,"disposition":status,"reason":"evidence refutes it"})
+                        ));
+                        if structured.len() < 32 {
+                            structured.push(json!({"id":id,"severity":"high","file":"a.rs","summary":"fixture finding","status":"open","verification":"falsified","disposition":"rejected","reason":"evidence refutes it"}));
+                        }
+                        count += 1;
+                    }
+                }
+                assert!(count > 32, "{count}");
+                format!(
+                    "read {count} findings from complete lens results\n{dispositions}```findings\n{}\n```\nVERDICT: PASS\n",
+                    json!({"schema_version":1,"findings":structured})
+                )
+            } else if prompt.contains("Lens:") {
+                let findings: Vec<_> = (0..10).map(|i| json!({"id":format!("F{i}"),"severity":"high","file":"a.rs","summary":"fixture finding","status":"open"})).collect();
+                format!(
+                    "```findings\n{}\n```\nVERDICT: PASS\n",
+                    json!({"schema_version":1,"findings":findings})
+                )
+            } else {
+                "subject framed\nVERDICT: PASS\n".to_owned()
+            }
+        } else if prompt.contains("fixture large result") {
             // Far past the 4 KiB excerpt a consuming node's prompt carries.
             let mut text: String = (0..2000)
                 .map(|n| format!("finding {n:04} body\n"))
@@ -2485,6 +2546,123 @@ fn graph_fixture_available() -> Result<bool> {
     Ok(true)
 }
 
+fn review_council_overcap_runs_through_fake_providers() -> Result {
+    if !graph_fixture_available().map_err(|e| format!("fixture availability: {e}"))? {
+        return Ok(());
+    }
+    let mut rig = claude_fixture().map_err(|e| format!("claude fixture: {e}"))?;
+    let cleanup = rig.process_cleanup();
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
+    rig.env.retain(|(key, _)| key != "PROVENANT_ROOT");
+    rig.env
+        .push(("PROVENANT_ROOT".into(), root.into_os_string()));
+    for path in [
+        ".cargo/bin",
+        ".cargo/registry",
+        ".cargo/git",
+        "Library/pnpm",
+        "Library/Caches/pnpm",
+        ".cache/node",
+        ".rustup/toolchains",
+        ".codex",
+        ".claude/hooks",
+        ".kiro/settings",
+        ".gemini/config",
+        ".cursor/extensions",
+        ".npm",
+    ] {
+        fs::create_dir_all(rig.home.join(path))?;
+    }
+    fs::write(rig.home.join(".rustup/settings.toml"), "")?;
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[domains.routing.pools]\nsenior = [{{ model = 'claude/claude-sonnet-5-5', effort = 'medium' }}]\nprincipal = [{{ model = 'claude/claude-sonnet-5-5', effort = 'medium' }}]\ngraph-test = [{{ model = 'claude/claude-sonnet-5-5', effort = 'medium' }}]"
+    )?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    assert_eq!(
+        code(&rig.execute(
+            &git,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "Initial"
+            ],
+            None
+        )?),
+        0
+    );
+    let prompt = rig.root.join("council-brief.txt");
+    fs::write(&prompt, "fixture-council-overcap")?;
+    let worktree = format!("parameters.worktree='{}'", rig.project.display());
+    let lenses = "parameters.lenses=[{name='correctness-spec',tier='graph-test',when=''},{name='tests',tier='graph-test',when=''},{name='simplicity',tier='graph-test',when=''},{name='reliability',tier='graph-test',when=''}]";
+    let out = rig
+        .command(&[
+            "run",
+            "--preset",
+            "review-council",
+            "--prompt-file",
+            prompt.to_str().ok_or("brief")?,
+            "--set",
+            &worktree,
+            "--set",
+            lenses,
+            "--set",
+            "parameters.verifier_tier='graph-test'",
+            "--wait",
+            "1s",
+            "--json",
+        ])
+        .map_err(|e| format!("start preset: {e}"))?;
+    let value: Value = serde_json::from_slice(&out.stdout.bytes).map_err(|e| {
+        format!(
+            "parse preset: {e}: {} {}",
+            String::from_utf8_lossy(&out.stdout.bytes),
+            String::from_utf8_lossy(&out.stderr.bytes)
+        )
+    })?;
+    let id = value["data"]["graph_id"]
+        .as_str()
+        .ok_or_else(|| format!("graph id: {value}"))?
+        .to_owned();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        let response = rig.command(&["fabric", "graph", "status", &id, "--json"])?;
+        let status: Value = serde_json::from_slice(&response.stdout.bytes)?;
+        if status["data"]["status"] == "complete" {
+            let nodes = status["data"]["checkpoint"]["nodes"]
+                .as_array()
+                .ok_or("nodes")?;
+            for id in ["lenses", "verify", "synthesis"] {
+                let node = nodes.iter().find(|node| node["id"] == id).ok_or("stage")?;
+                assert_eq!(node["state"], "succeeded", "{status}");
+                if id != "lenses" {
+                    assert!(
+                        node["outputs"]["result"]["excerpt"]
+                            .as_str()
+                            .unwrap_or("")
+                            .contains("read 40 findings"),
+                        "{status}"
+                    );
+                }
+            }
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{status}");
+        std::thread::park_timeout(std::time::Duration::from_millis(100));
+    }
+    cleanup.disarm();
+    Ok(())
+}
+
 fn graph_settlement_records_a_failed_advance_for_status() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -4393,7 +4571,9 @@ fn main() -> ExitCode {
     }
     let result = if args
         .first()
-        .is_some_and(|s| s == "exec" || s == "run" || s == "--version" || s == "auth" || s == "-p")
+        .is_some_and(|s| s == "exec" || s == "run" || s == "--version" || s == "auth")
+        // Claude options such as graph input `--add-dir` may precede `-p`.
+        || args.iter().any(|s| s == "-p")
     {
         fixture()
     } else {
@@ -4429,6 +4609,7 @@ fn main() -> ExitCode {
                 "unconfigured_host_native_repair_launches_alias_fallback",
                 "graph_settlement_advances_writer_and_account_routed_review",
                 "graph_node_reads_full_upstream_result_from_its_inputs_directory",
+                "review_council_overcap_runs_through_fake_providers",
                 "graph_settlement_records_a_failed_advance_for_status",
                 "opencode_free_pool_cools_second_model",
                 "opencode_free_reset_cools_pool_until_reset_and_restores",
@@ -4472,6 +4653,7 @@ fn main() -> ExitCode {
                     "capacity_settlement_resumes_the_same_session" => capacity_settlement_resumes_the_same_session(),
                     "fixture_guardian_exits_when_sigkilled_test_owner_dies" => fixture_guardian_exits_when_sigkilled_test_owner_dies(),
                     "review_fans_out_and_collects_fake_provider" => review_fans_out_and_collects_fake_provider(),
+                    "review_council_overcap_runs_through_fake_providers" => review_council_overcap_runs_through_fake_providers(),
                     "opencode_dispatch_observes_v2_wal_session" => {
                         opencode_dispatch_observes_v2_wal_session()
                     }

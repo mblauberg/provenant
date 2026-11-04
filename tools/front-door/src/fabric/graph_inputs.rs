@@ -9,7 +9,7 @@ use super::{
 };
 use provenant_core::{CancelToken, WaitBudget};
 use provenant_fabric_runtime::graph::{
-    AttemptKey, InputRequest, MaterialisedInput, MaterialisedInputs,
+    AttemptKey, InputRequest, MaterialisedInput, MaterialisedInputs, UPSTREAM_INPUT_LIST_LIMIT,
 };
 use provenant_os::fs::{Directory, PublishMode};
 use std::{ffi::OsStr, path::PathBuf};
@@ -183,6 +183,7 @@ pub(super) fn materialise(
     };
     let failed = |reason: &str| MaterialisedInputs {
         directory: None,
+        index: None,
         entries: requests
             .iter()
             .map(|request| unavailable(request, reason.into()))
@@ -194,9 +195,14 @@ pub(super) fn materialise(
         actor: None,
         chair: None,
     };
-    let Ok(session) = owner.session(cancel) else {
+    let session = owner.session(cancel).ok();
+    if session.is_none()
+        && requests
+            .iter()
+            .all(|request| request.inline_findings.is_none())
+    {
         return failed("the run store could not be opened");
-    };
+    }
     let Some((path, directory)) = attempt_directory(factory, key) else {
         return failed("the inputs directory could not be created");
     };
@@ -207,46 +213,63 @@ pub(super) fn materialise(
     let mut remaining = cap;
     let mut entries = Vec::with_capacity(requests.len());
     for request in requests {
-        let Some((owner_host, attempt)) = request
-            .attempt_ref
-            .as_deref()
-            .and_then(|reference| reference.split_once('/'))
-        else {
-            entries.push(unavailable(
-                request,
-                "no attempt was recorded for it".into(),
-            ));
-            continue;
-        };
         if remaining == 0 {
             entries.push(MaterialisedInput::Capped {
                 label: request.label.clone(),
             });
             continue;
         }
-        let Ok(attempt) = attempt.parse() else {
-            entries.push(unavailable(
-                request,
-                "its attempt reference is invalid".into(),
-            ));
-            continue;
-        };
-        let read = if owner_host == host.to_string() {
-            read_result(&session, &call, attempt, remaining).map_err(super::run_error)
+        let read = if let Some(findings) = &request.inline_findings {
+            let text = format!(
+                "```findings\n{}\n```\n",
+                serde_json::json!({"schema_version":1,"findings":findings})
+            );
+            let bytes = text.into_bytes();
+            let length = bytes.len() as u64;
+            Ok((bytes, length))
         } else {
-            match owner_host.parse() {
-                Ok(remote_host) => read_remote(
-                    &mut owner,
-                    AttemptTarget {
-                        extra: Default::default(),
-                        host: Some(remote_host),
-                        attempt,
-                    },
-                    budget,
-                    cancel,
-                    remaining,
-                ),
-                Err(_) => Err(FacadeError::InvalidInput { detail: None }),
+            let Some((owner_host, attempt)) = request
+                .attempt_ref
+                .as_deref()
+                .and_then(|reference| reference.split_once('/'))
+            else {
+                entries.push(unavailable(
+                    request,
+                    "no attempt was recorded for it".into(),
+                ));
+                continue;
+            };
+            let Some(session) = &session else {
+                entries.push(unavailable(
+                    request,
+                    "the run store could not be opened".into(),
+                ));
+                continue;
+            };
+            let Ok(attempt) = attempt.parse() else {
+                entries.push(unavailable(
+                    request,
+                    "its attempt reference is invalid".into(),
+                ));
+                continue;
+            };
+            if owner_host == host.to_string() {
+                read_result(session, &call, attempt, remaining).map_err(super::run_error)
+            } else {
+                match owner_host.parse() {
+                    Ok(remote_host) => read_remote(
+                        &mut owner,
+                        AttemptTarget {
+                            extra: Default::default(),
+                            host: Some(remote_host),
+                            attempt,
+                        },
+                        budget,
+                        cancel,
+                        remaining,
+                    ),
+                    Err(_) => Err(FacadeError::InvalidInput { detail: None }),
+                }
             }
         };
         let (bytes, length) = match read {
@@ -301,8 +324,43 @@ pub(super) fn materialise(
             omitted,
         });
     }
+    // Keep the ordinary prompt listing bounded while retaining every source
+    // and attempt reference in a small read-only index in the inputs directory.
+    let needs_index = entries.len() > UPSTREAM_INPUT_LIST_LIMIT
+        || entries
+            .iter()
+            .any(|entry| !matches!(entry, MaterialisedInput::File { omitted: 0, .. }));
+    let index = if needs_index {
+        let rows: Vec<_> = requests.iter().zip(&entries).map(|(request, entry)| {
+            let (file, status, omitted, reason) = match entry {
+                MaterialisedInput::File { path, omitted: 0, .. } => (Some(path), "complete", None, None),
+                MaterialisedInput::File { path, omitted, .. } => (Some(path), "capped", Some(*omitted), None),
+                MaterialisedInput::Capped { .. } => (None, "capped", None, None),
+                MaterialisedInput::Unavailable { reason, .. } => (None, "unavailable", None, Some(reason)),
+            };
+            serde_json::json!({"graph_id":key.graph_id, "label":request.label, "attempt_ref":request.attempt_ref, "finding_prefix":request.finding_prefix, "path":file, "status":status, "omitted":omitted, "reason":reason})
+        }).collect();
+        let bytes = serde_json::to_vec(&rows).ok();
+        bytes
+            .and_then(|bytes| {
+                directory
+                    .atomic_write_with_permissions(
+                        OsStr::new("upstream-index.json"),
+                        ".input-",
+                        &bytes,
+                        0o444,
+                        PublishMode::Replace,
+                    )
+                    .and_then(|publication| publication.require_durable())
+                    .ok()
+            })
+            .map(|_| path.join("upstream-index.json"))
+    } else {
+        None
+    };
     MaterialisedInputs {
         directory: Some(path),
+        index,
         entries,
     }
 }

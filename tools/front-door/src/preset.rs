@@ -1761,6 +1761,7 @@ fn lower_leaf(
             }
         }
     }
+    let input_dependencies = dependencies.clone();
     if let Some(source) = map
         .get("source")
         .filter(|source| source["type"] == "node")
@@ -1804,7 +1805,10 @@ fn lower_leaf(
     }
     let outputs = map.remove("outputs").unwrap_or_else(|| json!(["result"]));
     if !deps.is_empty() && !map.contains_key("inputs") && !control {
-        map.insert("inputs".into(), selected_inputs(deps, &outputs));
+        map.insert(
+            "inputs".into(),
+            selected_inputs(&input_dependencies, &outputs),
+        );
     }
     if map.get("worktree").is_some_and(|value| value == "") {
         map.remove("worktree");

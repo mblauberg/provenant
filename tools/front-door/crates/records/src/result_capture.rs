@@ -20,6 +20,7 @@ pub struct ResultCapture {
     utf8: Vec<u8>,
     verdict: VerdictCapture,
     handoff: crate::handoff::HandoffCapture,
+    dispositions: DispositionCapture,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,6 +42,8 @@ pub struct CapturedResult {
     pub source_truncated: bool,
     pub tail_truncated: bool,
     pub matched_required: bool,
+    /// Bounded stream proof for explicit per-finding disposition lines.
+    pub disposition_proof: DispositionProof,
 }
 
 impl CapturedResult {
@@ -96,12 +99,14 @@ impl ResultCapture {
             utf8: Vec::with_capacity(4),
             verdict: VerdictCapture::default(),
             handoff: crate::handoff::HandoffCapture::default(),
+            dispositions: DispositionCapture::default(),
         }
     }
 
     pub fn push(&mut self, chunk: &[u8]) {
         self.verdict.push(chunk);
         self.handoff.push(chunk);
+        self.dispositions.push(chunk);
         self.hash.update(chunk);
         self.bytes = self.bytes.saturating_add(chunk.len() as u64);
         let take = HEAD_BYTES.saturating_sub(self.head.len()).min(chunk.len());
@@ -212,7 +217,162 @@ impl ResultCapture {
             source_truncated: false,
             tail_truncated,
             matched_required: self.matched_required,
+            disposition_proof: self.dispositions.finish(),
         }
+    }
+}
+
+/// Bounded evidence for the identities and dispositions in a complete result.
+/// Only SHA-256 hashes are retained, never the finding text or reasons.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DispositionProof {
+    invalid: bool,
+    by_reference: Option<bool>,
+    entries: std::collections::BTreeMap<[u8; 32], [u8; 32]>,
+}
+
+impl DispositionProof {
+    fn identity<'a>(&self, item: &'a (String, String)) -> &'a str {
+        if self.by_reference == Some(true) {
+            &item.1
+        } else {
+            &item.0
+        }
+    }
+
+    pub fn matches(&self, identities: &[(String, String)], allowed: &[String]) -> bool {
+        if self.invalid || self.entries.len() != identities.len() {
+            return false;
+        }
+        let allowed: std::collections::BTreeSet<[u8; 32]> = allowed
+            .iter()
+            .map(|value| Sha256::digest(value.as_bytes()).into())
+            .collect();
+        let mut seen = std::collections::BTreeSet::new();
+        identities.iter().all(|item| {
+            let key: [u8; 32] = Sha256::digest(self.identity(item).as_bytes()).into();
+            seen.insert(key)
+                && self
+                    .entries
+                    .get(&key)
+                    .is_some_and(|status| allowed.contains(status))
+        })
+    }
+
+    /// A typed entry must agree with its corresponding proof, if it is an
+    /// original finding. New findings are checked by the typed-output rules.
+    pub fn agrees(&self, id: &str, disposition: &str, identities: &[(String, String)]) -> bool {
+        let mut matches = identities.iter().filter(|item| item.0 == id);
+        let Some(item) = matches.next() else {
+            return true;
+        };
+        if matches.next().is_some() {
+            return false;
+        }
+        let key: [u8; 32] = Sha256::digest(self.identity(item).as_bytes()).into();
+        let status: [u8; 32] = Sha256::digest(disposition.as_bytes()).into();
+        self.entries.get(&key) == Some(&status)
+    }
+}
+
+const DISPOSITION_PREFIX: &[u8] = b"DISPOSITION ";
+// Three 1024-byte fields can expand sixfold when encoded as JSON.
+const DISPOSITION_LINE_BYTES: usize = 20_000;
+// The graph admits at most 512 nodes and each task exports at most 32 findings.
+const DISPOSITION_RECORDS: usize = 512 * 32;
+
+#[derive(Default)]
+struct DispositionCapture {
+    line: Vec<u8>,
+    overflow: bool,
+    proof: DispositionProof,
+}
+
+impl DispositionCapture {
+    fn push(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            if byte == b'\n' {
+                self.end_line();
+            } else if self.line.len() < DISPOSITION_LINE_BYTES {
+                self.line.push(byte);
+            } else {
+                self.overflow = true;
+            }
+        }
+    }
+
+    fn end_line(&mut self) {
+        let line = std::mem::take(&mut self.line);
+        let overflow = std::mem::take(&mut self.overflow);
+        let Some(json) = line.strip_prefix(DISPOSITION_PREFIX) else {
+            return;
+        };
+        if overflow {
+            self.proof.invalid = true;
+            return;
+        }
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(json) else {
+            self.proof.invalid = true;
+            return;
+        };
+        let Some((disposition, reason)) = value
+            .get("disposition")
+            .and_then(serde_json::Value::as_str)
+            .zip(value.get("reason").and_then(serde_json::Value::as_str))
+        else {
+            self.proof.invalid = true;
+            return;
+        };
+        let (key, by_reference) = match (value.get("id"), value.get("member"), value.get("index")) {
+            (Some(id), None, None) => match id.as_str().filter(|id| id.len() <= 1024) {
+                Some(id) => (id.to_owned(), false),
+                None => {
+                    self.proof.invalid = true;
+                    return;
+                }
+            },
+            (None, Some(member), Some(index)) => match member
+                .as_str()
+                .filter(|member| !member.is_empty() && member.len() <= 64)
+                .zip(index.as_u64())
+            {
+                Some((member, index)) => (format!("{member}:{index}"), true),
+                None => {
+                    self.proof.invalid = true;
+                    return;
+                }
+            },
+            _ => {
+                self.proof.invalid = true;
+                return;
+            }
+        };
+        if self
+            .proof
+            .by_reference
+            .is_some_and(|mode| mode != by_reference)
+            || disposition.len() > 1024
+            || reason.len() > 1024
+            || reason.trim().is_empty()
+        {
+            self.proof.invalid = true;
+            return;
+        }
+        self.proof.by_reference = Some(by_reference);
+        let identity: [u8; 32] = Sha256::digest(key.as_bytes()).into();
+        let status: [u8; 32] = Sha256::digest(disposition.as_bytes()).into();
+        if self.proof.entries.len() >= DISPOSITION_RECORDS
+            || self.proof.entries.insert(identity, status).is_some()
+        {
+            self.proof.invalid = true;
+        }
+    }
+
+    fn finish(mut self) -> DispositionProof {
+        if !self.line.is_empty() || self.overflow {
+            self.end_line();
+        }
+        self.proof
     }
 }
 
@@ -556,5 +716,53 @@ mod tests {
         assert!(result.tail.len() <= TAIL_BYTES);
         assert!(result.tail.ends_with("the end"));
         assert!(result.tail_truncated);
+    }
+    #[test]
+    fn disposition_proof_covers_complete_stream_and_rejects_gaps() {
+        let ids: Vec<String> = (0..40).map(|i| format!("lens:F{i}")).collect();
+        let identities: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.clone(), format!("lens:{i}")))
+            .collect();
+        let mut text = "x".repeat(25_000) + "\n";
+        for id in &ids {
+            text.push_str(&format!(
+                "DISPOSITION {}\n",
+                serde_json::json!({"id":id,"disposition":"rejected","reason":"evidence"})
+            ));
+        }
+        let mut capture = ResultCapture::new(None);
+        for chunk in text.as_bytes().chunks(7) {
+            capture.push(chunk);
+        }
+        let proof = capture.finish().disposition_proof;
+        assert!(proof.matches(&identities, &["rejected".into()]));
+        assert!(!proof.matches(&identities[..39], &["rejected".into()]));
+        let mut substituted = identities.clone();
+        substituted[0].0 = "other:F0".into();
+        assert!(!proof.matches(&substituted, &["rejected".into()]));
+        let mut duplicated = identities.clone();
+        duplicated[0] = duplicated[1].clone();
+        assert!(!proof.matches(&duplicated, &["rejected".into()]));
+        assert!(!proof.matches(&identities, &["accepted".into()]));
+        assert!(proof.agrees("lens:F0", "rejected", &identities));
+        assert!(!proof.agrees("lens:F0", "accepted", &identities));
+        assert!(proof.agrees("new:F0", "accepted", &identities));
+        let mut references = ResultCapture::new(None);
+        for i in 0..40 {
+            references.push(format!("DISPOSITION {}\n", serde_json::json!({"member":"lens","index":i,"disposition":"rejected","reason":"evidence"})).as_bytes());
+        }
+        let compact = references.finish().disposition_proof;
+        assert!(compact.matches(&identities, &["rejected".into()]));
+        assert!(compact.agrees("lens:F0", "rejected", &identities));
+        assert!(!compact.agrees("lens:F0", "accepted", &identities));
+        let mut bad = ResultCapture::new(None);
+        bad.push(b"DISPOSITION {\"id\":\"x\",\"disposition\":\"rejected\",\"reason\":\" \"}\n");
+        assert!(
+            !bad.finish()
+                .disposition_proof
+                .matches(&[("x".into(), "lens:0".into())], &["rejected".into()])
+        );
     }
 }

@@ -975,6 +975,10 @@ pub struct NodeInput<'a> {
 pub struct InputRequest {
     pub label: String,
     pub attempt_ref: Option<String>,
+    /// Findings from a non-attempt member, such as a CI gate with no result file.
+    pub inline_findings: Option<Vec<Finding>>,
+    /// Composite qualification to apply to IDs in the source result.
+    pub finding_prefix: Option<String>,
 }
 
 /// What became of one requested upstream result.
@@ -997,6 +1001,8 @@ pub enum MaterialisedInput {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MaterialisedInputs {
     pub directory: Option<std::path::PathBuf>,
+    /// Optional index of all inputs when the prompt cannot list every source.
+    pub index: Option<std::path::PathBuf>,
     pub entries: Vec<MaterialisedInput>,
 }
 

@@ -117,6 +117,9 @@ const LAUNCH_RETRY_FIRST_SECONDS: u64 = 5;
 /// The longest launch retry wait.
 const LAUNCH_RETRY_MAX_SECONDS: u64 = 600;
 
+/// Entries a prompt lists before referring to the complete input index.
+pub const UPSTREAM_INPUT_LIST_LIMIT: usize = 64;
+
 /// Narrow read-only host interface for CI checks.
 pub trait CiStatus {
     fn host_stamp(&self) -> Option<CiHostStamp>;
@@ -1770,18 +1773,22 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 let mut prompt = render_input(node, &checkpoint, &positions, input_cap).0;
                 // An accepted attempt is only observed, so its files exist
                 // already and its prompt is not sent again.
-                let materialised = if stored_ref.is_some() {
+                let requests = if stored_ref.is_some() {
+                    Vec::new()
+                } else {
+                    upstream_results(node, &plan, &checkpoint, &positions)
+                };
+                let materialised = if requests.is_empty() {
                     None
                 } else {
-                    let requests = upstream_results(node, &plan, &checkpoint, &positions);
-                    if requests.is_empty() {
-                        None
-                    } else {
-                        owner.materialise_inputs(&key, &requests, NODE_INPUT_FILE_BYTES)
-                    }
+                    owner.materialise_inputs(&key, &requests, NODE_INPUT_FILE_BYTES)
                 };
                 if let Some(materialised) = &materialised {
-                    prompt.push_str(&render_files(&materialised.entries));
+                    prompt.push_str(&render_files(
+                        &materialised.entries,
+                        &requests,
+                        materialised.index.as_deref(),
+                    ));
                 }
                 // The writer is the nearest writing node along the source chain,
                 // so a framing node between a lens and the writer is skipped.
@@ -2091,6 +2098,22 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         .map(|(_, finding)| finding)
                         .collect()
                 };
+                let proof_dispositions = if node.dispositions.is_empty()
+                    && node.role.as_deref() == Some("review.verify")
+                {
+                    vec![
+                        "upheld".to_owned(),
+                        "falsified".to_owned(),
+                        "unverifiable".to_owned(),
+                    ]
+                } else {
+                    node.dispositions.clone()
+                };
+                let overflow_ids = if proof_dispositions.is_empty() {
+                    Vec::new()
+                } else {
+                    truncated_finding_ids(node, &plan, &checkpoint, &positions)
+                };
                 let mut settled_result = None;
                 let retry_was_pending;
                 let should_continue = {
@@ -2184,6 +2207,22 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 ))
                             } else {
                                 disposition_error(&node.dispositions, &upstream_findings, &outputs)
+                                    .or_else(|| {
+                                        (!overflow_ids.is_empty() && result.as_ref().is_none_or(|capture| !capture.disposition_proof.matches(&overflow_ids, &proof_dispositions))).then(|| (
+                                            "disposition_overflow_incomplete",
+                                            format!("all {} findings from truncated composites need exactly one DISPOSITION line with an allowed disposition and non-empty reason", overflow_ids.len()),
+                                        ))
+                                    })
+                                    .or_else(|| {
+                                        let proof = &result.as_ref()?.disposition_proof;
+                                        let verifier = node.dispositions.is_empty() && node.role.as_deref() == Some("review.verify");
+                                        let mismatch = outputs.findings.iter().any(|finding| {
+                                            if !overflow_ids.iter().any(|(id, _)| id == &finding.id) { return false; }
+                                            let status = if verifier { finding.extra.get("verification").and_then(serde_json::Value::as_str) } else { finding.disposition.as_deref() };
+                                            status.is_none_or(|status| !proof.agrees(&finding.id, status, &overflow_ids))
+                                        });
+                                        mismatch.then(|| ("disposition_overflow_inconsistent", "structured findings disagree with their DISPOSITION lines".to_owned()))
+                                    })
                             };
                             let review_result = node.access == AccessMode::ReadOnly
                                 && node.role.as_deref().is_some_and(|role| {

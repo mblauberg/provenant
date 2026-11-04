@@ -3455,6 +3455,7 @@ fn parent_and_child(
 #[test]
 fn upstream_files_are_listed_next_to_the_excerpts_and_the_launch_is_unchanged() {
     let (document, mut owner) = parent_and_child(Some(|requests| MaterialisedInputs {
+        index: None,
         directory: Some("/state/graph-inputs/child-0".into()),
         entries: requests
             .iter()
@@ -3474,6 +3475,8 @@ fn upstream_files_are_listed_next_to_the_excerpts_and_the_launch_is_unchanged() 
         vec![vec![InputRequest {
             label: "parent".into(),
             attempt_ref: Some("host-a/attempt-1".into()),
+            inline_findings: None,
+            finding_prefix: None,
         }]]
     );
     assert_eq!(owner.file_caps, vec![outputs::NODE_INPUT_FILE_BYTES]);
@@ -3488,6 +3491,7 @@ fn upstream_files_are_listed_next_to_the_excerpts_and_the_launch_is_unchanged() 
 #[test]
 fn a_remote_upstream_is_named_unavailable_and_the_node_still_runs() {
     let (document, mut owner) = parent_and_child(Some(|requests| MaterialisedInputs {
+        index: None,
         directory: None,
         entries: requests
             .iter()
@@ -3502,13 +3506,14 @@ fn a_remote_upstream_is_named_unavailable_and_the_node_still_runs() {
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
     assert!(
         owner.prompts[1]
-            .contains("- parent: unavailable: its result could not be read: peer unavailable")
+            .contains("- parent: unavailable: its result could not be read: peer unavailable; full result attempt: host-a/attempt-1")
     );
 }
 
 #[test]
 fn capped_upstream_results_are_named_in_the_prompt() {
     let (document, mut owner) = parent_and_child(Some(|requests| MaterialisedInputs {
+        index: Some("/state/graph-inputs/child-0/upstream-index.json".into()),
         directory: Some("/state/graph-inputs/child-0".into()),
         entries: vec![
             MaterialisedInput::File {
@@ -3528,7 +3533,31 @@ fn capped_upstream_results_are_named_in_the_prompt() {
         prompt.contains("CAPPED: 1234 more bytes omitted"),
         "{prompt}"
     );
+    assert!(
+        prompt.contains("full result attempt: host-a/attempt-1"),
+        "{prompt}"
+    );
     assert!(prompt.contains("- later: CAPPED: not written"), "{prompt}");
+}
+
+#[test]
+fn long_upstream_listing_points_to_complete_index() {
+    let (document, mut owner) = parent_and_child(Some(|_| MaterialisedInputs {
+        directory: Some("/inputs".into()),
+        index: Some("/inputs/upstream-index.json".into()),
+        entries: (0..=UPSTREAM_INPUT_LIST_LIMIT)
+            .map(|i| MaterialisedInput::File {
+                label: format!("member-{i}"),
+                path: format!("/inputs/{i}").into(),
+                bytes: 1,
+                omitted: 0,
+            })
+            .collect(),
+    }));
+    advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let prompt = &owner.prompts[1];
+    assert!(prompt.contains("Complete input index: /inputs/upstream-index.json"));
+    assert!(prompt.contains("1 more upstream results are not listed"));
 }
 
 #[test]
@@ -3544,6 +3573,7 @@ fn a_host_without_materialisation_leaves_the_prompt_as_it_was() {
 fn partial_composite_materialises_only_its_successful_members() {
     let (document, mut owner) = partial_review(1);
     owner.materialise = Some(|requests| MaterialisedInputs {
+        index: None,
         directory: Some("/state/graph-inputs/verify-0".into()),
         entries: requests
             .iter()
@@ -5680,6 +5710,186 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
     }
     impl Error for Untyped {}
     assert!(!launch_retry_kind(&Untyped));
+}
+
+#[test]
+fn composite_truncates_over_cap_findings_and_reaches_downstream() {
+    for long in [false, true] {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"over-cap","nodes":[
+                {"id":"reviews","kind":"composite","access":"read_only","composite":{
+                    "nodes":[{"id":"a","access":"read_only","prompt":"review","route":{"alias":"senior"}},
+                             {"id":"b","access":"read_only","prompt":"review","route":{"alias":"senior"}}],
+                    "exports":[{"node":"a","outputs":["result","findings"]},{"node":"b","outputs":["result","findings"]}]
+                }},
+                {"id":"verify","access":"read_only","prompt":"verify","route":{"alias":"senior"},
+                 "depends_on":["reviews"],"inputs":[{"node":"reviews","outputs":["result","findings"]}]}
+            ]
+        })).unwrap();
+        let count = if long { 8 } else { 20 };
+        let entries: Vec<_> = (0..count).map(|i| serde_json::json!({"id":format!("F{i}"),"severity":"high","file":"a", "summary":if long {"s".repeat(800)} else {"s".into()},"status":"open"})).collect();
+        let text = format!(
+            "```findings\n{}\n```",
+            serde_json::json!({"schema_version":1,"findings":entries})
+        );
+        let observation = |path: &str| {
+            let mut result = terminal_with_result(AttemptOutcome::Succeeded, &text);
+            if let AttemptObservation::Terminal {
+                result_path,
+                attempt_ref,
+                ..
+            } = &mut result
+            {
+                *result_path = Some(path.into());
+                *attempt_ref = Some(format!("fixture/{}", path.rsplit('/').next().unwrap()));
+            }
+            result
+        };
+        let mut owner = FakeOwner {
+            observations: [
+                observation("/results/a"),
+                observation("/results/b"),
+                terminal(AttemptOutcome::Succeeded),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        let composite = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == "reviews")
+            .unwrap();
+        assert_eq!(composite.state, NodeState::Succeeded);
+        let outputs = composite.outputs.as_ref().unwrap();
+        assert!(outputs.findings.len() < 2 * count);
+        assert!(outputs.findings.len() <= MAX_FINDINGS);
+        assert!(canonical_len(&outputs.findings) <= FINDINGS_BYTES);
+        assert!(
+            outputs.warnings[0]
+                .contains(&format!("{} dropped", 2 * count - outputs.findings.len()))
+        );
+        assert!(
+            outputs.warnings[0].contains("/results/a")
+                && outputs.warnings[0].contains("/results/b")
+                && outputs.warnings[0].contains("fixture/a")
+                && outputs.warnings[0].contains("fixture/b")
+        );
+        assert_eq!(
+            run.checkpoint
+                .nodes
+                .iter()
+                .find(|n| n.id == "verify")
+                .unwrap()
+                .state,
+            NodeState::Succeeded
+        );
+        assert!(owner.prompts[2].contains("composite findings truncated"));
+        if !long {
+            let (plan, positions) = validate_plan(&document).unwrap();
+            let mut checkpoint = run.checkpoint.clone();
+            checkpoint.nodes[positions["reviews--a"]]
+                .outputs
+                .as_mut()
+                .unwrap()
+                .result = None;
+            let requests = upstream_results(
+                &plan.nodes[positions["verify"]],
+                &plan,
+                &checkpoint,
+                &positions,
+            );
+            let gate = requests
+                .iter()
+                .find(|request| request.label == "reviews--a")
+                .unwrap();
+            assert_eq!(gate.inline_findings.as_ref().unwrap().len(), count);
+            assert_eq!(gate.finding_prefix.as_deref(), Some("reviews--a:"));
+        }
+        assert_eq!(
+            advance(&document, &mut FakeOwner::default(), &mut journal)
+                .unwrap()
+                .checkpoint,
+            run.checkpoint
+        );
+    }
+}
+
+#[test]
+fn nested_composite_propagates_its_members_truncation_notice() {
+    let doc: GraphDocument = serde_json::from_value(serde_json::json!({"schema_version":1,"graph_id":"nested-cap","nodes":[
+        {"id":"outer","kind":"composite","access":"read_only","composite":{"nodes":[
+            {"id":"inner","kind":"composite","access":"read_only","composite":{"nodes":[
+                {"id":"a","access":"read_only","prompt":"review","route":{"alias":"senior"}},
+                {"id":"b","access":"read_only","prompt":"review","route":{"alias":"senior"}}
+            ],"exports":[{"node":"a","outputs":["result","findings"]},{"node":"b","outputs":["result","findings"]}]}}
+        ],"exports":[{"node":"inner","outputs":["findings"]}]}},
+        {"id":"next","access":"read_only","prompt":"use findings","route":{"alias":"senior"},"depends_on":["outer"],"inputs":[{"node":"outer","outputs":["findings"]}]}
+    ]})).unwrap();
+    let entries: Vec<_> = (0..20).map(|i| serde_json::json!({"id":format!("F{i}"),"severity":"high","file":"a","summary":"s","status":"open"})).collect();
+    let text = format!(
+        "```findings\n{}\n```",
+        serde_json::json!({"schema_version":1,"findings":entries})
+    );
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, &text),
+            terminal_with_result(AttemptOutcome::Succeeded, &text),
+            terminal(AttemptOutcome::Succeeded),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let outer = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "outer")
+        .unwrap();
+    assert_eq!(outer.state, NodeState::Succeeded);
+    assert!(
+        outer
+            .outputs
+            .as_ref()
+            .unwrap()
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("8 dropped"))
+    );
+    assert!(owner.prompts[2].contains("8 dropped"));
+    let (plan, positions) = validate_plan(&doc).unwrap();
+    let requests = upstream_results(
+        &plan.nodes[positions["next"]],
+        &plan,
+        &run.checkpoint,
+        &positions,
+    );
+    let member = requests
+        .iter()
+        .find(|request| request.label == "outer--inner--a")
+        .unwrap();
+    assert_eq!(
+        member.finding_prefix.as_deref(),
+        Some("outer--inner:outer--inner--a:")
+    );
+    let ids = truncated_finding_ids(
+        &plan.nodes[positions["next"]],
+        &plan,
+        &run.checkpoint,
+        &positions,
+    );
+    assert_eq!(ids.len(), 40);
+    assert!(ids.contains(&(
+        "outer--inner:outer--inner--a:F0".into(),
+        "outer--inner--a:0".into()
+    )));
+    assert!(ids.contains(&(
+        "outer--inner:outer--inner--b:F19".into(),
+        "outer--inner--b:19".into()
+    )));
 }
 
 // Small: a qualified ID that cannot fit must fail the composite, including on replay.
