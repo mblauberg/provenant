@@ -15,8 +15,9 @@ work does not need it.
   its verify commands, commit rules and release steps; skills defer to them.
 - **Git.** Implementation branches and linked worktrees are pre-authorised,
   with one writer per worktree. Merge through the repository's own workflow;
-  an authorised merge prunes its own worktree and merged refs. Any other
-  deletion, force-removal, history rewrite or push to a shared branch needs
+  an authorised merge prunes its own worktree and merged refs. A writer may
+  rebase and force-push with lease the unmerged branches of its own stack; any
+  other deletion, force-removal, history rewrite or push to a shared branch needs
   the user's authority.
 - **Checks.** Locally, run only fast targeted checks: lint, type checks and the
   tests you touched. Full suites and release scans run in CI: push the branch,

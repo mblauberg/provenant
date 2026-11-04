@@ -36,6 +36,8 @@ which must then be set. Follow a run with
 `provenant status` and `provenant fabric graph status ID`; take over a stalled
 landing with `provenant land N --head SHA --wait`.
 
+Split a large dependent change into a stack; see the [stacked PR workflow](../../docs/runbooks/github-workflow.md#stacked-pull-requests).
+
 Other shapes: `generator-evaluator` for a slice that stays in your worktree,
 `big-batch` for several lanes, `single` when the change is routine. Read
 `docs/runbooks/presets.md` for parameters.

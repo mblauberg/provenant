@@ -178,7 +178,8 @@ to push its verified commit and open the pull request.
 
 ### Pull request
 
-Open the pull request against `main` and link the issue per the rule in
+Open the pull request against `main` (or its stack base as below) and link the
+issue per the rule in
 [Execute and review](#execute-and-review): `Closes #N` only when merge leaves
 no user or external-action gate, otherwise `References #N` with the issue left
 open. The body must follow the repository template
@@ -199,6 +200,52 @@ gh pr create --base main \
 Set the issue to `In review` while exact-head checks and independent review
 run, and `Awaiting user` once machine gates pass and only a user decision
 remains.
+
+### Stacked pull requests
+
+Use a stack for dependent slices of one outcome that merit separate review: a
+shared seam and its consumers, a second batch built on the first, or a large
+refactor in reviewable steps. Independent changes get separate PRs off `main`;
+do not stack a slice that cannot pass CI alone.
+
+GitHub stacked PRs are generally available, with no repository enablement.
+They form a linear chain in one repository, without forks: the bottom PR targets
+`main` and each later PR targets the branch below. The merge box shows the
+stack map. Each PR carries its own `Closes #N` or `Refs #N` per issue, following
+the closure rule above; review its own diff against the branch below.
+
+With a current `gh`, install `gh extension install github/gh-stack`. Run
+`gh stack init`, commit the first slice, then `gh stack add BRANCH` for each
+new branch on top. `gh stack submit` pushes branches, creates or updates PRs
+and creates the stack. `gh stack view` shows it; `gh stack unstack` dissolves
+it. A completed stack cannot be extended: a new submit starts a new stack.
+Alternatively create and extend stacks through the API. REST PRs carry a
+`stack` object; `GET /repos/{owner}/{repo}/stacks` lists stacks, and REST has
+create, extend and dissolve endpoints. GraphQL stack fields are read-only;
+webhooks carry `stack`.
+
+The chair normally merges `main` into branches instead of rebasing. For a
+stack, a writer may rebase and force-push with lease only the unmerged branches
+of its own stack, never `main` or another writer's branch. `gh stack rebase`
+cascades and supports `--upstack` and `--downstack`; `gh stack push` uses an
+atomic per-branch force-with-lease, and `gh stack sync` fetches, rebases, pushes
+and syncs PR state. Recheck the changed heads and their review evidence.
+
+Required checks and branch protection apply to every PR, based on the bottom
+PR's base; stack merges cannot bypass them. CI runs for every PR; use
+`github.event.pull_request.stack` to limit expensive jobs when appropriate.
+Land bottom-first with `gh stack merge --merge-method merge` or the asynchronous
+merge API. `gh stack merge` merges through the chosen PR, all-or-nothing; one
+PR, a prefix or the whole stack can land. Upper PRs automatically retarget
+`main`. GitHub also supports squash and rebase merge methods. The legacy REST
+`PUT /pulls/{n}/merge` used by `provenant pr land` cannot merge stacked PRs;
+until Provenant supports stacks, use `gh stack` to land them. Prune merged
+branches and worktrees as usual after landing.
+
+See GitHub's [overview](https://docs.github.com/en/pull-requests/get-started/about-stacked-prs),
+[quickstart](https://docs.github.com/en/pull-requests/get-started/stacked-prs-quickstart),
+[CLI reference](https://docs.github.com/en/pull-requests/reference/stacked-prs-cli-commands)
+and [rollout guide](https://docs.github.com/en/pull-requests/tutorials/roll-out-stacked-prs).
 
 ### Project status
 
@@ -330,7 +377,7 @@ reported cause and rerun: an already-merged PR skips CI and merge and retries
 only safe cleanup. CI failures use `CI_PENDING`, `CI_FAILED`,
 `CI_UNAVAILABLE`, `CI_POLICY_UNAVAILABLE`, `CI_TIMEOUT`, `CI_CONFLICT`,
 `CI_NOT_SCHEDULED` or `HEAD_MOVED`. `CI_CONFLICT` means the PR conflicts with its
-base, so CI never starts: rebase and push. `CI_NOT_SCHEDULED` means the wait
+base, so CI never starts: update the branch and push (see [stacked pull requests](#stacked-pull-requests) for the rebase exception). `CI_NOT_SCHEDULED` means the wait
 ended with no check registered for the head. Required checks on the exact head
 stay mandatory.
 
@@ -385,7 +432,7 @@ The user review/merge gate applies only when the agent is stuck: split review
 verdicts it cannot settle with primary-source evidence, an exhausted repair
 budget, or a decision outside its granted authority. Standing user gates are:
 forced branch deletion, deletion of a branch that is not merged, history
-rewrites, credential or connector setup, pushes to shared branches outside
+rewrites outside the [stack exception](#stacked-pull-requests), credential or connector setup, pushes to shared branches outside
 authorised merges, and risk-tier downgrades. Deleting a *merged* branch's own
 local ref and worktree is carried by the merge itself, under
 [post-merge pruning](../worktrees.md#ownership-and-cleanup).

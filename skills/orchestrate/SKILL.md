@@ -54,6 +54,8 @@ literal write scope, prohibited actions, authority, output location and stop
 conditions. Give independent reviewers the base, subject and spec, leaving the
 author's hypothesis out. `code-review` owns the rubric.
 
+For `big-batch`, stack dependent batches; independent lanes stay separate PRs. See the [stacked PR workflow](../../docs/runbooks/github-workflow.md#stacked-pull-requests).
+
 Register a separate worktree per writer. For `big-batch`, bind both lane
 worktrees and the serial batch worktree; integrate into the named branch before
 reviewing its combined head. Check returned commits, changed paths and tests
