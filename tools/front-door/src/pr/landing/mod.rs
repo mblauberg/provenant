@@ -165,7 +165,9 @@ fn run_inner(
         return Err("--head and --wait apply only to single-pull-request landing".into());
     }
     if integration == Integration::ForgeQueue {
-        return Err(LandingError::Unimplemented("forge queue integration").into());
+        return Err(
+            LandingError::Failed("land.integration=forge_queue is not supported".into()).into(),
+        );
     }
     use sha2::{Digest, Sha256};
     let definition = model::GateDefinition {
