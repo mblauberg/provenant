@@ -1494,6 +1494,23 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         {
                             return Err("review expansion subject or source mismatch".into());
                         }
+                        // Flat validation otherwise reports only `node id`.
+                        let mut ids: std::collections::BTreeSet<&str> =
+                            expanded.nodes.iter().map(|item| item.id.as_str()).collect();
+                        for child in &addition.nodes {
+                            if !valid_identifier(&child.id) {
+                                return Err(format!(
+                                    "expanded review node id {:?} is invalid; use at most 64 ASCII letters, digits, dots, underscores or hyphens; shorten the composite or lens name",
+                                    bounded(&child.id, 256)
+                                ));
+                            }
+                            if !ids.insert(child.id.as_str()) {
+                                return Err(format!(
+                                    "expanded review node id {:?} is duplicated; use distinct composite and lens names",
+                                    bounded(&child.id, 256)
+                                ));
+                            }
+                        }
                         let mut preview = expanded.clone();
                         plans::append(&mut preview, &addition);
                         let (next_plan, next_positions) =

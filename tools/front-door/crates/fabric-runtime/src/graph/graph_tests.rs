@@ -575,6 +575,114 @@ fn deferred_review_journals_and_replays_without_resolving_again() {
         Some("review_resolution_failed")
     );
     assert!(invalid_run.checkpoint.expansions.is_empty());
+    // An independently resolved panel can exceed the remaining checkpoint
+    // budget; its error must retain the projection and the remedy.
+    let mut oversized = addition.clone();
+    oversized
+        .nodes
+        .iter_mut()
+        .find(|node| node.composite.is_none())
+        .unwrap()
+        .extra
+        .insert(
+            "fixture_padding".into(),
+            serde_json::json!("x".repeat(MAX_CHECKPOINT_BYTES as usize)),
+        );
+    let invalid_run = advance(
+        &document,
+        &mut FakeOwner {
+            review_expansion: Some(oversized),
+            ..Default::default()
+        },
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    let error = invalid_run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "outer--review")
+        .unwrap()
+        .advance_error
+        .as_deref()
+        .unwrap();
+    assert!(error.contains("node outer--review:"), "{error}");
+    let projected = error
+        .split_once("graph checkpoint could reach ")
+        .and_then(|(_, rest)| rest.split_once(" bytes"))
+        .and_then(|(size, _)| size.parse::<u64>().ok())
+        .expect("the error names the projected checkpoint size");
+    assert!(projected > MAX_CHECKPOINT_BYTES, "{error}");
+    assert!(error.contains("16777216-byte limit"), "{error}");
+    assert!(error.contains("use fewer nodes"), "{error}");
+
+    let mut too_long = addition.clone();
+    let long_id = format!("outer--review--review--{}", "x".repeat(64));
+    too_long
+        .nodes
+        .iter_mut()
+        .find(|node| node.composite.is_none())
+        .unwrap()
+        .id = long_id.clone();
+    too_long
+        .nodes
+        .iter_mut()
+        .find_map(|node| node.composite.as_mut())
+        .unwrap()
+        .exports[0]
+        .node = long_id.clone();
+    let invalid_run = advance(
+        &document,
+        &mut FakeOwner {
+            review_expansion: Some(too_long),
+            ..Default::default()
+        },
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    let error = invalid_run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "outer--review")
+        .unwrap()
+        .advance_error
+        .as_deref()
+        .unwrap();
+    assert!(error.contains(&long_id), "{error}");
+    assert!(error.contains("64 ASCII"), "{error}");
+    assert!(error.contains("shorten"), "{error}");
+
+    let mut duplicate = addition.clone();
+    duplicate.nodes.push(
+        duplicate
+            .nodes
+            .iter()
+            .find(|node| node.composite.is_none())
+            .unwrap()
+            .clone(),
+    );
+    let invalid_run = advance(
+        &document,
+        &mut FakeOwner {
+            review_expansion: Some(duplicate),
+            ..Default::default()
+        },
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    let error = invalid_run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "outer--review")
+        .unwrap()
+        .advance_error
+        .as_deref()
+        .unwrap();
+    assert!(error.contains("outer--review--review--lens"), "{error}");
+    assert!(error.contains("duplicated"), "{error}");
+
     let mut owner = FakeOwner {
         review_expansion: Some(addition),
         observations: [
