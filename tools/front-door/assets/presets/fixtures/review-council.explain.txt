@@ -51,7 +51,7 @@ verify  role=review.verify tier=senior family=cross_preferred kind=- access=read
 synthesis  role=review.synthesis tier=senior family=any kind=synthesise access=read_only worktree=-
   read_roots: ["<project>"]
   source: {"node":"subject","type":"node"}
-  inputs: [{"node":"verify","outputs":["result"]}]
+  inputs: [{"node":"verify","outputs":["result"]},{"node":"lenses","outputs":["result"]}]
 Roles:
   lens.conventions-readability  origin=bundled digest=<digest>
   lens.correctness-spec  origin=bundled digest=<digest>
