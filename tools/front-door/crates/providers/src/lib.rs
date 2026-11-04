@@ -39,6 +39,8 @@ use provenant_quota::QuotaSource;
 pub struct Registration {
     pub adapter: &'static dyn Adapter,
     pub quota_source: Option<&'static dyn QuotaSource>,
+    pub stdout_decoder: Option<&'static dyn provenant_os::capture::FrameDecoder>,
+    pub stderr_decoder: Option<&'static dyn provenant_os::capture::FrameDecoder>,
     pub display_name: &'static str,
     pub quota: provenant_quota::QuotaPolicy,
 }
