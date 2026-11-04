@@ -17,7 +17,7 @@ pub struct FakeForge {
     pub refuse_merge: Option<u64>,
     pub valid_merge_ids: bool,
     pub merges: Vec<(u64, String, MergeMethod)>,
-    pub reverts: Vec<(u64, String)>,
+    pub reverts: Vec<(u64, String, String, String)>,
 }
 impl Forge for FakeForge {
     fn pull_request(&mut self, number: u64) -> Result<PullRequestInfo, LandingError> {
@@ -88,8 +88,15 @@ impl Forge for FakeForge {
     fn supports_revert_forward(&self) -> bool {
         true
     }
-    fn open_revert(&mut self, number: u64, landed: &str) -> Result<u64, LandingError> {
-        self.reverts.push((number, landed.into()));
+    fn open_revert(
+        &mut self,
+        number: u64,
+        branch: &str,
+        target: &str,
+        checks: &str,
+    ) -> Result<u64, LandingError> {
+        self.reverts
+            .push((number, branch.into(), target.into(), checks.into()));
         Ok(9000 + number)
     }
 }
@@ -127,6 +134,9 @@ impl Repo for FakeRepo {
         }
         self.target_ref = branch.into();
         Ok(self.target.clone())
+    }
+    fn revert_commit(&mut self, _target: &str, landed: &str) -> Result<String, LandingError> {
+        Ok(landed.into())
     }
     fn merge_tree(&mut self, base: &str, head: &str) -> Result<MergeTree, LandingError> {
         if self.conflicts.contains(&(base.into(), head.into())) {

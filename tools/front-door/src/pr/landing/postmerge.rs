@@ -298,9 +298,19 @@ fn follow_with(
             .iter()
             .find(|pr| pr.number == number)
             .and_then(|pr| receipt.approved_to_landed.get(&pr.head))
-            .cloned()
-            .unwrap_or(landed);
-        let outcome = match forge.open_revert(number, &landed_commit) {
+            .cloned();
+        let target = receipt.publish_target().to_owned();
+        let branch = format!("{}revert/{number}", settings.candidate_ref_prefix);
+        let result = (|| {
+            let landed_commit = landed_commit.ok_or_else(|| {
+                LandingError::Failed(format!("no landed commit recorded for #{number}"))
+            })?;
+            let base = repo.fetch_target(&target)?;
+            let commit = repo.revert_commit(&base, &landed_commit)?;
+            repo.push_ref(&branch, &commit, None)?;
+            forge.open_revert(number, &branch, &target, &failed.join(", "))
+        })();
+        let outcome = match result {
             Ok(revert) => alarm(
                 "revert_forward_opened",
                 format!("opened pull request #{revert} reverting #{number}"),
@@ -517,7 +527,15 @@ mod tests {
         r.gate.results.push_back(verdict("s2", GateResult::Failed));
         r.gate.results.push_back(verdict("s1", GateResult::Passed));
         run(&mut r)?;
-        assert_eq!(r.forge.reverts, [(2, "l2".to_string())]);
+        assert_eq!(
+            r.forge.reverts,
+            [(
+                2,
+                format!("{}revert/2", LandSettings::default().candidate_ref_prefix),
+                "main".into(),
+                "post".into()
+            )]
+        );
         assert_eq!(
             r.alarms.0.last().map(|a| a.code.as_str()),
             Some("revert_forward_opened")

@@ -326,6 +326,39 @@ impl Forge for GhForge {
         }
         Ok(verdict.is_ok())
     }
+    fn supports_revert_forward(&self) -> bool {
+        true
+    }
+    fn open_revert(
+        &mut self,
+        number: u64,
+        branch: &str,
+        target: &str,
+        checks: &str,
+    ) -> Result<u64, LandingError> {
+        let title = format!("Revert pull request #{number}");
+        let body =
+            format!("Reverts pull request #{number} after post-merge check failure: {checks}.");
+        let bytes = self.get(&[
+            "repos/{owner}/{repo}/pulls",
+            "--method",
+            "POST",
+            "-f",
+            &format!("title={title}"),
+            "-f",
+            &format!("body={body}"),
+            "-f",
+            &format!("head={branch}"),
+            "-f",
+            &format!("base={target}"),
+        ])?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+            LandingError::Failed(format!("invalid revert pull request response: {e}"))
+        })?;
+        value["number"].as_u64().ok_or_else(|| {
+            LandingError::Failed("revert pull request response has no number".into())
+        })
+    }
     fn labels(&mut self, number: u64) -> Result<Vec<String>, LandingError> {
         Ok(self
             .pages(&format!(
@@ -403,6 +436,14 @@ impl GitRepo {
             expected.map(object_id).transpose()?.unwrap_or_default()
         );
         let remote = self.remote("")?;
+        if expected.is_none() {
+            let existing = self.ok(&["ls-remote", "--refs", &remote, full])?;
+            if !existing.is_empty() {
+                return Err(LandingError::Refused(format!(
+                    "remote ref already exists: {full}"
+                )));
+            }
+        }
         match self.git.exit(
             &self.project,
             &["push", "--quiet", &lease, &remote, refspec],
@@ -444,6 +485,70 @@ impl Repo for GitRepo {
         let remote = self.remote(branch)?;
         self.ok(&["fetch", "--no-tags", "--quiet", "--refmap=", &remote, &full])?;
         self.ok(&["rev-parse", "--verify", "FETCH_HEAD^{commit}"])
+    }
+    fn revert_commit(&mut self, target: &str, landed: &str) -> Result<String, LandingError> {
+        self.ensure(target)?;
+        self.ensure(landed)?;
+        let parents = self.ok(&["rev-list", "--parents", "-n", "1", object_id(landed)?])?;
+        if parents.split_whitespace().count() != 3 || !self.is_ancestor(landed, target)? {
+            return Err(LandingError::Failed(
+                "culprit must be a two-parent merge commit on the target".into(),
+            ));
+        }
+        static SCRATCH_SEQUENCE: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+        let scratch = loop {
+            let nonce = SCRATCH_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("provenant-revert-{}-{nonce}", std::process::id()));
+            match std::fs::create_dir(&path) {
+                Ok(()) => break path,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(LandingError::Failed(format!(
+                        "create revert scratch: {error}"
+                    )));
+                }
+            }
+        };
+        let path = scratch
+            .to_str()
+            .ok_or_else(|| LandingError::Failed("scratch path is not UTF-8".into()))?;
+        let added = self.ok(&[
+            "worktree",
+            "add",
+            "--detach",
+            "--quiet",
+            path,
+            object_id(target)?,
+        ]);
+        if let Err(error) = added {
+            let _ = std::fs::remove_dir_all(&scratch);
+            return Err(error);
+        }
+        let result = (|| {
+            let (code, _, error) = self
+                .git
+                .exit(&scratch, &["revert", "--no-commit", "-m", "1", landed])
+                .map_err(failed)?;
+            if code != 0 {
+                return Err(LandingError::Failed(format!("revert failed: {error}")));
+            }
+            let (code, tree, error) = self.git.exit(&scratch, &["write-tree"]).map_err(failed)?;
+            if code != 0 {
+                return Err(LandingError::Failed(format!("write revert tree: {error}")));
+            }
+            self.commit_tree(
+                tree.trim(),
+                &[target.to_owned()],
+                &format!("Revert merge {landed}"),
+            )
+        })();
+        let cleanup = self.ok(&["worktree", "remove", "--force", path]);
+        match (result, cleanup) {
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+            (Ok(commit), Ok(_)) => Ok(commit),
+        }
     }
     fn merge_tree(&mut self, base: &str, head: &str) -> Result<MergeTree, LandingError> {
         self.ensure(base)?;
@@ -814,6 +919,44 @@ mod tests {
     }
 
     #[test]
+    fn revert_commit_uses_current_target_and_publishes_only_new_branch() {
+        let mut rig = rig();
+        git(&rig.work, &["config", "user.name", "test"]);
+        git(&rig.work, &["config", "user.email", "test@example.invalid"]);
+        git(&rig.work, &["checkout", "-qb", "feature"]);
+        commit_file(&rig.work, "culprit", "bad\n");
+        git(&rig.work, &["checkout", "-q", "main"]);
+        git(
+            &rig.work,
+            &["merge", "--no-ff", "-qm", "merge culprit", "feature"],
+        );
+        let culprit = git(&rig.work, &["rev-parse", "HEAD"]);
+        let target = commit_file(&rig.work, "later", "keep\n");
+        git(&rig.work, &["push", "-q", "origin", "main"]);
+        let revert = rig.repo.revert_commit(&target, &culprit).unwrap();
+        assert_eq!(
+            git(&rig.work, &["rev-parse", &format!("{revert}^1")]),
+            target
+        );
+        assert_eq!(
+            git(&rig.work, &["show", &format!("{revert}:later")]),
+            "keep"
+        );
+        assert_ne!(
+            rig.repo
+                .git
+                .exit(&rig.work, &["cat-file", "-e", &format!("{revert}:culprit")])
+                .unwrap()
+                .0,
+            0
+        );
+        rig.repo.push_ref("land/revert/1", &revert, None).unwrap();
+        assert!(rig.repo.push_ref("land/revert/1", &revert, None).is_err());
+        assert_eq!(git(&rig.bare, &["rev-parse", "refs/heads/main"]), target);
+        assert_eq!(git(&rig.work, &["rev-parse", "HEAD"]), target);
+    }
+
+    #[test]
     fn shadow_fetch_does_not_change_refs_when_target_advances() {
         let mut rig = rig();
         let base = git(&rig.work, &["rev-parse", "HEAD"]);
@@ -1164,6 +1307,92 @@ mod tests {
         assert!(direct_push_verdict(&push, &json!({}), &[]).is_err());
         assert!(direct_push_verdict(&json!({"permissions": {"push": false}}), &open, &[]).is_err());
         assert!(direct_push_verdict(&json!({}), &open, &[]).is_err());
+    }
+
+    #[test]
+    fn alarm_reaches_the_chair_inbox() {
+        use provenant_core::{
+            CancelToken, HostId, MonoTime, ProjectId, RootInputs, TestClock, WallTime,
+        };
+        use provenant_fabric_runtime::{
+            identity::{Address, Identity, chair_session_mailbox},
+            inbox::{ControlRoute, InboxInput, InboxService},
+        };
+        use provenant_fabric_store::{Request, Store};
+        use provenant_records::{AbsolutePath, control::LaunchKind, inbox::InteractionChannel};
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let mut inputs = RootInputs::new(base.join("home"), base.join("repo"));
+        inputs.state_dir = Some(base.join("state"));
+        let state = inputs
+            .resolve(&provenant_os::fs::SystemPathResolver)
+            .unwrap()
+            .state;
+        let host = HostId::from_bytes([1; 16]);
+        let identity = Identity {
+            project: ProjectId::from_bytes([2; 16]),
+            host,
+            inbox: Address::new(host, "chair").unwrap(),
+            client: "test".into(),
+            cwd: AbsolutePath::new(&base).unwrap(),
+            common_dir: AbsolutePath::new(&base).unwrap(),
+            federation: None,
+        };
+        let clock = TestClock::new(
+            WallTime::from_micros(2_000_000_000_000_000).unwrap(),
+            MonoTime::from_micros(0),
+        );
+        let cancel = CancelToken::new();
+        let lookup = |_: &InboxInput, _: &Request<'_>| {
+            Ok(ControlRoute {
+                provider: None,
+                launch: LaunchKind::Chair,
+                registered: true,
+                target: "chair-a".into(),
+            })
+        };
+        let alarm = Alarm {
+            code: "post_merge_failed".into(),
+            message: "check Build failed".into(),
+        };
+        deliver_alarm(
+            Some("chair-a"),
+            &alarm_text(&alarm),
+            &mut |session, text| {
+                InboxService::open(&state, &identity, &clock, &cancel)
+                    .unwrap()
+                    .with_control_lookup(&lookup)
+                    .execute(
+                        InboxInput::ChairMessage {
+                            extra: Default::default(),
+                            session: session.into(),
+                            text: text.into(),
+                            channel: InteractionChannel::Cli,
+                            operation_id: None,
+                        },
+                        &cancel,
+                    )
+                    .unwrap();
+                Ok(())
+            },
+        )
+        .unwrap();
+        let request = Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let mail = Store::open(&state, &request)
+            .unwrap()
+            .read_mail(
+                identity.project,
+                chair_session_mailbox(identity.project, "chair-a"),
+                Some(0),
+                50,
+                &request,
+            )
+            .unwrap();
+        assert_eq!(mail.items.len(), 1);
+        assert!(mail.items[0].message.body.contains("check Build failed"));
     }
 
     #[test]

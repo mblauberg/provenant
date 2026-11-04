@@ -41,8 +41,14 @@ pub trait Forge {
         false
     }
     /// Open a pull request reverting a landed pull request's commits; returns its number.
-    fn open_revert(&mut self, number: u64, landed: &str) -> Result<u64, LandingError> {
-        let _ = (number, landed);
+    fn open_revert(
+        &mut self,
+        number: u64,
+        branch: &str,
+        target: &str,
+        checks: &str,
+    ) -> Result<u64, LandingError> {
+        let _ = (number, branch, target, checks);
         Err(LandingError::Unimplemented("forge revert pull request"))
     }
 }
@@ -58,6 +64,9 @@ pub trait Repo {
     /// Fetch without changing any persistent reference, as required in shadow mode.
     fn fetch_target_untracked(&mut self, _branch: &str) -> Result<String, LandingError> {
         Err(LandingError::Unimplemented("untracked target fetch"))
+    }
+    fn revert_commit(&mut self, _target: &str, _landed: &str) -> Result<String, LandingError> {
+        Err(LandingError::Unimplemented("revert commit"))
     }
     fn merge_tree(&mut self, base: &str, head: &str) -> Result<MergeTree, LandingError>;
     fn commit_tree(

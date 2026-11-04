@@ -391,8 +391,13 @@ and reason and split decisions; no publication occurs. Gate failures name each
 unmet check and why it was unmet: missing, failed, skipped or neutral, wrong
 issuer, or another tree. Receipts also retain base, candidate, gate, policy
 sources, cost and alarms and map approved SHAs to landed SHAs. Post-merge
-checks can bisect failures and raise an alarm; revert-forward PRs require
-explicit authorisation.
+checks can bisect failures and raise an alarm. When `revert_forward` is enabled,
+the adapter creates a mainline-parent revert on the current target, pushes the
+new `<candidate_ref_prefix>revert/<pr>` branch only if absent, and opens a PR
+naming the culprit and failed checks. Any failure raises an alarm. Batch error
+envelopes retain outcomes recorded so far and distinguish `LAND_CONTENTION`,
+`LAND_CONFLICT`, `LAND_GATE_UNMET`, `LAND_PUBLICATION_UNKNOWN` and
+`LAND_SPENDING_CAP`.
 
 #### Landing settings
 
