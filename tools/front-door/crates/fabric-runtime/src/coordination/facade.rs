@@ -378,6 +378,8 @@ fn serialise_io_operation<S: serde::Serializer>(
 ) -> Result<S::Ok, S::Error> {
     let operation = match operation {
         "access Fabric store"
+        | "create peer worktree"
+        | "submit: create peer worktree"
         | "read file"
         | "rename"
         | "resolve path"
