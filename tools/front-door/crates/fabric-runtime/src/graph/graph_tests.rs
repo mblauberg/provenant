@@ -1386,6 +1386,56 @@ fn synthesis_disposes_once_of_findings_propagated_through_verifier() {
     assert_eq!(finding.extra["verification"], "upheld");
 }
 
+// Small: the verifier sees a composite-qualified ID and synthesis accepts its bare alias.
+#[test]
+fn composite_qualified_propagation_resolves_identity_only_disposition() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":1, "graph_id":"composite-propagation", "nodes":[
+            {"id":"lenses", "kind":"composite", "access":"read_only", "composite":{
+                "nodes":[{"id":"lens", "access":"read_only", "prompt":"review", "route":{"alias":"senior"}}],
+                "exports":[{"node":"lens", "outputs":["findings"]}]
+            }},
+            {"id":"verify", "access":"read_only", "prompt":"verify", "route":{"alias":"senior"},
+             "depends_on":["lenses"], "inputs":[{"node":"lenses", "outputs":["findings"]}]},
+            {"id":"synthesis", "kind":"synthesise", "access":"read_only", "prompt":"dispose", "route":{"alias":"senior"},
+             "depends_on":["lenses", "verify"], "inputs":[{"node":"lenses", "outputs":["findings"]}, {"node":"verify", "outputs":["findings"]}],
+             "dispositions":["accepted", "rejected", "deferred"]}
+        ]
+    })).unwrap();
+    let propagated =
+        entry(",\"verification\":\"upheld\",\"propagates\":\"lenses:lenses--lens:F1\"")
+            .replace("\"id\":\"F1\"", "\"id\":\"lenses--lens:F1\"");
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&propagated)),
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(r#"{"id":"F1","disposition":"accepted","reason":"verified"}"#),
+            ),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let synthesis = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "synthesis")
+        .unwrap();
+    assert_eq!(
+        synthesis.state,
+        NodeState::Succeeded,
+        "{:?}",
+        synthesis.advance_error
+    );
+    let findings = &synthesis.outputs.as_ref().unwrap().findings;
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].id, "lenses--lens:F1");
+    assert_eq!(findings[0].extra["verification"], "upheld");
+}
+
 #[test]
 fn dependent_reviewers_with_independent_same_ids_require_distinct_dispositions() {
     let a = node("a", route("first"));

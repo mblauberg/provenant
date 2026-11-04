@@ -353,7 +353,11 @@ fn fixture() -> Result {
                             json!({"id":id,"disposition":status,"reason":"evidence refutes it"})
                         ));
                         if structured.len() < 32 {
-                            structured.push(json!({"id":id,"severity":"high","file":"a.rs","summary":"fixture finding","status":"open","verification":"falsified","disposition":"rejected","reason":"evidence refutes it"}));
+                            let mut finding = json!({"id":id,"severity":"high","file":"a.rs","summary":"fixture finding","status":"open","verification":"falsified","disposition":"rejected","reason":"evidence refutes it"});
+                            if prompt.contains("Verify the lens findings for:") {
+                                finding["propagates"] = json!(format!("lenses:{id}"));
+                            }
+                            structured.push(finding);
                         }
                         count += 1;
                     }
@@ -513,6 +517,8 @@ fn fixture() -> Result {
             json!([])
         } else if prompt.contains("Reconcile independent review findings") {
             json!([{"id":"F1","disposition":"rejected","reason":"falsified"}])
+        } else if prompt.contains("Verify the lens findings for:") {
+            json!([{"id":"lenses--lens-correctness-spec:F1","severity":"high","file":"a.rs","summary":"fixture finding","status":"open","verification":"falsified","propagates":"lenses:lenses--lens-correctness-spec:F1"}])
         } else {
             json!([{"id":"F1","severity":"high","file":"a.rs","summary":"fixture finding","status":"open"}])
         };
