@@ -114,7 +114,7 @@ output's parent directory must already exist. The packager copies the exact asse
 inventory digested by `build.rs`, reads the binary's `--version --json` identity,
 and runs the install path's bounded version and help smoke before publishing
 `release.json` last. It refuses existing output directories and asset drift.
-Cargo does not install this example.
+Release archives include only the `provenant` executable.
 
 ```sh
 cd tools/front-door
