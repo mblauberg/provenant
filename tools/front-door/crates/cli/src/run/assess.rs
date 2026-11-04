@@ -90,6 +90,19 @@ pub(super) fn capacity_reason(reason: &str) -> bool {
 }
 
 /// Check that another registered account can continue on the same model.
+/// Only a quota-stopped writer on an unpinned account with a recorded,
+/// unfinished handoff may continue its retained worktree on another account.
+pub(super) fn quota_handoff_recovery_eligible(
+    outcome: run::Outcome,
+    task: &run::TaskRequest,
+    handoff: Option<&provenant_records::handoff::Handoff>,
+) -> bool {
+    outcome == run::Outcome::QuotaLimited
+        && task.writer.is_some()
+        && task.account.is_none()
+        && handoff.is_some_and(provenant_records::handoff::Handoff::unfinished)
+}
+
 pub(super) fn unspent_alternative<'k>(
     keys: impl IntoIterator<Item = &'k str>,
     quota: &[provenant_quota::AccountRecord],

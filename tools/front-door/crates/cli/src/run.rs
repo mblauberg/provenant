@@ -335,46 +335,45 @@ impl run::Providers for Registry<'_> {
         }
         // A quota-stopped writer with a recorded unfinished handoff may
         // continue its retained worktree on another eligible account.
-        let quota_handoff_recovery = if decoded.outcome == run::Outcome::QuotaLimited
-            && task.writer.is_some()
-            && task.account.is_none()
-            && handoff.is_some_and(|handoff| handoff.unfinished())
-        {
-            if let (Some(roots), Some(adapter), Some(key)) = (
-                context_roots.as_ref().or(self.roots),
-                route.provider.as_deref(),
-                route.account_key.as_deref(),
-            ) {
-                let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-                    .map_err(|error| error.to_string())?;
-                let accounts = config.domains.accounts.with_derived_accounts();
-                let quota = crate::quota::read_cache_at(roots.state.as_path()).unwrap_or_default();
-                let (quota, policies) = crate::route::account_evidence(
-                    &config.domains.quota,
-                    quota,
-                    now.unix_seconds(),
-                );
-                let catalogue =
-                    provenant_routing::Catalogue::bundled().map_err(|error| error.to_string())?;
-                unspent_alternative(
-                    accounts
-                        .entries
-                        .values()
-                        .filter(|entry| entry.adapter == adapter)
-                        .map(|entry| entry.key.as_str()),
-                    &quota,
-                    &policies,
-                    key,
-                    &model,
-                    &catalogue,
-                    now.unix_seconds(),
-                )
+        let quota_handoff_recovery =
+            if quota_handoff_recovery_eligible(decoded.outcome, task, handoff) {
+                if let (Some(roots), Some(adapter), Some(key)) = (
+                    context_roots.as_ref().or(self.roots),
+                    route.provider.as_deref(),
+                    route.account_key.as_deref(),
+                ) {
+                    let config =
+                        provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+                            .map_err(|error| error.to_string())?;
+                    let accounts = config.domains.accounts.with_derived_accounts();
+                    let quota =
+                        crate::quota::read_cache_at(roots.state.as_path()).unwrap_or_default();
+                    let (quota, policies) = crate::route::account_evidence(
+                        &config.domains.quota,
+                        quota,
+                        now.unix_seconds(),
+                    );
+                    let catalogue = provenant_routing::Catalogue::bundled()
+                        .map_err(|error| error.to_string())?;
+                    unspent_alternative(
+                        accounts
+                            .entries
+                            .values()
+                            .filter(|entry| entry.adapter == adapter)
+                            .map(|entry| entry.key.as_str()),
+                        &quota,
+                        &policies,
+                        key,
+                        &model,
+                        &catalogue,
+                        now.unix_seconds(),
+                    )
+                } else {
+                    false
+                }
             } else {
                 false
-            }
-        } else {
-            false
-        };
+            };
         Ok(assess_settlement_retry(
             &routing,
             record,

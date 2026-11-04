@@ -873,6 +873,54 @@ fn host_native_attempts_do_not_resume_implicitly_or_explicitly()
 }
 
 #[test]
+fn quota_handoff_recovery_requires_an_unpinned_writer_with_unfinished_work()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_records::handoff::Handoff;
+    let unfinished = Handoff::from_json(
+        br#"{"schema_version":2,"status":"stopped_early","note":"quota","remaining":["rest"],"decisions":[],"verify":[]}"#,
+    )?;
+    let done = Handoff::from_json(
+        br#"{"schema_version":2,"status":"done","note":"finished","remaining":[],"decisions":[],"verify":[]}"#,
+    )?;
+    let input = trace_run(
+        7,
+        AttemptId::from_bytes([8; 16]),
+        WallTime::from_unix_seconds(0)?,
+    )?;
+    let reader = input.request.tasks[0].clone();
+    let mut writer = reader.clone();
+    writer.writer = Some(run::WriterRequest {
+        extra: Default::default(),
+        project: "/fixture/project".into(),
+        worktree: "/fixture/project/.worktrees/lane".into(),
+    });
+    let mut pinned = writer.clone();
+    pinned.account = Some("work".into());
+    let quota = run::Outcome::QuotaLimited;
+    assert!(quota_handoff_recovery_eligible(
+        quota,
+        &writer,
+        Some(&unfinished)
+    ));
+    for (outcome, task, handoff) in [
+        (quota, &pinned, Some(&unfinished)),
+        (quota, &reader, Some(&unfinished)),
+        (quota, &writer, Some(&done)),
+        (quota, &writer, None),
+        (run::Outcome::ModelUnavailable, &writer, Some(&unfinished)),
+        (run::Outcome::Failed, &writer, Some(&unfinished)),
+    ] {
+        assert!(
+            !quota_handoff_recovery_eligible(outcome, task, handoff),
+            "{outcome:?} account={:?} writer={} handoff={:?}",
+            task.account,
+            task.writer.is_some(),
+            handoff.map(Handoff::unfinished)
+        );
+    }
+    Ok(())
+}
+#[test]
 fn capacity_and_quota_settlements_retry_within_their_bounds()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
