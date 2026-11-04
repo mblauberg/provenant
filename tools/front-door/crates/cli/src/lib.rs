@@ -492,7 +492,6 @@ const PRESET_INCOMPATIBLE: &[&str] = &[
     "write_root",
     "capability",
     "knobs",
-    "task_id",
     "delivery_id",
     "head",
     "base",
@@ -1239,11 +1238,26 @@ mod tests {
         }
     }
     #[test]
+    fn task_id_is_compatible_with_explicit_and_automatic_presets() {
+        // Experiments assign arms by task id, so both preset paths accept it.
+        let task = ["--task-id", "11111111111111111111111111111111"];
+        let automatic = valid(&["run", "--prompt-file", "brief.md", task[0], task[1]]);
+        assert!(automatic.preset_incompatible_flags.is_empty());
+        valid(&[
+            "run",
+            "--prompt-file",
+            "brief.md",
+            "--preset",
+            "single",
+            task[0],
+            task[1],
+        ]);
+    }
+    #[test]
     fn automatic_preset_tracks_explicit_incompatible_flags() {
         for (flag, value) in [
             ("--provider-timeout", "3600"),
             ("--mode", "read-only"),
-            ("--task-id", "11111111111111111111111111111111"),
             ("--operation-id", "chosen"),
         ] {
             let invocation = valid(&["run", "--prompt-file", "brief.md", flag, value]);
@@ -1963,7 +1977,6 @@ mod tests {
             vec!["--write-root", "dir"],
             vec!["--capability", "postgres"],
             vec!["--knob", "x=y"],
-            vec!["--task-id", "0123456789abcdef0123456789abcdef"],
             vec!["--delivery-id", "0123456789abcdef0123456789abcdef"],
             vec!["--head", "abc"],
             vec!["--base", "main"],

@@ -972,12 +972,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                     && cmd.route.model.is_none()
                     && cmd.route.route.is_none()) =>
         {
-            let ignored: Vec<_> = inv
-                .preset_incompatible_flags
-                .iter()
-                .filter(|flag| flag.as_str() != "--task-id")
-                .cloned()
-                .collect();
+            let ignored = &inv.preset_incompatible_flags;
             if cmd.preset.is_none() && !ignored.is_empty() {
                 return fail_with_repair(
                     &inv.leaf,
