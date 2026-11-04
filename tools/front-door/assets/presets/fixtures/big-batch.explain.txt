@@ -1,8 +1,14 @@
 Graph <id>
+Admission: {"reason":"writer worktree","status":"refused"}
+Inspection: null
 Preset selection: big-batch (override)
 Review shape: deep (by_kind; size=unknown; kind=integration; risk=unknown), standard (default; size=pending (measured at review launch); kind=unknown; risk=unknown)
 plan: off -> off (planning turned off)
-Requires configuration: "writer worktree"
+Pending "delivery_target": "Delivery target is checked before delivery."
+Pending "planner_authority": "Planner authority is checked when the plan runs."
+Pending "route_readiness": "Route readiness and quota are checked before launch."
+Pending "source": "Source binding must be resolved and verified at execution."
+Pending "worktree": "Writer worktree ownership is checked at execution."
 scout  role=- tier=- family=any kind=composite access=read_only worktree=-
   scouts  role=- tier=- family=any kind=composite access=read_only worktree=-
     scout-1  role=scout.codebase tier=junior family=any kind=- access=read_only worktree=-

@@ -4,6 +4,11 @@ pub(super) fn nodes_have_v2(nodes: &[GraphNode]) -> bool {
     nodes.iter().any(|node| {
         node.review.is_some()
             || node.family_group.is_some()
+            || node.plan.as_ref().is_some_and(|spec| {
+                spec.patterns
+                    .iter()
+                    .any(|pattern| pattern.nodes.iter().any(value_has_v2))
+            })
             || node
                 .composite
                 .as_ref()
@@ -18,6 +23,100 @@ pub(super) fn nodes_have_v2(nodes: &[GraphNode]) -> bool {
                 .and_then(|spec| spec.fallback.as_ref())
                 .is_some_and(|spec| nodes_have_v2(&spec.nodes))
     })
+}
+
+fn value_has_v2(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.contains_key("family_group")
+                || map.get("review").is_some_and(serde_json::Value::is_object)
+                || map.values().any(value_has_v2)
+        }
+        serde_json::Value::Array(values) => values.iter().any(value_has_v2),
+        _ => false,
+    }
+}
+
+/// Minimum document schema capable of representing the document's fields.
+/// Schema 2 is a superset, so callers may retain an authored version 2 even
+/// when the minimum is 1.
+pub fn minimum_schema_version(document: &GraphDocument) -> u32 {
+    if document_requires_schema_v2(document) {
+        2
+    } else {
+        1
+    }
+}
+
+pub(super) fn document_requires_schema_v2(document: &GraphDocument) -> bool {
+    document.review_base.is_some() || nodes_have_v2(&document.nodes)
+}
+
+pub(super) fn supplied_kinds(node: &GraphNode) -> Vec<OutputKind> {
+    if let Some(composite) = &node.composite {
+        return composite
+            .exports
+            .iter()
+            .flat_map(|input| input.outputs.iter().copied())
+            .fold(Vec::new(), |mut kinds, kind| {
+                if !kinds.contains(&kind) {
+                    kinds.push(kind);
+                }
+                kinds
+            });
+    }
+    let mut kinds = vec![
+        OutputKind::Result,
+        OutputKind::Findings,
+        OutputKind::Verdict,
+        OutputKind::Remaining,
+    ];
+    if node.kind == Some(NodeKind::Loop) {
+        return kinds;
+    }
+    let write = node.access == AccessMode::WorktreeWrite;
+    if write || node.kind == Some(NodeKind::Land) {
+        kinds.push(OutputKind::Branch);
+    }
+    let pinned = node.source.is_some();
+    if write || pinned || node.kind == Some(NodeKind::Land) {
+        kinds.push(OutputKind::Commit);
+    }
+    kinds
+}
+
+pub(super) fn validate_output_kinds(document: &GraphDocument) -> Result<(), String> {
+    let by_id: std::collections::BTreeMap<_, _> =
+        document.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    for consumer in &document.nodes {
+        // A composite's export declaration is its public output contract. Its
+        // members are validated in their own scopes; consumers are checked
+        // against the declared composite outputs through `supplied_kinds`.
+        for input in &consumer.inputs {
+            let source_id = input.node.strip_prefix("previous.").unwrap_or(&input.node);
+            let Some(source) = by_id.get(source_id) else {
+                continue;
+            };
+            let available = supplied_kinds(source);
+            for kind in &input.outputs {
+                if !available.contains(kind) {
+                    let labels = available
+                        .iter()
+                        .map(|v| format!("{v:?}").to_lowercase())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(format!(
+                        "node {} selects {} from {}, which supplies only {}",
+                        consumer.id,
+                        format!("{kind:?}").to_lowercase(),
+                        source_id,
+                        labels
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn validate_schema(document: &GraphDocument) -> Result<(), &'static str> {
@@ -65,9 +164,20 @@ pub(super) fn validate_plan_with_limits(
     document: &GraphDocument,
     limits: &crate::config::GraphLimits,
 ) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), String> {
+    document.admit(limits)?;
     validate_schema(document).map_err(String::from)?;
-    let expanded = loops::expand(document, &[], limits)?;
-    validate_flat_plan(&expanded, limits).map_err(String::from)
+    let expansion_limits = crate::config::GraphLimits {
+        nodes: limits.nodes.max(16_384),
+        expansion_depth: limits.expansion_depth.max(64),
+        edges: usize::MAX,
+        routes_per_node: u16::MAX as usize,
+        node_prompt_bytes: usize::MAX,
+        graph_prompt_bytes: usize::MAX,
+        ..limits.clone()
+    };
+    let expanded = loops::expand(document, &[], &expansion_limits)?;
+    let plan = validate_flat_plan(&expanded, &expansion_limits).map_err(String::from)?;
+    Ok(plan)
 }
 
 pub(super) fn validate_flat_plan(

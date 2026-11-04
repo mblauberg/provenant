@@ -1387,7 +1387,7 @@ mod result_tests {
 #[cfg(test)]
 #[allow(unused_imports, dead_code)] // The custom worktree driver compiles without a test harness.
 mod policy_tail_confirmation_tests {
-    use super::{FacadeError, confirm_stable_tail};
+    use super::{FacadeError, confirm_stable_tail, lane_timeout};
 
     // Each pass returns (attempt, pass index), so a test can tell which pass's
     // record came back.
@@ -1430,5 +1430,11 @@ mod policy_tail_confirmation_tests {
         );
         assert!(matches!(result, Err(FacadeError::StateCorrupt)));
         assert_eq!(calls, ceiling + 1);
+    }
+
+    #[test]
+    fn lane_timeout_is_node_deadline_capped_by_graph_timeout() {
+        assert_eq!(lane_timeout(Some(120), 60), 60);
+        assert_eq!(lane_timeout(Some(30), 60), 30);
     }
 }

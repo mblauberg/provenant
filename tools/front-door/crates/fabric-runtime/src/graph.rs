@@ -38,6 +38,11 @@ mod outputs;
 mod pattern_plan;
 mod plans;
 mod validation;
+#[doc(hidden)]
+pub use plans::prompt as rendered_prompt;
+pub use validation::minimum_schema_version;
+#[cfg(test)]
+mod admission_tests;
 use budget::*;
 pub use journal::*;
 pub use model::*;

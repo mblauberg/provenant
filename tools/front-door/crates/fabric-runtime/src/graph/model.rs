@@ -297,13 +297,8 @@ impl GraphDocument {
     /// A plan whose worst-case checkpoint would not fit is refused here, naming
     /// the size, rather than stopping mid-run on an oversized checkpoint.
     pub fn expanded(&self, limits: &crate::config::GraphLimits) -> Result<Self, String> {
-        let expanded = loops::expand(self, &[], limits)?;
-        if let Ok((plan, _)) = validate_flat_plan(&expanded, &plans::generous())
-            && let Some(reason) = envelope::reason(self, &[], &[], &plan)
-        {
-            return Err(reason);
-        }
-        Ok(expanded)
+        self.admit(limits)?;
+        loops::expand(self, &[], limits)
     }
 
     /// The checks admission applies to a submitted document, without running
@@ -311,12 +306,45 @@ impl GraphDocument {
     /// expanded plan against `limits`. A document that passes here is not
     /// refused as invalid when it is submitted.
     pub fn validate(&self, limits: &crate::config::GraphLimits) -> Result<(), String> {
-        validate_plan_with_limits(self, limits).map(|_| ())
+        self.admit(limits)
+    }
+
+    /// The single static admission decision for a submitted graph. The reason
+    /// is suitable for bounded display and typed projection by the front door.
+    pub fn admit(&self, limits: &crate::config::GraphLimits) -> Result<(), String> {
+        validate_schema(self).map_err(String::from)?;
+        let expansion_limits = crate::config::GraphLimits {
+            nodes: limits.nodes.max(16_384),
+            expansion_depth: limits.expansion_depth.max(64),
+            edges: usize::MAX,
+            routes_per_node: u16::MAX as usize,
+            node_prompt_bytes: usize::MAX,
+            graph_prompt_bytes: usize::MAX,
+            ..limits.clone()
+        };
+        let expanded = loops::expand(self, &[], &expansion_limits)?;
+        let (plan, _) = validate_flat_plan(&expanded, &expansion_limits).map_err(String::from)?;
+        if let Some(reason) = structural_limit_reason(&expanded, &plan, limits) {
+            return Err(reason);
+        }
+        if let Some(reason) = envelope::reason(self, &[], &[], &plan) {
+            return Err(reason);
+        }
+        validate_output_kinds(&expanded)
     }
 
     pub fn inspect(&self, limits: &crate::config::GraphLimits) -> Result<GraphInspection, String> {
         validate_schema(self).map_err(String::from)?;
-        let expanded = self.expanded(limits)?;
+        let inspect_limits = crate::config::GraphLimits {
+            nodes: limits.nodes.max(16_384),
+            expansion_depth: limits.expansion_depth.max(64),
+            edges: usize::MAX,
+            routes_per_node: u16::MAX as usize,
+            node_prompt_bytes: usize::MAX,
+            graph_prompt_bytes: usize::MAX,
+            ..limits.clone()
+        };
+        let expanded = loops::expand(self, &[], &inspect_limits)?;
         let generous = crate::config::GraphLimits {
             nodes: usize::MAX,
             edges: usize::MAX,

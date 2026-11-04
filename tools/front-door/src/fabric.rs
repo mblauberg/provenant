@@ -78,6 +78,12 @@ pub(crate) fn scratch_prepare_error(error: impl std::fmt::Display) -> FacadeErro
     }
 }
 
+fn lane_timeout(deadline_seconds: Option<u64>, graph_timeout_seconds: u64) -> u64 {
+    deadline_seconds
+        .unwrap_or(graph_timeout_seconds)
+        .min(graph_timeout_seconds)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum EdgeError {
     #[error(transparent)]
@@ -5062,10 +5068,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                             effort: route.effort.clone(),
                         },
                     }),
-                    timeout_seconds: node
-                        .deadline_seconds
-                        .unwrap_or(self.factory.context.config.limits.graph_timeout_seconds)
-                        .min(self.factory.context.config.limits.graph_timeout_seconds),
+                    timeout_seconds: lane_timeout(
+                        node.deadline_seconds,
+                        self.factory.context.config.limits.graph_timeout_seconds,
+                    ),
                     delivery_id: None,
                     deliver: delivery,
                     new_worktree: None,

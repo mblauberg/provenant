@@ -489,6 +489,159 @@ fn bundled_role_presets_have_bounded_nested_graphs() {
 }
 
 #[test]
+fn require_findings_nodes_instruct_a_findings_block() {
+    fn walk(nodes: &[Value], preset: &str) {
+        for node in nodes {
+            if node["require_findings"] == true {
+                let typed: provenant_fabric_runtime::graph::GraphNode =
+                    serde_json::from_value(node.clone()).unwrap();
+                let rendered = provenant_fabric_runtime::graph::rendered_prompt(&typed);
+                let prompt = rendered.as_str();
+                assert!(
+                    prompt.contains("```findings"),
+                    "{preset}: {} lacks findings fence",
+                    node["id"]
+                );
+                assert!(
+                    prompt.contains("{\"schema_version\":1,\"findings\":[]}"),
+                    "{preset}: {} lacks empty findings form",
+                    node["id"]
+                );
+            }
+            for key in ["composite", "loop"] {
+                for child_key in ["nodes", "body"] {
+                    if let Some(children) = node
+                        .pointer(&format!("/{key}/{child_key}"))
+                        .and_then(Value::as_array)
+                    {
+                        walk(children, preset);
+                    }
+                }
+            }
+            if let Some(nodes) = node
+                .pointer("/plan/fallback/nodes")
+                .and_then(Value::as_array)
+            {
+                walk(nodes, preset);
+            }
+            for pattern in node
+                .pointer("/plan/patterns")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(nodes) = pattern.get("nodes").and_then(Value::as_array) {
+                    walk(nodes, preset);
+                }
+            }
+        }
+    }
+    for name in [
+        "scout-swarm",
+        "generator-evaluator",
+        "review-council",
+        "big-batch",
+        "scope-then-run",
+        "deliver",
+    ] {
+        let expanded = expand(&Layers::empty(), name, "approved brief", &[]).unwrap();
+        walk(expanded.document["nodes"].as_array().unwrap(), name);
+    }
+}
+
+#[test]
+fn explain_pending_checks_follow_the_document() {
+    let cases = [
+        (
+            json!({"nodes":[{"id":"read","access":"read_only","prompt":"x"}]}),
+            vec!["route_readiness"],
+        ),
+        (
+            json!({"delivery":"integrate:main","nodes":[{"id":"write","access":"worktree_write","worktree":"/repo/w","prompt":"x"}]}),
+            vec!["delivery_target", "route_readiness", "worktree"],
+        ),
+        (
+            json!({"nodes":[{"id":"upstream","access":"read_only","prompt":"x"},{"id":"downstream","access":"read_only","prompt":"y","source":{"type":"node","node":"upstream"},"inputs":[{"node":"upstream","outputs":["result"]}]}]}),
+            vec!["route_readiness", "source"],
+        ),
+        (
+            json!({"nodes":[{"id":"plan","kind":"plan","access":"read_only","prompt":"x"}]}),
+            vec!["planner_authority", "route_readiness"],
+        ),
+    ];
+    for (document, expected) in cases {
+        let checks = super::preset::pending_checks(&document);
+        let ids: Vec<_> = checks
+            .iter()
+            .filter_map(|check| check["id"].as_str())
+            .collect();
+        assert_eq!(ids, expected);
+        assert!(checks.iter().all(|check| {
+            check["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.lines().count() == 1)
+        }));
+    }
+}
+
+#[test]
+fn admission_preset_version_follows_document() {
+    for name in [
+        "scout-swarm",
+        "generator-evaluator",
+        "review-council",
+        "big-batch",
+        "scope-then-run",
+        "deliver",
+    ] {
+        let document = bundled_fixture(name);
+        let raw: Value = serde_json::to_value(&document).unwrap();
+        document
+            .admit(&provenant_fabric_runtime::config::GraphConfig::default().limits)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let raw_document: provenant_fabric_runtime::graph::GraphDocument =
+            serde_json::from_value(raw).unwrap();
+        assert_eq!(
+            document.admit(&Default::default()),
+            raw_document.admit(&Default::default()),
+            "{name}"
+        );
+        assert_eq!(document.schema_version, 1, "{name}");
+    }
+    let mut review = expand(
+        &real_selector("/nonexistent"),
+        "deliver",
+        "approved brief",
+        &[
+            "parameters.worktree='/repo/w'".into(),
+            "parameters.base='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'".into(),
+        ],
+    )
+    .unwrap();
+    pin_fixture_sources(&mut review.document);
+    let review_doc: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(review.document.clone()).unwrap();
+    assert_eq!(review_doc.schema_version, 2);
+    review_doc
+        .admit(&provenant_fabric_runtime::config::GraphConfig::default().limits)
+        .unwrap();
+    let raw: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(review.document).unwrap();
+    assert_eq!(
+        review_doc.admit(&Default::default()),
+        raw.admit(&Default::default())
+    );
+    let raw_v2: provenant_fabric_runtime::graph::GraphDocument = serde_json::from_value(json!({
+        "schema_version":2,"graph_id":"raw-v2","nodes":[{"id":"task","access":"read_only","prompt":"x"}]
+    })).unwrap();
+    assert_eq!(raw_v2.schema_version, 2);
+    assert_eq!(
+        provenant_fabric_runtime::graph::minimum_schema_version(&raw_v2),
+        1
+    );
+}
+
+#[test]
 fn implementer_and_scope_briefs_carry_the_authority_envelope() {
     let mut expanded = expand(
         &Layers::empty(),

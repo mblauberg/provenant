@@ -1,6 +1,9 @@
 Graph <id>
+Admission: {"status":"admitted"}
+Inspection: {"dependency_depth":2,"edges":6,"limit_reason":null,"max_attempts":12,"nodes":7,"prompt_bytes":5964}
 Preset selection: scout-swarm (override)
 plan: off -> off (planning turned off)
+Pending "route_readiness": "Route readiness and quota are checked before launch."
 scouts  role=- tier=- family=any kind=composite access=read_only worktree=-
   scout-1  role=scout.codebase tier=junior family=any kind=- access=read_only worktree=-
     reference: skill:scope/references/scout-areas.md <digest>
