@@ -227,9 +227,8 @@ webhooks carry `stack`.
 
 The chair normally merges `main` into branches instead of rebasing. A writer
 may rebase and force-push with lease its own unmerged branches, including a
-whole stack, never `main` or another writer's branch. Until #2852 lands,
-Provenant's pre-push handler refuses every non-fast-forward push; where it is
-installed, push a rebased stack from a checkout without it or wait for that fix. `gh stack rebase`
+whole stack, never `main` or another writer's branch. Provenant's pre-push
+handler refuses non-fast-forward updates only to the default branch. `gh stack rebase`
 cascades and supports `--upstack` and `--downstack`; `gh stack push` uses an
 atomic per-branch force-with-lease, and `gh stack sync` fetches, rebases, pushes
 and syncs PR state. Recheck the changed heads and their review evidence.
