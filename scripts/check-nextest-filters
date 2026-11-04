@@ -50,7 +50,17 @@ def main() -> int:
         path.read_text(errors="replace") for path in (ROOT / "tools/front-door").rglob("*.rs") if "target" not in path.parts
     )
     missing = []
+    inventory = {
+        match.group(1)
+        for match in re.finditer(r"^\| `([^`]+)` \| macOS \|", (ROOT / "docs/runbooks/ci.md").read_text(), re.MULTILINE)
+    }
     for name in unlisted:
+        if name in inventory:
+            if sys.platform == "darwin":
+                missing.append(name)
+            else:
+                print(f"test(={name}) is checked against the macOS list by the native inventory gate.")
+            continue
         if re.search(rf"\bfn {re.escape(name.rsplit('::', 1)[-1])}\b", sources):
             print(f"test(={name}) is not built on this platform; its definition exists.")
         else:

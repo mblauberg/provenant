@@ -757,7 +757,8 @@ fn writer_protected_changes_wait_for_review_and_ignore_upstream() -> Result {
                 "review_required"
             } else {
                 "succeeded"
-            }
+            },
+            "unexpected writer terminal record: {value:#}"
         );
         if own_change {
             assert_eq!(value["head"], head);
@@ -1490,9 +1491,12 @@ pub(super) fn wait_for_writer_release(store: &provenant_run::RunStore) -> Result
 }
 
 fn wait_for_path(path: &Path, timeout: Duration, label: &str) -> Result {
-    if !eventually(timeout, || path.exists()) {
-        return Err(format!("timed out waiting for {label}: {}", path.display()).into());
-    }
+    provenant_test_support::wait_for(
+        &format!("{label}: {}", path.display()),
+        timeout,
+        || path.exists(),
+        |exists| *exists,
+    )?;
     Ok(())
 }
 

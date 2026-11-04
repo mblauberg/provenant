@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""Require each native inventory entry in the macOS list and passing JUnit."""
+import json
+from pathlib import Path
+import sys
+import xml.etree.ElementTree as ET
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def inventory(path):
+    rows = []
+    for line in path.read_text().splitlines():
+        if line.startswith('| `'):
+            fields = [field.strip().strip('`') for field in line.strip('|').split('|')]
+            if len(fields) == 5 and fields[1] == 'macOS':
+                rows.append(fields)
+    if not rows:
+        raise ValueError('native inventory is empty')
+    names = [row[0] for row in rows]
+    if len(set(names)) != len(names):
+        raise ValueError('duplicate native inventory test')
+    return rows
+
+
+def check(rows, listing, results):
+    suites = listing['rust-suites'].values()
+    names = {name for suite in suites for name in suite['testcases']}
+    errors = []
+    reports = {}
+    for path in results.glob('*.xml'):
+        try:
+            reports[path.stem] = list(ET.parse(path).getroot().iter('testcase'))
+        except (OSError, ET.ParseError) as error:
+            errors.append(f'{path.name}: invalid JUnit report: {error}')
+    for name, platform, lane, variables, tools in rows:
+        if not name or name not in names:
+            errors.append(f'{name}: absent from macOS nextest list')
+        try:
+            controls = json.loads((results / f'{lane}.json').read_text())
+            cases = reports[lane]
+            matches = [case for case in cases if case.get('name') == name]
+            total = sum(case.get('name') == name for cases in reports.values() for case in cases)
+            if len(matches) != 1 or total != 1 or any(case.find(tag) is not None for case in matches for tag in ('skipped', 'failure', 'error')):
+                errors.append(f'{name}: {lane} must contain exactly one passing testcase across all invocations (found {total})')
+            for var in variables.split(', '):
+                if var != '-' and controls.get(var) != '1':
+                    errors.append(f'{name}: {lane} missing {var}=1')
+        except (OSError, ValueError, KeyError, ET.ParseError) as error:
+            errors.append(f'{name}: {lane} results unavailable: {error}')
+    return errors
+
+
+def main():
+    if len(sys.argv) != 3:
+        sys.exit('usage: check-native-inventory LIST_JSON RESULTS_DIR')
+    try:
+        rows = inventory(ROOT / 'docs/runbooks/ci.md')
+        errors = check(rows, json.loads(Path(sys.argv[1]).read_text()), Path(sys.argv[2]))
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        sys.exit(f'Cannot check native inventory: {error}')
+    if errors:
+        print('\n'.join(errors), file=sys.stderr)
+        return 1
+    print(f'All {len(rows)} native inventory entries passed in their required lanes.')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

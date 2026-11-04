@@ -130,15 +130,17 @@ fn stderr_of(child: &mut Child) -> Result<String> {
     Ok(text)
 }
 
-fn until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if condition() {
-            return true;
+#[allow(clippy::print_stderr)] // Preserve the final readiness observation on failure.
+fn until(timeout: Duration, condition: impl FnMut() -> bool) -> bool {
+    match provenant_test_support::wait_for("build slot condition", timeout, condition, |ready| {
+        *ready
+    }) {
+        Ok(_) => true,
+        Err(error) => {
+            eprintln!("{error}");
+            false
         }
-        std::thread::sleep(Duration::from_millis(25));
     }
-    condition()
 }
 
 fn finish(child: &mut Child, timeout: Duration) -> Result<bool> {
