@@ -246,7 +246,7 @@ pub(super) fn materialise(
                     cancel,
                     remaining,
                 ),
-                Err(_) => Err(FacadeError::InvalidInput),
+                Err(_) => Err(FacadeError::InvalidInput { detail: None }),
             }
         };
         let (bytes, length) = match read {

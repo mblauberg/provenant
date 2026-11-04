@@ -1098,7 +1098,7 @@ pub fn coordination_outcome(
 ) -> Outcome {
     use provenant_fabric_runtime::coordination::facade::FacadeError;
     match error {
-        FacadeError::InvalidInput | FacadeError::NotFound => Outcome::Invalid,
+        FacadeError::InvalidInput { .. } | FacadeError::NotFound => Outcome::Invalid,
         FacadeError::StaleFence
         | FacadeError::GenerationConflict { .. }
         | FacadeError::Conflict

@@ -4587,6 +4587,66 @@ fn a_static_commit_council_records_the_requested_base() {
     .document;
     assert!(document["nodes"][1]["composite"].is_object());
     assert_eq!(document["review_base"], "origin/main");
+    // The runtime refuses a v1 document that carries a review base.
+    assert_eq!(document["schema_version"], 2);
+}
+
+/// Every document a preset emits must pass the admission checks the runtime
+/// applies on submit, not just deserialize: a document that carried a review
+/// base under schema 1 expanded and explained cleanly yet was refused as
+/// "invalid input" by every `run --preset review-council` with a base.
+#[test]
+fn every_bundled_preset_document_passes_graph_admission() {
+    let layers = real_selector("/nonexistent");
+    let limits = provenant_fabric_runtime::config::GraphLimits::default();
+    let shapes: [&[&str]; 5] = [
+        &[],
+        &["parameters.base='main'"],
+        &["parameters.base='main'", "parameters.review_shape='quick'"],
+        &["parameters.base='main'", "parameters.size='small'"],
+        &["parameters.review_shape='quick'"],
+    ];
+    let mut checked = 0;
+    for name in [
+        "single",
+        "chain",
+        "fan-out",
+        "scout-swarm",
+        "generator-evaluator",
+        "review-council",
+        "scope-then-run",
+        "deliver",
+        "big-batch",
+    ] {
+        for extra in shapes {
+            let mut overrides: Vec<String> = match name {
+                "generator-evaluator" | "review-council" | "scope-then-run" | "deliver" => {
+                    vec!["parameters.worktree='/repo/lane'".into()]
+                }
+                "big-batch" => vec![
+                    "parameters.lanes=[{name='one',worktree='/repo/one',scope=['.'],spec=''},{name='two',worktree='/repo/two',scope=['.'],spec=''}]".into(),
+                    "parameters.batch_worktree='/repo/batch'".into(),
+                ],
+                _ => Vec::new(),
+            };
+            overrides.extend(extra.iter().map(|entry| (*entry).to_owned()));
+            let mut expanded = match expand(&layers, name, "approved brief", &overrides) {
+                Ok(expanded) => expanded,
+                // A preset without a review stage declares no review parameters.
+                Err(error) if error.contains("unknown parameter") => continue,
+                Err(error) => panic!("{name} {extra:?}: {error}"),
+            };
+            pin_fixture_sources(&mut expanded.document);
+            let document: provenant_fabric_runtime::graph::GraphDocument =
+                serde_json::from_value(expanded.document)
+                    .unwrap_or_else(|error| panic!("{name} {extra:?}: {error}"));
+            document
+                .validate(&limits)
+                .unwrap_or_else(|error| panic!("{name} {extra:?}: {error}"));
+            checked += 1;
+        }
+    }
+    assert!(checked >= 20, "{checked} documents checked");
 }
 
 /// The lenses of a generator-evaluator judge what the writer commits, so the

@@ -28,7 +28,7 @@ impl std::error::Error for InputError {}
 impl InputError {
     /// The wire refusal code; `path` identifies the invalid field.
     pub fn code(&self) -> &'static str {
-        super::facade::FacadeError::InvalidInput.code()
+        super::facade::FacadeError::InvalidInput { detail: None }.code()
     }
 
     pub(crate) fn new(path: impl Into<String>) -> Self {

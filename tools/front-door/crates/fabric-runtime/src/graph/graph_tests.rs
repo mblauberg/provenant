@@ -5558,7 +5558,11 @@ fn a_permanent_refusal_blocks_the_node_at_once_with_reason_and_remedy() {
     let document = graph(vec![node("one", route("first"))]);
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
-        errors: [(1, crate::coordination::facade::FacadeError::InvalidInput)].into(),
+        errors: [(
+            1,
+            crate::coordination::facade::FacadeError::InvalidInput { detail: None },
+        )]
+        .into(),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
@@ -5655,7 +5659,7 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
         assert!(launch_retry_kind(&transient), "{transient}");
     }
     for permanent in [
-        FacadeError::InvalidInput,
+        FacadeError::InvalidInput { detail: None },
         FacadeError::ConfinementRefused,
         FacadeError::DispatchRefused {
             reason: "why".into(),
