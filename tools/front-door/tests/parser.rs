@@ -568,10 +568,7 @@ fn run_base_consistency_on_existing_branch() -> Result {
     );
 
     // Advance main to base_b so base_b is not an ancestor of feat/test-base
-    assert_eq!(
-        code(&rig.execute(&git, &commit_args("base-b"), None)?),
-        0
-    );
+    assert_eq!(code(&rig.execute(&git, &commit_args("base-b"), None)?), 0);
     let base_b = String::from_utf8(
         rig.execute(&git, &["rev-parse", "HEAD"], None)?
             .stdout
