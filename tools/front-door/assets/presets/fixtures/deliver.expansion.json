@@ -3,7 +3,7 @@
     "pattern": "deliver",
     "preset": "deliver"
   },
-  "graph_id": "preset-ea308c669ef1cd4137c365d24b869e1d",
+  "graph_id": "preset-12c54a1eeec23c67abb08b74a75b9b11",
   "nodes": [
     {
       "acceptance_checks": [
@@ -570,6 +570,12 @@
                 "node": "verify",
                 "outputs": [
                   "result",
+                  "findings"
+                ]
+              },
+              {
+                "node": "subject",
+                "outputs": [
                   "findings"
                 ]
               }

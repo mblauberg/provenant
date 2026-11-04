@@ -3,7 +3,7 @@
     "pattern": "big-batch",
     "preset": "big-batch"
   },
-  "graph_id": "preset-bd950414a06b3b3b8359d7c12cec1f91",
+  "graph_id": "preset-f2b223ac76727643efe466200fdcfb91",
   "integration_branch": "batch/graph",
   "nodes": [
     {
@@ -368,6 +368,12 @@
                                 "result",
                                 "findings"
                               ]
+                            },
+                            {
+                              "node": "implement",
+                              "outputs": [
+                                "findings"
+                              ]
                             }
                           ],
                           "kind": "synthesise",
@@ -489,6 +495,12 @@
                               "node": "lens",
                               "outputs": [
                                 "result",
+                                "findings"
+                              ]
+                            },
+                            {
+                              "node": "implement",
+                              "outputs": [
                                 "findings"
                               ]
                             }
@@ -704,13 +716,21 @@
                   {
                     "node": "lens-correctness-spec",
                     "outputs": [
-                      "result"
+                      "result",
+                      "findings"
                     ]
                   },
                   {
                     "node": "lens-simplicity",
                     "outputs": [
-                      "result"
+                      "result",
+                      "findings"
+                    ]
+                  },
+                  {
+                    "node": "implement",
+                    "outputs": [
+                      "findings"
                     ]
                   }
                 ],
@@ -1287,6 +1307,12 @@
                   "result",
                   "findings"
                 ]
+              },
+              {
+                "node": "subject",
+                "outputs": [
+                  "findings"
+                ]
               }
             ],
             "kind": "synthesise",
@@ -1537,6 +1563,12 @@
                       "node": "verify",
                       "outputs": [
                         "result",
+                        "findings"
+                      ]
+                    },
+                    {
+                      "node": "subject",
+                      "outputs": [
                         "findings"
                       ]
                     }

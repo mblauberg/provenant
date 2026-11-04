@@ -49,7 +49,7 @@ plan  role=plan.shape tier=principal family=any kind=plan access=read_only workt
     evaluate  role=review.evaluator tier=senior family=any kind=synthesise access=read_only worktree=-
       read_roots: ["${worktree}"]
       source: {"node":"implement","type":"node"}
-      inputs: [{"node":"lens-correctness-spec","outputs":["result"]},{"node":"lens-simplicity","outputs":["result"]}]
+      inputs: [{"node":"lens-correctness-spec","outputs":["result","findings"]},{"node":"lens-simplicity","outputs":["result","findings"]},{"node":"implement","outputs":["findings"]}]
       acceptance_checks: ["Give every finding one disposition","End with one exact VERDICT line"]
   pattern wave-barrier:
     barrier  role=plan.wave tier=senior family=any kind=synthesise access=read_only worktree=-
@@ -104,7 +104,7 @@ council  role=- tier=- family=any kind=composite access=read_only worktree=-
   synthesis  role=review.synthesis tier=senior family=any kind=synthesise access=read_only worktree=-
     read_roots: ["<project>"]
     source: {"node":"subject","type":"node"}
-    inputs: [{"node":"verify","outputs":["result","findings"]}]
+    inputs: [{"node":"verify","outputs":["result","findings"]},{"node":"subject","outputs":["findings"]}]
   exports: [{"node":"synthesis","outputs":["result","findings","verdict","commit"]}]
 refactor  role=refactor-principal tier=principal family=any kind=- access=worktree_write worktree=<project>
   write_scope: ["."]
@@ -134,7 +134,7 @@ repair  role=- tier=- family=any kind=loop access=read_only worktree=-
     synthesis  role=review.synthesis tier=senior family=any kind=synthesise access=read_only worktree=-
       read_roots: ["<project>"]
       source: {"node":"subject","type":"node"}
-      inputs: [{"node":"verify","outputs":["result","findings"]}]
+      inputs: [{"node":"verify","outputs":["result","findings"]},{"node":"subject","outputs":["findings"]}]
     exports: [{"node":"synthesis","outputs":["result","findings","verdict","commit"]}]
   accept  role=- tier=- family=any kind=gate access=read_only worktree=-
     inputs: [{"node":"review","outputs":["verdict"]}]

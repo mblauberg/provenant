@@ -1812,7 +1812,9 @@ fn lower_leaf(
         map.remove("effort");
     }
     let outputs = map.remove("outputs").unwrap_or_else(|| json!(["result"]));
-    if !deps.is_empty() && !control {
+    if !control
+        && (!deps.is_empty() || (map.contains_key("dispositions") && !dependencies.is_empty()))
+    {
         if !map.contains_key("inputs") {
             map.insert("inputs".into(), selected_inputs(deps, &outputs));
         }
@@ -1830,7 +1832,7 @@ fn lower_leaf(
                     outputs.push(json!("findings"));
                 }
             }
-            for dep in deps {
+            for dep in &dependencies {
                 if !inputs
                     .iter()
                     .any(|input| input.get("node").and_then(Value::as_str) == Some(dep))

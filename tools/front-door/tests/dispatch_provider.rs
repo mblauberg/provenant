@@ -445,14 +445,16 @@ fn fixture() -> Result {
         return Ok(());
     }
     let answer = if prompt.contains("fixture council findings") {
-        let entry = if prompt.contains("Reconcile independent review findings") {
-            json!({"id":"F1","disposition":"rejected","reason":"falsified"})
+        let entries = if prompt.contains("Frame the immutable review subject for:") {
+            json!([])
+        } else if prompt.contains("Reconcile independent review findings") {
+            json!([{"id":"F1","disposition":"rejected","reason":"falsified"}])
         } else {
-            json!({"id":"F1","severity":"high","file":"a.rs","summary":"fixture finding","status":"open"})
+            json!([{"id":"F1","severity":"high","file":"a.rs","summary":"fixture finding","status":"open"}])
         };
         format!(
-            "```findings\n{}\n```{DONE_FENCE}\nVERDICT: PASS\n",
-            json!({"schema_version":1,"findings":[entry]})
+            "```findings\n{}\n```\nVERDICT: PASS{DONE_FENCE}\n",
+            json!({"schema_version":1,"findings":entries})
         )
     } else if prompt.contains("fixture partial stop") {
         format!(

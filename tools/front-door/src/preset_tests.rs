@@ -2963,6 +2963,28 @@ fn substitutions_and_origins_travel_in_the_retained_graph_document() {
 }
 
 #[test]
+fn synthesis_selects_findings_from_implicit_and_explicit_dependencies() {
+    let mut layers = Layers::empty();
+    layers.insert("test", "mixed-dependencies", r#"
+stages = [
+  { id = "first", prompt = "First" },
+  { id = "second", prompt = "Second" },
+  { id = "synthesis", prompt = "Synthesize", depends_on = ["first"], dispositions = ["accepted", "rejected"] },
+]
+"#).unwrap();
+    let expanded = expand(&layers, "mixed-dependencies", "brief", &[]).unwrap();
+    let synthesis = node(&expanded.document, "synthesis");
+    assert_eq!(synthesis["depends_on"], json!(["second", "first"]));
+    assert_eq!(
+        synthesis["inputs"],
+        json!([
+            {"node": "second", "outputs": ["result", "findings"]},
+            {"node": "first", "outputs": ["findings"]}
+        ])
+    );
+}
+
+#[test]
 fn synthesis_declares_and_requests_a_disposition_for_every_finding() {
     let expanded = expand(
         &Layers::empty(),

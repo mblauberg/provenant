@@ -41,7 +41,7 @@ run  role=- tier=- family=any kind=composite access=read_only worktree=-
   evaluate  role=review.evaluator tier=senior family=any kind=synthesise access=read_only worktree=-
     read_roots: ["<project>"]
     source: {"node":"implement","type":"node"}
-    inputs: [{"node":"lens","outputs":["result","findings"]}]
+    inputs: [{"node":"lens","outputs":["result","findings"]},{"node":"implement","outputs":["findings"]}]
   exports: [{"node":"implement","outputs":["branch","commit"]},{"node":"evaluate","outputs":["result","findings","verdict"]}]
 Roles:
   lens.adversarial  origin=bundled digest=<digest>

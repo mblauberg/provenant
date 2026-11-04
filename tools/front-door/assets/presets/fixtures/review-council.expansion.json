@@ -3,7 +3,7 @@
     "pattern": "review-council",
     "preset": "review-council"
   },
-  "graph_id": "preset-584f917eb1d76b390e7743bfc5495ae0",
+  "graph_id": "preset-996b8397047a91f72f47a2b4eef09eb3",
   "nodes": [
     {
       "access": "read_only",
@@ -410,6 +410,12 @@
           "node": "verify",
           "outputs": [
             "result",
+            "findings"
+          ]
+        },
+        {
+          "node": "subject",
+          "outputs": [
             "findings"
           ]
         }
