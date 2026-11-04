@@ -1227,6 +1227,7 @@ pub(super) fn prepare_candidates(
             let authority = match credential_authority(roots.state.as_path(), paths, &login) {
                 Ok(authority) => authority,
                 Err(error) => {
+                    previous_outcome = provenant_routing::FallbackOutcome::AuthRequired;
                     reasons.push(skip(&label, SkipKind::AuthRequired, error));
                     continue;
                 }
@@ -1248,6 +1249,7 @@ pub(super) fn prepare_candidates(
             ) {
                 Ok(token) => Some(token),
                 Err(error) => {
+                    previous_outcome = provenant_routing::FallbackOutcome::AuthRequired;
                     reasons.push(skip(
                         &label,
                         SkipKind::AuthRequired,
