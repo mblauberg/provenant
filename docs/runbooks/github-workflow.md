@@ -350,7 +350,9 @@ single number also runs as a batch of one, with the exact-candidate gate and
 `auto` publication. `--batch` explicitly selects the batch path for one PR.
 `--wait`, `--head` or `integration = "single"` select the single-PR path. `--shadow`
 builds and gates the candidate and records the decisions without publishing;
-only the candidate ref may change. `--tier` selects a risk-tier override.
+only the candidate ref may change, and it is removed after the decision is recorded.
+`--tier` selects a risk-tier override: `routine`, `substantial`, `crucial` or
+`terminal`.
 `--explain --json` needs no numbers and reports effective policy values and
 their sources. `--head` and `--wait` apply to single-PR landing only.
 
@@ -391,7 +393,9 @@ and reason and split decisions; no publication occurs. Gate failures name each
 unmet check and why it was unmet: missing, failed, skipped or neutral, wrong
 issuer, or another tree. Receipts also retain base, candidate, gate, policy
 sources, cost and alarms and map approved SHAs to landed SHAs. Post-merge
-checks can bisect failures and raise an alarm. When `revert_forward` is enabled,
+checks can bisect failures and raise an alarm. `revert_forward` requires
+`post_merge.bisect` to identify a culprit; the lander warns when it is disabled.
+When `revert_forward` is enabled,
 the adapter creates a mainline-parent revert on the current target, pushes the
 new `<candidate_ref_prefix>revert/<pr>` branch only if absent, and opens a PR
 naming the culprit and failed checks. Any failure raises an alarm. Batch error
@@ -420,7 +424,8 @@ omitted fields inherit. The project and tier tables accept the same fields.
   `gate.coverage` bind its limit and declared coverage. Command gates remove
   `GH_TOKEN`, `GITHUB_TOKEN` and `GH_ENTERPRISE_TOKEN` from the environment
   unless named in `gate.env_passthrough`; the command process group is stopped
-  on every exit.
+  on every exit. Git credential helpers and keychains remain available to the
+  command under the user's normal environment.
 - `pr_ci.mode` selects `always`, `opt_in`, `affected` or `none`; `pr_ci.label`
   names the opt-in label. This policy cannot bypass forge-required checks.
 - `publish` selects `auto`, `rest_ordered` or `fast_forward`; `method` selects

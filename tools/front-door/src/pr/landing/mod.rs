@@ -52,10 +52,6 @@ pub mod adapters;
 pub mod budget;
 pub mod candidate;
 pub mod driver;
-#[allow(
-    dead_code,
-    reason = "gate coverage helper is retained for evidence integration"
-)]
 pub mod gate;
 pub mod postmerge;
 pub mod publish;
@@ -121,6 +117,12 @@ fn batch_response(
             (*outcome == model::Outcome::Conflicted).then_some(LandingError::Conflict(*number))
         })
     });
+    let failure = failure.or_else(|| {
+        report.outcomes.iter().find_map(|(number, outcome)| {
+            (*outcome == model::Outcome::Excluded)
+                .then(|| LandingError::Refused(format!("pull request #{number} was excluded")))
+        })
+    });
     let (status, code) = match failure.as_ref() {
         Some(
             LandingError::PublicationUnknown
@@ -175,6 +177,27 @@ pub(crate) fn project_id(
         .location;
     Ok(provenant_config::lookup_project(roots, &location)?
         .map(|binding| binding.project_id().to_string()))
+}
+
+fn gate_definition(
+    gate: &provenant_cli::domains::GateSettings,
+) -> Result<model::GateDefinition, serde_json::Error> {
+    use sha2::{Digest, Sha256};
+    Ok(model::GateDefinition {
+        kind: gate.kind,
+        digest: Sha256::digest(serde_json::to_vec(&gate)?)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+        checks: gate.checks.clone(),
+        commands: gate.commands.clone(),
+        issuer: gate.issuer.clone(),
+        executor: gate.executor.clone(),
+        coverage: gate.coverage.clone(),
+        timeout_seconds: gate.timeout_seconds,
+        pool: gate.pool.clone(),
+        env_passthrough: gate.env_passthrough.clone(),
+    })
 }
 
 fn run_inner(
@@ -236,10 +259,15 @@ fn run_inner(
     }
     if options.explain {
         let mut warnings = tier_warning.clone().into_iter().collect::<Vec<_>>();
+        if effective.post_merge.revert_forward && !effective.post_merge.bisect {
+            warnings.push(
+                "post_merge.revert_forward requires post_merge.bisect to identify a culprit".into(),
+            );
+        }
         if effective.candidate_ref_prefix != LandSettings::default().candidate_ref_prefix {
             warnings.push("candidate_ref_prefix differs from the bundled default; update the CI trigger to match".to_owned());
         }
-        let value = serde_json::json!({"fields": policy.fields, "budget_rate_micros_per_minute": policy.budget_rate_micros_per_minute, "warnings": warnings});
+        let value = serde_json::json!({"fields": policy.fields, "budget_rate_micros_per_minute": policy.budget_rate_micros_per_minute, "retry_budget_seconds": options.wait.unwrap_or(60), "retry_budget_source": if options.wait.is_some() { "--wait" } else { "compiled default" }, "warnings": warnings});
         let text = format!("{}\n", serde_json::to_string_pretty(&value)?);
         return Ok(crate::emit(
             &CommandResult::new("land", Outcome::Ok, value),
@@ -282,22 +310,7 @@ fn run_inner(
     if options.head.is_some() || options.wait.is_some() {
         return Err("--head and --wait apply only to single-pull-request landing".into());
     }
-    use sha2::{Digest, Sha256};
-    let definition = model::GateDefinition {
-        kind: effective.gate.kind,
-        digest: Sha256::digest(serde_json::to_vec(&effective.gate)?)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect(),
-        checks: effective.gate.checks.clone(),
-        commands: effective.gate.commands.clone(),
-        issuer: effective.gate.issuer.clone(),
-        executor: effective.gate.executor.clone(),
-        coverage: effective.gate.coverage.clone(),
-        timeout_seconds: effective.gate.timeout_seconds,
-        pool: effective.gate.pool.clone(),
-        env_passthrough: effective.gate.env_passthrough.clone(),
-    };
+    let definition = gate_definition(&effective.gate)?;
     let (mut forge, mut repo, mut runner, mut alarms) = adapters::connect(&resolved.project)?;
     let target = forge.target_branch()?;
     let result = driver::run(
@@ -343,6 +356,49 @@ fn run_inner(
 )]
 mod response_tests {
     use super::*;
+    #[test]
+    fn gate_definition_comes_from_resolved_policy() -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_cli::domains::{GateOverride, LandOverride, LandSettings};
+        let mut settings = LandSettings::default();
+        settings.tiers.insert(
+            "crucial".into(),
+            LandOverride {
+                gate: Some(GateOverride {
+                    checks: Some(vec!["tier-check".into()]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let policy = policy::LandPolicy::resolve(
+            &settings,
+            &Default::default(),
+            None,
+            Some("crucial"),
+            &Default::default(),
+        )?;
+        let effective = policy.settings()?;
+        let definition = gate_definition(&effective.gate)?;
+        assert_eq!(definition.checks, vec!["tier-check"]);
+        assert_eq!(definition.kind, effective.gate.kind);
+        assert_eq!(definition.timeout_seconds, effective.gate.timeout_seconds);
+        assert_ne!(
+            definition.digest,
+            gate_definition(&LandSettings::default().gate)?.digest
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn excluded_pr_has_error_envelope() {
+        let report = driver::Report {
+            outcomes: std::collections::BTreeMap::from([(7, model::Outcome::Excluded)]),
+            ..Default::default()
+        };
+        let response = batch_response(report, None);
+        assert_eq!(response.error.unwrap().code, "LAND_REFUSED");
+    }
+
     #[test]
     fn unknown_publication_keeps_pending_outcomes_and_recovery_path() {
         let report = driver::Report {

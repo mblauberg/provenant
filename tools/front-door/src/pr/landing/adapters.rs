@@ -446,14 +446,20 @@ impl GitRepo {
         }
         match self.git.exit(
             &self.project,
-            &["push", "--quiet", &lease, &remote, refspec],
+            &["push", "--porcelain", &lease, &remote, refspec],
         ) {
             Ok((0, ..)) => Ok(()),
-            Ok((_, _, error))
-                if error.contains("[rejected]")
-                    && (error.contains("stale info")
-                        || error.contains("non-fast-forward")
-                        || error.contains("fetch first")) =>
+            Ok((_, output, error))
+                if output.contains("[remote rejected]")
+                    || output.contains("[rejected]")
+                        && (output.contains("stale info")
+                            || output.contains("non-fast-forward")
+                            || output.contains("fetch first"))
+                    || error.contains("[remote rejected]")
+                    || error.contains("[rejected]")
+                        && (error.contains("stale info")
+                            || error.contains("non-fast-forward")
+                            || error.contains("fetch first")) =>
             {
                 Err(LandingError::Refused(format!("git push refused: {error}")))
             }
@@ -1052,6 +1058,26 @@ mod tests {
     }
 
     #[test]
+    fn push_rejected_by_remote_hook_is_definite_refusal() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut rig = rig();
+        let base = rig.repo.fetch_target("main").unwrap();
+        let tree = rig.repo.tree_of(&base).unwrap();
+        let candidate = rig
+            .repo
+            .commit_tree(&tree, std::slice::from_ref(&base), "candidate")
+            .unwrap();
+        let hook = rig.bare.join("hooks/pre-receive");
+        std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(
+            rig.repo.push_ref("main", &candidate, Some(&base)),
+            Err(LandingError::Refused(_))
+        ));
+        assert_eq!(rig.repo.fetch_target("main").unwrap(), base);
+    }
+
+    #[test]
     fn push_uses_a_lease_and_refuses_a_moved_target() {
         let mut rig = rig();
         let base = rig.repo.fetch_target("main").unwrap();
@@ -1069,7 +1095,8 @@ mod tests {
             .repo
             .commit_tree(&tree, std::slice::from_ref(&base), "c")
             .unwrap();
-        assert!(rig.repo.push_ref("main", &candidate, Some(&base)).is_err());
+        let stale = rig.repo.push_ref("main", &candidate, Some(&base));
+        assert!(matches!(stale, Err(LandingError::Refused(_))), "{stale:?}");
         assert_eq!(
             git(&rig.bare, &["rev-parse", "refs/heads/main"]),
             moved,
