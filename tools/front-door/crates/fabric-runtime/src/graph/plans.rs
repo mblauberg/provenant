@@ -1069,16 +1069,9 @@ fn fragment(
         integration_branch: document.integration_branch.clone(),
     };
     // Pattern wrappers are ordinary static composites. Expand them before the
-    // fragment is measured or validated so the host limits see every child.
+    // fragment is validated so the host limits see every child.
     let local = composites::expand(&local, &generous())?;
     validate_schema(&local).map_err(str::to_owned)?;
-    if local.nodes.len() > spec.max_nodes {
-        return Err(format!(
-            "fragment expands to {} nodes; plan allows at most {}",
-            local.nodes.len(),
-            spec.max_nodes
-        ));
-    }
     let (plan, _) = validate_flat_plan(&local, &generous()).map_err(str::to_owned)?;
     validate_output_kinds(&local)?;
     let mut nodes: Vec<GraphNode> = plan
@@ -1637,7 +1630,6 @@ pub(super) fn settle(
                                 node.expansion_pause
                                     .as_deref()
                                     .map(pause_reason_for_display)
-                                    .map(str::to_owned)
                             });
                             checkpoint.pause_code = checkpoint
                                 .pause_reason
@@ -1657,12 +1649,11 @@ pub(super) fn settle(
                         return Some((preview, plan, positions));
                     }
                     Err(fallback_error) => {
-                        let display_reason = bounded(
-                            &format!(
-                                "node {} fallback expansion paused: {fallback_error}",
-                                node.id
-                            ),
-                            1000,
+                        let display_fragment_error = bounded(&fragment_error, 350);
+                        let display_fallback_error = bounded(&fallback_error, 350);
+                        let display_reason = format!(
+                            "node {} expansion paused: planner fragment invalid: {display_fragment_error}; fallback expansion paused: {display_fallback_error}",
+                            node.id
                         );
                         let retry_context =
                             provenant_core::hex(bounded(&fragment_error, 1500).as_bytes());
@@ -1764,8 +1755,16 @@ fn retry_fragment_error(pause: &str) -> Option<String> {
     String::from_utf8(provenant_core::unhex(context)?).ok()
 }
 
-pub(super) fn pause_reason_for_display(reason: &str) -> &str {
-    reason
-        .rsplit_once(FALLBACK_RETRY_CONTEXT)
-        .map_or(reason, |(display, _)| display)
+pub(super) fn pause_reason_for_display(reason: &str) -> String {
+    let Some((display, _)) = reason.rsplit_once(FALLBACK_RETRY_CONTEXT) else {
+        return reason.to_owned();
+    };
+    match retry_fragment_error(reason) {
+        Some(fragment_error)
+            if !display.contains(" expansion paused: planner fragment invalid:") =>
+        {
+            format!("planner fragment invalid: {fragment_error}; {display}")
+        }
+        _ => display.to_owned(),
+    }
 }
