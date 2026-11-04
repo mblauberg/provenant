@@ -1172,7 +1172,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             node.expansion_pause
                 .as_deref()
                 .map(plans::pause_reason_for_display)
-                .map(str::to_owned)
         }) {
             checkpoint.pause_reason = Some(reason);
             checkpoint.pause_code = Some("invalid_plan_expansion".into());

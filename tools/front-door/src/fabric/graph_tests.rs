@@ -742,7 +742,10 @@ mod result_tests {
             "schema_version":1, "graph_id":"fixture", "nodes":[
                 {"id":"ordinary","role":"plan","access":"read_only","prompt":"test"}]
         }))?;
-        let checkpoint = graph_status_fixture().checkpoint;
+        let mut checkpoint = graph_status_fixture().checkpoint;
+        let display = "node ordinary expansion paused: planner fragment invalid: invalid fragment: missing nodes; fallback expansion paused: source requires a full commit ID";
+        checkpoint.pause_reason = Some(display.into());
+        checkpoint.nodes[0].expansion_pause = Some(format!("{display}\n[planner-fragment-retry-context:{}", provenant_core::hex(b"invalid fragment: missing nodes")));
         let mut journal = FileJournal::open(
             &roots.state,
             project,
@@ -768,7 +771,13 @@ mod result_tests {
             budget,
             &cancel,
         )?;
-        assert_eq!(status.checkpoint, before);
+        let reason = status.checkpoint.pause_reason.as_deref().unwrap();
+        assert!(reason.contains("invalid fragment: missing nodes"), "{reason}");
+        assert!(reason.find("invalid fragment") < reason.find("fallback expansion paused"));
+        let human = super::graph_display(&status, "fabric graph status", &provenant_cli::Globals::default());
+        assert!(human.contains("invalid fragment: missing nodes"), "{human}");
+        let json = serde_json::to_value(&status)?;
+        assert!(json["checkpoint"]["pause_reason"].as_str().unwrap().contains("invalid fragment: missing nodes"));
         assert_eq!(
             FileJournal::read_checkpoint(&roots.state, project, "fixture")?.unwrap(),
             before
