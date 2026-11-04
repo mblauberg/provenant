@@ -158,8 +158,24 @@ pub(super) fn verify_selected_head(
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 pub(super) fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), PermissionError> {
+    validate_profile_spec_impl(spec, None)
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn validate_profile_spec_with_home(
+    spec: &ProviderProfileSpec,
+    home: &Path,
+) -> Result<(), PermissionError> {
+    validate_profile_spec_impl(spec, Some(home))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn validate_profile_spec_impl(
+    spec: &ProviderProfileSpec,
+    home: Option<&Path>,
+) -> Result<(), PermissionError> {
     if spec.process_executables.len() > MAX_PATH_GRANTS
         || spec.runtime_reads.len() > MAX_PATH_GRANTS
         || spec.discovery_reads.len() > MAX_PATH_GRANTS
@@ -177,19 +193,37 @@ pub(super) fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), Pe
         return Err(PermissionError::ProcessPolicyMissing);
     }
     for executable in &spec.process_executables {
-        validate_read_exec_grant(executable)?;
+        validate_read_exec_grant(executable).map_err(|error| {
+            if home.is_some() {
+                error.with_credential_path(&executable.path, home)
+            } else {
+                error
+            }
+        })?;
         if executable.scope != PathScope::Exact {
             return Err(PermissionError::InvalidPath(executable.path.clone()));
         }
     }
     if let Some(socket) = &spec.fabric_socket {
-        validate_noncredential_grant(socket)?;
+        validate_noncredential_grant(socket).map_err(|error| {
+            if home.is_some() {
+                error.with_credential_path(&socket.path, home)
+            } else {
+                error
+            }
+        })?;
         if socket.scope != PathScope::Exact {
             return Err(PermissionError::InvalidPath(socket.path.clone()));
         }
     }
     for grant in &spec.runtime_reads {
-        validate_read_exec_grant(grant)?;
+        validate_read_exec_grant(grant).map_err(|error| {
+            if home.is_some() {
+                error.with_credential_path(&grant.path, home)
+            } else {
+                error
+            }
+        })?;
     }
     for grant in &spec.discovery_reads {
         grant.validate()?;
@@ -235,10 +269,22 @@ pub(super) fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), Pe
         }
     }
     for grant in &spec.continuation_reads {
-        validate_noncredential_grant(grant)?;
+        validate_noncredential_grant(grant).map_err(|error| {
+            if home.is_some() {
+                error.with_credential_path(&grant.path, home)
+            } else {
+                error
+            }
+        })?;
     }
     for root in &spec.tool_exec_roots {
-        validate_read_exec_grant(root)?;
+        validate_read_exec_grant(root).map_err(|error| {
+            if home.is_some() {
+                error.with_credential_path(&root.path, home)
+            } else {
+                error
+            }
+        })?;
     }
     // State may sit under a provider's home (Claude keeps transcripts beside
     // its configuration), so only the authentication roots themselves are off
@@ -251,11 +297,21 @@ pub(super) fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), Pe
             .flat_map(|auth| auth.roots.iter().chain(&auth.in_place_writes))
             .any(|root| grant.overlaps(root))
         {
-            return Err(PermissionError::CredentialRoot);
+            return Err(if home.is_some() {
+                PermissionError::credential_root_at(&grant.path, home)
+            } else {
+                PermissionError::CredentialRoot
+            });
         }
     }
     for grant in &spec.tool_writes {
-        validate_noncredential_grant(grant)?;
+        validate_noncredential_grant(grant).map_err(|error| {
+            if home.is_some() {
+                error.with_credential_path(&grant.path, home)
+            } else {
+                error
+            }
+        })?;
     }
     for endpoint in &spec.provider_api {
         validate_endpoint(endpoint)?;

@@ -99,9 +99,13 @@ fn prepare(
     // Codex scans `$HOME/.agents/skills` at startup independently of
     // CODEX_HOME. Grant the host's user skills read-only so the scan succeeds.
     let user_skills = input.home.join(".agents/skills");
-    if input.user_skills() && user_skills.is_dir() {
-        runtime_reads.extend(crate::launch::user_skills_grants(&user_skills));
-    }
+    let (skill_reads, skill_omitted) = if input.user_skills() && user_skills.is_dir() {
+        crate::user_skills_grants_with_omissions(&user_skills, Some(input.home))
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let mut omitted_discovery = crate::launch::OmittedGrant::skills(skill_omitted);
+    runtime_reads.extend(skill_reads);
     let mut setup = vec![SetupStep::Symlink {
         link: codex_home.join("auth.json"),
         target: credential.clone(),
@@ -118,6 +122,7 @@ fn prepare(
         &mut tool_exec_roots,
         &mut env,
         &mut setup,
+        &mut omitted_discovery,
     );
     crate::launch::node_tools(
         input.home,
@@ -126,6 +131,7 @@ fn prepare(
         &mut runtime_reads,
         &mut tool_exec_roots,
         &mut env,
+        &mut omitted_discovery,
     );
     // Git may inspect global config even for status. Keep host hooks,
     // includes and credential helpers outside the lane's environment.
@@ -151,6 +157,7 @@ fn prepare(
         secret_input: None,
         cwd: input.cwd.to_owned(),
         setup,
+        omitted_discovery,
         git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {

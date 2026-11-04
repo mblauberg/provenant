@@ -175,6 +175,11 @@ pub(super) fn prepare_command(
         settings.jobs(),
     );
     apply_setup(&spec.setup, &[&scratch, &paths.provider_state], None)?;
+    let warnings: Vec<String> = spec
+        .omitted_discovery
+        .iter()
+        .map(|entry| super::preparation::omission_warning(entry, &home))
+        .collect();
     Ok(run::PreparedLaunch {
         skipped_routes: Vec::new(),
         argv: spec.argv,
@@ -185,9 +190,12 @@ pub(super) fn prepare_command(
         route: RouteRecord {
             provider: Some(provider.into()),
             source: Some(format!("domains.fabric.commands.{name}")),
-            extra: [("name".into(), serde_json::Value::String(name.into()))]
-                .into_iter()
-                .collect(),
+            extra: [
+                ("name".into(), serde_json::Value::String(name.into())),
+                ("discovery_warnings".into(), serde_json::json!(warnings)),
+            ]
+            .into_iter()
+            .collect(),
             ..Default::default()
         },
         observed_head,

@@ -497,11 +497,31 @@ pub fn access_root_allowed(root: &std::path::Path, state: &std::path::Path, read
 /// sit inside a parent write root and each read root inside any parent root.
 /// The host repeats submission checks: roots must be existing canonical
 /// directories, clear of state except installed release roots granted for reads.
+#[cfg(test)]
 fn child_access_within(
     parent: &TaskRequest,
     child: &TaskRequest,
     state_root: &std::path::Path,
     home: Option<&std::path::Path>,
+) -> Result<()> {
+    child_access_within_impl(parent, child, state_root, home, false)
+}
+
+fn child_access_with_diagnostic(
+    parent: &TaskRequest,
+    child: &TaskRequest,
+    state_root: &std::path::Path,
+    home: Option<&std::path::Path>,
+) -> Result<()> {
+    child_access_within_impl(parent, child, state_root, home, true)
+}
+
+fn child_access_within_impl(
+    parent: &TaskRequest,
+    child: &TaskRequest,
+    state_root: &std::path::Path,
+    home: Option<&std::path::Path>,
+    diagnostic: bool,
 ) -> Result<()> {
     if child.access.database_ipc && !parent.access.database_ipc {
         return Err(RunError::Validation(
@@ -549,9 +569,11 @@ fn child_access_within(
                 provenant_confinement::refuses_lane_root(&canonical, read, home)
             })
         {
-            return Err(RunError::Confinement(
-                provenant_confinement::permissions::PermissionError::CredentialRoot,
-            ));
+            return Err(RunError::Confinement(if diagnostic {
+                provenant_confinement::permissions::PermissionError::credential_root_at(root, home)
+            } else {
+                provenant_confinement::permissions::PermissionError::CredentialRoot
+            }));
         }
     }
     let writes: Vec<PathBuf> = parent
@@ -634,6 +656,24 @@ mod release_root_tests {
         assert!(error.to_string().contains(
             &provenant_confinement::permissions::PermissionError::CredentialRoot.to_string()
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn child_credential_refusal_names_fixture_path_and_guard()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let home = std::fs::canonicalize(temp.path())?;
+        let root = home.join(".gemini/skills");
+        std::fs::create_dir_all(&root)?;
+        let mut parent = crate::tests::input().request.tasks.remove(0);
+        parent.access.read_roots = vec![root.clone()];
+        let child = parent.clone();
+        let error = child_access_with_diagnostic(&parent, &child, &home.join("state"), Some(&home))
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("~/.gemini/skills"), "{message}");
+        assert!(message.contains("credential root"), "{message}");
         Ok(())
     }
 
@@ -971,7 +1011,7 @@ impl RunStore {
             if task.writer.is_some() || task.deliver.is_some() {
                 return Err(RunError::Validation("a lane cannot propose a writer child"));
             }
-            child_access_within(
+            child_access_with_diagnostic(
                 parent_task,
                 &validated.effective_task(task),
                 self.context.state_root.as_path(),

@@ -643,7 +643,13 @@ fn prepare(
         setup.push(SetupStep::CreateDir(transcript_dir.clone()));
     }
     let user_skills = input.home.join(".claude/skills");
-    let discover_skills = input.user_skills() && user_skills.is_dir();
+    let (skill_reads, skill_omitted) = if input.user_skills() && user_skills.is_dir() {
+        crate::user_skills_grants_with_omissions(&user_skills, Some(input.home))
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let mut omitted_discovery = crate::launch::OmittedGrant::skills(skill_omitted);
+    let discover_skills = !skill_reads.is_empty();
     if shell || (discover_skills && input.account.is_some()) {
         let config = plan
             .private_state
@@ -664,8 +670,7 @@ fn prepare(
     }
     let mut runtime_reads = vec![subtree(package)];
     if discover_skills {
-        let grants = crate::launch::user_skills_grants(&user_skills);
-        for grant in &grants {
+        for grant in &skill_reads {
             // Claude's workspace arguments accept directories only. The
             // outer profile still grants linked files exactly, never siblings.
             let directory = match grant.scope {
@@ -676,7 +681,7 @@ fn prepare(
             };
             argv.extend(["--add-dir".into(), directory.as_os_str().to_owned()]);
         }
-        runtime_reads.extend(grants);
+        runtime_reads.extend(skill_reads);
     }
     let mut tool_exec_roots = ["/bin", "/usr/bin", "/usr/libexec"].map(subtree).to_vec();
     let tool_writes = Vec::new();
@@ -697,6 +702,7 @@ fn prepare(
             &mut tool_exec_roots,
             &mut env,
             &mut setup,
+            &mut omitted_discovery,
         );
         crate::launch::node_tools(
             input.home,
@@ -705,6 +711,7 @@ fn prepare(
             &mut runtime_reads,
             &mut tool_exec_roots,
             &mut env,
+            &mut omitted_discovery,
         );
     }
     let mut spec = LaunchSpec {
@@ -717,6 +724,7 @@ fn prepare(
         }),
         cwd: input.cwd.to_owned(),
         setup,
+        omitted_discovery,
         git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {

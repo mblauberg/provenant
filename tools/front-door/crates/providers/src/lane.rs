@@ -1148,6 +1148,7 @@ mod tests {
             secret_input: None,
             cwd: PathBuf::from("/"),
             setup: Vec::new(),
+            omitted_discovery: Vec::new(),
             git_wrapper: Default::default(),
             profile: provenant_confinement::permissions::ProviderProfile {
                 spec: ProviderProfileSpec::default(),
