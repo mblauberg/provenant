@@ -70,6 +70,16 @@ pub fn recover_pending(
                 &attempt.candidate.commit,
                 Some(&attempt.candidate.base),
             );
+            if matches!(
+                retry,
+                Err(LandingError::Refused(_)
+                    | LandingError::TargetMoved
+                    | LandingError::PullRequestChanged(_))
+            ) {
+                // The retry is definitely refused; later observation or cleanup must
+                // not leave an intent that authorizes another push.
+                receipt::clear_pending(state, repository, &attempt.candidate)?;
+            }
             if retry.is_err() {
                 #[allow(
                     clippy::disallowed_methods,
@@ -92,8 +102,11 @@ pub fn recover_pending(
         let mut outcomes = BTreeMap::new();
         let mut landed_prs = Vec::new();
         let mut unproven = false;
+        let mut refused = false;
         for (index, step) in attempt.candidate.steps.iter().enumerate() {
-            let landed = if exact {
+            let landed = if refused {
+                None
+            } else if exact {
                 Some(step.commit.clone())
             } else if attempt.publish.mode == PublishMode::FastForward {
                 if fast_unpublished {
@@ -132,8 +145,25 @@ pub fn recover_pending(
                             // again before each ordered retry to detect intervening movement.
                             tip = repo.fetch_target(target).map_err(|_| unknown())?;
                             if &tip != expected {
-                                unproven = true;
-                                outcomes.insert(step.pr.number, Outcome::PendingUnknown);
+                                #[allow(
+                                    clippy::disallowed_methods,
+                                    reason = "allow the original publication to settle"
+                                )]
+                                std::thread::sleep(std::time::Duration::from_secs(
+                                    settings.publish_settle_seconds,
+                                ));
+                                match forge.pull_request(step.pr.number) {
+                                    Ok(pr)
+                                        if pr.state == PullRequestState::Open
+                                            || pr.state == PullRequestState::Closed =>
+                                    {
+                                        outcomes.insert(step.pr.number, Outcome::Excluded);
+                                    }
+                                    _ => {
+                                        unproven = true;
+                                        outcomes.insert(step.pr.number, Outcome::PendingUnknown);
+                                    }
+                                }
                                 continue;
                             }
                             let retry = if valid_for_retry(forge, &attempt) {
@@ -145,6 +175,17 @@ pub fn recover_pending(
                                 Ok(commit) => {
                                     tip = commit.clone();
                                     Some(commit)
+                                }
+                                Err(
+                                    LandingError::Refused(_)
+                                    | LandingError::TargetMoved
+                                    | LandingError::PullRequestChanged(_),
+                                ) => {
+                                    // No earlier step is unknown when a retry is attempted. All
+                                    // remaining operations were never attempted by this retry.
+                                    receipt::clear_pending(state, repository, &attempt.candidate)?;
+                                    refused = true;
+                                    None
                                 }
                                 Err(_) => {
                                     #[allow(
@@ -175,6 +216,7 @@ pub fn recover_pending(
                                         }
                                         Ok(pr)
                                             if pr.state == PullRequestState::Closed
+                                                || pr.state == PullRequestState::Open
                                                 || pr.head != step.pr.head =>
                                         {
                                             None
@@ -188,10 +230,29 @@ pub fn recover_pending(
                                     }
                                 }
                             }
+                        } else if settled {
+                            None
                         } else {
-                            unproven = true;
-                            outcomes.insert(step.pr.number, Outcome::PendingUnknown);
-                            continue;
+                            #[allow(
+                                clippy::disallowed_methods,
+                                reason = "allow the original publication to settle"
+                            )]
+                            std::thread::sleep(std::time::Duration::from_secs(
+                                settings.publish_settle_seconds,
+                            ));
+                            match forge.pull_request(step.pr.number) {
+                                Ok(pr)
+                                    if pr.state == PullRequestState::Open
+                                        || pr.state == PullRequestState::Closed =>
+                                {
+                                    None
+                                }
+                                _ => {
+                                    unproven = true;
+                                    outcomes.insert(step.pr.number, Outcome::PendingUnknown);
+                                    continue;
+                                }
+                            }
                         }
                     }
                     _ => {
@@ -248,13 +309,18 @@ pub fn recover_pending(
                 .last()
                 .and_then(|pr| record.approved_to_landed.get(&pr.head))
                 .ok_or(LandingError::PublicationUnknown)?;
-            let tree = repo.tree_of(last)?;
+            let verified = if record.publish.mode == PublishMode::RestOrdered {
+                repo.fetch_target(target).map_err(|_| unknown())?
+            } else {
+                last.clone()
+            };
+            let tree = repo.tree_of(&verified).map_err(|_| unknown())?;
             if tree != attempt.candidate.tree {
                 record.alarms.push(Alarm {
                     code: "LAND_TREE_MISMATCH".into(),
                     message: format!(
                         "gated tree {} differs from landed commit {} tree {}",
-                        attempt.candidate.tree, last, tree
+                        attempt.candidate.tree, verified, tree
                     ),
                 });
             }

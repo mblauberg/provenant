@@ -33,6 +33,9 @@ without a pending marker;
 a moved target consumes a rebuild. Ambiguous responses leave a marker until
 ancestry and forge state prove the outcome. Recovery of a landing repeats the
 approval recheck, post-merge follow, receipt and candidate-ref cleanup.
+A lease push still in flight after the configured settle window can land after
+recovery concludes it did not land and clears the marker, leaving no receipt.
+The window bounds this residual race; setting it to zero removes that wait.
 
 Every PR receives an outcome receipt, including in shadow; shadow records the
 selected publication mode, reason and split. Receipts retain policy sources,

@@ -137,12 +137,13 @@ pub fn rest_ordered(
         expected = forge.merge(step.pr.number, &step.pr.head, method)?;
         landed.push(expected.clone());
     }
-    let actual_commit = repo.fetch_target(target).map_err(|error| {
-        LandingError::Refused(format!("could not read published target: {error}"))
-    })?;
-    let actual_tree = repo.tree_of(&actual_commit).map_err(|error| {
-        LandingError::Refused(format!("could not verify published tree: {error}"))
-    })?;
+    // The merges succeeded; a failed verification leaves their outcome recoverable.
+    let actual_commit = repo
+        .fetch_target(target)
+        .map_err(|_| LandingError::PublicationUnknown)?;
+    let actual_tree = repo
+        .tree_of(&actual_commit)
+        .map_err(|_| LandingError::PublicationUnknown)?;
     let alarms = if actual_tree == candidate.tree {
         Vec::new()
     } else {

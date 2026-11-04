@@ -485,7 +485,7 @@ fn land_explains_poll_and_budget_sources() -> Result {
     );
     fs::write(
         rig.state.join("config.toml"),
-        "schema_version = 1\n[domains.pr.land]\npoll_seconds = 45\ncandidate_ref_prefix = 'custom/'\n",
+        "schema_version = 1\n[domains.pr.land]\npoll_seconds = 45\npublish_settle_seconds = 0\ncandidate_ref_prefix = 'custom/'\n",
     )?;
     let config = show(&["land", "1668", "--explain", "--json"])?;
     assert_eq!(config["data"]["fields"]["poll_seconds"]["value"], 45);
@@ -498,6 +498,14 @@ fn land_explains_poll_and_budget_sources() -> Result {
             .as_str()
             .unwrap_or_default()
             .contains("CI trigger")
+    );
+    assert!(
+        config["data"]["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|warning| warning
+                .as_str()
+                .unwrap_or_default()
+                .contains("disables the in-flight")))
     );
     let cli = show(&[
         "land",

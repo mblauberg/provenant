@@ -384,8 +384,15 @@ cleanup, recovery checks ancestry and forge state, clears the marker when the
 outcome is proved landed or not landed, and retains it only when still unknown.
 The error gives the marker path: inspect its JSON under the project state
 `landing/pending/`, and compare its candidate and PR heads with the target's
-ancestry and forge PR state. Do not remove it just to force a retry. When
-recovery confirms a landing it repeats the approval recheck and alarms,
+ancestry and forge PR state. Do not remove it just to force a retry. If the
+marker stays unknown, restore access to the forge and target. Fetch the target
+with `git fetch origin <target>`, then check the recorded candidate with
+`git merge-base --is-ancestor <candidate> origin/<target>` and the PRs with
+`gh pr view <number> --json state,headRefOid,mergeCommit,baseRefName`.
+After the in-flight window, rerun `provenant land <number>` without `--shadow`;
+recovery observes the outcome, records it and clears the marker when proved.
+If the forge state or ancestry remains unavailable, restore that access before
+retrying. When recovery confirms a landing it repeats the approval recheck and alarms,
 post-merge follow, receipt and candidate-ref cleanup.
 
 Every PR receives an outcome receipt, including landed, red, conflicted,
@@ -417,7 +424,8 @@ omitted fields inherit. The project and tier tables accept the same fields.
   `batch_wait_seconds` bound collection. `candidate_ref_prefix` names temporary
   refs and `max_rebuilds` bounds rebuilds on target movement.
   `publish_settle_seconds` defaults to 30 and controls the wait before recovery
-  re-observes a publication that cannot safely be retried. The bundled CI
+  re-observes a publication that cannot safely be retried. Setting it to `0` disables
+  the in-flight window and `land --explain` warns. The bundled CI
   trigger covers `land/**`; if you change the prefix, update the CI trigger to
   match. `land --explain` warns on a non-default prefix. The contract's forge
   queue path is not yet implemented and `forge_queue` is rejected at runtime.

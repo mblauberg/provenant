@@ -6,6 +6,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 #[derive(Default)]
 pub struct FakeForge {
     pub target_branch: String,
+    pub shared_target: Option<std::rc::Rc<std::cell::RefCell<String>>>,
+    pub move_after_merge: Option<(u64, String)>,
     pub pull_requests: BTreeMap<u64, PullRequestInfo>,
     pub heads: BTreeMap<u64, String>,
     pub head_reads: BTreeMap<u64, VecDeque<String>>,
@@ -18,8 +20,10 @@ pub struct FakeForge {
     pub lose_merge_response: bool,
     pub lose_merge_response_at: Option<u64>,
     pub refuse_merge: Option<u64>,
+    pub fail_fetch_on_refusal: Option<std::rc::Rc<std::cell::Cell<bool>>>,
     pub valid_merge_ids: bool,
     pub merges: Vec<(u64, String, MergeMethod)>,
+    pub merge_attempts: Vec<u64>,
     pub reverts: Vec<(u64, String, String, String)>,
 }
 impl Forge for FakeForge {
@@ -76,10 +80,14 @@ impl Forge for FakeForge {
         head: &str,
         method: MergeMethod,
     ) -> Result<String, LandingError> {
+        self.merge_attempts.push(number);
         if self.head(number)? != head {
             return Err(LandingError::Failed("head moved".into()));
         }
         if self.refuse_merge == Some(number) {
+            if let Some(flag) = &self.fail_fetch_on_refusal {
+                flag.set(true);
+            }
             return Err(LandingError::Refused("merge refused".into()));
         }
         self.merges.push((number, head.into(), method));
@@ -88,6 +96,13 @@ impl Forge for FakeForge {
         } else {
             format!("landed-{number}")
         };
+        if let Some(target) = &self.shared_target {
+            *target.borrow_mut() = self
+                .move_after_merge
+                .as_ref()
+                .filter(|(n, _)| *n == number)
+                .map_or_else(|| landed.clone(), |(_, tip)| tip.clone());
+        }
         if let Some(pr) = self.pull_requests.get_mut(&number) {
             pr.state = PullRequestState::Merged;
             pr.merged_commit = Some(landed.clone());
@@ -121,6 +136,8 @@ impl Forge for FakeForge {
 #[derive(Default)]
 pub struct FakeRepo {
     pub target: String,
+    pub shared_target: Option<std::rc::Rc<std::cell::RefCell<String>>>,
+    pub fail_fetch: Option<std::rc::Rc<std::cell::Cell<bool>>>,
     pub valid_commit_ids: bool,
     pub target_ref: String,
     pub fetches: VecDeque<String>,
@@ -139,6 +156,12 @@ pub struct FakeRepo {
 }
 impl Repo for FakeRepo {
     fn fetch_target(&mut self, branch: &str) -> Result<String, LandingError> {
+        if self.fail_fetch.as_ref().is_some_and(|flag| flag.get()) {
+            return Err(LandingError::Failed("fetch unavailable".into()));
+        }
+        if let Some(target) = &self.shared_target {
+            self.target = target.borrow().clone();
+        }
         if let Some(next) = self.fetches.pop_front() {
             self.target = next;
         }

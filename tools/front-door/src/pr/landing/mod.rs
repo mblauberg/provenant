@@ -267,6 +267,12 @@ fn run_inner(
         if effective.candidate_ref_prefix != LandSettings::default().candidate_ref_prefix {
             warnings.push("candidate_ref_prefix differs from the bundled default; update the CI trigger to match".to_owned());
         }
+        if effective.publish_settle_seconds == 0 {
+            warnings.push(
+                "publish_settle_seconds = 0 disables the in-flight publication settle window"
+                    .into(),
+            );
+        }
         let value = serde_json::json!({"fields": policy.fields, "budget_rate_micros_per_minute": policy.budget_rate_micros_per_minute, "retry_budget_seconds": options.wait.unwrap_or(60), "retry_budget_source": if options.wait.is_some() { "--wait" } else { "compiled default" }, "warnings": warnings});
         let text = format!("{}\n", serde_json::to_string_pretty(&value)?);
         return Ok(crate::emit(

@@ -236,10 +236,7 @@ fn follow_with(
                     Observed::Unsettled { failed, pending } => {
                         Observed::Unsettled { failed, pending }
                     }
-                    Observed::Passed => Observed::Unsettled {
-                        failed: Vec::new(),
-                        pending: last_pending.clone(),
-                    },
+                    Observed::Passed => Observed::Passed,
                 }
             } else {
                 result?
@@ -664,6 +661,28 @@ mod tests {
             ]
         );
         assert!(r.alarms.0.iter().any(|alarm| alarm.code == "unsettled"));
+        Ok(())
+    }
+
+    #[test]
+    fn passing_observation_after_deadline_is_passed() -> Result<(), LandingError> {
+        let mut r = rig(false, false, 1);
+        post_result(&mut r, "l1", GateResult::Passed);
+        let calls = std::cell::Cell::new(0);
+        follow_with(
+            &mut r.forge,
+            &mut r.repo,
+            &mut r.gate,
+            &mut r.alarms,
+            &mut r.receipt,
+            &|_| {},
+            &|| {
+                let n = calls.get();
+                calls.set(n + 1);
+                std::time::Duration::from_secs(if n == 0 { 0 } else { 3601 })
+            },
+        )?;
+        assert!(r.alarms.0.is_empty());
         Ok(())
     }
 
