@@ -1,4 +1,4 @@
 ## Fixes
 ### Lanes and settlement
 
-- Lanes omit discovered user skills inside credential roots and record a warning instead of refusing to launch (#2810).
+- Claude and agy lanes no longer fail at launch with `credential root requires a selected fixture-backed mechanism` when user-skill discovery is on. A discovered skill folder, linked skill resource or other optional grant that falls inside a credential root is left out and named in a warning in the attempt record, and the lane launches. A required grant inside a credential root still refuses, and the refusal now names the path and the guard that matched (#2810).
