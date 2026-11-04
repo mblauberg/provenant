@@ -53,6 +53,13 @@ pub struct RunConfig {
         alias = "warn_brief_read_root"
     )]
     pub brief_read_root_warnings: bool,
+    /// Default admission deadline in seconds before launch.
+    #[serde(
+        default,
+        alias = "admission_timeout",
+        alias = "admission_timeout_seconds"
+    )]
+    pub admission_seconds: Option<u64>,
     #[serde(default)]
     pub projects: BTreeMap<String, ProjectRunConfig>,
 }
@@ -72,6 +79,13 @@ pub struct ProjectRunConfig {
         alias = "warn_brief_read_root"
     )]
     pub brief_read_root_warnings: Option<bool>,
+    /// Default admission deadline in seconds before launch for this project.
+    #[serde(
+        default,
+        alias = "admission_timeout",
+        alias = "admission_timeout_seconds"
+    )]
+    pub admission_seconds: Option<u64>,
 }
 fn default_review_exempt() -> Vec<String> {
     DEFAULT_REVIEW_EXEMPT
@@ -86,6 +100,7 @@ impl Default for RunConfig {
             review_exempt: default_review_exempt(),
             push_conflict_markers: true,
             brief_read_root_warnings: true,
+            admission_seconds: None,
             projects: BTreeMap::new(),
         }
     }
@@ -102,6 +117,15 @@ impl RunConfig {
             return Err(std::io::Error::other(error));
         }
         Ok(config)
+    }
+
+    /// The admission seconds that apply to `project`: its own setting when it
+    /// has one, otherwise the host-wide setting.
+    pub fn admission_seconds_for(&self, project: &str) -> Option<u64> {
+        self.projects
+            .get(project)
+            .and_then(|settings| settings.admission_seconds)
+            .or(self.admission_seconds)
     }
 
     /// The review-exempt paths that apply to `project`: its own list when it
@@ -173,12 +197,24 @@ fn valid_patterns(field: &str, patterns: &[String], errors: &mut Vec<SectionErro
 impl DomainConfig for RunConfig {
     fn validate(&self) -> Vec<SectionError> {
         let mut errors = Vec::new();
+        if let Some(0) = self.admission_seconds {
+            errors.push(SectionError {
+                field: "admission_seconds".into(),
+                code: "range",
+            });
+        }
         valid_patterns("review_exempt", &self.review_exempt, &mut errors);
         for (project, settings) in &self.projects {
             if !project_key(project) {
                 errors.push(SectionError {
                     field: format!("projects.{project}"),
                     code: "key",
+                });
+            }
+            if let Some(0) = settings.admission_seconds {
+                errors.push(SectionError {
+                    field: format!("projects.{project}.admission_seconds"),
+                    code: "range",
                 });
             }
             if let Some(patterns) = &settings.review_exempt {
@@ -218,11 +254,17 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("push_conflict_markers", "bool"),
     FieldMetadata::new("brief_read_root_warnings", "bool"),
     FieldMetadata::new("warn_brief_read_roots", "bool"),
+    FieldMetadata::new("admission_seconds", "integer"),
+    FieldMetadata::new("admission_timeout", "integer"),
+    FieldMetadata::new("admission_timeout_seconds", "integer"),
     FieldMetadata::new("writer_writes", "array"),
     FieldMetadata::new("review_exempt", "array"),
     FieldMetadata::new("projects.{project}.review_exempt", "array"),
     FieldMetadata::new("projects.{project}.brief_read_root_warnings", "bool"),
     FieldMetadata::new("projects.{project}.warn_brief_read_roots", "bool"),
+    FieldMetadata::new("projects.{project}.admission_seconds", "integer"),
+    FieldMetadata::new("projects.{project}.admission_timeout", "integer"),
+    FieldMetadata::new("projects.{project}.admission_timeout_seconds", "integer"),
 ];
 pub const SECTION: DomainSection = DomainSection::new::<RunConfig>("run", |_| DEFAULTS)
     .with_boundary_checks()
@@ -395,5 +437,42 @@ review_exempt = []
         write("not toml [")?;
         assert!(RunConfig::review_exempt_at(state.path(), "p").is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn admission_seconds_config_resolution_and_validation() {
+        let mut config = RunConfig {
+            admission_seconds: Some(1800),
+            projects: [
+                (
+                    "proj-override".to_owned(),
+                    ProjectRunConfig {
+                        admission_seconds: Some(600),
+                        ..Default::default()
+                    },
+                ),
+                ("proj-default".to_owned(), ProjectRunConfig::default()),
+            ]
+            .into(),
+            ..RunConfig::default()
+        };
+        assert_eq!(config.admission_seconds_for("proj-override"), Some(600));
+        assert_eq!(config.admission_seconds_for("proj-default"), Some(1800));
+        assert_eq!(config.admission_seconds_for("proj-other"), Some(1800));
+        assert!(config.validate().is_empty());
+
+        // Zero seconds is refused by range
+        config.admission_seconds = Some(0);
+        let fields: Vec<_> = config.validate().into_iter().map(|e| e.field).collect();
+        assert_eq!(fields, ["admission_seconds"]);
+
+        config.admission_seconds = Some(1800);
+        config
+            .projects
+            .get_mut("proj-override")
+            .unwrap()
+            .admission_seconds = Some(0);
+        let fields: Vec<_> = config.validate().into_iter().map(|e| e.field).collect();
+        assert_eq!(fields, ["projects.proj-override.admission_seconds"]);
     }
 }

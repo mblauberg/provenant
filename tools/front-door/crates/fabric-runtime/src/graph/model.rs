@@ -15,6 +15,9 @@ pub struct LaunchRetry {
     /// Failed launches so far, counting the initial launch.
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub failures: u8,
+    /// Absolute end of this attempt's launch admission window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<provenant_core::WallTime>,
     /// Earliest next launch, for the host tick.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_at: Option<provenant_core::WallTime>,

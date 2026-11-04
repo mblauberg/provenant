@@ -90,9 +90,6 @@ const HOST_ID_BYTES: usize = 256;
 const MAX_UNKNOWN_USAGE: usize = 64;
 const MAX_USAGE_EVENTS: usize = 128;
 
-/// Launch retries granted after the initial failure, with a bounded backoff.
-/// Past this count the node is blocked instead of retried.
-pub const MAX_LAUNCH_RETRIES: u8 = 3;
 /// Seconds before the first launch retry; each further failure doubles it.
 const LAUNCH_RETRY_FIRST_SECONDS: u64 = 5;
 /// The longest launch retry wait.
@@ -132,6 +129,11 @@ pub trait AttemptOwner {
     /// Infrastructure successors already published in this run lineage.
     fn retry_successors(&mut self, _attempt_ref: &str) -> Result<u64, Self::Error> {
         Ok(0)
+    }
+
+    /// Maximum time to admit a launch, measured from its first submission.
+    fn admission_timeout_seconds(&self) -> Option<u64> {
+        None
     }
 
     /// Pin the integration branch at the instant this node is first admitted.
@@ -239,6 +241,12 @@ pub trait AttemptOwner {
 
     /// Read-only check: never starts or replays an attempt.
     fn cancelled_attempt_settled(&mut self, _attempt: &GraphAttempt) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
+    /// Whether a launch already crossed run's acceptance boundary. This is
+    /// read-only and must not submit a new operation.
+    fn launch_accepted(&mut self, _attempt: &GraphAttempt) -> Result<bool, Self::Error> {
         Ok(false)
     }
 
@@ -561,13 +569,14 @@ fn launch_remedy(error: &(dyn Error + 'static), graph_id: &str) -> String {
 
 /// Apply a persisted disposition to a node whose launch errored while its
 /// attempt was still starting: a bounded retry with backoff for a transient
-/// kind, a blocked node with reason and remedy otherwise and after the retry
-/// limit. Saves the checkpoint either way.
+/// kind, a blocked node with reason and remedy otherwise and after the
+/// admission deadline. Saves the checkpoint either way.
 fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
     checkpoint: &mut GraphCheckpoint,
     index: usize,
     error: &R::Error,
     clock: Option<provenant_core::WallTime>,
+    admission_seconds: u64,
     journal: &mut J,
 ) -> Result<(), GraphError<R::Error, J::Error>> {
     let retrying = launch_retry_kind(error);
@@ -585,20 +594,35 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
             .get_or_insert_with(|| LaunchRetry {
                 extra: Default::default(),
                 failures: 0,
+                deadline: None,
                 wake_at: None,
                 reason: None,
             });
         retry.failures = retry.failures.saturating_add(1);
-        if retry.failures <= MAX_LAUNCH_RETRIES {
+        let deadline = match retry.deadline {
+            Some(deadline) => deadline,
+            None => {
+                let deadline = DurationMicros::from_seconds(admission_seconds)
+                    .ok()
+                    .and_then(|duration| now.checked_add(duration).ok())
+                    .ok_or_else(|| GraphError::Refused("invalid admission deadline".into()))?;
+                retry.deadline = Some(deadline);
+                deadline
+            }
+        };
+        if now < deadline {
             let delay = provenant_core::retry::Backoff::new(
                 std::time::Duration::from_secs(LAUNCH_RETRY_FIRST_SECONDS),
                 2,
                 std::time::Duration::from_secs(LAUNCH_RETRY_MAX_SECONDS),
             )
             .delay(u64::from(retry.failures) - 1);
-            retry.wake_at = DurationMicros::from_seconds(delay.as_secs())
-                .ok()
-                .and_then(|duration| now.checked_add(duration).ok());
+            retry.wake_at = Some(
+                DurationMicros::from_seconds(delay.as_secs())
+                    .ok()
+                    .and_then(|duration| now.checked_add(duration).ok())
+                    .map_or(deadline, |wake| wake.min(deadline)),
+            );
             retry.reason = Some(bounded(&error.to_string(), MAX_ADVANCE_ERROR_BYTES));
             asks::refresh_wake(checkpoint);
             return journal.save(checkpoint).map_err(GraphError::Journal);
@@ -1310,6 +1334,17 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 // on every advance, tick or manual, so a failing host that
                 // cannot launch is not hammered with new submissions.
                 let launch_clock = owner.wall_now();
+                if launch_clock.is_none()
+                    && checkpoint.nodes[node_index]
+                        .launch_retry
+                        .as_ref()
+                        .is_some_and(|retry| retry.deadline.is_some())
+                {
+                    return Err(GraphError::Refused(format!(
+                        "node {}: no wall clock to check the launch deadline; retry the advance",
+                        node.id
+                    )));
+                }
                 if checkpoint.nodes[node_index]
                     .launch_retry
                     .as_ref()
@@ -1317,6 +1352,37 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .is_some_and(|wake| launch_clock.is_none_or(|now| now < wake))
                 {
                     break;
+                }
+                if let Some(retry) = &checkpoint.nodes[node_index].launch_retry
+                    && retry
+                        .deadline
+                        .zip(launch_clock)
+                        .is_some_and(|(end, now)| now >= end)
+                {
+                    let accepted = match checkpoint.nodes[node_index].attempts.last() {
+                        Some(attempt) if attempt.attempt_ref.is_some() => true,
+                        Some(attempt) => owner.launch_accepted(attempt).map_err(GraphError::Run)?,
+                        None => false,
+                    };
+                    if !accepted {
+                        let reason = retry.reason.clone().unwrap_or_default();
+                        let progress = &mut checkpoint.nodes[node_index];
+                        progress.advance_error_code = Some("launch_retry_exhausted".into());
+                        progress.advance_error = Some(format!(
+                            "node {}: the launch failed: {}; {}",
+                            progress.id,
+                            reason,
+                            launch_remedy(
+                                &crate::coordination::facade::FacadeError::Busy,
+                                &checkpoint.graph_id
+                            )
+                        ));
+                        progress.state = NodeState::Blocked;
+                        progress.launch_retry = None;
+                        asks::refresh_wake(&mut checkpoint);
+                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        break;
+                    }
                 }
                 let progress = &checkpoint.nodes[node_index];
                 let route_index = match progress.attempts.last() {
@@ -1588,6 +1654,27 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         usage: None,
                     });
                     checkpoint.nodes[node_index].state = NodeState::Running;
+                    if let Some(seconds) = owner.admission_timeout_seconds() {
+                        let now = owner.wall_now().ok_or_else(|| {
+                            GraphError::Refused(format!(
+                                "node {}: no wall clock to start the launch deadline; retry the advance",
+                                node.id
+                            ))
+                        })?;
+                        let deadline = DurationMicros::from_seconds(seconds)
+                            .ok()
+                            .and_then(|duration| now.checked_add(duration).ok())
+                            .ok_or_else(|| {
+                                GraphError::Refused("invalid admission deadline".into())
+                            })?;
+                        checkpoint.nodes[node_index].launch_retry = Some(LaunchRetry {
+                            extra: Default::default(),
+                            failures: 0,
+                            deadline: Some(deadline),
+                            wake_at: None,
+                            reason: None,
+                        });
+                    }
                     journal.save(&checkpoint).map_err(GraphError::Journal)?;
                 }
 
@@ -1720,6 +1807,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             node_index,
                             &error,
                             owner.wall_now(),
+                            owner.admission_timeout_seconds().unwrap_or(3600),
                             journal,
                         )?;
                         break;

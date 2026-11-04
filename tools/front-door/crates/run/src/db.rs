@@ -282,7 +282,7 @@ impl RunStore {
             };
             store.write(request, |tx| {
                 let current = version(tx)?;
-                if current > 0 && current < 7 {
+                if current > 0 && current < 8 {
                     // The write reservation excludes other commits until both the
                     // WAL-aware snapshot and the migration are complete.
                     let stamp = request
@@ -326,6 +326,7 @@ impl RunStore {
                     include_str!("schema_v5.sql"),
                     include_str!("schema_v6.sql"),
                     include_str!("schema_v7.sql"),
+                    include_str!("schema_v8.sql"),
                 ];
                 provenant_sqlite::apply_migrations(tx, &steps, start, |index, db| {
                     if index == 3 {
@@ -451,7 +452,7 @@ pub(crate) fn open_database(
     Ok((root, db, initialisation))
 }
 fn version(db: &Connection) -> Result<i64> {
-    match provenant_sqlite::read_version(db, 7) {
+    match provenant_sqlite::read_version(db, 8) {
         Ok(version) => Ok(version as i64),
         Err(provenant_sqlite::VersionError::Unsupported(version)) => {
             Err(RunError::Version(version))

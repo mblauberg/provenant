@@ -2403,6 +2403,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--worktree-branch` | `{"conflicts": ["worktree", "branch", "host", "manifest"], "description": "Create or reuse a clean local writer worktree owned by this lane", "name": "worktree_branch"}` |
 | `--head` | `{"description": "Chair-verified full commit SHA to review (must exist on the executing host)", "name": "head"}` |
 | `--base` | `{"description": "Git base for attempt history and a new writer branch", "name": "base"}` |
+| `--admission-timeout` | `{"description": "Admission timeout before launch (seconds, or a duration such as 10m)", "name": "admission_timeout"}` |
 | `--model` | `{"conflicts": ["route"], "description": "Exact model in ADAPTER/ID form", "name": "model"}` |
 | `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "capability"], "description": "Dispatch the tasks in this manifest file", "name": "manifest"}` |
 | `--worktree` | `{"description": "Bind an existing preset writer worktree; single tasks can create an owned worktree for a missing branch name", "name": "worktree"}` |
@@ -2649,6 +2650,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--head` | `{"description": "Chair-verified full commit SHA to review (must exist on the executing host)", "name": "head"}` |
 | `--base` | `{"description": "Git base for attempt history and a new writer branch", "name": "base"}` |
 | `--wait` | `{"bounds": [1, 14400], "description": "Wait for task or preset graph settlement (seconds, or a duration such as 30m)", "name": "wait"}` |
+| `--admission-timeout` | `{"description": "Admission timeout before launch (seconds, or a duration such as 10m)", "name": "admission_timeout"}` |
 | `--model` | `{"conflicts": ["route"], "description": "Exact model in ADAPTER/ID form", "name": "model"}` |
 | `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "capability"], "description": "Dispatch the tasks in this manifest file", "name": "manifest"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |

@@ -78,6 +78,25 @@ pub(crate) fn scratch_prepare_error(error: impl std::fmt::Display) -> FacadeErro
     }
 }
 
+fn graph_writer_initialisation_error(
+    commit: &str,
+    error: provenant_confinement::worktrees::WorktreeError,
+) -> FacadeError {
+    use provenant_confinement::worktrees::WorktreeError;
+    use provenant_os::fs::FsError;
+    if matches!(
+        &error,
+        WorktreeError::Filesystem(FsError::LockTimeout { path, .. })
+            if path.file_name().is_some_and(|name| name == "worktrees.lock")
+    ) {
+        FacadeError::Busy
+    } else {
+        FacadeError::DispatchRefused {
+            reason: format!("initialise graph writer at {commit}: {error}"),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum EdgeError {
     #[error(transparent)]
@@ -4016,6 +4035,17 @@ fn graph_review_node(document: &provenant_fabric_runtime::graph::GraphDocument, 
 }
 
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
+    fn admission_timeout_seconds(&self) -> Option<u64> {
+        let configured = provenant_confinement::run_config::RunConfig::read(
+            self.factory.context.roots.state.as_path(),
+        )
+        .ok()
+        .and_then(|config| {
+            config.admission_seconds_for(&self.factory.context.identity.project.to_string())
+        });
+        let effective = provenant_run::AdmissionPolicy::resolve_timeout(None, configured);
+        Some(effective.seconds)
+    }
     type Error = FacadeError;
     fn retry_allowance(
         &self,
@@ -4363,6 +4393,30 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         }
     }
 
+    fn launch_accepted(
+        &mut self,
+        attempt: &provenant_fabric_runtime::graph::GraphAttempt,
+    ) -> Result<bool, Self::Error> {
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: true,
+            actor: Some(
+                attempt
+                    .launch_actor
+                    .parse()
+                    .map_err(|_| FacadeError::StateCorrupt)?,
+            ),
+            chair: None,
+        };
+        let operation_id = graph_operation("graph-attempt-operation", &attempt.key)?;
+        let store = owner.store(self.cancel)?;
+        let call = owner.call(self.cancel);
+        Ok(store
+            .operation(&operation_id, &call)
+            .map_err(run_error)?
+            .is_some_and(|operation| operation.state != provenant_run::OperationState::Prepared))
+    }
+
     fn observe_or_start(
         &mut self,
         key: &provenant_fabric_runtime::graph::AttemptKey,
@@ -4466,9 +4520,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         )
                     },
                 )
-                .map_err(|error| FacadeError::DispatchRefused {
-                    reason: format!("initialise graph writer at {commit}: {error}"),
-                })?;
+                .map_err(|error| graph_writer_initialisation_error(commit, error))?;
             }
             let delivery = if let Some(mode) = replay.delivery {
                 let branch = if let Some(path) = worktree {

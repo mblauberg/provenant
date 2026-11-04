@@ -293,7 +293,7 @@ fn node_bound(
     }
     // The node's own bounded launch retry wait, kept while it is running.
     if !boundary && node.composite.is_none() && node.decide.is_none() && node.land.is_none() {
-        bytes += MAX_ADVANCE_ERROR_BYTES; // launch retry reason
+        bytes += MAX_ADVANCE_ERROR_BYTES + 128; // launch retry reason and deadline
     }
     if expands {
         bytes += MAX_ADVANCE_ERROR_BYTES; // expansion pause

@@ -1,4 +1,274 @@
 #[cfg(test)]
+#[allow(unused_imports, dead_code)] // Included by the custom worktree driver without a test harness.
+mod graph_writer_admission_tests {
+    use super::*;
+    use provenant_confinement::worktrees::WorktreeError;
+    use provenant_os::fs::FsError;
+    use std::{path::PathBuf, time::Duration};
+
+    #[test]
+    fn registry_lock_timeout_is_retryable_but_writer_refusals_are_not() {
+        let lock = |path: &str| WorktreeError::Filesystem(FsError::LockTimeout {
+            path: PathBuf::from(path),
+            timeout: Duration::from_secs(5),
+        });
+        assert!(matches!(
+            graph_writer_initialisation_error("head", lock("worktrees.lock")),
+            FacadeError::Busy
+        ));
+        for error in [
+            lock("writer.lock"),
+            WorktreeError::LiveWriter,
+            WorktreeError::WriterBusy {
+                holder: Some(provenant_core::AttemptId::from_bytes([7; 16])),
+            },
+            WorktreeError::UnknownWriter,
+            WorktreeError::Dirty(String::new()),
+        ] {
+            assert!(matches!(
+                graph_writer_initialisation_error("head", error),
+                FacadeError::DispatchRefused { .. }
+            ));
+        }
+    }
+
+    #[derive(Default)]
+    struct MockWriterOwner {
+        errors: std::collections::VecDeque<WorktreeError>,
+        calls: usize,
+        now: Option<provenant_core::WallTime>,
+    }
+
+    impl provenant_fabric_runtime::graph::AttemptOwner for MockWriterOwner {
+        type Error = FacadeError;
+
+        fn actor(&self) -> String {
+            "fixture".to_string()
+        }
+
+        fn wall_now(&self) -> Option<provenant_core::WallTime> {
+            self.now
+        }
+
+        fn admission_timeout_seconds(&self) -> Option<u64> {
+            Some(3600)
+        }
+
+        fn observe_or_start(
+            &mut self,
+            _key: &provenant_fabric_runtime::graph::AttemptKey,
+            _node: provenant_fabric_runtime::graph::NodeInput<'_>,
+            _route: &provenant_fabric_runtime::graph::GraphRoute,
+            _access: provenant_fabric_runtime::graph::AccessMode,
+            _worktree: Option<&str>,
+            _replay: provenant_fabric_runtime::graph::Replay<'_>,
+        ) -> Result<provenant_fabric_runtime::graph::AttemptObservation, FacadeError> {
+            self.calls += 1;
+            if let Some(err) = self.errors.pop_front() {
+                Err(graph_writer_initialisation_error("HEAD", err))
+            } else {
+                Ok(
+                    provenant_fabric_runtime::graph::AttemptObservation::Terminal {
+                        attempt_ref: None,
+                        outcome:
+                            provenant_fabric_runtime::graph::AttemptOutcome::Succeeded,
+                        launched: true,
+                        result: None,
+                        result_warning: None,
+                        result_path: None,
+                        branch: None,
+                        commit: None,
+                    },
+                )
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct MemoryJournal(Option<provenant_fabric_runtime::graph::GraphCheckpoint>);
+
+    impl provenant_fabric_runtime::graph::GraphJournal for MemoryJournal {
+        type Error = std::convert::Infallible;
+
+        fn load(
+            &mut self,
+            _graph_id: &str,
+        ) -> Result<Option<provenant_fabric_runtime::graph::GraphCheckpoint>, Self::Error> {
+            Ok(self.0.clone())
+        }
+        fn save(
+            &mut self,
+            checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+        ) -> Result<(), Self::Error> {
+            self.0 = Some(checkpoint.clone());
+            Ok(())
+        }
+    }
+
+    fn advance<R: provenant_fabric_runtime::graph::AttemptOwner, J: provenant_fabric_runtime::graph::GraphJournal>(
+        document: &provenant_fabric_runtime::graph::GraphDocument,
+        owner: &mut R,
+        journal: &mut J,
+    ) -> Result<provenant_fabric_runtime::graph::GraphRun, provenant_fabric_runtime::graph::GraphError<R::Error, J::Error>> {
+        provenant_fabric_runtime::graph::advance_with_budget(
+            document,
+            owner,
+            journal,
+            &provenant_fabric_runtime::config::GraphLimits::default(),
+            &provenant_fabric_runtime::config::GraphBudget::default(),
+        )
+    }
+
+    #[test]
+    fn graph_writer_launch_retries_lock_timeout_and_runs_not_blocked() {
+        use provenant_fabric_runtime::graph::{GraphDocument, NodeState};
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "graph_id": "test-writer-lock",
+            "nodes": [{
+                "id": "writer-node",
+                "role": "plan",
+                "access": "worktree_write",
+                "worktree": "lane",
+                "prompt": "write code",
+                "route": {
+                    "adapter": "mock",
+                    "model": "mock-model"
+                }
+            }]
+        }))
+        .unwrap();
+
+        let lock_timeout = WorktreeError::Filesystem(FsError::LockTimeout {
+            path: PathBuf::from("worktrees.lock"),
+            timeout: Duration::from_secs(5),
+        });
+
+        let mut owner = MockWriterOwner {
+            errors: std::collections::VecDeque::from([lock_timeout]),
+            calls: 0,
+            now: Some(provenant_core::WallTime::from_micros(0).unwrap()),
+        };
+        let mut journal = MemoryJournal::default();
+
+        // First advance: launch encounters lock timeout on worktrees.lock
+        let first = advance(&document, &mut owner, &mut journal).unwrap();
+        // The node must be retryable Running, NOT Blocked!
+        assert_eq!(first.checkpoint.nodes[0].state, NodeState::Running);
+        let retry = first.checkpoint.nodes[0]
+            .launch_retry
+            .as_ref()
+            .expect("launch retry must be recorded");
+        assert_eq!(retry.failures, 1);
+        assert!(retry.deadline.is_some());
+        assert!(retry.wake_at.is_some());
+
+        // Advance at wake_at: lock has freed, node runs and completes
+        owner.now = retry.wake_at;
+        let second = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(second.checkpoint.nodes[0].state, NodeState::Succeeded);
+        assert_eq!(owner.calls, 2);
+    }
+
+    #[test]
+    fn real_graph_writer_retries_registry_lock_and_launches() -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_confinement::worktrees::{self, WorktreeCreate, WorkerObserver, WorkerState};
+        use provenant_fabric_runtime::graph::{self, NodeState};
+        use provenant_os::fs::{Directory, LockMode};
+        if super::peer_tests::host_test("fabric::graph_writer_admission_tests::real_graph_writer_retries_registry_lock_and_launches")? { return Ok(()); }
+        struct Free;
+        impl WorkerObserver for Free {
+            fn observe_roots(&self, roots: &[PathBuf]) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+                roots.iter().cloned().map(|root| (root, WorkerState::Free)).collect()
+            }
+        }
+        let rig = crate::worktree_tests::support::TestRig::new()?;
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        for args in [vec!["config", "user.name", "Fixture"], vec!["config", "user.email", "fixture@example.invalid"], vec!["commit", "--allow-empty", "-qm", "base"]] {
+            assert_eq!(crate::worktree_tests::support::code(&rig.execute(&git, &args, None)?), 0);
+        }
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots.clone(), &rig.home, &rig.project)?,
+            project_attribution: false, clock: SystemClock, backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
+            assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &Free,
+        };
+        let cancel = CancelToken::new();
+        let (info, registry) = worktrees::with_context(&roots, &rig.home, &rig.project, &factory.clock, &cancel, |ctx| {
+            let registry = roots.state.as_path().join("worktrees").join(ctx.binding.project_id().to_string());
+            let info = worktrees::create(&worktrees::WorktreeContext { workers: &Free, ..*ctx }, WorktreeCreate { branch: "graph-lane".into(), base: Some("HEAD".into()) }, &cancel)?;
+            Ok((info, registry))
+        })?;
+        let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1, "graph_id":"real-graph-lock", "nodes":[{
+                "id":"writer", "role":"plan", "access":"worktree_write", "worktree":info.path,
+                "source":{"type":"commit", "commit":info.head.to_string()}, "prompt":"write code",
+                "route":{"adapter":"fixture", "model":"fixture/model"}
+            }]
+        }))?;
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 60)?;
+        let mut owner = BoundGraphOwner { factory: &factory, integration_base: None, integration_branch: None, network: None, exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false };
+        let mut journal = MemoryJournal::default();
+        let directory = Directory::open_anchor(&registry)?;
+        let guard = directory.lock(std::ffi::OsStr::new("worktrees.lock"), LockMode::Exclusive, budget, &cancel, &factory.clock)?;
+        let first = advance(&document, &mut owner, &mut journal)?;
+        assert_eq!(first.checkpoint.nodes[0].state, NodeState::Running);
+        let wake = first.checkpoint.nodes[0].launch_retry.as_ref().and_then(|retry| retry.wake_at).ok_or("retry wake")?;
+        drop(guard);
+        let now = factory.clock.wall_now()?;
+        let delay = u64::try_from(wake.as_micros().saturating_sub(now.as_micros()))?;
+        factory.clock.wait_until(factory.clock.mono_now().checked_add(provenant_core::DurationMicros::from_micros(delay))?)?;
+        let second = advance(&document, &mut owner, &mut journal)?;
+        assert_ne!(second.checkpoint.nodes[0].state, NodeState::Blocked, "{:?}", second.checkpoint.nodes[0].advance_error);
+        assert!(second.checkpoint.nodes[0].attempts[0].attempt_ref.is_some(), "graph must submit the writer");
+        Ok(())
+    }
+
+    #[test]
+    fn graph_writer_launch_fails_closed_on_permanent_refusals() {
+        use provenant_fabric_runtime::graph::{GraphDocument, NodeState};
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "graph_id": "test-writer-refusal",
+            "nodes": [{
+                "id": "writer-node",
+                "role": "plan",
+                "access": "worktree_write",
+                "worktree": "lane",
+                "prompt": "write code",
+                "route": {
+                    "adapter": "mock",
+                    "model": "mock-model"
+                }
+            }]
+        }))
+        .unwrap();
+
+        for non_transient in [
+            WorktreeError::LiveWriter,
+            WorktreeError::Dirty("file.txt".into()),
+            WorktreeError::WriterBusy {
+                holder: Some(provenant_core::AttemptId::from_bytes([7; 16])),
+            },
+        ] {
+            let mut owner = MockWriterOwner {
+                errors: std::collections::VecDeque::from([non_transient]),
+                calls: 0,
+                now: Some(provenant_core::WallTime::from_micros(0).unwrap()),
+            };
+            let mut journal = MemoryJournal::default();
+
+            // Permanent refusal blocks the node immediately
+            let result = advance(&document, &mut owner, &mut journal).unwrap();
+            assert_eq!(result.checkpoint.nodes[0].state, NodeState::Blocked);
+            assert!(result.checkpoint.nodes[0].launch_retry.is_none());
+            assert_eq!(owner.calls, 1);
+        }
+    }
+}
+
+#[cfg(test)]
 mod graph_review_tests {
     #[test]
     fn expanded_review_roles_include_lenses_verification_and_synthesis()
