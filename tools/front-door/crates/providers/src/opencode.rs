@@ -245,9 +245,10 @@ fn prepare(
     }
     if let Ok(config_dir) = std::fs::canonicalize(&config_dir)
         && provenant_confinement::refuses_lane_root(&config_dir, true, Some(input.home))
-        && !omitted_discovery
-            .iter()
-            .any(|entry| entry.path == config_dir)
+        && !omitted_discovery.iter().any(|entry| {
+            entry.path == config_dir
+                && entry.source == crate::launch::OmissionSource::ProviderConfig
+        })
     {
         omitted_discovery.push(crate::launch::OmittedGrant {
             path: config_dir,

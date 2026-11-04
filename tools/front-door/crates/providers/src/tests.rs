@@ -6695,8 +6695,12 @@ fn optional_discovered_grants_are_filtered_without_touching_required_grants()
     std::fs::create_dir_all(&secret)?;
     std::os::unix::fs::symlink(&secret, &optional)?;
     let required = crate::launch::subtree(&secret);
-    let mut grants = vec![required.clone(), crate::launch::subtree(&optional)];
-    let mut omitted = Vec::new();
+    let mut grants = vec![
+        required.clone(),
+        crate::launch::subtree(&optional),
+        crate::launch::subtree(&secret),
+    ];
+    let mut omitted = crate::launch::OmittedGrant::skills(vec![secret.clone()]);
     crate::launch::filter_optional_grants(
         &mut grants,
         1,
@@ -6707,10 +6711,49 @@ fn optional_discovered_grants_are_filtered_without_touching_required_grants()
     assert_eq!(grants, vec![required]);
     assert_eq!(
         omitted,
-        vec![crate::launch::OmittedGrant {
-            path: secret,
-            source: crate::launch::OmissionSource::Toolchain,
-        }]
+        vec![
+            crate::launch::OmittedGrant {
+                path: secret.clone(),
+                source: crate::launch::OmissionSource::UserSkill,
+            },
+            crate::launch::OmittedGrant {
+                path: secret,
+                source: crate::launch::OmissionSource::Toolchain,
+            },
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn opencode_skill_and_provider_config_omissions_keep_both_sources()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().canonicalize()?;
+    let secret = home.join(".gemini/skills");
+    std::fs::create_dir_all(&secret)?;
+    std::fs::create_dir_all(home.join(".config"))?;
+    std::os::unix::fs::symlink(&secret, home.join(".config/opencode"))?;
+    std::os::unix::fs::symlink(&secret, secret.join("skills"))?;
+    let mut route = route("opencode", "fixture-model");
+    route.account_key = None;
+    let plan = fixture_access_plan(Access::ReadOnly, None, false);
+    let prompt = Prompt::new("fixture".into());
+    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.home = &home;
+    let spec = opencode::OpenCode.prepare(input)?;
+    assert_eq!(
+        spec.omitted_discovery,
+        vec![
+            crate::launch::OmittedGrant {
+                path: secret.clone(),
+                source: crate::launch::OmissionSource::UserSkill,
+            },
+            crate::launch::OmittedGrant {
+                path: secret,
+                source: crate::launch::OmissionSource::ProviderConfig,
+            },
+        ]
     );
     Ok(())
 }

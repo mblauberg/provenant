@@ -1207,6 +1207,11 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         };
         let skill_root = home.join(".gemini/skills");
         std::fs::create_dir_all(&skill_root)?;
+        // Skill discovery and Rust discovery omit the same canonical root.
+        // Repeated read/exec grants for that root collapse within Toolchain.
+        std::os::unix::fs::symlink(&skill_root, skill_root.join("bin"))?;
+        std::os::unix::fs::symlink(&skill_root, home.join(".cargo"))?;
+        std::fs::create_dir_all(home.join(".rustup/toolchains"))?;
         let login = home.join("Library/Keychains/login.keychain-db");
         std::fs::create_dir_all(login.parent().unwrap())?;
         std::fs::write(&login, b"fixture")?;
@@ -1267,9 +1272,17 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
                 .ok_or("missing agy warning")?;
             assert!(warning.contains("~/.gemini/skills"), "{warning}");
             assert_eq!(
+                prepared.route.extra["user_skills"]["warnings"],
+                serde_json::json!([warning]),
+            );
+            assert_eq!(
                 prepared.route.extra["discovery_warnings"],
-                serde_json::json!([]),
-                "skill omissions must not appear as launch-grant warnings"
+                if write {
+                    serde_json::json!([warning])
+                } else {
+                    serde_json::json!([])
+                },
+                "writers discover the same path as both a skill and a toolchain"
             );
             let confinement = prepared.confinement.as_ref().ok_or("missing confinement")?;
             assert!(
@@ -1314,6 +1327,7 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
             assert_eq!(result.termination, Termination::Exit(0), "{result:?}");
             assert!(String::from_utf8_lossy(&result.stdout.bytes).contains("agy 1.0.0"));
         }
+        std::fs::remove_file(home.join(".cargo"))?;
     }
     std::fs::write(
         state.join("config.toml"),

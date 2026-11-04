@@ -81,7 +81,10 @@ pub(crate) fn filter_optional_grants(
             target.filter(|path| provenant_confinement::refuses_lane_root(path, true, Some(home)))
         {
             grants.remove(index);
-            if !omitted.iter().any(|entry| entry.path == target) {
+            if !omitted
+                .iter()
+                .any(|entry| entry.path == target && entry.source == source)
+            {
                 omitted.push(OmittedGrant {
                     path: target,
                     source,
