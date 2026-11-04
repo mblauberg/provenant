@@ -420,6 +420,10 @@ impl FacadeError {
             }
             Self::InvalidInput { detail: None } => projected = projected.detail("invalid input").next("check the input and retry"),
             Self::Busy => projected = projected.detail("service is busy").next("wait for host capacity before retrying"),
+            Self::PeerProtocolMismatch { peer, remote, expected } => {
+                projected = projected.detail(crate::hosts::protocol_mismatch_message(peer, *remote, *expected))
+                    .next("upgrade both hosts to compatible protocol versions");
+            }
             Self::DispatchUnobserved { .. } => projected = projected.detail("disk observation failed").next("restore the host disk observation before retrying"),
             Self::DispatchRefused { disk: Some(disk), .. } => {
                 projected = projected.detail(format!("insufficient disk space on the limiting volume: {} bytes available, floor {} bytes; bounded GC reported {} bytes reclaimed", disk.available, disk.floor, disk.reclaimed))
