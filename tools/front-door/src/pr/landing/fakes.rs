@@ -14,6 +14,7 @@ pub struct FakeForge {
     pub direct_push: bool,
     pub lose_merge_response: bool,
     pub merges: Vec<(u64, String, MergeMethod)>,
+    pub reverts: Vec<(u64, String)>,
 }
 impl Forge for FakeForge {
     fn pull_request(&mut self, number: u64) -> Result<PullRequestInfo, LandingError> {
@@ -66,6 +67,10 @@ impl Forge for FakeForge {
     }
     fn labels(&mut self, number: u64) -> Result<Vec<String>, LandingError> {
         Ok(self.labels.get(&number).cloned().unwrap_or_default())
+    }
+    fn open_revert(&mut self, number: u64, landed: &str) -> Result<u64, LandingError> {
+        self.reverts.push((number, landed.into()));
+        Ok(9000 + number)
     }
 }
 #[derive(Default)]

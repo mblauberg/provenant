@@ -36,6 +36,11 @@ pub trait Forge {
     ) -> Result<String, LandingError>;
     fn may_push_directly(&mut self, branch: &str) -> Result<bool, LandingError>;
     fn labels(&mut self, number: u64) -> Result<Vec<String>, LandingError>;
+    /// Open a pull request reverting a landed pull request's commits; returns its number.
+    fn open_revert(&mut self, number: u64, landed: &str) -> Result<u64, LandingError> {
+        let _ = (number, landed);
+        Err(LandingError::Unimplemented("forge revert pull request"))
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MergeTree {
