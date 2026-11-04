@@ -64,6 +64,22 @@ pub(crate) fn run(
     }
 }
 
+/// Resolve a checkout's optional project binding for landing policy consumers.
+pub(crate) fn project_id(
+    roots: &provenant_core::Roots,
+    runtime: &provenant_confinement::UtilityRuntime,
+    executor: &provenant_os::exec::SystemExecutor,
+    project: &std::path::Path,
+    budget: provenant_confinement::UtilityBudget,
+    cancel: &provenant_core::CancelToken,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let location = runtime
+        .project_location(executor, project, budget, cancel)?
+        .location;
+    Ok(provenant_config::lookup_project(roots, &location)?
+        .map(|binding| binding.project_id().to_string()))
+}
+
 fn run_inner(
     options: Options,
     globals: &provenant_cli::Globals,
@@ -96,16 +112,14 @@ fn run_inner(
         provenant_config::read_with_domains(&resolved.roots, &provenant_cli::domains::SECTIONS)?;
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
     let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
-    let location = runtime
-        .project_location(
-            &provenant_os::exec::SystemExecutor::new(1)?,
-            &resolved.project,
-            provenant_confinement::UtilityBudget::bounded(std::time::Duration::from_secs(5))?,
-            &provenant_core::CancelToken::new(),
-        )?
-        .location;
-    let project = provenant_config::lookup_project(&resolved.roots, &location)?
-        .map(|binding| binding.project_id().to_string());
+    let project = project_id(
+        &resolved.roots,
+        &runtime,
+        &provenant_os::exec::SystemExecutor::new(1)?,
+        &resolved.project,
+        provenant_confinement::UtilityBudget::bounded(std::time::Duration::from_secs(5))?,
+        &provenant_core::CancelToken::new(),
+    )?;
     let invocation = LandOverride {
         poll_seconds: options.poll,
         ..LandOverride::default()

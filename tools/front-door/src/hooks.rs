@@ -887,42 +887,70 @@ fn pre_push(remote: &str, globals: &Globals, deadline: Instant) -> Result<(), Er
             error.into()
         })
     })?;
-    match local_gate_settings(globals, &project) {
-        Ok(settings) => run_local_gate(&settings, &project),
-        Err(error) => {
-            diagnostic(&format!("pre-push: local gate unavailable: {error}"));
-            Ok(())
-        }
+    if let Some(settings) = local_gate_settings(globals, &project)? {
+        run_local_gate(&settings, &project)?;
     }
+    Ok(())
 }
 
 fn local_gate_settings(
     globals: &Globals,
     project: &Path,
-) -> Result<provenant_cli::domains::LocalGateSettings, Error> {
-    let resolved = crate::roots::resolve(
+) -> Result<Option<provenant_cli::domains::LocalGateSettings>, Error> {
+    use provenant_cli::domains::LocalGateMode;
+    // Like the conflict-marker setting, an unreadable host configuration has
+    // no known local-gate policy and falls back silently.
+    let Ok(resolved) = crate::roots::resolve(
         globals,
         crate::roots::Workspace::At(project),
         crate::roots::Product::Optional,
-    )?;
-    let config = provenant_config::config_show(&resolved.roots, &provenant_cli::domains::SECTIONS)?;
-    let id = with_git(|runtime, executor, budget, cancel| {
-        let location = runtime
-            .project_location(executor, project, budget, cancel)?
-            .location;
-        Ok(
-            provenant_config::lookup_project(&resolved.roots, &location)?
-                .map(|binding| binding.project_id().to_string()),
-        )
-    })?;
-    let policy = crate::pr::landing::policy::LandPolicy::resolve(
-        &config.domains.pr.land,
+    ) else {
+        return Ok(None);
+    };
+    let Ok(config) =
+        provenant_config::config_show(&resolved.roots, &provenant_cli::domains::SECTIONS)
+    else {
+        return Ok(None);
+    };
+    let land = &config.domains.pr.land;
+    if land.local_gate.mode != LocalGateMode::Enforce
+        && land.local_gate.commands.is_empty()
+        && land
+            .projects
+            .values()
+            .all(|project| project.local_gate.is_none())
+    {
+        return Ok(Some(land.local_gate.clone()));
+    }
+    let id = match with_git(|runtime, executor, budget, cancel| {
+        crate::pr::landing::project_id(&resolved.roots, runtime, executor, project, budget, cancel)
+    }) {
+        Ok(id) => id,
+        Err(_) if land.local_gate.mode == LocalGateMode::Enforce => {
+            return Err("local gate settings unavailable".into());
+        }
+        Err(_) => return Ok(None),
+    };
+    let enforce = id
+        .as_deref()
+        .and_then(|id| land.projects.get(id))
+        .and_then(|project| project.local_gate.as_ref())
+        .and_then(|gate| gate.mode)
+        .unwrap_or(land.local_gate.mode)
+        == LocalGateMode::Enforce;
+    let settings = crate::pr::landing::policy::LandPolicy::resolve(
+        land,
         &config.origins,
         id.as_deref(),
         None,
         &Default::default(),
-    )?;
-    Ok(policy.settings()?.local_gate)
+    )
+    .and_then(|policy| policy.settings());
+    match settings {
+        Ok(settings) => Ok(Some(settings.local_gate)),
+        Err(_) if enforce => Err("local gate settings unavailable".into()),
+        Err(_) => Ok(None),
+    }
 }
 
 fn run_local_gate(
@@ -961,6 +989,7 @@ fn run_local_gate_with(
             Duration::from_secs(settings.timeout_seconds),
         );
         options.process_group = true;
+        options.cleanup_process_group = true;
         options.stdout = StreamPolicy::Discard;
         options.stderr = StreamPolicy::Discard;
         let failure = match executor.execute(options) {
@@ -1020,6 +1049,20 @@ mod answer_delivery_tests {
         settings.mode = LocalGateMode::Enforce;
         settings.commands.clear();
         run_local_gate(&settings, dir.path())?;
+        Ok(())
+    }
+
+    #[test]
+    fn local_gate_cleans_up_background_processes() -> Result<(), Error> {
+        let dir = tempfile::tempdir()?;
+        let settings = provenant_cli::domains::LocalGateSettings {
+            mode: provenant_cli::domains::LocalGateMode::Enforce,
+            commands: vec!["(sleep 1; touch escaped) &".into()],
+            timeout_seconds: 2,
+        };
+        run_local_gate(&settings, dir.path())?;
+        std::thread::sleep(Duration::from_millis(1200));
+        assert!(!dir.path().join("escaped").exists());
         Ok(())
     }
 
