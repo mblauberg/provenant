@@ -378,6 +378,19 @@ fn run_inner(
             let publication = if request.shadow {
                 PublishResult::default()
             } else {
+                // Write the intent before publishing, so a crash or lost response mid-publication
+                // leaves a marker for the next run to reconcile. Definite outcomes clear it below.
+                let attempt = PendingAttempt {
+                    repository: repository.clone(),
+                    target: request.target.into(),
+                    candidate: candidate.clone(),
+                    policy: request.policy.clone(),
+                    gate_definition: request.gate.clone(),
+                    gate_evidence: evidence.clone(),
+                    publish: decision.clone(),
+                    cost: cost.clone(),
+                };
+                receipt::record_pending(request.state, &attempt)?;
                 let mut progress = Vec::new();
                 let published = match decision.mode {
                     PublishMode::FastForward => {
@@ -401,17 +414,6 @@ fn run_inner(
                                 | LandingError::TargetMoved
                                 | LandingError::PullRequestChanged(_)
                         ) {
-                            let attempt = PendingAttempt {
-                                repository: repository.clone(),
-                                target: request.target.into(),
-                                candidate: candidate.clone(),
-                                policy: request.policy.clone(),
-                                gate_definition: request.gate.clone(),
-                                gate_evidence: evidence.clone(),
-                                publish: decision.clone(),
-                                cost: cost.clone(),
-                            };
-                            receipt::record_pending(request.state, &attempt)?;
                             recover(forge, repo, runner, alarms, &request, &repository, report)?;
                             prs.retain(|pr| {
                                 report.outcomes.get(&pr.number) != Some(&Outcome::Landed)
@@ -454,6 +456,7 @@ fn run_inner(
                             followed?;
                         }
                         repo.delete_ref(&candidate.ref_name, &candidate.commit)?;
+                        receipt::clear_pending(request.state, &repository, &candidate)?;
                         prs.drain(..progress.len());
                         if let LandingError::PullRequestChanged(number) = error {
                             prs.retain(|pr| {
@@ -1244,7 +1247,8 @@ mod tests {
             receipt::pending(state.path(), "fake-repository", "main")?.len(),
             0
         );
-        assert!(!repo.saw_pending_on_target_push);
+        // The marker is written ahead of publication and cleared once the refusal is definite.
+        assert!(repo.saw_pending_on_target_push);
         assert_eq!(
             repo.push_attempts
                 .iter()
