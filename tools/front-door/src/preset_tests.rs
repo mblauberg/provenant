@@ -2547,8 +2547,10 @@ fn generator_evaluator_ends_with_an_evaluator_over_the_lens_list() {
     assert_eq!(route(evaluate)["alias"], "principal");
     assert_eq!(evaluate["source"]["node"], "implement");
     assert_eq!(evaluate["review_base"], "main");
+    let mut fixture = expanded.document.clone();
+    pin_fixture_sources(&mut fixture);
     let document: provenant_fabric_runtime::graph::GraphDocument =
-        serde_json::from_value(expanded.document.clone()).unwrap();
+        serde_json::from_value(fixture).unwrap();
     let graph = document
         .expanded(&provenant_fabric_runtime::config::GraphLimits::default())
         .unwrap();
@@ -3176,9 +3178,12 @@ prompt = "Look at ${prompt}"
             "stages = [{ id = \"inner\", preset = \"typed\" }]",
         )
         .unwrap();
-    let error = expand(&layers, "outer", "brief", &[]).err().unwrap();
+    let expansion = expand(&layers, "outer", "brief", &[]).unwrap();
+    let document: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(expansion.document).unwrap();
+    let error = document.admit(&Default::default()).unwrap_err();
     assert!(error.contains("look"), "{error}");
-    assert!(error.contains("composite"), "{error}");
+    assert!(error.contains("inner"), "{error}");
     assert!(error.contains("commit"), "{error}");
 }
 
@@ -3191,19 +3196,26 @@ fn selection(stages: &str) -> Result<Expansion, String> {
             &format!("stages = {stages}\n[roles.scout]\nprompt = \"Look at ${{prompt}}\""),
         )
         .unwrap();
-    expand(&layers, "sel", "brief", &[])
+    let expansion = expand(&layers, "sel", "brief", &[])?;
+    let document: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(expansion.document.clone()).map_err(|error| error.to_string())?;
+    document.admit(&Default::default())?;
+    Ok(expansion)
 }
 
 #[test]
 fn composite_children_inherit_the_pinned_source_for_commit() {
-    let pinned = r#"[{ id = "grp", source = { type = "commit", commit = "abc" },
+    let pinned = r#"[{ id = "grp", source = { type = "commit", commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
         stages = [{ id = "look", role = "scout" }],
         exports = [{ node = "look", outputs = ["commit"] }] }]"#;
     selection(pinned).unwrap();
-    let error = selection(&pinned.replace("source = { type = \"commit\", commit = \"abc\" },", ""))
-        .err()
-        .unwrap();
-    assert!(error.contains("commit from look"), "{error}");
+    let error = selection(&pinned.replace(
+        "source = { type = \"commit\", commit = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" },",
+        "",
+    ))
+    .err()
+    .unwrap();
+    assert!(error.contains("commit from grp--look"), "{error}");
 }
 
 #[test]
@@ -3215,23 +3227,23 @@ fn selections_resolve_against_enclosing_scopes_and_branch_needs_a_writer() {
     .err()
     .unwrap();
     assert!(
-        error.contains("node x selects commit from scope"),
+        error.contains("node run--x selects commit from scope"),
         "{error}"
     );
     let error = selection(
-        r#"[{ id = "grp", source = { type = "commit", commit = "abc" },
+        r#"[{ id = "grp", source = { type = "commit", commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
         stages = [{ id = "look", role = "scout" }],
         exports = [{ node = "look", outputs = ["branch"] }] }]"#,
     )
     .err()
     .unwrap();
-    assert!(error.contains("branch from look"), "{error}");
+    assert!(error.contains("branch from grp--look"), "{error}");
 }
 
 #[test]
 fn loops_supply_no_commit_or_branch() {
     let error = selection(
-        r#"[{ id = "again", loop = { stages = [{ id = "look", role = "scout" }], until = "look", max_rounds = 2 } },
+        r#"[{ id = "again", loop = { stages = [{ id = "look", role = "scout" }, { id = "accept", kind = "gate", condition = { type = "budget" } }], until = "accept", max_rounds = 2 } },
         { id = "after", role = "scout", inputs = [{ node = "again", outputs = ["commit"] }] }]"#,
     )
     .err()
@@ -3243,11 +3255,12 @@ fn loops_supply_no_commit_or_branch() {
 fn previous_round_selections_resolve_against_the_loop_body() {
     let error = selection(
         r#"[{ id = "again", loop = { stages = [{ id = "look", role = "scout" },
-        { id = "fix", role = "scout", inputs = [{ node = "previous.look", outputs = ["commit"] }] }], until = "look", max_rounds = 2 } }]"#,
+        { id = "fix", role = "scout", inputs = [{ node = "previous.look", outputs = ["commit"] }] }, { id = "accept", kind = "gate", condition = { type = "budget" } }], until = "accept", max_rounds = 2 } }]"#,
     )
     .err()
     .unwrap();
-    assert!(error.contains("commit from look"), "{error}");
+    assert!(error.contains("commit from again--r1--look"), "{error}");
+    assert!(error.contains("again--r2--fix"), "{error}");
 }
 
 mod planner_front_end {

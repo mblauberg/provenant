@@ -2651,15 +2651,17 @@ fn gate_reachability_accepts_a_limit_sized_graph_and_rejects_lower_limits() {
     assert!(validate_plan_with_limits(&document, &limits).is_ok());
     let mut smaller = limits.clone();
     smaller.nodes -= 1;
-    assert_eq!(
-        validate_plan_with_limits(&document, &smaller).unwrap_err(),
-        "node count"
+    assert!(
+        validate_plan_with_limits(&document, &smaller)
+            .unwrap_err()
+            .contains("limits.nodes")
     );
     smaller = limits;
     smaller.edges = document.nodes.len() / 2 - 1;
-    assert_eq!(
-        validate_plan_with_limits(&document, &smaller).unwrap_err(),
-        "edge count"
+    assert!(
+        validate_plan_with_limits(&document, &smaller)
+            .unwrap_err()
+            .contains("limits.edges")
     );
 }
 

@@ -830,6 +830,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         routes_per_node: u16::MAX as usize,
         node_prompt_bytes: usize::MAX,
         graph_prompt_bytes: usize::MAX,
+        fan_out_width: usize::MAX,
+        expansion_depth: usize::MAX,
         ..limits.clone()
     };
     let mut stored = journal
@@ -845,8 +847,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
     }
     let stored_extensions = stored.as_ref().map_or(&[][..], |c| c.extensions.as_slice());
-    let (base, _) = validate_plan_with_limits(document, &unbounded)
-        .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
+    let (base, _) = if stored.is_some() {
+        validate_replay_plan(document, &unbounded)
+    } else {
+        validate_plan_with_limits(document, &unbounded)
+    }
+    .map_err(GraphError::Invalid)?;
     let mut expanded = plans::expand(
         document,
         stored_extensions,

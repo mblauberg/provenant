@@ -92,7 +92,12 @@ pub(super) fn validate_output_kinds(document: &GraphDocument) -> Result<(), Stri
         // A composite's export declaration is its public output contract. Its
         // members are validated in their own scopes; consumers are checked
         // against the declared composite outputs through `supplied_kinds`.
-        for input in &consumer.inputs {
+        for input in consumer.inputs.iter().chain(
+            consumer
+                .composite
+                .iter()
+                .flat_map(|composite| &composite.exports),
+        ) {
             let source_id = input.node.strip_prefix("previous.").unwrap_or(&input.node);
             let Some(source) = by_id.get(source_id) else {
                 continue;
@@ -165,6 +170,13 @@ pub(super) fn validate_plan_with_limits(
     limits: &crate::config::GraphLimits,
 ) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), String> {
     document.admit(limits)?;
+    validate_replay_plan(document, limits)
+}
+
+pub(super) fn validate_replay_plan(
+    document: &GraphDocument,
+    limits: &crate::config::GraphLimits,
+) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), String> {
     validate_schema(document).map_err(String::from)?;
     let expansion_limits = crate::config::GraphLimits {
         nodes: limits.nodes.max(16_384),

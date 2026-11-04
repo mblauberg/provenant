@@ -160,6 +160,7 @@ fn admission_output_kind_matrix() {
 fn admission_composite_exports_are_declared_capabilities() {
     let council = json!({
         "id":"council","kind":"composite","access":"read_only",
+        "source":{"type":"commit","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
         "composite":{"nodes":[{"id":"synthesis","kind":"synthesise","access":"read_only"}],
         "exports":[{"node":"synthesis","outputs":["result","findings","verdict","commit"]}]}
     });
@@ -195,7 +196,8 @@ fn admission_structural_limits_name_the_key() {
             {"id":"b","prompt":"child prompt","access":"read_only","depends_on":["root"],"routes":[{"alias":"senior"}]}
         ]),
     );
-    let cases: [(&str, fn(&mut crate::config::GraphLimits)); 7] = [
+    type LimitCase = (&'static str, fn(&mut crate::config::GraphLimits));
+    let cases: [LimitCase; 7] = [
         ("nodes", |limits: &mut crate::config::GraphLimits| {
             limits.nodes = 2
         }),
