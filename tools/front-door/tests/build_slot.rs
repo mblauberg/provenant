@@ -144,29 +144,23 @@ fn until(timeout: Duration, condition: impl FnMut() -> bool) -> bool {
 }
 
 fn finish(child: &mut Child, timeout: Duration) -> Result<bool> {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if let Some(status) = child.try_wait()? {
-            return Ok(status.success());
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    child.kill()?;
-    child.wait()?;
-    Err("shim did not finish in time".into())
+    Ok(until_exit(child, timeout)?.success())
 }
 
 fn until_exit(child: &mut Child, timeout: Duration) -> Result<std::process::ExitStatus> {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if let Some(status) = child.try_wait()? {
-            return Ok(status);
+    match provenant_test_support::wait_for(
+        "shim exit",
+        timeout,
+        || child.try_wait(),
+        |status| !matches!(status, Ok(None)),
+    ) {
+        Ok(status) => Ok(status?.ok_or("shim exit observation missing")?),
+        Err(error) => {
+            child.kill()?;
+            child.wait()?;
+            Err(error.into())
         }
-        std::thread::sleep(Duration::from_millis(25));
     }
-    child.kill()?;
-    child.wait()?;
-    Err("shim did not exit in time".into())
 }
 
 fn alive(pid: &str) -> bool {

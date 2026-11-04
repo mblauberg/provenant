@@ -3893,7 +3893,8 @@ if (process.argv[2] === 'child') {
             "pnpm --dir \"$TMPDIR/cargo-probe\" run compat; ",
             "printf 'lane-node-pnpm-compat: PASS\\n'; ",
             "elif [ \"${PROVENANT_LANE_TOOLS_REQUIRED:-0}\" = 1 ]; then ",
-            "echo 'required node/pnpm unavailable' >&2; exit 15; fi"
+            "echo 'required node/pnpm unavailable' >&2; exit 15; ",
+            "else echo 'SKIP #1: node/pnpm unavailable' >&2; fi"
         )].map(OsString::from);
         let command = compiled.command(&argv, &provenant_core::AttemptId::from_bytes([0; 16]))?;
         let mut options = ExecOptions::new(&command, &launch.cwd, Duration::from_secs(30));
@@ -3931,6 +3932,10 @@ if (process.argv[2] === 'child') {
                 String::from_utf8_lossy(&output.stdout.bytes)
                     .contains("lane-node-pnpm-compat: PASS")
             );
+        } else if !String::from_utf8_lossy(&output.stdout.bytes)
+            .contains("lane-node-pnpm-compat: PASS")
+        {
+            provenant_test_support::missing_prerequisite(false, "node/pnpm unavailable in lane")?;
         }
     }
     // Start the configured MCP inside the compiled profile too: an

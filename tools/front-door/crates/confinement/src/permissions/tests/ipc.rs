@@ -32,15 +32,32 @@ fn postgres_bin() -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
             .map(PathBuf::from)
             .find(|bin| bin.join("initdb").is_file())
         });
-    if bin.is_none() {
-        assert_ne!(
-            std::env::var("PROVENANT_POSTGRES_REQUIRED").as_deref(),
-            Ok("1"),
-            "PostgreSQL 18 unavailable; set PROVENANT_TEST_POSTGRES_BIN"
-        );
-    }
+    let bin = postgres_requirement(
+        bin,
+        std::env::var("PROVENANT_POSTGRES_REQUIRED").as_deref() == Ok("1"),
+    )?;
     bin.map(|path| provenant_os::fs::canonicalize(&path).map_err(Into::into))
         .transpose()
+}
+
+fn postgres_requirement(bin: Option<PathBuf>, required: bool) -> Result<Option<PathBuf>, String> {
+    let bin = bin.filter(|path| path.join("initdb").is_file() && path.join("postgres").is_file());
+    if bin.is_none() {
+        provenant_test_support::missing_prerequisite(
+            required,
+            "PostgreSQL 18 (initdb and postgres); set PROVENANT_TEST_POSTGRES_BIN",
+        )?;
+    }
+    Ok(bin)
+}
+
+#[test]
+fn missing_postgres_obeys_required_control() {
+    let root = tempfile::tempdir().unwrap();
+    let missing = Some(root.path().join("missing"));
+    let error = postgres_requirement(missing.clone(), true).unwrap_err();
+    assert!(error.contains("PostgreSQL 18"));
+    assert_eq!(postgres_requirement(missing, false).unwrap(), None);
 }
 
 fn database_profile(

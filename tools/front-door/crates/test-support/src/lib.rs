@@ -34,16 +34,23 @@ pub fn wait_for<T: std::fmt::Debug>(
 /// requires native confinement. The ordinal makes skips visible and countable
 /// in captured test output.
 pub fn skip_sandbox_dependent_test(reason: impl Display) -> Result<(), String> {
-    let reason = reason.to_string();
-    report_sandbox_skip(
+    missing_prerequisite(
         std::env::var_os("PROVENANT_CONFINEMENT_REQUIRED").is_some(),
         reason,
+    )
+}
+
+/// Fail a required native prerequisite, or print a numbered local skip.
+pub fn missing_prerequisite(required: bool, reason: impl Display) -> Result<(), String> {
+    report_missing_prerequisite(
+        required,
+        reason.to_string(),
         &mut std::io::stderr(),
         &SKIP_COUNT,
     )
 }
 
-fn report_sandbox_skip(
+fn report_missing_prerequisite(
     required: bool,
     reason: String,
     output: &mut impl Write,
@@ -55,13 +62,13 @@ fn report_sandbox_skip(
 
     let count = count.fetch_add(1, Ordering::Relaxed) + 1;
     writeln!(output, "SKIP #{count}: {reason}")
-        .map_err(|error| format!("failed to report sandbox-dependent test skip: {error}"))?;
+        .map_err(|error| format!("failed to report native prerequisite skip: {error}"))?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::report_sandbox_skip;
+    use super::report_missing_prerequisite;
     use std::sync::atomic::AtomicUsize;
 
     #[test]
@@ -97,7 +104,7 @@ mod tests {
         let mut output = Vec::new();
         let count = AtomicUsize::new(0);
         assert_eq!(
-            report_sandbox_skip(false, "sandbox backend".into(), &mut output, &count),
+            report_missing_prerequisite(false, "sandbox backend".into(), &mut output, &count),
             Ok(())
         );
         assert_eq!(output, b"SKIP #1: sandbox backend\n");
@@ -108,9 +115,30 @@ mod tests {
         let mut output = Vec::new();
         let count = AtomicUsize::new(0);
         assert_eq!(
-            report_sandbox_skip(true, "sandbox backend".into(), &mut output, &count),
+            report_missing_prerequisite(true, "sandbox backend".into(), &mut output, &count),
             Err("sandbox backend".into())
         );
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn native_prerequisites_fail_when_required_and_name_optional_skips() {
+        for capability in ["sandbox backend", "rg", "PostgreSQL 18", "node/pnpm"] {
+            let count = AtomicUsize::new(0);
+            let mut output = Vec::new();
+            assert_eq!(
+                report_missing_prerequisite(true, capability.into(), &mut output, &count),
+                Err(capability.into())
+            );
+            assert!(output.is_empty());
+            assert_eq!(
+                report_missing_prerequisite(false, capability.into(), &mut output, &count),
+                Ok(())
+            );
+            assert_eq!(
+                String::from_utf8(output).unwrap(),
+                format!("SKIP #1: {capability}\n")
+            );
+        }
     }
 }
