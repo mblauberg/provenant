@@ -2471,6 +2471,7 @@ pub fn run(
             };
             let mut result = CommandResult::new(name, status, None);
             result.error = Some(CommandError {
+                diagnostic: None,
                 code: code.into(),
                 message: error.to_string(),
                 cause: None,

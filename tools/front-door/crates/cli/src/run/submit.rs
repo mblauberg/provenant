@@ -525,18 +525,21 @@ pub(super) fn submit_with_host_and_wait(
                         DiskCheck::Low { .. } => (ErrorKind::DiskFloor, Status::Refused),
                         DiskCheck::Unobserved(_) => (ErrorKind::Io, Status::Error),
                     };
-                    let message = String::from(check);
-                    let mut fail = Fail::new(status, kind, message.clone());
-                    // Keep the volume, available bytes and floor for MCP callers.
-                    fail.detail = Some(if status == Status::Refused {
-                            provenant_fabric_runtime::coordination::facade::FacadeError::DispatchRefused {
-                                reason: message.clone(),
-                            }
-                        } else {
-                            provenant_fabric_runtime::coordination::facade::FacadeError::DispatchUnobserved {
-                                reason: message,
-                            }
-                    });
+                    let projection = match &check {
+                        DiskCheck::Low { path, available, floor, reclaimed } => {
+                            let path = provenant_records::diagnostic::safe_path(path, provenant_records::diagnostic::Destination::Local)
+                                .unwrap_or_else(|| "the limiting volume".into());
+                            Some(provenant_records::diagnostic::Diagnostic::new(kind.code()).category(kind.category())
+                                .detail(format!("insufficient disk space on {path}: {available} bytes available, floor {floor} bytes; bounded GC reported {reclaimed} bytes reclaimed"))
+                                .next(format!("run `provenant gc --free-floor {floor}B` before dispatching a writer"))
+                                .fact(provenant_records::diagnostic::DiagnosticFact::DiskPressure { available: *available, floor: *floor, reclaimed: *reclaimed }))
+                        }
+                        DiskCheck::Unobserved(_) => Some(provenant_records::diagnostic::Diagnostic::new(kind.code()).category(kind.category())
+                            .detail("disk observation failed").next("restore the host disk observation before retrying")
+                            .fact(provenant_records::diagnostic::DiagnosticFact::DiskUnobserved)),
+                    };
+                    let mut fail = Fail::new(status, kind, projection.as_ref().and_then(|p| p.detail.clone()).unwrap_or_default());
+                    fail.projection = projection.map(Box::new);
                     fail
                 })?;
             }

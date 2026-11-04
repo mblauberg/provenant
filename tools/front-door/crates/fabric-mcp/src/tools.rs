@@ -1309,7 +1309,16 @@ impl ServiceError {
         match self {
             Self::Mutation { source, .. } => source.code(),
             Self::Inbox(error) => error.code(),
-            Self::InboxOwner { code, .. } | Self::Cli { code, .. } => code,
+            Self::InboxOwner { code, .. } | Self::Cli { code, .. }
+                if !code.is_empty()
+                    && code.len() <= 128
+                    && code
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-')) =>
+            {
+                code
+            }
+            Self::InboxOwner { .. } | Self::Cli { .. } => "cli_failed",
             Self::Invalid(_) => "invalid_input",
             Self::Coordination(error) => error.code(),
             Self::Facade(error) => error.code(),
@@ -1323,6 +1332,37 @@ impl ServiceError {
     /// Stable structured error data. Uncertain mutations carry their
     /// idempotency key; prompts, tokens and raw source errors are omitted.
     pub fn structured_error(&self) -> Value {
+        if let Self::Facade(error) = self {
+            let projection = error.diagnostic();
+            let mut value = serde_json::to_value(&projection)
+                .unwrap_or_else(|_| serde_json::json!({"code": error.code()}));
+            value["message"] = Value::String(
+                projection
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| projection.code.clone()),
+            );
+            value["hint"] = Value::String(
+                projection
+                    .next
+                    .clone()
+                    .unwrap_or_else(|| "Inspect the current state before retrying.".into()),
+            );
+            match error {
+                FacadeError::LaunchUnknown { operation_id } => {
+                    value["operation_id"] = serde_json::json!(operation_id)
+                }
+                FacadeError::GenerationConflict { current_generation } => {
+                    value["current_generation"] = serde_json::json!(current_generation)
+                }
+                FacadeError::Busy => value["retryable"] = Value::Bool(true),
+                FacadeError::Io { operation, .. } if operation == "access Fabric store" => {
+                    value["operation"] = Value::String(operation.clone());
+                }
+                _ => {}
+            }
+            return value;
+        }
         if let Self::Coordination(CoordinationError::Store(error)) = self {
             if let provenant_fabric_runtime::StoreError::Invalid(field) = error {
                 return serde_json::json!({"code":self.code(),"field":field,"message":error.to_string(),"hint":"Check the field and retry."});
@@ -1345,42 +1385,29 @@ impl ServiceError {
             return detail;
         }
         let mut detail = match self {
-            // Object data is flattened beside the code; any other shape stays under `data`.
-            Self::Cli { data, .. } => match data.as_object() {
-                Some(fields) => {
-                    let mut detail = fields.clone();
-                    detail.insert("code".into(), Value::String(self.code().into()));
-                    Value::Object(detail)
+            Self::Cli { data, .. } => {
+                let mut value = serde_json::json!({"code":self.code()});
+                if let Some(revision) = data.get("revision").and_then(Value::as_u64) {
+                    value["revision"] = revision.into();
                 }
-                None => serde_json::json!({"code":self.code(),"data":data}),
-            },
+                value
+            }
             Self::Invalid(error) => serde_json::json!({"code":self.code(),"path":error.path}),
             Self::Coordination(CoordinationError::LaneMutation) => {
                 serde_json::json!({"code":self.code(),"message":self.to_string()})
             }
-            Self::Facade(FacadeError::DispatchRefused { .. })
-            | Self::Facade(FacadeError::HostDeliveryIo { .. })
-            | Self::Facade(FacadeError::UpgradeRequired { .. })
-            | Self::Facade(FacadeError::PeerProtocolMismatch { .. })
-            | Self::Coordination(CoordinationError::Peer(
+            Self::Coordination(CoordinationError::Peer(
                 provenant_fabric_runtime::hosts::PeerError::ProtocolMismatch { .. },
             )) => {
                 serde_json::json!({"code":self.code(),"message":self.to_string()})
             }
-            Self::Facade(
-                error @ (FacadeError::Io { .. }
-                | FacadeError::WorktreeUnregistered { .. }
-                | FacadeError::GenerationConflict { .. }),
-            ) => serde_json::to_value(error)
-                .unwrap_or_else(|_| serde_json::json!({"code":self.code()})),
             Self::Coordination(CoordinationError::Input(error)) => {
                 serde_json::json!({"code":self.code(),"path":error.path})
             }
             Self::Inbox(InboxError::Invalid(field)) => {
                 serde_json::json!({"code":self.code(),"field":field})
             }
-            Self::Facade(FacadeError::LaunchUnknown { operation_id })
-            | Self::Coordination(CoordinationError::Peer(
+            Self::Coordination(CoordinationError::Peer(
                 provenant_fabric_runtime::hosts::PeerError::Unknown { operation_id },
             )) => {
                 serde_json::json!({"code":self.code(),"operation_id":operation_id})
@@ -1391,7 +1418,7 @@ impl ServiceError {
         if self.code() == "busy" {
             detail["retryable"] = Value::Bool(true);
         }
-        detail["message"] = Value::String(self.to_string());
+        detail["message"] = Value::String(self.code().to_owned());
         detail["hint"] = Value::String(
             match self {
                 Self::Invalid(_) | Self::Time(_) => {

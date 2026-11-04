@@ -393,6 +393,7 @@ fn actionable_failures_have_specific_repairs_without_unrelated_advice() {
         ("config show", "CONFIG", "invalid configuration", None),
     ] {
         let mut error = provenant_records::CommandError {
+            diagnostic: None,
             code: code.into(),
             message: message.into(),
             cause: None,

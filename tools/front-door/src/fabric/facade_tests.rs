@@ -1985,7 +1985,7 @@ mod peer_tests {
         let fixture = SettlementFixture::resumed()?;
         let (result, admitted) = integrate_graph(&fixture, "integrate-own-branch", "resumed-lane")?;
         assert!(!admitted, "graph was admitted: {result:?}");
-        let Err(FacadeError::DispatchRefused { reason }) = result else {
+        let Err(FacadeError::DispatchRefused { reason, .. }) = result else {
             return Err(format!("expected a dispatch refusal: {result:?}").into());
         };
         assert!(
@@ -2981,6 +2981,8 @@ mod peer_tests {
         assert_eq!(
             error,
             super::FacadeError::Io {
+            delivery_limit: None,
+            delivery_stage: None,
                 operation: "submit: access Fabric database".into(),
                 path: None,
             }
@@ -2990,6 +2992,8 @@ mod peer_tests {
     #[test]
     fn submit_io_retains_single_prefix_for_peer_error_and_scopes_local_error() {
         let peer_error = super::FacadeError::Io {
+            delivery_limit: None,
+            delivery_stage: None,
             operation: "submit: open writer repository".into(),
             path: Some("/repo".into()),
         };
@@ -2997,12 +3001,16 @@ mod peer_tests {
         assert_eq!(
             rescoped,
             super::FacadeError::Io {
+            delivery_limit: None,
+            delivery_stage: None,
                 operation: "submit: open writer repository".into(),
                 path: Some("/repo".into()),
             }
         );
 
         let local_error = super::FacadeError::Io {
+            delivery_limit: None,
+            delivery_stage: None,
             operation: "open writer repository".into(),
             path: Some("/repo".into()),
         };
@@ -3010,6 +3018,8 @@ mod peer_tests {
         assert_eq!(
             scoped,
             super::FacadeError::Io {
+            delivery_limit: None,
+            delivery_stage: None,
                 operation: "submit: open writer repository".into(),
                 path: Some("/repo".into()),
             }
@@ -3017,7 +3027,7 @@ mod peer_tests {
     }
 
     #[test]
-    fn writer_repository_open_failure_keeps_its_operation_and_project_path()
+    fn writer_repository_open_failure_hides_unanchored_project_path()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let root = std::fs::canonicalize(temp.path())?;
@@ -3035,8 +3045,8 @@ mod peer_tests {
             serde_json::to_value(error)?,
             serde_json::json!({
                 "code": "io",
-                "operation": "open writer repository",
-                "path": root,
+                "operation": "I/O operation",
+                "path": null,
             })
         );
         Ok(())
@@ -3083,6 +3093,8 @@ mod peer_tests {
             super::FacadeError::OperationConflict,
             super::FacadeError::OwnerUnavailable,
             super::FacadeError::Io {
+            delivery_limit: None,
+            delivery_stage: None,
                 operation: "openat directory".into(),
                 path: Some("/state/worktrees".into()),
             },
@@ -3090,7 +3102,7 @@ mod peer_tests {
                 path: "/repo/.worktrees/writer".into(),
             },
         ] {
-            let expected = error.clone();
+            let expected_code = error.code();
             let response = super::peer_result::<()>(Err(error), |()| super::PeerResult::Error {
                 data: provenant_fabric_runtime::hosts::PeerResultError {
                     extra: Default::default(),
@@ -3112,9 +3124,14 @@ mod peer_tests {
                 status,
                 kind,
                 message: error.to_string(),
-                detail: Some(error),
+                detail: Some(Box::new(error)),
+                projection: None,
             };
-            assert_eq!(super::fail_error(fail), expected);
+            let result = super::fail_error(fail);
+            assert_eq!(result.code(), expected_code);
+            let encoded = serde_json::to_string(&result)?;
+            assert!(!encoded.contains("/state/worktrees"));
+            assert!(!encoded.contains("/repo/.worktrees/writer"));
         }
         Ok(())
     }
@@ -3136,14 +3153,17 @@ mod peer_tests {
         )
         .err()
         .ok_or("unknown capability refuses")?;
-        let (kind, message) = (fail.kind, fail.message.clone());
+        let kind = fail.kind;
         match super::dispatch_refused(fail) {
-            FacadeError::DispatchRefused { reason } => assert_eq!(reason, message),
+            FacadeError::DispatchRefused { reason, .. } => {
+                assert!(reason.contains("inspect"));
+                assert!(!reason.contains("bogus"));
+            }
             error => panic!("a refused submit kept no reason: {error:?}"),
         }
         // The kind alone renders as invalid input; the dispatch edge must not
         // lose the refusal by rerendering it.
-        assert_eq!(super::kind_error(kind), FacadeError::InvalidInput { detail: None });
+        assert_eq!(super::facade_error_for_kind(kind), FacadeError::InvalidInput { detail: None });
         Ok(())
     }
     #[test]

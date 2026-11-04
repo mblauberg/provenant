@@ -25,6 +25,7 @@ pub fn run(command: Mileage, edge: &Edge<'_>) -> Reply {
         Err((kind, message)) => {
             let mut result = CommandResult::new("telemetry mileage", Status::Error, Value::Null);
             result.error = Some(CommandError {
+                diagnostic: None,
                 code: kind.code().into(),
                 message,
                 cause: None,

@@ -934,6 +934,7 @@ pub fn run(args: Handoff, globals: &Globals, workers: &dyn WorkerObserver) -> u8
         }) => {
             let mut result = CommandResult::new(COMMAND, status, data);
             result.error = Some(provenant_records::CommandError {
+                diagnostic: None,
                 code,
                 message,
                 cause: None,
@@ -1237,6 +1238,7 @@ mod tests {
             head: base,
             dirty: WorktreeCondition::Clean,
             writer: WriterState::Free,
+            owner: worktrees::OwnerStatus::Unknown,
         };
         assert_eq!(worktree_warning(&info, &base), None);
         info.head = provenant_core::GitOid::parse(&"b".repeat(40)).unwrap();

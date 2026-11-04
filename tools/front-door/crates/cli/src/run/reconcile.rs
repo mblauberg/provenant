@@ -38,6 +38,7 @@ pub(super) fn reconcile_reply(outcome: Result<(Value, String), Fail>, fenced: bo
     if fenced && out.result.status == Status::Ok {
         out.result.status = Status::Failed;
         out.result.error = Some(CommandError {
+            diagnostic: None,
             code: "reconcile_incomplete".into(),
             message: out.human.trim().to_owned(),
             cause: None,

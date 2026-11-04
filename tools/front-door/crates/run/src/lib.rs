@@ -447,6 +447,129 @@ impl From<provenant_confinement::worktrees::WorktreeError> for RunError {
 }
 pub type Result<T> = std::result::Result<T, RunError>;
 impl RunError {
+    /// A generic code can wrap multiple guards; classify the typed cause rather
+    /// than assigning an unrelated hard boundary to every confinement error.
+    pub fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
+        use provenant_records::diagnostic::BoundaryClass as B;
+        match self {
+            Self::Confinement(error) => error.boundary_class(),
+            Self::Plan(provenant_confinement::PlanError::Permission(error)) => {
+                error.boundary_class()
+            }
+            Self::Plan(provenant_confinement::PlanError::UnconfinedExtensions) => B::Authority,
+            Self::Plan(_) => B::None,
+            _ => ErrorKind::from(self).boundary_class(),
+        }
+    }
+
+    /// Select safe facts at their owner, before an adapter formats a refusal.
+    pub fn diagnostic(
+        &self,
+        destination: provenant_records::diagnostic::Destination<'_>,
+    ) -> provenant_records::diagnostic::Diagnostic {
+        use provenant_confinement::{permissions::PermissionError, worktrees::WorktreeError};
+        use provenant_records::diagnostic::{Diagnostic, DiagnosticFact, safe_path, shell_path};
+        let kind = ErrorKind::from(self);
+        let mut diagnostic = Diagnostic::new(kind.code()).category(kind.category());
+        match self {
+            Self::Confinement(PermissionError::CredentialGrant { path, access }) => {
+                diagnostic = diagnostic
+                    .detail(match safe_path(path, destination) {
+                        Some(path) => format!("credential root refused for {access} grant: {path}"),
+                        None => format!("credential root refused for {access} grant"),
+                    })
+                    .next(format!(
+                        "inspect the requested {access} grant and select a permitted root"
+                    ))
+                    .fact(DiagnosticFact::CredentialGrant { access });
+            }
+            Self::WorktreeUnregistered(path) => {
+                if let Some(path) = safe_path(path, destination) {
+                    diagnostic = diagnostic.detail(format!("worktree is not registered: {path}"));
+                }
+                diagnostic = diagnostic.fact(DiagnosticFact::WorktreeUnregistered).next(match shell_path(path, destination) {
+                    Some(path) => format!("inspect custody, then select the checkout with --worktree {path}"),
+                    None => "inspect worktree registration and select a verified checkout with --worktree".into(),
+                });
+            }
+            Self::Writer(error) => {
+                if let Some(action) = error.repair() {
+                    diagnostic = diagnostic.next(action);
+                }
+                if let WorktreeError::UnknownWriterAt { path } = error {
+                    if let Some(path) = safe_path(path, destination) {
+                        diagnostic =
+                            diagnostic.detail(format!("writer custody is unknown for {path}"));
+                    }
+                    if let Some(path) = shell_path(path, destination) {
+                        diagnostic = diagnostic.next(format!(
+                            "inspect custody, then select the checkout with --worktree {path}"
+                        ));
+                    }
+                }
+                if matches!(error, WorktreeError::Dirty(_)) {
+                    diagnostic = diagnostic.detail("the writer worktree has uncommitted edits");
+                }
+            }
+            Self::Delivery(stage) => {
+                diagnostic = diagnostic
+                    .detail(format!("host writer delivery failed at {stage:?}"))
+                    .fact(DiagnosticFact::DeliveryStage(*stage));
+            }
+            Self::DeliveryLimit {
+                stage,
+                tool,
+                command,
+                limit,
+                ..
+            } => {
+                if let Some(fact) =
+                    provenant_records::diagnostic::DeliveryLimit::new(*stage, tool, command, *limit)
+                {
+                    diagnostic = diagnostic
+                        .detail(fact.detail())
+                        .fact(DiagnosticFact::DeliveryLimit(fact));
+                }
+            }
+            Self::GenerationConflict { current_generation } => {
+                diagnostic =
+                    diagnostic.fact(DiagnosticFact::GenerationConflict(*current_generation));
+            }
+            Self::OperationIo { operation, .. } => {
+                diagnostic = diagnostic.fact(DiagnosticFact::Filesystem { operation });
+            }
+            Self::Filesystem(error) | Self::Publication(error) => {
+                use provenant_os::fs::FsError;
+                let operation = match error {
+                    FsError::Io { operation, .. } => *operation,
+                    FsError::ReadIo { .. } => "read file",
+                    FsError::Rename { .. } => "rename",
+                    FsError::Symlink { .. } => "resolve path",
+                    FsError::CrossDevice { .. } => "verify filesystem device",
+                    FsError::LockTimeout { .. } | FsError::Cancelled { .. } => "acquire lock",
+                    FsError::LockDeadlineOverflow { .. } => "set lock deadline",
+                    _ => "verify filesystem entry",
+                };
+                diagnostic = diagnostic.fact(DiagnosticFact::Filesystem { operation });
+            }
+            Self::Admission(AdmissionError::Disk { .. }) => {
+                diagnostic = diagnostic.next("free disk space above gc.free_floor before retrying")
+            }
+            Self::Admission(AdmissionError::MemoryPressure { .. }) => {
+                diagnostic = diagnostic.next("reduce host memory pressure before retrying")
+            }
+            Self::Admission(AdmissionError::Processes { .. }) => {
+                diagnostic = diagnostic.next("reduce host process use before retrying")
+            }
+            Self::Admission(AdmissionError::LaneCap { .. }) => {
+                diagnostic =
+                    diagnostic.next("wait for an active lane to finish or adjust the lane limit")
+            }
+            _ => {}
+        }
+        diagnostic
+    }
+
     /// Refuse `path`, which is relative to the state root where the store owns it
     /// and as given for a project or worktree path outside the state root.
     pub(crate) fn unsafe_path(path: impl Into<std::path::PathBuf>, check: PathCheck) -> Self {
@@ -493,3 +616,107 @@ mod delivery_tests;
 mod dispatch_tests;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod diagnostic_projection_tests {
+    use super::*;
+    use provenant_records::diagnostic::{BoundaryClass, Destination};
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn raw_io_source_is_not_a_safe_fact() {
+        let error = RunError::Io(std::io::Error::other("TOKEN_SENTINEL\u{1b}[31m"));
+        let projection = error.diagnostic(Destination::Remote {
+            repository: None,
+            home: None,
+        });
+        let encoded = serde_json::to_string(&projection).unwrap();
+        assert!(!encoded.contains("TOKEN_SENTINEL"));
+        assert_eq!(projection.code, "IO");
+        assert!(projection.detail.is_none());
+    }
+
+    #[test]
+    fn filesystem_fact_keeps_operation_without_source() {
+        let error = RunError::Filesystem(provenant_os::fs::FsError::ReadIo {
+            path: "/private/host".into(),
+            source: std::io::Error::other("TOKEN_SENTINEL"),
+        });
+        let projection = error.diagnostic(Destination::Remote {
+            repository: None,
+            home: None,
+        });
+        assert!(matches!(
+            projection.fact,
+            Some(provenant_records::diagnostic::DiagnosticFact::Filesystem {
+                operation: "read file"
+            })
+        ));
+        assert!(
+            !serde_json::to_string(&projection)
+                .unwrap()
+                .contains("TOKEN_SENTINEL")
+        );
+    }
+
+    #[test]
+    fn credential_grants_disclose_only_safe_anchored_paths() {
+        for access in ["read", "write"] {
+            let error = RunError::Confinement(
+                provenant_confinement::permissions::PermissionError::CredentialGrant {
+                    path: PathBuf::from("/home/person/.config/private"),
+                    access,
+                },
+            );
+            let remote = error.diagnostic(Destination::Remote {
+                repository: None,
+                home: Some(Path::new("/home/person")),
+            });
+            assert_eq!(
+                ErrorKind::from(&error).boundary_class(),
+                BoundaryClass::Credentials
+            );
+            assert!(
+                remote
+                    .detail
+                    .as_deref()
+                    .unwrap()
+                    .contains("~/.config/private")
+            );
+            assert!(remote.detail.as_deref().unwrap().contains(access));
+            let opaque = error.diagnostic(Destination::Remote {
+                repository: None,
+                home: None,
+            });
+            assert!(!opaque.detail.as_deref().unwrap().contains("/home/person"));
+            assert!(opaque.next.is_some());
+        }
+    }
+
+    #[test]
+    fn unknown_writer_action_quotes_a_local_worktree_path() {
+        let error = RunError::Writer(
+            provenant_confinement::worktrees::WorktreeError::UnknownWriterAt {
+                path: PathBuf::from("/checkout/has a'quote"),
+            },
+        );
+        let local = error.diagnostic(Destination::Local);
+        assert_eq!(local.code, "WRITER_UNKNOWN");
+        assert!(
+            local
+                .next
+                .as_deref()
+                .unwrap()
+                .contains("--worktree '/checkout/has a'\\''quote'")
+        );
+        let remote = error.diagnostic(Destination::Remote {
+            repository: None,
+            home: None,
+        });
+        assert!(
+            !serde_json::to_string(&remote)
+                .unwrap()
+                .contains("/checkout")
+        );
+    }
+}

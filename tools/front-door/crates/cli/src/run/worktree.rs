@@ -144,7 +144,9 @@ pub(super) fn own_worktree(
                                 || worktrees::cache_writer_probe(context.project_state, &info.path)
                                     .is_err()
                             {
-                                return Err(worktrees::WorktreeError::UnknownWriter);
+                                return Err(worktrees::WorktreeError::UnknownWriterAt {
+                                    path: info.path.clone(),
+                                });
                             }
                         }
                     }

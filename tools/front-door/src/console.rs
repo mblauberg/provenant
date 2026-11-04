@@ -172,6 +172,7 @@ pub fn run(command: Console, globals: &Globals) -> u8 {
             };
             let mut result = CommandResult::new(leaf, status, None);
             result.error = Some(CommandError {
+                diagnostic: None,
                 code: code.into(),
                 message: error.to_string(),
                 cause: None,
@@ -331,6 +332,7 @@ fn open(globals: &Globals) -> u8 {
 fn unavailable(message: String) -> CommandResult<Option<serde_json::Value>> {
     let mut result = CommandResult::new("console open", Outcome::Error, None);
     result.error = Some(CommandError {
+        diagnostic: None,
         code: "console_app_unavailable".into(),
         message,
         cause: None,
@@ -506,6 +508,7 @@ fn render(
         Err(error) => {
             let mut failure = CommandResult::new(&result.command, Outcome::Error, ());
             failure.error = Some(CommandError {
+                diagnostic: None,
                 code: if matches!(error, RenderError::TooLarge) {
                     "RESULT_TOO_LARGE"
                 } else {

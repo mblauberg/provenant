@@ -481,10 +481,13 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
         FacadeError::OperationConflict => (Outcome::Refused, ErrorKind::OperationConflict),
         FacadeError::Busy => (Outcome::Refused, ErrorKind::QueueFull),
         FacadeError::ConfinementRefused => (Outcome::Refused, ErrorKind::Refused),
+        FacadeError::WriterBusy => (Outcome::Refused, ErrorKind::WriterBusy),
+        FacadeError::WriterUnknown => (Outcome::Refused, ErrorKind::WriterUnknown),
+        FacadeError::CredentialRoot { .. } => (Outcome::Refused, ErrorKind::CredentialRoot),
         FacadeError::DispatchRefused { .. } => (Outcome::Refused, ErrorKind::Refused),
-        FacadeError::DispatchUnobserved { .. } | FacadeError::HostDeliveryIo { .. } => {
-            (Outcome::Error, ErrorKind::Io)
-        }
+        FacadeError::DispatchUnobserved { .. }
+        | FacadeError::HostDeliveryStage { .. }
+        | FacadeError::HostDeliveryLimit { .. } => (Outcome::Error, ErrorKind::Io),
         FacadeError::WorktreeMissing => (Outcome::Invalid, ErrorKind::WorktreeMissing),
         FacadeError::WorktreeUnregistered { .. } => {
             (Outcome::Refused, ErrorKind::WorktreeUnregistered)

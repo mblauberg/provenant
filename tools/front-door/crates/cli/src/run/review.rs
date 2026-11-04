@@ -35,6 +35,7 @@ pub fn review(command: crate::Review, edge: &Edge<'_>) -> Reply {
     let mut result = CommandResult::new("review", status, data);
     if let Some(error) = error {
         result.error = Some(CommandError {
+            diagnostic: None,
             code: error.kind.code().into(),
             message: format!("{}\n{}", error.message, human),
             cause: None,

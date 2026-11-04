@@ -24,6 +24,8 @@ pub struct CommandError {
     pub message: String,
     pub cause: Option<String>,
     pub repair: Option<String>,
+    #[serde(flatten)]
+    pub diagnostic: Option<crate::diagnostic::DiagnosticFields>,
 }
 impl Outcome {
     /// Every status, in declaration order; the published schemas enumerate it.

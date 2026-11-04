@@ -22,6 +22,7 @@ pub fn run(globals: &Globals) -> u8 {
             };
             let mut result = CommandResult::new("disk report", outcome, None);
             result.error = Some(CommandError {
+                diagnostic: None,
                 code: "DISK".into(),
                 message: error.to_string(),
                 cause: None,
@@ -40,6 +41,7 @@ pub fn run(globals: &Globals) -> u8 {
                 result.status = Outcome::Error;
                 result.data = None;
                 result.error = Some(CommandError {
+                    diagnostic: None,
                     code: "ENCODE".into(),
                     message: error.to_string(),
                     cause: None,
@@ -103,6 +105,7 @@ fn render(
         Err(error) => {
             let mut failure = CommandResult::new("disk report", Outcome::Error, ());
             failure.error = Some(CommandError {
+                diagnostic: None,
                 code: if matches!(error, RenderError::TooLarge) {
                     "RESULT_TOO_LARGE"
                 } else {
