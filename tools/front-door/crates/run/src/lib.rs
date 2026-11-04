@@ -483,6 +483,19 @@ impl RunError {
                     ))
                     .fact(DiagnosticFact::CredentialGrant { access });
             }
+            Self::WriterProjectMismatch {
+                project, selected, ..
+            } => {
+                if let (Some(project), Some(selected)) = (
+                    safe_path(project, destination),
+                    safe_path(selected, destination),
+                ) {
+                    diagnostic = diagnostic.detail(format!(
+                        "writer project {project} differs from selected project {selected}"
+                    ));
+                }
+                diagnostic = diagnostic.next("select a worktree belonging to the chosen project");
+            }
             Self::WorktreeUnregistered(path) => {
                 if let Some(path) = safe_path(path, destination) {
                     diagnostic = diagnostic.detail(format!("worktree is not registered: {path}"));
@@ -508,6 +521,17 @@ impl RunError {
                             "inspect custody, then select the checkout with --worktree {path}"
                         ));
                     }
+                }
+                if let WorktreeError::BranchCollision { existing } = error {
+                    diagnostic = diagnostic
+                        .detail(format!("branch name collides with existing ref {existing}"));
+                }
+                if let WorktreeError::BranchExistsWithBase { branch, head, base } = error {
+                    diagnostic = diagnostic
+                        .detail(format!(
+                            "branch {branch} at {head} does not contain base {base}"
+                        ))
+                        .next("omit --base to reuse the branch");
                 }
                 if let WorktreeError::WriterBusy {
                     holder: Some(holder),
@@ -678,6 +702,25 @@ mod diagnostic_projection_tests {
                 .unwrap()
                 .contains("TOKEN_SENTINEL")
         );
+    }
+
+    #[test]
+    fn project_mismatch_discloses_paths_only_at_safe_destinations() {
+        let error = RunError::WriterProjectMismatch {
+            worktree: "/foreign/tree".into(),
+            project: "/foreign".into(),
+            selected: "/selected".into(),
+        };
+        let local = error.diagnostic(Destination::Local);
+        let detail = local.detail.unwrap();
+        assert!(detail.contains("/foreign"));
+        assert!(detail.contains("/selected"));
+        let remote = error.diagnostic(Destination::Remote {
+            repository: None,
+            home: None,
+        });
+        assert!(remote.detail.is_none());
+        assert!(remote.next.is_some());
     }
 
     #[test]
