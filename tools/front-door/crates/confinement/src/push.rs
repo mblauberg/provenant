@@ -173,6 +173,47 @@ mod tests {
     }
 
     #[test]
+    fn divergent_topic_update_still_scans_conflict_markers() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        fixture.run(&["branch", "-m", "main"])?;
+        let base = fixture.head()?;
+        fixture.run(&["commit", "--allow-empty", "-m", "old topic"])?;
+        let old_tip = fixture.head()?;
+        fixture.run(&["reset", "--hard", &base.to_string()])?;
+        std::fs::write(fixture.root.join("rebased.txt"), "<<<<<<< ours\n")?;
+        fixture.run(&["add", "rebased.txt"])?;
+        fixture.run(&["commit", "-m", "rebased topic"])?;
+        let new_tip = fixture.head()?;
+        let root = fixture.root.to_str().ok_or("non-UTF8 root")?;
+        fixture.run(&["remote", "add", "origin", root])?;
+        let repo = fixture.runtime.open_read_repo(
+            &fixture.executor,
+            &fixture.root,
+            fixture.budget()?,
+            &CancelToken::new(),
+        )?;
+        let cancel = CancelToken::new();
+        let context = PushContext {
+            repo: &repo,
+            runtime: &fixture.runtime,
+            executor: &fixture.executor,
+            budget: fixture.budget()?,
+            cancel: &cancel,
+            check_conflict_markers: true,
+        };
+        let update = PushUpdate {
+            local: new_tip,
+            remote_ref: "refs/heads/topic".to_owned(),
+            remote: old_tip,
+        };
+        assert!(matches!(
+            context.check("origin", &[update]),
+            Err(PushRefusal::ConflictMarkers)
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn advertised_default_overrides_stale_tracking_head() -> Result<(), Box<dyn Error>> {
         let fixture = Fixture::new()?;
         let head = fixture.head()?;
