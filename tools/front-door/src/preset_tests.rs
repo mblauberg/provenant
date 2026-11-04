@@ -558,6 +558,7 @@ impl provenant_fabric_runtime::graph::GraphJournal for PresetJournal {
 
 #[derive(Default)]
 struct PresetOwner {
+    council_findings: bool,
     /// Nodes whose result carries `VERDICT: FAIL`.
     failing: Vec<String>,
     launched: Vec<String>,
@@ -601,6 +602,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
             provenant_records::result_capture::ResultCapture::new(node.required_verdict);
         result.push(if self.failing.contains(&key.node_id) {
             b"Blocked on the user.\nVERDICT: FAIL\n".as_slice()
+        } else if self.council_findings && key.node_id == "verify" {
+            b"```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"a.rs\",\"summary\":\"fixture finding\",\"status\":\"open\"}]}\n```\nVERDICT: PASS\n".as_slice()
+        } else if self.council_findings && key.node_id == "synthesis" {
+            b"```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"disposition\":\"rejected\",\"reason\":\"falsified\"}]}\n```\nVERDICT: PASS\n".as_slice()
         } else {
             format!(
                 "Evidence checked for {}.\n```findings\n{{\"schema_version\":1,\"findings\":[]}}\n```\nVERDICT: PASS\n",
@@ -761,10 +766,25 @@ fn bundled_presets_complete_through_the_real_scheduler_and_replay() {
         let document = bundled_fixture(name);
         let config = provenant_fabric_runtime::config::GraphConfig::default();
         let limits = config.limits.clone();
-        let mut owner = PresetOwner::default();
+        let mut owner = PresetOwner {
+            council_findings: name == "review-council",
+            ..Default::default()
+        };
         let mut journal = PresetJournal::default();
         let run = advance_with_budget(&document, &mut owner, &mut journal, &limits, &config.budget)
             .unwrap_or_else(|error| panic!("{name}: {error}"));
+        if name == "review-council" {
+            let synthesis = run
+                .checkpoint
+                .nodes
+                .iter()
+                .find(|node| node.id == "synthesis")
+                .unwrap();
+            assert_eq!(
+                synthesis.outputs.as_ref().unwrap().findings[0].summary,
+                "fixture finding"
+            );
+        }
         assert_eq!(
             run.status,
             GraphStatus::Complete,

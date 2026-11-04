@@ -1812,8 +1812,33 @@ fn lower_leaf(
         map.remove("effort");
     }
     let outputs = map.remove("outputs").unwrap_or_else(|| json!(["result"]));
-    if !deps.is_empty() && !map.contains_key("inputs") && !control {
-        map.insert("inputs".into(), selected_inputs(deps, &outputs));
+    if !deps.is_empty() && !control {
+        if !map.contains_key("inputs") {
+            map.insert("inputs".into(), selected_inputs(deps, &outputs));
+        }
+        if map.contains_key("dispositions") {
+            let inputs = map
+                .get_mut("inputs")
+                .and_then(Value::as_array_mut)
+                .ok_or("inputs must be an array")?;
+            for input in inputs.iter_mut() {
+                let outputs = input
+                    .get_mut("outputs")
+                    .and_then(Value::as_array_mut)
+                    .ok_or("input outputs must be an array")?;
+                if !outputs.iter().any(|output| output == "findings") {
+                    outputs.push(json!("findings"));
+                }
+            }
+            for dep in deps {
+                if !inputs
+                    .iter()
+                    .any(|input| input.get("node").and_then(Value::as_str) == Some(dep))
+                {
+                    inputs.push(json!({"node": dep, "outputs": ["findings"]}));
+                }
+            }
+        }
     }
     if map.get("worktree").is_some_and(|value| value == "") {
         map.remove("worktree");

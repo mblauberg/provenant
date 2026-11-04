@@ -33,7 +33,7 @@ review  role=- tier=- family=any kind=composite access=read_only worktree=-
   synthesis  role=review.synthesis tier=senior family=any kind=synthesise access=read_only worktree=-
     read_roots: ["<project>"]
     source: {"node":"subject","type":"node"}
-    inputs: [{"node":"verify","outputs":["result"]}]
+    inputs: [{"node":"verify","outputs":["result","findings"]}]
   exports: [{"node":"synthesis","outputs":["result","findings","verdict","commit"]}]
 accept  role=- tier=- family=any kind=gate access=read_only worktree=-
   inputs: [{"node":"review","outputs":["verdict"]}]

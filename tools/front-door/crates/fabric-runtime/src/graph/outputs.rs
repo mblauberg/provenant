@@ -103,15 +103,30 @@ pub(super) fn make_outputs_with_upstream(
                 .ok_or_else(|| "field findings: block unterminated".to_owned())?;
             parse_findings(block, upstream)
         });
-    let findings = parsed.unwrap_or_else(|error| {
-        if result.is_some() {
-            warnings.push(bounded(
-                &format!("{FINDINGS_INVALID}: {error}"),
-                WARNING_BYTES,
-            ));
-        }
-        Vec::new()
-    });
+    let findings = parsed
+        .map(|(findings, skipped)| {
+            if let Some(first) = skipped.first() {
+                let warning = if skipped.len() > 1 {
+                    format!(
+                        "{first}; {} more unknown identities skipped",
+                        skipped.len() - 1
+                    )
+                } else {
+                    first.clone()
+                };
+                warnings.push(bounded(&warning, WARNING_BYTES));
+            }
+            findings
+        })
+        .unwrap_or_else(|error| {
+            if result.is_some() {
+                warnings.push(bounded(
+                    &format!("{FINDINGS_INVALID}: {error}"),
+                    WARNING_BYTES,
+                ));
+            }
+            Vec::new()
+        });
     let path = path.filter(|value| {
         let valid = encoded_len(value) <= OUTPUT_FIELD_BYTES;
         if !valid {
@@ -174,7 +189,10 @@ pub(super) fn make_outputs_with_upstream(
 }
 
 /// Parse entries individually so the first failure retains its identity and field.
-fn parse_findings(block: &str, upstream: &[Finding]) -> Result<Vec<Finding>, String> {
+fn parse_findings(
+    block: &str,
+    upstream: &[Finding],
+) -> Result<(Vec<Finding>, Vec<String>), String> {
     let block: serde_json::Value = serde_json::from_str(block).map_err(|error| {
         format!(
             "field findings: invalid JSON at line {} column {}",
@@ -203,6 +221,7 @@ fn parse_findings(block: &str, upstream: &[Finding]) -> Result<Vec<Finding>, Str
         return Err(format!("field findings: exceeds {MAX_FINDINGS} entries"));
     }
     let mut findings = Vec::new();
+    let mut skipped = Vec::new();
     for (index, (key, entry)) in entries.into_iter().enumerate() {
         let id = entry
             .get("id")
@@ -265,7 +284,8 @@ fn parse_findings(block: &str, upstream: &[Finding]) -> Result<Vec<Finding>, Str
             .any(|field| !entry.contains_key(*field))
             && entry.contains_key("disposition")
         {
-            return Err(fail("id", "unknown upstream identity"));
+            skipped.push(fail("id", "unknown upstream identity"));
+            continue;
         }
         for field in [
             "id",
@@ -319,7 +339,10 @@ fn parse_findings(block: &str, upstream: &[Finding]) -> Result<Vec<Finding>, Str
     if canonical_len(&findings) > cap {
         return Err("field findings: exceeds canonical byte cap".into());
     }
-    Ok(findings)
+    if findings.is_empty() && !skipped.is_empty() {
+        return Err(skipped.remove(0));
+    }
+    Ok((findings, skipped))
 }
 
 /// Select findings once per source and qualify identities shared by distinct sources.
@@ -565,8 +588,31 @@ mod alias_tests {
             &[finding("lens-a:F1", "suffix"), finding("F1", "exact")],
         )
         .unwrap();
-        assert_eq!(result[0].id, "F1");
-        assert_eq!(result[0].summary, "exact");
+        assert_eq!(result.0[0].id, "F1");
+        assert_eq!(result.0[0].summary, "exact");
+    }
+
+    #[test]
+    fn unknown_identity_warns_when_another_disposition_is_valid() {
+        let upstream: Finding = serde_json::from_value(serde_json::json!({
+            "id":"F1", "severity":"high", "file":"a.rs", "summary":"s", "status":"open"
+        }))
+        .unwrap();
+        let block = r#"{"schema_version":1,"findings":[{"id":"F1","disposition":"accepted","reason":"yes"},{"id":"F9","disposition":"rejected","reason":"no"}]}"#;
+        let mut capture = crate::result_capture::ResultCapture::new(Some("VERDICT: PASS"));
+        capture.push(format!("```findings\n{block}\n```\nVERDICT: PASS\n").as_bytes());
+        let outputs = make_outputs_with_upstream(
+            Some(&capture.finish()),
+            None,
+            None,
+            None,
+            None,
+            &[upstream],
+        );
+        assert_eq!(outputs.findings.len(), 1);
+        assert_eq!(outputs.findings[0].id, "F1");
+        assert_eq!(outputs.verdict.as_deref(), Some("VERDICT: PASS"));
+        assert!(outputs.warnings[0].contains("(F9) field id: unknown upstream identity"));
     }
 
     #[test]

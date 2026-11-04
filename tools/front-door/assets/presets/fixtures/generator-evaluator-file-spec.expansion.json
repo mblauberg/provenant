@@ -147,7 +147,8 @@
         {
           "node": "lens",
           "outputs": [
-            "result"
+            "result",
+            "findings"
           ]
         }
       ],

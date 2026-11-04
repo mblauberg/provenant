@@ -3,7 +3,7 @@
     "pattern": "big-batch",
     "preset": "big-batch"
   },
-  "graph_id": "preset-3312ef8a2ae9e9c40a848544f9bfcaf0",
+  "graph_id": "preset-1158ead8ee3a13e58476da6457a51c29",
   "integration_branch": "batch/graph",
   "nodes": [
     {
@@ -407,7 +407,8 @@
                     {
                       "node": "lens",
                       "outputs": [
-                        "result"
+                        "result",
+                        "findings"
                       ]
                     }
                   ],
@@ -598,7 +599,8 @@
                     {
                       "node": "lens",
                       "outputs": [
-                        "result"
+                        "result",
+                        "findings"
                       ]
                     }
                   ],
@@ -1060,7 +1062,8 @@
               {
                 "node": "verify",
                 "outputs": [
-                  "result"
+                  "result",
+                  "findings"
                 ]
               }
             ],
@@ -1601,7 +1604,8 @@
                     {
                       "node": "verify",
                       "outputs": [
-                        "result"
+                        "result",
+                        "findings"
                       ]
                     }
                   ],
