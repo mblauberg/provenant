@@ -90,12 +90,10 @@ never reads credentials. The subsystem contracts are in the
 ## Lifecycle and user gates
 
 Review pressure follows the [`HARNESS.md` Review ladder](../HARNESS.md#review-ladder).
-Routine work uses the chair and objective checks. Substantial work adds one
-independent cross-family review when available. Crucial work requires two passing
-independent reviews with distinct lenses and two non-chair families when
-available. Terminal work adds an adversarial lens to crucial coverage. The
-shared ladder checker enforces this coverage for delivery receipts, including
-the recorded-blocker fallback.
+The planner-led policy requires one independent reviewer for routine, two for
+substantial, two or more for crucial and three or more including an adversarial
+reviewer for terminal work. The shared ladder checker currently enforces lower
+counts for some tiers; the chair supplies the missing policy coverage.
 
 Gold gates reserve scope and one-way doors, any required explicit acceptance,
 and external-action authority for the user. Objective checks and tier-required
