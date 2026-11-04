@@ -535,7 +535,8 @@ floors are never written over the raw ledger cache. Zen does not use Go floors.
 DeepSeek V4.1 Flash (junior weight 2, senior 1) and GLM-5.3 Flash (junior 1,
 senior 1) are provisional Go pool members. Uncalibrated partial windows exclude
 them by default. To accept unknown headroom, set
-`provenant config set routing.allow_unknown_partial_headroom true`. Route
+`provenant config set routing.allow_unknown_partial_headroom true`. This is a
+host setting and cannot be overridden by an individual dispatch. Route
 diagnostics identify partial coverage and uncalibrated windows; adding floors
 can tighten pacing. An observed lower bound at the limit remains exhausted.
 MiMo V2.6 Flash is catalogued for exact selection only. Paid OpenCode pacing
