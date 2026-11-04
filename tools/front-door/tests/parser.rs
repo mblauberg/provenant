@@ -525,6 +525,19 @@ fn core_run_creates_a_new_managed_worktree_from_a_name_or_branch() -> Result {
 fn run_base_consistency_on_existing_branch() -> Result {
     let rig = TestRig::new()?;
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    // The rig has no git identity, so every commit names one.
+    let commit_args = |message: &'static str| {
+        [
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            message,
+        ]
+    };
     for args in [
         vec![
             "-c",
@@ -556,7 +569,7 @@ fn run_base_consistency_on_existing_branch() -> Result {
 
     // Advance main to base_b so base_b is not an ancestor of feat/test-base
     assert_eq!(
-        code(&rig.execute(&git, &["commit", "--allow-empty", "-qm", "base-b"], None)?),
+        code(&rig.execute(&git, &commit_args("base-b"), None)?),
         0
     );
     let base_b = String::from_utf8(
@@ -573,11 +586,7 @@ fn run_base_consistency_on_existing_branch() -> Result {
         0
     );
     assert_eq!(
-        code(&rig.execute(
-            &git,
-            &["commit", "--allow-empty", "-qm", "feat-commit"],
-            None
-        )?),
+        code(&rig.execute(&git, &commit_args("feat-commit"), None)?),
         0
     );
     let feat_head = String::from_utf8(
