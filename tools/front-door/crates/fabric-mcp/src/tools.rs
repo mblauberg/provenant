@@ -1390,6 +1390,9 @@ impl ServiceError {
                 if let Some(revision) = data.get("revision").and_then(Value::as_u64) {
                     value["revision"] = revision.into();
                 }
+                if let Some(revision) = data.get("current_revision").and_then(Value::as_u64) {
+                    value["current_revision"] = revision.into();
+                }
                 if self.code() == CONTROL_UNSUPPORTED
                     && let Ok(receipt) = serde_json::from_value::<
                         provenant_records::control::ControlReceipt,

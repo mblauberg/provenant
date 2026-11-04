@@ -1909,7 +1909,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     }
 
     use provenant_fabric_runtime::coordination::facade::FacadeError;
-    for (error, expected_operation) in [
+    for (error, _expected_operation) in [
         (
             FacadeError::Io {
                 delivery_limit: None,
@@ -1965,7 +1965,8 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         assert_eq!(result["isError"], true, "{result}");
         let structured = &result["structuredContent"];
         assert_eq!(structured["code"], "io", "{result}");
-        assert_eq!(structured["operation"], expected_operation, "{result}");
+        assert_eq!(structured["operation_id"], "verified-submit-scope", "{result}");
+        assert!(structured.get("operation").is_none(), "{result}");
     }
 
     // Return valid status records after admission, so a wrong-branch receipt
@@ -4497,7 +4498,7 @@ fn submit_writer_io_names_the_failed_operation_and_path() -> Result {
     let private = Path::new(gitfile.trim().strip_prefix("gitdir: ").ok_or("gitdir")?);
     let head = private.join("HEAD");
     let original_head = std::fs::read(&head)?;
-    for (contents, operation) in [
+    for (contents, _operation) in [
         (None, "submit: openat read"),
         (Some(vec![0xff]), "submit: decode writer HEAD"),
         (
@@ -4513,8 +4514,8 @@ fn submit_writer_io_names_the_failed_operation_and_path() -> Result {
         let result = submit()?;
         let error = &result["structuredContent"];
         assert_eq!(error["code"], "io", "{result}");
-        assert_eq!(error["operation"], operation, "{result}");
-        assert_eq!(error["path"], head.to_string_lossy().as_ref(), "{result}");
+        assert_eq!(error["operation_id"], "writer-io", "{result}");
+        assert!(!error.to_string().contains(head.to_string_lossy().as_ref()), "{result}");
     }
     std::fs::write(&head, original_head)?;
     let blocked = rig.state.join("worktrees");
@@ -4522,12 +4523,8 @@ fn submit_writer_io_names_the_failed_operation_and_path() -> Result {
     let result = submit()?;
     let error = &result["structuredContent"];
     assert_eq!(error["code"], "io", "{result}");
-    assert_eq!(error["operation"], "submit: openat directory", "{result}");
-    assert_eq!(
-        error["path"],
-        blocked.to_string_lossy().as_ref(),
-        "{result}"
-    );
+    assert_eq!(error["operation_id"], "writer-io", "{result}");
+    assert!(!error.to_string().contains(blocked.to_string_lossy().as_ref()), "{result}");
     rig.assert_legacy_unchanged()
 }
 
@@ -4554,15 +4551,8 @@ fn submit_coordination_io_names_the_failed_operation_and_path() -> Result {
         .ok_or("submit reply")?["result"];
     let error = &result["structuredContent"];
     assert_eq!(error["code"], "io", "{result}");
-    assert_eq!(
-        error["operation"], "open coordination store: openat directory",
-        "{result}"
-    );
-    assert_eq!(
-        error["path"],
-        blocked.to_string_lossy().as_ref(),
-        "{result}"
-    );
+    assert_eq!(error["operation_id"], "store-io", "{result}");
+    assert!(!error.to_string().contains(blocked.to_string_lossy().as_ref()), "{result}");
     rig.assert_legacy_unchanged()
 }
 
