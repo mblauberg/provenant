@@ -240,7 +240,8 @@ Before queueing merge for a substantial software change, confirm its delivery re
 
 Merge authority is repo-based. Review pressure follows the
 [`HARNESS.md` Review ladder](../../HARNESS.md#review-ladder), including its
-recorded-blocker fallback when cross-family review is unavailable. This
+same-family substitution, through a different lens without reducing the count,
+when cross-family review is unavailable. This
 repository is a personal harness, not production: by user directive, repository auto-merge is enabled
 and agents merge directly. An agent merges a pull request once it has passed
 its tier's planned independent review coverage and

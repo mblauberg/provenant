@@ -49,8 +49,10 @@ worktree. Name the method skill: `test-design` for observable behaviour,
 `refactor` for restructuring, `diagnose` for an unknown cause.
 
 The preset does not yet implement the planner-led policy or review repair loop.
-Run `review-council --plan on` and supplement its panel to meet HARNESS floors;
-a failed council stops `deliver`. A separate writer repairs accepted findings,
+Run `review-council --plan on` and supplement its panel to meet HARNESS floors.
+`deliver` has no gate for that supplemental review, so pass `land=0` when the
+panel needs supplementing and land by hand once it passes. A failed council
+stops `deliver`. A separate writer repairs accepted findings,
 then the raising lenses re-review the delta. After three cycles or a concrete
 design concern, obtain read-only principal scoping; proceed within approved
 scope and notify the owner, but wait at changed scope or one-way doors.

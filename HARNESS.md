@@ -136,9 +136,9 @@ found.
 
 Use `review-council --plan on` by default. The planner reads the pinned diff,
 acceptance criteria, dependency boundaries, reversibility and oracle strength;
-the plan records the panel, reviewer count, lenses, scope, route tiers, budget
-and rationale. The chair checks it against these floors and supplies missing
-coverage. Unknown paths are at least
+the planner picks lenses and their route tiers from the panel. The chair
+checks that plan against these floors, supplies missing coverage, and records
+the reviewer count, scope and budget. Unknown paths are at least
 `substantial`; uncertainty about a protected surface is `crucial`.
 
 | Floor | Required coverage |
