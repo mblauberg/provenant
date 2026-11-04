@@ -48,7 +48,8 @@ private struct QuotaRowView: View {
                 Text(row.provider).font(.caption).foregroundStyle(.secondary)
                 Spacer(minLength: Space.small)
                 if let binding = row.binding {
-                    Text("\(Int(binding.percent.rounded()))%").font(.title3.weight(.semibold)).monospacedDigit()
+                    Text("\(binding.lowerBound ? "≥" : "")\(Int(binding.percent.rounded()))%")
+                        .accessibilityLabel("\(binding.lowerBound ? "at least " : "")\(Int(binding.percent.rounded())) percent used").font(.title3.weight(.semibold)).monospacedDigit()
                         .foregroundStyle(tone == .good ? Color.primary : tone.color)
                 } else {
                     Text(row.status.replacingOccurrences(of: "_", with: " ").capitalized).foregroundStyle(.secondary)
@@ -72,7 +73,7 @@ private struct QuotaRowView: View {
                     .font(.caption).foregroundStyle(.secondary)
                 }
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel("\(window.pool), \(Int(window.percent.rounded())) percent used\(window.resetsAt.map { ", resets " + Stamp.relative($0, now: now) } ?? "")")
+                .accessibilityLabel("\(window.pool), \(window.lowerBound ? "at least " : "")\(Int(window.percent.rounded())) percent used\(window.resetsAt.map { ", resets " + Stamp.relative($0, now: now) } ?? "")")
             }
             if let error = row.error { Text(error).font(.caption).foregroundStyle(.secondary) }
             if row.trend.count > 1 { trend }

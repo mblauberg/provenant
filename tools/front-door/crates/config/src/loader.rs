@@ -452,7 +452,10 @@ fn inspect<T: DeserializeOwned + Serialize>(
                 let location = site(&user_sites, &key, &user_origin, rule == "unknown_key");
                 // An invalid capability or authority knob never recovers to
                 // its default, which could grant what the user withheld.
-                if rule == "unknown_key" && key.starts_with("knobs.domains.") {
+                if rule == "unknown_key"
+                    && crate::migrate::RETIRED_DOMAIN_KNOBS
+                        .contains(&key.trim_start_matches("knobs."))
+                {
                     knob_boundary.get_or_insert(ConfigError::MisplacedDomainKnob {
                         name: key.trim_start_matches("knobs.").to_owned(),
                         location,

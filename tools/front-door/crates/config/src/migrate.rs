@@ -8,6 +8,14 @@ use provenant_os::fs::{Directory, PublishMode};
 use serde::Serialize;
 use toml_edit::{DocumentMut, Item, TableLike, Value};
 
+pub(crate) const RETIRED_DOMAIN_KNOBS: &[&str] = &[
+    "domains.routing.capacity_cooldown_seconds",
+    "domains.routing.settlement_retries",
+    "domains.routing.capacity_retry_seconds",
+    "domains.routing.capacity_retry_max_seconds",
+    "domains.routing.retry_delay_ceiling_seconds",
+];
+
 /// Tables whose rows may carry the retired keys, under `domains.routing`, and
 /// whether a row that has already expired is dropped instead of converted.
 const TARGETS: [(&[&str], bool); 2] = [
@@ -141,12 +149,7 @@ fn rewrite(document: &mut DocumentMut, now: i64) -> Result<Vec<Migration>, Confi
                         | "review.rereview_scope"
                         | "review.polish"
                         | "confinement.census_host_list_complete"
-                        | "domains.routing.capacity_cooldown_seconds"
-                        | "domains.routing.settlement_retries"
-                        | "domains.routing.capacity_retry_seconds"
-                        | "domains.routing.capacity_retry_max_seconds"
-                        | "domains.routing.retry_delay_ceiling_seconds"
-                )
+                ) || RETIRED_DOMAIN_KNOBS.contains(&k.as_str())
             })
             .collect();
         for key in &to_drop {

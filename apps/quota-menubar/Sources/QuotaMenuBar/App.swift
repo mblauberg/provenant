@@ -61,14 +61,14 @@ struct MenuLabel: Equatable {
         symbol = failed ? "exclamationmark.triangle" : Self.gauge(used ?? 0)
         usesBrandGlyph = !failed && (used.map { $0 < (report?.alertPercent ?? 90) } ?? true)
         text = report.map { report in
-            featured.map { Fmt.percent($0.window.usedPercent ?? 0) }
+            featured.map { Fmt.used($0.window) }
                 ?? (report.iconOnly ? nil : report.headline(now: now).map(Fmt.percent) ?? "–")
         } ?? "–"
         let exhausted = report?.exhausted(now: now).count ?? 0
         let drawing = report?.drawing(now: now).count ?? 0
         let unavailable = report?.visible.filter { !$0.hasReading && !$0.needsAction }.count ?? 0
         spoken = ["Provider quota",
-                  featured.map { "\($0.account.title), \($0.window.fullTitle) \(Fmt.percent($0.window.usedPercent ?? 0)) used" },
+                  featured.map { "\($0.account.title), \($0.window.fullTitle) \($0.window.lowerBound ? "at least " : "")\(Fmt.percent($0.window.usedPercent ?? 0)) used" },
                   exhausted > 0 ? "\(exhausted) exhausted" : nil,
                   drawing > 0 ? "\(drawing) drawing on credits" : nil, unavailable > 0 ? "\(unavailable) unavailable" : nil,
                   failed ? "last refresh failed" : nil].compactMap { $0 }.joined(separator: ", ")

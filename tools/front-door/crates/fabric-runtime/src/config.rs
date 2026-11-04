@@ -757,13 +757,10 @@ fn boundary(error: &SectionError) -> bool {
     if error.code == "retired.bundle_bytes" {
         return false;
     }
-    if error.code == "unknown_key" {
-        if error.field == "graph.limit_ceiling" || error.field.starts_with("graph.limit_ceiling.") {
-            return true;
-        }
-        if error.field.starts_with("graph.") || error.field.starts_with("plan.") {
-            return false;
-        }
+    if error.code == "unknown_key"
+        && (error.field.starts_with("graph.") || error.field.starts_with("plan."))
+    {
+        return false;
     }
     boundary_existing(error)
 }
@@ -1251,11 +1248,9 @@ mod tests {
         let sections = provenant_config::DomainSections::<Domains>::new(&[SECTION]);
         let text = b"schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 10\nedges = 20\n[domains.fabric.graph.ci_poll_backoff]\ninitial_seconds = 60\nmax_seconds = 300\n[domains.fabric.graph.ci_poll_overrides.build]\ninitial_seconds = 120\nmax_seconds = 600\n";
         let retired = b"schema_version = 1\n[domains.fabric.graph.limit_ceiling]\nnodes = 1\n";
-        let error = provenant_config::load_with_domains(&roots, Some(&retired[..]), &sections)
-            .err()
-            .unwrap();
-        assert!(error.to_string().contains("unknown_key"), "{error}");
-        assert!(error.to_string().contains("limit_ceiling"), "{error}");
+        let loaded =
+            provenant_config::load_with_domains(&roots, Some(&retired[..]), &sections).unwrap();
+        assert!(format!("{:?}", loaded.warnings).contains("limit_ceiling"));
         let unknown =
             b"schema_version = 1\n[domains.fabric.graph.limits]\nunknown_limit = 1\nnodes = 10\n";
         let loaded =

@@ -5,7 +5,7 @@ use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::
 use provenant_confinement::permissions::{NetworkEndpoint, ProviderProfile, ProviderProfileSpec};
 use serde::Deserialize;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 pub struct OpenCode;
 
 /// Only a typed quota refusal ends a live attempt; ordinary text and malformed
@@ -292,7 +292,35 @@ fn prepare(
         // Seatbelt resolves Homebrew's install-name symlinks to these files.
         // Canonical literals also satisfy the held-parent checks, which reject
         // symlink grants, without granting a library directory.
-        runtime_reads.extend(crate::dylib::linked_libraries(&rg).into_iter().map(exact));
+        // Resolve the host-selected rg, not the lane-writable cached copy, to
+        // discover its package-manager Cellar. Never trust a root in lane state.
+        let excluded: Vec<_> = [input.home, private.as_path(), input.cwd]
+            .into_iter()
+            .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
+            .collect();
+        let roots: Vec<_> = (input.host_var)("PATH")
+            .into_iter()
+            .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+            .map(|dir| dir.join("rg"))
+            .find_map(|path| std::fs::canonicalize(path).ok().filter(|p| p.is_file()))
+            .into_iter()
+            .flat_map(|path| {
+                path.ancestors()
+                    .find(|p| p.file_name().is_some_and(|n| n == "Cellar"))
+                    .map(Path::to_path_buf)
+            })
+            .filter(|root| {
+                !excluded
+                    .iter()
+                    .any(|p| root.starts_with(p) || p.starts_with(root))
+            })
+            .collect();
+        let root_refs: Vec<_> = roots.iter().map(PathBuf::as_path).collect();
+        runtime_reads.extend(
+            crate::dylib::linked_libraries_within(&rg, &root_refs)
+                .into_iter()
+                .map(exact),
+        );
         tool_exec_roots.push(exact(rg));
         tool_exec_roots.push(exact("/usr/bin/grep"));
     }
@@ -1188,46 +1216,98 @@ mod tests {
 
         let temp = tempfile::tempdir()?;
         let root = temp.path().canonicalize()?;
-        let lib = root.join("cellar/lib");
+        let cellar = root.join("host/Cellar");
+        let lib = cellar.join("libs/1/lib");
         std::fs::create_dir_all(&lib)?;
-        symlink("cellar", root.join("opt"))?;
-        let first = root.join("opt/lib/first.dylib");
+        symlink("Cellar", root.join("host/opt"))?;
+        let first = root.join("host/opt/libs/1/lib/first.dylib");
         let second = lib.join("second.dylib");
         image(&lib.join("first.dylib"), Some(&second))?;
         image(&second, None)?;
         image(&lib.join("unrelated.dylib"), None)?;
+        let host_bin = cellar.join("rg/1/bin");
+        std::fs::create_dir_all(&host_bin)?;
+        image(&host_bin.join("rg"), None)?;
+        let lane = root.join("lane");
+        let cached = lane.join("state/cache/opencode/bin/rg");
+        std::fs::create_dir_all(cached.parent().unwrap())?;
+        image(&cached, Some(&first))?;
+        let found = crate::dylib::linked_libraries_within(&cached, &[&cellar]);
+        assert_eq!(found.len(), 2);
+        assert!(found.contains(&lib.join("first.dylib")));
+        assert!(found.contains(&second));
+        let plan = crate::tests::read_only_plan(lane.to_str().unwrap(), None);
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        let cwd = lane.join("repo");
+        let home = lane.join("home");
+        let mut input = crate::tests::fixture_input(&route, &plan, &prompt, &cwd, None);
+        input.home = &home;
+        let host_var = |name: &str| (name == "PATH").then(|| host_bin.clone().into_os_string());
+        input.host_var = &host_var;
+        let spec = prepare(
+            &input,
+            Access::ReadOnly,
+            Session::Fresh,
+            OpenCode.stream(None)?,
+        )?;
+        let profile = provenant_confinement::permissions::snapshot::render(
+            plan.permissions(),
+            &spec.profile,
+            &home,
+        )?;
+        for path in [&lib.join("first.dylib"), &second] {
+            assert!(profile.contains(&format!(
+                "(allow file-read* (literal \"{}\"))",
+                path.display()
+            )));
+        }
+        assert!(!profile.contains("(allow process-exec (subpath"));
+        Ok(())
+    }
+
+    #[test]
+    fn cached_rg_cannot_name_arbitrary_host_files() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let home = root.join("home");
+        let secret = home.join("Documents/secret.txt");
+        std::fs::create_dir_all(secret.parent().unwrap())?;
+        std::fs::write(&secret, "secret")?;
         let cached = root.join("state/cache/opencode/bin/rg");
         std::fs::create_dir_all(cached.parent().unwrap())?;
+        let name = secret.to_str().unwrap().as_bytes();
+        let size = (24 + name.len() + 1).next_multiple_of(8);
+        let mut bytes = vec![0; 32];
+        bytes[..4].copy_from_slice(&0xfeed_facf_u32.to_le_bytes());
+        bytes[16..20].copy_from_slice(&1_u32.to_le_bytes());
+        bytes.extend(0xc_u32.to_le_bytes());
+        bytes.extend((size as u32).to_le_bytes());
+        bytes.extend(24_u32.to_le_bytes());
+        bytes.resize(56, 0);
+        bytes.extend(name);
+        bytes.resize(32 + size, 0);
+        std::fs::write(cached, bytes)?;
         let plan = crate::tests::read_only_plan(root.to_str().unwrap(), None);
         let route = crate::tests::route("opencode", "fixture-model");
         let prompt = crate::Prompt::new("fixture".into());
-        let input = crate::tests::fixture_input(&route, &plan, &prompt, &root, None);
-        let render = || -> Result<String, Box<dyn std::error::Error>> {
-            let spec = prepare(
-                &input,
-                Access::ReadOnly,
-                Session::Fresh,
-                OpenCode.stream(None)?,
-            )?;
-            Ok(provenant_confinement::permissions::snapshot::render(
-                plan.permissions(),
-                &spec.profile,
-                input.home,
-            )?)
-        };
-        let before = render()?;
-        image(&cached, Some(&first))?;
-        let after = render()?;
-        let added: Vec<_> = after
-            .lines()
-            .filter(|line| !before.lines().any(|old| old == *line))
-            .collect();
-        for path in [&lib.join("first.dylib"), &second] {
-            let rule = format!("(allow file-read* (literal \"{}\"))", path.display());
-            assert!(added.contains(&rule.as_str()), "missing {rule}: {added:?}");
-        }
-        assert_eq!(added.len(), 2, "unexpected grants: {added:?}");
-        assert!(!after.contains("(allow process-exec (subpath"));
+        let mut input = crate::tests::fixture_input(&route, &plan, &prompt, &root, None);
+        input.home = &home;
+        let spec = prepare(
+            &input,
+            Access::ReadOnly,
+            Session::Fresh,
+            OpenCode.stream(None)?,
+        )?;
+        let profile = provenant_confinement::permissions::snapshot::render(
+            plan.permissions(),
+            &spec.profile,
+            &home,
+        )?;
+        assert!(!profile.contains(&format!(
+            "(allow file-read* (literal \"{}\"))",
+            secret.display()
+        )));
         Ok(())
     }
 
@@ -1254,7 +1334,8 @@ mod tests {
         let plan = crate::tests::read_only_plan(root.to_str().unwrap(), None);
         let route = crate::tests::route("opencode", "fixture-model");
         let prompt = crate::Prompt::new("fixture".into());
-        let input = crate::tests::fixture_input(&route, &plan, &prompt, &root, None);
+        let mut input = crate::tests::fixture_input(&route, &plan, &prompt, &root, None);
+        input.host_var = &|name| std::env::var_os(name);
         let spec = prepare(
             &input,
             Access::ReadOnly,

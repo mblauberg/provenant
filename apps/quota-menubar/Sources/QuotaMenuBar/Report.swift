@@ -129,7 +129,7 @@ struct QuotaReport {
                 return Window(name: item.pool, label: presentation.title, usedPercent: Double(item.usedBasisPoints) / 100,
                               windowMinutes: minutes, resetAt: item.resetsUnixSeconds.map(QuotaReport.date), usedAmount: nil,
                               limitAmount: nil, currency: nil, advisory: presentation.advisory, pool: presentation.pool,
-                              poolLabel: presentation.poolLabel,
+                              poolLabel: presentation.poolLabel, lowerBound: details?.coverage == "partial",
                               pace: Pace(state: paceState, runsOutAt: nil, summary: nil))
             }
             windows = mappedWindows
@@ -166,6 +166,7 @@ struct QuotaReport {
         let currency: String?
         let advisory: Bool?
         let pool, poolLabel: String?
+        let lowerBound: Bool
         let pace: Pace
         var title: String { label ?? Fmt.human(name) }
         var fullTitle: String { poolLabel.map { "\($0) · \(title)" } ?? title }
@@ -392,7 +393,7 @@ struct QuotaWireSnapshot: Decodable, Sendable {
     let details: QuotaWireDetails?
 }
 struct QuotaWireDetails: Decodable, Sendable {
-    let plan, fingerprint, creditBalance, note: String?
+    let plan, fingerprint, creditBalance, note, coverage: String?
     let priority, resetCredits: UInt64?
     let resetExpiriesUnixSeconds: [Int64]?
 }
@@ -525,7 +526,7 @@ enum Fmt {
 
     /// "$136 of $250" for a budget window, otherwise the percentage.
     static func used(_ window: QuotaReport.Window) -> String {
-        guard let used = window.usedAmount, let limit = window.limitAmount else { return percent(window.usedPercent ?? 0) }
+        guard let used = window.usedAmount, let limit = window.limitAmount else { return (window.lowerBound ? "≥" : "") + percent(window.usedPercent ?? 0) }
         return "\(money(used, window.currency)) of \(money(limit, window.currency))"
     }
 
@@ -653,9 +654,9 @@ enum Fmt {
         guard let window = account.display(now: now, alert: alert) else { return Row(lead: "No current reading", spoken: ["no current reading"]) }
         let lead = [window.poolLabel ?? window.pool.map(human), account.showsShortWindow(now: now, alert: alert) ? window.title : nil]
             .compactMap { $0 }.joined(separator: " · ")
-        let used = percent(window.usedPercent ?? 0)
+        let used = Fmt.used(window)
         return Row(lead: lead.isEmpty ? nil : lead, reset: soon(window.resetAt, now: now), trailing: used,
-                   spoken: [lead.isEmpty ? nil : lead, "\(used) used", resets(window.resetAt, now: now)].compactMap { $0 })
+                   spoken: [lead.isEmpty ? nil : lead, "\(used.replacingOccurrences(of: "≥", with: "at least ")) used", resets(window.resetAt, now: now)].compactMap { $0 })
     }
 
     /// "Allowance back in 3d 2h" for an account drawing on credits; its section already says so.

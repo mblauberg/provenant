@@ -10,6 +10,17 @@ const LIBRARY_LIMIT: usize = 64;
 /// Canonical, recursively resolved library files outside the system roots.
 /// Anything that is not an absolute-path Mach-O dependency is ignored.
 pub(crate) fn linked_libraries(executable: &Path) -> Vec<PathBuf> {
+    linked_libraries_filtered(executable, |_| true)
+}
+
+/// Resolve only regular libraries beneath the host-supplied roots.
+pub(crate) fn linked_libraries_within(executable: &Path, roots: &[&Path]) -> Vec<PathBuf> {
+    linked_libraries_filtered(executable, |path| {
+        path.is_file() && roots.iter().any(|root| path.starts_with(root))
+    })
+}
+
+fn linked_libraries_filtered(executable: &Path, allowed: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
     let mut found: Vec<PathBuf> = Vec::new();
     let mut pending = vec![executable.to_owned()];
     while let Some(image) = pending.pop() {
@@ -20,7 +31,7 @@ pub(crate) fn linked_libraries(executable: &Path) -> Vec<PathBuf> {
             let Ok(path) = std::fs::canonicalize(&name) else {
                 continue;
             };
-            if found.len() < LIBRARY_LIMIT && !found.contains(&path) {
+            if found.len() < LIBRARY_LIMIT && allowed(&path) && !found.contains(&path) {
                 found.push(path.clone());
                 pending.push(path);
             }

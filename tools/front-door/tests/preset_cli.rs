@@ -2257,9 +2257,13 @@ fn default_config_expands_big_batch() -> Result<(), Box<dyn std::error::Error>> 
             "parameters.batch_worktree=\"{project}\"",
             "--set",
             "parameters.worktrees=[\"{project}\"]",
+            "--set",
+            "parameters.lanes=[{name=\"one\",worktree=\"{project}\",scope=[\".\"],spec=\"\"}]",
         ],
     )?;
     assert!(text.contains("big-batch"), "{text}");
+    assert!(!text.contains("Requires configuration"), "{text}");
+    assert!(!text.contains("Execution: null"), "{text}");
     Ok(())
 }
 

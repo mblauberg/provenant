@@ -1902,3 +1902,20 @@ fn misplaced_domain_knob_points_to_its_domain_key() {
     assert!(message.contains("domains.routing.capacity_cooldown_seconds"));
     assert!(message.contains("outside [knobs]"));
 }
+
+#[test]
+fn unknown_domain_knob_is_an_unknown_key_not_misplaced() {
+    let error = load(
+        &roots(),
+        Some(&b"schema_version=1\n[knobs]\n'domains.routing.future'=1"[..]),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        &error,
+        ConfigError::Schema {
+            rule: "unknown_key",
+            ..
+        }
+    ));
+    assert!(!error.to_string().contains("outside [knobs]"));
+}

@@ -361,9 +361,8 @@ sweep or an admission holds the host ledger is reported as an alert.
 `config/harness-knobs.json` owns the workflow knob registry and presets.
 Fabric's similarly named TOML assets supply only Fabric domain defaults; they
 are not a second source for the workflow knob values. The binary embeds the
-registry at build time and `config set` validates against it. The four
-`review` knobs remain in the registry because configuration and transport tests
-use them, but are not wired: changing them has no effect.
+registry at build time and `config set` validates against it. The `review` knobs and the `rigorous` profile were removed and are refused.
+Run `provenant config migrate` to remove them.
 
 For model effort, context ceilings and compaction, see
 [model policy](model-policy.md); for council selection, pool routing and quota
