@@ -1054,15 +1054,24 @@ fn explain_admission_matches_submission() -> Result<(), Box<dyn std::error::Erro
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
     }
-    std::fs::write(
-        state.join("config.toml"),
-        "schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 1\n",
-    )?;
     let prompt = temp.path().join("prompt");
     std::fs::write(&prompt, "brief")?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let project = temp.path().join("project");
     std::fs::create_dir(&project)?;
+    let presets = project.join(".provenant/presets");
+    std::fs::create_dir_all(&presets)?;
+    std::fs::write(
+        presets.join("limits.toml"),
+        r#"
+stages = [
+  { id = "a", tier = "senior" },
+  { id = "b", tier = "senior", depends_on = ["a"] },
+  { id = "c", tier = "senior", depends_on = ["a"] },
+  { id = "d", tier = "senior", depends_on = ["b"] },
+]
+"#,
+    )?;
     let init = provenant_os::fixture::git_command()
         .current_dir(&project)
         .args(["init", "-q"])
@@ -1080,37 +1089,52 @@ fn explain_admission_matches_submission() -> Result<(), Box<dyn std::error::Erro
             .env("XDG_CONFIG_HOME", temp.path().join("config"))
             .args(["--json", "--state-dir"])
             .arg(&state)
-            .args(["run", "--preset", "fan-out", "--prompt-file"])
-            .arg(&prompt)
-            .args(["--set", "parameters.width=2"]);
+            .args(["run", "--preset", "limits", "--prompt-file"])
+            .arg(&prompt);
         if explain {
             command.arg("--explain");
         }
         Ok(command.output()?)
     };
-    let explained = run(true)?;
-    assert!(
-        explained.status.success(),
-        "{}",
-        String::from_utf8_lossy(&explained.stderr)
-    );
-    let value: serde_json::Value = serde_json::from_slice(&explained.stdout)?;
-    assert_eq!(value["data"]["admission"]["status"], "refused");
-    let reason = value["data"]["admission"]["reason"]
-        .as_str()
-        .ok_or("missing admission reason")?;
-    assert!(reason.contains("limits.nodes"), "{reason}");
-    assert!(!value["data"].get("execution").is_some());
-    assert!(!value["data"].get("validation_error").is_some());
-
-    let submitted = run(false)?;
-    assert!(!submitted.status.success());
-    let output = format!(
-        "{}{}",
-        String::from_utf8_lossy(&submitted.stdout),
-        String::from_utf8_lossy(&submitted.stderr)
-    );
-    assert!(output.contains("limits.nodes"), "{output}");
+    for key in [
+        "nodes",
+        "edges",
+        "routes_per_node",
+        "node_prompt_bytes",
+        "graph_prompt_bytes",
+        "fan_out_width",
+        "expansion_depth",
+    ] {
+        std::fs::write(
+            state.join("config.toml"),
+            format!("schema_version = 1\n[domains.fabric.graph.limits]\n{key} = 1\n"),
+        )?;
+        let explained = run(true)?;
+        assert!(
+            explained.status.success(),
+            "{key}: {}",
+            String::from_utf8_lossy(&explained.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&explained.stdout)?;
+        assert_eq!(
+            value["data"]["admission"]["status"], "refused",
+            "{key}: {value}"
+        );
+        let reason = value["data"]["admission"]["reason"]
+            .as_str()
+            .ok_or("missing admission reason")?;
+        assert!(reason.contains(&format!("limits.{key}")), "{key}: {reason}");
+        assert!(value["data"].get("execution").is_none());
+        assert!(value["data"].get("validation_error").is_none());
+        let submitted = run(false)?;
+        assert!(!submitted.status.success(), "{key}");
+        let output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&submitted.stdout),
+            String::from_utf8_lossy(&submitted.stderr)
+        );
+        assert!(output.contains(&format!("limits.{key}")), "{key}: {output}");
+    }
     fn has_graph_journal(path: &std::path::Path) -> std::io::Result<bool> {
         if !path.exists() {
             return Ok(false);

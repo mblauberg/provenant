@@ -1174,7 +1174,7 @@ impl ToolCall {
                                 ) {
                                     Ok(output) => outputs.push(serde_json::to_value(output)?),
                                     Err(error) => {
-                                        outputs.push(serde_json::json!({"target": target, "error": {"code": error.code(), "message": error.to_string()}}));
+                                        outputs.push(serde_json::json!({"target": target, "error": ServiceError::Facade(error).structured_error()}));
                                         value["continuation"] = serde_json::json!(
                                             "Use fabric_output to read each result using the receipt targets."
                                         );
@@ -1189,7 +1189,7 @@ impl ToolCall {
                             "Use fabric_run wait with the receipt targets, then fabric_output to read the result."
                         );
                         value["timed_out"] = Value::Bool(matches!(error, FacadeError::Timeout));
-                        value["observation_error"] = serde_json::json!({"code": error.code(), "message": error.to_string(), "hint":"Use the receipt targets to continue observing the submitted runs."});
+                        value["observation_error"] = ServiceError::Facade(error).structured_error();
                     }
                 }
                 if let Some(limits) = &service.limits {
