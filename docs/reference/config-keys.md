@@ -359,6 +359,19 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `trade_off` | `"Lower marks silence sooner; the process census and observation cadence stays unchanged."` |
 | `type` | `"int"` |
 
+## `routing.allow_unknown_partial_headroom`
+
+| Field | Value |
+|---|---|
+| `default` | `false` |
+| `effect` | `"Allow uncalibrated partial quota headroom below the limit."` |
+| `host_only` | `true` |
+| `reader` | `"tools/front-door/crates/cli/src/route.rs"` |
+| `status` | `"wired"` |
+| `strict` | `true` |
+| `trade_off` | `"Partial coverage cannot prove remaining allowance; exhausted lower bounds still block selection."` |
+| `type` | `"bool"` |
+
 ## `routing.exclude`
 
 | Field | Value |
