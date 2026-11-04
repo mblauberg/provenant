@@ -632,6 +632,38 @@ fn second_writer_is_refused_while_first_holds_the_worktree() -> Result {
     Ok(())
 }
 
+/// Run Git as the lane does: against its private view of refs and objects,
+/// bound to the writer worktree.
+fn lane_git(rig: &TestRig, scratch: &Path, worktree: &Path, args: &[&str]) -> Result<String> {
+    let git = provenant_os::git::git_executable().ok_or("Git executable unavailable")?;
+    let common = scratch.join("git-common");
+    let binding = [
+        format!("GIT_DIR={}", common.display()),
+        format!("GIT_COMMON_DIR={}", common.display()),
+        format!("GIT_WORK_TREE={}", worktree.display()),
+        format!(
+            "GIT_OBJECT_DIRECTORY={}",
+            scratch.join("git-objects").display()
+        ),
+        "GIT_AUTHOR_NAME=Lane".to_owned(),
+        "GIT_AUTHOR_EMAIL=lane@example.invalid".to_owned(),
+        "GIT_COMMITTER_NAME=Lane".to_owned(),
+        "GIT_COMMITTER_EMAIL=lane@example.invalid".to_owned(),
+    ];
+    let mut argv: Vec<std::ffi::OsString> = binding.iter().map(Into::into).collect();
+    argv.push(git.into_os_string());
+    argv.extend(["-C".into(), worktree.into()]);
+    argv.extend(args.iter().map(std::ffi::OsString::from));
+    let output = rig.execute_os(Path::new("/usr/bin/env"), &argv, None)?;
+    assert_eq!(
+        code(&output),
+        0,
+        "lane git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    Ok(String::from_utf8(output.stdout.bytes)?.trim().to_owned())
+}
+
 fn writer_protected_changes_wait_for_review_and_ignore_upstream() -> Result {
     if !writer_backend_available()? {
         return Ok(());
@@ -643,7 +675,6 @@ fn writer_protected_changes_wait_for_review_and_ignore_upstream() -> Result {
             &["worktree", "create", "writer", "--base", "HEAD", "--json"],
         )?;
         let path = rig.project.join(".worktrees/writer");
-        let path_text = path.to_str().ok_or("fixture worktree encoding")?;
         let (roots, context) = writer_context(&rig)?;
         let cleanup = writer_process_cleanup(&context);
         let store = open_writer_store(&context)?;
@@ -655,25 +686,8 @@ fn writer_protected_changes_wait_for_review_and_ignore_upstream() -> Result {
         let prepared = writer_run(writer, "protected-review", 101, "hold for protected commit")?;
         let attempt = prepared.attempts[0].attempt_id;
         let record = store.create(&prepared, &call)?;
-        let release = path.join(".writer-fixture-release");
-        let _release_on_drop = ReleaseOnDrop(release.clone());
-        let provider = WriterProvider {
-            state: context.state_root.as_path().to_owned(),
-            home: fs::canonicalize(&rig.home)?,
-            project: context.project_id,
-            mode: "hold",
-        };
-        let holder = holder_context(&rig, &roots, &context);
-        let started = start_writer(&store, record.run_id, &provider, &holder, &call)?;
-        assert!(
-            matches!(started.as_slice(), [provenant_run::Started::Launched(id)] if *id == attempt)
-        );
-        wait_for_path(
-            &path.join(".writer-fixture-ready"),
-            Duration::from_secs(8),
-            "writer hold",
-        )?;
-        // Upstream advances after launch while local main stays at the base.
+        // Upstream advances after the worktree exists and before launch, so the
+        // lane's private Git view carries it while local main stays at the base.
         git(&rig, &["checkout", "-qb", "upstream"])?;
         fs::write(
             rig.project.join(".github/workflows/check.yml"),
@@ -693,25 +707,47 @@ fn writer_protected_changes_wait_for_review_and_ignore_upstream() -> Result {
             ],
         )?;
         git(&rig, &["checkout", "-q", "main"])?;
-        fs::write(path.join("source.txt"), b"writer source")?;
-        git(&rig, &["-C", path_text, "add", "source.txt"])?;
-        git(&rig, &["-C", path_text, "commit", "-qm", "Writer source"])?;
-        git(
-            &rig,
-            &["-C", path_text, "merge", "--no-edit", "origin/main"],
+        let release = path.join(".writer-fixture-release");
+        let _release_on_drop = ReleaseOnDrop(release.clone());
+        let provider = WriterProvider {
+            state: context.state_root.as_path().to_owned(),
+            home: fs::canonicalize(&rig.home)?,
+            project: context.project_id,
+            mode: "hold",
+        };
+        let holder = holder_context(&rig, &roots, &context);
+        let started = start_writer(&store, record.run_id, &provider, &holder, &call)?;
+        assert!(
+            matches!(started.as_slice(), [provenant_run::Started::Launched(id)] if *id == attempt),
+            "{started:?}"
+        );
+        wait_for_path(
+            &path.join(".writer-fixture-ready"),
+            Duration::from_secs(8),
+            "writer hold",
         )?;
+        // The lane commits to its private Git view. A commit made in the shared
+        // repository during the attempt is a competing host update that
+        // settlement never sees.
+        let scratch = context
+            .state_root
+            .as_path()
+            .join("runs")
+            .join(record.run_id.to_string())
+            .join("attempts")
+            .join(attempt.to_string())
+            .join("tmp/candidate-0");
+        let lane = |args: &[&str]| lane_git(&rig, &scratch, &path, args);
+        fs::write(path.join("source.txt"), b"writer source")?;
+        lane(&["add", "source.txt"])?;
+        lane(&["commit", "-qm", "Writer source"])?;
+        lane(&["merge", "--no-edit", "origin/main"])?;
         if own_change {
             fs::write(path.join(".github/workflows/check.yml"), b"writer workflow")?;
-            git(
-                &rig,
-                &["-C", path_text, "add", ".github/workflows/check.yml"],
-            )?;
-            git(
-                &rig,
-                &["-C", path_text, "commit", "-qm", "Writer protected change"],
-            )?;
+            lane(&["add", ".github/workflows/check.yml"])?;
+            lane(&["commit", "-qm", "Writer protected change"])?;
         }
-        let head = git(&rig, &["-C", path_text, "rev-parse", "HEAD"])?;
+        let head = lane(&["rev-parse", "HEAD"])?;
         fs::write(&release, b"release")?;
         let terminal = await_terminal(&store, attempt, &call)?;
         let value = serde_json::to_value(&terminal)?;
