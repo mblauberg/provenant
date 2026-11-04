@@ -377,11 +377,14 @@ the publication mode based on direct-push authority and records why.
 A stale or non-fast-forward push, merge response 405, 409 or 422, or head
 mismatch is a definite refusal. The lander reconciles and receipts anything
 already landed; target movement consumes a rebuild, while another refusal is
-reported without leaving a pending marker. The lander writes the marker before
-publishing, so an interrupted run also leaves one. A lost or ambiguous response,
-such as a transport error, timeout or 5xx, keeps the marker. Before retry or
-cleanup, recovery checks ancestry and forge state, clears the marker when the
-outcome is proved landed or not landed, and retains it only when still unknown.
+reported after follow-up completes. The lander writes a publishing marker before
+publication, so an interrupted run also leaves one. A lost or ambiguous response,
+such as a transport error, timeout or 5xx, keeps it. Recovery checks ancestry and
+forge state before any retry. Once the outcome is definite, the marker becomes
+settled: it records each outcome and the remaining receipt, follow, tree comparison
+and candidate-ref cleanup steps. A settled marker never authorises publication.
+Recovery completes those steps and deletes the marker last; a follow-up failure
+leaves it in place for the next run.
 The error gives the marker path: inspect its JSON under the project state
 `landing/pending/`, and compare its candidate and PR heads with the target's
 ancestry and forge PR state. Do not remove it just to force a retry. If the
@@ -390,10 +393,10 @@ with `git fetch origin <target>`, then check the recorded candidate with
 `git merge-base --is-ancestor <candidate> origin/<target>` and the PRs with
 `gh pr view <number> --json state,headRefOid,mergeCommit,baseRefName`.
 After the in-flight window, rerun `provenant land <number>` without `--shadow`;
-recovery observes the outcome, records it and clears the marker when proved.
+recovery observes the outcome and completes the recorded follow-up.
 If the forge state or ancestry remains unavailable, restore that access before
-retrying. When recovery confirms a landing it repeats the approval recheck and alarms,
-post-merge follow, receipt and candidate-ref cleanup.
+retrying. The tree comparison uses the recorded landed commit, even if the target
+has since moved. Shadow mode does not write a marker or perform recovery.
 
 Every PR receives an outcome receipt, including landed, red, conflicted,
 excluded or pending-unknown outcomes. Shadow receipts include the publish mode

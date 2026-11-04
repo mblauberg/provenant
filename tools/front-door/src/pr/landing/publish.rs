@@ -137,27 +137,10 @@ pub fn rest_ordered(
         expected = forge.merge(step.pr.number, &step.pr.head, method)?;
         landed.push(expected.clone());
     }
-    // The merges succeeded; a failed verification leaves their outcome recoverable.
-    let actual_commit = repo
-        .fetch_target(target)
-        .map_err(|_| LandingError::PublicationUnknown)?;
-    let actual_tree = repo
-        .tree_of(&actual_commit)
-        .map_err(|_| LandingError::PublicationUnknown)?;
-    let alarms = if actual_tree == candidate.tree {
-        Vec::new()
-    } else {
-        vec![Alarm {
-            code: "LAND_TREE_MISMATCH".into(),
-            message: format!(
-                "gated candidate {} tree {} differs from target commit {} tree {}",
-                candidate.commit, candidate.tree, actual_commit, actual_tree
-            ),
-        }]
-    };
+    // The final landed commit is durable evidence for the later tree comparison.
     Ok(PublishResult {
         landed: landed.clone(),
-        alarms,
+        alarms: Vec::new(),
     })
 }
 
@@ -389,7 +372,7 @@ mod tests {
         assert_eq!(forge.merges[0].0, 1);
     }
     #[test]
-    fn ordered_merge_pins_heads_and_alarms_on_tree_mismatch() -> Result<(), LandingError> {
+    fn ordered_merge_pins_heads_and_records_landed_commits() -> Result<(), LandingError> {
         let mut forge = FakeForge::default();
         prepare(&mut forge);
         let mut repo = FakeRepo {
@@ -414,8 +397,7 @@ mod tests {
             ]
         );
         assert_eq!(result.landed, vec!["landed-1", "landed-2"]);
-        assert!(result.alarms[0].message.contains("candidate tree tree-2"));
-        assert!(result.alarms[0].message.contains("actual tree different"));
+        assert!(result.alarms.is_empty());
         Ok(())
     }
 }

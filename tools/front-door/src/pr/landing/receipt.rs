@@ -122,8 +122,17 @@ pub fn pending_path(
     )))
 }
 
+#[cfg(test)]
+thread_local! { pub(super) static FAIL_SETTLE_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
 /// Persist the candidate and policy evidence before a publication can become uncertain.
 pub fn record_pending(state: &Path, attempt: &PendingAttempt) -> Result<(), LandingError> {
+    #[cfg(test)]
+    if attempt.settled.is_some() && FAIL_SETTLE_WRITE.with(|flag| flag.replace(false)) {
+        return Err(LandingError::Failed(
+            "injected marker rewrite failure".into(),
+        ));
+    }
     let bytes = serde_json::to_vec_pretty(attempt).map_err(|e| failed("encode pending", e))?;
     atomic_write(
         &pending_path(state, &attempt.repository, &attempt.candidate)?,
@@ -262,7 +271,7 @@ pub(crate) mod tests {
             shadow,
         }
     }
-    fn attempt(target: &str, commit: &str) -> PendingAttempt {
+    pub(crate) fn attempt(target: &str, commit: &str) -> PendingAttempt {
         PendingAttempt {
             repository: "fake-repository".into(),
             target: target.into(),
@@ -275,6 +284,7 @@ pub(crate) mod tests {
                 reason: "test".into(),
             },
             cost: CostEstimate::Known { micros: 1 },
+            settled: None,
         }
     }
 

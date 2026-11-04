@@ -229,10 +229,7 @@ fn follow_with(
             let result = observe(forge, &landed, &post.checks, remaining);
             if clock() >= std::time::Duration::from_secs(post.timeout_seconds) {
                 match result? {
-                    Observed::Failed(failed) => Observed::Unsettled {
-                        failed,
-                        pending: last_pending.clone(),
-                    },
+                    Observed::Failed(failed) => Observed::Failed(failed),
                     Observed::Unsettled { failed, pending } => {
                         Observed::Unsettled { failed, pending }
                     }
@@ -683,6 +680,34 @@ mod tests {
             },
         )?;
         assert!(r.alarms.0.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn failure_observed_at_deadline_is_not_unsettled() -> Result<(), LandingError> {
+        let mut r = rig(false, false, 1);
+        post_result(&mut r, "l1", GateResult::Failed);
+        let calls = std::cell::Cell::new(0);
+        follow_with(
+            &mut r.forge,
+            &mut r.repo,
+            &mut r.gate,
+            &mut r.alarms,
+            &mut r.receipt,
+            &|_| {},
+            &|| {
+                let n = calls.get();
+                calls.set(n + 1);
+                std::time::Duration::from_secs(if n == 0 { 0 } else { 3601 })
+            },
+        )?;
+        assert!(r.alarms.0.iter().all(|alarm| alarm.code != "unsettled"));
+        assert!(
+            r.alarms
+                .0
+                .iter()
+                .any(|alarm| alarm.code == "post_merge_failed")
+        );
         Ok(())
     }
 
