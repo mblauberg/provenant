@@ -36,6 +36,10 @@ pub trait Forge {
     ) -> Result<String, LandingError>;
     fn may_push_directly(&mut self, branch: &str) -> Result<bool, LandingError>;
     fn labels(&mut self, number: u64) -> Result<Vec<String>, LandingError>;
+    /// Whether this adapter can open revert-forward pull requests.
+    fn supports_revert_forward(&self) -> bool {
+        false
+    }
     /// Open a pull request reverting a landed pull request's commits; returns its number.
     fn open_revert(&mut self, number: u64, landed: &str) -> Result<u64, LandingError> {
         let _ = (number, landed);
@@ -48,6 +52,8 @@ pub enum MergeTree {
     Conflict,
 }
 pub trait Repo {
+    /// Stable opaque identity for scoping recovery records to a repository.
+    fn repository_identity(&mut self, target: &str) -> Result<String, LandingError>;
     fn fetch_target(&mut self, branch: &str) -> Result<String, LandingError>;
     fn merge_tree(&mut self, base: &str, head: &str) -> Result<MergeTree, LandingError>;
     fn commit_tree(

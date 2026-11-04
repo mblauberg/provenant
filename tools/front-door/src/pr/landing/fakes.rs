@@ -8,11 +8,14 @@ pub struct FakeForge {
     pub target_branch: String,
     pub pull_requests: BTreeMap<u64, PullRequestInfo>,
     pub heads: BTreeMap<u64, String>,
+    pub head_reads: BTreeMap<u64, VecDeque<String>>,
     pub approvals_at_head: BTreeMap<(u64, String), Vec<Approval>>,
     pub check_runs: BTreeMap<String, Vec<GateEvidence>>,
     pub labels: BTreeMap<u64, Vec<String>>,
     pub direct_push: bool,
     pub lose_merge_response: bool,
+    pub refuse_merge: Option<u64>,
+    pub valid_merge_ids: bool,
     pub merges: Vec<(u64, String, MergeMethod)>,
     pub reverts: Vec<(u64, String)>,
 }
@@ -27,6 +30,13 @@ impl Forge for FakeForge {
         Ok(self.target_branch.clone())
     }
     fn head(&mut self, number: u64) -> Result<String, LandingError> {
+        if let Some(head) = self
+            .head_reads
+            .get_mut(&number)
+            .and_then(VecDeque::pop_front)
+        {
+            return Ok(head);
+        }
         self.heads
             .get(&number)
             .cloned()
@@ -51,8 +61,15 @@ impl Forge for FakeForge {
         if self.head(number)? != head {
             return Err(LandingError::Failed("head moved".into()));
         }
+        if self.refuse_merge == Some(number) {
+            return Err(LandingError::Refused("merge refused".into()));
+        }
         self.merges.push((number, head.into(), method));
-        let landed = format!("landed-{number}");
+        let landed = if self.valid_merge_ids {
+            format!("{:040x}", 2000 + number)
+        } else {
+            format!("landed-{number}")
+        };
         if let Some(pr) = self.pull_requests.get_mut(&number) {
             pr.state = PullRequestState::Merged;
             pr.merged_commit = Some(landed.clone());
@@ -68,6 +85,9 @@ impl Forge for FakeForge {
     fn labels(&mut self, number: u64) -> Result<Vec<String>, LandingError> {
         Ok(self.labels.get(&number).cloned().unwrap_or_default())
     }
+    fn supports_revert_forward(&self) -> bool {
+        true
+    }
     fn open_revert(&mut self, number: u64, landed: &str) -> Result<u64, LandingError> {
         self.reverts.push((number, landed.into()));
         Ok(9000 + number)
@@ -76,6 +96,7 @@ impl Forge for FakeForge {
 #[derive(Default)]
 pub struct FakeRepo {
     pub target: String,
+    pub valid_commit_ids: bool,
     pub target_ref: String,
     pub fetches: VecDeque<String>,
     pub conflicts: BTreeSet<(String, String)>,
@@ -86,8 +107,12 @@ pub struct FakeRepo {
     pub refuse_push: bool,
     pub refuse_target_push: bool,
     pub lose_push_response: bool,
+    pub refuse_delete: bool,
 }
 impl Repo for FakeRepo {
+    fn repository_identity(&mut self, _target: &str) -> Result<String, LandingError> {
+        Ok("fake-repository".into())
+    }
     fn fetch_target(&mut self, branch: &str) -> Result<String, LandingError> {
         if let Some(next) = self.fetches.pop_front() {
             self.target = next;
@@ -109,7 +134,11 @@ impl Repo for FakeRepo {
         parents: &[String],
         _message: &str,
     ) -> Result<String, LandingError> {
-        let commit = format!("commit-{}", self.parents.len());
+        let commit = if self.valid_commit_ids {
+            format!("{:040x}", self.parents.len() + 1000)
+        } else {
+            format!("commit-{}", self.parents.len())
+        };
         self.parents.insert(commit.clone(), parents.into());
         self.trees.insert(commit.clone(), tree.into());
         Ok(commit)
@@ -121,7 +150,7 @@ impl Repo for FakeRepo {
         expected_old: Option<&str>,
     ) -> Result<(), LandingError> {
         if self.refuse_push || (self.refuse_target_push && name == self.target_ref) {
-            return Err(LandingError::Failed("push refused".into()));
+            return Err(LandingError::Refused("push refused".into()));
         }
         if self.refs.get(name).map(String::as_str) != expected_old {
             return Err(LandingError::Failed("ref moved".into()));
@@ -132,12 +161,18 @@ impl Repo for FakeRepo {
         }
         self.pushes
             .push((name.into(), commit.into(), expected_old.map(str::to_owned)));
-        if self.lose_push_response {
+        if self.lose_push_response && name == self.target_ref {
             return Err(LandingError::Failed("lost response".into()));
         }
         Ok(())
     }
     fn delete_ref(&mut self, name: &str, expected_old: &str) -> Result<(), LandingError> {
+        if self.refuse_delete {
+            return Err(LandingError::Failed("delete refused".into()));
+        }
+        if !self.refs.contains_key(name) {
+            return Ok(());
+        }
         if self.refs.get(name).map(String::as_str) != Some(expected_old) {
             return Err(LandingError::Failed("ref moved".into()));
         }
@@ -168,15 +203,62 @@ impl Repo for FakeRepo {
 pub struct FakeGate {
     pub results: VecDeque<GateEvidence>,
     pub observed: Vec<String>,
+    pub auto: bool,
+    pub red_head: Option<String>,
+    pub check_result: Option<GateResult>,
+    pub omit_check: bool,
+    pub wrong_tree: bool,
+    pub wrong_issuer: bool,
+    pub pool: Option<String>,
+    pub duration_seconds: Option<u64>,
 }
 impl GateRunner for FakeGate {
     fn gate(
         &mut self,
         candidate: &Candidate,
-        _definition: &GateDefinition,
+        definition: &GateDefinition,
         _poll_seconds: u64,
     ) -> Result<GateEvidence, LandingError> {
         self.observed.push(candidate.commit.clone());
+        if self.auto {
+            let red = self
+                .red_head
+                .as_ref()
+                .is_some_and(|head| candidate.steps.iter().any(|step| &step.pr.head == head));
+            let result = self.check_result.clone().unwrap_or(if red {
+                GateResult::Failed
+            } else {
+                GateResult::Passed
+            });
+            return Ok(GateEvidence {
+                commit: candidate.commit.clone(),
+                tree: if self.wrong_tree {
+                    "other-tree".into()
+                } else {
+                    candidate.tree.clone()
+                },
+                definition_digest: definition.digest.clone(),
+                checks: definition
+                    .checks
+                    .iter()
+                    .filter(|_| !self.omit_check)
+                    .map(|name| CheckEvidence {
+                        name: name.clone(),
+                        issuer: if self.wrong_issuer {
+                            Some("wrong".into())
+                        } else {
+                            definition.issuer.clone()
+                        },
+                        result: result.clone(),
+                    })
+                    .collect(),
+                issuer: None,
+                coverage: vec![],
+                result,
+                pool: self.pool.clone(),
+                duration_seconds: self.duration_seconds,
+            });
+        }
         self.results
             .pop_front()
             .ok_or_else(|| LandingError::Failed("missing gate result".into()))

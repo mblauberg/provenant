@@ -26,6 +26,21 @@ fn pending_dir(state: &Path) -> PathBuf {
     state.join("landing").join("pending")
 }
 
+/// Serialize pending-state recovery and publication across local land processes.
+pub fn lock(state: &Path) -> Result<std::fs::File, LandingError> {
+    let directory = state.join("landing");
+    std::fs::create_dir_all(&directory).map_err(|e| failed("create landing state directory", e))?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(directory.join("publication.lock"))
+        .map_err(|e| failed("open landing lock", e))?;
+    provenant_os::sys::fs::try_flock(&file, provenant_os::fs::LockMode::Exclusive)
+        .map_err(|e| failed("another landing may be running", e))?;
+    Ok(file)
+}
+
 fn receipt_dir(state: &Path) -> PathBuf {
     state.join("landing").join("receipts")
 }
@@ -73,24 +88,70 @@ pub fn write_receipt(path: &Path, receipt: &LandingReceipt) -> Result<(), Landin
     atomic_write(&receipt_dir(path).join(name), &bytes)
 }
 
+/// Record the overall run, including selections that never produced a candidate.
+#[allow(clippy::disallowed_methods, reason = "unique receipt name")]
+pub fn write_run_summary(
+    state: &Path,
+    report: &super::driver::Report,
+    shadow: bool,
+) -> Result<(), LandingError> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| failed("receipt clock", e))?
+        .as_nanos();
+    let name = format!(
+        "run-{nanos:x}-{:x}-{:x}.json",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let value = serde_json::json!({"shadow": shadow, "outcomes": report.outcomes, "receipts": report.receipts, "warnings": report.warnings});
+    let bytes = serde_json::to_vec_pretty(&value).map_err(|e| failed("encode run summary", e))?;
+    atomic_write(&receipt_dir(state).join(name), &bytes)
+}
+
+pub fn pending_path(
+    state: &Path,
+    repository: &str,
+    candidate: &Candidate,
+) -> Result<PathBuf, LandingError> {
+    Ok(pending_dir(state).join(format!(
+        "{}-{}.json",
+        component(repository)?,
+        component(&candidate.commit)?
+    )))
+}
+
 /// Persist the candidate and policy evidence before a publication can become uncertain.
 pub fn record_pending(state: &Path, attempt: &PendingAttempt) -> Result<(), LandingError> {
-    let name = format!("{}.json", component(&attempt.candidate.commit)?);
     let bytes = serde_json::to_vec_pretty(attempt).map_err(|e| failed("encode pending", e))?;
-    atomic_write(&pending_dir(state).join(name), &bytes)
+    atomic_write(
+        &pending_path(state, &attempt.repository, &attempt.candidate)?,
+        &bytes,
+    )
 }
 
 /// Read pending publication attempts for a target before any retry or cleanup.
-pub fn pending(state: &Path, target: &str) -> Result<Vec<PendingAttempt>, LandingError> {
+pub fn pending(
+    state: &Path,
+    repository: &str,
+    target: &str,
+) -> Result<Vec<PendingAttempt>, LandingError> {
     let entries = match std::fs::read_dir(pending_dir(state)) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(failed("read pending directory", error)),
     };
     let mut found = Vec::new();
+    let prefix = format!("{}-", component(repository)?);
     for entry in entries {
         let path = entry.map_err(|e| failed("read pending entry", e))?.path();
-        if path.extension().is_none_or(|ext| ext != "json") {
+        if path.extension().is_none_or(|ext| ext != "json")
+            || !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&prefix))
+        {
             continue;
         }
         let bytes = std::fs::read(&path).map_err(|e| failed("read pending record", e))?;
@@ -98,7 +159,7 @@ pub fn pending(state: &Path, target: &str) -> Result<Vec<PendingAttempt>, Landin
         // because skipping could hide an uncertain publication.
         let attempt: PendingAttempt = serde_json::from_slice(&bytes)
             .map_err(|e| failed(&format!("decode {}", path.display()), e))?;
-        if attempt.target == target {
+        if attempt.repository == repository && attempt.target == target {
             found.push(attempt);
         }
     }
@@ -107,8 +168,12 @@ pub fn pending(state: &Path, target: &str) -> Result<Vec<PendingAttempt>, Landin
 }
 
 /// Remove the durable pending marker only after its receipt is settled.
-pub fn clear_pending(state: &Path, candidate: &Candidate) -> Result<(), LandingError> {
-    let path = pending_dir(state).join(format!("{}.json", component(&candidate.commit)?));
+pub fn clear_pending(
+    state: &Path,
+    repository: &str,
+    candidate: &Candidate,
+) -> Result<(), LandingError> {
+    let path = pending_path(state, repository, candidate)?;
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -183,6 +248,7 @@ pub(crate) mod tests {
                 reason: "test".into(),
             },
             outcomes: BTreeMap::new(),
+            split: Vec::new(),
             approved_to_landed: BTreeMap::from([("head".to_string(), "landed".to_string())]),
             cost: CostEstimate::Unknown { reason: "x".into() },
             alarms: vec![],
@@ -191,6 +257,7 @@ pub(crate) mod tests {
     }
     fn attempt(target: &str, commit: &str) -> PendingAttempt {
         PendingAttempt {
+            repository: "fake-repository".into(),
             target: target.into(),
             candidate: candidate(commit),
             policy: policy(),
@@ -207,15 +274,22 @@ pub(crate) mod tests {
     #[test]
     fn pending_survives_reload_and_is_scoped_to_target() -> Result<(), LandingError> {
         let dir = tempfile::tempdir().map_err(|e| failed("tmp", e))?;
-        assert!(pending(dir.path(), "main")?.is_empty());
+        assert!(pending(dir.path(), "fake-repository", "main")?.is_empty());
         record_pending(dir.path(), &attempt("main", "c1"))?;
         record_pending(dir.path(), &attempt("other", "c2"))?;
-        let found = pending(dir.path(), "main")?;
+        let mut other_repository = attempt("main", "c1");
+        other_repository.repository = "another-repository".into();
+        record_pending(dir.path(), &other_repository)?;
+        assert_eq!(
+            pending(dir.path(), "another-repository", "main")?,
+            vec![other_repository]
+        );
+        let found = pending(dir.path(), "fake-repository", "main")?;
         assert_eq!(found, vec![attempt("main", "c1")]);
-        clear_pending(dir.path(), &candidate("c1"))?;
-        clear_pending(dir.path(), &candidate("c1"))?;
-        assert!(pending(dir.path(), "main")?.is_empty());
-        assert_eq!(pending(dir.path(), "other")?.len(), 1);
+        clear_pending(dir.path(), "fake-repository", &candidate("c1"))?;
+        clear_pending(dir.path(), "fake-repository", &candidate("c1"))?;
+        assert!(pending(dir.path(), "fake-repository", "main")?.is_empty());
+        assert_eq!(pending(dir.path(), "fake-repository", "other")?.len(), 1);
         Ok(())
     }
 
@@ -223,9 +297,12 @@ pub(crate) mod tests {
     fn corrupt_pending_record_refuses_instead_of_hiding_an_attempt() -> Result<(), LandingError> {
         let dir = tempfile::tempdir().map_err(|e| failed("tmp", e))?;
         record_pending(dir.path(), &attempt("main", "c1"))?;
-        std::fs::write(pending_dir(dir.path()).join("c1.json"), b"{")
-            .map_err(|e| failed("write", e))?;
-        assert!(pending(dir.path(), "main").is_err());
+        std::fs::write(
+            pending_dir(dir.path()).join("fake-repository-c1.json"),
+            b"{",
+        )
+        .map_err(|e| failed("write", e))?;
+        assert!(pending(dir.path(), "fake-repository", "main").is_err());
         Ok(())
     }
 
