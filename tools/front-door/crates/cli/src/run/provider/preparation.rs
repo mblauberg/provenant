@@ -805,8 +805,34 @@ pub(super) fn prepare_candidates(
             ));
         }
     }
+    // Candidate preparation happens before writer custody or guardian handoff.
+    // Advance only for a typed provider outcome, within the sealed alternatives,
+    // and never substitute a differently pinned account.
+    let mut previous_outcome = provenant_routing::FallbackOutcome::Other;
     for (candidate, route) in candidates(resolved).into_iter().enumerate() {
+        if candidate > 0
+            && !(provenant_routing::FallbackPolicy {
+                outcome: previous_outcome,
+                handoff: provenant_routing::FallbackHandoff::Local,
+                custody_released: true,
+                budget_remaining: true,
+                pinned: selected.is_some_and(|key| route.account_key.as_deref() != Some(key)),
+            })
+            .allows_switch()
+        {
+            break;
+        }
+        previous_outcome = provenant_routing::FallbackOutcome::Other;
         let label = format!("{}/{}", route.adapter, route.model);
+        if !eligible(&route.adapter) {
+            previous_outcome = provenant_routing::FallbackOutcome::AdapterUnavailable;
+            reasons.push(skip(
+                &label,
+                SkipKind::Unavailable,
+                "provider lease unavailable",
+            ));
+            continue;
+        }
         if let Some(spec) = AdapterSpec::get(&route.adapter)
             && let Err(error) =
                 request
@@ -868,6 +894,7 @@ pub(super) fn prepare_candidates(
             .iter()
             .find(|registration| registration.adapter.id() == route.adapter)
         else {
+            previous_outcome = provenant_routing::FallbackOutcome::AdapterUnavailable;
             reasons.push(skip(&label, SkipKind::Unavailable, "unknown adapter"));
             continue;
         };
@@ -878,6 +905,9 @@ pub(super) fn prepare_candidates(
                 provenant_records::RouteExclusionReason::UnknownAvailability
             ) {
                 if let Some((kind, detail)) = default_failures.get(&route.adapter) {
+                    if *kind == SkipKind::AuthRequired {
+                        previous_outcome = provenant_routing::FallbackOutcome::AuthRequired;
+                    }
                     reasons.push(skip(&label, *kind, detail));
                     continue;
                 }
@@ -908,6 +938,7 @@ pub(super) fn prepare_candidates(
                 reason,
                 provenant_records::RouteExclusionReason::AuthRequired
             ) {
+                previous_outcome = provenant_routing::FallbackOutcome::AuthRequired;
                 reasons.push(skip(
                     &label,
                     SkipKind::AuthRequired,
@@ -921,9 +952,21 @@ pub(super) fn prepare_candidates(
             ) && let Some(detail) =
                 unavailable_auth_detail(&route, selected, &entries, &auth_failures)
             {
+                previous_outcome = provenant_routing::FallbackOutcome::AuthRequired;
                 reasons.push(skip(&label, SkipKind::AuthRequired, detail));
                 continue;
             }
+            previous_outcome = match reason {
+                provenant_records::RouteExclusionReason::Exhausted
+                | provenant_records::RouteExclusionReason::FreeTierRefused
+                | provenant_records::RouteExclusionReason::ProviderRefused => {
+                    provenant_routing::FallbackOutcome::UsageLimited
+                }
+                provenant_records::RouteExclusionReason::MissingExecutable => {
+                    provenant_routing::FallbackOutcome::AdapterUnavailable
+                }
+                _ => provenant_routing::FallbackOutcome::Other,
+            };
             // An adapter left out of `access` names its confinement error, not the router's denial.
             let detail = plan_errors
                 .get(route.adapter.as_str())
@@ -984,6 +1027,7 @@ pub(super) fn prepare_candidates(
         let executable = match locate(adapter.id()) {
             Ok(path) => path,
             Err(error) => {
+                previous_outcome = provenant_routing::FallbackOutcome::AdapterUnavailable;
                 reasons.push(skip(&label, SkipKind::Unavailable, error));
                 continue;
             }
