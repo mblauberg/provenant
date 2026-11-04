@@ -26,8 +26,8 @@ Four boundaries are strict and fail closed:
    rather than recovering to permissive defaults.
 
 Everything else is flexible. User configuration warns and keeps valid settings;
-other edge cases get a typed refusal ([ADR 0034](0034-refusals-carry-stable-typed-codes.md))
-or a note. Persisted formats are versioned and tolerate extra fields.
+other edge cases get a note, or a typed refusal of that one operation
+([ADR 0034](0034-refusals-carry-stable-typed-codes.md)). Persisted formats are versioned and tolerate extra fields.
 
 Interfaces change without compatibility shims, before and after 1.0: no legacy
 readers, aliases, fallback paths or dual formats. A breaking change ships with
