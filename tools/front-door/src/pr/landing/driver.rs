@@ -18,11 +18,19 @@ pub struct Request<'a> {
     pub shadow: bool,
     pub state: &'a std::path::Path,
 }
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Report {
     pub receipts: Vec<LandingReceipt>,
     pub outcomes: BTreeMap<u64, Outcome>,
     pub warnings: Vec<String>,
+}
+
+fn fetch_target(repo: &mut dyn Repo, target: &str, shadow: bool) -> Result<String, LandingError> {
+    if shadow {
+        repo.fetch_target_untracked(target)
+    } else {
+        repo.fetch_target(target)
+    }
 }
 
 fn cleanup_unpublished<T>(
@@ -123,11 +131,12 @@ pub fn run(
     let mut report = Report::default();
     let result = run_inner(forge, repo, runner, alarms, request, &mut report);
     if let Err(error) = &result {
-        let unknown = matches!(error, LandingError::PublicationUnknown)
-            || error.to_string().contains("publication outcome is unknown")
-            || error
-                .to_string()
-                .contains("pending publication requires recovery");
+        let unknown = matches!(
+            error,
+            LandingError::PublicationUnknown
+                | LandingError::PublicationUnknownAt { .. }
+                | LandingError::RecoveryRequired { .. }
+        );
         for number in numbers {
             report.outcomes.entry(*number).or_insert(if unknown {
                 Outcome::PendingUnknown
@@ -136,8 +145,25 @@ pub fn run(
             });
         }
     }
-    receipt::write_run_summary(state, &report, shadow)?;
-    result.map(|()| report)
+    let summary = receipt::write_run_summary(state, &report, shadow);
+    match (result, summary) {
+        (Ok(()), Ok(())) => Ok(report),
+        (Err(cause), summary) => {
+            if let Err(error) = summary {
+                report
+                    .warnings
+                    .push(format!("could not write run summary: {error}"));
+            }
+            Err(LandingError::RunFailed {
+                cause: Box::new(cause),
+                report: Box::new(report),
+            })
+        }
+        (Ok(()), Err(cause)) => Err(LandingError::RunFailed {
+            cause: Box::new(cause),
+            report: Box::new(report),
+        }),
+    }
 }
 
 fn run_inner(
@@ -207,7 +233,7 @@ fn run_inner(
         )?;
         let mut rebuilds = 0;
         loop {
-            let base = repo.fetch_target(request.target)?;
+            let base = fetch_target(repo, request.target, request.shadow)?;
             let candidate = match candidate::build_candidate(
                 repo,
                 &base,
@@ -390,7 +416,7 @@ fn run_inner(
                 }
                 break;
             }
-            let observed_target = repo.fetch_target(request.target);
+            let observed_target = fetch_target(repo, request.target, request.shadow);
             if cleanup_unpublished(observed_target, repo, &candidate, request.shadow)? != base {
                 if !request.shadow {
                     repo.delete_ref(&candidate.ref_name, &candidate.commit)?;
@@ -541,11 +567,9 @@ fn run_inner(
                         return Err(LandingError::Refused(reason));
                     }
                     Err(_) => {
-                        return Err(LandingError::Failed(format!(
-                            "publication outcome is unknown; inspect pending marker {} and rerun land to reconcile it",
-                            receipt::pending_path(request.state, &repository, &candidate)?
-                                .display()
-                        )));
+                        return Err(LandingError::PublicationUnknownAt {
+                            marker: receipt::pending_path(request.state, &repository, &candidate)?,
+                        });
                     }
                 }
             };
@@ -558,7 +582,9 @@ fn run_inner(
                 }
             } else {
                 if publication.landed.len() != prs.len() {
-                    return Err(LandingError::PublicationUnknown);
+                    return Err(LandingError::PublicationUnknownAt {
+                        marker: receipt::pending_path(request.state, &repository, &candidate)?,
+                    });
                 }
                 for (pr, sha) in prs.iter().zip(publication.landed) {
                     mapping.insert(pr.head.clone(), sha.clone());
@@ -753,6 +779,10 @@ mod tests {
                 state,
             },
         )
+        .map_err(|error| match error {
+            LandingError::RunFailed { cause, .. } => *cause,
+            error => error,
+        })
     }
 
     #[test]
@@ -846,6 +876,8 @@ mod tests {
         assert_eq!(repo.target, "a".repeat(40));
         assert_eq!(repo.pushes.len(), 1);
         assert!(repo.pushes[0].0.starts_with("land/"));
+        assert_eq!(repo.refs.len(), 1);
+        assert_eq!(repo.refs.get(&repo.pushes[0].0), Some(&repo.pushes[0].1));
         assert!(forge.merges.is_empty());
         let record = &report.receipts[0];
         assert!(record.shadow);
@@ -1023,25 +1055,6 @@ mod tests {
         let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
         repo.lose_push_response = true;
         let state = tempfile::tempdir()?;
-        assert!(matches!(
-            exercise(
-                &mut forge,
-                &mut repo,
-                &mut gate,
-                &settings,
-                &definition,
-                &[1],
-                false,
-                state.path()
-            ),
-            Err(LandingError::Failed(message)) if message.contains("publication outcome is unknown")
-        ));
-        assert_eq!(
-            receipt::pending(state.path(), "fake-repository", "main")?.len(),
-            1
-        );
-        forge.approvals_at_head.clear();
-        repo.lose_push_response = false;
         let policy = LandPolicy::resolve(
             &settings,
             &BTreeMap::new(),
@@ -1049,6 +1062,39 @@ mod tests {
             None,
             &LandOverride::default(),
         )?;
+        let result = run(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &mut FakeAlarms::default(),
+            Request {
+                numbers: &[1],
+                target: "main",
+                settings: &settings,
+                policy: &policy,
+                gate: &definition,
+                shadow: false,
+                state: state.path(),
+            },
+        );
+        let Err(LandingError::RunFailed { cause, report }) = result else {
+            panic!("expected unknown outcome with report")
+        };
+        assert!(matches!(*cause, LandingError::PublicationUnknownAt { .. }));
+        let response = super::super::batch_response(*report, Some(*cause));
+        assert_eq!(response.status, provenant_records::Outcome::Pending);
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code.as_str()),
+            Some("LAND_PUBLICATION_UNKNOWN")
+        );
+        assert_eq!(response.data["outcomes"]["1"], "pending_unknown");
+        assert!(response.error.unwrap().message.contains("pending marker"));
+        assert_eq!(
+            receipt::pending(state.path(), "fake-repository", "main")?.len(),
+            1
+        );
+        forge.approvals_at_head.clear();
+        repo.lose_push_response = false;
         let mut alarms = FakeAlarms::default();
         let report = run(
             &mut forge,
@@ -1329,19 +1375,47 @@ mod tests {
         repo.parents.insert(landed.clone(), vec!["a".repeat(40)]);
         repo.fetches = ["a".repeat(40), "a".repeat(40), "a".repeat(40), landed].into();
         let state = tempfile::tempdir()?;
-        assert!(matches!(
-            exercise(
-                &mut forge,
-                &mut repo,
-                &mut gate,
-                &settings,
-                &definition,
-                &[1, 2],
-                false,
-                state.path()
-            ),
-            Err(LandingError::Refused(_))
-        ));
+        let policy = LandPolicy::resolve(
+            &settings,
+            &BTreeMap::new(),
+            None,
+            None,
+            &LandOverride::default(),
+        )?;
+        let result = run(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &mut FakeAlarms::default(),
+            Request {
+                numbers: &[1, 2],
+                target: "main",
+                settings: &settings,
+                policy: &policy,
+                gate: &definition,
+                shadow: false,
+                state: state.path(),
+            },
+        );
+        let Err(LandingError::RunFailed { cause, report }) = result else {
+            panic!("expected refusal with partial report")
+        };
+        assert!(matches!(*cause, LandingError::Refused(_)));
+        let response = super::super::batch_response(*report, Some(*cause));
+        assert_eq!(response.status, provenant_records::Outcome::Refused);
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code.as_str()),
+            Some("LAND_REFUSED")
+        );
+        assert_eq!(response.data["outcomes"]["1"], "landed");
+        assert_eq!(response.data["outcomes"]["2"], "excluded");
+        assert!(
+            response.data["receipts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|record| record["outcomes"]["1"] == "landed")
+        );
         assert_eq!(forge.merges.len(), 1);
         assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
         let summary = std::fs::read_dir(state.path().join("landing/receipts"))?
@@ -1419,6 +1493,51 @@ mod tests {
         assert_eq!(report.outcomes[&1], Outcome::Landed);
         assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
         assert!(repo.refs.keys().all(|name| !name.starts_with("land/")));
+        Ok(())
+    }
+    #[test]
+    fn shadow_recovery_does_not_update_refs_for_an_advanced_target()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
+        repo.lose_push_response = true;
+        let state = tempfile::tempdir()?;
+        assert!(
+            exercise(
+                &mut forge,
+                &mut repo,
+                &mut gate,
+                &settings,
+                &definition,
+                &[1],
+                false,
+                state.path()
+            )
+            .is_err()
+        );
+        let published = repo.target.clone();
+        let refs = repo.refs.clone();
+        let advanced = "b".repeat(40);
+        repo.parents.insert(advanced.clone(), vec![published]);
+        repo.target = advanced;
+        repo.lose_push_response = false;
+        assert!(matches!(
+            exercise(
+                &mut forge,
+                &mut repo,
+                &mut gate,
+                &settings,
+                &definition,
+                &[1],
+                true,
+                state.path()
+            ),
+            Err(LandingError::RecoveryRequired { .. })
+        ));
+        assert_eq!(repo.refs, refs);
+        assert_eq!(
+            receipt::pending(state.path(), "fake-repository", "main")?.len(),
+            1
+        );
         Ok(())
     }
 }

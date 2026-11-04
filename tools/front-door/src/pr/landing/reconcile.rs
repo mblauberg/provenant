@@ -23,7 +23,11 @@ pub fn recover_pending(
 ) -> Result<Vec<LandingReceipt>, LandingError> {
     let mut recovered = Vec::new();
     for attempt in receipt::pending(state, repository, target)? {
-        let tip = repo.fetch_target(target)?;
+        let tip = if shadow {
+            repo.fetch_target_untracked(target)?
+        } else {
+            repo.fetch_target(target)?
+        };
         let exact = repo.is_ancestor(&attempt.candidate.commit, &tip)?;
         let mut mapping = BTreeMap::new();
         let mut outcomes = BTreeMap::new();
@@ -41,10 +45,9 @@ pub fn recover_pending(
                     }
                     (PullRequestState::Open | PullRequestState::Closed, _) => None,
                     _ => {
-                        return Err(LandingError::Failed(format!(
-                            "publication outcome is unknown; inspect pending marker {}",
-                            receipt::pending_path(state, repository, &attempt.candidate)?.display()
-                        )));
+                        return Err(LandingError::PublicationUnknownAt {
+                            marker: receipt::pending_path(state, repository, &attempt.candidate)?,
+                        });
                     }
                 }
             };
@@ -58,10 +61,9 @@ pub fn recover_pending(
             }
         }
         if shadow {
-            return Err(LandingError::Failed(format!(
-                "pending publication requires recovery; inspect {}",
-                receipt::pending_path(state, repository, &attempt.candidate)?.display()
-            )));
+            return Err(LandingError::RecoveryRequired {
+                marker: receipt::pending_path(state, repository, &attempt.candidate)?,
+            });
         }
         let mut record = LandingReceipt {
             policy: attempt.policy,

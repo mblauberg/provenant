@@ -30,6 +30,19 @@ pub enum LandingError {
     Refused(String),
     #[error("publication outcome is unknown")]
     PublicationUnknown,
+    #[error(
+        "publication outcome is unknown; inspect pending marker {marker} and rerun land to reconcile it"
+    )]
+    PublicationUnknownAt { marker: std::path::PathBuf },
+    #[error(
+        "pending publication requires recovery; inspect {marker} and rerun land without --shadow"
+    )]
+    RecoveryRequired { marker: std::path::PathBuf },
+    #[error("{cause}")]
+    RunFailed {
+        cause: Box<LandingError>,
+        report: Box<driver::Report>,
+    },
 }
 pub mod adapters;
 pub mod budget;
@@ -75,6 +88,49 @@ pub(crate) fn run(
             globals,
         ),
     }
+}
+
+fn batch_response(
+    report: driver::Report,
+    failure: Option<LandingError>,
+) -> provenant_records::CommandResult<serde_json::Value> {
+    use provenant_records::{CommandError, CommandResult, Outcome};
+    let (status, code) = match failure.as_ref() {
+        Some(
+            LandingError::PublicationUnknown
+            | LandingError::PublicationUnknownAt { .. }
+            | LandingError::RecoveryRequired { .. },
+        ) => (Outcome::Pending, "LAND_PUBLICATION_UNKNOWN"),
+        Some(LandingError::Contention | LandingError::TargetMoved) => {
+            (Outcome::Refused, "LAND_CONTENTION")
+        }
+        Some(LandingError::Refused(_) | LandingError::PullRequestChanged(_)) => {
+            (Outcome::Refused, "LAND_REFUSED")
+        }
+        Some(LandingError::Conflict(_)) => (Outcome::Failed, "LAND_CONFLICT"),
+        Some(LandingError::Unimplemented(_)) => (Outcome::Unavailable, "LAND_UNSUPPORTED"),
+        Some(_) => (Outcome::Failed, "LAND_FAILED"),
+        None if report
+            .outcomes
+            .values()
+            .all(|outcome| *outcome == model::Outcome::Landed) =>
+        {
+            (Outcome::Ok, "")
+        }
+        None => (Outcome::Failed, ""),
+    };
+    let value = serde_json::json!({"receipts": report.receipts, "outcomes": report.outcomes, "warnings": report.warnings});
+    let mut response = CommandResult::new("land", status, value);
+    if let Some(error) = failure {
+        response.error = Some(CommandError {
+            code: code.into(),
+            message: error.to_string(),
+            cause: None,
+            repair: None,
+            diagnostic: None,
+        });
+    }
+    response
 }
 
 /// Resolve a checkout's optional project binding for landing policy consumers.
@@ -170,8 +226,7 @@ fn run_inner(
     let integration: Integration =
         serde_json::from_value(policy.fields["integration"].value.clone())?;
     let explicit_batch = options.batch || options.shadow || options.numbers.len() > 1;
-    let use_batch = explicit_batch
-        || (integration == Integration::Batch && options.head.is_none() && options.wait.is_none());
+    let use_batch = explicit_batch;
     if integration == Integration::Single && explicit_batch {
         return Err("single integration accepts one pull request without batch or shadow".into());
     }
@@ -216,7 +271,7 @@ fn run_inner(
     };
     let (mut forge, mut repo, mut runner, mut alarms) = adapters::connect(&resolved.project)?;
     let target = forge.target_branch()?;
-    let mut report = driver::run(
+    let result = driver::run(
         &mut *forge,
         &mut *repo,
         &mut *runner,
@@ -230,25 +285,65 @@ fn run_inner(
             shadow: options.shadow,
             state: resolved.roots.state.as_path(),
         },
-    )?;
+    );
+    let (mut report, failure) = match result {
+        Ok(report) => (report, None),
+        Err(LandingError::RunFailed { cause, report }) => (*report, Some(*cause)),
+        Err(error) => (driver::Report::default(), Some(error)),
+    };
     if let Some(warning) = tier_warning {
         report.warnings.push(warning);
     }
-    let status = if report
-        .outcomes
-        .values()
-        .all(|outcome| *outcome == model::Outcome::Landed)
-    {
-        Outcome::Ok
-    } else {
-        Outcome::Failed
+    let response = batch_response(report, failure);
+    let text = match &response.error {
+        Some(error) => format!(
+            "{}: {}\n{}\n",
+            error.code,
+            error.message,
+            serde_json::to_string_pretty(&response.data)?
+        ),
+        None => format!("{}\n", serde_json::to_string_pretty(&response.data)?),
     };
-    let value = serde_json::json!({"receipts": report.receipts, "outcomes": report.outcomes, "warnings": report.warnings});
-    let text = format!("{}\n", serde_json::to_string_pretty(&value)?);
-    Ok(crate::emit(
-        &CommandResult::new("land", status, value),
-        globals,
-        &text,
-        false,
-    ))
+    Ok(crate::emit(&response, globals, &text, false))
+}
+
+#[cfg(test)]
+#[allow(
+    unused_imports,
+    reason = "custom worktree harness includes tests without the test runner"
+)]
+mod response_tests {
+    use super::*;
+    #[test]
+    fn unknown_publication_keeps_pending_outcomes_and_recovery_path() {
+        let report = driver::Report {
+            outcomes: std::collections::BTreeMap::from([(7, model::Outcome::PendingUnknown)]),
+            ..Default::default()
+        };
+        let response = batch_response(
+            report,
+            Some(LandingError::PublicationUnknownAt {
+                marker: "/state/landing/pending/marker.json".into(),
+            }),
+        );
+        assert_eq!(response.status, provenant_records::Outcome::Pending);
+        let error = response.error.expect("unknown publication has an error");
+        assert_eq!(error.code, "LAND_PUBLICATION_UNKNOWN");
+        assert!(error.message.contains("/state/landing/pending/marker.json"));
+        assert!(error.message.contains("rerun land"));
+        assert_eq!(response.data["outcomes"]["7"], "pending_unknown");
+    }
+
+    #[test]
+    fn contention_and_definite_refusal_have_distinct_codes() {
+        let contention = batch_response(driver::Report::default(), Some(LandingError::Contention));
+        assert_eq!(contention.status, provenant_records::Outcome::Refused);
+        assert_eq!(contention.error.unwrap().code, "LAND_CONTENTION");
+        let refused = batch_response(
+            driver::Report::default(),
+            Some(LandingError::Refused("no".into())),
+        );
+        assert_eq!(refused.status, provenant_records::Outcome::Refused);
+        assert_eq!(refused.error.unwrap().code, "LAND_REFUSED");
+    }
 }
