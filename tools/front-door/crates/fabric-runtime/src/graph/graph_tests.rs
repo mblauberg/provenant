@@ -1791,6 +1791,76 @@ fn qualified_id_collision_requires_three_distinct_dispositions() {
 }
 
 #[test]
+fn ambiguous_propagation_warns_and_remains_independent() {
+    let input = |id: &str| GraphInput {
+        extra: Default::default(),
+        node: id.into(),
+        outputs: vec![OutputKind::Findings],
+    };
+    let mut a = node("a", route("first"));
+    a.depends_on = vec!["b".into()];
+    a.inputs = vec![input("b")];
+    let mut verify = node("verify", route("first"));
+    verify.depends_on = vec!["a".into(), "b".into(), "c".into()];
+    verify.inputs = vec![input("a"), input("b"), input("c")];
+    let mut synth = node("synthesis", route("first"));
+    synth.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synth.depends_on = vec!["b".into(), "verify".into()];
+    synth.inputs = vec![input("b"), input("verify")];
+    // a:b:F1 matches the stored ID of a's independent finding and the
+    // rendered ID of a's propagated copy of b:F1.
+    let renamed = entry("").replace("\"id\":\"F1\"", "\"id\":\"b:F1\"");
+    let a_findings = format!("{},{}", entry(",\"propagates\":\"b:F1\""), renamed);
+    let c_findings = format!("{},{}", entry(""), renamed);
+    let decisions = r#"{"id":"b:F1","disposition":"accepted","reason":"yes"},{"id":"verify:F1","disposition":"rejected","reason":"no"}"#;
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&c_findings)),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&a_findings)),
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(&entry(",\"propagates\":\"a:b:F1\"")),
+            ),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(decisions)),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![
+            node("b", route("first")),
+            node("c", route("first")),
+            a,
+            verify,
+            synth,
+        ]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    let warning = &run.checkpoint.nodes[3].outputs.as_ref().unwrap().warnings;
+    assert!(
+        warning
+            .iter()
+            .any(|w| w.contains("unresolved propagates marker") && w.contains("a:b:F1"))
+    );
+    assert_eq!(
+        run.checkpoint.nodes[4].state,
+        NodeState::Succeeded,
+        "{:?}",
+        run.checkpoint.nodes[4].advance_error
+    );
+    let findings = &run.checkpoint.nodes[4].outputs.as_ref().unwrap().findings;
+    assert_eq!(
+        findings.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
+        ["b:F1", "verify:F1"]
+    );
+    assert_eq!(findings[0].disposition.as_deref(), Some("accepted"));
+    assert_eq!(findings[1].disposition.as_deref(), Some("rejected"));
+}
+
+#[test]
 fn unresolved_marker_warns_and_remains_an_independent_identity() {
     let input = |id: &str| GraphInput {
         extra: Default::default(),

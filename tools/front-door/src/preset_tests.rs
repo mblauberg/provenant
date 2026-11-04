@@ -947,7 +947,36 @@ fn review_council_continues_when_lens_findings_exceed_the_cap() {
             .outputs
             .as_ref()
             .unwrap();
-        assert_eq!(output.findings.len(), 32, "{id}");
+        if id == "verify" {
+            assert_eq!(output.findings.len(), 32);
+        } else {
+            // The structured decisions cover 32 verifier findings. Of those, 28
+            // also appear in the capped lens export; settlement retains both copies.
+            // The overflow proof covers the remaining lens findings.
+            let lenses = run
+                .checkpoint
+                .nodes
+                .iter()
+                .find(|n| n.id == "lenses")
+                .unwrap();
+            let originals = &lenses.outputs.as_ref().unwrap().findings;
+            let verifier = run
+                .checkpoint
+                .nodes
+                .iter()
+                .find(|n| n.id == "verify")
+                .unwrap();
+            let copies = &verifier.outputs.as_ref().unwrap().findings;
+            assert_eq!(originals.len(), 32);
+            assert_eq!(copies.len(), 32);
+            assert_eq!(output.findings.len(), 60);
+            assert!(
+                output
+                    .findings
+                    .iter()
+                    .all(|f| f.disposition.as_deref() == Some("rejected"))
+            );
+        }
         let prompt = &owner.prompts.iter().find(|(node, _)| node == id).unwrap().1;
         assert!(
             prompt.contains("composite findings truncated"),
