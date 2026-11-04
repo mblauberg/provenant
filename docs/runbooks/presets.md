@@ -735,9 +735,8 @@ plan uses the research; position is per preset. The planner may assign only the
 registered writer worktrees: the project's linked worktrees by default, or
 `--set 'parameters.worktrees=["/path/a","/path/b"]'`. Overlapping write scopes
 inside one wave, a worktree outside the list and a budget above the graph
-timeout refuse the plan before anything is admitted. A lane budget is advisory:
-graph nodes have no per-node timer, so only `limits.graph_timeout_seconds`
-is enforced.
+timeout refuse the plan before anything is admitted. A node's `deadline_seconds`
+sets its lane timeout, capped by `limits.graph_timeout_seconds`.
 
 `--plan` defaults to `[domains.fabric.plan] mode` (`auto`). `auto` stays off when
 `lanes` (or the catalogue's other `explicit` parameter, such as `width` or

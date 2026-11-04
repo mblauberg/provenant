@@ -38,6 +38,7 @@ mod outputs;
 mod pattern_plan;
 mod plans;
 mod validation;
+pub use validation::minimum_schema_version;
 use budget::*;
 pub use journal::*;
 pub use model::*;

@@ -20,6 +20,48 @@ pub(super) fn nodes_have_v2(nodes: &[GraphNode]) -> bool {
     })
 }
 
+/// Minimum document schema capable of representing the document's fields.
+/// Schema 2 is a superset, so callers may retain an authored version 2 even
+/// when the minimum is 1.
+pub fn minimum_schema_version(document: &GraphDocument) -> u32 {
+    if document_requires_schema_v2(document) { 2 } else { 1 }
+}
+
+pub(super) fn document_requires_schema_v2(document: &GraphDocument) -> bool {
+    document.review_base.is_some() || nodes_have_v2(&document.nodes)
+}
+
+fn supplied_kinds(node: &GraphNode) -> Vec<OutputKind> {
+    if let Some(composite) = &node.composite {
+        return composite.exports.iter().flat_map(|input| input.outputs.iter().copied())
+            .fold(Vec::new(), |mut kinds, kind| { if !kinds.contains(&kind) { kinds.push(kind); } kinds });
+    }
+    let mut kinds = vec![OutputKind::Result, OutputKind::Findings, OutputKind::Verdict, OutputKind::Remaining];
+    if node.kind == Some(NodeKind::Loop) { return kinds; }
+    let write = node.access == AccessMode::WorktreeWrite;
+    if write || node.kind == Some(NodeKind::Land) { kinds.push(OutputKind::Branch); }
+    if write || node.source.is_some() || node.kind == Some(NodeKind::Land) { kinds.push(OutputKind::Commit); }
+    kinds
+}
+
+fn validate_output_kinds(document: &GraphDocument) -> Result<(), String> {
+    let by_id: std::collections::BTreeMap<_, _> = document.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    for consumer in &document.nodes {
+        for input in consumer.inputs.iter().chain(consumer.composite.iter().flat_map(|c| c.exports.iter())) {
+            let source_id = input.node.strip_prefix("previous.").unwrap_or(&input.node);
+            let Some(source) = by_id.get(source_id) else { continue };
+            let available = supplied_kinds(source);
+            for kind in &input.outputs {
+                if !available.contains(kind) {
+                    let labels = available.iter().map(|v| format!("{v:?}").to_lowercase()).collect::<Vec<_>>().join(", ");
+                    return Err(format!("node {} selects {} from {}, which supplies only {}", consumer.id, format!("{kind:?}").to_lowercase(), source_id, labels));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn validate_schema(document: &GraphDocument) -> Result<(), &'static str> {
     let has_v2 = document.review_base.is_some() || nodes_have_v2(&document.nodes);
     // Version 2 is a superset: it may omit every v2 field, but version 1
@@ -67,7 +109,9 @@ pub(super) fn validate_plan_with_limits(
 ) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), String> {
     validate_schema(document).map_err(String::from)?;
     let expanded = loops::expand(document, &[], limits)?;
-    validate_flat_plan(&expanded, limits).map_err(String::from)
+    let plan = validate_flat_plan(&expanded, limits).map_err(String::from)?;
+    validate_output_kinds(&expanded)?;
+    Ok(plan)
 }
 
 pub(super) fn validate_flat_plan(

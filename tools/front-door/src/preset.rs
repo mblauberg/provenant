@@ -976,7 +976,6 @@ pub fn expand_with(
     .to_string();
     let id = format!("preset-{}", &digest[7..39]);
     check_expansion(&nodes, "", 0)?;
-    check_selections(&nodes)?;
     let bases = layers.review_bases.take();
     if bases.len() > 1 {
         return Err(format!(
@@ -987,12 +986,7 @@ pub fn expand_with(
     // A graph that states a review field, including the document-level review
     // base, is schema 2: the runtime refuses a v1 document that carries one.
     // Every other preset keeps its v1 document and digest.
-    let schema_version = if carries_review_field(&nodes) || !bases.is_empty() {
-        2
-    } else {
-        1
-    };
-    let mut document = json!({"schema_version":schema_version,"graph_id":id,"context":{"preset":name,"pattern":name},"nodes":nodes});
+    let mut document = json!({"schema_version":1,"graph_id":id,"context":{"preset":name,"pattern":name},"nodes":nodes});
     if let Some(base) = bases.into_iter().next() {
         document["review_base"] = json!(base);
     }
@@ -1049,6 +1043,11 @@ pub fn expand_with(
     if let Some(decision) = &plan {
         document["provenance"]["plan"] = decision.to_json();
     }
+    let typed: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(document.clone()).map_err(|error| error.to_string())?;
+    document["schema_version"] = json!(provenant_fabric_runtime::graph::minimum_schema_version(
+        &typed
+    ));
     if serde_json::to_vec(&document)
         .map_err(|e| e.to_string())?
         .len()
@@ -1079,23 +1078,6 @@ pub fn expand_with(
         warnings,
         plan,
     })
-}
-
-/// Whether any node, at any depth, uses a schema 2 review field.
-fn carries_review_field(nodes: &[Value]) -> bool {
-    fn walk(value: &Value) -> bool {
-        match value {
-            Value::Object(map) => {
-                map.contains_key("family_group")
-                    || (map.get("kind").is_some_and(|kind| kind == "plan")
-                        && map.get("review").is_some_and(Value::is_object))
-                    || map.values().any(walk)
-            }
-            Value::Array(list) => list.iter().any(walk),
-            _ => false,
-        }
-    }
-    nodes.iter().any(walk)
 }
 
 const LAND_TIERS: [&str; 4] = ["routine", "substantial", "crucial", "terminal"];
@@ -2557,103 +2539,6 @@ fn composite(
         node["inputs"] = selected_inputs(deps, outputs);
     }
     node
-}
-
-/// Output kinds a node can supply. Every node reports a result, findings, a
-/// verdict and the remaining window. `commit` needs write access or a pinned
-/// source (its own or inherited from an enclosing composite); `branch` needs
-/// write access, since a read-only node has no delivery receipt. Loops settle
-/// with a verdict only, and a composite supplies what it exports.
-fn produced(node: &Value, inherited: bool) -> Vec<String> {
-    if let Some(exports) = node.pointer("/composite/exports").and_then(Value::as_array) {
-        let mut kinds: Vec<String> = Vec::new();
-        for kind in exports
-            .iter()
-            .filter_map(|export| export["outputs"].as_array())
-            .flatten()
-            .filter_map(Value::as_str)
-        {
-            if !kinds.iter().any(|known| known == kind) {
-                kinds.push(kind.into());
-            }
-        }
-        return kinds;
-    }
-    let mut kinds: Vec<String> = ["result", "findings", "verdict", "remaining"]
-        .map(String::from)
-        .into();
-    if node["kind"] == "loop" {
-        return kinds;
-    }
-    let writes = node["access"] != "read_only" && !node["access"].is_null();
-    let sourced = inherited || node.get("source").is_some_and(|s| !s.is_null());
-    if writes || node["kind"] == "land" {
-        kinds.push("branch".into());
-    }
-    if writes || sourced || node["kind"] == "land" {
-        kinds.push("commit".into());
-    }
-    kinds
-}
-
-/// Nodes visible to a selection: the sibling list first, then enclosing scopes,
-/// each node paired with whether it inherits a pinned source.
-type Scope<'a> = Vec<(&'a Value, bool)>;
-
-fn check_selection(owner: &str, selected: &Value, scope: &Scope) -> Result<(), String> {
-    let Some(target) = selected["node"].as_str() else {
-        return Ok(());
-    };
-    // `previous.X` names body node X of the loop's earlier round.
-    let target = target.strip_prefix("previous.").unwrap_or(target);
-    let Some((source, inherited)) = scope.iter().find(|(node, _)| node["id"] == target) else {
-        return Ok(());
-    };
-    let available = produced(source, *inherited);
-    for kind in selected["outputs"].as_array().into_iter().flatten() {
-        let kind = kind.as_str().unwrap_or_default();
-        if !available.iter().any(|known| known == kind) {
-            return Err(format!(
-                "{owner} selects {kind} from {target}, which supplies only {}",
-                available.join(", ")
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Refuse an input or export that selects an output its source cannot
-/// supply, naming both nodes.
-fn check_selections(nodes: &[Value]) -> Result<(), String> {
-    check_scope(nodes, &Vec::new(), false)
-}
-
-fn check_scope<'a>(nodes: &'a [Value], outer: &Scope<'a>, inherited: bool) -> Result<(), String> {
-    let mut scope: Scope = nodes.iter().map(|node| (node, inherited)).collect();
-    scope.extend(outer.iter().copied());
-    for node in nodes {
-        let id = node["id"].as_str().unwrap_or_default();
-        for input in node["inputs"].as_array().into_iter().flatten() {
-            check_selection(&format!("node {id}"), input, &scope)?;
-        }
-        let pinned = inherited || node.get("source").is_some_and(|s| !s.is_null());
-        if let Some(children) = node.pointer("/composite/nodes").and_then(Value::as_array) {
-            let inner: Scope = children.iter().map(|child| (child, pinned)).collect();
-            for export in node
-                .pointer("/composite/exports")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-            {
-                check_selection(&format!("composite {id} export"), export, &inner)?;
-            }
-            check_scope(children, &scope, pinned)?;
-        }
-        if let Some(children) = node.pointer("/loop/body").and_then(Value::as_array) {
-            check_scope(children, &scope, pinned)?;
-        }
-    }
-    Ok(())
 }
 
 fn check_expansion(nodes: &[Value], prefix: &str, depth: usize) -> Result<usize, String> {
