@@ -1172,7 +1172,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             node.expansion_pause
                 .as_deref()
                 .map(plans::pause_reason_for_display)
-                .map(str::to_owned)
         }) {
             checkpoint.pause_reason = Some(reason);
             checkpoint.pause_code = Some("invalid_plan_expansion".into());
@@ -1658,7 +1657,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         journal.save(&checkpoint).map_err(GraphError::Journal)?;
                         break;
                     }
-                    if !node.inputs.is_empty() && render_input(node, &checkpoint, &positions, cap).1
+                    if !node.inputs.is_empty()
+                        && render_input(node, &plan, &checkpoint, &positions, cap).1
                     {
                         let (code, reason) = if node
                             .prompt
@@ -1828,7 +1828,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .last()
                     .and_then(|attempt| attempt.input_cap)
                     .unwrap_or(limits.node_prompt_bytes);
-                let mut prompt = render_input(node, &checkpoint, &positions, input_cap).0;
+                let mut prompt = render_input(node, &plan, &checkpoint, &positions, input_cap).0;
                 // An accepted attempt is only observed, so its files exist
                 // already and its prompt is not sent again.
                 let requests = if stored_ref.is_some() {
@@ -2161,7 +2161,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 let upstream_findings: Vec<Finding> = if node.dispositions.is_empty() {
                     Default::default()
                 } else {
-                    selected_findings(node, &checkpoint, &positions)
+                    selected_findings(node, &plan, &checkpoint, &positions)
                         .into_iter()
                         .map(|(_, finding)| finding)
                         .collect()
@@ -2182,6 +2182,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 } else {
                     truncated_finding_ids(node, &plan, &checkpoint, &positions)
                 };
+                let marker_inputs = propagation_inputs(node, &plan, &checkpoint, &positions);
                 let mut settled_result = None;
                 let retry_was_pending;
                 let should_continue = {
@@ -2235,6 +2236,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 commit,
                                 &upstream_findings,
                             );
+                            let marker_warnings = propagation_warnings(&outputs, &marker_inputs);
+                            if !marker_warnings.is_empty() {
+                                outputs.warnings.truncate(MAX_WARNINGS.saturating_sub(2));
+                                outputs.warnings.extend(marker_warnings);
+                            }
                             if node.access == AccessMode::ReadOnly
                                 && node.role.as_deref().is_some_and(|role| {
                                     role == "lens"
@@ -2274,7 +2280,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                         }),
                                 ))
                             } else {
-                                disposition_error(&node.dispositions, &upstream_findings, &outputs)
+                                // Overflow proof covers all findings from truncated composites;
+                                // their structured subset may differ across selected inputs.
+                                let required_findings: Vec<_> = upstream_findings
+                                    .iter()
+                                    .filter(|finding| {
+                                        !overflow_ids.iter().any(|(id, _)| id == &finding.id)
+                                    })
+                                    .cloned()
+                                    .collect();
+                                disposition_error(&node.dispositions, &required_findings, &outputs)
                                     .or_else(|| {
                                         (!overflow_ids.is_empty() && result.as_ref().is_none_or(|capture| !capture.disposition_proof.matches(&overflow_ids, &proof_dispositions))).then(|| (
                                             "disposition_overflow_incomplete",

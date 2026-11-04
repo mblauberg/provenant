@@ -103,15 +103,30 @@ pub(super) fn make_outputs_with_upstream(
                 .ok_or_else(|| "field findings: block unterminated".to_owned())?;
             parse_findings(block, upstream)
         });
-    let findings = parsed.unwrap_or_else(|error| {
-        if result.is_some() {
-            warnings.push(bounded(
-                &format!("{FINDINGS_INVALID}: {error}"),
-                WARNING_BYTES,
-            ));
-        }
-        Vec::new()
-    });
+    let findings = parsed
+        .map(|(findings, skipped)| {
+            if let Some(first) = skipped.first() {
+                let warning = if skipped.len() > 1 {
+                    format!(
+                        "{first}; {} more unknown identities skipped",
+                        skipped.len() - 1
+                    )
+                } else {
+                    first.clone()
+                };
+                warnings.push(bounded(&warning, WARNING_BYTES));
+            }
+            findings
+        })
+        .unwrap_or_else(|error| {
+            if result.is_some() {
+                warnings.push(bounded(
+                    &format!("{FINDINGS_INVALID}: {error}"),
+                    WARNING_BYTES,
+                ));
+            }
+            Vec::new()
+        });
     let path = path.filter(|value| {
         let valid = encoded_len(value) <= OUTPUT_FIELD_BYTES;
         if !valid {
@@ -174,7 +189,10 @@ pub(super) fn make_outputs_with_upstream(
 }
 
 /// Parse entries individually so the first failure retains its identity and field.
-fn parse_findings(block: &str, upstream: &[Finding]) -> Result<Vec<Finding>, String> {
+fn parse_findings(
+    block: &str,
+    upstream: &[Finding],
+) -> Result<(Vec<Finding>, Vec<String>), String> {
     let block: serde_json::Value = serde_json::from_str(block).map_err(|error| {
         format!(
             "field findings: invalid JSON at line {} column {}",
@@ -203,6 +221,7 @@ fn parse_findings(block: &str, upstream: &[Finding]) -> Result<Vec<Finding>, Str
         return Err(format!("field findings: exceeds {MAX_FINDINGS} entries"));
     }
     let mut findings = Vec::new();
+    let mut skipped = Vec::new();
     for (index, (key, entry)) in entries.into_iter().enumerate() {
         let id = entry
             .get("id")
@@ -240,7 +259,7 @@ fn parse_findings(block: &str, upstream: &[Finding]) -> Result<Vec<Finding>, Str
                     .is_some_and(|prefix| prefix.ends_with(':'))
             });
             let source = matches.next();
-            if matches.next().is_some() {
+            if matches.any(|finding| Some(&finding.id) != source.map(|item| &item.id)) {
                 return Err(fail(
                     "id",
                     "ambiguous upstream identity; use the qualified id",
@@ -249,24 +268,16 @@ fn parse_findings(block: &str, upstream: &[Finding]) -> Result<Vec<Finding>, Str
             source
         };
         if let Some(source) = source {
-            let inherited = serde_json::to_value(source)
-                .map_err(|_| fail("id", "cannot encode upstream finding"))?;
-            for (field, value) in inherited
-                .as_object()
-                .ok_or_else(|| fail("id", "invalid upstream finding"))?
-            {
-                if field != "disposition" && field != "reason" {
-                    entry.entry(field.clone()).or_insert_with(|| value.clone());
-                }
-            }
             entry.insert("id".into(), source.id.clone().into());
         } else if ["severity", "file", "summary", "status"]
             .iter()
             .any(|field| !entry.contains_key(*field))
             && entry.contains_key("disposition")
         {
-            return Err(fail("id", "unknown upstream identity"));
+            skipped.push(fail("id", "unknown upstream identity"));
+            continue;
         }
+        // Validate explicit fields before retaining the original evidence below.
         for field in [
             "id",
             "severity",
@@ -276,12 +287,13 @@ fn parse_findings(block: &str, upstream: &[Finding]) -> Result<Vec<Finding>, Str
             "disposition",
             "reason",
         ] {
-            let optional = matches!(field, "disposition" | "reason");
-            match entry.get(field) {
-                Some(serde_json::Value::String(value)) if value.len() <= OUTPUT_FIELD_BYTES => {}
-                None | Some(serde_json::Value::Null) if optional => {}
-                Some(serde_json::Value::String(_)) => return Err(fail(field, "exceeds byte cap")),
-                _ => return Err(fail(field, "expected string")),
+            if let Some(value) = entry.get(field) {
+                match value {
+                    serde_json::Value::String(value) if value.len() <= OUTPUT_FIELD_BYTES => {}
+                    serde_json::Value::String(_) => return Err(fail(field, "exceeds byte cap")),
+                    serde_json::Value::Null if matches!(field, "disposition" | "reason") => {}
+                    _ => return Err(fail(field, "expected string")),
+                }
             }
         }
         if entry
@@ -290,7 +302,7 @@ fn parse_findings(block: &str, upstream: &[Finding]) -> Result<Vec<Finding>, Str
         {
             return Err(fail("line", "expected non-negative integer or null"));
         }
-        let mut extensions = entry.clone();
+        let mut explicit_extensions = entry.clone();
         for field in [
             "id",
             "severity",
@@ -301,15 +313,83 @@ fn parse_findings(block: &str, upstream: &[Finding]) -> Result<Vec<Finding>, Str
             "disposition",
             "reason",
         ] {
-            extensions.remove(field);
+            explicit_extensions.remove(field);
         }
-        if canonical_len(&extensions) > FINDINGS_BYTES {
+        if canonical_len(&explicit_extensions) > FINDINGS_BYTES {
             return Err(fail("findings", "additional fields exceed byte cap"));
         }
-        findings.push(
-            serde_json::from_value::<Finding>(entry.into())
-                .map_err(|_| fail("findings", "invalid entry"))?,
+        // Expand one disposition to all copies, inheriting each separately.
+        let copies: Vec<_> = source.map_or_else(
+            || vec![None],
+            |source| {
+                upstream
+                    .iter()
+                    .filter(|finding| finding.id == source.id)
+                    .map(Some)
+                    .collect()
+            },
         );
+        for source in copies {
+            let mut entry = entry.clone();
+            if let Some(source) = source {
+                let inherited = serde_json::to_value(source)
+                    .map_err(|_| fail("id", "cannot encode upstream finding"))?;
+                for (field, value) in inherited
+                    .as_object()
+                    .ok_or_else(|| fail("id", "invalid upstream finding"))?
+                {
+                    if field != "disposition" && field != "reason" && field != "propagates" {
+                        entry.insert(field.clone(), value.clone());
+                    }
+                }
+            }
+            for field in [
+                "id",
+                "severity",
+                "file",
+                "summary",
+                "status",
+                "disposition",
+                "reason",
+            ] {
+                let optional = matches!(field, "disposition" | "reason");
+                match entry.get(field) {
+                    Some(serde_json::Value::String(value)) if value.len() <= OUTPUT_FIELD_BYTES => {
+                    }
+                    None | Some(serde_json::Value::Null) if optional => {}
+                    Some(serde_json::Value::String(_)) => {
+                        return Err(fail(field, "exceeds byte cap"));
+                    }
+                    _ => return Err(fail(field, "expected string")),
+                }
+            }
+            if entry
+                .get("line")
+                .is_some_and(|line| !line.is_null() && line.as_u64().is_none())
+            {
+                return Err(fail("line", "expected non-negative integer or null"));
+            }
+            let mut extensions = entry.clone();
+            for field in [
+                "id",
+                "severity",
+                "file",
+                "line",
+                "summary",
+                "status",
+                "disposition",
+                "reason",
+            ] {
+                extensions.remove(field);
+            }
+            if canonical_len(&extensions) > FINDINGS_BYTES {
+                return Err(fail("findings", "additional fields exceed byte cap"));
+            }
+            findings.push(
+                serde_json::from_value::<Finding>(entry.into())
+                    .map_err(|_| fail("findings", "invalid entry"))?,
+            );
+        }
     }
     let cap = if upstream.is_empty() {
         FINDINGS_BYTES
@@ -319,49 +399,218 @@ fn parse_findings(block: &str, upstream: &[Finding]) -> Result<Vec<Finding>, Str
     if canonical_len(&findings) > cap {
         return Err("field findings: exceeds canonical byte cap".into());
     }
-    Ok(findings)
+    if findings.is_empty() && !skipped.is_empty() {
+        return Err(skipped.remove(0));
+    }
+    Ok((findings, skipped))
 }
 
-/// Select findings once per source and qualify identities shared by distinct sources.
-pub(super) fn selected_findings(
+type FindingOrigin = (String, String);
+
+#[derive(Clone)]
+pub(super) struct ResolvedFinding {
+    source: String,
+    stored_id: String,
+    finding: Finding,
+    root: FindingOrigin,
+}
+
+/// Reserve unique stored IDs before qualifying colliding roots.
+fn display_ids(
+    roots: &std::collections::BTreeSet<FindingOrigin>,
+) -> std::collections::BTreeMap<FindingOrigin, String> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut counts = BTreeMap::new();
+    for (_, id) in roots {
+        *counts.entry(id).or_insert(0usize) += 1;
+    }
+    let mut used: BTreeSet<String> = roots
+        .iter()
+        .filter(|(_, id)| counts[id] == 1)
+        .map(|(_, id)| id.clone())
+        .collect();
+    let mut ids = BTreeMap::new();
+    for (node, id) in roots {
+        let display = if counts[id] == 1 {
+            id.clone()
+        } else {
+            let base = format!("{node}:{id}");
+            let mut candidate = base.clone();
+            let mut suffix = 1usize;
+            while used.contains(&candidate) {
+                candidate = format!("{base}:{suffix}");
+                suffix += 1;
+            }
+            used.insert(candidate.clone());
+            candidate
+        };
+        ids.insert((node.clone(), id.clone()), display);
+    }
+    ids
+}
+
+/// Resolve markers only against actual inputs, following each match to its root.
+fn resolved_inputs(
     node: &PlannedNode,
+    plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
     positions: &std::collections::BTreeMap<String, usize>,
-) -> Vec<(String, Finding)> {
+    include_results: bool,
+) -> Vec<ResolvedFinding> {
+    resolved_inputs_inner(
+        node,
+        plan,
+        checkpoint,
+        positions,
+        include_results,
+        &mut Default::default(),
+    )
+}
+
+fn resolved_inputs_inner(
+    node: &PlannedNode,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+    include_results: bool,
+    cache: &mut std::collections::BTreeMap<usize, Vec<ResolvedFinding>>,
+) -> Vec<ResolvedFinding> {
     let mut selected = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for input in &node.inputs {
-        if !input.outputs.contains(&OutputKind::Findings) || !seen.insert(&input.node) {
+        if !(input.outputs.contains(&OutputKind::Findings)
+            || include_results && input.outputs.contains(&OutputKind::Result))
+            || !seen.insert(&input.node)
+        {
             continue;
         }
-        if let Some(outputs) = positions
-            .get(&input.node)
-            .and_then(|i| checkpoint.nodes[*i].outputs.as_ref())
-        {
-            selected.extend(
-                outputs
-                    .findings
-                    .iter()
-                    .cloned()
-                    .map(|f| (input.node.clone(), f)),
-            );
+        let Some(&index) = positions.get(&input.node) else {
+            continue;
+        };
+        let Some(outputs) = checkpoint.nodes[index].outputs.as_ref() else {
+            continue;
+        };
+        let upstream = if let Some(cached) = cache.get(&index) {
+            cached.clone()
+        } else {
+            let resolved =
+                resolved_inputs_inner(&plan.nodes[index], plan, checkpoint, positions, true, cache);
+            cache.insert(index, resolved.clone());
+            resolved
+        };
+        for finding in &outputs.findings {
+            let default = (input.node.clone(), finding.id.clone());
+            let root = finding
+                .extra
+                .get("propagates")
+                .and_then(|v| v.as_str())
+                .and_then(|marker| marker_root(marker, &upstream))
+                .unwrap_or(default);
+            selected.push(ResolvedFinding {
+                source: input.node.clone(),
+                stored_id: finding.id.clone(),
+                finding: finding.clone(),
+                root,
+            });
         }
     }
-    let collisions: std::collections::BTreeSet<String> = selected
-        .iter()
-        .filter(|(node, finding)| {
-            selected
+    let is_rendered = |source: &str| {
+        !include_results
+            || node
+                .inputs
                 .iter()
-                .any(|(other, f)| other != node && f.id == finding.id)
-        })
-        .map(|(_, finding)| finding.id.clone())
+                .any(|input| input.node == source && input.outputs.contains(&OutputKind::Findings))
+    };
+    let roots = selected
+        .iter()
+        .filter(|item| is_rendered(&item.source))
+        .map(|item| item.root.clone())
         .collect();
-    for (node, finding) in &mut selected {
-        if collisions.contains(&finding.id) {
-            finding.id = format!("{node}:{}", finding.id);
+    let ids = display_ids(&roots);
+    for item in &mut selected {
+        if is_rendered(&item.source) {
+            item.finding.id = ids[&item.root].clone();
         }
     }
     selected
+}
+
+fn marker_root(marker: &str, upstream: &[ResolvedFinding]) -> Option<FindingOrigin> {
+    let roots: std::collections::BTreeSet<_> = upstream
+        .iter()
+        .filter(|item| {
+            marker == format!("{}:{}", item.source, item.stored_id)
+                || marker == format!("{}:{}", item.source, item.finding.id)
+        })
+        .map(|item| item.root.clone())
+        .collect();
+    (roots.len() == 1)
+        .then(|| roots.into_iter().next())
+        .flatten()
+}
+
+pub(super) fn propagation_inputs(
+    node: &PlannedNode,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> Vec<ResolvedFinding> {
+    resolved_inputs(node, plan, checkpoint, positions, true)
+}
+
+/// Warn on unresolved markers even if no consumer later selects the finding.
+pub(super) fn propagation_warnings(
+    outputs: &NodeOutputs,
+    upstream: &[ResolvedFinding],
+) -> Vec<String> {
+    let invalid: Vec<_> = outputs
+        .findings
+        .iter()
+        .filter_map(|finding| {
+            let marker = finding.extra.get("propagates")?;
+            if marker
+                .as_str()
+                .and_then(|marker| marker_root(marker, upstream))
+                .is_some()
+            {
+                return None;
+            }
+            Some(format!(
+                "unresolved propagates marker for finding {}: {}",
+                finding.id, marker
+            ))
+        })
+        .collect();
+    invalid
+        .first()
+        .map(|first| {
+            bounded(
+                &format!(
+                    "{first}{}",
+                    if invalid.len() > 1 {
+                        format!("; {} more", invalid.len() - 1)
+                    } else {
+                        String::new()
+                    }
+                ),
+                WARNING_BYTES,
+            )
+        })
+        .into_iter()
+        .collect()
+}
+
+/// Select every copy while assigning one display identity to each structural root.
+pub(super) fn selected_findings(
+    node: &PlannedNode,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> Vec<(String, Finding)> {
+    resolved_inputs(node, plan, checkpoint, positions, false)
+        .into_iter()
+        .map(|item| (item.source, item.finding))
+        .collect()
 }
 
 /// Full identities from selected truncated composites, including nested members.
@@ -443,6 +692,7 @@ pub(super) const INPUT_CLOSE: &str = "\n</UPSTREAM_DATA>\n";
 
 pub(super) fn render_input(
     node: &PlannedNode,
+    plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
     positions: &std::collections::BTreeMap<String, usize>,
     cap: usize,
@@ -491,7 +741,7 @@ pub(super) fn render_input(
         return (prompt, true);
     }
     prompt.push_str(INPUT_OPEN);
-    let selected = selected_findings(node, checkpoint, positions);
+    let selected = selected_findings(node, plan, checkpoint, positions);
     for input in &node.inputs {
         let Some(outputs) = positions
             .get(&input.node)
@@ -812,6 +1062,38 @@ mod alias_tests {
     use super::*;
 
     #[test]
+    fn display_id_uniqueness_property_for_colon_containing_roots() {
+        use std::collections::BTreeSet;
+        let roots: Vec<_> = ["a", "b", "a:F1"]
+            .into_iter()
+            .flat_map(|node| {
+                ["F1", "a:F1", "a:F1:1", "b:F1"]
+                    .into_iter()
+                    .map(move |id| (node.to_owned(), id.to_owned()))
+            })
+            .collect();
+        for mask in 0usize..(1 << roots.len()) {
+            let selected: BTreeSet<_> = roots
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| mask & (1 << i) != 0)
+                .map(|(_, root)| root.clone())
+                .collect();
+            let ids = display_ids(&selected);
+            assert_eq!(
+                ids.values().collect::<BTreeSet<_>>().len(),
+                selected.len(),
+                "{selected:?}"
+            );
+            for root in &selected {
+                if selected.iter().filter(|other| other.1 == root.1).count() == 1 {
+                    assert_eq!(ids[root], root.1);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn exact_identity_takes_precedence_over_suffix_alias() {
         let finding = |id: &str, summary: &str| {
             serde_json::from_value::<Finding>(serde_json::json!({
@@ -825,8 +1107,31 @@ mod alias_tests {
             &[finding("lens-a:F1", "suffix"), finding("F1", "exact")],
         )
         .unwrap();
-        assert_eq!(result[0].id, "F1");
-        assert_eq!(result[0].summary, "exact");
+        assert_eq!(result.0[0].id, "F1");
+        assert_eq!(result.0[0].summary, "exact");
+    }
+
+    #[test]
+    fn unknown_identity_warns_when_another_disposition_is_valid() {
+        let upstream: Finding = serde_json::from_value(serde_json::json!({
+            "id":"F1", "severity":"high", "file":"a.rs", "summary":"s", "status":"open"
+        }))
+        .unwrap();
+        let block = r#"{"schema_version":1,"findings":[{"id":"F1","disposition":"accepted","reason":"yes"},{"id":"F9","disposition":"rejected","reason":"no"}]}"#;
+        let mut capture = crate::result_capture::ResultCapture::new(Some("VERDICT: PASS"));
+        capture.push(format!("```findings\n{block}\n```\nVERDICT: PASS\n").as_bytes());
+        let outputs = make_outputs_with_upstream(
+            Some(&capture.finish()),
+            None,
+            None,
+            None,
+            None,
+            &[upstream],
+        );
+        assert_eq!(outputs.findings.len(), 1);
+        assert_eq!(outputs.findings[0].id, "F1");
+        assert_eq!(outputs.verdict.as_deref(), Some("VERDICT: PASS"));
+        assert!(outputs.warnings[0].contains("(F9) field id: unknown upstream identity"));
     }
 
     #[test]
