@@ -28,8 +28,7 @@ pub fn scrub_git_env(command: &mut Command) -> &mut Command {
 pub fn git_command_at(program: impl AsRef<OsStr>) -> Command {
     let mut command = Command::new(program);
     scrub_git_env(&mut command);
-    command.env("GIT_CONFIG_GLOBAL", "/dev/null");
-    command.env("GIT_CONFIG_NOSYSTEM", "1");
+    command.envs(fixture_git_settings());
     command
 }
 
@@ -58,6 +57,26 @@ pub fn git_command() -> Command {
     git_command_at(git_program())
 }
 
+/// Git configuration common to direct commands and executor-backed fixtures.
+/// Override inherited identity and config injection, and keep hooks and signing off.
+pub fn fixture_git_settings() -> [(OsString, OsString); 12] {
+    [
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("GIT_CONFIG_COUNT", "4"),
+        ("GIT_CONFIG_KEY_0", "commit.gpgsign"),
+        ("GIT_CONFIG_VALUE_0", "false"),
+        ("GIT_CONFIG_KEY_1", "core.hooksPath"),
+        ("GIT_CONFIG_VALUE_1", "/dev/null"),
+        ("GIT_CONFIG_KEY_2", "user.name"),
+        ("GIT_CONFIG_VALUE_2", "Fixture"),
+        ("GIT_CONFIG_KEY_3", "user.email"),
+        ("GIT_CONFIG_VALUE_3", "fixture@example.invalid"),
+        ("GIT_TERMINAL_PROMPT", "0"),
+    ]
+    .map(|(key, value)| (key.into(), value.into()))
+}
+
 /// Environment for a fixture that runs Git through the executor: the inherited
 /// environment without any `GIT_*` setting, with global and system Git config off,
 /// and with the native Git directory first on `PATH`.
@@ -78,8 +97,7 @@ pub fn git_env() -> Vec<(OsString, OsString)> {
             env.push(("PATH".into(), path));
         }
     }
-    env.push(("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()));
-    env.push(("GIT_CONFIG_NOSYSTEM".into(), "1".into()));
+    env.extend(fixture_git_settings());
     env
 }
 
@@ -119,6 +137,95 @@ pub fn run_git(cwd: &Path, args: &[&str]) -> io::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn fixture_commits_ignore_hostile_configuration() -> Result<(), Box<dyn std::error::Error>> {
+        use std::{fs, os::unix::fs::PermissionsExt};
+        if let Some(root) = std::env::var_os("PROVENANT_HOSTILE_GIT_CHILD") {
+            for (index, direct) in [false, true].into_iter().enumerate() {
+                let dir = Path::new(&root).join(format!("repo-{index}"));
+                fs::create_dir(&dir)?;
+                for args in [
+                    &["init", "-q"][..],
+                    &["commit", "--allow-empty", "-qm", "fixture"][..],
+                ] {
+                    if direct {
+                        assert!(
+                            git_command()
+                                .current_dir(&dir)
+                                .args(args)
+                                .status()?
+                                .success()
+                        );
+                    } else {
+                        run_git(&dir, args)?;
+                    }
+                }
+                let identity = run_git(&dir, &["log", "-1", "--format=%an <%ae>|%cn <%ce>"])?;
+                assert_eq!(
+                    String::from_utf8(identity)?.trim(),
+                    "Fixture <fixture@example.invalid>|Fixture <fixture@example.invalid>"
+                );
+                run_git(
+                    &dir,
+                    &[
+                        "-c",
+                        "user.name=Explicit",
+                        "commit",
+                        "--allow-empty",
+                        "-qm",
+                        "explicit",
+                    ],
+                )?;
+                let name = run_git(&dir, &["log", "-1", "--format=%an"])?;
+                assert_eq!(String::from_utf8(name)?.trim(), "Explicit");
+            }
+            fs::write(Path::new(&root).join("child-ran"), b"")?;
+            return Ok(());
+        }
+        let temp = tempfile::tempdir()?;
+        let hook_dir = temp.path().join("hooks");
+        fs::create_dir(&hook_dir)?;
+        let hook = hook_dir.join("pre-commit");
+        fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\ntouch '{}'\nexit 1\n",
+                temp.path().join("hook-ran").display()
+            ),
+        )?;
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o700))?;
+        let config = temp.path().join("config");
+        fs::write(
+            &config,
+            format!(
+                "[commit]\n gpgsign = true\n template = {}/missing-template\n[gpg]\n program = /bin/false\n[core]\n hooksPath = {}\n[user]\n name = Hostile\n email = hostile@example.invalid\n",
+                temp.path().display(),
+                hook_dir.display()
+            ),
+        )?;
+        let status = Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "fixture::fixture_git::tests::fixture_commits_ignore_hostile_configuration",
+            ])
+            .env("PROVENANT_HOSTILE_GIT_CHILD", temp.path())
+            .env("HOME", temp.path())
+            .env("XDG_CONFIG_HOME", temp.path())
+            .env("GIT_CONFIG_GLOBAL", &config)
+            .env("GIT_CONFIG_SYSTEM", &config)
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "commit.gpgsign")
+            .env("GIT_CONFIG_VALUE_0", "true")
+            .env("GIT_AUTHOR_NAME", "Hostile")
+            .env("GIT_COMMITTER_EMAIL", "hostile@example.invalid")
+            .status()?;
+        assert!(status.success());
+        assert!(temp.path().join("child-ran").is_file());
+        assert!(!temp.path().join("hook-ran").exists());
+        Ok(())
+    }
 
     #[test]
     fn fixture_uses_resolved_git_when_available() {

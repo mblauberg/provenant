@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+"""Run one nextest invocation and preserve its JUnit and effective controls."""
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+if len(sys.argv) < 3 or not sys.argv[1].replace('-', '').isalnum():
+    sys.exit('usage: run-native-test-group GROUP COMMAND...')
+results = Path(os.environ['RUNNER_TEMP']) / 'native-test-results'
+results.mkdir(parents=True, exist_ok=True)
+group = sys.argv[1]
+report = Path('target/nextest/ci/junit.xml')
+report.unlink(missing_ok=True)
+controls = ('PROVENANT_CONFINEMENT_REQUIRED', 'PROVENANT_POSTGRES_REQUIRED', 'PROVENANT_LANE_TOOLS_REQUIRED')
+(results / f'{group}.json').write_text(json.dumps({name: os.environ.get(name) for name in controls}))
+status = subprocess.run(sys.argv[2:]).returncode
+if report.is_file():
+    shutil.copyfile(report, results / f'{group}.xml')
+else:
+    print(f'{group}: nextest did not produce JUnit results', file=sys.stderr)
+    status = status or 1
+sys.exit(status)

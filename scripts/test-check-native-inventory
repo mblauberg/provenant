@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""Exercise native evidence checks against synthetic nextest results."""
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import tempfile
+
+loader = importlib.machinery.SourceFileLoader('native_inventory', str(Path(__file__).with_name('check-native-inventory')))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+name = 'example::native_test'
+row = [name, 'macOS', 'native', 'PROVENANT_CONFINEMENT_REQUIRED', 'sandbox-exec', 'suite']
+listing = {'rust-suites': {'suite': {'testcases': {name: {}}}}}
+with tempfile.TemporaryDirectory() as directory:
+    root = Path(directory)
+    (root / 'native.json').write_text(json.dumps({'PROVENANT_CONFINEMENT_REQUIRED': '1'}))
+    report = root / 'native.xml'
+    def write_case(body=''):
+        report.write_text(f'<testsuites><testsuite><testcase classname="suite" name="{name}">{body}</testcase></testsuite></testsuites>')
+    write_case()
+    assert not module.check([row], listing, root)
+    # A source definition or a selector cannot substitute for the platform list.
+    assert module.check([row], {'rust-suites': {'other': {'testcases': {name: {}}}}}, root)
+    report.write_text(f'<testsuite><testcase classname="other" name="{name}"/></testsuite>')
+    assert module.check([row], listing, root)
+    write_case()
+    assert module.check([['missing', *row[1:]]], listing, root)
+    for marker in ('skipped', 'failure', 'error'):
+        write_case(f'<{marker}/>')
+        assert module.check([row], listing, root)
+    report.write_text('<testsuites/>')  # Empty filter or zero tests.
+    assert module.check([row], listing, root)
+    write_case()
+    (root / 'native.json').write_text('{}')
+    assert module.check([row], listing, root)
+    (root / 'native.json').unlink()
+    assert module.check([row], listing, root)
+    (root / 'native.json').write_text(json.dumps({'PROVENANT_CONFINEMENT_REQUIRED': '1'}))
+    (root / 'duplicate.xml').write_text(report.read_text())
+    assert module.check([row], listing, root)
+print('Native inventory evidence fixtures passed.')
