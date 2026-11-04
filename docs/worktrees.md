@@ -148,6 +148,18 @@ copies; host integration refreshes and verifies its own refs and objects.
 Host delivery preparation constrains fetches to the selected remote's tracking
 refs and redacts URL userinfo from preparation errors.
 
+Repository scripts in a confined writer lane see this private layout when they
+run `git` through the lane's Git launcher from inside the worktree.
+`git rev-parse --git-dir` and `--git-common-dir` both name the lane's private
+Git directory (the two spellings may differ), and `--show-toplevel` names the
+worktree. Read-only lanes, temporary repositories and nested repositories see
+ordinary Git. A script must not read the writer layout as a main checkout or an
+unregistered worktree: the host assigned the worktree to the writer before
+launch (see [writer dispatch](#writer-dispatch)). To detect a lane, test that
+`PROVENANT_LANE_DEPTH` is set and not `0` (see
+[lane identity](specs/routing.md#lane-identity-and-refusals)); check the
+worktree with `--show-toplevel`.
+
 Tests run Git only through `provenant_os::fixture`.
 See [Tests and Git](runbooks/lane-lifecycle.md#tests-and-git).
 

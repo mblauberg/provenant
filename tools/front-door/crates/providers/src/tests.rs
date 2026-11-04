@@ -3304,19 +3304,22 @@ fn opencode_writer_gets_the_rust_toolchain_in_its_lane_cache()
             .contains(&crate::launch::subtree(home.join(".cargo")))
     );
     // Read-only lanes deny bash, so they get no toolchain: only the search
-    // binary OpenCode's grep and glob tools execute.
+    // binaries OpenCode's grep and glob tools execute.
     let plan = fixture_access_plan(Access::ReadOnly, None, false);
     let spec = prepare(&home, &plan)?;
     assert_eq!(
         spec.profile.spec.tool_exec_roots,
-        [crate::launch::exact(
-            plan.permissions()
-                .private_state
-                .as_ref()
-                .unwrap()
-                .path
-                .join("cache/opencode/bin/rg")
-        )]
+        [
+            crate::launch::exact(
+                plan.permissions()
+                    .private_state
+                    .as_ref()
+                    .unwrap()
+                    .path
+                    .join("cache/opencode/bin/rg")
+            ),
+            crate::launch::exact("/usr/bin/grep"),
+        ]
     );
     assert!(spec.env.iter().all(|(name, _)| name != "CARGO_HOME"));
     Ok(())
@@ -3665,18 +3668,20 @@ fn cursor_cli_only_account_matches_desktop_identity() {
         if let Some(config) = config {
             std::fs::write(directory.path().join("cli-config.json"), config).unwrap();
         }
-        assert!(matches!(
-            crate::accounts::detect(
-                &NoDesktop,
-                "cursor",
-                Path::new("/bin/cursor-agent"),
-                Path::new("/home/test"),
-                OsStr::new("test"),
-                directory.path(),
-                directory.path(),
-            ),
-            Err(ProviderError::UnknownIdentity)
-        ));
+        let result = crate::accounts::detect(
+            &NoDesktop,
+            "cursor",
+            Path::new("/bin/cursor-agent"),
+            Path::new("/home/test"),
+            OsStr::new("test"),
+            directory.path(),
+            directory.path(),
+        );
+        if config.is_none() {
+            assert!(matches!(result, Err(ProviderError::CredentialNotFound)));
+        } else {
+            assert!(matches!(result, Err(ProviderError::UnknownIdentity)));
+        }
     }
 }
 
@@ -3817,7 +3822,42 @@ fn agy_account_probe_logs_under_the_host_probe_root() {
     )
     .unwrap();
     assert!(key.starts_with("agy-google-"));
-    assert_eq!(std::fs::read_dir(&host_root).unwrap().count(), 0);
+    // Only the non-secret identity cache survives; the log and private probe
+    // directory are still removed before detection returns.
+    let entries: Vec<_> = std::fs::read_dir(&host_root)
+        .unwrap()
+        .map(|e| e.unwrap())
+        .collect();
+    assert_eq!(entries.len(), 1);
+    assert!(
+        entries[0]
+            .file_name()
+            .to_string_lossy()
+            .starts_with("agy-identity-")
+    );
+    assert_eq!(
+        crate::agy::cached_identity(
+            &host_root,
+            Path::new("/home/test"),
+            provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new()),
+        )
+        .as_deref(),
+        Some(key.as_str())
+    );
+    // A second dispatch identity lookup consumes that unexpired observation.
+    assert_eq!(
+        crate::accounts::detect(
+            &provenant_os::exec::SystemExecutor::new(1).unwrap(),
+            "agy",
+            Path::new("/does-not-exist/agy"),
+            Path::new("/home/test"),
+            OsStr::new("test"),
+            Path::new("/home/test"),
+            &host_root,
+        )
+        .unwrap(),
+        key
+    );
 }
 
 #[test]
@@ -3991,6 +4031,8 @@ fn registration_keeps_other_executor_failures_as_unknown_identity() {
     }
     let state = tempfile::tempdir().unwrap();
     let agy = tempfile::tempdir().unwrap();
+    let cursor = tempfile::tempdir().unwrap();
+    std::fs::write(cursor.path().join("state.vscdb"), b"fixture").unwrap();
     write_agy_keychain(agy.path());
     for adapter in ["claude", "cursor", "agy"] {
         for busy in [false, true] {
@@ -4002,6 +4044,8 @@ fn registration_keeps_other_executor_failures_as_unknown_identity() {
                 OsStr::new("test"),
                 if adapter == "agy" {
                     agy.path()
+                } else if adapter == "cursor" {
+                    cursor.path()
                 } else {
                     Path::new("/home/test/identity")
                 },
@@ -6647,6 +6691,105 @@ fn free_plan_notional_value_and_extra_directories_parse_and_validate() {
     assert!(ok.validate().is_empty());
     let relative = accounts_with_plans("directories = [\"rel/dir\"]\n").unwrap();
     assert!(!relative.validate().is_empty());
+}
+
+#[test]
+fn adapter_sign_in_stderr_has_a_typed_auth_cause() {
+    let fixtures: &[(&dyn Adapter, &[u8])] = &[
+        (
+            &cursor::Cursor,
+            include_bytes!("../../../tests/fixtures/providers/cursor/auth-required.stderr"),
+        ),
+        (
+            &codex::Codex,
+            include_bytes!("../../../tests/fixtures/providers/codex/auth-required.stderr"),
+        ),
+        (
+            &opencode::OpenCode,
+            include_bytes!("../../../tests/fixtures/providers/opencode/auth-required.stderr"),
+        ),
+        (
+            &agy::Agy,
+            include_bytes!("../../../tests/fixtures/providers/agy/auth-required.stderr"),
+        ),
+    ];
+    for (adapter, stderr) in fixtures {
+        assert_eq!(
+            adapter.failure_cause(stderr),
+            FailureCause::AuthRequired,
+            "{}",
+            adapter.id()
+        );
+        for unrelated in [
+            "connection closed",
+            "tool request failed: Unauthorized",
+            "application request unauthenticated",
+            "tool request failed: invalid API key",
+            "tool documentation mentions opencode auth login",
+        ] {
+            assert_eq!(
+                adapter.failure_cause(unrelated.as_bytes()),
+                FailureCause::Provider,
+                "{}: {unrelated}",
+                adapter.id()
+            );
+        }
+    }
+}
+
+#[test]
+fn identity_probes_preserve_auth_failures_only_from_intact_captures() {
+    use provenant_os::exec::{
+        CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
+    };
+    struct SignedOut<'a>(&'a [u8], bool);
+    impl Executor for SignedOut<'_> {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            assert!(matches!(
+                options.stderr,
+                provenant_os::exec::StreamPolicy::Capture { .. }
+            ));
+            Ok(ExecOutcome {
+                termination: Termination::Exit(1),
+                stdout: Default::default(),
+                stderr: CapturedStream {
+                    bytes: self.0.to_vec(),
+                    truncated: self.1,
+                    ..Default::default()
+                },
+                timed_out: false,
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: false,
+                elapsed_micros: 0,
+            })
+        }
+    }
+    let scratch = tempfile::tempdir().unwrap();
+    for (adapter, capture) in [
+        (
+            "agy",
+            include_bytes!("../../../tests/fixtures/providers/agy/auth-required.stderr").as_slice(),
+        ),
+        ("claude", b"Not logged in".as_slice()),
+    ] {
+        for truncated in [false, true] {
+            let result = accounts::detect(
+                &SignedOut(capture, truncated),
+                adapter,
+                Path::new("/fixture/agy"),
+                scratch.path(),
+                OsStr::new("fixture"),
+                scratch.path(),
+                scratch.path(),
+            );
+            if truncated {
+                assert!(matches!(result, Err(ProviderError::UnknownIdentity)));
+            } else {
+                assert!(matches!(result, Err(ProviderError::CredentialUnavailable)));
+            }
+        }
+    }
 }
 
 #[test]

@@ -126,6 +126,50 @@ impl Settings {
         settings
     }
 }
+/// Rebind only the registration whose key and directory the quota probe used.
+/// The config editor serialises this with manual registration. Labels and all
+/// user policy stay in place; the old quota record remains a routing exclusion.
+pub(crate) fn reconcile_agy(
+    roots: &provenant_core::Roots,
+    directory: &Path,
+    previous: &str,
+    actual: &str,
+) -> Result<bool, provenant_config::ConfigError> {
+    #[derive(Deserialize, Serialize)]
+    struct Domains {
+        accounts: Settings,
+    }
+    const SECTIONS: provenant_config::DomainSections<Domains> =
+        provenant_config::DomainSections::new(&[SECTION]);
+    let mut changed = false;
+    provenant_config::edit_config(
+        roots,
+        &SECTIONS,
+        &provenant_config::EditOptions::new("agy-account-switch"),
+        |doc, current| {
+            if current
+                .domains
+                .accounts
+                .entries
+                .values()
+                .any(|entry| entry.adapter == "agy" && entry.key == actual)
+            {
+                return Err(provenant_config::ConfigError::Refused(
+                    "agy identity is already registered; run `provenant accounts list`".into(),
+                ));
+            }
+            for (id, entry) in &current.domains.accounts.entries {
+                if entry.adapter == "agy" && entry.key == previous && entry.directory == directory {
+                    doc["domains"]["accounts"]["entries"][id]["key"] = toml_edit::value(actual);
+                    changed = true;
+                }
+            }
+            Ok(())
+        },
+    )?;
+    Ok(changed)
+}
+
 const NOT_ALLOWED: &str =
     "a per-account `settings` key is not in `shared_settings.keys`; add it there first";
 impl Settings {
@@ -362,6 +406,18 @@ pub fn detect(
     )
     .map(|(key, _)| key)
 }
+fn credential_identity_read_error(error: provenant_os::fs::FsError) -> ProviderError {
+    match error {
+        provenant_os::fs::FsError::Io { source, .. }
+        | provenant_os::fs::FsError::ReadIo { source, .. }
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            ProviderError::CredentialNotFound
+        }
+        _ => ProviderError::UnknownIdentity,
+    }
+}
+
 /// The account key and, for Claude, the organisation fingerprint when exposed.
 pub fn detect_with_org(
     executor: &dyn Executor,
@@ -372,6 +428,37 @@ pub fn detect_with_org(
     directory: &Path,
     probe_root: &Path,
 ) -> Result<(String, Option<String>), ProviderError> {
+    detect_with_org_inner(
+        executor, adapter, executable, home, user, directory, probe_root, true,
+    )
+}
+
+/// Registration must observe the current identity, even when a recent probe is cached.
+pub fn detect_for_registration(
+    executor: &dyn Executor,
+    adapter: &str,
+    executable: &Path,
+    home: &Path,
+    user: &OsStr,
+    directory: &Path,
+    probe_root: &Path,
+) -> Result<(String, Option<String>), ProviderError> {
+    detect_with_org_inner(
+        executor, adapter, executable, home, user, directory, probe_root, false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn detect_with_org_inner(
+    executor: &dyn Executor,
+    adapter: &str,
+    executable: &Path,
+    home: &Path,
+    user: &OsStr,
+    directory: &Path,
+    probe_root: &Path,
+    use_cache: bool,
+) -> Result<(String, Option<String>), ProviderError> {
     let cwd = Path::new(crate::claude::PROBE_CWD);
     if adapter == "agy" {
         // An isolated account is signed in under its own directory as `HOME`.
@@ -379,22 +466,30 @@ pub fn detect_with_org(
         // here rather than probed under the shared login.
         let probe_home = crate::agy::ProbeHome::select(directory, home)?;
         let guarded = probe_home.guard(executor);
-        return detect_agy(
+        use provenant_core::Clock;
+        let now = provenant_os::clock::SystemClock::new().unix_seconds();
+        if use_cache && let Some(key) = crate::agy::cached_identity(probe_root, directory, now) {
+            return Ok((key, None));
+        }
+        crate::agy::forget_identity(probe_root, directory);
+        let stamp_before = crate::agy::keychain_stamp(directory);
+        let key = detect_agy(
             &guarded,
             executable,
             probe_home.path(),
             user,
             cwd,
             probe_root,
-        )
-        .map(|key| (key, None));
+        )?;
+        crate::agy::remember_identity(probe_root, directory, &key, now, stamp_before);
+        return Ok((key, None));
     }
     if adapter == "codex" {
         let bytes = read_following(
             &directory.join("auth.json"),
             ReadOptions { limit: 1024 * 1024 },
         )
-        .map_err(|_| ProviderError::UnknownIdentity)?;
+        .map_err(credential_identity_read_error)?;
         return crate::identity::codex_account(&bytes)
             .map(|key| (key, None))
             .ok_or(ProviderError::UnknownIdentity);
@@ -431,7 +526,7 @@ pub fn detect_with_org(
             &directory.join("cli-config.json"),
             ReadOptions { limit: 1024 * 1024 },
         )
-        .map_err(|_| ProviderError::UnknownIdentity)?;
+        .map_err(credential_identity_read_error)?;
         let config: serde_json::Value =
             serde_json::from_slice(&bytes).map_err(|_| ProviderError::UnknownIdentity)?;
         // authInfo.authId and the desktop JWT sub are the same subject, verified 27 Oct 2026.
@@ -461,16 +556,30 @@ pub fn detect_with_org(
     let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(4));
     options.env = Some(&env);
     options.stdout = StreamPolicy::Capture { limit: 65536 };
-    options.stderr = StreamPolicy::Discard;
+    options.stderr = StreamPolicy::Capture { limit: 65536 };
     options.stop_on_output_limit = true;
     let out = executor.execute(options).map_err(exec_error)?;
-    if out.termination != Termination::Exit(0)
-        || out.stdout.truncated
+    if out.stdout.truncated
         || out.stdout.read_failed
+        || out.stderr.truncated
+        || out.stderr.read_failed
+        || out.cancelled
+        || out.overflow_stopped
         || out.timed_out
         || out.drain_truncated
     {
         return Err(ProviderError::UnknownIdentity);
+    }
+    if out.termination != Termination::Exit(0) {
+        return Err(
+            if crate::Adapter::failure_cause(&crate::claude::Claude, &out.stderr.bytes)
+                == crate::FailureCause::AuthRequired
+            {
+                ProviderError::CredentialUnavailable
+            } else {
+                ProviderError::UnknownIdentity
+            },
+        );
     }
     #[derive(Deserialize)]
     struct Status {
@@ -536,17 +645,30 @@ fn detect_agy(
     );
     options.env = Some(&env);
     options.stdout = StreamPolicy::Capture { limit: 1024 * 1024 };
-    options.stderr = StreamPolicy::Discard;
+    options.stderr = StreamPolicy::Capture { limit: 65536 };
     options.stop_on_output_limit = true;
     let out = executor.execute(options).map_err(exec_error)?;
-    if out.termination != Termination::Exit(0)
-        || out.stdout.truncated
+    if out.stdout.truncated
         || out.stdout.read_failed
+        || out.stderr.truncated
+        || out.stderr.read_failed
+        || out.cancelled
         || out.timed_out
         || out.drain_truncated
         || out.overflow_stopped
     {
         return Err(ProviderError::UnknownIdentity);
+    }
+    if out.termination != Termination::Exit(0) {
+        return Err(
+            if crate::Adapter::failure_cause(&crate::agy::Agy, &out.stderr.bytes)
+                == crate::FailureCause::AuthRequired
+            {
+                ProviderError::CredentialUnavailable
+            } else {
+                ProviderError::UnknownIdentity
+            },
+        );
     }
     let payload: serde_json::Value =
         serde_json::from_slice(&out.stdout.bytes).map_err(|_| ProviderError::UnknownIdentity)?;

@@ -1,4 +1,5 @@
 //! Local, read-only composition of project and chair discovery owners.
+use crate::metadata::CatalogueArg;
 use clap::Subcommand;
 use provenant_core::{ProjectId, Roots};
 use provenant_records::CanonicalV1;
@@ -30,10 +31,10 @@ pub enum Console {
     /// Read a bounded local tree of nested runs
     Tree {
         /// Maximum store depth, including the host store
-        #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u64).range(1..=16))]
+        #[arg(long, default_value_t = 8, catalog_u64_range = 1..=16)]
         max_depth: u64,
         /// Maximum attempts to include
-        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u64).range(1..=100))]
+        #[arg(long, default_value_t = 100, catalog_u64_range = 1..=100)]
         max_nodes: u64,
         /// Include complete run and attempt records
         #[arg(long)]
@@ -48,7 +49,7 @@ pub enum Console {
         #[arg(long)]
         all: bool,
         /// Maximum rows in a page
-        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u64).range(1..=100))]
+        #[arg(long, default_value_t = 50, catalog_u64_range = 1..=100)]
         limit: u64,
         /// Continue the same filters and attempt high-water mark
         #[arg(long)]
@@ -67,7 +68,7 @@ pub enum Console {
         part: String,
         #[arg(long)]
         session: Option<String>,
-        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u64).range(1..=100))]
+        #[arg(long, default_value_t = 50, catalog_u64_range = 1..=100)]
         limit: u64,
         #[arg(long)]
         cursor: Option<String>,
@@ -83,7 +84,7 @@ pub enum Console {
         /// Select a host session ID
         session: Option<String>,
         /// Maximum rows in a page
-        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u64).range(1..=100))]
+        #[arg(long, default_value_t = 50, catalog_u64_range = 1..=100)]
         limit: u64,
         /// Continue an unchanged catalogue snapshot
         #[arg(long)]

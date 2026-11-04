@@ -30,7 +30,7 @@ pub struct QuotaTick {
     pub power: Power,
 }
 
-pub const TICK_BUDGET_SECONDS: i64 = 55;
+pub const TICK_BUDGET_SECONDS: i64 = crate::DEFAULT_WALL_BUDGET_SECONDS as i64;
 /// A probe must finish before its durable claim expires, even when the tick's
 /// configured wall budget is longer than the claim window.
 pub fn probe_deadline(tick_deadline: i64, started: i64) -> Result<i64, QuotaError> {

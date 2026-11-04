@@ -18,7 +18,7 @@ use std::{
 };
 use thiserror::Error;
 
-const CLAUDE_CONFIG_LIMIT: u64 = 16 * 1024 * 1024;
+use crate::harness::CLAUDE_CONFIG_LIMIT;
 
 #[derive(Debug, Error)]
 pub enum InstallError {

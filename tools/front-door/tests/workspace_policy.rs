@@ -353,9 +353,12 @@ fn test_scopes(source: &str, test_file: bool) -> Vec<&str> {
                 // Leaving the enclosing group (a parameter or field attribute) ends the item.
                 ")" | "]" | "," if depth + nesting == 0 => break,
                 ")" | "]" => nesting -= 1,
-                ";" if depth + nesting == 0 => break,
+                ";" if depth + nesting == 0 => {
+                    scopes.push(&source[offset(attribute[0])..=offset(token)]);
+                    break;
+                }
                 "{" => depth += 1,
-                "}" if depth <= 1 => {
+                "}" if depth <= 1 && nesting == 0 => {
                     scopes.push(&source[offset(attribute[0])..=offset(token)]);
                     break;
                 }
@@ -975,5 +978,56 @@ fn native_boundaries_mirror_workspace_lints_except_for_unsafe_code() -> Result<(
             "{member} must mirror workspace lint policy"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn adapter_policy_excludes_complete_test_const_arrays() {
+    let source = "#[cfg(test)] const ROWS: &[Row] = &[Row { adapter: \"claude\" }, Row { adapter: \"agy\" }];\nfn production() {}";
+    let scopes = test_scopes(source, false);
+    assert_eq!(scopes.len(), 1);
+    assert!(scopes[0].contains("agy"));
+    assert!(!scopes[0].contains("production"));
+}
+
+/// Adapter policy belongs to the records registry; hooks are declarative
+/// provider command data. Test fixtures may still name their provider.
+#[test]
+fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let literal = regex::Regex::new(r#""(?:claude|opencode|agy)""#)?;
+    let mut sources = Vec::new();
+    for name in ["cli", "routing", "quota"] {
+        rust_sources(&root.join("crates").join(name).join("src"), &mut sources)?;
+    }
+    let mut violations = Vec::new();
+    for path in sources {
+        // The hook command table is registry data, not adapter policy.
+        if path == root.join("crates/cli/src/hooks.rs") {
+            continue;
+        }
+        let source = fs::read_to_string(&path)?;
+        let tests = test_scopes(&source, is_test_source(&path.to_string_lossy()));
+        for found in literal.find_iter(&source) {
+            let offset = source.as_ptr() as usize + found.start();
+            if tests.iter().any(|scope| {
+                let start = scope.as_ptr() as usize;
+                (start..start + scope.len()).contains(&offset)
+            }) {
+                continue;
+            }
+            let line = source[..found.start()]
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count()
+                + 1;
+            violations.push(format!("{}:{line}: {}", path.display(), found.as_str()));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "adapter policy must use AdapterSpec data:\n{}",
+        violations.join("\n")
+    );
     Ok(())
 }

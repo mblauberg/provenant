@@ -34,12 +34,19 @@ impl crate::Settings {
     pub fn apply_calibration(&self, records: &mut [AccountRecord], now: i64) {
         let mut labels = std::collections::BTreeMap::<String, usize>::new();
         let mut keys = std::collections::BTreeSet::new();
-        for record in records.iter().filter(|r| r.account.adapter == "opencode") {
+        for record in records.iter().filter(|r| {
+            provenant_records::AdapterSpec::get(&r.account.adapter).is_some_and(|spec| {
+                spec.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
+            })
+        }) {
             *labels.entry(record.account.label.clone()).or_default() += 1;
             keys.insert(record.account.account_key.clone());
         }
         for record in records {
-            if record.account.adapter != "opencode" || record.account.account_key == "zen" {
+            if !provenant_records::AdapterSpec::get(&record.account.adapter).is_some_and(|spec| {
+                spec.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
+            }) || record.account.account_key == "zen"
+            {
                 continue;
             }
             let Some(snapshot) = &mut record.snapshot else {

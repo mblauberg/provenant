@@ -279,11 +279,15 @@ pub(crate) fn run_preset_graph(
                 false,
             )
         }
-        Err(error) => crate::fail(
+        Err(error) => crate::fail_with_repair(
             "run",
             Outcome::Error,
             "preset_graph",
             &error.to_string(),
+            error
+                .downcast_ref::<provenant_cli::fabric::EdgeError>()
+                .and_then(|error| error.repair())
+                .as_deref(),
             globals,
         ),
     }

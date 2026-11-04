@@ -1275,7 +1275,7 @@ impl provenant_run::Providers for WriterProvider {
         _prompt: &str,
         paths: &provenant_run::LaunchPaths,
         resume: Option<&provenant_run::AttemptRecord>,
-    ) -> std::result::Result<provenant_run::PreparedLaunch, String> {
+    ) -> std::result::Result<provenant_run::PreparedLaunch, provenant_run::PrepareRefusal> {
         if resume.is_some() {
             return Err("writer fixture does not resume".into());
         }
@@ -2355,6 +2355,7 @@ fn recreated_worktree_accepts_writer_after_settlement() -> Result {
 fn existing_branch_with_base_names_the_repair_in_json_and_human_output() -> Result {
     let rig = repository()?;
     git(&rig, &["branch", "existing"])?;
+    git(&rig, &["commit", "--allow-empty", "-qm", "advance"])?;
     let json_output = command(
         &rig,
         &["worktree", "create", "existing", "--base", "HEAD", "--json"],
@@ -2363,7 +2364,9 @@ fn existing_branch_with_base_names_the_repair_in_json_and_human_output() -> Resu
     let value = json(&json_output)?;
     let message = value["error"]["message"].as_str().ok_or("error message")?;
     assert!(
-        message.contains("branch existing already exists; omit --base"),
+        message.contains("branch existing at")
+            && message.contains("does not contain base")
+            && message.contains("omit --base"),
         "{value}"
     );
 
@@ -2371,7 +2374,9 @@ fn existing_branch_with_base_names_the_repair_in_json_and_human_output() -> Resu
     assert_ne!(code(&human_output), 0);
     let message = String::from_utf8_lossy(&human_output.stderr.bytes);
     assert!(
-        message.contains("branch existing already exists; omit --base"),
+        message.contains("branch existing at")
+            && message.contains("does not contain base")
+            && message.contains("omit --base"),
         "{message}"
     );
     Ok(())

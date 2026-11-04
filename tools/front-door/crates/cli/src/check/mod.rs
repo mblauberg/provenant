@@ -1,5 +1,6 @@
 //! Check composition and stateless, evidence-bound pagination.
 use crate::grammar::{Page, Rules, absolute};
+use crate::metadata::CatalogueArg;
 use clap::{Subcommand, builder::TypedValueParser};
 use provenant_confinement::utility::run_release_read_utility;
 use provenant_confinement::{GitRead, ReadOnlyRepo, UtilityBudget, UtilityRuntime};
@@ -34,10 +35,10 @@ pub enum Check {
     /// Check a release range for blocking findings
     Release {
         /// Base commit of the range
-        #[arg(long, requires = "head")]
+        #[arg(long, catalog_requires = "head")]
         base: Option<GitOid>,
         /// Head commit of the range
-        #[arg(long, requires = "base")]
+        #[arg(long, catalog_requires = "base")]
         head: Option<GitOid>,
         #[command(flatten)]
         page: Page,
@@ -461,7 +462,12 @@ pub fn config_page(
             ConfigError::Schema { location, .. } | ConfigError::CollectionLimit { location } => (
                 "config.schema",
                 location.line,
-                "configuration violates the typed TOML schema".to_owned(),
+                "configuration violates the typed TOML schema; repair: delete the line or run `provenant config migrate`".to_owned(),
+            ),
+            ConfigError::MisplacedDomainKnob { name, location } => (
+                "config.schema",
+                location.line,
+                format!("set {name} outside [knobs]; repair: delete the line or run `provenant config migrate`"),
             ),
             ConfigError::Domain {
                 location, source, ..
