@@ -1765,7 +1765,7 @@ fn composite_rejects_ambiguous_exports_and_blocks_on_child_failure() {
             "composite":{"nodes":[
                 {"id":"a","access":"read_only","prompt":"a","route":{"alias":"junior"}},
                 {"id":"b","access":"read_only","prompt":"b","route":{"alias":"junior"}}
-            ],"exports":[{"node":"a","outputs":["commit"]},{"node":"b","outputs":["commit"]}]}
+            ],"exports":[{"node":"a","outputs":["verdict"]},{"node":"b","outputs":["verdict"]}]}
         }]
     }))
     .unwrap();

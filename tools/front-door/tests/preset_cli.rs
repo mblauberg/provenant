@@ -1049,6 +1049,11 @@ fn explain_admission_matches_submission() -> Result<(), Box<dyn std::error::Erro
     let temp = tempfile::tempdir()?;
     let state = temp.path().join("state");
     std::fs::create_dir(&state)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+    }
     std::fs::write(
         state.join("config.toml"),
         "schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 1\n",
@@ -1056,10 +1061,21 @@ fn explain_admission_matches_submission() -> Result<(), Box<dyn std::error::Erro
     let prompt = temp.path().join("prompt");
     std::fs::write(&prompt, "brief")?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    let init = provenant_os::fixture::git_command()
+        .current_dir(&project)
+        .args(["init", "-q"])
+        .output()?;
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
     let run = |explain: bool| -> Result<std::process::Output, Box<dyn std::error::Error>> {
         let mut command = fixture_cli();
         command
-            .current_dir(&root)
+            .current_dir(&project)
             .env("PROVENANT_ROOT", &root)
             .env("XDG_CONFIG_HOME", temp.path().join("config"))
             .args(["--json", "--state-dir"])

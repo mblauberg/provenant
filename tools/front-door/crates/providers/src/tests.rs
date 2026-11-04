@@ -7460,7 +7460,7 @@ fn staged_skills_native_probes() -> Result<(), Box<dyn std::error::Error>> {
             std::fs::create_dir_all(keychain.parent().ok_or("keychain parent")?)?;
             std::fs::write(keychain, b"fixture")?;
             let executable = fixture.join("package/bin/provider");
-            std::fs::write(&executable, b"fixture")?;
+            std::fs::copy(std::env::current_exe()?, &executable)?;
             let authentication = match adapter {
                 "agy" => Some("keychain"),
                 "codex" | "cursor" => Some("login"),
@@ -7508,21 +7508,45 @@ fn staged_skills_native_probes() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             let profile = render(plan.permissions(), &launch.profile, &home)?;
-            let probe = "cat \"$1\" >/dev/null && ! cat \"$2\" >/dev/null 2>&1 && ! cat \"$3\" >/dev/null 2>&1 && ! (printf x >\"$1\") 2>/dev/null && ! (printf x >\"$2\") 2>/dev/null";
             let output = std::process::Command::new("/usr/bin/sandbox-exec")
-                .args(["-p", &profile, "/bin/sh", "-c", probe, "probe"])
-                .arg(stage.join("SKILL.md"))
-                .arg(skills.join("SKILL.md"))
-                .arg(&secret)
+                .args(["-p", &profile])
+                .arg(&executable)
+                .args(["--exact", "tests::staged_skills_probe_child", "--nocapture"])
                 .env_clear()
+                .env("PROVENANT_PROBE_STAGE", stage.join("SKILL.md"))
+                .env("PROVENANT_PROBE_HOST", skills.join("SKILL.md"))
+                .env("PROVENANT_PROBE_SECRET", &secret)
                 .output()?;
             let error = String::from_utf8_lossy(&output.stderr);
             if error.contains("sandbox_apply: Operation not permitted") {
                 provenant_test_support::skip_sandbox_dependent_test(error.to_string())?;
                 return Ok(());
             }
-            assert!(output.status.success(), "{adapter} {access:?}: {error}");
+            assert!(
+                output.status.success(),
+                "{adapter} {access:?}: {error} {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "{adapter} {access:?}: probe child did not run"
+            );
         }
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn staged_skills_probe_child() {
+    let Some(stage) = std::env::var_os("PROVENANT_PROBE_STAGE") else {
+        return;
+    };
+    let host = std::env::var_os("PROVENANT_PROBE_HOST").expect("host path");
+    let secret = std::env::var_os("PROVENANT_PROBE_SECRET").expect("secret path");
+    assert_eq!(std::fs::read(&stage).unwrap(), b"fixture skill");
+    assert!(std::fs::read(&host).is_err());
+    assert!(std::fs::read(&secret).is_err());
+    assert!(std::fs::write(&stage, b"x").is_err());
+    assert!(std::fs::write(&host, b"x").is_err());
 }

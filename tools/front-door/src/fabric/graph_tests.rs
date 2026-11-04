@@ -10,12 +10,12 @@ mod graph_review_tests {
                 "id": "council", "kind": "composite", "access": "read_only",
                 "composite": {
                     "nodes": [
-                        {"id":"subject", "role":"plan.review", "access":"read_only", "prompt":"Frame"},
-                        {"id":"lens", "role":"lens.correctness-spec", "access":"read_only", "prompt":"Review"},
-                        {"id":"verify", "role":"review.verify", "access":"read_only", "prompt":"Verify"},
-                        {"id":"synthesis", "role":"review.synthesis", "access":"read_only", "prompt":"Reconcile"},
-                        {"id":"other", "role":"plan", "access":"read_only", "prompt":"Plan"},
-                        {"id":"writer", "role":"review.verify", "access":"worktree_write", "worktree":"lane", "prompt":"Write"}
+                        {"id":"subject", "route":{"alias":"junior"}, "role":"plan.review", "access":"read_only", "prompt":"Frame"},
+                        {"id":"lens", "route":{"alias":"junior"}, "role":"lens.correctness-spec", "access":"read_only", "prompt":"Review"},
+                        {"id":"verify", "route":{"alias":"junior"}, "role":"review.verify", "access":"read_only", "prompt":"Verify"},
+                        {"id":"synthesis", "route":{"alias":"junior"}, "role":"review.synthesis", "access":"read_only", "prompt":"Reconcile"},
+                        {"id":"other", "route":{"alias":"junior"}, "role":"plan", "access":"read_only", "prompt":"Plan"},
+                        {"id":"writer", "route":{"alias":"junior"}, "role":"review.verify", "access":"worktree_write", "worktree":"lane", "prompt":"Write"}
                     ],
                     "exports": [{"node":"synthesis","outputs":["result"]}]
                 }
