@@ -5926,6 +5926,77 @@ fn claude_session_reaches_the_decoded_attempt() {
 }
 
 #[test]
+fn agy_repeated_answer_is_captured_once() {
+    let answer = "# Review\n\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"low\",\"file\":\"a.rs\",\"summary\":\"issue\",\"status\":\"open\"}]}\n```\nVERDICT: PASS\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"done\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```";
+    let route = run::RouteRecord {
+        provider: Some("agy".into()),
+        ..Default::default()
+    };
+    let decode = |step: &str, response: &str| {
+        let stream = format!(
+            "{}\n{}\n{}\n",
+            json!({"event":"init","conversation_id":"s","init":{"model":"m"}}),
+            json!({"event":"step_update","step_update":{"conversation_id":"s","step_type":"agent_response","text_delta":step}}),
+            json!({"event":"result","result":{"conversation_id":"s","status":"SUCCESS","response":response,"usage":{"input_tokens":1,"output_tokens":1}}})
+        );
+        Registry::default()
+            .decode(
+                &route,
+                stream.as_bytes(),
+                &clean_exit(),
+                Path::new("/unused"),
+            )
+            .unwrap()
+    };
+    for decoded in [
+        decode(&format!("{answer}\n"), answer),
+        decode("", &format!("  {answer}\n\n{answer}  ")),
+    ] {
+        assert_eq!(decoded.outcome, run::Outcome::Succeeded);
+        assert_eq!(decoded.result, answer);
+        let mut capture = provenant_records::result_capture::ResultCapture::new(None);
+        capture.push(decoded.result.as_bytes());
+        let captured = capture.finish();
+        assert!(captured.handoff.unwrap().is_some());
+        assert_eq!(captured.verdict.as_deref(), Some("VERDICT: PASS"));
+        assert_eq!(captured.declarations, 1);
+        assert_eq!(decoded.result.matches("```findings").count(), 1);
+    }
+    for response in [
+        format!("{answer}\nextra"),
+        format!(
+            "{answer}\n{}",
+            answer.replace("\"note\":\"done\"", "\"note\":\"different\"")
+        ),
+    ] {
+        let decoded = decode("", &response);
+        assert_eq!(decoded.result, response);
+        assert!(provenant_records::handoff::Handoff::from_result(&decoded.result).is_err());
+    }
+}
+
+#[test]
+fn repeated_answer_from_non_agy_adapter_is_unchanged() {
+    let route = run::RouteRecord {
+        provider: Some("claude".into()),
+        ..Default::default()
+    };
+    let stream = concat!(
+        "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n",
+        "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"answer\\nanswer\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n"
+    );
+    let decoded = Registry::default()
+        .decode(
+            &route,
+            stream.as_bytes(),
+            &clean_exit(),
+            Path::new("/unused"),
+        )
+        .unwrap();
+    assert_eq!(decoded.result, "answer\nanswer");
+}
+
+#[test]
 fn claude_usage_records_cache_read_and_cache_write() {
     let route = run::RouteRecord {
         provider: Some("claude".into()),
