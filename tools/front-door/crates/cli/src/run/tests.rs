@@ -2162,7 +2162,7 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
         WorktreeOwner,
     };
     use provenant_core::RootInputs;
-    struct LiveObserver(PathBuf);
+    struct LiveObserver(PathBuf, std::sync::atomic::AtomicUsize);
     impl WorkerObserver for LiveObserver {
         fn observe_roots(
             &self,
@@ -2172,6 +2172,37 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
                 .iter()
                 .map(|root| (root.clone(), WorkerState::Live))
                 .collect()
+        }
+
+        fn observe_evidence_with_policy(
+            &self,
+            roots: &[PathBuf],
+            _entries: &[provenant_os::pid::CensusIgnoreEntry],
+            _for_land: bool,
+        ) -> provenant_confinement::worktrees::WorkerEvidence {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            provenant_confinement::worktrees::WorkerEvidence {
+                states: roots
+                    .iter()
+                    .cloned()
+                    .map(|root| (root, WorkerState::Live))
+                    .collect(),
+                holders: roots
+                    .iter()
+                    .cloned()
+                    .map(|root| {
+                        (
+                            root,
+                            ObservedProcess {
+                                pid: 54321,
+                                command: Some("foreign-writer".into()),
+                                cwd: Some(self.0.clone()),
+                            },
+                        )
+                    })
+                    .collect(),
+                details: Default::default(),
+            }
         }
         fn live_process(&self, _root: &Path) -> Option<ObservedProcess> {
             Some(ObservedProcess {
@@ -2191,6 +2222,42 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
                 .iter()
                 .map(|root| (root.clone(), WorkerState::Free))
                 .collect()
+        }
+    }
+    struct CountedUnknown(std::sync::atomic::AtomicUsize);
+    impl WorkerObserver for CountedUnknown {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, WorkerState::Unknown))
+                .collect()
+        }
+
+        fn observe_roots_with_details(
+            &self,
+            roots: &[PathBuf],
+        ) -> provenant_confinement::worktrees::WorkerObservations {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (
+                roots
+                    .iter()
+                    .cloned()
+                    .map(|root| (root.clone(), WorkerState::Unknown))
+                    .collect(),
+                roots
+                    .iter()
+                    .cloned()
+                    .map(|root| (root, "injected census incomplete".into()))
+                    .collect(),
+            )
+        }
+
+        fn incomplete_census_detail(&self) -> String {
+            "injected census incomplete".into()
         }
     }
     let temp = tempfile::tempdir()?;
@@ -2263,7 +2330,64 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
         Ok((info.path, info.head))
     })?;
 
-    let observer = LiveObserver(path.clone());
+    // Exercise the actual owned-run admission boundary for an existing,
+    // unowned tree whose registration and on-disk custody are known but whose
+    // process census is incomplete.
+    let census_branch = "census-refusal-branch";
+    worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+        let context = &worktrees::WorktreeContext {
+            workers: &Free,
+            ..*context
+        };
+        worktrees::create(
+            context,
+            WorktreeCreate {
+                branch: census_branch.into(),
+                base: None,
+            },
+            &cancel,
+        )?;
+        Ok(())
+    })?;
+    let counted = CountedUnknown(std::sync::atomic::AtomicUsize::new(0));
+    let session = worktrees::CensusSession::new(&counted, &clock);
+    let census_error = super::own_worktree(
+        &super::OwnedWorktree {
+            branch: census_branch.into(),
+            host,
+            created_at: WallTime::from_micros(2)?,
+        },
+        None,
+        &OperationId::parse("census-op")?,
+        &edge,
+        &session,
+        |_| false,
+        &mut None,
+        &clock,
+        &cancel,
+    );
+    match census_error {
+        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
+            provenant_confinement::worktrees::WorktreeError::CensusUnknown { detail },
+        ))) => assert_eq!(detail, "injected census incomplete"),
+        other => panic!("expected typed census refusal, got {other:?}"),
+    }
+    assert_eq!(counted.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let census_unknown = worktrees::WorktreeError::CensusUnknown {
+        detail: "injected census incomplete".into(),
+    };
+    assert_eq!(
+        census_unknown.admission_cause(),
+        Some(worktrees::AdmissionCause::CensusIncomplete)
+    );
+    assert_eq!(
+        census_unknown.to_string(),
+        worktrees::WorktreeError::UnknownWriter.to_string()
+    );
+
+    let observer = LiveObserver(path.clone(), std::sync::atomic::AtomicUsize::new(0));
+    let live_policy = worktrees::CensusPolicyWorkers::for_run(&observer, &roots)?;
+    let live_session = worktrees::CensusSession::new(&live_policy, &clock);
     let err = super::own_worktree(
         &super::OwnedWorktree {
             branch: branch.into(),
@@ -2273,7 +2397,7 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
         None,
         &OperationId::parse("new-op")?,
         &edge,
-        &observer,
+        &live_session,
         |_| false,
         &mut None,
         &clock,
@@ -2291,6 +2415,7 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
         }
         other => panic!("expected LiveProcess, got {other:?}"),
     }
+    assert_eq!(observer.1.load(std::sync::atomic::Ordering::SeqCst), 1);
     Ok(())
 }
 

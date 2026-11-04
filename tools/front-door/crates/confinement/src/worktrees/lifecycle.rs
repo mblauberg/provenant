@@ -87,10 +87,33 @@ pub fn list(
     context: &WorktreeContext<'_>,
     cancel: &CancelToken,
 ) -> Result<Vec<WorktreeInfo>, WorktreeError> {
+    Ok(list_with_observation(context, cancel)?
+        .into_iter()
+        .map(|observation| observation.info)
+        .collect())
+}
+
+/// The native census and registration/custody provenance for one inventory row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorktreeObservation {
+    pub info: WorktreeInfo,
+    pub observed: WorkerState,
+    pub registration_unknown: bool,
+}
+
+/// Like [`list`], preserving the native observation and whether registration
+/// or on-disk custody was itself unresolved. Admission callers use these
+/// typed facts to distinguish incomplete census from unresolved custody.
+pub fn list_with_observation(
+    context: &WorktreeContext<'_>,
+    cancel: &CancelToken,
+) -> Result<Vec<WorktreeObservation>, WorktreeError> {
     validate_binding(context)?;
-    let _lock = repository_lock(context, LockMode::Exclusive, cancel)?;
-    context.repo.revalidate()?;
-    let entries = read_worktrees(context, cancel)?;
+    let entries = {
+        let _lock = repository_lock(context, LockMode::Exclusive, cancel)?;
+        context.repo.revalidate()?;
+        read_worktrees(context, cancel)?
+    };
     // A stale Git registration must not hide the remaining worktrees from GC.
     let candidates: Vec<_> = entries
         .iter()
@@ -111,12 +134,13 @@ pub fn list(
             .copied()
             .unwrap_or(WorkerState::Unknown);
         let mut owner = OwnerStatus::Unknown;
-        let (dirty, writer) = if path == primary {
+        let (dirty, writer, registration_unknown) = if path == primary {
             owner = OwnerStatus::Primary;
             (
                 worktree_dirty_at(context, context.repo, cancel)
                     .unwrap_or(WorktreeCondition::Unknown),
                 combine_worker_state(WorkerState::Unknown, observed),
+                true,
             )
         } else {
             match verify_probed_worktree(context, &path, cancel) {
@@ -126,29 +150,36 @@ pub fn list(
                         Ok(None) => OwnerStatus::Unowned,
                         Err(_) => OwnerStatus::Unknown,
                     };
+                    let disk = if entry.locked || entry.prunable {
+                        WorkerState::Unknown
+                    } else {
+                        disk_writer_state(context.project_state, &path)
+                    };
                     (
                         worktree_dirty_at(context, worktree.repo(), cancel)
                             .unwrap_or(WorktreeCondition::Unknown),
                         if entry.locked || entry.prunable {
                             WriterState::Unknown
                         } else {
-                            combine_worker_state(
-                                disk_writer_state(context.project_state, &path),
-                                observed,
-                            )
+                            combine_worker_state(disk, observed)
                         },
+                        entry.locked || entry.prunable || disk == WorkerState::Unknown,
                     )
                 }
-                Err(_) => (WorktreeCondition::Unknown, WriterState::Unknown),
+                Err(_) => (WorktreeCondition::Unknown, WriterState::Unknown, true),
             }
         };
-        result.push(WorktreeInfo {
-            path,
-            branch: branch_text,
-            head: entry.head,
-            dirty,
-            writer,
-            owner,
+        result.push(WorktreeObservation {
+            info: WorktreeInfo {
+                path,
+                branch: branch_text,
+                head: entry.head,
+                dirty,
+                writer,
+                owner,
+            },
+            observed,
+            registration_unknown,
         });
     }
     Ok(result)

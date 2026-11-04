@@ -124,6 +124,11 @@ pub enum WorktreeError {
     UnknownWriter,
     #[error("worktree writer or registration is unknown at {}", .path.display())]
     UnknownWriterAt { path: PathBuf },
+    /// The merged writer state is unknown specifically because native census
+    /// evidence was incomplete. The public refusal text and code stay the same
+    /// as `UnknownWriter`; lifecycle consumers get a typed retry cause.
+    #[error("worktree writer or registration is unknown")]
+    CensusUnknown { detail: String },
     #[error("Git marks the worktree {}", if *.locked { "locked" } else { "prunable" })]
     GitEntryHeld { locked: bool },
     #[error("worktree operation was cancelled")]
@@ -185,7 +190,8 @@ impl WorktreeError {
         match self {
             Self::RegistryLockTimeout => Some(AdmissionCause::RegistryLockTimeout),
             Self::IncompleteCensus { .. } => Some(AdmissionCause::CensusIncomplete),
-            Self::UnknownWriter | Self::GitEntryHeld { .. } => {
+            Self::CensusUnknown { .. } => Some(AdmissionCause::CensusIncomplete),
+            Self::UnknownWriter | Self::UnknownWriterAt { .. } | Self::GitEntryHeld { .. } => {
                 Some(AdmissionCause::RegistrationOrCustodyUnknown)
             }
             _ => None,
@@ -197,7 +203,10 @@ impl WorktreeError {
     pub fn is_custody_unknown(&self) -> bool {
         matches!(
             self,
-            Self::UnknownWriter | Self::UnknownWriterAt { .. } | Self::GitEntryHeld { .. }
+            Self::UnknownWriter
+                | Self::UnknownWriterAt { .. }
+                | Self::CensusUnknown { .. }
+                | Self::GitEntryHeld { .. }
         )
     }
 
@@ -224,7 +233,7 @@ impl WorktreeError {
             Self::GitOperationInProgress => {
                 "run `git -C PATH status` and complete or abort the Git operation before retrying"
             }
-            Self::UnknownWriter | Self::UnknownWriterAt { .. } => {
+            Self::UnknownWriter | Self::UnknownWriterAt { .. } | Self::CensusUnknown { .. } => {
                 "run `provenant worktree list` and inspect the registration and writer state before retrying"
             }
             Self::IncompleteCensus { .. } => {

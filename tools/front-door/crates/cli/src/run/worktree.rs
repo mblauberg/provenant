@@ -102,11 +102,15 @@ pub(super) fn own_worktree(
             } else {
                 None
             };
-            let existing = worktrees::list(context, cancel)?.into_iter().find(|tree| {
-                tree.branch.as_deref() == Some(format!("refs/heads/{branch}").as_str())
-            });
+            let existing = worktrees::list_with_observation(context, cancel)?
+                .into_iter()
+                .find(|observation| {
+                    observation.info.branch.as_deref()
+                        == Some(format!("refs/heads/{branch}").as_str())
+                });
             let (info, pinned) = match existing {
-                Some(info) => {
+                Some(observation) => {
+                    let info = observation.info;
                     if let Some(base) = requested_base_oid
                         && !worktrees::is_ancestor(context, base, info.head, cancel)?
                     {
@@ -124,6 +128,22 @@ pub(super) fn own_worktree(
                     {
                         owner_refused = true;
                         return Err(worktrees::WorktreeError::UnknownWriter);
+                    }
+                    if observation.observed == worktrees::WorkerState::Unknown
+                        && !observation.registration_unknown
+                        && owner.is_none()
+                        && worktrees::cache_writer_probe(context.project_state, &info.path).is_ok()
+                    {
+                        let evidence = context
+                            .workers
+                            .observe_evidence(std::slice::from_ref(&info.path), false);
+                        return Err(worktrees::WorktreeError::CensusUnknown {
+                            detail: evidence
+                                .details
+                                .get(&info.path)
+                                .cloned()
+                                .unwrap_or_else(|| context.workers.incomplete_census_detail()),
+                        });
                     }
                     match info.writer {
                         WriterState::Free => {}

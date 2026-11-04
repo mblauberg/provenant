@@ -2446,6 +2446,65 @@ fn gc_census_never_runs_under_the_repository_lock() -> Result<(), Box<dyn Error>
     Ok(())
 }
 
+#[test]
+fn inventory_census_runs_after_repository_snapshot_lock_is_released() -> Result<(), Box<dyn Error>>
+{
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let probe = LockProbeWorkers {
+        project_state: context.project_state,
+        repository_held: Default::default(),
+    };
+    context.workers = &probe;
+
+    // `collect` and the CLI's project-GC discovery both obtain their candidate
+    // set through this inventory path before applying GC policy.
+    let inventory = list(&context, &cancel())?;
+    assert!(!inventory.is_empty());
+    assert_eq!(
+        *probe.repository_held.lock().unwrap(),
+        vec![false],
+        "native census must run after the Git registration snapshot lock drops"
+    );
+    Ok(())
+}
+
+#[test]
+fn locked_registration_stays_unknown_when_census_reports_live() -> Result<(), Box<dyn Error>> {
+    struct LiveWorkers;
+    impl WorkerObserver for LiveWorkers {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, WorkerState::Live))
+                .collect()
+        }
+    }
+
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let path = fixture.root.join(".worktrees/locked-live");
+    fixture.run(&[
+        "worktree",
+        "add",
+        "-b",
+        "locked-live",
+        path.to_str().ok_or("path")?,
+    ])?;
+    fixture.run(&["worktree", "lock", path.to_str().ok_or("path")?])?;
+    context.workers = &LiveWorkers;
+
+    let listed = list(&context, &cancel())?
+        .into_iter()
+        .find(|entry| entry.path == path)
+        .ok_or("locked linked worktree missing from inventory")?;
+    assert_eq!(listed.writer, WriterState::Unknown);
+    Ok(())
+}
+
 /// Free until the `unknown_from`th call (1-based), then unobservable.
 struct FlippingWorkers {
     calls: std::sync::atomic::AtomicUsize,

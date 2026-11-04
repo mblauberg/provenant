@@ -327,10 +327,6 @@ pub(super) fn dispatch_with_workers(
                 &census,
                 |context| {
                     use provenant_confinement::worktrees;
-                    let context = &worktrees::WorktreeContext {
-                        workers: &workers,
-                        ..*context
-                    };
                     let info = worktrees::list(context, &cancel)?
                         .into_iter()
                         .find(|tree| tree.path == path)
