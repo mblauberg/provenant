@@ -166,6 +166,12 @@ bounded_input! {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DispatchRefusalFact {
+    DetachedWriter,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum FacadeError {
@@ -237,6 +243,8 @@ pub enum FacadeError {
         reason: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         disk: Option<DiskPressure>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fact: Option<DispatchRefusalFact>,
     },
     #[error("{reason}")]
     DispatchUnobserved {
@@ -427,6 +435,10 @@ impl FacadeError {
                     .next("upgrade both hosts to compatible protocol versions");
             }
             Self::DispatchUnobserved { .. } => projected = projected.detail("disk observation failed").next("restore the host disk observation before retrying"),
+            Self::DispatchRefused { fact: Some(DispatchRefusalFact::DetachedWriter), .. } => {
+                projected = projected.detail("writer needs a branch")
+                    .next("create a branch for the worktree before retrying");
+            }
             Self::DispatchRefused { disk: Some(disk), .. } => {
                 projected = projected.detail(format!("insufficient disk space on the limiting volume: {} bytes available, floor {} bytes; bounded GC reported {} bytes reclaimed", disk.available, disk.floor, disk.reclaimed))
                     .next(format!("run `provenant gc --free-floor {}B` before dispatching a writer", disk.floor));
@@ -887,8 +899,29 @@ mod diagnostic_tests {
     }
 
     #[test]
+    fn detached_writer_refusal_keeps_its_typed_cause_across_transport() {
+        let error = FacadeError::DispatchRefused {
+            reason: "writer needs a branch".into(),
+            disk: None,
+            fact: Some(super::DispatchRefusalFact::DetachedWriter),
+        };
+        let wire = serde_json::to_string(&error).unwrap();
+        let received: FacadeError = serde_json::from_str(&wire).unwrap();
+        let projected = received.diagnostic();
+        assert_eq!(projected.code, "dispatch_refused");
+        assert_eq!(projected.detail.as_deref(), Some("writer needs a branch"));
+        assert!(
+            projected
+                .next
+                .as_deref()
+                .is_some_and(|next| next.contains("branch"))
+        );
+    }
+
+    #[test]
     fn disk_refusal_retains_numeric_facts_without_source_or_host_path() {
         let error = FacadeError::DispatchRefused {
+            fact: None,
             reason: "TOKEN_SENTINEL /private/host".into(),
             disk: Some(super::DiskPressure {
                 available: 42,

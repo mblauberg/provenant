@@ -5823,6 +5823,7 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
         FacadeError::InvalidInput { detail: None },
         FacadeError::ConfinementRefused,
         FacadeError::DispatchRefused {
+            fact: None,
             disk: None,
             reason: "why".into(),
         },
