@@ -5817,7 +5817,6 @@ impl Factory {
             ) {
                 graph_status_elapsed(&mut checkpoint, &boot, now);
             }
-            checkpoint.restore_pause_reason_for_status();
             let mut run = graph_snapshot(checkpoint);
             let sidecar_error = FileJournal::read_advance_error(
                 &self.context.roots.state,

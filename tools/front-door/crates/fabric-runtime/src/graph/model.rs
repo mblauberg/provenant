@@ -854,22 +854,6 @@ impl NodeState {
 }
 
 impl GraphCheckpoint {
-    /// Restore the decoded planner error in a read-only status snapshot of older pauses.
-    pub fn restore_pause_reason_for_status(&mut self) {
-        if let Some(reason) = self.pause_reason.as_deref()
-            && let Some(display) = self
-                .nodes
-                .iter()
-                .filter_map(|node| node.expansion_pause.as_deref())
-                .find(|pause| {
-                    pause.split("\n[planner-fragment-retry-context:").next() == Some(reason)
-                })
-                .map(plans::pause_reason_for_display)
-        {
-            self.pause_reason = Some(display);
-        }
-    }
-
     /// Failed gates are handled only when their recovery path succeeds.
     pub fn successful(&self) -> bool {
         if self.nodes.iter().any(|n| n.expansion_pause.is_some()) {

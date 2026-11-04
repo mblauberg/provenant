@@ -1756,15 +1756,8 @@ fn retry_fragment_error(pause: &str) -> Option<String> {
 }
 
 pub(super) fn pause_reason_for_display(reason: &str) -> String {
-    let Some((display, _)) = reason.rsplit_once(FALLBACK_RETRY_CONTEXT) else {
-        return reason.to_owned();
-    };
-    match retry_fragment_error(reason) {
-        Some(fragment_error)
-            if !display.contains(" expansion paused: planner fragment invalid:") =>
-        {
-            format!("planner fragment invalid: {fragment_error}; {display}")
-        }
-        _ => display.to_owned(),
-    }
+    reason
+        .rsplit_once(FALLBACK_RETRY_CONTEXT)
+        .map_or(reason, |(display, _)| display)
+        .to_owned()
 }
