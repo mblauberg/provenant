@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 
-Changed: 2026-10-30, #2284.
+Changed: 2026-10-30, #2284; 2026-11-04 (shims and provider guards).
 
 ## Context
 
@@ -26,13 +26,25 @@ Four boundaries are strict and fail closed:
    rather than recovering to permissive defaults.
 
 Everything else is flexible. User configuration warns and keeps valid settings;
-other edge cases get a typed refusal ([ADR 0034](0034-refusals-carry-stable-typed-codes.md))
-or a note. Persisted formats are versioned and tolerate extra fields. Pre-release
-interfaces change without compatibility shims; the project makes no stability
-promise before then.
+other edge cases get a note, or a typed refusal of that one operation
+([ADR 0034](0034-refusals-carry-stable-typed-codes.md)). Persisted formats are
+versioned and tolerate extra fields.
+
+Interfaces change without compatibility shims, before and after 1.0: no legacy
+readers, aliases, fallback paths or dual formats. A breaking change ships with
+a release note, and with `provenant config migrate` or a drain before
+upgrade ([install](../runbooks/install.md#bootstrap-and-upgrade)) when
+persisted state changes.
+
+Provider and launch guards outside the four boundaries warn and continue, or
+are configurable defaults with a visible source. They do not refuse a lane.
+Dropping an optional grant, skill or tool with a named warning is preferred
+over refusing the launch.
 
 ## Consequences
 
-New guards need an observed failure in one of the four classes. See
+New guards need an observed failure in one of the four classes. Reviews treat
+a lane or launch refusal outside them, or any guard that blocks ordinary work,
+as a defect to loosen, not a safety gain. See
 [Simple first](../specs/rust-workspace.md#simple-first) and the
 [supervisor spec](../specs/supervisor.md).

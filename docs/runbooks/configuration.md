@@ -832,9 +832,9 @@ that intentionally contain markers:
 push_conflict_markers = false
 ```
 
-The default is `true`. Default-branch deletion, non-fast-forward updates and
-default-branch pushes from linked worktrees are still refused, so the Git lane
-boundary is unchanged. An unreadable config keeps the check on.
+The default is `true`. Default-branch deletion, non-fast-forward updates to the
+default branch and default-branch pushes from linked worktrees are still
+refused. An unreadable config keeps the check on.
 
 ## Brief read-root warnings
 

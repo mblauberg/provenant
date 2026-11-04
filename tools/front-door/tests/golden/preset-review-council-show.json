@@ -325,6 +325,9 @@
           }
         },
         {
+          "depends_on": [
+            "lenses"
+          ],
           "id": "synthesis",
           "role": "review.synthesis"
         }

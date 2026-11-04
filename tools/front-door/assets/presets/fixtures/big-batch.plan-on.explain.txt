@@ -111,7 +111,7 @@ council  role=- tier=- family=any kind=composite access=read_only worktree=-
   synthesis  role=review.synthesis tier=senior family=any kind=synthesise access=read_only worktree=-
     read_roots: ["<project>"]
     source: {"node":"subject","type":"node"}
-    inputs: [{"node":"verify","outputs":["result"]}]
+    inputs: [{"node":"verify","outputs":["result"]},{"node":"lenses","outputs":["result"]}]
   exports: [{"node":"synthesis","outputs":["result","findings","verdict","commit"]}]
 refactor  role=refactor-principal tier=principal family=any kind=- access=worktree_write worktree=<project>
   write_scope: ["."]
@@ -141,7 +141,7 @@ repair  role=- tier=- family=any kind=loop access=read_only worktree=-
     synthesis  role=review.synthesis tier=senior family=any kind=synthesise access=read_only worktree=-
       read_roots: ["<project>"]
       source: {"node":"subject","type":"node"}
-      inputs: [{"node":"verify","outputs":["result"]}]
+      inputs: [{"node":"verify","outputs":["result"]},{"node":"lenses","outputs":["result"]}]
     exports: [{"node":"synthesis","outputs":["result","findings","verdict","commit"]}]
   accept  role=- tier=- family=any kind=gate access=read_only worktree=-
     inputs: [{"node":"review","outputs":["verdict"]}]
