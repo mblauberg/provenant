@@ -1965,7 +1965,10 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         assert_eq!(result["isError"], true, "{result}");
         let structured = &result["structuredContent"];
         assert_eq!(structured["code"], "io", "{result}");
-        assert_eq!(structured["operation_id"], "verified-submit-scope", "{result}");
+        assert_eq!(
+            structured["operation_id"], "verified-submit-scope",
+            "{result}"
+        );
         assert!(structured.get("operation").is_none(), "{result}");
     }
 
@@ -4515,7 +4518,10 @@ fn submit_writer_io_names_the_failed_operation_and_path() -> Result {
         let error = &result["structuredContent"];
         assert_eq!(error["code"], "io", "{result}");
         assert_eq!(error["operation_id"], "writer-io", "{result}");
-        assert!(!error.to_string().contains(head.to_string_lossy().as_ref()), "{result}");
+        assert!(
+            !error.to_string().contains(head.to_string_lossy().as_ref()),
+            "{result}"
+        );
     }
     std::fs::write(&head, original_head)?;
     let blocked = rig.state.join("worktrees");
@@ -4524,7 +4530,12 @@ fn submit_writer_io_names_the_failed_operation_and_path() -> Result {
     let error = &result["structuredContent"];
     assert_eq!(error["code"], "io", "{result}");
     assert_eq!(error["operation_id"], "writer-io", "{result}");
-    assert!(!error.to_string().contains(blocked.to_string_lossy().as_ref()), "{result}");
+    assert!(
+        !error
+            .to_string()
+            .contains(blocked.to_string_lossy().as_ref()),
+        "{result}"
+    );
     rig.assert_legacy_unchanged()
 }
 
@@ -4552,7 +4563,12 @@ fn submit_coordination_io_names_the_failed_operation_and_path() -> Result {
     let error = &result["structuredContent"];
     assert_eq!(error["code"], "io", "{result}");
     assert_eq!(error["operation_id"], "store-io", "{result}");
-    assert!(!error.to_string().contains(blocked.to_string_lossy().as_ref()), "{result}");
+    assert!(
+        !error
+            .to_string()
+            .contains(blocked.to_string_lossy().as_ref()),
+        "{result}"
+    );
     rig.assert_legacy_unchanged()
 }
 

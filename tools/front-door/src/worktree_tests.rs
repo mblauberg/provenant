@@ -3076,7 +3076,12 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
         task.route = provenant_run::RequestedRoute::Model {
             extra: Default::default(),
             provider: adapter.into(),
-            model: if adapter == "codex" { "codex/gpt-6-luna" } else { "claude/claude-haiku-5-5" }.into(),
+            model: if adapter == "codex" {
+                "codex/gpt-6-luna"
+            } else {
+                "claude/claude-haiku-5-5"
+            }
+            .into(),
             effort: None,
         };
         let attempt = roots.state.as_path().join(format!(
@@ -3217,7 +3222,10 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
                 .any(|grant| grant.path == selected_git && grant.scope == PathScope::Exact)
         );
         let permissions = confinement.plan.permissions();
-        assert_eq!(permissions.scratch.path, paths.temporary.join("candidate-0"));
+        assert_eq!(
+            permissions.scratch.path,
+            paths.temporary.join("candidate-0")
+        );
 
         if adapter == "codex" {
             assert!(
