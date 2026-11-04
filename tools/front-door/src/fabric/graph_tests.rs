@@ -1369,7 +1369,7 @@ mod result_tests {
         }
         assert_eq!(
             super::decode_graph_document(br#"{"schema_version":0}"#).unwrap_err(),
-            super::FacadeError::InvalidInput
+            super::FacadeError::invalid("graph document schema_version must be 1 or 2")
         );
     }
 

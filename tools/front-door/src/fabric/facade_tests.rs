@@ -3143,7 +3143,7 @@ mod peer_tests {
         }
         // The kind alone renders as invalid input; the dispatch edge must not
         // lose the refusal by rerendering it.
-        assert_eq!(super::kind_error(kind), FacadeError::InvalidInput);
+        assert_eq!(super::kind_error(kind), FacadeError::InvalidInput { detail: None });
         Ok(())
     }
     #[test]

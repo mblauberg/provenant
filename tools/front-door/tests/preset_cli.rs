@@ -361,6 +361,75 @@ fn review_council_bound_worktree_resolves_subject_and_warns_on_differing_head()
     Ok(())
 }
 
+/// A council with a pinned base carries a document-level review base, which the
+/// runtime accepts only under schema 2. `--explain` never admitted the graph,
+/// so the mismatch surfaced only on submit, as `preset_graph: invalid input`.
+#[test]
+fn review_council_with_a_base_is_admitted_on_submit() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    let git = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
+        let output = provenant_os::fixture::git_command()
+            .current_dir(&project)
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+            ])
+            .args(args)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    };
+    git(&["init", "-q"])?;
+    git(&["commit", "--allow-empty", "-qm", "base"])?;
+    let base = git(&["rev-parse", "HEAD"])?;
+    git(&["commit", "--allow-empty", "-qm", "subject"])?;
+    let head = git(&["rev-parse", "HEAD"])?;
+    let prompt = project.join("brief");
+    std::fs::write(&prompt, "review the subject")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = fixture_cli()
+        .current_dir(&project)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .args(["--json", "--state-dir"])
+        .arg(temp.path().join("state"))
+        .args(["run", "--preset", "review-council", "--prompt-file"])
+        .arg(&prompt)
+        .args([
+            "--set",
+            &format!("parameters.subject.commit=\"{head}\""),
+            "--set",
+            &format!("parameters.base=\"{base}\""),
+            "--set",
+            "parameters.review_shape=\"quick\"",
+            "--plan",
+            "off",
+            "--wait",
+            "1s",
+        ])
+        .output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let result: serde_json::Value = serde_json::from_str(&stdout)?;
+    assert_ne!(result["error"]["code"], "preset_graph", "{stdout}");
+    assert!(
+        !stdout.contains("invalid input"),
+        "the submit was refused as invalid: {stdout}"
+    );
+    assert!(
+        result["data"]["graph"]["checkpoint"]["graph_id"].is_string(),
+        "the graph was not admitted: {stdout}"
+    );
+    Ok(())
+}
+
 fn fixture_cli() -> Command {
     scrubbed(env!("CARGO_BIN_EXE_provenant"))
 }

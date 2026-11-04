@@ -171,8 +171,13 @@ bounded_input! {
 pub enum FacadeError {
     #[error("run execution owner is unavailable")]
     OwnerUnavailable,
-    #[error("invalid input")]
-    InvalidInput,
+    /// `detail` names the field path or static reason when the refusing check
+    /// has one. Absent on the wire when empty, so older readers still decode it.
+    #[error("invalid input{}", invalid_detail(.detail))]
+    InvalidInput {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
     #[error("record not found")]
     NotFound,
     #[error("request conflicts with current state")]
@@ -280,7 +285,7 @@ impl FacadeError {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::OwnerUnavailable => "owner_unavailable",
-            Self::InvalidInput => "invalid_input",
+            Self::InvalidInput { .. } => "invalid_input",
             Self::NotFound => "not_found",
             Self::Conflict | Self::GenerationConflict { .. } => "conflict",
             Self::NotTerminal => "not_terminal",
@@ -314,7 +319,23 @@ impl FacadeError {
     }
 }
 
+/// The ": reason" suffix of an invalid-input message, control characters
+/// escaped so a detail echoing caller text cannot forge terminal output.
+fn invalid_detail(detail: &Option<String>) -> String {
+    detail
+        .as_deref()
+        .map(|detail| format!(": {}", detail.escape_debug()))
+        .unwrap_or_default()
+}
+
 impl FacadeError {
+    /// An invalid-input refusal naming the field path or reason that failed.
+    pub fn invalid(detail: impl Into<String>) -> Self {
+        Self::InvalidInput {
+            detail: Some(detail.into()),
+        }
+    }
+
     pub fn io(operation: impl Into<String>) -> Self {
         Self::Io {
             operation: operation.into(),
@@ -370,7 +391,7 @@ impl From<&crate::hosts::PeerError> for FacadeError {
                 expected: Some(*expected),
             },
             PeerError::Project | PeerError::SourceHost | PeerError::RequestTooLarge => {
-                Self::InvalidInput
+                Self::invalid(error.to_string())
             }
             PeerError::Unavailable | PeerError::Failed(_) => Self::HomeUnavailable,
             PeerError::Unknown { operation_id } => Self::LaunchUnknown {
@@ -389,7 +410,8 @@ impl From<&super::CoordinationError> for FacadeError {
         match error {
             CoordinationError::LaneMutation => Self::LaneCoordinationRefused,
             CoordinationError::Peer(error) => Self::from(error),
-            CoordinationError::InvalidInput(_) | CoordinationError::Input(_) => Self::InvalidInput,
+            CoordinationError::InvalidInput(reason) => Self::invalid(*reason),
+            CoordinationError::Input(error) => Self::invalid(error.to_string()),
             CoordinationError::Time(_) | CoordinationError::ResponseEncoding(_) => {
                 Self::StateCorrupt
             }
@@ -416,8 +438,9 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
             | Error::Overlap { .. } => Self::Conflict,
             Error::Busy => Self::Busy,
             Error::Cancelled => Self::Cancelled,
-            Error::Invalid(_) | Error::PathEncoding | Error::ViewerLimit | Error::ViewerNotOpen => {
-                Self::InvalidInput
+            Error::Invalid(reason) => Self::invalid(*reason),
+            Error::PathEncoding | Error::ViewerLimit | Error::ViewerNotOpen => {
+                Self::invalid(error.to_string())
             }
             Error::Decode(provenant_records::DecodeError::UnsupportedVersion { found, .. })
                 if *found > 1 =>
@@ -583,6 +606,44 @@ mod diagnostic_tests {
                 serde_json::json!({"code": "host_delivery_io", "reason": reason})
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn invalid_input_names_its_detail_and_stays_wire_compatible() {
+        let bare = FacadeError::InvalidInput { detail: None };
+        assert_eq!(bare.to_string(), "invalid input");
+        assert_eq!(
+            serde_json::to_value(&bare).unwrap(),
+            serde_json::json!({"code": "invalid_input"})
+        );
+        let detailed = FacadeError::invalid("schema version\n\u{1b}[31m");
+        assert_eq!(detailed.code(), "invalid_input");
+        assert_eq!(
+            detailed.to_string(),
+            "invalid input: schema version\\n\\u{1b}[31m"
+        );
+        let wire = serde_json::to_value(&detailed).unwrap();
+        assert_eq!(
+            serde_json::from_value::<FacadeError>(wire).unwrap(),
+            detailed
+        );
+        // A refusal from a release that predates the detail still decodes.
+        let legacy = serde_json::json!({"code": "invalid_input"});
+        assert_eq!(serde_json::from_value::<FacadeError>(legacy).unwrap(), bare);
+        let from_field = FacadeError::from(&super::super::CoordinationError::Input(
+            super::super::input::InputError::new("scope.paths"),
+        ));
+        assert!(
+            from_field.to_string().contains("scope.paths"),
+            "{from_field}"
+        );
+        assert_eq!(
+            FacadeError::from(&super::super::CoordinationError::InvalidInput(
+                "landing lock required"
+            ))
+            .to_string(),
+            "invalid input: landing lock required"
         );
     }
 

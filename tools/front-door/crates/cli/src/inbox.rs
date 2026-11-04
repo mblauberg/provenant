@@ -633,7 +633,7 @@ fn classify_miss(failure: &crate::fabric::PeerFailure) -> Miss {
     use provenant_fabric_runtime::coordination::facade::FacadeError;
     let detail = failure.detail.as_deref().unwrap_or_default();
     match failure.error {
-        FacadeError::InvalidInput => Miss::Invalid,
+        FacadeError::InvalidInput { .. } => Miss::Invalid,
         FacadeError::Timeout => Miss::Timeout,
         _ if detail.contains(&provenant_fabric_runtime::hosts::PeerError::Project.to_string()) => {
             Miss::ProjectUnknown
