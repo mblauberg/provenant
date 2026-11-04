@@ -201,6 +201,8 @@ pub enum RouteExclusionReason {
     UnsupportedEffort,
     Exhausted,
     PacingReserve,
+    /// Partial usage is a lower bound and its headroom is uncalibrated.
+    UnknownPartialHeadroom,
     AuthRequired,
     UnverifiedModel,
     /// Persisted evidence shows the executable's account differs from the registered one.

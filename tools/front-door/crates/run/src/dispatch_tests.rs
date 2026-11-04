@@ -8710,6 +8710,17 @@ fn a_policy_retry_launches_for_no_launcher_before_its_sealed_time() -> TestResul
         clock: &clock,
         cancel: &cancel,
     };
+    // Even after the delay, a result-quality successor cannot start while
+    // the prior attempt's custody remains held or unverifiable.
+    let directory = store.attempt_dir(run.run_id, id, false)?;
+    let custody = directory.try_lock(
+        std::ffi::OsStr::new("custody.lock"),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
+    let started = store.start(run.run_id, &fake, &|_, _| unreachable!(), &later)?;
+    assert!(matches!(started.as_slice(), [Started::Deferred(attempt)] if *attempt == next));
+    assert_eq!(fake.prepared.get(), 0);
+    drop(custody);
     let started = store.start(run.run_id, &fake, &|_, _| unreachable!(), &later)?;
     assert!(matches!(started.as_slice(), [Started::Refused { attempt, .. }] if *attempt == next));
     assert_eq!(fake.prepared.get(), 1);
@@ -8827,6 +8838,8 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
         ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
             Err(crate::PrepareRefusal {
                 message: "all candidates require sign-in; run provenant accounts".into(),
+                fallback_outcome: (!self.0)
+                    .then_some(provenant_records::run::PreparationFailure::AuthRequired),
                 skipped_routes: ["cursor/example", "codex/example"]
                     .map(|route| SkippedRoute {
                         extra: Default::default(),
@@ -8874,6 +8887,19 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
             Some(provenant_records::run::TerminalEvidence::PreLaunchRefusal)
         );
         assert_eq!(record.provider_launched, Some(false));
+        assert_eq!(
+            record.preparation_failure,
+            (!mixed).then_some(provenant_records::run::PreparationFailure::AuthRequired)
+        );
+        assert!(store.custody_released(&record, &call)?);
+        if !mixed {
+            let mut corrupt = record.clone();
+            corrupt.provider_launched = None;
+            assert!(matches!(
+                crate::reader::validate_attempt(&corrupt),
+                Err(RunError::Validation("preparation failure evidence"))
+            ));
+        }
         assert_eq!(record.skipped_routes.len(), 2);
         assert_eq!(
             record

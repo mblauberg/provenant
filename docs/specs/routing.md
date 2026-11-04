@@ -33,6 +33,12 @@ Provider-family assurance remains established by provider evidence.
 
 ### Exact selection, seeded pools
 
+A dispatch carries its requested write and effective network controls into
+selection. Each candidate must support those controls in its adapter's launch
+table, and preparation checks them again before launching. Unsupported explicit
+requests are refused; unsupported pool members are excluded. Capability facts
+never grant filesystem or network authority.
+
 A request names exactly one `--model ADAPTER/ID` or `--route NAME`. No
 adapter, upgrade, effort default or downgrade is inferred, and an unknown
 explicit ID runs only if availability, disclosure and confinement are
@@ -82,21 +88,16 @@ stop resumes the same session when the adapter's launch table allows resume, aft
 a quarter of jitter drawn from the attempt ID (default 30), capped by
 `domains.routing.capacity_retry_max_seconds` (default 600) and by
 `domains.routing.retry_delay_ceiling_seconds` (default 3600), the ceiling on any
-sealed wait. Each wait is configurable up to a week. Without a
-session, a read-only lane takes its first fallback and a writer redraws its granted
-route. A quota stop retries at once only when the account is not pinned and another
-registered account serves the applied model with no live refusal and no reading
-that routing's spent rule binds. The retry keeps that exact model, so a redraw cannot reach the spent account
-through another model; admission refuses the spent account and resolution falls
-through to the other. The retry seals its earliest launch time, and every
-launcher defers the successor until then. The successor's admission window opens
-when that wait ends, and each attempt in a retry chain records its own
-continuation row, so a run retries as often as configuration allows. The settling guardian advances graphs
-first, then waits for that time and launches it; a redraw of a pinned granted route
-keeps the pin.
+sealed wait. Each wait is configurable up to a week. A settled capacity stop
+without a session and a quota stop do not automatically switch route or account;
+the user can choose a new route after reviewing the result. This avoids retrying
+work whose provider has already launched. Scoped admission still excludes a
+spent account. The retry seals its earliest launch time, and every launcher
+defers the same-session successor until that time. The successor's admission
+window opens when the wait ends, and each attempt records its continuation row.
 The lane's reason names the retry and its attempt number.
-- Why: a provider's capacity or one account's quota should cost a short wait, not a
-  chair turn.
+- Why: same-session capacity recovery preserves the applied route; route switches
+  require verified local preparation and released custody.
 - Test: `crates/providers/src/tests.rs::agy_overload_is_typed_capacity_not_a_generic_failure`;
   `::codex_usage_limit_is_quota_limited`;
   `crates/providers/src/claude.rs::overload_tests::usage_limit_is_a_typed_quota_refusal_not_a_generic_failure`;
@@ -105,7 +106,6 @@ The lane's reason names the retry and its attempt number.
   `crates/run/src/tests.rs::version_five_lets_one_run_continue_several_targets`;
   `crates/run/src/dispatch_tests.rs::a_policy_retry_launches_for_no_launcher_before_its_sealed_time`;
   `crates/run/src/launch.rs::retry_pin_tests::redraws_of_a_pinned_granted_route_keep_the_pin`;
-  `crates/cli/src/run.rs::tests::an_alternate_account_is_spent_only_by_routing_rule_or_a_live_refusal`;
   `crates/cli/src/run.rs::tests::capacity_and_quota_settlements_retry_within_their_bounds`;
   `crates/cli/src/route.rs::tests::refused_account_falls_through_to_another_for_the_same_model`;
   `crates/cli/src/route.rs::tests::review_substitution_skips_refused_unused_families`;
@@ -117,9 +117,11 @@ The lane's reason names the retry and its attempt number.
 Resolution runs once against immutable catalogue, availability and quota
 snapshots and returns one route with at most two ordered alternatives, each
 passing the same checks; Run never rebuilds candidates. Fallback to
-another route is read-only and explicit, except for configurable result-policy
-fallback on restricted routes; a writer may retry only its granted route or the
-exact model that route applied. Unsupported effort fails; where clamping is permitted, the requested,
+another route during provider preparation requires a typed auth, quota or
+adapter-unavailable refusal before handoff, released custody, remaining budget
+and compatible pins. Separately, a configured read-only result-quality check may
+escalate an invalid successful result after custody release; task failures and
+uncertain outcomes cannot trigger that escalation. Unsupported effort fails; where clamping is permitted, the requested,
 applied and observed values are recorded. `route list` and `resolve` start no
 process and mutate nothing.
 - Why: the fallback plan is decided once and visible.
@@ -183,12 +185,14 @@ OpenCode Go local ledger usage is labelled `source: local-ledger` and
 `coverage: partial`; it is a lower bound because other devices are absent.
 An active per-account calibration supplies dashboard percentage floors,
 applied as the maximum of ledger and floor at each read. Expiry restores raw
-ledger usage. Missing or expired floors do not exclude pool members; route list
-and resolve identify uncalibrated windows so users can tighten pacing.
-Exhaustion, authentication and quota limits still exclude members.
+ledger usage. Missing or expired floors make the affected partial headroom
+unknown and ineligible by default. The `routing.allow_unknown_partial_headroom`
+knob opts into selection and admission with that uncertainty; an observed lower
+bound at the limit still excludes the member. Route explanation reports the
+setting and its source. Exhaustion, authentication and quota limits still exclude members.
 Configuration and the operational limits are
 in the [calibration runbook](../runbooks/configuration.md#opencode-go-quota-calibration).
-- Why: Go models remain available while partial coverage is visible.
+- Why: selection and launch admission use the same scoped quota evidence.
 - Test: `crates/quota/src/calibration.rs::tests::calibration_takes_maximum_and_expires_even_with_cached_ledger`
 - Owner: `crates/quota/src/calibration.rs`, `crates/routing/src/resolve.rs`
 

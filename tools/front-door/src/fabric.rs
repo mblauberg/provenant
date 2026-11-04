@@ -4272,6 +4272,44 @@ impl BoundGraphOwner<'_> {
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     type Error = FacadeError;
 
+    fn preparation_fallback_evidence(
+        &mut self,
+        key: &provenant_fabric_runtime::graph::AttemptKey,
+        reference: &str,
+    ) -> Result<Option<provenant_records::run::PreparationFailure>, Self::Error> {
+        let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+        // Only this host can verify its writer fences and custody lock.
+        if host != self.factory.context.identity.host.to_string() {
+            return Ok(None);
+        }
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: false,
+            actor: None,
+            chair: None,
+        };
+        let store = owner.store(self.cancel)?;
+        let call = owner.call(self.cancel);
+        let record = store
+            .record(
+                attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+                &call,
+            )
+            .map_err(run_error)?;
+        if record.operation_id != graph_operation("graph-attempt-operation", key)?
+            || record.context.as_ref().is_none_or(|context| {
+                context.graph_id.as_deref() != Some(key.graph_id.as_str())
+                    || context.node_id.as_deref() != Some(key.node_id.as_str())
+            })
+        {
+            return Ok(None);
+        }
+        if !store.custody_released(&record, &call).map_err(run_error)? {
+            return Ok(None);
+        }
+        Ok(record.preparation_failure)
+    }
+
     fn resolve_review(
         &mut self,
         node: &provenant_fabric_runtime::graph::GraphNode,
@@ -5169,6 +5207,18 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     attempt_ref: reference,
                     outcome: if result_warning.is_some() {
                         AttemptOutcome::OtherFailure
+                    } else if let Some(failure) = attempt.preparation_failure {
+                        match failure {
+                            provenant_records::run::PreparationFailure::AuthRequired => {
+                                AttemptOutcome::AuthRequired
+                            }
+                            provenant_records::run::PreparationFailure::UsageLimited => {
+                                AttemptOutcome::UsageLimited
+                            }
+                            provenant_records::run::PreparationFailure::AdapterUnavailable => {
+                                AttemptOutcome::AdapterUnavailable
+                            }
+                        }
                     } else {
                         match outcome {
                             Outcome::Succeeded

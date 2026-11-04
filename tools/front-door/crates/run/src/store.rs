@@ -590,7 +590,7 @@ impl RunStore {
                     profile: task.profile.clone(),
                     schema_version: 2, attempt_id: new.attempt_id, run_id: run.run_id, project_id: run.project_id, task_id: task.task_id, operation_id: run.operation_id.clone(), attempt_number: u64::try_from(number).map_err(|_| RunError::Validation("attempt number"))?, revision: 1, generation: 0,
                     delivery_id: task.delivery_id, retry_of: input.request.parent, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, granted_tracking_ref: None, subject: None, head: None, protected_paths: Vec::new(), delivery: None, verified_owner: Some(context.actor_id), session: None,
-                queued_at: input.created_at, started_at: None, priority: None, requested_priority: None, last_output_at: None, provider_silent_for_ms: provenant_records::run::Transient(None), process_observation_valid: provenant_records::run::Transient(false), provider_silence_suppressed: provenant_records::run::Transient(false), provider_launched: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, partial_signals: Vec::new(), state: AttemptState::Queued { extra: Default::default() }, usage: UsageRecord::default(),
+                queued_at: input.created_at, started_at: None, priority: None, requested_priority: None, last_output_at: None, provider_silent_for_ms: provenant_records::run::Transient(None), process_observation_valid: provenant_records::run::Transient(false), provider_silence_suppressed: provenant_records::run::Transient(false), provider_launched: None, preparation_failure: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, partial_signals: Vec::new(), state: AttemptState::Queued { extra: Default::default() }, usage: UsageRecord::default(),
                     terminal_evidence: None, settlement_reason: None, cancellation_disposition: None, settlement_receipts: None, custody_pending: None,
                     prompt: ArtifactRecord {extra: Default::default(),  path: artifact_path(new.attempt_id, AttemptFile::Prompt.name())?, digest: task.prompt_digest, bytes: new.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None, skipped_routes: Vec::new(),
                     trace: provenant_records::Trace {extra: Default::default(),
@@ -738,6 +738,33 @@ impl RunStore {
         finished_at: WallTime,
         call: &Request<'_>,
     ) -> Result<Option<AttemptRecord>> {
+        self.withdraw_with_preparation_failure(
+            id,
+            expected,
+            outcome,
+            reason,
+            finished_at,
+            None,
+            call,
+        )
+    }
+
+    /// Seal a typed refusal made in local provider preparation before custody.
+    pub(crate) fn withdraw_with_preparation_failure(
+        &self,
+        id: AttemptId,
+        expected: AttemptState,
+        outcome: Outcome,
+        reason: &str,
+        finished_at: WallTime,
+        failure: Option<provenant_records::run::PreparationFailure>,
+        call: &Request<'_>,
+    ) -> Result<Option<AttemptRecord>> {
+        if failure.is_some() && !matches!(expected, AttemptState::Queued { .. }) {
+            return Err(RunError::Validation(
+                "preparation evidence requires queued attempt",
+            ));
+        }
         if !matches!(
             outcome,
             Outcome::Rejected | Outcome::Cancelled | Outcome::AuthRequired
@@ -754,7 +781,7 @@ impl RunStore {
             call.cancel,
             call.clock,
         )?;
-        let old = self.record(id, call)?;
+        let mut old = self.record(id, call)?;
         if let AttemptState::Terminal { .. } = old.state {
             return Ok(None);
         }
@@ -770,7 +797,7 @@ impl RunStore {
         let attempt_dir = self.attempt_dir(old.run_id, id, true)?;
         // An interrupted withdrawal resumes its own sealed facts, so a retry
         // never renders a second finished_at or reason.
-        let (outcome, finished_at, reason) = match read_sealed(
+        let (outcome, finished_at, reason, preparation_failure) = match read_sealed(
             &attempt_dir,
             AttemptFile::TerminalPending.name(),
             RECORD_LIMIT,
@@ -795,7 +822,12 @@ impl RunStore {
                         && saved.provider_launched == Some(false)
                         && Some(saved.revision) == revision.checked_add(1) =>
                     {
-                        (saved_outcome, finished_at, reason)
+                        (
+                            saved_outcome,
+                            finished_at,
+                            reason,
+                            saved.preparation_failure,
+                        )
                     }
                     _ => return Err(RunError::TerminalRecoveryRequired),
                 }
@@ -804,8 +836,10 @@ impl RunStore {
                 outcome,
                 finished_at,
                 Some(reason.chars().take(256).collect()),
+                failure,
             ),
         };
+        old.preparation_failure = preparation_failure;
         let publication = TerminalPublication {
             outcome,
             finished_at,

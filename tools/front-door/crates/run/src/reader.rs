@@ -1023,6 +1023,18 @@ pub(crate) fn write_grants_fit(grants: &[WriteGrantRecord]) -> bool {
 }
 
 pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
+    if r.preparation_failure.is_some()
+        && (r.provider_launched != Some(false)
+            || !matches!(
+                r.state,
+                AttemptState::Terminal {
+                    outcome: Outcome::Rejected | Outcome::AuthRequired,
+                    ..
+                }
+            ))
+    {
+        return Err(RunError::Validation("preparation failure evidence"));
+    }
     if r.context.as_ref().is_some_and(|context| !context.valid()) {
         return Err(RunError::Validation("work context"));
     }

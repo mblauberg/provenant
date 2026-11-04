@@ -1937,6 +1937,124 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         fallback_launch.route.model.as_deref(),
         Some("cursor/gpt-5.3-codex-low")
     );
+    // A named pool redraws after an adapter disappears during local preparation.
+    // The first two lookups establish availability; the third refuses the first
+    // selected member, and the next lookup admits the remaining member.
+    let saved_config = std::fs::read(state.join("config.toml"))?;
+    std::fs::write(
+        state.join("config.toml"),
+        "schema_version=1\n[domains.routing]\nsettlement_retries=1\n[[domains.routing.pools.redraw-fixture]]\nmodel='cursor/gpt-5.3-codex-low'\nweight=1\nefforts=[]\n[[domains.routing.pools.redraw-fixture]]\nmodel='cursor/grok-4.7'\nweight=1\nefforts=[]\n",
+    )?;
+    let mut redraw_task = task.clone();
+    redraw_task.route = run::RequestedRoute::Named {
+        extra: Default::default(),
+        name: "redraw-fixture".into(),
+        effort: None,
+    };
+    redraw_task.fallback.clear();
+    let redraw_prompt = "pool redraw fixture";
+    redraw_task.prompt_digest =
+        provenant_records::CanonicalV1::file_digest(redraw_prompt.as_bytes());
+    let redraw_paths = run::LaunchPaths {
+        scratch: attempt.join("redraw-scratch"),
+        provider_state: attempt.join("redraw-provider-state"),
+        temporary: attempt.join("redraw-tmp"),
+        temporary_alias: None,
+        attempt_id: fallback_paths.attempt_id,
+        operation_id: fallback_paths.operation_id.clone(),
+        task_index: fallback_paths.task_index,
+        lane_depth: fallback_paths.lane_depth,
+        run_id: fallback_paths.run_id,
+        deadline_unix_ms: fallback_paths.deadline_unix_ms,
+    };
+    for path in [
+        &redraw_paths.scratch,
+        &redraw_paths.provider_state,
+        &redraw_paths.temporary,
+    ] {
+        std::fs::DirBuilder::new().mode(0o700).create(path)?;
+    }
+    let lookup_count = std::cell::Cell::new(0);
+    let redraw_launch = prepare_with(
+        &registry,
+        &redraw_task,
+        redraw_prompt,
+        &redraw_paths,
+        None,
+        |adapter| {
+            assert_eq!(adapter, "cursor");
+            let count = lookup_count.get() + 1;
+            lookup_count.set(count);
+            if count == 3 {
+                Err("fixture executable disappeared".into())
+            } else {
+                Ok(executable.clone())
+            }
+        },
+        None,
+    )?;
+    assert_eq!(redraw_launch.skipped_routes.len(), 1);
+    assert!(
+        redraw_launch.skipped_routes[0]
+            .detail
+            .contains("fixture executable disappeared")
+    );
+    assert_ne!(
+        redraw_launch.route.model.as_deref(),
+        Some(redraw_launch.skipped_routes[0].route.as_str())
+    );
+    let config = std::fs::read_to_string(state.join("config.toml"))?;
+    std::fs::write(
+        state.join("config.toml"),
+        config.replace("settlement_retries=1", "settlement_retries=0"),
+    )?;
+    let no_retry_paths = run::LaunchPaths {
+        scratch: attempt.join("no-redraw-scratch"),
+        provider_state: attempt.join("no-redraw-provider-state"),
+        temporary: attempt.join("no-redraw-tmp"),
+        temporary_alias: None,
+        attempt_id: fallback_paths.attempt_id,
+        operation_id: fallback_paths.operation_id.clone(),
+        task_index: fallback_paths.task_index,
+        lane_depth: fallback_paths.lane_depth,
+        run_id: fallback_paths.run_id,
+        deadline_unix_ms: fallback_paths.deadline_unix_ms,
+    };
+    for path in [
+        &no_retry_paths.scratch,
+        &no_retry_paths.provider_state,
+        &no_retry_paths.temporary,
+    ] {
+        std::fs::DirBuilder::new().mode(0o700).create(path)?;
+    }
+    let calls = std::cell::Cell::new(0);
+    let Err(refusal) = prepare_with(
+        &registry,
+        &redraw_task,
+        redraw_prompt,
+        &no_retry_paths,
+        None,
+        |_| {
+            let count = calls.get() + 1;
+            calls.set(count);
+            if count == 3 {
+                Err("fixture executable disappeared".into())
+            } else {
+                Ok(executable.clone())
+            }
+        },
+        None,
+    ) else {
+        panic!("zero retry budget must not redraw")
+    };
+    assert!(
+        refusal
+            .to_string()
+            .contains("fixture executable disappeared")
+    );
+    assert_eq!(calls.get(), 3);
+    std::fs::write(state.join("config.toml"), saved_config)?;
+
     let mut review_task = task.clone();
     review_task.writer = None;
     let review_paths = run::LaunchPaths {

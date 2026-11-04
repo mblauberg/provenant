@@ -260,6 +260,15 @@ impl Admission<'_> {
     /// Check provider readiness, current allowance and the account record's
     /// persisted refusals.
     pub fn check(&self, route: &ResolvedRoute) -> Result<(), QuotaError> {
+        self.check_with_partial_headroom(route, false)
+    }
+
+    /// Opt in only to uncalibrated partial headroom; exhaustion remains binding.
+    pub fn check_with_partial_headroom(
+        &self,
+        route: &ResolvedRoute,
+        allow_unknown: bool,
+    ) -> Result<(), QuotaError> {
         match route.readiness {
             RouteReadiness::Ready {
                 expires_unix_seconds,
@@ -279,58 +288,89 @@ impl Admission<'_> {
             .iter()
             .find(|r| r.account.adapter == route.adapter && r.account.account_key == *key);
         let snapshot = self.fresh_snapshot(&route.adapter, record);
-        let go_model = provenant_records::AdapterSpec::get(&route.adapter)
-            .and_then(|spec| spec.allowance_prefix)
-            .is_some_and(|prefix| route.model.starts_with(prefix));
         if let Some(snapshot) = snapshot {
             if snapshot.status == QuotaStatus::AuthRequired {
                 return Err(QuotaError::Refused("authentication required"));
             }
-            // An unknown reading proves exhaustion only as a partial lower bound.
-            if (matches!(
-                snapshot.status,
-                QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
-            ) || (snapshot.status == QuotaStatus::Unknown
-                && snapshot
-                    .details
-                    .as_ref()
-                    .is_some_and(|d| d.coverage.as_deref() == Some("partial"))))
-                && snapshot.windows.iter().any(|w| {
-                    (self
-                        .pools
-                        .iter()
-                        .any(|pool| matches_pool(&route.adapter, &w.pool, pool))
-                        || (go_model
-                            && ["five_hour", "seven_day", "thirty_day"].contains(&w.pool.as_str())))
-                        && w.used_basis_points >= 10000
-                        && (w
-                            .resets_unix_seconds
-                            .is_none_or(|r| r > self.now_unix_seconds)
-                            || snapshot.details.as_ref().is_some_and(|d| {
-                                d.calibration_active(&w.pool, self.now_unix_seconds)
-                            }))
-                })
-            {
-                return Err(QuotaError::Refused("allowance exhausted"));
-            }
-            if snapshot.details.as_ref().is_some_and(|d| {
-                d.coverage.as_deref() == Some("partial")
-                    && snapshot.windows.iter().any(|w| {
-                        (self
-                            .pools
-                            .iter()
-                            .any(|pool| matches_pool(&route.adapter, &w.pool, pool))
-                            || (go_model
-                                && ["five_hour", "seven_day", "thirty_day"]
-                                    .contains(&w.pool.as_str())))
-                            && !d.calibration_active(&w.pool, self.now_unix_seconds)
-                    })
-            }) {
-                return Err(QuotaError::Refused("uncalibrated partial coverage"));
+            match partial_headroom(
+                snapshot,
+                &route.adapter,
+                &route.model,
+                self.pools,
+                self.now_unix_seconds,
+            ) {
+                PartialHeadroom::Exhausted => {
+                    return Err(QuotaError::Refused("allowance exhausted"));
+                }
+                PartialHeadroom::Unknown if !allow_unknown => {
+                    return Err(QuotaError::Refused("uncalibrated partial coverage"));
+                }
+                _ => {}
             }
         }
         Ok(())
     }
+}
+
+/// Headroom in the windows governing a particular model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PartialHeadroom {
+    Known,
+    Unknown,
+    Exhausted,
+}
+
+/// Apply the same window and calibration rules during selection and launch.
+pub fn partial_headroom(
+    snapshot: &QuotaSnapshot,
+    adapter: &str,
+    model: &str,
+    pools: &[String],
+    now: i64,
+) -> PartialHeadroom {
+    let allowance_windows = provenant_records::AdapterSpec::get(adapter)
+        .filter(|spec| {
+            spec.allowance_prefix
+                .is_some_and(|prefix| model.starts_with(prefix))
+        })
+        .map_or(&[][..], |spec| spec.allowance_windows);
+    let relevant = |w: &&QuotaWindow| {
+        pools
+            .iter()
+            .any(|pool| matches_pool(adapter, &w.pool, pool))
+            || allowance_windows.contains(&w.pool.as_str())
+    };
+    let partial = snapshot
+        .details
+        .as_ref()
+        .is_some_and(|d| d.coverage.as_deref() == Some("partial"));
+    if (matches!(
+        snapshot.status,
+        QuotaStatus::Available | QuotaStatus::CreditOnly | QuotaStatus::Exhausted
+    ) || (snapshot.status == QuotaStatus::Unknown && partial))
+        && snapshot.windows.iter().filter(relevant).any(|w| {
+            w.used_basis_points >= 10000
+                && (partial
+                    || w.resets_unix_seconds.is_none_or(|r| r > now)
+                    || snapshot
+                        .details
+                        .as_ref()
+                        .is_some_and(|d| d.calibration_active(&w.pool, now)))
+        })
+    {
+        return PartialHeadroom::Exhausted;
+    }
+    if partial
+        && snapshot.windows.iter().filter(relevant).any(|w| {
+            !snapshot
+                .details
+                .as_ref()
+                .is_some_and(|d| d.calibration_active(&w.pool, now))
+        })
+    {
+        return PartialHeadroom::Unknown;
+    }
+    PartialHeadroom::Known
 }
 
 /// Build a compare-and-swap update for structured provider quota evidence.
@@ -648,10 +688,29 @@ mod admission_tests {
             check(&partial, 1100),
             Err(QuotaError::Refused("uncalibrated partial coverage"))
         ));
+        let opt_in = |records: &[AccountRecord]| {
+            Admission {
+                policies: crate::source::TEST_POLICIES,
+                now_unix_seconds: 1100,
+                records,
+                pools: &[],
+            }
+            .check_with_partial_headroom(&route, true)
+        };
+        assert!(opt_in(&partial).is_ok());
         partial[0].snapshot.as_mut().unwrap().windows[0].used_basis_points = 10000;
         partial[0].snapshot.as_mut().unwrap().status = QuotaStatus::Unknown;
         assert!(matches!(
             check(&partial, 1100),
+            Err(QuotaError::Refused("allowance exhausted"))
+        ));
+        assert!(matches!(
+            opt_in(&partial),
+            Err(QuotaError::Refused("allowance exhausted"))
+        ));
+        partial[0].snapshot.as_mut().unwrap().windows[0].resets_unix_seconds = Some(1099);
+        assert!(matches!(
+            opt_in(&partial),
             Err(QuotaError::Refused("allowance exhausted"))
         ));
         settings.calibration.get_mut("go").unwrap().five_hour = Some(100);

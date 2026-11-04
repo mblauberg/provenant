@@ -335,18 +335,12 @@ impl run::Providers for Registry<'_> {
                     .map_err(|error| error.to_string())
             })
             .transpose()?;
-        let (routing, accounts, quota, quota_settings) = match context_roots.as_ref().or(self.roots)
-        {
+        let routing = match context_roots.as_ref().or(self.roots) {
             Some(roots) => {
-                let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-                    .map_err(|error| error.to_string())?;
-                (
-                    config.domains.routing,
-                    config.domains.accounts.with_derived_accounts(),
-                    // Unreadable quota is unknown, and unknown is not spent.
-                    crate::quota::read_cache_at(roots.state.as_path()).unwrap_or_default(),
-                    config.domains.quota,
-                )
+                provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+                    .map_err(|error| error.to_string())?
+                    .domains
+                    .routing
             }
             None => Default::default(),
         };
@@ -368,31 +362,8 @@ impl run::Providers for Registry<'_> {
         if assessment.refusal.is_some() || assessment.retry.is_some() {
             return Ok(assessment);
         }
-        let catalogue =
-            provenant_routing::Catalogue::bundled().map_err(|error| error.to_string())?;
-        // The same calibrated records and configured polling intervals that
-        // resolution and the admission recheck read.
-        let (quota, policies) =
-            crate::route::account_evidence(&quota_settings, quota, now.unix_seconds());
-        let other_account = |adapter: &str, key: &str| {
-            unspent_alternative(
-                accounts
-                    .entries
-                    .values()
-                    .filter(|entry| entry.adapter == adapter)
-                    .map(|entry| entry.key.as_str()),
-                &quota,
-                &policies,
-                key,
-                &model,
-                &catalogue,
-                now.unix_seconds(),
-            )
-        };
         Ok(assess_settlement_retry(
             &routing,
-            other_account,
-            task,
             record,
             decoded,
             policy_attempt,
@@ -961,6 +932,7 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
     Ok(provenant_routing::RouteRequest {
         intent: provenant_routing::RouteIntent {
             writes: run::Service::has_writes(task.writer.is_some(), &task.access.write_roots),
+            network: Some(task.access.network(task.writer.is_some())),
             workload: if matches!(task.route, run::RequestedRoute::Review { .. }) {
                 provenant_routing::Workload::Review
             } else {

@@ -3,6 +3,7 @@
 mod catalog;
 mod exclusion;
 mod facts;
+mod fallback;
 mod policy;
 mod request;
 mod resolve;
@@ -10,6 +11,7 @@ mod review;
 pub use catalog::*;
 pub use exclusion::*;
 pub use facts::*;
+pub use fallback::*;
 pub use policy::*;
 pub use provenant_records::ResolvedRoute;
 pub use request::*;
@@ -28,6 +30,8 @@ pub enum RoutingError {
     Alternatives,
     #[error("unknown adapter")]
     UnknownAdapter,
+    #[error("{0}")]
+    UnsupportedLaunch(String),
     #[error("unknown named route")]
     UnknownRoute,
     #[error("route is not permitted for confidential input")]
@@ -61,6 +65,7 @@ impl RoutingError {
             Self::InvalidValue => "invalid_value",
             Self::Alternatives => "alternatives",
             Self::UnknownAdapter => "unknown_adapter",
+            Self::UnsupportedLaunch(_) => "unsupported_launch",
             Self::UnknownRoute => "unknown_route",
             Self::ConfidentialModel => "confidential_model",
             Self::NoEligiblePoolMember { .. } => "no_eligible_pool_member",

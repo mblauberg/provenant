@@ -295,6 +295,7 @@ pub(super) enum PrepareError {
         message: String,
         plans: Vec<provenant_confinement::PlanError>,
         skipped_routes: Vec<SkippedRoute>,
+        fallback_outcome: Option<provenant_records::run::PreparationFailure>,
     },
     #[error("{0}")]
     Other(String),
@@ -305,10 +306,12 @@ impl PrepareError {
             Self::Candidates {
                 message,
                 skipped_routes,
+                fallback_outcome,
                 ..
             } => run::PrepareRefusal {
                 message,
                 skipped_routes,
+                fallback_outcome,
             },
             other => other.to_string().into(),
         }
@@ -771,6 +774,34 @@ pub(super) fn prepare_candidates(
         .to_string();
     let rules = crate::route::task_exclusion_rules(&task.profile, roots)
         .map_err(|error| error.to_string())?;
+    let family_constraints = match &task.route {
+        run::RequestedRoute::Review {
+            excluded_families,
+            distinct_families: true,
+            require_distinct,
+            preferred_families,
+            ..
+        } => Some((
+            excluded_families.as_slice(),
+            *require_distinct,
+            preferred_families.as_slice(),
+        )),
+        _ => None,
+    };
+    let resolve = |rejected: &[provenant_routing::ModelId]| {
+        crate::route::resolve_dispatch_rejecting(
+            &request,
+            roots,
+            selected,
+            (paths.operation_id.as_str(), paths.task_index),
+            &availability,
+            &access,
+            &host,
+            family_constraints,
+            &rules,
+            rejected,
+        )
+    };
     let resolved = crate::route::resolve_dispatch(
         &request,
         roots,
@@ -779,23 +810,11 @@ pub(super) fn prepare_candidates(
         &availability,
         &access,
         &host,
-        match &task.route {
-            run::RequestedRoute::Review {
-                excluded_families,
-                distinct_families: true,
-                require_distinct,
-                preferred_families,
-                ..
-            } => Some((
-                excluded_families.as_slice(),
-                *require_distinct,
-                preferred_families.as_slice(),
-            )),
-            _ => None,
-        },
+        family_constraints,
         &rules,
     )
     .map_err(|error| error.to_string())?;
+    let named_pool = resolved.pool_selection.is_some() && resume.is_none();
     if let Some(selection) = &resolved.pool_selection {
         for redraw in &selection.redraws {
             reasons.push(skip(
@@ -805,8 +824,77 @@ pub(super) fn prepare_candidates(
             ));
         }
     }
-    for (candidate, route) in candidates(resolved).into_iter().enumerate() {
+    // Candidate preparation happens before writer custody or guardian handoff.
+    // Advance only for a typed provider outcome, within the sealed alternatives,
+    // and never substitute a differently pinned account.
+    let mut previous_outcome = provenant_routing::FallbackOutcome::Other;
+    let mut queue: std::collections::VecDeque<_> = candidates(resolved).into();
+    let mut rejected = Vec::new();
+    let mut candidate = 0usize;
+    let mut redraws = 0u8;
+    loop {
+        if queue.is_empty() {
+            let allowed = provenant_routing::FallbackPolicy {
+                outcome: previous_outcome,
+                handoff: provenant_routing::FallbackHandoff::Local,
+                custody_released: true,
+                budget_remaining: named_pool && redraws < config.domains.routing.settlement_retries,
+                pinned: false,
+            }
+            .allows_switch();
+            if !allowed {
+                break;
+            }
+            let Ok(next) = resolve(&rejected) else {
+                break;
+            };
+            redraws += 1;
+            queue.extend(candidates(next));
+        }
+        let Some(route) = queue.pop_front() else {
+            break;
+        };
+        let model =
+            provenant_routing::ModelId::parse(&format!("{}/{}", route.adapter, route.model))
+                .map_err(|error| error.to_string())?;
+        if rejected.contains(&model) {
+            continue;
+        }
+        if candidate > 0
+            && !(provenant_routing::FallbackPolicy {
+                outcome: previous_outcome,
+                handoff: provenant_routing::FallbackHandoff::Local,
+                custody_released: true,
+                budget_remaining: true,
+                pinned: selected.is_some_and(|key| route.account_key.as_deref() != Some(key)),
+            })
+            .allows_switch()
+        {
+            break;
+        }
+        rejected.push(model);
+        let current_candidate = candidate;
+        candidate += 1;
+        previous_outcome = provenant_routing::FallbackOutcome::Other;
         let label = format!("{}/{}", route.adapter, route.model);
+        if !eligible(&route.adapter) {
+            previous_outcome = provenant_routing::FallbackOutcome::AdapterUnavailable;
+            reasons.push(skip(
+                &label,
+                SkipKind::Unavailable,
+                "provider lease unavailable",
+            ));
+            continue;
+        }
+        if let Some(spec) = AdapterSpec::get(&route.adapter)
+            && let Err(error) =
+                request
+                    .intent
+                    .check_launch(spec, &route.model, route.effort.as_deref())
+        {
+            reasons.push(skip(&label, SkipKind::Refused, &error.to_string()));
+            continue;
+        }
         let effective = config.domains.routing.model_policy.effective(
             &provenant_routing::ModelId::parse(&label).map_err(|error| error.to_string())?,
             route.account_key.as_deref(),
@@ -859,6 +947,7 @@ pub(super) fn prepare_candidates(
             .iter()
             .find(|registration| registration.adapter.id() == route.adapter)
         else {
+            previous_outcome = provenant_routing::FallbackOutcome::AdapterUnavailable;
             reasons.push(skip(&label, SkipKind::Unavailable, "unknown adapter"));
             continue;
         };
@@ -869,6 +958,9 @@ pub(super) fn prepare_candidates(
                 provenant_records::RouteExclusionReason::UnknownAvailability
             ) {
                 if let Some((kind, detail)) = default_failures.get(&route.adapter) {
+                    if *kind == SkipKind::AuthRequired {
+                        previous_outcome = provenant_routing::FallbackOutcome::AuthRequired;
+                    }
                     reasons.push(skip(&label, *kind, detail));
                     continue;
                 }
@@ -899,6 +991,7 @@ pub(super) fn prepare_candidates(
                 reason,
                 provenant_records::RouteExclusionReason::AuthRequired
             ) {
+                previous_outcome = provenant_routing::FallbackOutcome::AuthRequired;
                 reasons.push(skip(
                     &label,
                     SkipKind::AuthRequired,
@@ -912,9 +1005,21 @@ pub(super) fn prepare_candidates(
             ) && let Some(detail) =
                 unavailable_auth_detail(&route, selected, &entries, &auth_failures)
             {
+                previous_outcome = provenant_routing::FallbackOutcome::AuthRequired;
                 reasons.push(skip(&label, SkipKind::AuthRequired, detail));
                 continue;
             }
+            previous_outcome = match reason {
+                provenant_records::RouteExclusionReason::Exhausted
+                | provenant_records::RouteExclusionReason::FreeTierRefused
+                | provenant_records::RouteExclusionReason::ProviderRefused => {
+                    provenant_routing::FallbackOutcome::UsageLimited
+                }
+                provenant_records::RouteExclusionReason::MissingExecutable => {
+                    provenant_routing::FallbackOutcome::AdapterUnavailable
+                }
+                _ => provenant_routing::FallbackOutcome::Other,
+            };
             // An adapter left out of `access` names its confinement error, not the router's denial.
             let detail = plan_errors
                 .get(route.adapter.as_str())
@@ -975,6 +1080,7 @@ pub(super) fn prepare_candidates(
         let executable = match locate(adapter.id()) {
             Ok(path) => path,
             Err(error) => {
+                previous_outcome = provenant_routing::FallbackOutcome::AdapterUnavailable;
                 reasons.push(skip(&label, SkipKind::Unavailable, error));
                 continue;
             }
@@ -982,8 +1088,10 @@ pub(super) fn prepare_candidates(
         // Every lane stages temporary files under tmp for terminal cleanup.
         // A failed setup never poisons the next explicit fallback candidate.
         let staging = &paths.temporary;
-        let scratch = staging.join(format!("candidate-{candidate}"));
-        let private_state = paths.provider_state.join(format!("candidate-{candidate}"));
+        let scratch = staging.join(format!("candidate-{current_candidate}"));
+        let private_state = paths
+            .provider_state
+            .join(format!("candidate-{current_candidate}"));
         // Retain the handle opened while creating scratch: a parent lane can
         // rename tmp and redirect its pathname before context is published.
         let scratch_directory =
@@ -1209,7 +1317,7 @@ pub(super) fn prepare_candidates(
             alias_temporary_env(
                 &mut spec.env,
                 scratch,
-                &alias.join(format!("candidate-{candidate}")),
+                &alias.join(format!("candidate-{current_candidate}")),
             );
         }
         spec.profile.spec.allow_database_ipc = task.access.database_ipc;
@@ -1352,7 +1460,7 @@ pub(super) fn prepare_candidates(
             entry.map(|e| e.label.as_str()),
             &task.route,
             resume.is_some(),
-            redirected || candidate > 0,
+            redirected || current_candidate > 0,
         );
         provider.extra.insert(
             "account_source".into(),
@@ -1403,6 +1511,18 @@ pub(super) fn prepare_candidates(
         });
     }
     Err(PrepareError::Candidates {
+        fallback_outcome: match previous_outcome {
+            provenant_routing::FallbackOutcome::AuthRequired => {
+                Some(provenant_records::run::PreparationFailure::AuthRequired)
+            }
+            provenant_routing::FallbackOutcome::UsageLimited => {
+                Some(provenant_records::run::PreparationFailure::UsageLimited)
+            }
+            provenant_routing::FallbackOutcome::AdapterUnavailable => {
+                Some(provenant_records::run::PreparationFailure::AdapterUnavailable)
+            }
+            provenant_routing::FallbackOutcome::Other => None,
+        },
         message: reasons
             .iter()
             .map(|skipped| format!("{}: {}", skipped.route, skipped.detail))
