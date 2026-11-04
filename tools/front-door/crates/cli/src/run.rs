@@ -670,6 +670,21 @@ impl Registry<'_> {
                 _ => {}
             }
         }
+        if adapter.id() == provenant_records::Harness::Agy.spec().name {
+            // Agy can repeat the whole answer across its streamed response and
+            // result, or within the result itself. Leave distinct text intact.
+            let answer = decoded.result.trim();
+            let mut middle = answer.len() / 2;
+            while !answer.is_char_boundary(middle) {
+                middle -= 1;
+            }
+            let (left, right) = answer.split_at(middle);
+            let first = left.trim_end();
+            let second = right.trim_start();
+            if !first.is_empty() && first == second && first.len() + second.len() < answer.len() {
+                decoded.result = first.to_owned();
+            }
+        }
         if adapter.id() == "command" {
             decoded.observed_route = Some(run::RouteRecord {
                 source: Some("command_exit".into()),
