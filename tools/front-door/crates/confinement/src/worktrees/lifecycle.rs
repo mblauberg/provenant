@@ -544,6 +544,8 @@ pub(super) fn execute_mutation(
     mutation: GitMutation,
     cancel: &CancelToken,
 ) -> Result<(), WorktreeError> {
+    // A failed or timed-out mutation may still have changed repository state.
+    context.workers.invalidate();
     let outcome = execute_git_mutation(
         context.executor,
         context.repo,
@@ -712,6 +714,9 @@ pub(super) fn remove_tree_when(
             &settings.keep,
             cancel,
         )?;
+        if matches!(repository, Repository::Held) {
+            refresh_census_under_custody(context, &canonical)?;
+        }
     }
     // Output preparation can take time. Recheck registration, head and lane
     // eligibility before removing the tree while writer exclusion is held.
@@ -774,6 +779,32 @@ pub(super) fn remove_tree_when(
         _writer: writer,
         repository: repository_guard,
     })
+}
+
+/// Output preparation can take long enough for a native process to enter the
+/// tree. Refresh under the retained writer lease before a held-repository
+/// removal; land requires complete Free, ordinary custody rejects only a
+/// positive occupant as before.
+fn refresh_census_under_custody(
+    context: &WorktreeContext<'_>,
+    root: &Path,
+) -> Result<(), WorktreeError> {
+    context.workers.invalidate();
+    let (states, details) = context
+        .workers
+        .observe_roots_with_details(std::slice::from_ref(&root.to_path_buf()));
+    match states.get(root).copied().unwrap_or(WorkerState::Unknown) {
+        WorkerState::Free => Ok(()),
+        WorkerState::Unknown if !context.workers.requires_complete_census() => Ok(()),
+        WorkerState::Unknown => Err(WorktreeError::IncompleteCensus {
+            detail: details
+                .get(root)
+                .cloned()
+                .unwrap_or_else(|| context.workers.incomplete_census_detail()),
+        }),
+        WorkerState::Live => Err(live_refusal(context.workers, root)),
+        WorkerState::Busy => Err(WorktreeError::LockBusy),
+    }
 }
 
 #[allow(clippy::print_stderr)]

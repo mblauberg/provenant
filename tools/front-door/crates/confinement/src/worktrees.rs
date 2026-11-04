@@ -8,7 +8,7 @@ mod inventory;
 mod lifecycle;
 mod owner;
 pub use census::*;
-pub use context::with_context;
+pub use context::{with_context, with_context_using_workers};
 pub use custody::*;
 pub use gc::{WorktreeGcPolicy, WorktreeGcReport, collect};
 pub use inventory::*;
@@ -110,6 +110,8 @@ pub enum WorktreeError {
     GitOperationInProgress,
     #[error("worktree writer lock busy")]
     LockBusy,
+    #[error("worktree registry reservation timed out")]
+    RegistryLockTimeout,
     #[error("worktree writer is live")]
     LiveWriter,
     #[error(
@@ -157,6 +159,15 @@ pub enum WorktreeError {
     PathWire(#[from] PathWireError),
 }
 
+/// Stable machine cause for worktree admission transitions. Presentation may
+/// change; lifecycle callers must branch on this value rather than refusal text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdmissionCause {
+    RegistryLockTimeout,
+    CensusIncomplete,
+    RegistrationOrCustodyUnknown,
+}
+
 fn dirty_suffix(paths: &str) -> String {
     if paths.is_empty() {
         String::new()
@@ -166,6 +177,19 @@ fn dirty_suffix(paths: &str) -> String {
 }
 
 impl WorktreeError {
+    /// Returns a typed retry-relevant cause without making the error retryable
+    /// by itself. The caller still owns deadlines and transition policy.
+    pub fn admission_cause(&self) -> Option<AdmissionCause> {
+        match self {
+            Self::RegistryLockTimeout => Some(AdmissionCause::RegistryLockTimeout),
+            Self::IncompleteCensus { .. } => Some(AdmissionCause::CensusIncomplete),
+            Self::UnknownWriter | Self::GitEntryHeld { .. } => {
+                Some(AdmissionCause::RegistrationOrCustodyUnknown)
+            }
+            _ => None,
+        }
+    }
+
     /// Refusals that mean Provenant cannot prove who owns the tree. Callers
     /// that retain such a tree treat every one of them alike.
     pub fn is_custody_unknown(&self) -> bool {
@@ -442,6 +466,27 @@ mod lifecycle_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admission_causes_keep_transient_observation_distinct_from_custody() {
+        assert_eq!(
+            WorktreeError::RegistryLockTimeout.admission_cause(),
+            Some(AdmissionCause::RegistryLockTimeout)
+        );
+        assert_eq!(
+            WorktreeError::IncompleteCensus {
+                detail: "process listing failed".into()
+            }
+            .admission_cause(),
+            Some(AdmissionCause::CensusIncomplete)
+        );
+        assert_eq!(
+            WorktreeError::UnknownWriter.admission_cause(),
+            Some(AdmissionCause::RegistrationOrCustodyUnknown)
+        );
+        assert_eq!(WorktreeError::LockBusy.admission_cause(), None);
+        assert_eq!(WorktreeError::Dirty(String::new()).admission_cause(), None);
+    }
 
     #[test]
     fn remove_admin_entry_handles_large_directory_and_keeps_other_targets()

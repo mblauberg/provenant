@@ -525,30 +525,9 @@ fn core_run_creates_a_new_managed_worktree_from_a_name_or_branch() -> Result {
 fn run_base_consistency_on_existing_branch() -> Result {
     let rig = TestRig::new()?;
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    // The rig has no git identity, so every commit names one.
-    let commit_args = |message: &'static str| {
-        [
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            message,
-        ]
-    };
+    let commit_args = |message: &'static str| ["commit", "--allow-empty", "-qm", message];
     for args in [
-        vec![
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "base-a",
-        ],
+        vec!["commit", "--allow-empty", "-qm", "base-a"],
         vec!["branch", "-M", "main"],
     ] {
         assert_eq!(code(&rig.execute(&git, &args, None)?), 0);

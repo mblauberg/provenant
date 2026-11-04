@@ -2,6 +2,15 @@
 Owner: provenant
 Anchor: tools/front-door/src/tick.rs
 
+Repeated census state and refusal details within one GC command use the same
+observation evidence. Preview evidence never authorises deletion: apply takes
+a fresh census after acquiring writer custody, and refreshes after any
+required output preparation. Foreign collection still requires a complete
+`Free` result. GC performs census work outside the repository lock. Native
+processes may start without taking the advisory writer lock, so this check is
+not atomic exclusion; existing registration, identity, cleanliness and
+non-forcing Git removal fences remain in force.
+
 Preview collection before inspecting the named removals:
 
 ```sh

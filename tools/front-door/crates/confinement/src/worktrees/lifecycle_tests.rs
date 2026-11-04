@@ -2480,6 +2480,248 @@ impl WorkerObserver for FlippingWorkers {
 }
 
 #[test]
+fn removal_refreshes_session_after_output_preparation() -> Result<(), Box<dyn Error>> {
+    struct AppearingAfterPreparation {
+        artifact: PathBuf,
+        calls: std::sync::atomic::AtomicUsize,
+        complete_required: bool,
+    }
+    impl WorkerObserver for AppearingAfterPreparation {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let state = if self.artifact.exists() {
+                WorkerState::Free
+            } else {
+                WorkerState::Live
+            };
+            roots.iter().cloned().map(|root| (root, state)).collect()
+        }
+        fn requires_complete_census(&self) -> bool {
+            self.complete_required
+        }
+    }
+    for complete_required in [false, true] {
+        let fixture = Fixture::new()?;
+        fs::write(fixture.root.join(".git/info/exclude"), "target/\n")?;
+        let test = TestContext::new(&fixture)?;
+        let mut context = test.context();
+        let info = create(
+            &context,
+            WorktreeCreate {
+                branch: "late-worker".into(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        let artifact = info.path.join("target/artifact");
+        fs::create_dir(info.path.join("target"))?;
+        fs::write(&artifact, "output")?;
+        let observer = AppearingAfterPreparation {
+            artifact: artifact.clone(),
+            calls: Default::default(),
+            complete_required,
+        };
+        let session = CensusSession::new(&observer, &test.clock);
+        context.workers = &session;
+        let result = remove_with_output(
+            &context,
+            WorktreeRemove::Name {
+                name: "late-worker".into(),
+                discard: false,
+                integration: None,
+                expected_head: None,
+            },
+            &cancel(),
+            &provenant_config::ProjectGcSettings {
+                regenerable: vec!["target".into()],
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(
+                result,
+                Err(WorktreeError::LiveWriter | WorktreeError::LiveProcess(_))
+            ),
+            "{result:?}"
+        );
+        assert!(
+            !artifact.exists(),
+            "output preparation must precede the late observation"
+        );
+        assert!(info.path.is_dir());
+        assert!(observer.calls.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+    }
+    Ok(())
+}
+
+#[test]
+fn removal_session_detects_worker_after_preview() -> Result<(), Box<dyn Error>> {
+    struct Appearing {
+        calls: std::sync::atomic::AtomicUsize,
+        complete_required: bool,
+    }
+    impl WorkerObserver for Appearing {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let state = if call == 0 {
+                WorkerState::Free
+            } else {
+                WorkerState::Live
+            };
+            roots.iter().cloned().map(|root| (root, state)).collect()
+        }
+        fn requires_complete_census(&self) -> bool {
+            self.complete_required
+        }
+    }
+    for complete_required in [false, true] {
+        let fixture = Fixture::new()?;
+        let test = TestContext::new(&fixture)?;
+        let mut context = test.context();
+        let info = create(
+            &context,
+            WorktreeCreate {
+                branch: "worker-appears".into(),
+                base: None,
+            },
+            &cancel(),
+        )?;
+        let observer = Appearing {
+            calls: Default::default(),
+            complete_required,
+        };
+        let session = CensusSession::new(&observer, &test.clock);
+        assert_eq!(
+            session.observe_roots(std::slice::from_ref(&info.path))[&info.path],
+            WorkerState::Free
+        );
+        context.workers = &session;
+        let error = remove(
+            &context,
+            WorktreeRemove::Name {
+                name: "worker-appears".into(),
+                discard: false,
+                integration: None,
+                expected_head: None,
+            },
+            &cancel(),
+        )
+        .err()
+        .ok_or("removed occupied tree")?;
+        assert!(
+            matches!(
+                error,
+                WorktreeError::LiveWriter | WorktreeError::LiveProcess(_)
+            ),
+            "{error:?}"
+        );
+        assert!(info.path.is_dir());
+        assert!(observer.calls.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+    }
+    Ok(())
+}
+
+#[test]
+fn foreign_gc_session_requires_fresh_complete_census() -> Result<(), Box<dyn Error>> {
+    struct BecomingUnknown(std::sync::atomic::AtomicUsize);
+    impl WorkerObserver for BecomingUnknown {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            let call = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let state = if call == 0 {
+                WorkerState::Free
+            } else {
+                WorkerState::Unknown
+            };
+            roots.iter().cloned().map(|root| (root, state)).collect()
+        }
+    }
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let path = fixture._temp.path().join("foreign-session");
+    fixture.run(&[
+        "worktree",
+        "add",
+        "-b",
+        "foreign-session",
+        path.to_str().ok_or("path")?,
+    ])?;
+    let lanes = list(&context, &cancel())?;
+    let observer = BecomingUnknown(Default::default());
+    let session = CensusSession::new(&observer, &test.clock);
+    assert_eq!(
+        session.observe_roots(std::slice::from_ref(&path))[&path],
+        WorkerState::Free
+    );
+    context.workers = &session;
+    let report = collect(
+        &context,
+        &lanes,
+        &WorktreeGcPolicy {
+            foreign_merged_clean: true,
+            upstream: Some(fixture.head()?),
+            terminal: &|_| false,
+            no_live_lanes: &|_| true,
+            regenerable: &[],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            dry_run: false,
+        },
+        &cancel(),
+    )?;
+    assert!(report.worktrees.removed.is_empty(), "{report:?}");
+    assert!(path.is_dir());
+    assert!(observer.0.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+    Ok(())
+}
+
+#[test]
+fn gc_session_detects_worker_after_preview() -> Result<(), Box<dyn Error>> {
+    struct Appearing(std::sync::atomic::AtomicUsize);
+    impl WorkerObserver for Appearing {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            let call = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let state = if call == 0 {
+                WorkerState::Free
+            } else {
+                WorkerState::Live
+            };
+            roots.iter().cloned().map(|root| (root, state)).collect()
+        }
+    }
+    let fixture = Fixture::new()?;
+    let test_context = TestContext::new(&fixture)?;
+    let mut context = test_context.context();
+    let lane = gc_merged_worktree(&fixture, &context, "gc-worker-appears")?;
+    let observer = Appearing(Default::default());
+    let session = CensusSession::new(&observer, &test_context.clock);
+    assert_eq!(
+        session.observe_roots(std::slice::from_ref(&lane.path))[&lane.path],
+        WorkerState::Free
+    );
+    context.workers = &session;
+    let report = collect(
+        &context,
+        std::slice::from_ref(&lane),
+        &WorktreeGcPolicy {
+            foreign_merged_clean: false,
+            upstream: Some(fixture.head()?),
+            terminal: &|_| true,
+            no_live_lanes: &|_| true,
+            regenerable: &[],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            dry_run: false,
+        },
+        &cancel(),
+    )?;
+    assert!(report.worktrees.removed.is_empty(), "{report:?}");
+    assert!(lane.path.is_dir());
+    assert!(observer.0.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+    Ok(())
+}
+
+#[test]
 fn gc_managed_removal_needs_a_fresh_free_census_under_custody() -> Result<(), Box<dyn Error>> {
     // Count the censuses of an uninterrupted removal, then make the last one
     // fail: a tree whose census turns unobservable after selection is kept.
@@ -2512,7 +2754,8 @@ fn gc_managed_removal_needs_a_fresh_free_census_under_custody() -> Result<(), Bo
                 calls: Default::default(),
                 unknown_from,
             };
-            context.workers = &counting;
+            let session = CensusSession::new(&counting, &test_context.clock);
+            context.workers = &session;
             let report = run(&context)?;
             assert_eq!(report.worktrees.removed.len(), 1, "{report:?}");
             total = counting.calls.load(std::sync::atomic::Ordering::SeqCst);
@@ -2524,7 +2767,8 @@ fn gc_managed_removal_needs_a_fresh_free_census_under_custody() -> Result<(), Bo
             calls: Default::default(),
             unknown_from: total,
         };
-        context.workers = &flipping;
+        let session = CensusSession::new(&flipping, &test_context.clock);
+        context.workers = &session;
         let report = run(&context)?;
         assert!(report.worktrees.removed.is_empty(), "{report:?}");
         assert_eq!(

@@ -2396,14 +2396,15 @@ mod tests {
     }
     #[test]
     fn deadline_expiring_after_lock_keeps_previous_complete_bytes() {
-        struct ExpiringAfterLock(std::cell::Cell<u32>);
+        struct ExpiringAfterLock(std::sync::Mutex<u32>);
         impl Clock for ExpiringAfterLock {
             fn wall_now(&self) -> Result<UtcMicros, provenant_core::TimeError> {
                 UtcMicros::from_micros(0)
             }
             fn mono_now(&self) -> MonoTime {
-                let call = self.0.get();
-                self.0.set(call + 1);
+                let mut value = self.0.lock().unwrap();
+                let call = *value;
+                *value += 1;
                 // Call 0 is the uncontended lock poll; call 1 is the post-lock check.
                 MonoTime::from_micros(if call < 1 { 0 } else { 1_000_000 })
             }
@@ -2415,7 +2416,7 @@ mod tests {
         let selected = store(&root, project, "host-1");
         save(&selected, b"original").unwrap();
         let budget = WaitBudget::cli(MonoTime::from_micros(0), 1).unwrap();
-        let clock = ExpiringAfterLock(std::cell::Cell::new(0));
+        let clock = ExpiringAfterLock(std::sync::Mutex::new(0));
         assert!(matches!(
             selected.save(b"late", budget, &CancelToken::new(), &clock),
             Err(SessionError::Deadline)

@@ -323,6 +323,7 @@ fn integration_protection(
 /// Removal needs a fresh positive census. Custody accepts an unobservable
 /// process for ordinary removal; deleting a tree automatically does not.
 fn census_free(context: &WorktreeContext<'_>, path: &Path) -> bool {
+    context.workers.invalidate();
     census_refusal_detail(context, path).is_none()
 }
 
@@ -978,6 +979,7 @@ fn preview_foreign(
     let recheck = || -> Result<(), WorktreeError> {
         verified.repo().revalidate()?;
         tree_unchanged(&read_worktrees(context, cancel)?, entry, lane.head)?;
+        context.workers.invalidate();
         if let Some(detail) = census_refusal_detail(context, &lane.path) {
             return Err(WorktreeError::IncompleteCensus { detail });
         }

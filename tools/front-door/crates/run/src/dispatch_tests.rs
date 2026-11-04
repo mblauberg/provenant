@@ -4091,49 +4091,47 @@ fn a_nested_lane_reads_class_spacing_from_the_host_ledger_only_with_the_host_roo
 /// move the wall and monotonic clocks together like `TestClock`.
 struct Stepped {
     inner: TestClock,
-    wall_offset_micros: Cell<i64>,
-    host_base_micros: Cell<u64>,
-    boot: RefCell<&'static str>,
-    host_readable: Cell<bool>,
-    boot_readable: Cell<bool>,
+    wall_offset_micros: std::sync::Mutex<i64>,
+    host_base_micros: std::sync::Mutex<u64>,
+    boot: std::sync::RwLock<&'static str>,
+    host_readable: std::sync::Mutex<bool>,
+    boot_readable: std::sync::Mutex<bool>,
 }
 impl Stepped {
     /// A host that has been up `host_ms`, in boot `"boot-a"`.
     fn up(host_ms: u64) -> Self {
         Self {
             inner: clock(),
-            wall_offset_micros: Cell::new(0),
-            host_base_micros: Cell::new(host_ms * 1000),
-            boot: RefCell::new("boot-a"),
-            host_readable: Cell::new(true),
-            boot_readable: Cell::new(true),
+            wall_offset_micros: std::sync::Mutex::new(0),
+            host_base_micros: std::sync::Mutex::new(host_ms * 1000),
+            boot: std::sync::RwLock::new("boot-a"),
+            host_readable: std::sync::Mutex::new(true),
+            boot_readable: std::sync::Mutex::new(true),
         }
     }
     /// The wall clock alone steps, as an operator or NTP can make it.
     fn step_wall_ms(&self, ms: i64) {
-        self.wall_offset_micros
-            .set(self.wall_offset_micros.get() + ms * 1000);
+        *self.wall_offset_micros.lock().unwrap() += ms * 1000;
     }
     /// Real time passes: the wall and host clocks both move.
     fn pass_micros(&self, micros: u64) {
-        self.host_base_micros
-            .set(self.host_base_micros.get() + micros);
-        self.wall_offset_micros
-            .set(self.wall_offset_micros.get() + i64::try_from(micros).unwrap_or(0));
+        *self.host_base_micros.lock().unwrap() += micros;
+        *self.wall_offset_micros.lock().unwrap() += i64::try_from(micros).unwrap_or(0);
     }
     fn pass_ms(&self, ms: u64) {
         self.pass_micros(ms * 1000);
     }
     /// The host restarts: a new boot whose clock has run `host_ms`.
     fn reboot(&self, boot: &'static str, host_ms: u64) {
-        *self.boot.borrow_mut() = boot;
-        self.host_base_micros
-            .set(host_ms * 1000 - self.inner.mono_now().as_micros());
+        *self.boot.write().unwrap() = boot;
+        *self.host_base_micros.lock().unwrap() = host_ms * 1000 - self.inner.mono_now().as_micros();
     }
 }
 impl Clock for Stepped {
     fn wall_now(&self) -> std::result::Result<WallTime, provenant_core::TimeError> {
-        WallTime::from_micros(self.inner.wall_now()?.as_micros() + self.wall_offset_micros.get())
+        WallTime::from_micros(
+            self.inner.wall_now()?.as_micros() + *self.wall_offset_micros.lock().unwrap(),
+        )
     }
     fn mono_now(&self) -> MonoTime {
         self.inner.mono_now()
@@ -4142,16 +4140,16 @@ impl Clock for Stepped {
         self.inner.wait_until(deadline)
     }
     fn host_monotonic_micros(&self) -> std::result::Result<u64, provenant_core::TimeError> {
-        if !self.host_readable.get() {
+        if !*self.host_readable.lock().unwrap() {
             return Err(provenant_core::TimeError::HostClock);
         }
-        Ok(self.inner.mono_now().as_micros() + self.host_base_micros.get())
+        Ok(self.inner.mono_now().as_micros() + *self.host_base_micros.lock().unwrap())
     }
     fn boot_identity(&self) -> std::result::Result<String, provenant_core::TimeError> {
-        if !self.boot_readable.get() {
+        if !*self.boot_readable.lock().unwrap() {
             return Err(provenant_core::TimeError::HostClock);
         }
-        Ok((*self.boot.borrow()).to_owned())
+        Ok((*self.boot.read().unwrap()).to_owned())
     }
 }
 fn stepped_call<'a>(clock: &'a Stepped, cancel: &'a CancelToken) -> Request<'a> {
@@ -4278,7 +4276,7 @@ fn an_unreadable_host_clock_or_boot_identity_refuses_the_claim() -> TestResult {
         (&host.host_readable, "monotonic clock"),
         (&host.boot_readable, "boot identity"),
     ] {
-        readable.set(false);
+        *readable.lock().unwrap() = false;
         assert!(
             matches!(
                 store.claim(lane_id, &host, &call),
@@ -4296,7 +4294,7 @@ fn an_unreadable_host_clock_or_boot_identity_refuses_the_claim() -> TestResult {
             },
             "nothing started"
         );
-        readable.set(true);
+        *readable.lock().unwrap() = true;
     }
     assert!(
         store.claim(lane_id, &host, &call)?.is_some(),
@@ -4329,7 +4327,7 @@ fn lane_waits_count_spacing_on_the_host_clock_and_say_nothing_when_it_is_unreada
         "writer startup spacing: 15.0 s left of 20.0 s",
         "the wall clock stepped a day and is not what the wait counts"
     );
-    host.host_readable.set(false);
+    *host.host_readable.lock().unwrap() = false;
     assert!(
         wait(&host)?.starts_with("host capacity"),
         "no wait is stated when the host clock cannot be read"
@@ -4543,7 +4541,7 @@ fn a_version_1_upgrade_refuses_when_the_host_clock_cannot_be_read() -> TestResul
     let store = RunStore::open(&context(temp.path())?, &call)?;
     version_1_start(&store, &host, 5_000)?;
     let writer = starting(&store, &lane(103, true), &call)?;
-    host.boot_readable.set(false);
+    *host.boot_readable.lock().unwrap() = false;
     assert!(matches!(
         store.claim(writer, &host, &call),
         Err(RunError::Admission(AdmissionError::Clock))
@@ -4556,7 +4554,7 @@ fn a_version_1_upgrade_refuses_when_the_host_clock_cannot_be_read() -> TestResul
         (1, 1),
         "the refused upgrade dropped nothing"
     );
-    host.boot_readable.set(true);
+    *host.boot_readable.lock().unwrap() = true;
     assert!(store.claim(writer, &host, &call)?.is_none());
     Ok(())
 }

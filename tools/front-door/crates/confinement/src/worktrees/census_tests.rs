@@ -7,6 +7,174 @@ use std::error::Error;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
+#[test]
+fn session_reuses_evidence_and_refreshes_at_epoch_boundaries() -> Result<(), Box<dyn Error>> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    struct Counting(AtomicUsize, AtomicBool);
+    impl WorkerObserver for Counting {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, WorkerState::Free))
+                .collect()
+        }
+        fn epoch_policy(&self) -> Option<CensusEpochPolicy> {
+            Some(CensusEpochPolicy {
+                exclude_ancestors: self.1.load(Ordering::SeqCst),
+                ..CensusEpochPolicy::default()
+            })
+        }
+    }
+    let fixture = Fixture::new()?;
+    let a = fixture.root.join("session-a");
+    let b = fixture.root.join("session-b");
+    fs::create_dir(&a)?;
+    fs::create_dir(&b)?;
+    let clock = provenant_core::TestClock::new(
+        provenant_os::clock::SystemClock.wall_now()?,
+        provenant_core::MonoTime::from_micros(42),
+    );
+    let observer = Counting(AtomicUsize::new(0), AtomicBool::new(false));
+    let session = CensusSession::new(&observer, &clock);
+    assert_eq!(
+        session.observe_roots(std::slice::from_ref(&a))[&a],
+        WorkerState::Free
+    );
+    assert_eq!(
+        session
+            .observe_roots_with_details(std::slice::from_ref(&a))
+            .0[&a],
+        WorkerState::Free
+    );
+    assert_eq!(session.observed_at(), Some(clock.mono_now()));
+    assert_eq!(observer.0.load(Ordering::SeqCst), 1);
+    session.observe_roots(&[a.clone(), b.clone()]);
+    session.observe_roots(std::slice::from_ref(&a));
+    assert_eq!(observer.0.load(Ordering::SeqCst), 2);
+    session.observe_roots_for_land(std::slice::from_ref(&a));
+    session.invalidate();
+    session.observe_roots_for_land(std::slice::from_ref(&a));
+    fs::rename(&a, fixture.root.join("session-old"))?;
+    fs::create_dir(&a)?;
+    session.observe_roots_for_land(std::slice::from_ref(&a));
+    assert_eq!(observer.0.load(Ordering::SeqCst), 5);
+    let second_command = CensusSession::new(&observer, &clock);
+    second_command.observe_roots(std::slice::from_ref(&a));
+    assert_eq!(observer.0.load(Ordering::SeqCst), 6);
+    observer.1.store(true, Ordering::SeqCst);
+    second_command.observe_roots(std::slice::from_ref(&a));
+    assert_eq!(observer.0.load(Ordering::SeqCst), 7);
+    Ok(())
+}
+
+#[test]
+fn session_refusal_uses_decision_evidence_and_missing_root_is_unknown() -> Result<(), Box<dyn Error>>
+{
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Sequenced(AtomicUsize);
+    impl WorkerObserver for Sequenced {
+        fn observe_roots(&self, _: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            panic!("must acquire evidence together")
+        }
+        fn observe_evidence(&self, roots: &[PathBuf], _: bool) -> WorkerEvidence {
+            let n = self.0.fetch_add(1, Ordering::SeqCst);
+            let root = roots[0].clone();
+            WorkerEvidence {
+                states: BTreeMap::from([(
+                    root.clone(),
+                    if n == 0 {
+                        WorkerState::Live
+                    } else {
+                        WorkerState::Free
+                    },
+                )]),
+                holders: BTreeMap::from([(
+                    root.clone(),
+                    ObservedProcess {
+                        pid: 123,
+                        command: Some("first".into()),
+                        cwd: Some(root.clone()),
+                    },
+                )]),
+                details: BTreeMap::from([(root, "first observation".into())]),
+            }
+        }
+    }
+    let fixture = Fixture::new()?;
+    let clock = provenant_core::TestClock::new(
+        provenant_os::clock::SystemClock.wall_now()?,
+        provenant_core::MonoTime::from_micros(1),
+    );
+    let observer = Sequenced(AtomicUsize::new(0));
+    let session = CensusSession::new(&observer, &clock);
+    let root = fixture.root.clone();
+    let (states, details) = session.observe_roots_with_details(std::slice::from_ref(&root));
+    assert_eq!(states[&root], WorkerState::Live);
+    assert_eq!(details[&root], "first observation");
+    assert_eq!(session.live_process(&root).unwrap().pid, 123);
+    assert_eq!(observer.0.load(Ordering::SeqCst), 1);
+    let missing = root.join("missing");
+    assert_eq!(
+        session.observe_roots(std::slice::from_ref(&missing))[&missing],
+        WorkerState::Unknown
+    );
+    let states = session.observe_roots(&[root.clone(), missing.clone()]);
+    assert_eq!(states[&root], WorkerState::Free);
+    assert_eq!(states[&missing], WorkerState::Unknown);
+    Ok(())
+}
+
+#[test]
+fn command_session_is_reused_across_worktree_contexts() -> Result<(), Box<dyn Error>> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Counting(AtomicUsize);
+    impl WorkerObserver for Counting {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, WorkerState::Free))
+                .collect()
+        }
+    }
+    let fixture = Fixture::new()?;
+    let state = fixture._temp.path().join("command-state");
+    fs::create_dir(&state)?;
+    let mut input = provenant_core::RootInputs::new(fixture.home.clone(), fixture.root.clone());
+    input.state_dir = Some(state);
+    let roots = input.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let clock = provenant_os::clock::SystemClock;
+    let observer = Counting(AtomicUsize::new(0));
+    let session = CensusSession::new(&observer, &clock);
+    for _ in 0..2 {
+        super::context::with_context_using_workers(
+            &roots,
+            &fixture.home,
+            &fixture.root,
+            &clock,
+            &cancel(),
+            &session,
+            |context| {
+                let roots = std::slice::from_ref(&fixture.root);
+                assert_eq!(
+                    context.workers.observe_roots(roots)[&fixture.root],
+                    WorkerState::Free
+                );
+                assert_eq!(
+                    context.workers.observe_roots_with_details(roots).0[&fixture.root],
+                    WorkerState::Free
+                );
+                Ok(())
+            },
+        )?;
+    }
+    assert_eq!(observer.0.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 #[allow(clippy::print_stderr, clippy::disallowed_methods)] // Real process list and child are the acceptance fixture.
@@ -782,18 +950,36 @@ fn occupancy_is_placed_per_root_and_partial_results_remain_conservative()
     };
     let roots = vec![a.clone(), b.clone()];
     let observe = |paths, complete| {
-        observe_worker_roots(
-            &roots,
-            &processes,
-            &Occupancy {
+        struct FixtureObserver<'a> {
+            processes: &'a InjectedCensus,
+            cwd: Occupancy,
+            current: &'a ProcessFact,
+        }
+        impl WorkerObserver for FixtureObserver<'_> {
+            fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+                self.observe_evidence(roots, false).states
+            }
+            fn observe_evidence(&self, roots: &[PathBuf], _: bool) -> WorkerEvidence {
+                let (states, holders, details) =
+                    observe_worker_holders(roots, self.processes, &self.cwd, self.current, false);
+                WorkerEvidence {
+                    states,
+                    holders,
+                    details,
+                }
+            }
+        }
+        let observer = FixtureObserver {
+            processes: &processes,
+            cwd: Occupancy {
                 cwd: base.clone(),
                 paths,
                 complete,
             },
-            &current,
-            false,
-        )
-        .0
+            current: &current,
+        };
+        let clock = provenant_os::clock::SystemClock;
+        CensusSession::new(&observer, &clock).observe_roots(&roots)
     };
     let free = observe(vec![], true);
     assert_eq!(free[&a], WorkerState::Free);
