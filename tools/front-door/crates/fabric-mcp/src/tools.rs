@@ -154,7 +154,9 @@ pub trait McpFacade: F3Facade {
         _budget: WaitBudget,
         _cancel: &CancelToken,
     ) -> Result<Value, ServiceError> {
-        Err(ServiceError::Facade(FacadeError::InvalidInput))
+        Err(ServiceError::Facade(FacadeError::InvalidInput {
+            detail: None,
+        }))
     }
     fn chair(
         &mut self,
@@ -162,7 +164,9 @@ pub trait McpFacade: F3Facade {
         _budget: WaitBudget,
         _cancel: &CancelToken,
     ) -> Result<Value, ServiceError> {
-        Err(ServiceError::Facade(FacadeError::InvalidInput))
+        Err(ServiceError::Facade(FacadeError::InvalidInput {
+            detail: None,
+        }))
     }
 }
 

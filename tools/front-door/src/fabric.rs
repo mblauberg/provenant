@@ -1123,7 +1123,7 @@ fn landing_error(error: &(dyn std::error::Error + 'static)) -> FacadeError {
             }
             E::Store(error) => FacadeError::from(error),
             E::PushNotFound { .. } => FacadeError::NotFound,
-            E::Invalid(_) | E::InvalidRemote => FacadeError::InvalidInput,
+            E::Invalid(_) | E::InvalidRemote => FacadeError::invalid(error.to_string()),
             E::DirtyWorktree
             | E::IncompleteRepository
             | E::OidMismatch
@@ -1527,7 +1527,7 @@ fn kind_error(kind: provenant_run::ErrorKind) -> FacadeError {
         | E::ParentAttempt
         | E::Invalid
         | E::WorktreeRequired
-        | E::WorktreeNotApplicable => FacadeError::InvalidInput,
+        | E::WorktreeNotApplicable => FacadeError::InvalidInput { detail: None },
         E::WorktreeMissing => FacadeError::WorktreeMissing,
         E::NotFound => FacadeError::NotFound,
         E::Conflict => FacadeError::Conflict,
@@ -1669,7 +1669,9 @@ impl BinaryRunOwner<'_> {
             if !self.allow_remote {
                 return Err(FacadeError::ConfinementRefused);
             }
-            let host = target.host.ok_or(FacadeError::InvalidInput)?;
+            let host = target
+                .host
+                .ok_or(FacadeError::InvalidInput { detail: None })?;
             let attempt_id = target.attempt;
             return match self.peer(
                 host,
@@ -1764,7 +1766,9 @@ impl BinaryRunOwner<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<provenant_records::run::AttemptRecord, FacadeError> {
-        let host = target.host.ok_or(FacadeError::InvalidInput)?;
+        let host = target
+            .host
+            .ok_or(FacadeError::InvalidInput { detail: None })?;
         let mut current = self.snapshot(target.clone(), budget, cancel)?;
         let mut candidates = std::collections::BTreeMap::new();
         let mut after = None;
@@ -1849,7 +1853,7 @@ impl BinaryRunOwner<'_> {
             .iter()
             .any(|target| target.host.is_some_and(|target_host| target_host != host))
         {
-            return Err(FacadeError::InvalidInput);
+            return Err(FacadeError::InvalidInput { detail: None });
         }
         let session = self.session(cancel)?;
         let call = self.call(cancel);
@@ -1872,7 +1876,7 @@ impl BinaryRunOwner<'_> {
         cancel: &CancelToken,
     ) -> Result<Vec<provenant_records::run::AttemptRecord>, FacadeError> {
         if !(1..=100).contains(&limit) {
-            return Err(FacadeError::InvalidInput);
+            return Err(FacadeError::InvalidInput { detail: None });
         }
         let store = self.store(cancel)?;
         let page = provenant_run::Service::new(&store)
@@ -2028,7 +2032,7 @@ impl BinaryRunOwner<'_> {
         for task in &mut tasks {
             let Some(spec) = task.new_worktree.take() else {
                 if ingress && task.worktree.is_some() {
-                    return Err(FacadeError::InvalidInput);
+                    return Err(FacadeError::InvalidInput { detail: None });
                 }
                 continue;
             };
@@ -2037,7 +2041,7 @@ impl BinaryRunOwner<'_> {
                 || task.worktree.is_some()
                 || task.access != provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
             {
-                return Err(FacadeError::InvalidInput);
+                return Err(FacadeError::InvalidInput { detail: None });
             }
             let worktree = self.peer_worktree(&operation_id, spec, budget, cancel)?;
             task.worktree = Some(worktree.path.clone());
@@ -2105,9 +2109,9 @@ impl BinaryRunOwner<'_> {
             self, WorktreeCondition, WorktreeCreate, WorktreeError, WriterState,
         };
         let branch = provenant_confinement::repo::GitRefName::branch(&spec.branch)
-            .map_err(|_| FacadeError::InvalidInput)?;
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         provenant_confinement::repo::GitRevision::new(&spec.base)
-            .map_err(|_| FacadeError::InvalidInput)?;
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         let replay = self
             .store(cancel)?
             .operation(operation_id, &self.call(cancel))
@@ -2262,7 +2266,7 @@ impl BinaryRunOwner<'_> {
                     OutputPart::Result => provenant_run::ArtifactPart::Result,
                     OutputPart::Prompt => provenant_run::ArtifactPart::Prompt,
                     OutputPart::Stderr => provenant_run::ArtifactPart::Stderr,
-                    OutputPart::Events => return Err(FacadeError::InvalidInput),
+                    OutputPart::Events => return Err(FacadeError::InvalidInput { detail: None }),
                 };
                 let mut chunk = session
                     .service()
@@ -2369,11 +2373,11 @@ impl BinaryRunOwner<'_> {
                     provenant_core::DurationMicros::from_micros(
                         wait_seconds
                             .checked_mul(1_000_000)
-                            .ok_or(FacadeError::InvalidInput)?,
+                            .ok_or(FacadeError::InvalidInput { detail: None })?,
                     ),
                     provenant_core::WaitTransport::Cli,
                 )
-                .map_err(|_| FacadeError::InvalidInput)?;
+                .map_err(|_| FacadeError::InvalidInput { detail: None })?;
                 let budget =
                     if requested.deadline().as_mono_time() < budget.deadline().as_mono_time() {
                         requested
@@ -2381,7 +2385,7 @@ impl BinaryRunOwner<'_> {
                         budget
                     };
                 if !(1..=100).contains(&targets.len()) {
-                    return Err(FacadeError::InvalidInput);
+                    return Err(FacadeError::InvalidInput { detail: None });
                 }
                 let local_host = self.factory.context.identity.host;
                 let mut local_indices = Vec::new();
@@ -2633,7 +2637,7 @@ impl BinaryRunOwner<'_> {
             }
             RunInput::List { after, limit, .. } => {
                 if !(1..=100).contains(&limit) {
-                    return Err(FacadeError::InvalidInput);
+                    return Err(FacadeError::InvalidInput { detail: None });
                 }
                 let host = self.factory.context.identity.host;
                 if after
@@ -2697,7 +2701,7 @@ impl BinaryRunOwner<'_> {
         cancel: &CancelToken,
     ) -> Result<RunEventsPage, FacadeError> {
         if !(1..=64).contains(&limit) {
-            return Err(FacadeError::InvalidInput);
+            return Err(FacadeError::InvalidInput { detail: None });
         }
         let store = self.store(cancel)?;
         let call = provenant_run::Request {
@@ -3103,19 +3107,22 @@ fn decode_graph_document(
 ) -> Result<provenant_fabric_runtime::graph::GraphDocument, FacadeError> {
     let value: serde_json::Value =
         provenant_records::decode(bytes, provenant_records::Limits::default())
-            .map_err(|_| FacadeError::InvalidInput)?;
+            .map_err(|_| FacadeError::invalid("graph document is not a valid record"))?;
     match value
         .get("schema_version")
         .and_then(serde_json::Value::as_u64)
     {
-        Some(1 | 2) => serde_json::from_value(value).map_err(|_| FacadeError::InvalidInput),
+        Some(1 | 2) => serde_json::from_value(value)
+            .map_err(|error| FacadeError::invalid(format!("graph document: {error}"))),
         Some(version) if version > 2 => Err(FacadeError::UpgradeRequired {
             reader_release: env!("CARGO_PKG_VERSION").into(),
             writer_release: "unknown".into(),
             record: "graph document schema".into(),
             version,
         }),
-        _ => Err(FacadeError::InvalidInput),
+        _ => Err(FacadeError::invalid(
+            "graph document schema_version must be 1 or 2",
+        )),
     }
 }
 
@@ -4406,7 +4413,8 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             Some(branch) => format!("refs/remotes/origin/{branch}"),
             None => format!("refs/heads/{branch}"),
         };
-        let git = provenant_os::git::git_executable().ok_or(FacadeError::InvalidInput)?;
+        let git = provenant_os::git::git_executable()
+            .ok_or(FacadeError::InvalidInput { detail: None })?;
         provenant_run::resolve_git_base(&git, &self.factory.cwd, &reference)
             .map(Some)
             .map_err(run_error)
@@ -4492,7 +4500,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         let branch = document
             .integration_branch
             .as_deref()
-            .ok_or(FacadeError::InvalidInput)?;
+            .ok_or(FacadeError::InvalidInput { detail: None })?;
         let session = BinaryRunOwner {
             factory: self.factory,
             allow_remote: false,
@@ -4823,7 +4831,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 }
             }
             if !accepted && let (Some(path), Some(commit)) = (worktree, node.source_commit) {
-                let head = commit.parse().map_err(|_| FacadeError::InvalidInput)?;
+                let head = commit
+                    .parse()
+                    .map_err(|_| FacadeError::InvalidInput { detail: None })?;
                 provenant_confinement::worktrees::with_context(
                     &self.factory.context.roots,
                     &self.factory.home,
@@ -4926,8 +4936,8 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             {
                 node.review_base
                     .map(|base| {
-                        let git =
-                            provenant_os::git::git_executable().ok_or(FacadeError::InvalidInput)?;
+                        let git = provenant_os::git::git_executable()
+                            .ok_or(FacadeError::InvalidInput { detail: None })?;
                         provenant_run::resolve_git_base(&git, &self.factory.cwd, base)
                             .map_err(run_error)
                     })
@@ -4967,13 +4977,21 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         None if route.name.is_some() => {
                             provenant_records::run::RequestedRoute::Adapter {
                                 extra: Default::default(),
-                                provider: route.adapter.clone().ok_or(FacadeError::InvalidInput)?,
-                                name: route.name.clone().ok_or(FacadeError::InvalidInput)?,
+                                provider: route
+                                    .adapter
+                                    .clone()
+                                    .ok_or(FacadeError::InvalidInput { detail: None })?,
+                                name: route
+                                    .name
+                                    .clone()
+                                    .ok_or(FacadeError::InvalidInput { detail: None })?,
                             }
                         }
                         Some(model) => {
-                            let adapter =
-                                route.adapter.as_ref().ok_or(FacadeError::InvalidInput)?;
+                            let adapter = route
+                                .adapter
+                                .as_ref()
+                                .ok_or(FacadeError::InvalidInput { detail: None })?;
                             provenant_records::run::RequestedRoute::Model {
                                 extra: Default::default(),
                                 provider: adapter.clone(),
@@ -4984,7 +5002,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         None if !avoided_families.is_empty() => {
                             provenant_records::run::RequestedRoute::Review {
                                 extra: Default::default(),
-                                name: route.alias.clone().ok_or(FacadeError::InvalidInput)?,
+                                name: route
+                                    .alias
+                                    .clone()
+                                    .ok_or(FacadeError::InvalidInput { detail: None })?,
                                 effort: route.effort.clone(),
                                 excluded_families: avoided_families,
                                 distinct_families: true,
@@ -4994,7 +5015,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         }
                         None => provenant_records::run::RequestedRoute::Named {
                             extra: Default::default(),
-                            name: route.alias.clone().ok_or(FacadeError::InvalidInput)?,
+                            name: route
+                                .alias
+                                .clone()
+                                .ok_or(FacadeError::InvalidInput { detail: None })?,
                             effort: route.effort.clone(),
                         },
                     }),
@@ -5222,12 +5246,12 @@ fn graph_exclude(
         None => Ok(Vec::new()),
         Some(value) => value
             .as_array()
-            .ok_or(FacadeError::InvalidInput)?
+            .ok_or(FacadeError::InvalidInput { detail: None })?
             .iter()
             .map(|item| {
                 item.as_str()
                     .map(str::to_owned)
-                    .ok_or(FacadeError::InvalidInput)
+                    .ok_or(FacadeError::InvalidInput { detail: None })
             })
             .collect(),
     }
@@ -5242,7 +5266,7 @@ fn graph_network(
         Some(value) => match value.as_str() {
             Some("on") => Ok(Some(provenant_cli::Switch::On)),
             Some("off") => Ok(Some(provenant_cli::Switch::Off)),
-            _ => Err(FacadeError::InvalidInput),
+            _ => Err(FacadeError::InvalidInput { detail: None }),
         },
     }
 }
@@ -5417,7 +5441,7 @@ impl Factory {
         };
         input
             .validate_input(provenant_core::WaitTransport::Cli)
-            .map_err(|_| FacadeError::InvalidInput)?;
+            .map_err(|error| FacadeError::invalid(error.to_string()))?;
         let resume = matches!(&input, GraphInput::Resume { .. });
         let document = match &input {
             GraphInput::Run { document, .. } | GraphInput::Resume { document, .. } => {
@@ -5427,7 +5451,7 @@ impl Factory {
                         .prepare_scratch(
                             cancel,
                             WaitBudget::cli(self.clock.mono_now(), 30)
-                                .map_err(|_| FacadeError::InvalidInput)?,
+                                .map_err(|_| FacadeError::InvalidInput { detail: None })?,
                         )
                         .map_err(scratch_prepare_error)?,
                 };
@@ -5477,7 +5501,10 @@ impl Factory {
                     if !admitted
                         && node.delivery == Some(provenant_records::run::DeliveryMode::Push)
                     {
-                        let path = node.worktree.as_deref().ok_or(FacadeError::InvalidInput)?;
+                        let path = node
+                            .worktree
+                            .as_deref()
+                            .ok_or(FacadeError::InvalidInput { detail: None })?;
                         let writer = provenant_run::resolve_writer(
                             self.context.roots.state.as_path(),
                             &self.cwd,
@@ -5534,7 +5561,7 @@ impl Factory {
             GraphInput::Status { id, .. } | GraphInput::Cancel { id, .. } => id.as_str(),
             _ => document
                 .as_ref()
-                .ok_or(FacadeError::InvalidInput)?
+                .ok_or(FacadeError::InvalidInput { detail: None })?
                 .graph_id
                 .as_str(),
         };
@@ -5637,7 +5664,8 @@ impl Factory {
                     Some(branch) => format!("refs/remotes/origin/{branch}"),
                     None => format!("refs/heads/{branch}"),
                 };
-                let git = provenant_os::git::git_executable().ok_or(FacadeError::InvalidInput)?;
+                let git = provenant_os::git::git_executable()
+                    .ok_or(FacadeError::InvalidInput { detail: None })?;
                 Some(
                     provenant_run::resolve_git_base(&git, &self.cwd, &reference)
                         .map_err(run_error)?
@@ -5656,7 +5684,8 @@ impl Factory {
                 .as_deref()
                 .filter(|base| !base.is_empty())
             {
-                let git = provenant_os::git::git_executable().ok_or(FacadeError::InvalidInput)?;
+                let git = provenant_os::git::git_executable()
+                    .ok_or(FacadeError::InvalidInput { detail: None })?;
                 Some(
                     provenant_run::resolve_git_base(&git, &self.cwd, reference)
                         .map_err(run_error)?
@@ -5719,8 +5748,8 @@ impl Factory {
             };
             let run = run.map_err(|error| match error {
                 provenant_fabric_runtime::graph::GraphError::Run(error) => error,
-                provenant_fabric_runtime::graph::GraphError::Invalid(_) => {
-                    FacadeError::InvalidInput
+                provenant_fabric_runtime::graph::GraphError::Invalid(reason) => {
+                    FacadeError::invalid(format!("graph {reason}"))
                 }
                 provenant_fabric_runtime::graph::GraphError::Extension(reason)
                 | provenant_fabric_runtime::graph::GraphError::Refused(reason) => {
@@ -5958,9 +5987,9 @@ fn graph_operation(
     key: &provenant_fabric_runtime::graph::AttemptKey,
 ) -> Result<provenant_core::OperationId, FacadeError> {
     let digest = provenant_records::CanonicalV1::record_digest(domain, 1, key)
-        .map_err(|_| FacadeError::InvalidInput)?;
+        .map_err(|_| FacadeError::InvalidInput { detail: None })?;
     provenant_core::OperationId::parse(&format!("graph-{}", provenant_core::hex(digest.as_bytes())))
-        .map_err(|_| FacadeError::InvalidInput)
+        .map_err(|_| FacadeError::InvalidInput { detail: None })
 }
 fn graph_display(
     run: &provenant_fabric_runtime::graph::GraphRun,
@@ -6188,7 +6217,7 @@ pub fn events(
     let result = (|| -> Result<(EventsResult, bool), Box<dyn std::error::Error>> {
         let factory = factory(globals, workers)?;
         if page.limit > factory.context.config.limits.page_rows {
-            return Err(FacadeError::InvalidInput.into());
+            return Err(FacadeError::InvalidInput { detail: None }.into());
         }
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), wait.unwrap_or(30))?;

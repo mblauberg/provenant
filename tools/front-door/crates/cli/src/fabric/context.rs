@@ -462,7 +462,7 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
         FacadeError::PeerVersion | FacadeError::PeerProtocolMismatch { .. } => {
             (Outcome::Refused, ErrorKind::PeerVersion)
         }
-        FacadeError::InvalidInput => (Outcome::Invalid, ErrorKind::Invalid),
+        FacadeError::InvalidInput { .. } => (Outcome::Invalid, ErrorKind::Invalid),
         FacadeError::NotFound => (Outcome::Invalid, ErrorKind::NotFound),
         FacadeError::Conflict | FacadeError::GenerationConflict { .. } => {
             (Outcome::Refused, ErrorKind::Conflict)

@@ -322,7 +322,7 @@ fn is_definitive_refusal(error: &facade::FacadeError) -> bool {
     use facade::FacadeError;
     matches!(
         error,
-        FacadeError::InvalidInput
+        FacadeError::InvalidInput { .. }
             | FacadeError::NotFound
             | FacadeError::Conflict
             | FacadeError::GenerationConflict { .. }
