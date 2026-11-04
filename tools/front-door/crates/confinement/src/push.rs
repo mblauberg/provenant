@@ -30,7 +30,7 @@ pub enum PushRefusal {
     )]
     NonFastForward,
     #[error(
-        "conflict markers in pushed commits; remove the marker lines, then `git commit --amend --no-edit` and push again; if the bad commit was already pushed to the topic branch, the amended history is refused as non-fast-forward, so commit the fix as a new commit (`git commit -am fix-markers`) and push the topic branch normally"
+        "conflict markers in pushed commits; remove the marker lines, then `git commit --amend --no-edit` and push again; if the bad commit was already pushed to the topic branch, use `git push --force-with-lease` to update it"
     )]
     ConflictMarkers,
 }
@@ -97,7 +97,7 @@ impl PushContext<'_> {
             if is_zero(update.local) {
                 continue;
             }
-            if !is_zero(update.remote) {
+            if update.remote_ref == default.as_str() && !is_zero(update.remote) {
                 let ancestor = self.read(GitRead::MergeBaseIsAncestor {
                     ancestor: update.remote,
                     tip: update.local,
@@ -138,6 +138,39 @@ mod tests {
     use super::*;
     use crate::test_support::Fixture;
     use std::error::Error;
+
+    #[test]
+    fn non_fast_forward_to_topic_branch_is_allowed() -> Result<(), Box<dyn Error>> {
+        let fixture = Fixture::new()?;
+        fixture.run(&["branch", "-m", "main"])?;
+        let first = fixture.head()?;
+        fixture.run(&["commit", "--allow-empty", "-m", "second"])?;
+        let second = fixture.head()?;
+        let root = fixture.root.to_str().ok_or("non-UTF8 root")?;
+        fixture.run(&["remote", "add", "origin", root])?;
+        let repo = fixture.runtime.open_read_repo(
+            &fixture.executor,
+            &fixture.root,
+            fixture.budget()?,
+            &CancelToken::new(),
+        )?;
+        let cancel = CancelToken::new();
+        let context = PushContext {
+            repo: &repo,
+            runtime: &fixture.runtime,
+            executor: &fixture.executor,
+            budget: fixture.budget()?,
+            cancel: &cancel,
+            check_conflict_markers: true,
+        };
+        let update = PushUpdate {
+            local: first,
+            remote_ref: "refs/heads/topic".to_owned(),
+            remote: second,
+        };
+        assert!(context.check("origin", &[update]).is_ok());
+        Ok(())
+    }
 
     #[test]
     fn advertised_default_overrides_stale_tracking_head() -> Result<(), Box<dyn Error>> {
