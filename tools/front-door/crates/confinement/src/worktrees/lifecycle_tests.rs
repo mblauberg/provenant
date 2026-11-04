@@ -2446,6 +2446,30 @@ fn gc_census_never_runs_under_the_repository_lock() -> Result<(), Box<dyn Error>
     Ok(())
 }
 
+#[test]
+fn inventory_census_runs_after_repository_snapshot_lock_is_released() -> Result<(), Box<dyn Error>>
+{
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let probe = LockProbeWorkers {
+        project_state: context.project_state,
+        repository_held: Default::default(),
+    };
+    context.workers = &probe;
+
+    // `collect` and the CLI's project-GC discovery both obtain their candidate
+    // set through this inventory path before applying GC policy.
+    let inventory = list(&context, &cancel())?;
+    assert!(!inventory.is_empty());
+    assert_eq!(
+        *probe.repository_held.lock().unwrap(),
+        vec![false],
+        "native census must run after the Git registration snapshot lock drops"
+    );
+    Ok(())
+}
+
 /// Free until the `unknown_from`th call (1-based), then unobservable.
 struct FlippingWorkers {
     calls: std::sync::atomic::AtomicUsize,

@@ -122,6 +122,11 @@ pub enum WorktreeError {
     IncompleteCensus { detail: String },
     #[error("worktree writer or registration is unknown")]
     UnknownWriter,
+    /// The merged writer state is unknown specifically because native census
+    /// evidence was incomplete. The public refusal text and code stay the same
+    /// as `UnknownWriter`; lifecycle consumers get a typed retry cause.
+    #[error("worktree writer or registration is unknown")]
+    CensusUnknown { detail: String },
     #[error("Git marks the worktree {}", if *.locked { "locked" } else { "prunable" })]
     GitEntryHeld { locked: bool },
     #[error("worktree operation was cancelled")]
@@ -183,6 +188,7 @@ impl WorktreeError {
         match self {
             Self::RegistryLockTimeout => Some(AdmissionCause::RegistryLockTimeout),
             Self::IncompleteCensus { .. } => Some(AdmissionCause::CensusIncomplete),
+            Self::CensusUnknown { .. } => Some(AdmissionCause::CensusIncomplete),
             Self::UnknownWriter | Self::GitEntryHeld { .. } => {
                 Some(AdmissionCause::RegistrationOrCustodyUnknown)
             }
@@ -193,7 +199,10 @@ impl WorktreeError {
     /// Refusals that mean Provenant cannot prove who owns the tree. Callers
     /// that retain such a tree treat every one of them alike.
     pub fn is_custody_unknown(&self) -> bool {
-        matches!(self, Self::UnknownWriter | Self::GitEntryHeld { .. })
+        matches!(
+            self,
+            Self::UnknownWriter | Self::CensusUnknown { .. } | Self::GitEntryHeld { .. }
+        )
     }
 
     /// The operator's next step for a refusal that has one.
@@ -219,7 +228,7 @@ impl WorktreeError {
             Self::GitOperationInProgress => {
                 "run `git -C PATH status` and complete or abort the Git operation before retrying"
             }
-            Self::UnknownWriter => {
+            Self::UnknownWriter | Self::CensusUnknown { .. } => {
                 "run `provenant worktree list` and inspect the registration and writer state before retrying"
             }
             Self::IncompleteCensus { .. } => {
