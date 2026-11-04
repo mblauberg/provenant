@@ -112,7 +112,8 @@ pub fn build_candidate(
         .as_nanos();
     let sequence = NEXT_REF.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let ref_name = format!(
-        "{ref_prefix}{previous}-{nanos:x}-{:x}-{sequence:x}",
+        "{ref_prefix}{}-{previous}-{nanos:x}-{:x}-{sequence:x}",
+        prs[0].number,
         std::process::id()
     );
     repo.push_ref(&ref_name, &previous, None)?;
@@ -209,7 +210,19 @@ mod tests {
             selected.iter().map(|pr| pr.number).collect::<Vec<_>>(),
             vec![2, 1]
         );
-        assert!(build_candidate(&mut FakeRepo::default(), "main", &selected, "land/").is_err());
+        let unpinned = vec![EligiblePr {
+            head: "main".into(),
+            ..selected[0].clone()
+        }];
+        assert!(
+            build_candidate(
+                &mut FakeRepo::default(),
+                &"a".repeat(40),
+                &unpinned,
+                "land/"
+            )
+            .is_err()
+        );
         Ok(())
     }
     #[test]

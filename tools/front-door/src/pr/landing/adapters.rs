@@ -40,6 +40,12 @@ fn failed(error: Box<dyn std::error::Error>) -> LandingError {
 fn mutation_failed(error: Box<dyn std::error::Error>) -> LandingError {
     if error.is::<TimedOut>() {
         LandingError::PublicationUnknown
+    } else if error
+        .downcast_ref::<wait::Failure>()
+        .is_some_and(|failure| matches!(failure.code, "HEAD_MOVED" | "MERGE_NOT_ALLOWED"))
+        || error.to_string().contains("HTTP 422")
+    {
+        LandingError::Refused(error.to_string())
     } else {
         failed(error)
     }
@@ -450,13 +456,30 @@ impl GitRepo {
             &["push", "--quiet", &lease, &remote, refspec],
         ) {
             Ok((0, ..)) => Ok(()),
-            Ok((_, _, error)) => Err(LandingError::Failed(format!("git push refused: {error}"))),
+            Ok((_, _, error))
+                if error.contains("[rejected]")
+                    && (error.contains("stale info")
+                        || error.contains("non-fast-forward")
+                        || error.contains("fetch first")) =>
+            {
+                Err(LandingError::Refused(format!("git push refused: {error}")))
+            }
+            Ok((_, _, error)) => Err(LandingError::Failed(format!("git push failed: {error}"))),
             Err(error) => Err(mutation_failed(error)),
         }
     }
 }
 
 impl Repo for GitRepo {
+    fn repository_identity(&mut self, target: &str) -> Result<String, LandingError> {
+        use sha2::{Digest, Sha256};
+        let remote = self.remote(target)?;
+        let url = self.ok(&["remote", "get-url", &remote])?;
+        Ok(Sha256::digest(url.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect())
+    }
     fn fetch_target(&mut self, branch: &str) -> Result<String, LandingError> {
         let full = Self::branch_ref(branch)?;
         let remote = self.remote(branch)?;
@@ -515,7 +538,18 @@ impl Repo for GitRepo {
     fn delete_ref(&mut self, name: &str, expected_old: &str) -> Result<(), LandingError> {
         let full = Self::branch_ref(name)?;
         let refspec = format!(":{full}");
-        self.lease_push(&full, &refspec, Some(expected_old))
+        match self.lease_push(&full, &refspec, Some(expected_old)) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                // A previous cleanup may have succeeded despite a lost response.
+                // Only absence is idempotent; a ref at a different value stays untouched.
+                let remote = self.remote("")?;
+                match self.exit(&["ls-remote", "--exit-code", "--heads", &remote, &full]) {
+                    Ok((2, _, _)) => Ok(()),
+                    _ => Err(error),
+                }
+            }
+        }
     }
     fn is_ancestor(&mut self, ancestor: &str, descendant: &str) -> Result<bool, LandingError> {
         self.ensure(ancestor)?;
@@ -776,6 +810,26 @@ mod tests {
     }
 
     #[test]
+    fn repository_identity_preserves_the_targets_configured_remote() {
+        let mut rig = rig();
+        git(
+            &rig.work,
+            &["remote", "add", "upstream", rig.bare.to_str().unwrap()],
+        );
+        git(&rig.work, &["config", "branch.main.remote", "upstream"]);
+        git(
+            &rig.work,
+            &["remote", "set-url", "origin", "missing-origin"],
+        );
+        let identity = rig.repo.repository_identity("main").unwrap();
+        assert_eq!(identity.len(), 64);
+        assert_eq!(
+            rig.repo.fetch_target("main").unwrap(),
+            git(&rig.work, &["rev-parse", "HEAD"])
+        );
+    }
+
+    #[test]
     fn merge_tree_returns_a_tree_or_a_conflict() {
         let mut rig = rig();
         let base = git(&rig.work, &["rev-parse", "HEAD"]);
@@ -849,6 +903,7 @@ mod tests {
             .unwrap();
         assert!(rig.repo.push_ref("land/x", &rival, None).is_err());
         assert!(rig.repo.delete_ref("land/x", &base).is_err());
+        rig.repo.delete_ref("land/x", &candidate).unwrap();
         rig.repo.delete_ref("land/x", &candidate).unwrap();
         assert!(
             Command::new("git")

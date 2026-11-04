@@ -102,6 +102,7 @@ pub enum CostEstimate {
 /// Durable evidence recorded before attempting a publication.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PendingAttempt {
+    pub repository: String,
     pub target: String,
     pub candidate: Candidate,
     pub policy: LandPolicy,
@@ -123,6 +124,8 @@ pub struct LandingReceipt {
     pub gate_evidence: GateEvidence,
     pub publish: PublishDecision,
     pub outcomes: BTreeMap<u64, Outcome>,
+    #[serde(default)]
+    pub split: Vec<Vec<u64>>,
     pub approved_to_landed: BTreeMap<String, String>,
     pub cost: CostEstimate,
     pub alarms: Vec<Alarm>,

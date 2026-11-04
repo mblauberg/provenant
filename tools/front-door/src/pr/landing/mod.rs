@@ -1,7 +1,10 @@
-//! Batch landing contract. Lane-owned functions refuse until their implementations land.
-#![allow(
-    dead_code,
-    reason = "integration contracts are populated by independent landing lanes"
+//! Candidate-based batch landing orchestration.
+#![cfg_attr(
+    test,
+    allow(
+        dead_code,
+        reason = "the custom worktree harness includes tests without running them"
+    )
 )]
 #[cfg(test)]
 pub mod fakes;
@@ -19,6 +22,12 @@ pub enum LandingError {
     Conflict(u64),
     #[error("landing target moved too many times")]
     Contention,
+    #[error("landing target moved during publication")]
+    TargetMoved,
+    #[error("pull request {0} changed before publication")]
+    PullRequestChanged(u64),
+    #[error("publication refused: {0}")]
+    Refused(String),
     #[error("publication outcome is unknown")]
     PublicationUnknown,
 }
@@ -26,6 +35,10 @@ pub mod adapters;
 pub mod budget;
 pub mod candidate;
 pub mod driver;
+#[allow(
+    dead_code,
+    reason = "gate coverage helper is retained for evidence integration"
+)]
 pub mod gate;
 pub mod postmerge;
 pub mod publish;
@@ -85,24 +98,8 @@ fn run_inner(
     globals: &provenant_cli::Globals,
     workers: &dyn provenant_confinement::worktrees::WorkerObserver,
 ) -> Result<u8, Box<dyn std::error::Error>> {
-    use provenant_cli::domains::{Integration, LandOverride};
+    use provenant_cli::domains::{Integration, LandOverride, LandSettings};
     use provenant_records::{CommandResult, Outcome};
-    if !options.explain
-        && !options.batch
-        && !options.shadow
-        && options.tier.is_none()
-        && options.numbers.len() == 1
-    {
-        return Ok(super::land::run(
-            options.numbers[0],
-            options.head,
-            options.wait,
-            options.poll,
-            false,
-            globals,
-            workers,
-        ));
-    }
     let resolved = crate::roots::resolve(
         globals,
         crate::roots::Workspace::Checkout,
@@ -132,6 +129,13 @@ fn run_inner(
         &invocation,
     )?;
     let effective = policy.settings()?;
+    let tier_warning = options
+        .tier
+        .as_ref()
+        .filter(|tier| !config.domains.pr.land.tiers.contains_key(*tier))
+        .map(|tier| {
+            format!("no landing override is configured for tier {tier}; inherited settings apply")
+        });
     let errors = provenant_config::DomainConfig::validate(&provenant_cli::domains::PrSettings {
         land: effective.clone(),
     });
@@ -147,9 +151,14 @@ fn run_inner(
         .into());
     }
     if options.explain {
-        let text = format!("{}\n", serde_json::to_string_pretty(&policy)?);
+        let mut warnings = tier_warning.clone().into_iter().collect::<Vec<_>>();
+        if effective.candidate_ref_prefix != LandSettings::default().candidate_ref_prefix {
+            warnings.push("candidate_ref_prefix differs from the bundled default; update the CI trigger to match".to_owned());
+        }
+        let value = serde_json::json!({"fields": policy.fields, "budget_rate_micros_per_minute": policy.budget_rate_micros_per_minute, "warnings": warnings});
+        let text = format!("{}\n", serde_json::to_string_pretty(&value)?);
         return Ok(crate::emit(
-            &CommandResult::new("land", Outcome::Ok, policy),
+            &CommandResult::new("land", Outcome::Ok, value),
             globals,
             &text,
             true,
@@ -160,11 +169,22 @@ fn run_inner(
     }
     let integration: Integration =
         serde_json::from_value(policy.fields["integration"].value.clone())?;
-    let use_batch = options.batch || options.shadow || options.numbers.len() > 1;
-    if integration == Integration::Single && use_batch {
+    let explicit_batch = options.batch || options.shadow || options.numbers.len() > 1;
+    let use_batch = explicit_batch
+        || (integration == Integration::Batch && options.head.is_none() && options.wait.is_none());
+    if integration == Integration::Single && explicit_batch {
         return Err("single integration accepts one pull request without batch or shadow".into());
     }
+    if integration == Integration::ForgeQueue {
+        return Err(
+            LandingError::Failed("land.integration=forge_queue is not supported".into()).into(),
+        );
+    }
     if !use_batch {
+        if let Some(warning) = &tier_warning {
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+        }
         return Ok(super::land::run(
             options.numbers[0],
             options.head,
@@ -177,11 +197,6 @@ fn run_inner(
     }
     if options.head.is_some() || options.wait.is_some() {
         return Err("--head and --wait apply only to single-pull-request landing".into());
-    }
-    if integration == Integration::ForgeQueue {
-        return Err(
-            LandingError::Failed("land.integration=forge_queue is not supported".into()).into(),
-        );
     }
     use sha2::{Digest, Sha256};
     let definition = model::GateDefinition {
@@ -199,7 +214,7 @@ fn run_inner(
     };
     let (mut forge, mut repo, mut runner, mut alarms) = adapters::connect(&resolved.project)?;
     let target = forge.target_branch()?;
-    let report = driver::run(
+    let mut report = driver::run(
         &mut *forge,
         &mut *repo,
         &mut *runner,
@@ -214,10 +229,22 @@ fn run_inner(
             state: resolved.roots.state.as_path(),
         },
     )?;
+    if let Some(warning) = tier_warning {
+        report.warnings.push(warning);
+    }
+    let status = if report
+        .outcomes
+        .values()
+        .all(|outcome| *outcome == model::Outcome::Landed)
+    {
+        Outcome::Ok
+    } else {
+        Outcome::Failed
+    };
     let value = serde_json::json!({"receipts": report.receipts, "outcomes": report.outcomes, "warnings": report.warnings});
     let text = format!("{}\n", serde_json::to_string_pretty(&value)?);
     Ok(crate::emit(
-        &CommandResult::new("land", Outcome::Ok, value),
+        &CommandResult::new("land", status, value),
         globals,
         &text,
         false,

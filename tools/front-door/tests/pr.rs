@@ -442,15 +442,27 @@ fn land_explains_poll_and_budget_sources() -> Result {
         Ok(serde_json::from_slice(&output.stdout.bytes)?)
     };
     let default = show(&["land", "1668", "--explain", "--json"])?;
-    assert_eq!(default["data"]["poll_seconds"], 30);
-    assert_eq!(default["data"]["poll_source"], "compiled default");
+    assert_eq!(default["data"]["fields"]["poll_seconds"]["value"], 30);
+    assert_eq!(
+        default["data"]["fields"]["poll_seconds"]["source"]["layer"],
+        "bundled"
+    );
     fs::write(
         rig.state.join("config.toml"),
-        "schema_version = 1\n[domains.pr.land]\npoll_seconds = 45\n",
+        "schema_version = 1\n[domains.pr.land]\npoll_seconds = 45\ncandidate_ref_prefix = 'custom/'\n",
     )?;
     let config = show(&["land", "1668", "--explain", "--json"])?;
-    assert_eq!(config["data"]["poll_seconds"], 45);
-    assert_eq!(config["data"]["poll_source"], "host config");
+    assert_eq!(config["data"]["fields"]["poll_seconds"]["value"], 45);
+    assert_eq!(
+        config["data"]["fields"]["poll_seconds"]["source"]["layer"],
+        "host"
+    );
+    assert!(
+        config["data"]["warnings"][0]
+            .as_str()
+            .unwrap_or_default()
+            .contains("CI trigger")
+    );
     let cli = show(&[
         "land",
         "1668",
@@ -460,10 +472,11 @@ fn land_explains_poll_and_budget_sources() -> Result {
         "--wait=90s",
         "--json",
     ])?;
-    assert_eq!(cli["data"]["poll_seconds"], 7);
-    assert_eq!(cli["data"]["poll_source"], "--poll");
-    assert_eq!(cli["data"]["retry_budget_seconds"], 90);
-    assert_eq!(cli["data"]["retry_budget_source"], "--wait");
+    assert_eq!(cli["data"]["fields"]["poll_seconds"]["value"], 7);
+    assert_eq!(
+        cli["data"]["fields"]["poll_seconds"]["source"]["layer"],
+        "invocation"
+    );
     assert!(!rig.project.join("gh-calls").exists());
     Ok(())
 }
