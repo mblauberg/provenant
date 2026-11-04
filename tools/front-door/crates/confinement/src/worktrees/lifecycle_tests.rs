@@ -2082,7 +2082,8 @@ fn gc_failed_prune_retains_once_and_continues() -> Result<(), Box<dyn Error>> {
     assert!(branch_exists(&fixture, "gc-prune-failed"));
     assert_eq!(report.worktrees.retained.len(), 1, "{report:?}");
     assert_eq!(report.worktrees.retained[0].branch, "gc-prune-failed");
-    assert_eq!(report.worktrees.removed, vec![second.clone()]);
+    assert_eq!(report.worktrees.removed.len(), 1);
+    assert_eq!(report.worktrees.removed[0].path, second.path);
     assert_eq!(report.worktrees.pruned_refs, vec!["gc-prune-next"]);
     assert!(!second.path.exists());
     Ok(())
@@ -3012,8 +3013,13 @@ fn gc_settlement_error_retains_ref_and_continues() -> Result<(), Box<dyn Error>>
         &cancel(),
     )?;
     assert_eq!(
-        report.worktrees.removed,
-        vec![first.clone(), second.clone()]
+        report
+            .worktrees
+            .removed
+            .iter()
+            .map(|tree| &tree.path)
+            .collect::<Vec<_>>(),
+        vec![&first.path, &second.path]
     );
     assert_eq!(report.worktrees.retained.len(), 1);
     assert_eq!(report.worktrees.retained[0].branch, "gc-settle-failed");
