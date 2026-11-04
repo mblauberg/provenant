@@ -2269,6 +2269,10 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
         error.to_string(),
         "host-native absent is not configured in domains.fabric.host_native"
     );
+    assert_eq!(
+        error.fallback_outcome,
+        Some(provenant_records::run::PreparationFailure::AdapterUnavailable)
+    );
     assert_eq!(fs::read_dir(&paths.temporary)?.count(), 0);
     writeln!(
         OpenOptions::new()

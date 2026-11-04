@@ -385,7 +385,16 @@ pub(super) fn prepare_with_wait(
         let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
             .map_err(|error| error.to_string())?;
         let native = config.domains.fabric.host_native.get(name).ok_or_else(|| {
-            format!("host-native {name} is not configured in domains.fabric.host_native")
+            PrepareError::Candidates {
+                message: format!(
+                    "host-native {name} is not configured in domains.fabric.host_native"
+                ),
+                plans: Vec::new(),
+                skipped_routes: Vec::new(),
+                fallback_outcome: Some(
+                    provenant_records::run::PreparationFailure::AdapterUnavailable,
+                ),
+            }
         })?;
         let provenant_fabric_runtime::config::HostNativeConfig::ClaudeAgent {
             model,
