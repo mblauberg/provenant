@@ -35,7 +35,7 @@ current exact-head landing gates.
 
 The target's owner decides and records it. Ask whether agents may merge once
 tier-appropriate review and CI are green on the exact head, or whether every merge
-needs a user. Unmerged or forced branch deletion, history rewrites, credential setup,
+needs a user. Unmerged or forced branch deletion, credential setup,
 pushes to shared branches outside authorised merges and risk downgrades stay user
 gates. An authorised merge covers pruning its own merged branch and worktree, nothing
 else. Provenant's own choice (merge directly once gates pass) is an offer, not a default.
