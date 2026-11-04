@@ -248,12 +248,12 @@ fn prepare(
     }
     .unwrap_or_else(|| input.home.join(KEYCHAIN));
     let user_skills = input.home.join(".gemini/skills");
-    let discover_skills = input.user_skills() && user_skills.is_dir();
-    let skill_reads = if discover_skills {
-        crate::user_skills_grants(&user_skills)
+    let (skill_reads, mut omitted_discovery) = if input.user_skills() && user_skills.is_dir() {
+        crate::user_skills_grants_with_omissions(&user_skills, Some(input.home))
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
+    let discover_skills = !skill_reads.is_empty();
     let mut argv: Vec<OsString> = [
         input.executable.as_os_str(),
         "--output-format".as_ref(),
@@ -355,6 +355,7 @@ fn prepare(
             &mut tool_exec_roots,
             &mut env,
             &mut setup,
+            &mut omitted_discovery,
         );
         crate::launch::node_tools(
             input.home,
@@ -363,6 +364,7 @@ fn prepare(
             &mut runtime_reads,
             &mut tool_exec_roots,
             &mut env,
+            &mut omitted_discovery,
         );
     }
     Ok(LaunchSpec {
@@ -372,6 +374,7 @@ fn prepare(
         secret_input: None,
         cwd: input.cwd.to_owned(),
         setup,
+        omitted_discovery,
         git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {

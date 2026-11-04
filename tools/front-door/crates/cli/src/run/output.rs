@@ -892,6 +892,16 @@ pub(super) fn grants_lines(record: &run::AttemptRecord) -> String {
     if let Some(digest) = record.git_grants_digest {
         text.push_str(&format!("grant git digest={digest}\n"));
     }
+    if let Some(warnings) = record
+        .applied_route
+        .as_ref()
+        .and_then(|route| route.extra.get("discovery_warnings"))
+        .and_then(serde_json::Value::as_array)
+    {
+        for warning in warnings.iter().filter_map(serde_json::Value::as_str) {
+            text.push_str(&format!("warning: {}\n", plain_text(warning, usize::MAX)));
+        }
+    }
     if let Some(skills) = record.user_skills() {
         text.push_str(&format!(
             "grant user_skills {}\n",

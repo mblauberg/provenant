@@ -38,7 +38,8 @@ pub fn worktree_cargo_cache(
         path: home.join("Library/Caches/provenant-lane-cargo").join(name),
         scope: PathScope::Subtree,
     };
-    validate_noncredential_grant(&grant)?;
+    validate_noncredential_grant(&grant)
+        .map_err(|error| error.with_credential_path(&grant.path, Some(home)))?;
     Ok(grant)
 }
 
@@ -181,7 +182,8 @@ impl WorktreeWriteGrants {
     pub(super) fn validate(&self) -> Result<(), PermissionError> {
         self.worktree.validate()?;
         for grant in self.iter().skip(1) {
-            validate_noncredential_grant(grant)?;
+            validate_noncredential_grant(grant)
+                .map_err(|error| error.with_credential_path(&grant.path, None))?;
         }
         Ok(())
     }

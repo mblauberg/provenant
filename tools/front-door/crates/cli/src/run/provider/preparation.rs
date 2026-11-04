@@ -1184,6 +1184,7 @@ pub(super) fn prepare_candidates(
                 &home,
                 &|key| std::env::var_os(key),
                 user_skills_origin,
+                &spec.omitted_discovery,
             ),
         );
         let stdin = match spec.stdin {
@@ -1370,6 +1371,19 @@ mod receipt_tests {
     }
 }
 
+pub(super) fn discovery_warnings(omitted: &[PathBuf], home: &Path) -> Vec<String> {
+    omitted
+        .iter()
+        .map(|path| {
+            let display = path
+                .strip_prefix(home)
+                .map(|relative| format!("~/{}", relative.display()))
+                .unwrap_or_else(|_| path.display().to_string());
+            format!("omitted discovered grant {display}: credential root guard")
+        })
+        .collect()
+}
+
 /// Report the same provider-owned locations and grants used during prepare.
 fn user_skills_exposure(
     adapter: &str,
@@ -1377,6 +1391,7 @@ fn user_skills_exposure(
     home: &Path,
     host_var: &dyn Fn(&str) -> Option<std::ffi::OsString>,
     origin: serde_json::Value,
+    omitted: &[PathBuf],
 ) -> serde_json::Value {
     let directory = mode
         .is_discover()
@@ -1384,13 +1399,15 @@ fn user_skills_exposure(
         .flatten();
     let reads = directory
         .as_ref()
-        .map(|path| provenant_providers::user_skills_grants(path))
+        .map(|path| provenant_providers::user_skills_grants_with_omissions(path, Some(home)).0)
         .unwrap_or_default();
+    let warnings = discovery_warnings(omitted, home);
     serde_json::json!({
         "mode": mode,
         "exposed": !reads.is_empty(),
         "directory": directory,
         "read_grants": reads,
+        "warnings": warnings,
         "source": origin,
     })
 }
@@ -1398,6 +1415,27 @@ fn user_skills_exposure(
 #[cfg(test)]
 mod user_skills_tests {
     use super::*;
+    #[test]
+    fn agy_credential_skills_are_omitted_with_warning() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().canonicalize()?;
+        std::fs::create_dir_all(home.join(".gemini/skills"))?;
+        let record = user_skills_exposure(
+            "agy",
+            provenant_records::UserSkillsMode::Discover,
+            &home,
+            &|_| None,
+            serde_json::Value::Null,
+            &[home.join(".gemini/skills")],
+        );
+        assert_eq!(record["exposed"], false);
+        assert_eq!(record["read_grants"], serde_json::json!([]));
+        let warning = record["warnings"][0].as_str().ok_or("missing warning")?;
+        assert!(warning.contains("~/.gemini/skills"));
+        assert!(warning.contains("credential root"));
+        Ok(())
+    }
+
     #[test]
     fn user_skills_record_reports_mode_origin_and_canonical_grants()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1415,6 +1453,7 @@ mod user_skills_tests {
             &home,
             &|_| None,
             origin.clone(),
+            &[],
         );
         assert_eq!(record["exposed"], true);
         assert_eq!(record["directory"], serde_json::json!(skills));
@@ -1432,6 +1471,7 @@ mod user_skills_tests {
             &home,
             &|_| None,
             serde_json::json!({"route_policy": ["rules[0]"]}),
+            &[],
         );
         assert_eq!(off["mode"], "off");
         assert_eq!(off["exposed"], false);
