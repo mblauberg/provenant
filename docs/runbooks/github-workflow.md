@@ -139,7 +139,7 @@ several issues or a slice) and no run vocabulary such as batch, wave, lane or
 model name. The worktree directory is the branch with `/` replaced by `-`. The
 standing `HARNESS.md` envelope covers branch and worktree creation without
 extra authority. An authorised merge covers pruning its own worktree and
-merged refs; other deletion needs user authority. Dirty worktrees are refused.
+merged refs; the chair decides other removals, as `GLOBAL-AGENTS.md` sets out. Dirty worktrees are refused.
 
 ```sh
 provenant worktree create fix/repo-runbook-mechanics --base main
@@ -157,8 +157,8 @@ provenant worktree create fix/repo-runbook-mechanics
 
 Use `provenant worktree list` to inspect worktrees and
 `provenant worktree remove NAME` to remove an eligible one; its branch goes
-too once merged. `--discard` deletes an unmerged branch and needs explicit
-user authority.
+too once merged. `--discard` deletes an unmerged branch; the chair uses it
+for superseded or abandoned work and records the returned head.
 
 Then set the issue to `In progress` (commands under
 [Project status](#project-status)).
@@ -434,11 +434,11 @@ The user review/merge gate applies only when the agent is stuck: split review
 verdicts it cannot settle with primary-source evidence, or a decision outside
 its granted authority. An exhausted repair budget triggers the ladder's
 principal scoping, not an owner wait within approved scope. Standing user gates are:
-forced branch deletion, deletion of a branch that is not merged, credential
-or connector setup, rewrites of or pushes to shared branches (including
+credential or connector setup, rewrites of or pushes to shared branches (including
 `main`) outside authorised merges, and risk-tier downgrades. Deleting a *merged* branch's own
 local ref and worktree is carried by the merge itself, under
-[post-merge pruning](../worktrees.md#ownership-and-cleanup).
+[post-merge pruning](../worktrees.md#ownership-and-cleanup); removing other
+branches and worktrees, unmerged ones included, is the chair's judgement.
 
 The live `Protect main` ruleset sets `strict_required_status_checks_policy: false`,
 so branch protection does not require the head to be up to date with `main`.
