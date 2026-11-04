@@ -7152,3 +7152,115 @@ fn claude_user_skills_use_private_placement_for_registered_readers()
     );
     Ok(())
 }
+
+#[test]
+#[cfg_attr(not(target_os = "macos"), ignore = "requires macOS sandbox")]
+#[allow(clippy::disallowed_methods)]
+fn staged_skills_native_probes() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::permissions::{
+        AccessMode, WorktreeWriteAuthority, snapshot::render,
+    };
+    use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    for adapter in ["claude", "codex", "cursor", "agy", "opencode"] {
+        for access in [Access::ReadOnly, Access::WorktreeWrite] {
+            let fixture = root.join(format!("{adapter}-{access:?}"));
+            let home = fixture.join("home");
+            let repo = fixture.join("repo");
+            for dir in [
+                &home,
+                &repo,
+                &fixture.join("scratch"),
+                &fixture.join("state"),
+                &fixture.join("bin"),
+            ] {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::create_dir_all(repo.join(".git"))?;
+            std::fs::create_dir_all(fixture.join("cargo-cache"))?;
+            let skills = match adapter {
+                "claude" => home.join(".claude/skills"),
+                "codex" => home.join(".agents/skills"),
+                "cursor" => home.join(".cursor/skills"),
+                "agy" => home.join(".gemini/skills"),
+                _ => home.join(".config/opencode/skills"),
+            };
+            std::fs::create_dir_all(&skills)?;
+            std::fs::write(skills.join("SKILL.md"), b"fixture skill")?;
+            let codex_auth = home.join(".codex/auth.json");
+            std::fs::create_dir_all(codex_auth.parent().ok_or("auth parent")?)?;
+            std::fs::write(codex_auth, b"fixture auth")?;
+            let secret = home.join(".claude/.credentials.json");
+            std::fs::create_dir_all(secret.parent().ok_or("secret parent")?)?;
+            std::fs::write(&secret, b"sentinel")?;
+            let keychain = home.join("Library/Keychains/login.keychain-db");
+            std::fs::create_dir_all(keychain.parent().ok_or("keychain parent")?)?;
+            std::fs::write(keychain, b"fixture")?;
+            let executable = fixture.join("bin/provider");
+            std::fs::write(&executable, b"fixture")?;
+            let authentication = match adapter {
+                "agy" => Some("keychain"),
+                "codex" | "cursor" => Some("login"),
+                _ => None,
+            };
+            let base = read_only_plan(fixture.to_str().ok_or("fixture path")?, authentication);
+            let mut permissions = base.permissions().clone();
+            if access == Access::WorktreeWrite {
+                let authority: WorktreeWriteAuthority =
+                    serde_json::from_value(serde_json::json!({
+                        "git_grants_digest": vec![0; 32], "publishing": false,
+                        "common_git_dir": repo.join(".git"),
+                        "cargo_cache": {"path": fixture.join("cargo-cache"), "scope": "subtree"}
+                    }))?;
+                permissions.mode = AccessMode::WorktreeWrite(Box::new(authority));
+            }
+            let plan = ConfinedPlan::new(PlanRequest {
+                scope: base.scope(),
+                permissions,
+                codex: CodexPolicy::Clean,
+                extensions: ExtensionPolicy::Deny,
+                agy_state: None,
+            })?;
+            let mut route = route(adapter, "fixture-model");
+            route.account_key = None;
+            route.set_user_skills(true);
+            let prompt = Prompt::new("fixture".into());
+            let token = fixture_token();
+            let mut input = fixture_input(&route, &plan, &prompt, &repo, Some(&token));
+            input.home = &home;
+            input.executable = &executable;
+            let provider = REGISTRY
+                .iter()
+                .find(|entry| entry.adapter.id() == adapter)
+                .ok_or("adapter")?
+                .adapter;
+            let launch = provider.prepare(input)?;
+            let stage = launch.user_skills.root.as_ref().ok_or("missing stage")?;
+            std::fs::create_dir_all(stage)?;
+            for step in launch.user_skills.setup() {
+                match step {
+                    SetupStep::CreateDir(path) => std::fs::create_dir_all(path)?,
+                    SetupStep::WriteFile { path, bytes } => std::fs::write(path, bytes)?,
+                    _ => return Err("unexpected staged setup".into()),
+                }
+            }
+            let profile = render(plan.permissions(), &launch.profile, &home)?;
+            let probe = "cat \"$1\" >/dev/null && ! cat \"$2\" >/dev/null 2>&1 && ! cat \"$3\" >/dev/null 2>&1 && ! (printf x >\"$1\") 2>/dev/null && ! (printf x >\"$2\") 2>/dev/null";
+            let output = std::process::Command::new("/usr/bin/sandbox-exec")
+                .args(["-p", &profile, "/bin/sh", "-c", probe, "probe"])
+                .arg(stage.join("SKILL.md"))
+                .arg(skills.join("SKILL.md"))
+                .arg(&secret)
+                .env_clear()
+                .output()?;
+            let error = String::from_utf8_lossy(&output.stderr);
+            if error.contains("sandbox_apply: Operation not permitted") {
+                provenant_test_support::skip_sandbox_dependent_test(error.to_string())?;
+                return Ok(());
+            }
+            assert!(output.status.success(), "{adapter} {access:?}: {error}");
+        }
+    }
+    Ok(())
+}

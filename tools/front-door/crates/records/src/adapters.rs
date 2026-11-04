@@ -49,6 +49,9 @@ pub struct AdapterSpec {
     pub name: &'static str,
     pub binary: &'static str,
     pub skills: Option<SkillLocation>,
+    /// Home-relative installation roots that can supply linked skills.
+    /// They describe discovery provenance, not an eligibility allowlist.
+    pub skill_install_roots: &'static [&'static str],
     pub registered_account: bool,
     /// A registered account's directory is the client's configuration
     /// directory, which account settings sync keeps in step. False where it is
@@ -228,6 +231,10 @@ impl AdapterSpec {
     }
 }
 
+// The installed Provenant release carries the common portfolio used by each
+// provider. Linked skill targets outside these roots remain eligible too.
+const SKILL_INSTALL_ROOTS: &[&str] = &[".local/share/provenant/v1/releases"];
+
 // Keep the rows in Harness order. CLI installation also uses this order.
 pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
     AdapterSpec {
@@ -239,6 +246,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             fallback: ".claude",
             suffix: "skills",
         }),
+        skill_install_roots: SKILL_INSTALL_ROOTS,
         registered_account: true,
         account_config_dir: true,
         local_login: false,
@@ -291,6 +299,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             fallback: ".agents",
             suffix: "skills",
         }),
+        skill_install_roots: SKILL_INSTALL_ROOTS,
         registered_account: true,
         account_config_dir: true,
         local_login: false,
@@ -347,6 +356,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             fallback: ".cursor",
             suffix: "skills",
         }),
+        skill_install_roots: SKILL_INSTALL_ROOTS,
         registered_account: false,
         account_config_dir: false,
         local_login: true,
@@ -402,6 +412,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             fallback: ".gemini",
             suffix: "skills",
         }),
+        skill_install_roots: SKILL_INSTALL_ROOTS,
         registered_account: true,
         account_config_dir: false,
         local_login: true,
@@ -461,6 +472,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
             fallback: ".config",
             suffix: "opencode/skills",
         }),
+        skill_install_roots: SKILL_INSTALL_ROOTS,
         registered_account: false,
         account_config_dir: false,
         local_login: true,
@@ -514,6 +526,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         name: "command",
         binary: "",
         skills: None,
+        skill_install_roots: &[],
         registered_account: false,
         account_config_dir: false,
         local_login: false,
@@ -564,6 +577,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         name: "host-native",
         binary: "",
         skills: None,
+        skill_install_roots: &[],
         registered_account: false,
         account_config_dir: false,
         local_login: false,

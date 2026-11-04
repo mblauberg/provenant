@@ -34,6 +34,8 @@ struct Capture<'a> {
     budget: u64,
     entries_left: usize,
     ancestors: BTreeSet<(u64, u64)>,
+    #[cfg(test)]
+    before_link_read: Option<&'a dyn Fn(&Path)>,
     result: StagedUserSkills,
 }
 
@@ -58,6 +60,11 @@ impl Capture<'_> {
             self.warn(relative, "cycle");
             return;
         }
+        if self.ancestors.len() > 128 {
+            self.warn(relative, "depth_limit");
+            self.ancestors.remove(&(metadata.device, metadata.inode));
+            return;
+        }
         if !relative.as_os_str().is_empty() {
             self.result
                 .setup
@@ -71,7 +78,11 @@ impl Capture<'_> {
                 return;
             }
         };
-        for name in entries.flatten() {
+        for entry in entries {
+            let Ok(name) = entry else {
+                self.warn(relative, "changed_during_copy");
+                continue;
+            };
             let path = relative.join(&name);
             if self.entries_left == 0 {
                 self.warn(&path, "entry_limit");
@@ -195,6 +206,10 @@ impl Capture<'_> {
                 self.warn(relative, "changed_during_copy");
                 return;
             }
+            #[cfg(test)]
+            if let Some(hook) = self.before_link_read {
+                hook(relative);
+            }
             match directory.read_stable(file_name, self.budget) {
                 Ok(bytes) if unchanged() => {
                     self.budget -= bytes.len() as u64;
@@ -222,24 +237,29 @@ pub(crate) fn capture(
     home: &Path,
     max_bytes: u64,
 ) -> StagedUserSkills {
+    let skipped = |reason| StagedUserSkills {
+        warnings: vec![SkillWarning {
+            path: PathBuf::new(),
+            reason,
+        }],
+        ..StagedUserSkills::default()
+    };
     let Ok(canonical) = std::fs::canonicalize(source) else {
-        return StagedUserSkills::default();
+        return if std::fs::symlink_metadata(source).is_ok() {
+            skipped("changed_during_copy")
+        } else {
+            StagedUserSkills::default()
+        };
     };
     if canonical != source && provenant_confinement::refuses_lane_root(&canonical, true, Some(home))
     {
-        return StagedUserSkills {
-            warnings: vec![SkillWarning {
-                path: PathBuf::new(),
-                reason: "credential_root",
-            }],
-            ..StagedUserSkills::default()
-        };
+        return skipped("credential_root");
     }
     let Ok(dir) = Directory::open_anchor(&canonical) else {
-        return StagedUserSkills::default();
+        return skipped("changed_during_copy");
     };
     if dir.current_path().ok().as_deref() != Some(canonical.as_path()) {
-        return StagedUserSkills::default();
+        return skipped("changed_during_copy");
     }
     let mut capture = Capture {
         home,
@@ -248,6 +268,8 @@ pub(crate) fn capture(
         budget: max_bytes,
         entries_left: 100_000,
         ancestors: BTreeSet::new(),
+        #[cfg(test)]
+        before_link_read: None,
         result: StagedUserSkills::default(),
     };
     capture.directory(dir, Path::new(""));
@@ -331,6 +353,19 @@ mod tests {
     }
 
     #[test]
+    fn skill_locations_declare_installed_release_provenance() {
+        for spec in provenant_records::ADAPTER_SPECS
+            .iter()
+            .filter(|spec| spec.skills.is_some())
+        {
+            assert!(
+                spec.skill_install_roots
+                    .contains(&".local/share/provenant/v1/releases")
+            );
+        }
+    }
+
+    #[test]
     fn linked_source_inside_credential_root_is_skipped() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let home = temp.path().canonicalize()?;
@@ -348,6 +383,48 @@ mod tests {
                 .iter()
                 .any(|warning| warning.reason == "credential_root")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn replaced_link_target_is_skipped_before_copy() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().canonicalize()?;
+        let source = home.join("skills");
+        let destination = home.join("stage");
+        let target = home.join("resource");
+        let secret = home.join(".codex/auth.json");
+        std::fs::create_dir_all(&source)?;
+        std::fs::create_dir_all(secret.parent().ok_or("missing parent")?)?;
+        std::fs::write(&target, b"safe")?;
+        std::fs::write(&secret, b"secret-sentinel")?;
+        symlink(&target, source.join("resource"))?;
+        let hook = |_: &Path| {
+            std::fs::rename(&target, home.join("old-resource")).unwrap();
+            symlink(&secret, &target).unwrap();
+        };
+        let mut capture = Capture {
+            home: &home,
+            root: &destination,
+            source: &source,
+            budget: 1024,
+            entries_left: 100,
+            ancestors: BTreeSet::new(),
+            before_link_read: Some(&hook),
+            result: StagedUserSkills::default(),
+        };
+        capture.directory(Directory::open_anchor(&source)?, Path::new(""));
+        assert_eq!(capture.result.file_count, 0);
+        assert!(
+            capture
+                .result
+                .warnings
+                .iter()
+                .any(|warning| warning.path == Path::new("resource")
+                    && warning.reason == "changed_during_copy")
+        );
+        assert!(capture.result.setup().iter().all(|step| !matches!(step,
+            SetupStep::WriteFile { bytes, .. } if bytes.windows(15).any(|part| part == b"secret-sentinel"))));
         Ok(())
     }
 }

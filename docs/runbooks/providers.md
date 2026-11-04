@@ -196,7 +196,9 @@ lane receives read-only access to that tree, and the provider discovers the
 staged copy. Links are followed into the copy, but targets in credential roots
 are skipped with a warning. Missing directories are skipped. Files exceeding
 the staging byte limit and entries that change during capture are skipped with
-a warning. The staged tree contains no links and receives no write grant.
+a warning. If the staged tree cannot be written, the lane continues without
+user skills and records a warning. The staged tree contains no links and
+receives no write grant.
 Project skills and selected-provider credential access keep their existing
 rules. Reading a skill does not change nested dispatch policy.
 

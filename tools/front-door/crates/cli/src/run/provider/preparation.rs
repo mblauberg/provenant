@@ -1172,40 +1172,68 @@ pub(super) fn prepare_candidates(
         provider_route.set_user_skills(user_skills_mode.is_discover());
         let nonce = entropy_128().map_err(|error| error.to_string())?;
         let grant_digest = task.authority_digest.to_string();
-        let mut spec = match adapter.prepare(PrepareInput {
-            command: None,
-            route: &provider_route,
-            confined: &plan,
-            prompt: &prompt,
-            continuation: continuation.as_ref(),
-            grant_digest: &grant_digest,
-            executable: &executable,
-            home: &home,
-            user: &user,
-            host_var: &|key| std::env::var_os(key),
-            skill_stage_max_bytes: 16 * 1024 * 1024,
-            account: account.as_ref(),
-            token,
-            cwd: &cwd,
-            git_context: git_context.is_some(),
-            nonce,
-            provenant: LaneRuntime {
-                executable: &provenant_executable,
-                git: &git,
-                state: roots.state.as_path(),
-                child_state: &child_state,
+        let prepare = |provider_route: &provenant_records::ResolvedRoute| {
+            adapter.prepare(PrepareInput {
+                command: None,
+                route: provider_route,
+                confined: &plan,
+                prompt: &prompt,
+                continuation: continuation.as_ref(),
+                grant_digest: &grant_digest,
+                executable: &executable,
                 home: &home,
-                depth: paths.lane_depth,
-                attempt: paths.attempt_id,
-                assets,
-            },
-        }) {
+                user: &user,
+                host_var: &|key| std::env::var_os(key),
+                skill_stage_max_bytes: 16 * 1024 * 1024,
+                account: account.as_ref(),
+                token,
+                cwd: &cwd,
+                git_context: git_context.is_some(),
+                nonce,
+                provenant: LaneRuntime {
+                    executable: &provenant_executable,
+                    git: &git,
+                    state: roots.state.as_path(),
+                    child_state: &child_state,
+                    home: &home,
+                    depth: paths.lane_depth,
+                    attempt: paths.attempt_id,
+                    assets,
+                },
+            })
+        };
+        let mut spec = match prepare(&provider_route) {
             Ok(spec) => spec,
             Err(error) => {
                 reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
                 continue;
             }
         };
+        if let Some(stage) = &spec.user_skills.root {
+            let result = apply_setup_directory(&[staging], stage)
+                .and_then(|_| apply_setup(spec.user_skills.setup(), &[stage], None));
+            if result.is_err() {
+                let source = spec.user_skills.source.take();
+                let warnings = std::mem::take(&mut spec.user_skills.warnings);
+                let mut without_skills = provider_route.clone();
+                without_skills.set_user_skills(false);
+                spec = match prepare(&without_skills) {
+                    Ok(spec) => spec,
+                    Err(error) => {
+                        reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
+                        continue;
+                    }
+                };
+                spec.user_skills.source = source;
+                spec.user_skills.warnings = warnings;
+                spec.user_skills
+                    .warnings
+                    .push(provenant_providers::SkillWarning {
+                        path: PathBuf::new(),
+                        reason: "staging_failed",
+                    });
+            }
+        }
         if let Some(alias) = &paths.temporary_alias {
             alias_temporary_env(
                 &mut spec.env,
@@ -1300,18 +1328,6 @@ pub(super) fn prepare_candidates(
             }
         } else if adapter.id() == "cursor" {
             setup_roots.push(&home);
-        }
-        if let Some(stage) = &spec.user_skills.root {
-            let result = apply_setup_directory(&[staging], stage)
-                .and_then(|_| apply_setup(spec.user_skills.setup(), &[stage], None));
-            if let Err(error) = result {
-                reasons.push(skip(
-                    &label,
-                    SkipKind::Setup,
-                    format!("skill staging failed: {error}"),
-                ));
-                continue;
-            }
         }
         if let Err(error) = apply_setup(&spec.setup, &setup_roots, transcript_account) {
             reasons.push(skip(
