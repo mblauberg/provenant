@@ -535,6 +535,16 @@ Literal discovery grants accept absent entries or real directories through
 
 ### Git write set
 
+The host exports `PROVENANT_PRIMARY_CHECKOUT` and, for a linked worktree,
+`PROVENANT_WORKTREE_GITDIR`. These identify host paths without changing the
+lane's private Git view. The real admin directory receives read access only.
+Project `shared_paths` add read-write grants for existing host resources to
+writer lanes; `exec_roots` add read and execution grants to primary-checkout
+toolchain directories and never write access. Git, credentials, protected host
+state and overlaps with executable roots remain excluded from shared writes.
+Invalid entries warn and are ignored. Applied grants and portable paths in the
+receipt derive from one host-side resolution.
+
 A writer owns a complete Git directory and object store under attempt scratch,
 including its index, HEAD, refs, config, temporary files, stash, rebase and merge
 state. Plain Git environment selects these paths; its object alternate supplies
