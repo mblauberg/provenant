@@ -7528,7 +7528,8 @@ fn staged_skills_native_probes() -> Result<(), Box<dyn std::error::Error>> {
                 String::from_utf8_lossy(&output.stdout)
             );
             assert!(
-                String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                String::from_utf8_lossy(&output.stdout)
+                    .contains("staged skills assertions completed"),
                 "{adapter} {access:?}: probe child did not run"
             );
         }
@@ -7549,4 +7550,9 @@ fn staged_skills_probe_child() {
     assert!(std::fs::read(&secret).is_err());
     assert!(std::fs::write(&stage, b"x").is_err());
     assert!(std::fs::write(&host, b"x").is_err());
+    std::io::Write::write_all(
+        &mut std::io::stdout(),
+        b"staged skills assertions completed\n",
+    )
+    .expect("write probe marker");
 }

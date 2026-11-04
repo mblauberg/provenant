@@ -1128,12 +1128,11 @@ stages = [
         assert!(value["data"].get("validation_error").is_none());
         let submitted = run(false)?;
         assert!(!submitted.status.success(), "{key}");
-        let output = format!(
-            "{}{}",
-            String::from_utf8_lossy(&submitted.stdout),
-            String::from_utf8_lossy(&submitted.stderr)
-        );
-        assert!(output.contains(&format!("limits.{key}")), "{key}: {output}");
+        let submitted_value: serde_json::Value = serde_json::from_slice(&submitted.stdout)?;
+        let submitted_reason = submitted_value["error"]["message"]
+            .as_str()
+            .ok_or("missing submission refusal reason")?;
+        assert_eq!(reason, submitted_reason, "{key}: {submitted_value}");
     }
     fn has_graph_journal(path: &std::path::Path) -> std::io::Result<bool> {
         if !path.exists() {
@@ -1796,7 +1795,16 @@ fn remaining_bundled_patterns_have_explain_goldens() -> Result<(), Box<dyn std::
         ("scope-then-run", &worktree[..]),
         ("deliver", &deliver[..]),
     ] {
-        golden(&format!("{name}.explain.txt"), &explain_text(name, extra)?)?;
+        let explained = explain_text(name, extra)?;
+        if name == "single" {
+            let inspection = explained
+                .lines()
+                .find_map(|line| line.strip_prefix("Inspection: "))
+                .ok_or("missing inspection")?;
+            let inspection: serde_json::Value = serde_json::from_str(inspection)?;
+            assert_eq!(inspection["prompt_bytes"], 10);
+        }
+        golden(&format!("{name}.explain.txt"), &explained)?;
     }
     Ok(())
 }
