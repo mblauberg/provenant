@@ -1055,7 +1055,7 @@ pub(super) fn prepare_candidates(
         let child_state = state_root
             .join("children")
             .join(paths.attempt_id.to_string());
-        let (plan, observed_head, repository) = match confinement_request(
+        let (plan, observed_head, repository, worktree_gitdir) = match confinement_request(
             project_id,
             ConfinementRoots {
                 cwd: &cwd,
@@ -1081,6 +1081,7 @@ pub(super) fn prepare_candidates(
                             writer.worktree.repo().common_git_dir(),
                         )
                         .ok(),
+                        Some(writer.worktree.repo().private_git_dir().to_owned()),
                     )
                 })
                 .map_err(|error| error.to_string()),
@@ -1213,6 +1214,25 @@ pub(super) fn prepare_candidates(
             );
         }
         spec.profile.spec.allow_database_ipc = task.access.database_ipc;
+        let common_git_path = repository
+            .as_ref()
+            .map(|path| path.to_path_buf())
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        let project_paths = super::project_paths::apply(
+            &mut spec,
+            &plan,
+            super::project_paths::Context {
+                cwd: &cwd,
+                home: &home,
+                common_git: common_git_path.as_deref(),
+                state_root: roots.state.as_path(),
+                worktree_gitdir: worktree_gitdir.as_deref(),
+                writer: writer.is_some(),
+                settings: config.domains.lanes.projects.get(&project_id_str),
+                project: &project_id_str,
+            },
+        );
         configure_process_tree(&mut spec, paths)?;
         let build_settings = config.domains.fabric.lanes.build_settings();
         configure_build_slots(
@@ -1358,6 +1378,7 @@ pub(super) fn prepare_candidates(
             "account_source".into(),
             account_source(resume.is_some(), task.account.is_some()).into(),
         );
+        provider.extra.insert("project_paths".into(), project_paths);
         if let Some(event) = &dependency_event {
             provider
                 .extra

@@ -155,6 +155,36 @@ refreshes tokens. This is an accepted limit. A lane is not granted other
 providers' credential stores, and GitHub CLI configuration stays denied
 ([#2432](https://github.com/mblauberg/provenant/issues/2432)).
 
+## Project paths and host checkout identity
+
+Lanes receive `PROVENANT_PRIMARY_CHECKOUT`, the canonical primary checkout.
+Linked-worktree lanes also receive `PROVENANT_WORKTREE_GITDIR`, their real,
+read-only admin directory. A writer's `git rev-parse --git-common-dir` still
+names its private Git view; use the environment variable to locate host-owned
+project state instead of querying Git against the primary checkout.
+
+Configure existing shared paths and repo-managed tools per registered project:
+
+```toml
+[domains.lanes.projects."PROJECT-ID"]
+shared_paths = [".agent-run/locks", "~/shared-test-state"]
+exec_roots = [".local-tools"]
+```
+
+`shared_paths` gives this project's writers read-write access. Paths may be
+absolute, home-relative or relative to the primary checkout; missing paths are
+never created. Read-only lanes get no additional writes. Git directories,
+credential stores, protected host state and executable roots are omitted with a
+`shared_path_ignored` warning.
+
+`exec_roots` gives lanes read and execution access to directory subtrees under
+the primary checkout. Entries that escape it, are missing, overlap writes or
+name protected or credential paths are ignored with `exec_root_ignored`.
+Neither setting changes the lane's PATH; call tools by a project-resolved path.
+The receipt's `project_paths` records the applied paths and warnings with their
+configuration keys. Paths use checkout- or home-relative forms; external paths
+require inspection of the host configuration.
+
 ## User skills in lanes
 
 Lanes discover host user skills read-only by default. The

@@ -251,6 +251,7 @@ pub(super) type PreparedReadPlan = (
     ConfinedPlan,
     Option<provenant_core::GitOid>,
     Option<provenant_records::AbsolutePath>,
+    Option<PathBuf>,
 );
 
 pub(super) fn read_only_plan(
@@ -323,13 +324,14 @@ pub(super) fn read_only_plan(
                         plan,
                         head,
                         provenant_records::AbsolutePath::new(repo.common_git_dir()).ok(),
+                        Some(repo.private_git_dir().to_owned()),
                     )
                 })
                 .map_err(|error| error.to_string())
         }
         // Non-Git workspaces have no Git metadata or repository exceptions.
         None => ConfinedPlan::new(request)
-            .map(|plan| (plan, None, None))
+            .map(|plan| (plan, None, None, None))
             .map_err(|error| error.to_string()),
     }
 }

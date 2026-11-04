@@ -1,6 +1,7 @@
 //! The binary edge registers the closed aggregate of landed domain owners.
 use provenant_config::{DomainConfig, DomainSection, DomainSections, FieldMetadata, SectionError};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -61,10 +62,11 @@ const PR_SECTION: DomainSection =
 
 pub use provenant_records::UserSkillsMode;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LanesSettings {
     pub user_skills: UserSkillsMode,
+    pub skill_stage_max_bytes: u64,
     #[serde(default)]
     pub projects: std::collections::BTreeMap<String, ProjectLanesConfig>,
 }
@@ -74,6 +76,20 @@ pub struct LanesSettings {
 pub struct ProjectLanesConfig {
     #[serde(default)]
     pub user_skills: Option<UserSkillsMode>,
+    #[serde(default)]
+    pub shared_paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub exec_roots: Vec<PathBuf>,
+}
+
+impl Default for LanesSettings {
+    fn default() -> Self {
+        Self {
+            user_skills: UserSkillsMode::default(),
+            skill_stage_max_bytes: 16 * 1024 * 1024,
+            projects: Default::default(),
+        }
+    }
 }
 
 impl LanesSettings {
@@ -91,13 +107,17 @@ impl DomainConfig for LanesSettings {
     }
 }
 
-const LANES_SECTION: DomainSection =
-    DomainSection::new::<LanesSettings>("lanes", |_| "user_skills = \"discover\"\n").with_fields(
-        &[
-            FieldMetadata::enumeration("user_skills", &["discover", "off"]),
-            FieldMetadata::enumeration("projects.{project}.user_skills", &["discover", "off"]),
-        ],
-    );
+const LANES_SECTION: DomainSection = DomainSection::new::<LanesSettings>(
+    "lanes",
+    |_| "user_skills = \"discover\"\nskill_stage_max_bytes = 16777216\n",
+)
+.with_fields(&[
+    FieldMetadata::enumeration("user_skills", &["discover", "off"]),
+    FieldMetadata::new("skill_stage_max_bytes", "int"),
+    FieldMetadata::enumeration("projects.{project}.user_skills", &["discover", "off"]),
+    FieldMetadata::new("projects.{project}.shared_paths", "array"),
+    FieldMetadata::new("projects.{project}.exec_roots", "array"),
+]);
 
 static ENTRIES: [DomainSection; 9] = [
     crate::wait::SECTION,
@@ -451,5 +471,41 @@ read_only = true
                 .user_skills_for(Some("other-proj")),
             UserSkillsMode::Off
         );
+    }
+
+    #[test]
+    fn project_paths_and_skill_stage_bound_have_defaults_and_user_origins() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp);
+        let (config, _) = provenant_config::show(&roots, &SECTIONS).unwrap();
+        assert_eq!(config.domains.lanes.skill_stage_max_bytes, 16 * 1024 * 1024);
+        assert!(ProjectLanesConfig::default().shared_paths.is_empty());
+        assert!(ProjectLanesConfig::default().exec_roots.is_empty());
+        let edited = edit(
+            &roots,
+            json!({
+                "domains.lanes.projects.example.shared_paths": [".agent-run/locks", "~/locks"],
+                "domains.lanes.projects.example.exec_roots": [".local-tools"],
+                "domains.lanes.skill_stage_max_bytes": 1024,
+            }),
+        )
+        .unwrap();
+        let project = &edited.config.domains.lanes.projects["example"];
+        assert_eq!(
+            project.shared_paths,
+            [PathBuf::from(".agent-run/locks"), PathBuf::from("~/locks")]
+        );
+        assert_eq!(project.exec_roots, [PathBuf::from(".local-tools")]);
+        assert_eq!(edited.config.domains.lanes.skill_stage_max_bytes, 1024);
+        for key in [
+            "domains.lanes.projects.example.shared_paths",
+            "domains.lanes.projects.example.exec_roots",
+            "domains.lanes.skill_stage_max_bytes",
+        ] {
+            assert!(matches!(
+                edited.config.origins.get(key),
+                Some(provenant_config::Origin::User { .. })
+            ));
+        }
     }
 }
