@@ -35,6 +35,11 @@
       "parameters.spec.default": "bundled",
       "parameters.spec.doc": "bundled",
       "parameters.spec.type": "bundled",
+      "parameters.spec_max_bytes.default": "bundled",
+      "parameters.spec_max_bytes.doc": "bundled",
+      "parameters.spec_max_bytes.max": "bundled",
+      "parameters.spec_max_bytes.min": "bundled",
+      "parameters.spec_max_bytes.type": "bundled",
       "parameters.subject.default.commit": "bundled",
       "parameters.subject.default.type": "bundled",
       "parameters.subject.doc": "bundled",
@@ -191,6 +196,13 @@
           "default": "",
           "doc": "Issue number or file the change answers.",
           "type": "string"
+        },
+        "spec_max_bytes": {
+          "default": 16384,
+          "doc": "Maximum bytes of a file spec included in each review brief.",
+          "max": 65536,
+          "min": 1,
+          "type": "integer"
         },
         "subject": {
           "default": {
