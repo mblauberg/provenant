@@ -3603,6 +3603,18 @@ pub(crate) fn lane_provider() -> Result {
     Ok(())
 }
 
+// Share the lane-side discovery decision with its injected PATH fixture.
+const LANE_NODE_PNPM_PROBE: &str = concat!(
+    "if command -v node >/dev/null && command -v pnpm >/dev/null; then ",
+    "node --version; pnpm --version; ",
+    "node \"$TMPDIR/cargo-probe/child-process.cjs\"; ",
+    "pnpm --dir \"$TMPDIR/cargo-probe\" run compat; ",
+    "printf 'lane-node-pnpm-compat: PASS\\n'; ",
+    "elif [ \"${PROVENANT_LANE_TOOLS_REQUIRED:-0}\" = 1 ]; then ",
+    "echo 'required node/pnpm unavailable' >&2; exit 15; ",
+    "else echo 'SKIP #1: node/pnpm unavailable' >&2; fi"
+);
+
 /// Only the narrowest Claude profile that actually grants a shell can run the
 /// native cargo probe: read-only Claude has neither a worktree write nor cargo
 /// on PATH, so its probe would test a profile that cannot build. A successful
@@ -3861,7 +3873,7 @@ if (process.argv[2] === 'child') {
 }
 "#,
         )?;
-        let argv = ["/bin/sh", "-c", concat!(
+        let script = [concat!(
             "set -eu; ",
             // The lane's TMPDIR is the short alias: it must resolve inside the
             // sandbox, take files, and hold a Unix-domain socket (#2661).
@@ -3887,15 +3899,13 @@ if (process.argv[2] === 'child') {
             "test \"$(command -v git)\" = \"$(cd \"$TMPDIR\" && pwd -P)/bin/git\" && ",
             "git --version && git status --porcelain && ",
             "cargo test -j2 --lib --offline --manifest-path \"$TMPDIR/cargo-probe/Cargo.toml\"; ",
-            "if command -v node >/dev/null && command -v pnpm >/dev/null; then ",
-            "node --version; pnpm --version; ",
-            "node \"$TMPDIR/cargo-probe/child-process.cjs\"; ",
-            "pnpm --dir \"$TMPDIR/cargo-probe\" run compat; ",
-            "printf 'lane-node-pnpm-compat: PASS\\n'; ",
-            "elif [ \"${PROVENANT_LANE_TOOLS_REQUIRED:-0}\" = 1 ]; then ",
-            "echo 'required node/pnpm unavailable' >&2; exit 15; ",
-            "else echo 'SKIP #1: node/pnpm unavailable' >&2; fi"
-        )].map(OsString::from);
+
+        ), LANE_NODE_PNPM_PROBE].concat();
+        let argv = [
+            OsString::from("/bin/sh"),
+            OsString::from("-c"),
+            script.into(),
+        ];
         let command = compiled.command(&argv, &provenant_core::AttemptId::from_bytes([0; 16]))?;
         let mut options = ExecOptions::new(&command, &launch.cwd, Duration::from_secs(30));
         options.process_group = true;
@@ -5141,6 +5151,61 @@ fn gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch() -> Result {
 
 #[cfg(test)]
 mod predicate_tests {
+    #[test]
+    fn lane_tool_prerequisite_uses_injected_path_and_required_control() -> super::Result {
+        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor};
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let executor = SystemExecutor::new(1)?;
+        for tools in [&[][..], &["node"][..], &["pnpm"][..], &["node", "pnpm"][..]] {
+            let bin = root.join(format!("tools-{}", tools.join("-")));
+            std::fs::create_dir(&bin)?;
+            for name in tools {
+                let path = bin.join(name);
+                std::fs::write(&path, "#!/bin/sh\nexit 0\n")?;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+            }
+            for required in [None, Some("0"), Some("1")] {
+                let mut env = vec![
+                    ("PATH".into(), bin.as_os_str().to_owned()),
+                    ("TMPDIR".into(), root.as_os_str().to_owned()),
+                ];
+                if let Some(value) = required {
+                    env.push(("PROVENANT_LANE_TOOLS_REQUIRED".into(), value.into()));
+                }
+                let argv = [
+                    "/bin/sh".into(),
+                    "-ec".into(),
+                    super::LANE_NODE_PNPM_PROBE.into(),
+                ];
+                let mut options = ExecOptions::new(&argv, &root, super::Duration::from_secs(3));
+                options.env = Some(&env);
+                options.stdout = provenant_os::exec::StreamPolicy::Capture { limit: 4096 };
+                options.stderr = provenant_os::exec::StreamPolicy::Capture { limit: 4096 };
+                let output = executor.execute(options)?;
+                let available = tools.len() == 2;
+                assert_eq!(
+                    super::code(&output),
+                    if !available && required == Some("1") {
+                        15
+                    } else {
+                        0
+                    }
+                );
+                assert_eq!(
+                    String::from_utf8_lossy(&output.stdout.bytes)
+                        .contains("lane-node-pnpm-compat: PASS"),
+                    available
+                );
+                if !available && required != Some("1") {
+                    assert!(String::from_utf8_lossy(&output.stderr.bytes).contains("SKIP #1:"));
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn only_the_narrowest_probe_capable_claude_case_runs_the_native_shell_probe() {
         assert!(super::native_shell_probe_case("claude", true, false));
