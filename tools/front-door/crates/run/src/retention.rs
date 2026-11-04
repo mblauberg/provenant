@@ -1678,18 +1678,20 @@ mod tests {
         use provenant_core::{Clock, MonoTime, TimeError};
         // Each DB observation completes within its own five-second budget,
         // while time between observations exceeds the original deadline.
-        struct AdvancingClock(std::cell::Cell<u64>);
+        struct AdvancingClock(std::sync::Mutex<u64>);
         impl Clock for AdvancingClock {
             fn mono_now(&self) -> MonoTime {
-                let now = self.0.get();
-                self.0.set(now + 2_000_000);
+                let mut value = self.0.lock().unwrap();
+                let now = *value;
+                *value += 2_000_000;
                 MonoTime::from_micros(now)
             }
             fn wall_now(&self) -> std::result::Result<WallTime, TimeError> {
                 WallTime::from_micros(200 + DAY_MICROS)
             }
             fn wait_until(&self, deadline: MonoTime) -> std::result::Result<(), TimeError> {
-                self.0.set(self.0.get().max(deadline.as_micros()));
+                let mut value = self.0.lock().unwrap();
+                *value = (*value).max(deadline.as_micros());
                 Ok(())
             }
         }
@@ -1702,7 +1704,7 @@ mod tests {
             .mode(0o700)
             .create(attempt.join("tmp"))?;
         store.set_temporary_retained(id, true, &call)?;
-        let slow = AdvancingClock(std::cell::Cell::new(0));
+        let slow = AdvancingClock(std::sync::Mutex::new(0));
         let call = Request {
             clock: &slow,
             cancel: &cancel,
