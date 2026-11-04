@@ -324,7 +324,7 @@ jobs:
         env:
           HOMEBREW_NO_INSTALL_CLEANUP: "1"
         run: |
-          brew install postgresql@18 node pnpm
+          brew install postgresql@18 node pnpm ripgrep
           echo "PROVENANT_TEST_POSTGRES_BIN=$(brew --prefix postgresql@18)/bin" >> "$GITHUB_ENV"
       - name: Configure native census host policy
         run: |

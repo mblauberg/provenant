@@ -335,7 +335,11 @@ public struct QuotaShow: Decodable, Equatable, Sendable {
         public let usedBasisPoints: UInt64
         public let resetsUnixSeconds: Int64?
     }
-    public struct Snapshot: Decodable, Equatable, Sendable { public let windows: [Window] }
+    public struct Snapshot: Decodable, Equatable, Sendable {
+        public struct Details: Decodable, Equatable, Sendable { public let coverage: String? }
+        public let windows: [Window]
+        public let details: Details?
+    }
     public struct Account: Decodable, Equatable, Sendable, Identifiable {
         public struct Refusal: Decodable, Equatable, Sendable {
             public let model: String

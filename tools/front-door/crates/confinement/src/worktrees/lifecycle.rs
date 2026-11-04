@@ -160,11 +160,18 @@ pub fn create(
     let checked_out = entries
         .iter()
         .filter(|entry| !entry.prunable)
-        .any(|entry| entry.branch.as_ref() == Some(&branch));
-    if checked_out {
-        return Err(if request.base.is_some() {
-            WorktreeError::BranchExistsWithBase {
-                branch: request.branch.clone(),
+        .find(|entry| entry.branch.as_ref() == Some(&branch));
+    if let Some(entry) = checked_out {
+        return Err(if let Some(base) = request.base.as_deref() {
+            let base_oid = pin_revision(context, base, cancel)?;
+            if !is_ancestor(context, base_oid, entry.head, cancel)? {
+                WorktreeError::BranchExistsWithBase {
+                    branch: request.branch.clone(),
+                    head: entry.head,
+                    base: base_oid,
+                }
+            } else {
+                WorktreeError::CheckedOut
             }
         } else {
             WorktreeError::CheckedOut
@@ -178,10 +185,17 @@ pub fn create(
     }
     let branch_tips = read_branch_tips(context, cancel)?;
     let existing = branch_tips.get(&branch).copied();
-    if existing.is_some() && request.base.is_some() {
-        return Err(WorktreeError::BranchExistsWithBase {
-            branch: request.branch.clone(),
-        });
+    if let Some(existing_head) = existing
+        && let Some(base) = request.base.as_deref()
+    {
+        let base_oid = pin_revision(context, base, cancel)?;
+        if !is_ancestor(context, base_oid, existing_head, cancel)? {
+            return Err(WorktreeError::BranchExistsWithBase {
+                branch: request.branch.clone(),
+                head: existing_head,
+                base: base_oid,
+            });
+        }
     }
     let create_branch = existing.is_none();
     if create_branch {
@@ -209,10 +223,10 @@ pub fn create(
             }
         }
     }
-    let base = if let Some(base) = request.base.as_deref() {
-        pin_revision(context, base, cancel)?
-    } else if let Some(existing) = existing {
+    let base = if let Some(existing) = existing {
         existing
+    } else if let Some(base) = request.base.as_deref() {
+        pin_revision(context, base, cancel)?
     } else {
         let outcome = run_git(context, context.repo, GitRead::RevParseHead, cancel)?;
         if exit_code(&outcome)? != 0 {

@@ -75,16 +75,34 @@ pub trait WorkerObserver: Send + Sync {
 pub struct CensusPolicyWorkers<'a> {
     inner: &'a dyn WorkerObserver,
     pub(super) entries: Vec<CensusIgnoreEntry>,
+    pub(super) exclude_ancestors: bool,
 }
 impl<'a> CensusPolicyWorkers<'a> {
     pub fn from_roots(
         inner: &'a dyn WorkerObserver,
         roots: &provenant_core::Roots,
     ) -> Result<Self, WorktreeError> {
+        Self::configured(inner, roots, false)
+    }
+
+    /// Apply the host ancestor-exclusion setting only for run admission.
+    pub fn for_run(
+        inner: &'a dyn WorkerObserver,
+        roots: &provenant_core::Roots,
+    ) -> Result<Self, WorktreeError> {
+        Self::configured(inner, roots, true)
+    }
+
+    fn configured(
+        inner: &'a dyn WorkerObserver,
+        roots: &provenant_core::Roots,
+        for_run: bool,
+    ) -> Result<Self, WorktreeError> {
         let config = provenant_config::read_knobs(roots)?;
         Ok(Self {
             inner,
             entries: config.census_ignore_unreadable()?,
+            exclude_ancestors: for_run && config.census_exclude_ancestors()?,
         })
     }
 }
@@ -117,7 +135,7 @@ impl WorkerObserver for CensusPolicyWorkers<'_> {
     }
     fn observe_roots_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
         self.inner
-            .observe_roots_with_policy(roots, &self.entries, false)
+            .observe_roots_with_policy(roots, &self.entries, self.exclude_ancestors)
     }
     fn observe_roots_for_land_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
         self.inner
@@ -125,7 +143,7 @@ impl WorkerObserver for CensusPolicyWorkers<'_> {
     }
     fn live_process(&self, root: &Path) -> Option<ObservedProcess> {
         self.inner
-            .live_process_with_policy(root, &self.entries, false)
+            .live_process_with_policy(root, &self.entries, self.exclude_ancestors)
     }
     fn live_process_for_land(&self, root: &Path) -> Option<ObservedProcess> {
         self.inner
@@ -506,6 +524,7 @@ pub(super) fn observe_worker_holders_with_audit(
                             .or_insert_with(|| ObservedProcess {
                                 pid,
                                 command: fact.command.clone(),
+                                cwd: Some(location.to_path_buf()),
                             });
                         details.insert(
                             root,
@@ -614,6 +633,7 @@ pub(super) fn observe_worker_holders_with_audit(
                                 .or_insert_with(|| ObservedProcess {
                                     pid,
                                     command: fact.command.clone(),
+                                    cwd: Some(canonical.clone()),
                                 });
                         details.insert(root, format!("process {}: cwd inside root", holder.pid));
                     }

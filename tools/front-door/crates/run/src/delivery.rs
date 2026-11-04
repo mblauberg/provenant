@@ -1902,8 +1902,8 @@ pub(super) fn prepare_error(step: &'static str, detail: impl std::fmt::Display) 
     }
 }
 
-/// The stdout limit for one host Git or forge call, chosen from its argv. A
-/// worktree listing grows with the linked worktrees, so it gets the crate's
+/// The stdout limit for one host Git or forge call, chosen from its argv.
+/// Worktree and ref listings grow with the repository, so they get the crate's
 /// capture default; every other call keeps its bound.
 pub(super) fn stdout_limit(commit_log: bool, args: &[&str]) -> usize {
     if commit_log {
@@ -1911,7 +1911,10 @@ pub(super) fn stdout_limit(commit_log: bool, args: &[&str]) -> usize {
     } else if args.contains(&"--show-origin") {
         // A configuration listing with origins can exceed an ordinary reply.
         1024 * 1024
-    } else if args.starts_with(&["worktree", "list"]) {
+    } else if matches!(
+        git_subcommand(args).as_str(),
+        "worktree list" | "for-each-ref" | "ls-remote"
+    ) {
         provenant_os::exec::DEFAULT_CAPTURE_LIMIT
     } else {
         16 * 1024

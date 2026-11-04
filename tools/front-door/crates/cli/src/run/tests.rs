@@ -1252,6 +1252,43 @@ fn host_delivery_limit_keeps_its_text_as_typed_io_detail() {
         assert_eq!(detail.code(), "io");
         assert_eq!(detail.to_string(), text);
     }
+    let failure = super::Fail::from(provenant_run::RunError::Delivery(
+        provenant_records::run::WriterDeliveryStage::Prepare,
+    ));
+    assert_eq!(
+        failure.detail.expect("stage detail").to_string(),
+        failure.message
+    );
+}
+
+#[test]
+fn host_delivery_limit_cli_error_matches_golden() -> Result<(), Box<dyn std::error::Error>> {
+    let failure = super::Fail::from(provenant_run::RunError::DeliveryLimit {
+        stage: provenant_records::run::WriterDeliveryStage::Integrate,
+        tool: "git",
+        command: "worktree list".into(),
+        limit: provenant_os::exec::DEFAULT_CAPTURE_LIMIT,
+    });
+    let reply = super::reply("run", Err(failure));
+    let mut rendered = Vec::new();
+    crate::render::render(
+        &reply.result,
+        crate::render::RenderMode::Human {
+            text: &reply.human,
+            summary: reply.summary.as_ref(),
+            read_only: reply.read_only,
+        },
+        &mut rendered,
+    )?;
+    let actual = String::from_utf8(rendered)?;
+    let golden_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/golden/delivery-limit-error.txt");
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        std::fs::write(&golden_path, &actual)?;
+    }
+    let expected = std::fs::read_to_string(&golden_path)?;
+    assert_eq!(actual, expected);
+    Ok(())
 }
 
 #[test]
@@ -2247,6 +2284,321 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
 }
 
 #[test]
+fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::worktrees::{
+        self, ObservedProcess, WorkerObserver, WorkerState, WorktreeCreate, WorktreeOrigin,
+        WorktreeOwner,
+    };
+    use provenant_core::RootInputs;
+    struct LiveObserver(PathBuf);
+    impl WorkerObserver for LiveObserver {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .map(|root| (root.clone(), WorkerState::Live))
+                .collect()
+        }
+        fn live_process(&self, _root: &Path) -> Option<ObservedProcess> {
+            Some(ObservedProcess {
+                pid: 54321,
+                command: Some("foreign-writer".into()),
+                cwd: Some(self.0.clone()),
+            })
+        }
+    }
+    struct Free;
+    impl WorkerObserver for Free {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .map(|root| (root.clone(), WorkerState::Free))
+                .collect()
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let home = root.join("home");
+    let state = root.join("state");
+    let project = root.join("project");
+    std::fs::create_dir_all(&home)?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(&state)?;
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::create_dir_all(&project)?;
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "base",
+        ],
+    ] {
+        provenant_os::fixture::run_git(&project, &args)?;
+    }
+    let mut inputs = RootInputs::new(home.clone(), project.clone());
+    inputs.state_dir = Some(state);
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let edge = Edge {
+        roots: &roots,
+        home: &home,
+        assets: &project,
+        cwd: &project,
+    };
+    let host = provenant_config::bind_host(&roots)?;
+    let prior_attempt = AttemptId::from_bytes([111; 16]);
+    let branch = "live-refusal-branch";
+    let (path, _) = worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+        let context = &worktrees::WorktreeContext {
+            workers: &Free,
+            ..*context
+        };
+        let info = worktrees::create(
+            context,
+            WorktreeCreate {
+                branch: branch.into(),
+                base: None,
+            },
+            &cancel,
+        )?;
+        let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
+        worktrees::save_owner(
+            &tree,
+            &WorktreeOwner {
+                attempt_id: Some(prior_attempt),
+                operation_id: Some("prior-op".parse().unwrap()),
+                branch: branch.into(),
+                base: info.head.to_string(),
+                host,
+                created_at: WallTime::from_micros(1)
+                    .map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
+                origin: WorktreeOrigin::Lane,
+                label: None,
+            },
+        )?;
+        Ok((info.path, info.head))
+    })?;
+
+    let observer = LiveObserver(path.clone());
+    let err = super::own_worktree(
+        &super::OwnedWorktree {
+            branch: branch.into(),
+            host,
+            created_at: WallTime::from_micros(2)?,
+        },
+        None,
+        &OperationId::parse("new-op")?,
+        &edge,
+        &observer,
+        |_| false,
+        &mut None,
+        &clock,
+        &cancel,
+    );
+    match err {
+        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
+            provenant_confinement::worktrees::WorktreeError::LiveProcess(proc),
+        ))) => {
+            assert_eq!(proc.pid, 54321);
+            assert_eq!(proc.command.as_deref(), Some("foreign-writer"));
+            assert_eq!(proc.cwd.as_ref(), Some(&path));
+            let msg = proc.to_string();
+            assert!(!msg.contains(&prior_attempt.to_string()));
+        }
+        other => panic!("expected LiveProcess, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
+fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::worktrees::{
+        self, CensusPolicyWorkers, ObservedProcess, WorkerObserver, WorkerState, WorktreeCreate,
+    };
+    use provenant_core::RootInputs;
+    struct ControlledObserver {
+        target: PathBuf,
+    }
+    impl WorkerObserver for ControlledObserver {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .map(|root| {
+                    (
+                        root.clone(),
+                        if root == &self.target {
+                            WorkerState::Live
+                        } else {
+                            WorkerState::Free
+                        },
+                    )
+                })
+                .collect()
+        }
+
+        fn observe_roots_for_land(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .map(|root| (root.clone(), WorkerState::Free))
+                .collect()
+        }
+
+        fn live_process(&self, root: &Path) -> Option<ObservedProcess> {
+            (root == self.target).then(|| ObservedProcess {
+                pid: 24680,
+                command: Some("ancestor-shell".into()),
+                cwd: Some(self.target.clone()),
+            })
+        }
+
+        fn live_process_for_land(&self, _root: &Path) -> Option<ObservedProcess> {
+            None
+        }
+    }
+    struct Free;
+    impl WorkerObserver for Free {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .map(|root| (root.clone(), WorkerState::Free))
+                .collect()
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let home = root.join("home");
+    let state = root.join("state");
+    let project = root.join("project");
+    std::fs::create_dir_all(&home)?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(&state)?;
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::create_dir_all(&project)?;
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "base",
+        ],
+    ] {
+        provenant_os::fixture::run_git(&project, &args)?;
+    }
+    let mut inputs = RootInputs::new(home.clone(), project.clone());
+    inputs.state_dir = Some(state);
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let host = provenant_config::bind_host(&roots)?;
+    let branch = "inside-worktree-branch";
+    let (path, head) =
+        worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+            let context = &worktrees::WorktreeContext {
+                workers: &Free,
+                ..*context
+            };
+            let info = worktrees::create(
+                context,
+                WorktreeCreate {
+                    branch: branch.into(),
+                    base: None,
+                },
+                &cancel,
+            )?;
+            Ok((info.path, info.head))
+        })?;
+
+    // Admission launched from cwd inside target worktree:
+    let edge_inside = Edge {
+        roots: &roots,
+        home: &home,
+        assets: &project,
+        cwd: &path,
+    };
+    let observer = ControlledObserver {
+        target: path.clone(),
+    };
+
+    // Ordinary policy without run ancestor exclusion refuses admission because
+    // the inside process is observed live:
+    let ordinary = CensusPolicyWorkers::from_roots(&observer, &roots)?;
+    let refused = super::own_worktree(
+        &super::OwnedWorktree {
+            branch: branch.into(),
+            host,
+            created_at: WallTime::from_micros(2)?,
+        },
+        None,
+        &OperationId::parse("inside-op-refused")?,
+        &edge_inside,
+        &ordinary,
+        |_| false,
+        &mut None,
+        &clock,
+        &cancel,
+    );
+    match refused {
+        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
+            provenant_confinement::worktrees::WorktreeError::LiveProcess(proc),
+        ))) => {
+            assert_eq!(proc.pid, 24680);
+            assert_eq!(proc.command.as_deref(), Some("ancestor-shell"));
+            assert_eq!(proc.cwd.as_ref(), Some(&path));
+        }
+        other => panic!("expected LiveProcess refusal without ancestor exclusion, got {other:?}"),
+    }
+
+    // Real run policy applies ancestor exclusion, so admission succeeds:
+    let run_policy = CensusPolicyWorkers::for_run(&observer, &roots)?;
+    let admitted = super::own_worktree(
+        &super::OwnedWorktree {
+            branch: branch.into(),
+            host,
+            created_at: WallTime::from_micros(2)?,
+        },
+        None,
+        &OperationId::parse("inside-op")?,
+        &edge_inside,
+        &run_policy,
+        |_| false,
+        &mut None,
+        &clock,
+        &cancel,
+    )?;
+    assert_eq!(admitted.0.path, path);
+    assert_eq!(admitted.0.head, head);
+    Ok(())
+}
+
+#[test]
 fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
     use provenant_core::RootInputs;
@@ -2374,6 +2726,59 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
         "-qm",
         "second",
     ])?;
+    // Move the named base between early resolution and creation.
+    struct MoveBase {
+        project: PathBuf,
+        moved: std::sync::atomic::AtomicBool,
+    }
+    impl provenant_confinement::worktrees::WorkerObserver for MoveBase {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::WorkerState>
+        {
+            if !self.moved.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                provenant_os::fixture::run_git(
+                    &self.project,
+                    &["update-ref", "refs/heads/moving-base", "HEAD"],
+                )
+                .unwrap();
+            }
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, provenant_confinement::worktrees::WorkerState::Free))
+                .collect()
+        }
+    }
+    run_git(&["branch", "moving-base", "HEAD^"])?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let moving = MoveBase {
+        project: project.clone(),
+        moved: std::sync::atomic::AtomicBool::new(false),
+    };
+    let (created_info, created_base) = own_worktree(
+        &OwnedWorktree {
+            branch: "moving-base-lane".into(),
+            host: provenant_config::bind_host(&roots)?,
+            created_at: clock.wall_now()?,
+        },
+        Some("moving-base"),
+        &OperationId::parse("moving-base-lane")?,
+        &edge,
+        &moving,
+        |_| false,
+        &mut None,
+        &clock,
+        &cancel,
+    )
+    .map_err(|fail| fail.to_string())?;
+    assert_eq!(created_info.head, created_base);
+    assert_eq!(
+        created_base.to_string(),
+        String::from_utf8(run_git(&["rev-parse", "HEAD"])?)?.trim()
+    );
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
@@ -2929,7 +3334,7 @@ fn refused_provider_continuation_keeps_a_durable_attempt() -> Result<(), Box<dyn
             _: &str,
             _: &run::LaunchPaths,
             resume: Option<&run::AttemptRecord>,
-        ) -> Result<run::PreparedLaunch, String> {
+        ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
             assert_eq!(resume.map(|prior| prior.attempt_id), self.prior);
             Err("fixture continuation refused; run provenant run".into())
         }
@@ -5593,6 +5998,70 @@ fn wait_follows_a_policy_chain_to_the_ceiling_reading_state_before_tail() {
             .all(|pair| pair[0].0 == "state" && pair[1].0 == "tail" && pair[0].1 == pair[1].1),
         "each hop reads state before its tail"
     );
+}
+
+#[test]
+fn every_adapter_sign_in_failure_settles_auth_required() -> Result<(), Box<dyn std::error::Error>> {
+    use run::Providers;
+    let fixtures: &[(&str, &[u8])] = &[
+        (
+            "cursor",
+            include_bytes!("../../../../tests/fixtures/providers/cursor/auth-required.stderr"),
+        ),
+        (
+            "codex",
+            include_bytes!("../../../../tests/fixtures/providers/codex/auth-required.stderr"),
+        ),
+        (
+            "opencode",
+            include_bytes!("../../../../tests/fixtures/providers/opencode/auth-required.stderr"),
+        ),
+        (
+            "agy",
+            include_bytes!("../../../../tests/fixtures/providers/agy/auth-required.stderr"),
+        ),
+    ];
+    let temp = tempfile::tempdir()?;
+    let mut exit = clean_exit();
+    exit.termination = Some(provenant_os::exec::Termination::Exit(1));
+    for (adapter, stderr) in fixtures {
+        let route = run::RouteRecord {
+            provider: Some((*adapter).into()),
+            model: Some(format!("{adapter}/example")),
+            ..Default::default()
+        };
+        let decoded =
+            Registry::default().decode_captures(&route, b"", stderr, &exit, temp.path(), None)?;
+        assert_eq!(decoded.outcome, run::Outcome::AuthRequired, "{adapter}");
+        assert!(
+            decoded.reason.as_deref().unwrap().contains(
+                provenant_records::AdapterSpec::get(adapter)
+                    .unwrap()
+                    .login_hint
+            )
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn successful_output_with_incidental_auth_stderr_stays_successful() {
+    let route = run::RouteRecord {
+        provider: Some("cursor".into()),
+        model: Some("cursor/example".into()),
+        ..Default::default()
+    };
+    let decoded = Registry::default()
+        .decode_captures(
+            &route,
+            include_bytes!("../../../../tests/fixtures/providers/cursor/fresh.jsonl"),
+            include_bytes!("../../../../tests/fixtures/providers/cursor/auth-required.stderr"),
+            &clean_exit(),
+            Path::new("/unused"),
+            None,
+        )
+        .unwrap();
+    assert_eq!(decoded.outcome, run::Outcome::Succeeded);
 }
 
 #[cfg(feature = "fixture")]

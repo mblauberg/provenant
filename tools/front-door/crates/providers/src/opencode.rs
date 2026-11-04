@@ -8,6 +8,28 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 pub struct OpenCode;
 
+/// Only a typed quota refusal ends a live attempt; ordinary text and malformed
+/// frames retain the existing exit-time decoding policy.
+impl provenant_os::capture::FrameDecoder for OpenCode {
+    fn decode(
+        &self,
+        frame: &[u8],
+    ) -> Result<provenant_os::capture::FrameEvent, provenant_os::capture::DecodeFailure> {
+        use provenant_os::capture::FrameEvent;
+        Ok(
+            if decode(frame).is_ok_and(|events| {
+                events
+                    .iter()
+                    .any(|event| matches!(event, E::QuotaLimited { .. }))
+            }) {
+                FrameEvent::Terminal
+            } else {
+                FrameEvent::Progress
+            },
+        )
+    }
+}
+
 pub const REGISTRATION: crate::Registration = crate::Registration {
     adapter: &OpenCode,
     quota_source: Some(&OpenCode),
@@ -295,8 +317,24 @@ fn prepare(
         // `rg` from PATH, then from its cache bin ($XDG_CACHE_HOME/opencode/bin),
         // and installs it there when absent. The lane sets XDG_CACHE_HOME to
         // its private state, whose grant already covers the read, so grant
-        // exactly that binary for execution. No shell is enabled.
-        tool_exec_roots.push(exact(private.join("cache/opencode/bin/rg")));
+        // exactly that binary for execution, alongside system grep. No shell is enabled.
+        let rg = private.join("cache/opencode/bin/rg");
+        // Resolve install-name symlinks to exact files, accepting libraries by
+        // content regardless of the host's package manager or PATH ordering.
+        let excluded: Vec<_> = [input.home, private.as_path(), &plan.scratch.path, input.cwd]
+            .into_iter()
+            .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
+            .collect();
+        runtime_reads.extend(
+            crate::dylib::linked_dynamic_libraries(&rg, |path| {
+                !excluded.iter().any(|root| path.starts_with(root))
+                    && !provenant_confinement::is_credential_root(path)
+            })
+            .into_iter()
+            .map(exact),
+        );
+        tool_exec_roots.push(exact(rg));
+        tool_exec_roots.push(exact("/usr/bin/grep"));
     }
     env.extend([
         ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
@@ -1082,7 +1120,7 @@ mod tests {
     }
 
     #[test]
-    fn read_only_search_grants_only_ripgrep_in_the_lane_cache() {
+    fn read_only_search_grants_cached_ripgrep_and_system_grep() {
         use provenant_confinement::permissions::{PathGrant, PathScope};
         use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
 
@@ -1142,7 +1180,10 @@ mod tests {
             spec.profile.spec.process_executables,
             [exact(input.executable), exact(input.provenant.git)]
         );
-        assert_eq!(spec.profile.spec.tool_exec_roots, std::slice::from_ref(&rg));
+        assert_eq!(
+            spec.profile.spec.tool_exec_roots,
+            [rg.clone(), exact("/usr/bin/grep")]
+        );
         // No shell toolchain leaks into a read-only lane.
         let path: Vec<_> = std::env::split_paths(&env("PATH").expect("PATH")).collect();
         assert!(!path.contains(&input.home.join(".cargo/bin")), "{path:?}");
@@ -1162,6 +1203,173 @@ mod tests {
         );
         // The private state grant is the read access ripgrep needs.
         assert!(profile.contains("(allow file-read* (subpath \"/fixture/provider-state\"))"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cached_search_library_grants_follow_content_and_exclude_lane_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::symlink;
+        use std::path::Path;
+
+        fn image(path: &Path, file_type: u32, dependencies: &[&Path]) -> std::io::Result<()> {
+            let mut bytes = vec![0; 32];
+            bytes[..4].copy_from_slice(&0xfeed_facf_u32.to_le_bytes());
+            bytes[12..16].copy_from_slice(&file_type.to_le_bytes());
+            bytes[16..20].copy_from_slice(&(dependencies.len() as u32).to_le_bytes());
+            for dependency in dependencies {
+                let name = dependency.to_str().unwrap().as_bytes();
+                let start = bytes.len();
+                let size = (24 + name.len() + 1).next_multiple_of(8);
+                bytes.extend(0xc_u32.to_le_bytes());
+                bytes.extend((size as u32).to_le_bytes());
+                bytes.extend(24_u32.to_le_bytes());
+                bytes.resize(start + 24, 0);
+                bytes.extend(name);
+                bytes.resize(start + size, 0);
+            }
+            std::fs::create_dir_all(path.parent().unwrap())?;
+            std::fs::write(path, bytes)
+        }
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let lane = root.join("lane");
+        let cwd = lane.join("repo");
+        let home = lane.join("home");
+        let first = root.join("host/arbitrary/first.dylib");
+        let second = root.join("host/other/second.dylib");
+        image(&first, 6, &[&second])?;
+        image(&second, 6, &[])?;
+        let alias = root.join("host/alias.dylib");
+        symlink(&first, &alias)?;
+        let denied = [
+            home.join("Documents/plain.txt"),
+            root.join("host/Cellar/plain.txt"),
+            home.join("fixture.dylib"),
+            lane.join("state/fixture.dylib"),
+            lane.join("scratch/fixture.dylib"),
+            cwd.join("fixture.dylib"),
+            root.join("host/.ssh/fixture.dylib"),
+            root.join("host/executable"),
+            root.join("host/directory"),
+        ];
+        // Every rejected image names another host dylib. It must not be
+        // reached through a rejected node of the closure.
+        let hidden = root.join("host/hidden.dylib");
+        image(&hidden, 6, &[])?;
+        for path in &denied {
+            image(path, 6, &[&hidden])?;
+        }
+        std::fs::write(&denied[0], "plain text")?;
+        std::fs::write(&denied[1], "plain text")?;
+        image(&denied[7], 2, &[&hidden])?;
+        std::fs::remove_file(&denied[8])?;
+        std::fs::create_dir(&denied[8])?;
+        let cached = lane.join("state/cache/opencode/bin/rg");
+        let mut dependencies = vec![alias.as_path()];
+        dependencies.extend(denied.iter().map(|path| path.as_path()));
+        image(&cached, 2, &dependencies)?;
+        // A non-executable, unrelated rg earlier on PATH cannot suppress grants.
+        let host_bin = root.join("host/bin");
+        std::fs::create_dir_all(&host_bin)?;
+        std::fs::write(host_bin.join("rg"), "unrelated")?;
+        let plan = crate::tests::read_only_plan(lane.to_str().unwrap(), None);
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        let mut input = crate::tests::fixture_input(&route, &plan, &prompt, &cwd, None);
+        input.home = &home;
+        let host_var = |name: &str| (name == "PATH").then(|| host_bin.clone().into_os_string());
+        input.host_var = &host_var;
+        let spec = prepare(
+            &input,
+            Access::ReadOnly,
+            Session::Fresh,
+            OpenCode.stream(None)?,
+        )?;
+        let profile = provenant_confinement::permissions::snapshot::render(
+            plan.permissions(),
+            &spec.profile,
+            &home,
+        )?;
+        for path in [&first, &second] {
+            assert!(
+                profile.contains(&format!(
+                    "(allow file-read* (literal \"{}\"))",
+                    path.display()
+                )),
+                "{}",
+                path.display()
+            );
+        }
+        for path in denied.iter().chain([&hidden, &alias]) {
+            assert!(
+                !profile.contains(&format!(
+                    "(allow file-read* (literal \"{}\"))",
+                    path.display()
+                )),
+                "{}",
+                path.display()
+            );
+        }
+        assert!(!profile.contains("(allow process-exec (subpath"));
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn read_only_search_runs_in_native_profile() -> Result<(), Box<dyn std::error::Error>> {
+        let Some(rg) = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join("rg"))
+            .find(|path| path.is_file())
+        else {
+            // CI installs ripgrep and sets PROVENANT_CONFINEMENT_REQUIRED, so
+            // this skip fails there instead of passing silently.
+            provenant_test_support::skip_sandbox_dependent_test(
+                "rg is required for the native search test",
+            )?;
+            return Ok(());
+        };
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let cached = root.join("state/cache/opencode/bin/rg");
+        std::fs::create_dir_all(cached.parent().unwrap())?;
+        std::fs::copy(rg, &cached)?;
+        let plan = crate::tests::read_only_plan(root.to_str().unwrap(), None);
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        let mut input = crate::tests::fixture_input(&route, &plan, &prompt, &root, None);
+        input.host_var = &|name| std::env::var_os(name);
+        let spec = prepare(
+            &input,
+            Access::ReadOnly,
+            Session::Fresh,
+            OpenCode.stream(None)?,
+        )?;
+        let profile = provenant_confinement::permissions::snapshot::render(
+            plan.permissions(),
+            &spec.profile,
+            input.home,
+        )?;
+        for program in [cached.as_path(), std::path::Path::new("/usr/bin/grep")] {
+            let output = std::process::Command::new("/usr/bin/sandbox-exec")
+                .args(["-p", &profile])
+                .arg(program)
+                .arg("--version")
+                .output()?;
+            let diagnostic = String::from_utf8_lossy(&output.stderr);
+            if diagnostic.contains("sandbox_apply: Operation not permitted") {
+                provenant_test_support::skip_sandbox_dependent_test(diagnostic.to_string())?;
+                return Ok(());
+            }
+            assert!(
+                output.status.success(),
+                "{}: {diagnostic}",
+                program.display()
+            );
+        }
+        Ok(())
     }
 
     #[test]
@@ -1297,20 +1505,23 @@ mod tests {
                 link: bin.join("git"),
                 target: input.provenant.git.to_owned(),
             }));
-            // Read-only discovery enables only OpenCode's search binary; a
+            // Read-only discovery enables OpenCode's cached search binary and system grep; a
             // writer's toolchain roots follow the system and package roots.
             let roots = &spec.profile.spec.tool_exec_roots;
             if access == Access::ReadOnly {
                 assert_eq!(
                     roots,
-                    &[exact(
-                        plan.permissions()
-                            .private_state
-                            .as_ref()
-                            .unwrap()
-                            .path
-                            .join("cache/opencode/bin/rg")
-                    )]
+                    &[
+                        exact(
+                            plan.permissions()
+                                .private_state
+                                .as_ref()
+                                .unwrap()
+                                .path
+                                .join("cache/opencode/bin/rg")
+                        ),
+                        exact("/usr/bin/grep"),
+                    ]
                 );
             } else {
                 assert_eq!(
@@ -1446,6 +1657,11 @@ mod tests {
             fs::create_dir(project_parent.join(name)).unwrap();
             fs::set_permissions(project_parent.join(name), fs::Permissions::from_mode(0o700))
                 .unwrap();
+        }
+        let cached = project_parent.join("state/cache/opencode/bin/rg");
+        if access == Access::ReadOnly && std::path::Path::new("/opt/homebrew/bin/rg").is_file() {
+            fs::create_dir_all(cached.parent().unwrap()).unwrap();
+            fs::copy("/opt/homebrew/bin/rg", &cached).unwrap();
         }
         let plan = crate::tests::read_only_plan(project_parent.to_str().unwrap(), None);
         let route = crate::tests::route("opencode", "fixture-model");

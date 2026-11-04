@@ -1,4 +1,5 @@
 //! Human inbox grammar and thin CLI adapter over Fabric's service.
+use crate::metadata::CatalogueArg;
 use crate::{Globals, fabric::Context};
 use clap::{Args, Subcommand, ValueEnum};
 use provenant_core::{Clock, HumanAnswerId, HumanRequestId, OperationId, WaitBudget};
@@ -169,7 +170,7 @@ pub struct Answer {
     /// Read a UTF-8 reply composed in a file (at most 4 KiB)
     #[arg(long, conflicts_with = "text_stdin")]
     pub text_file: Option<PathBuf>,
-    #[arg(long, value_parser=clap::value_parser!(u64).range(1..))]
+    #[arg(long, catalog_u64_range = 1..)]
     pub expect_revision: u64,
     #[arg(long, value_enum)]
     pub channel: Channel,
@@ -217,7 +218,7 @@ pub struct Inbox {
     /// Owner host label or host ID
     #[arg(long)]
     pub host: Option<String>,
-    #[arg(long,default_value="50",value_parser=clap::value_parser!(u64).range(1..=100))]
+    #[arg(long,default_value="50",catalog_u64_range = 1..=100)]
     pub limit: u64,
     #[arg(long)]
     pub cursor: Option<String>,
@@ -244,7 +245,7 @@ pub enum InboxCommand {
         state: Closure,
         #[arg(long)]
         reason: String,
-        #[arg(long,value_parser=clap::value_parser!(u64).range(1..))]
+        #[arg(long,catalog_u64_range = 1..)]
         expect_revision: u64,
         #[arg(long)]
         operation_id: Option<OperationId>,

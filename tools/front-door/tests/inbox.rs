@@ -815,7 +815,7 @@ impl provenant_run::Providers for Indexed {
         _: &str,
         _: &provenant_run::LaunchPaths,
         _: Option<&provenant_run::AttemptRecord>,
-    ) -> std::result::Result<provenant_run::PreparedLaunch, String> {
+    ) -> std::result::Result<provenant_run::PreparedLaunch, provenant_run::PrepareRefusal> {
         Ok(provenant_run::PreparedLaunch {
             argv: vec!["fixture".into()],
             environment: vec![],

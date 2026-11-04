@@ -73,7 +73,7 @@ enum MenuStyle {
 
     /// What VoiceOver reads for a row: its title, detail, figure and subtitle, without the tab.
     static func spoken(_ spec: MenuItemSpec) -> String {
-        [spec.title, spec.detail, spec.value.map { "\($0) used" }, spec.subtitle].compactMap { $0 }.joined(separator: ", ")
+        [spec.title, spec.detail, spec.value.map { "\($0.replacingOccurrences(of: "≥", with: "at least ")) used" }, spec.subtitle].compactMap { $0 }.joined(separator: ", ")
     }
 
     // MARK: Icons
@@ -246,7 +246,7 @@ final class WindowRowView: MenuInfoView {
         value = Self.text(window.value, MenuStyle.figureFont, .labelColor, alignment: .right)
         caption = window.caption.map { Self.text($0, MenuStyle.captionFont, .secondaryLabelColor) }
         (fraction, tint) = (window.fraction, window.tint)
-        setAccessibilityLabel([window.title, window.value + " used", window.caption].compactMap { $0 }.joined(separator: ", "))
+        setAccessibilityLabel([window.title, window.value.replacingOccurrences(of: "≥", with: "at least ") + " used", window.caption].compactMap { $0 }.joined(separator: ", "))
         needsDisplay = true
     }
 

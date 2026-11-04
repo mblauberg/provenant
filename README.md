@@ -226,7 +226,7 @@ Settings, routes and accounts live in one validated file, `config.toml` in the
 state root (`~/.local/share/provenant/v1` by default), and the CLI edits it.
 
 ```sh
-provenant config set profile economy                    # balanced, economy or rigorous
+provenant config set profile economy                    # balanced or economy
 provenant config set lanes.max_concurrency 4            # or override per run with --knob
 provenant route set senior claude/claude-sonnet-5-5 --weight 6
 provenant route pacing codex spend                      # pace, spend or max

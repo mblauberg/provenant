@@ -2,6 +2,7 @@
 //! gathers owner facts (run attempts, trusted actor, clock) and hands workflow
 //! plain values; request JSON never supplies verified facts or authority.
 use crate::Globals;
+use crate::metadata::CatalogueArg;
 use clap::{Args, Subcommand};
 use provenant_core::{
     ActorId, AttemptId, CancelToken, Clock, DeliveryId, DurationMicros, ProjectId, Roots,
@@ -85,7 +86,7 @@ pub enum Session {
         /// Session ID
         session_id: String,
         /// Show this retained revision's text instead of the current one
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        #[arg(long, catalog_u64_range = 1..)]
         rev: Option<u64>,
         /// List the retained revisions with their parents and hashes
         #[arg(long, conflicts_with = "rev")]
@@ -96,7 +97,7 @@ pub enum Session {
         /// Session ID
         session_id: String,
         /// Revision to compare with the current checkpoint
-        #[arg(value_parser = clap::value_parser!(u64).range(1..))]
+        #[arg(catalog_u64_range = 1..)]
         rev: u64,
     },
     /// Hand this session to a fresh Claude session on a peer host
@@ -139,7 +140,7 @@ pub struct Handoff {
     #[arg(long)]
     pub no_checkpoint: bool,
     /// Provider for the new session; only `claude` is supported
-    #[arg(long, default_value = "claude")]
+    #[arg(long, default_value = provenant_records::Harness::Claude.spec().name)]
     pub provider: String,
     /// Model for the new session
     #[arg(long)]

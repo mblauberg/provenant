@@ -166,6 +166,35 @@ pub struct Decoded {
     /// Partial-finish signals the provider decode found; run adds its own.
     pub partial_signals: Vec<PartialSignal>,
 }
+/// A task-local preparation refusal, retaining candidate classifications.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct PrepareRefusal {
+    pub message: String,
+    pub skipped_routes: Vec<SkippedRoute>,
+}
+impl PrepareRefusal {
+    pub fn auth_required(&self) -> bool {
+        !self.skipped_routes.is_empty()
+            && self
+                .skipped_routes
+                .iter()
+                .all(|route| route.kind == SkipKind::AuthRequired)
+    }
+}
+impl From<String> for PrepareRefusal {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            skipped_routes: Vec::new(),
+        }
+    }
+}
+impl From<&str> for PrepareRefusal {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
 /// Run-owned per-attempt paths. Allocated once, shared by explicit fallback candidates.
 pub struct LaunchPaths {
     pub attempt_id: AttemptId,
@@ -330,7 +359,11 @@ impl RunStore {
         let prompt = output_prompt(&base, &attempt.prompt);
         let plan = providers
             .check_policy(task)
-            .and_then(|()| providers.prepare(task, &prompt, &paths, None))
+            .and_then(|()| {
+                providers
+                    .prepare(task, &prompt, &paths, None)
+                    .map_err(|error| error.to_string())
+            })
             .and_then(|plan| {
                 applied_write_grants(&plan)
                     .map(|_| plan)
@@ -386,7 +419,7 @@ pub trait Providers {
         prompt: &str,
         paths: &LaunchPaths,
         resume: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, String>;
+    ) -> std::result::Result<PreparedLaunch, PrepareRefusal>;
     /// A recognised diagnostic from the sealed stderr of a failed provider.
     fn failure_diagnostic(&self, _route: &RouteRecord, _stderr: &[u8]) -> Option<String> {
         None
@@ -1497,12 +1530,17 @@ impl RunStore {
             };
             let prepared = providers
                 .priority(task)
-                .map_err(|reason| (RefusalKind::PriorityUnavailable, reason))
+                .map_err(|reason| {
+                    (
+                        RefusalKind::PriorityUnavailable,
+                        PrepareRefusal::from(reason),
+                    )
+                })
                 .and_then(|priority| {
                     providers
                         .check_policy(task)
                         .map(|()| priority)
-                        .map_err(|reason| (RefusalKind::Policy, reason))
+                        .map_err(|reason| (RefusalKind::Policy, PrepareRefusal::from(reason)))
                 })
                 .and_then(|priority| {
                     providers
@@ -1521,13 +1559,22 @@ impl RunStore {
                 });
             let (mut plan, priority) = match prepared {
                 Ok(prepared) => prepared,
-                Err((kind, reason)) => {
+                Err((kind, refusal)) => {
+                    if !refusal.skipped_routes.is_empty() {
+                        self.record_skipped_routes(id, &refusal.skipped_routes, call)?;
+                    }
+                    let outcome = if refusal.auth_required() {
+                        Outcome::AuthRequired
+                    } else {
+                        Outcome::Rejected
+                    };
+                    let reason = refusal.message;
                     match self.withdraw(
                         id,
                         AttemptState::Queued {
                             extra: Default::default(),
                         },
-                        Outcome::Rejected,
+                        outcome,
                         &reason,
                         now()?,
                         call,

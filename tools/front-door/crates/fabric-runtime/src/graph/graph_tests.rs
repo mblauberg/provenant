@@ -3808,6 +3808,38 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
 }
 
 #[test]
+fn read_only_sign_in_failure_falls_back_to_next_route() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 1, "graph_id": "signed-out", "nodes": [{
+            "id": "review", "prompt": "review", "access": "read_only", "routes": [
+                {"adapter": "cursor", "model": "cursor/example"},
+                {"adapter": "codex", "model": "codex/example"}
+            ]
+        }]
+    }))
+    .expect("graph fixture");
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([
+            terminal(AttemptOutcome::AuthRequired),
+            terminal(AttemptOutcome::Succeeded),
+        ]),
+        ..FakeOwner::default()
+    };
+    let run =
+        advance(&document, &mut owner, &mut MemoryJournal::default()).expect("fallback advances");
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(
+        run.checkpoint.nodes[0].attempts[0].outcome,
+        Some(AttemptOutcome::AuthRequired)
+    );
+    assert_eq!(
+        run.checkpoint.nodes[0].attempts[1].outcome,
+        Some(AttemptOutcome::Succeeded)
+    );
+}
+
+#[test]
 fn route_fallback_preserves_each_selected_account() {
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version": 1, "graph_id": "accounts", "nodes": [{

@@ -9,16 +9,16 @@ Use `--state-dir /absolute/path` to select an isolated root. Change the
 profile or a knob with `provenant config set profile economy` or
 `provenant config set lanes.max_concurrency 4`; `config unset KNOB` reverts it.
 
-Profiles are `balanced`, `economy` and `rigorous`. Override a knob for one run
+Profiles are `balanced` and `economy`. Override a knob for one run
 with `provenant run --knob NAME=VALUE` (the terminal path; agents use
 `fabric_run` (`op: submit`)'s `knobs`).
 
 ## Precedence and stamps
 
-The header requires `schema_version = 1`. `profile` selects `balanced`,
-`economy` or `rigorous`, and a missing file selects defaults. Unknown keys
-and invalid optional values warn and use defaults; invalid optional rows are
-isolated so valid rows still apply. Effective values retain their source in
+The header requires `schema_version = 1`. `profile` selects `balanced` or
+`economy`, and a missing file selects defaults. Unknown knobs are refused;
+other unknown keys and invalid optional values warn and use defaults; invalid
+optional rows are isolated so valid rows still apply. Effective values retain their source in
 `config show`. Each warning names the offending key, so an invalid value
 inside a table drops only that value and its valid siblings still apply. A
 model policy rule or pacing override whose selector or schedule is malformed
@@ -76,7 +76,6 @@ daemon census policy cannot exclude. Configure the strict knob
   { path = "/Library/Example/daemon", team_id = "TEAM123456" },
   { path = "/usr/bin/login", team_id = "platform" },
 ]
-"confinement.census_host_list_complete" = false
 ```
 
 Use `provenant config set confinement.census_ignore_unreadable` with the same
@@ -124,14 +123,19 @@ candidate root's owner is never excluded. This refuses an owner's setuid tool;
 an owner-launched sudo command that resets all three uids to root still falls
 within the accepted cwd-history risk when its image otherwise qualifies.
 
-After listing this host's unreadable daemons, the host owner can set
-`provenant config set confinement.census_host_list_complete true`. This strict
-host-only boolean defaults to `false`; unset restores that default. It declares
-coverage for native acceptance and grants no process exception or cleanup
-authority. Native tests always audit every unplaceable process and check a
-same-user sleep occupant; they assert clean-Free only when this flag is true.
-With the default they print why that Free assertion was skipped. CI deliberately
-leaves the flag false while retaining its usbmuxd/platform entry.
+After listing this host's unreadable daemons, set
+`PROVENANT_CENSUS_HOST_LIST_COMPLETE=1` when running the native acceptance test
+to assert clean-Free. The declaration grants no process exception or cleanup
+authority. The test always audits unplaceable processes and checks a same-user
+sleep occupant; without the variable it reports that the clean-Free assertion
+was skipped.
+
+`confinement.census_exclude_ancestors` controls whether run admission excludes the
+invoking process's ancestor chain (such as the invoking shell) from live-writer detection.
+This strict boolean defaults to `true`. When set to `false`, only the invoking process
+itself is excluded, so an ancestor shell with its working directory inside the worktree
+is treated as a live writer and refused. Set it with
+`provenant config set confinement.census_exclude_ancestors false` or in `[knobs]`.
 
 Land cleanup still refuses an incomplete census and reports the first unlisted
 daemon. Its diagnostic includes pid, path, real/effective/saved uids, CS flags and, for non-platform
@@ -357,9 +361,8 @@ sweep or an admission holds the host ledger is reported as an alert.
 `config/harness-knobs.json` owns the workflow knob registry and presets.
 Fabric's similarly named TOML assets supply only Fabric domain defaults; they
 are not a second source for the workflow knob values. The binary embeds the
-registry at build time and `config set` validates against it. The four
-`review` knobs remain in the registry because configuration and transport tests
-use them, but are not wired: changing them has no effect.
+registry at build time and `config set` validates against it. The `review` knobs and the `rigorous` profile were removed and are refused.
+Run `provenant config migrate` to remove them.
 
 For model effort, context ceilings and compaction, see
 [model policy](model-policy.md); for council selection, pool routing and quota

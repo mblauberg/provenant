@@ -164,10 +164,13 @@ impl ModelPolicy {
     /// This is a launch control only for Claude. Other providers receive
     /// task-boundary advice, never guessed provider environment variables.
     pub fn launch_env(&self, adapter: &str) -> Vec<(String, String)> {
-        if adapter == "claude" && self.compaction.mode != Some(CompactionMode::Never) {
+        if let Some(variable) = provenant_records::AdapterSpec::get(adapter)
+            .and_then(|spec| spec.compaction_env)
+            .filter(|_| self.compaction.mode != Some(CompactionMode::Never))
+        {
             self.compaction
                 .window
-                .map(|window| vec![("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), window.to_string())])
+                .map(|window| vec![(variable.into(), window.to_string())])
                 .unwrap_or_default()
         } else {
             Vec::new()

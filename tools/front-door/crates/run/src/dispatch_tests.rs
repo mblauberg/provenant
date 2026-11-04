@@ -896,7 +896,7 @@ impl Providers for PrepareHook<'_> {
         prompt: &str,
         paths: &LaunchPaths,
         resume: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, String> {
+    ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
         (self.0)().map_err(|error| error.to_string())?;
         Ready.prepare(task, prompt, paths, resume)
     }
@@ -1366,7 +1366,7 @@ impl Providers for Ready {
         _: &str,
         _: &LaunchPaths,
         _: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, String> {
+    ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
         Ok(PreparedLaunch {
             argv: vec!["fixture".into()],
             environment: Vec::new(),
@@ -1406,7 +1406,7 @@ impl Providers for FirstPriorityFailure {
         prompt: &str,
         paths: &LaunchPaths,
         resume: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, String> {
+    ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
         Ready.prepare(task, prompt, paths, resume)
     }
     fn decode(
@@ -1479,7 +1479,7 @@ impl Providers for Confined {
         prompt: &str,
         paths: &LaunchPaths,
         resume: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, String> {
+    ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
         use provenant_confinement::permissions::{
             AccessMode, NetworkAccess, PlanPermissions, ProviderProfile, ProviderProfileSpec,
             WorktreeWriteAuthority,
@@ -1631,7 +1631,7 @@ impl Providers for FirstOversized {
         prompt: &str,
         paths: &LaunchPaths,
         resume: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, String> {
+    ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
         let provider = if task.task_id == self.first {
             &self.oversized
         } else {
@@ -3000,7 +3000,7 @@ impl Providers for Fake {
         prompt: &str,
         paths: &LaunchPaths,
         resume: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, String> {
+    ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
         self.network
             .set(Some(task.access.network(task.writer.is_some())));
         self.prepared.set(self.prepared.get() + 1);
@@ -5575,7 +5575,7 @@ fn rejected_resume_remains_visible_and_addressable() -> TestResult {
             _: &str,
             _: &LaunchPaths,
             prior: Option<&AttemptRecord>,
-        ) -> std::result::Result<PreparedLaunch, String> {
+        ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
             assert!(prior.is_some());
             Err("route differs from the prior attempt's provider, model or account".into())
         }
@@ -8728,7 +8728,7 @@ impl Providers for RefusesAfterAlias {
         _: &str,
         paths: &LaunchPaths,
         _: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, String> {
+    ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
         self.0.set(Some(paths.temporary_alias.is_some()));
         Err("provider unavailable".into())
     }
@@ -8813,5 +8813,77 @@ fn resolved_named_route_survives_launch_admission() -> TestResult {
         Some("high")
     );
     assert_eq!(record.resolved_route, record.applied_route);
+    Ok(())
+}
+
+#[test]
+fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
+    struct SignedOut(bool);
+    impl Providers for SignedOut {
+        fn prepare(
+            &self,
+            _: &TaskRequest,
+            _: &str,
+            _: &LaunchPaths,
+            _: Option<&AttemptRecord>,
+        ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
+            Err(crate::PrepareRefusal {
+                message: "all candidates require sign-in; run provenant accounts".into(),
+                skipped_routes: ["cursor/example", "codex/example"]
+                    .map(|route| SkippedRoute {
+                        extra: Default::default(),
+                        route: route.into(),
+                        kind: if self.0 && route.starts_with("codex/") {
+                            SkipKind::Unavailable
+                        } else {
+                            SkipKind::AuthRequired
+                        },
+                        detail: "sign-in required".into(),
+                    })
+                    .to_vec(),
+            })
+        }
+        fn decode(
+            &self,
+            _: &RouteRecord,
+            _: &[u8],
+            _: &ExitObservation,
+            _: &std::path::Path,
+        ) -> std::result::Result<Decoded, String> {
+            unreachable!()
+        }
+    }
+    for mixed in [false, true] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let run = input();
+        let id = run.attempts[0].attempt_id;
+        store.create(&run, &call)?;
+        store.start(run.run_id, &SignedOut(mixed), &|_, _| unreachable!(), &call)?;
+        assert_eq!(
+            terminal(&store, id, &call)?,
+            if mixed {
+                Outcome::Rejected
+            } else {
+                Outcome::AuthRequired
+            }
+        );
+        let record = store.record(id, &call)?;
+        assert_eq!(
+            record.terminal_evidence,
+            Some(provenant_records::run::TerminalEvidence::PreLaunchRefusal)
+        );
+        assert_eq!(record.provider_launched, Some(false));
+        assert_eq!(record.skipped_routes.len(), 2);
+        assert_eq!(
+            record
+                .skipped_routes
+                .iter()
+                .all(|route| route.kind == SkipKind::AuthRequired),
+            !mixed
+        );
+    }
     Ok(())
 }
