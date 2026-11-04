@@ -1430,6 +1430,88 @@ fn synthesis_disposes_once_of_findings_propagated_through_verifier() {
     assert_eq!(finding.extra["verification"], "upheld");
 }
 
+#[test]
+fn settled_copies_keep_origin_and_evidence_for_downstream_disposition() {
+    let input = |id: &str| GraphInput {
+        extra: Default::default(),
+        node: id.into(),
+        outputs: vec![OutputKind::Findings],
+    };
+    let mut verify = node("verify", route("first"));
+    verify.depends_on = vec!["lens".into()];
+    verify.inputs = vec![input("lens")];
+    let mut synthesis = node("synthesis", route("first"));
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.depends_on = vec!["lens".into(), "verify".into()];
+    synthesis.inputs = vec![input("lens"), input("verify")];
+    let mut downstream = node("downstream", route("first"));
+    downstream.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    downstream.depends_on = vec!["lens".into(), "synthesis".into()];
+    downstream.inputs = vec![input("lens"), input("synthesis")];
+    let decision = findings_text(r#"{"id":"F1","disposition":"accepted","reason":"verified"}"#);
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(&entry(",\"original\":\"lens-evidence\"")),
+            ),
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(&entry(
+                    ",\"verification\":\"verified-evidence\",\"propagates\":\"lens:F1\"",
+                )),
+            ),
+            terminal_with_result(AttemptOutcome::Succeeded, &decision),
+            terminal_with_result(AttemptOutcome::Succeeded, &decision),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![
+            node("lens", route("first")),
+            verify,
+            synthesis,
+            downstream,
+        ]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    let settled = &run.checkpoint.nodes[3];
+    assert_eq!(
+        settled.state,
+        NodeState::Succeeded,
+        "{:?}",
+        settled.advance_error
+    );
+    let findings = &settled.outputs.as_ref().unwrap().findings;
+    assert_eq!(findings.len(), 3);
+    assert!(findings.iter().all(|f| f.id == "F1"
+        && f.disposition.as_deref() == Some("accepted")
+        && f.reason.as_deref() == Some("verified")));
+    assert_eq!(
+        findings
+            .iter()
+            .filter(|f| f
+                .extra
+                .get("original")
+                .is_some_and(|v| v == "lens-evidence"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        findings
+            .iter()
+            .filter(|f| f
+                .extra
+                .get("verification")
+                .is_some_and(|v| v == "verified-evidence"))
+            .count(),
+        1
+    );
+}
+
 // Small: the verifier sees a composite-qualified ID and synthesis accepts its bare alias.
 #[test]
 fn composite_qualified_propagation_resolves_identity_only_disposition() {
