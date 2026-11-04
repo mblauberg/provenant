@@ -1358,7 +1358,8 @@ fn with_context_mode<T>(
         child(&worktrees_state, &name)?
     };
     let clock = SystemClock;
-    let workers = worktrees::CensusPolicyWorkers::from_roots(workers, roots)?;
+    let policy_workers = worktrees::CensusPolicyWorkers::from_roots(workers, roots)?;
+    let workers = worktrees::CensusSession::new(&policy_workers, &clock);
     let context = WorktreeContext {
         home,
         repo: &repo,

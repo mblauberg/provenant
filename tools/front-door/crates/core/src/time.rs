@@ -281,7 +281,7 @@ impl WaitBudget {
 }
 
 /// Sampled by the edge; state machines receive values, never ambient time.
-pub trait Clock {
+pub trait Clock: Sync {
     fn wall_now(&self) -> Result<WallTime, TimeError>;
     /// Whole Unix seconds now, for second-granular records; zero when the
     /// wall clock is outside the supported range.

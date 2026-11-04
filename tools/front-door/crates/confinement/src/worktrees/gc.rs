@@ -288,16 +288,17 @@ pub fn collect(
                 branch: &branch,
                 settings: &settings,
                 eligible: &|| {
-                    (policy.terminal)(&lane.path)
-                        && (policy.no_live_lanes)(&lane.path)
-                        && census_free(context, &lane.path)
+                    if !(policy.terminal)(&lane.path) || !(policy.no_live_lanes)(&lane.path) {
+                        return Err(WorktreeError::UnknownWriter);
+                    }
+                    census_free(context, &lane.path)
                 },
                 lanes: &|| (policy.terminal)(&lane.path) && (policy.no_live_lanes)(&lane.path),
             },
             cancel,
             &mut report.worktrees,
         ) {
-            retain(&mut report.worktrees, &branch, retain_reason(&error));
+            retain_error(&mut report.worktrees, &branch, error);
         }
     }
     Ok(report)
@@ -322,8 +323,12 @@ fn integration_protection(
 
 /// Removal needs a fresh positive census. Custody accepts an unobservable
 /// process for ordinary removal; deleting a tree automatically does not.
-fn census_free(context: &WorktreeContext<'_>, path: &Path) -> bool {
-    census_refusal_detail(context, path).is_none()
+fn census_free(context: &WorktreeContext<'_>, path: &Path) -> Result<(), WorktreeError> {
+    context.workers.invalidate();
+    match census_refusal_detail(context, path) {
+        Some(detail) => Err(WorktreeError::IncompleteCensus { detail }),
+        None => Ok(()),
+    }
 }
 
 fn census_refusal_detail(context: &WorktreeContext<'_>, path: &Path) -> Option<String> {
@@ -373,7 +378,7 @@ struct Removal<'a> {
     branch: &'a GitRefName,
     settings: &'a provenant_config::ProjectGcSettings,
     /// Lanes and a fresh free census, checked under writer custody alone.
-    eligible: &'a dyn Fn() -> bool,
+    eligible: &'a dyn Fn() -> Result<(), WorktreeError>,
     /// The cheap lane fence rechecked under the repository lock.
     lanes: &'a dyn Fn() -> bool,
 }
@@ -935,7 +940,10 @@ fn collect_foreign(
                 branch,
                 settings,
                 eligible: &|| {
-                    (policy.no_live_lanes)(&lane.path) && census_free(context, &lane.path)
+                    if !(policy.no_live_lanes)(&lane.path) {
+                        return Err(WorktreeError::UnknownWriter);
+                    }
+                    census_free(context, &lane.path)
                 },
                 lanes: &|| (policy.no_live_lanes)(&lane.path),
             },
@@ -978,6 +986,7 @@ fn preview_foreign(
     let recheck = || -> Result<(), WorktreeError> {
         verified.repo().revalidate()?;
         tree_unchanged(&read_worktrees(context, cancel)?, entry, lane.head)?;
+        context.workers.invalidate();
         if let Some(detail) = census_refusal_detail(context, &lane.path) {
             return Err(WorktreeError::IncompleteCensus { detail });
         }

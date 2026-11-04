@@ -17,8 +17,8 @@ work does not need it.
   with one writer per worktree. Merge through the repository's own workflow;
   an authorised merge prunes its own worktree and merged refs. A writer may
   rebase, rewrite and force-push with lease its own unmerged branches. Any
-  other deletion, force-removal or push to a shared branch needs the user's
-  authority.
+  other deletion, force-removal, or rewrite of or push to a shared branch
+  needs the user's authority.
 - **Checks.** Locally, run only fast targeted checks: lint, type checks and the
   tests you touched. Full suites and release scans run in CI: push the branch,
   open the pull request and gate the merge on its CI run.

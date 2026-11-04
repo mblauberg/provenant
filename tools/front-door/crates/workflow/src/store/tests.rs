@@ -270,14 +270,15 @@ fn lock_inode_is_stable_and_cancellation_deadline_contention_are_distinct() {
         ),
         Err(StoreError::Contention)
     ));
-    struct ExpiringClock(std::cell::Cell<u32>);
+    struct ExpiringClock(std::sync::Mutex<u32>);
     impl Clock for ExpiringClock {
         fn wall_now(&self) -> Result<UtcMicros, provenant_core::TimeError> {
             Ok(time(30))
         }
         fn mono_now(&self) -> MonoTime {
-            let call = self.0.get();
-            self.0.set(call + 1);
+            let mut value = self.0.lock().unwrap();
+            let call = *value;
+            *value += 1;
             MonoTime::from_micros(if call < 2 { 999_999 } else { 1_000_000 })
         }
         fn wait_until(&self, _deadline: MonoTime) -> Result<(), provenant_core::TimeError> {
@@ -291,7 +292,7 @@ fn lock_inode_is_stable_and_cancellation_deadline_contention_are_distinct() {
             context(),
             budget,
             &CancelToken::new(),
-            &ExpiringClock(std::cell::Cell::new(0))
+            &ExpiringClock(std::sync::Mutex::new(0))
         ),
         Err(StoreError::Deadline)
     ));

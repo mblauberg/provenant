@@ -33,7 +33,7 @@ fi
 
 changed=$(git diff --name-only "$BASE_SHA...$HEAD_SHA")
 printf 'Changed paths since merge base:\n%s\n' "$changed"
-if printf '%s\n' "$changed" | grep -Eq '^(tools/front-door/|apps/|\.github/workflows/ci\.yml$)'; then
+if printf '%s\n' "$changed" | grep -Eq '^(tools/front-door/|apps/|\.github/workflows/ci\.yml$|docs/runbooks/ci\.md$|scripts/(check-native-inventory|run-native-test-group|test-check-native-inventory)$)'; then
   set_output true
 else
   set_output false
