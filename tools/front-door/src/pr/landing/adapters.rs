@@ -489,6 +489,12 @@ impl Repo for GitRepo {
         let peeled = format!("{tracking}^{{commit}}");
         self.ok(&["rev-parse", "--verify", &peeled])
     }
+    fn fetch_target_untracked(&mut self, branch: &str) -> Result<String, LandingError> {
+        let full = Self::branch_ref(branch)?;
+        let remote = self.remote(branch)?;
+        self.ok(&["fetch", "--no-tags", "--quiet", "--refmap=", &remote, &full])?;
+        self.ok(&["rev-parse", "--verify", "FETCH_HEAD^{commit}"])
+    }
     fn merge_tree(&mut self, base: &str, head: &str) -> Result<MergeTree, LandingError> {
         self.ensure(base)?;
         self.ensure(head)?;
@@ -807,6 +813,40 @@ mod tests {
             bare,
             repo,
         }
+    }
+
+    #[test]
+    fn shadow_fetch_does_not_change_refs_when_target_advances() {
+        let mut rig = rig();
+        let base = git(&rig.work, &["rev-parse", "HEAD"]);
+        git(
+            &rig.work,
+            &["update-ref", "refs/remotes/origin/main", &base],
+        );
+        let before = git(
+            &rig.work,
+            &["for-each-ref", "--format=%(refname) %(objectname)"],
+        );
+        let other = rig._dir.path().join("other");
+        git(
+            rig._dir.path(),
+            &["clone", "-q", rig.bare.to_str().unwrap(), "other"],
+        );
+        git(&other, &["config", "commit.gpgsign", "false"]);
+        let moved = commit_file(&other, "new", "new\n");
+        git(&other, &["push", "-q", "origin", "main"]);
+        assert_eq!(rig.repo.fetch_target_untracked("main").unwrap(), moved);
+        assert_eq!(
+            git(
+                &rig.work,
+                &["for-each-ref", "--format=%(refname) %(objectname)"]
+            ),
+            before
+        );
+        assert_eq!(
+            git(&rig.work, &["rev-parse", "refs/remotes/origin/main"]),
+            base
+        );
     }
 
     #[test]

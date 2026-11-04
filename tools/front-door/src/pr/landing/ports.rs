@@ -55,6 +55,10 @@ pub trait Repo {
     /// Stable opaque identity for scoping recovery records to a repository.
     fn repository_identity(&mut self, target: &str) -> Result<String, LandingError>;
     fn fetch_target(&mut self, branch: &str) -> Result<String, LandingError>;
+    /// Fetch without changing any persistent reference, as required in shadow mode.
+    fn fetch_target_untracked(&mut self, _branch: &str) -> Result<String, LandingError> {
+        Err(LandingError::Unimplemented("untracked target fetch"))
+    }
     fn merge_tree(&mut self, base: &str, head: &str) -> Result<MergeTree, LandingError>;
     fn commit_tree(
         &mut self,

@@ -434,6 +434,42 @@ fn land_waits_for_new_checks_to_stop_registering_when_no_check_is_required() -> 
     Ok(())
 }
 
+fn land_plain_singleton_uses_batch_driver() -> Result {
+    let rig = self::rig()?;
+    let git = provenant_os::git::git_executable().ok_or("Git executable")?;
+    let remote = rig.root.join("unused-remote.git");
+    assert_eq!(
+        code(&rig.execute(
+            &git,
+            &[
+                "remote",
+                "add",
+                "origin",
+                remote.to_str().ok_or("remote path")?
+            ],
+            None
+        )?),
+        0
+    );
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[domains.pr.land]\nbatch_wait_seconds = 0\n",
+    )?;
+    let output = rig.command(&["land", "1668", "--json"])?;
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_ne!(code(&output), 0, "an unapproved PR must not land");
+    assert_eq!(report["data"]["outcomes"]["1668"], "excluded", "{report}");
+    assert!(report["error"].is_null(), "{report}");
+    let calls = fs::read_to_string(rig.project.join("gh-calls"))?.replace("api --include ", "api ");
+    assert!(calls.contains("api repos/{owner}/{repo}"), "{calls}");
+    assert!(
+        calls.contains("api repos/{owner}/{repo}/pulls/1668"),
+        "{calls}"
+    );
+    assert!(!rig.project.join("merge-args").exists());
+    Ok(())
+}
+
 fn land_explains_poll_and_budget_sources() -> Result {
     let rig = self::rig()?;
     let show = |args: &[&str]| -> Result<serde_json::Value> {
@@ -771,6 +807,12 @@ fn fake_gh(args: &[String]) -> Result<u8> {
     )?;
     let normalised = call.replace("api --include ", "api ");
     match normalised.as_str() {
+        "api repos/{owner}/{repo}" => {
+            io::stdout().write_all(br#"{"default_branch":"main"}"#)?;
+        }
+        "api --paginate --slurp repos/{owner}/{repo}/pulls/1668/reviews?per_page=100" => {
+            io::stdout().write_all(b"[[]]")?;
+        }
         "api repos/{owner}/{repo}/pulls/1668" => {
             if Path::new("read-fail-after-merge").exists() && Path::new("merge-args").exists() {
                 writeln!(io::stderr(), "HTTP 502 Bad Gateway")?;
@@ -1056,6 +1098,10 @@ fn main() -> ExitCode {
             (
                 "land_waits_for_new_checks_to_stop_registering_when_no_check_is_required",
                 land_waits_for_new_checks_to_stop_registering_when_no_check_is_required,
+            ),
+            (
+                "land_plain_singleton_uses_batch_driver",
+                land_plain_singleton_uses_batch_driver,
             ),
             (
                 "land_explains_poll_and_budget_sources",

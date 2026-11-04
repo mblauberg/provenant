@@ -121,6 +121,13 @@ impl Repo for FakeRepo {
         self.refs.insert(branch.into(), self.target.clone());
         Ok(self.target.clone())
     }
+    fn fetch_target_untracked(&mut self, branch: &str) -> Result<String, LandingError> {
+        if let Some(next) = self.fetches.pop_front() {
+            self.target = next;
+        }
+        self.target_ref = branch.into();
+        Ok(self.target.clone())
+    }
     fn merge_tree(&mut self, base: &str, head: &str) -> Result<MergeTree, LandingError> {
         if self.conflicts.contains(&(base.into(), head.into())) {
             Ok(MergeTree::Conflict)
