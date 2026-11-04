@@ -11,7 +11,7 @@ use std::path::{Component, Path, PathBuf};
 pub const RULES: [(&str, &str); 3] = [
     (
         "force-push",
-        "Force push to the default branch is refused. Accepted: `git push origin my-topic` then open a PR; the pre-push hook refuses non-fast-forward updates on every branch, so integrate with `git fetch origin && git merge origin/my-topic` rather than forcing.",
+        "Force push to the default branch is refused. Accepted: `git push origin my-topic` then open a PR.",
     ),
     (
         "rm-root",

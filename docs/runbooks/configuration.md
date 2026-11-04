@@ -66,6 +66,14 @@ continuations keep that stamp.
 
 ## Unreadable process census exceptions
 
+The `confinement.census_ignore_unreadable` exception list is host-owned and
+applies to each command's census session. Session reuse ends when effective
+host policy, ancestor mode, verified root identity, or relevant command-owned
+process, custody or worktree state changes. The exception list grants no
+process signalling or removal authority; destructive operations take fresh
+evidence under writer custody. Run admission's ancestor exclusion does not
+change land policy.
+
 The host owner may accept specific signed executables that the built-in macOS
 daemon census policy cannot exclude. Configure the strict knob
 `confinement.census_ignore_unreadable`; its default is an empty list:
@@ -812,9 +820,9 @@ that intentionally contain markers:
 push_conflict_markers = false
 ```
 
-The default is `true`. Default-branch deletion, non-fast-forward updates and
-default-branch pushes from linked worktrees are still refused, so the Git lane
-boundary is unchanged. An unreadable config keeps the check on.
+The default is `true`. Default-branch deletion, non-fast-forward updates to the
+default branch and default-branch pushes from linked worktrees are still
+refused. An unreadable config keeps the check on.
 
 ## Brief read-root warnings
 

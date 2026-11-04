@@ -65,7 +65,8 @@ measured against all authors.
 ### Required coverage by risk
 
 [HARNESS.md](../../HARNESS.md#review-ladder) owns the review ladder. This
-spec enforces its counts:
+spec describes the current checker counts, which are below the policy floors
+for routine, substantial and terminal work:
 
 | Risk | Counted independent passing reviews | Enforced beyond the count |
 |---|---:|---|

@@ -1144,11 +1144,12 @@ fn acquire_retries_return_live_fences_without_renewal_or_events() {
 
 #[test]
 fn renewal_uses_one_wall_timestamp_for_expiry_and_record() {
-    struct TickingClock(std::cell::Cell<i64>);
+    struct TickingClock(std::sync::Mutex<i64>);
     impl Clock for TickingClock {
         fn wall_now(&self) -> std::result::Result<WallTime, TimeError> {
-            let at = self.0.get();
-            self.0.set(at + 1);
+            let mut value = self.0.lock().unwrap();
+            let at = *value;
+            *value += 1;
             WallTime::from_micros(at)
         }
         fn mono_now(&self) -> MonoTime {
@@ -1168,17 +1169,17 @@ fn renewal_uses_one_wall_timestamp_for_expiry_and_record() {
     let work = store.acquire_claim(&work(&f, 3), &f.request()).unwrap();
     store.create_task(&task(&f), &f.request()).unwrap();
     let task = store.claim_task(&claim(&f, 3), &f.request()).unwrap();
-    let clock = TickingClock(std::cell::Cell::new(f.now().as_micros()));
+    let clock = TickingClock(std::sync::Mutex::new(f.now().as_micros()));
     let mut req = f.request();
     req.clock = &clock;
     for renew in 0..3 {
-        let before = clock.0.get();
+        let before = *clock.0.lock().unwrap();
         let (at, expires) = match renew {
             0 => {
                 store
                     .renew_claim(project(), &work, input.lease, &req)
                     .unwrap();
-                assert_eq!(clock.0.get(), before + 1);
+                assert_eq!(*clock.0.lock().unwrap(), before + 1);
                 let row = store.verify_claim(project(), &work, &req).unwrap();
                 (row.updated_at, row.expires_at)
             }
@@ -1186,7 +1187,7 @@ fn renewal_uses_one_wall_timestamp_for_expiry_and_record() {
                 store
                     .renew_landing(&guard, &fence, input.lease, &req)
                     .unwrap();
-                assert_eq!(clock.0.get(), before + 1);
+                assert_eq!(*clock.0.lock().unwrap(), before + 1);
                 let row = store.verify_landing(&guard, &fence, &req).unwrap();
                 (row.updated_at, row.expires_at)
             }
@@ -1194,7 +1195,7 @@ fn renewal_uses_one_wall_timestamp_for_expiry_and_record() {
                 store
                     .renew_task(project(), &task, input.lease, &req)
                     .unwrap();
-                assert_eq!(clock.0.get(), before + 1);
+                assert_eq!(*clock.0.lock().unwrap(), before + 1);
                 let row = store.verify_task(project(), &task, &req).unwrap();
                 (row.updated_at, row.expires_at)
             }

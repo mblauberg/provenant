@@ -16,6 +16,27 @@ relative to `tools/front-door/`.
 
 ## Custody
 
+### Worktree census sessions
+
+Each command owns a census session. Within an unchanged observation epoch,
+root state, holder identity and refusal detail come from the same process
+evidence. The session is scoped to the command and effective host policy; it is
+not a cross-command cache and elapsed time alone does not authorise reuse.
+Adding a candidate root requires evidence that can place occupants for that
+root, otherwise the session refreshes. Root identity, ancestor-exclusion
+mode, effective host policy, or command-controlled process, custody or
+worktree changes start a new epoch.
+
+Uncertainty remains attached to each root the available evidence cannot
+exclude. Positive occupants remain live when another part of the census is
+incomplete. Ordinary custody may accept `Unknown` where its writer proof
+permits it; land and complete-census collection require a positive `Free`.
+Destructive decisions always acquire fresh evidence after writer custody is
+held, and repeat required census checks after output preparation. A native
+process that does not take the advisory writer lock may start after the
+observation; the census is not atomic exclusion and never grants signalling
+authority.
+
 ### Closed stop reasons; natural exit wins
 
 Only `ProviderGroup::stop(StopReason)` signals a provider: explicit cancellation, wall deadline, protocol rejection, supervisor signal or post-terminal

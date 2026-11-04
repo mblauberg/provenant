@@ -172,8 +172,6 @@ impl TestRig {
             ("XDG_STATE_HOME", root.join("xdg-state")),
             ("CLAUDE_CONFIG_DIR", root.join("claude")),
             ("CODEX_HOME", root.join("codex")),
-            ("GIT_CONFIG_GLOBAL", root.join("gitconfig")),
-            ("GIT_CONFIG_SYSTEM", root.join("git-system")),
             ("PROVENANT_GIT", git.clone()),
             ("PROVENANT_STATE_DIR", state.clone()),
             ("PROVENANT_ROOT", project.clone()),
@@ -184,7 +182,6 @@ impl TestRig {
         .chain(
             [
                 ("PATH", "/usr/bin:/bin"),
-                ("GIT_CONFIG_NOSYSTEM", "1"),
                 ("PROVENANT_AGENT_LABEL", "fixture"),
                 // Disposable state: skip the per-sync storage-device flush.
                 ("PROVENANT_DURABILITY", "relaxed"),
@@ -196,6 +193,7 @@ impl TestRig {
             .map(|(k, v)| (k.into(), v.into())),
         )
         .collect();
+        env.extend(provenant_os::fixture::fixture_git_settings());
         env.push((
             provenant_supervisor::FIXTURE_OWNER_PID_ENV.into(),
             std::process::id().to_string().into(),

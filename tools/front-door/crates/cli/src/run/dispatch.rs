@@ -311,24 +311,22 @@ pub(super) fn dispatch_with_workers(
             )
             .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
             let clock = SystemClock::new();
+            let census = provenant_confinement::worktrees::CensusSession::new(&workers, &clock);
             let cancel = CancelToken::new();
             let call = request(&clock, &cancel)?;
             let session = open(edge, &call)?;
             if session.store.operation(&operation_id, &call)?.is_some() {
                 return Ok(());
             }
-            provenant_confinement::worktrees::with_context(
+            provenant_confinement::worktrees::with_context_using_workers(
                 edge.roots,
                 edge.home,
                 edge.cwd,
                 &clock,
                 &cancel,
+                &census,
                 |context| {
                     use provenant_confinement::worktrees;
-                    let context = &worktrees::WorktreeContext {
-                        workers: &workers,
-                        ..*context
-                    };
                     let info = worktrees::list(context, &cancel)?
                         .into_iter()
                         .find(|tree| tree.path == path)
@@ -679,7 +677,10 @@ pub(super) fn dispatch_inner(
     let configured_workers =
         provenant_confinement::worktrees::CensusPolicyWorkers::for_run(workers, edge.roots)
             .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
-    let workers = &configured_workers;
+    let census_clock = SystemClock::new();
+    let census =
+        provenant_confinement::worktrees::CensusSession::new(&configured_workers, &census_clock);
+    let workers: &dyn provenant_confinement::worktrees::WorkerObserver = &census;
     // Preflight. An owned worktree is the first side effect, so every check
     // that does not depend on the tree runs before it and a refusal leaves
     // no tree behind.
@@ -696,7 +697,7 @@ pub(super) fn dispatch_inner(
         // Initialise the state before entering the shared confinement context.
         let call = request(&clock, &cancel)?;
         let session = open(edge, &call)?;
-        if let Some(replayed) = replay_owned_dispatch(&command, edge, &session, &call)? {
+        if let Some(replayed) = replay_owned_dispatch(&command, edge, &session, &call, workers)? {
             return Ok(replayed);
         }
         if let Some(mode) = &command.deliver {
@@ -1053,8 +1054,8 @@ pub(super) fn dispatch_inner(
             .store
             .operation(&command.operation_id, &call)?
             .is_some();
-        Some(provenant_confinement::worktrees::with_context(
-            edge.roots, edge.home, &writer.project, &clock, &cancel, |context| {
+        Some(provenant_confinement::worktrees::with_context_using_workers(
+            edge.roots, edge.home, &writer.project, &clock, &cancel, workers, |context| {
                 use provenant_confinement::worktrees;
                 let context = &worktrees::WorktreeContext { workers, ..*context };
                 let info = worktrees::list(context, &cancel)?.into_iter()
@@ -1339,6 +1340,7 @@ pub(super) fn replay_owned_dispatch(
     edge: &Edge<'_>,
     session: &Session,
     call: &run::Request<'_>,
+    workers: &dyn provenant_confinement::worktrees::WorkerObserver,
 ) -> Result<Option<(Value, String, bool)>, Fail> {
     let Some(operation) = session.store.operation(&command.operation_id, call)? else {
         return Ok(None);
@@ -1404,12 +1406,13 @@ pub(super) fn replay_owned_dispatch(
     }
     let mut settlement = None;
     let owned = if writer.worktree.exists() {
-        provenant_confinement::worktrees::with_context(
+        provenant_confinement::worktrees::with_context_using_workers(
             edge.roots,
             edge.home,
             &writer.project,
             call.clock,
             call.cancel,
+            workers,
             |context| {
                 let tree = provenant_confinement::verify_worktree(context.repo, &writer.worktree)?;
                 Ok(

@@ -352,6 +352,27 @@ fn discover_checkouts(git: &Git, project: &Path) -> Result<Vec<Checkout>> {
 /// continue to use the ordinary observer, which includes those processes.
 struct LandWorkers<'a>(&'a dyn WorkerObserver);
 impl WorkerObserver for LandWorkers<'_> {
+    fn observe_evidence_with_policy(
+        &self,
+        roots: &[PathBuf],
+        entries: &[provenant_os::pid::CensusIgnoreEntry],
+        _: bool,
+    ) -> provenant_confinement::worktrees::WorkerEvidence {
+        self.0.observe_evidence_with_policy(roots, entries, true)
+    }
+    fn epoch_policy(&self) -> Option<provenant_confinement::worktrees::CensusEpochPolicy> {
+        self.0.epoch_policy()
+    }
+    fn observe_evidence(
+        &self,
+        roots: &[PathBuf],
+        _: bool,
+    ) -> provenant_confinement::worktrees::WorkerEvidence {
+        self.0.observe_evidence(roots, true)
+    }
+    fn invalidate(&self) {
+        self.0.invalidate()
+    }
     fn observe_roots_with_policy(
         &self,
         roots: &[PathBuf],
@@ -1539,6 +1560,87 @@ fn append_land_entry(
 mod land_log_tests {
     use super::{LandEntry, append_land_entry};
     use provenant_workflow::{log::LogStore, session::HostSessionId};
+
+    #[test]
+    fn land_policy_preserves_combined_evidence_and_ancestor_mode()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_confinement::worktrees::{
+            CensusPolicyWorkers, CensusSession, WorkerEvidence, WorkerObserver, WorkerState,
+        };
+        use std::collections::BTreeMap;
+        use std::path::PathBuf;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Observer(AtomicUsize);
+        impl WorkerObserver for Observer {
+            fn observe_roots(&self, _: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+                panic!("combined evidence required")
+            }
+            fn observe_evidence_with_policy(
+                &self,
+                roots: &[PathBuf],
+                _: &[provenant_os::pid::CensusIgnoreEntry],
+                land: bool,
+            ) -> WorkerEvidence {
+                assert!(land);
+                self.0.fetch_add(1, Ordering::SeqCst);
+                WorkerEvidence {
+                    states: roots
+                        .iter()
+                        .cloned()
+                        .map(|root| (root, WorkerState::Live))
+                        .collect(),
+                    holders: roots
+                        .iter()
+                        .cloned()
+                        .map(|root| {
+                            (
+                                root.clone(),
+                                super::ObservedProcess {
+                                    pid: 42,
+                                    command: Some("worker".into()),
+                                    cwd: Some(root),
+                                },
+                            )
+                        })
+                        .collect(),
+                    ..WorkerEvidence::default()
+                }
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let home = base.join("home");
+        let state = base.join("state");
+        let checkout = base.join("checkout");
+        std::fs::create_dir(&home)?;
+        std::fs::create_dir(&state)?;
+        std::fs::create_dir(&checkout)?;
+        let mut input = provenant_core::RootInputs::new(home, checkout.clone());
+        input.state_dir = Some(state);
+        let roots = input.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let observer = Observer(AtomicUsize::new(0));
+        let land = super::LandWorkers(&observer);
+        let policy = CensusPolicyWorkers::from_roots(&land, &roots)?;
+        let clock = provenant_os::clock::SystemClock;
+        let session = CensusSession::new(&policy, &clock);
+        assert!(session.requires_complete_census());
+        assert_eq!(
+            session.observe_roots(std::slice::from_ref(&checkout))[&checkout],
+            WorkerState::Live
+        );
+        assert_eq!(
+            session
+                .observe_roots_with_details(std::slice::from_ref(&checkout))
+                .0[&checkout],
+            WorkerState::Live
+        );
+        assert_eq!(
+            session.live_process(&checkout).map(|holder| holder.pid),
+            Some(42)
+        );
+        assert_eq!(observer.0.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
 
     #[test]
     fn a_landed_pull_request_appends_one_readable_entry() -> Result<(), Box<dyn std::error::Error>>

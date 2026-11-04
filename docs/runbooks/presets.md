@@ -376,6 +376,11 @@ generator-evaluator, deliver, scope-then-run and review-council.
 
 ## Review and source subjects
 
+The policy default is `review-council --plan on`; the chair checks the plan
+against the [review ladder](../../HARNESS.md#review-ladder) and supplies any
+missing required reviewers and lenses. Runtime selection and partial-success
+thresholds below do not yet enforce those floors or every triggered lens.
+
 `review-council` runs one `lens.NAME` role per entry of the `lenses` list: correctness
 against the spec, design fit and reuse, simplicity, conventions and
 readability, and tests. `security-privacy` and `concurrency-data-errors` join
@@ -437,13 +442,13 @@ only successful lenses flow to verification and synthesis, after an
 `coverage_below_minimum: N of M lenses succeeded, minimum K; unavailable: ...`
 when fewer than `min_reviews` lenses succeed, which stops the council for the
 chair to substitute a lens through a different lens or decide. `min_reviews`
-defaults to the review ladder minimum for `risk_tier` (`substantial` 1,
+currently defaults by `risk_tier` (`substantial` 1,
 `crucial` and `terminal` 2) and is at least 1; it is capped at the lens count.
 A lens that ran and found blocking issues still blocks through its verdict.
 Councils where every lens succeeds are unchanged.
 
-The routing review shapes are canonical for who reviews. A lens whose `tier`
-is empty takes its pool from the review selection for `risk_tier` or the
+The routing review shapes describe the runtime selection, not the policy floor.
+A lens whose `tier` is empty takes its pool from the review selection for `risk_tier` or the
 `review_shape` override. See [review shapes](model-routing.md#review-shapes)
 for the shape rules and reviewer counts. Conditional lenses add to that count.
 Set a lens `tier` to override the shape for that lens.

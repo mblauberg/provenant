@@ -1770,6 +1770,7 @@ fn lower_leaf(
             }
         }
     }
+    let input_dependencies = dependencies.clone();
     if let Some(source) = map
         .get("source")
         .filter(|source| source["type"] == "node")
@@ -1816,7 +1817,10 @@ fn lower_leaf(
         && (!deps.is_empty() || (map.contains_key("dispositions") && !dependencies.is_empty()))
     {
         if !map.contains_key("inputs") {
-            map.insert("inputs".into(), selected_inputs(deps, &outputs));
+            map.insert(
+                "inputs".into(),
+                selected_inputs(&input_dependencies, &outputs),
+            );
         }
         if map.contains_key("dispositions") {
             let inputs = map

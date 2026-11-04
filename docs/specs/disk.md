@@ -101,6 +101,15 @@ declared output containing it, including beneath ignored parents.
 
 ## Opt-in foreign collection
 
+Collection previews may reuse command-local census evidence for consistent
+state and diagnostics. Applying removal requires a fresh complete `Free`
+observation after the writer lock is held, and any required post-preparation
+check refreshes again. GC census work stays outside the repository lock.
+Unknown evidence remains a refusal for foreign collection. Native processes
+do not take the advisory lock, so a process may start after the census; this
+accepted race does not weaken identity, cleanliness, registration or
+non-forcing removal checks.
+
 `gc.projects.<id>.foreign_worktrees = "merged-clean"` applies exactly where
 GC otherwise reports unknown writer evidence. The default is `"keep"`.
 Removal is immediate once the tree is proven merged: there is no idle age.

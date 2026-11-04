@@ -878,6 +878,8 @@ mod result_tests {
         let request = |label: &str, attempt_ref: Option<&str>| InputRequest {
             label: label.into(),
             attempt_ref: attempt_ref.map(str::to_owned),
+            inline_findings: None,
+            finding_prefix: None,
         };
         let key = AttemptKey {
             extra: Default::default(),
@@ -908,6 +910,11 @@ mod result_tests {
         };
         assert_eq!(std::fs::read_to_string(path)?, text);
         assert_eq!(*omitted, 0);
+        let index: serde_json::Value = serde_json::from_slice(&std::fs::read(inputs.index.as_ref().ok_or("input index")?)?)?;
+        assert_eq!(index[0]["status"], "complete");
+        assert_eq!(index[1]["status"], "unavailable");
+        assert_eq!(index[1]["attempt_ref"], format!("{}/{attempt}", provenant_core::HostId::from_bytes([7; 16])));
+        assert_eq!(index[2]["label"], "never-ran");
         // Exercise the graph scheduler with the real staging adapter and a
         // fixture peer, including a consumer that reads its materialised file.
         use provenant_fabric_runtime::graph;
@@ -1054,6 +1061,17 @@ mod result_tests {
         assert_eq!(*bytes, 5);
         assert_eq!(*omitted, (text.len() - 5) as u64);
         assert!(std::fs::read_to_string(path)?.starts_with("full "));
+        let index: serde_json::Value = serde_json::from_slice(&std::fs::read(capped.index.as_ref().ok_or("capped index")?)?)?;
+        assert_eq!(index[0]["status"], "capped");
+        assert_eq!(index[0]["attempt_ref"], format!("{remote_host}/{attempt}"));
+        let finding: graph::Finding = serde_json::from_value(serde_json::json!({"id":"ci-1","severity":"high","file":"","summary":"failed check","status":"open"}))?;
+        let inline = graph_inputs::materialise(
+            &factory, WaitBudget::cli(factory.clock.mono_now(), 30)?, &CancelToken::new(), &key,
+            &[InputRequest { label: "ci".into(), attempt_ref: None, inline_findings: Some(vec![finding]), finding_prefix: None }], 16_384,
+        );
+        let MaterialisedInput::File { path, omitted: 0, .. } = &inline.entries[0] else { return Err(format!("{inline:?}").into()); };
+        let inline_text = std::fs::read_to_string(path)?;
+        assert!(inline_text.contains("```findings\n") && inline_text.contains("failed check"));
         assert!(
             matches!(&inputs.entries[1], MaterialisedInput::Unavailable { label, reason } if label == "offline" && reason.contains("result could not be read")),
             "{inputs:?}"
