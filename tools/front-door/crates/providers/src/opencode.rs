@@ -1161,10 +1161,17 @@ mod tests {
     #[test]
     #[allow(clippy::disallowed_methods)]
     fn read_only_search_runs_in_native_profile() -> Result<(), Box<dyn std::error::Error>> {
-        let rg = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        let Some(rg) = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
             .map(|dir| dir.join("rg"))
             .find(|path| path.is_file())
-            .ok_or("rg is required for the native search test")?;
+        else {
+            // CI installs ripgrep and sets PROVENANT_CONFINEMENT_REQUIRED, so
+            // this skip fails there instead of passing silently.
+            provenant_test_support::skip_sandbox_dependent_test(
+                "rg is required for the native search test",
+            )?;
+            return Ok(());
+        };
         let temp = tempfile::tempdir()?;
         let root = temp.path().canonicalize()?;
         let cached = root.join("state/cache/opencode/bin/rg");
