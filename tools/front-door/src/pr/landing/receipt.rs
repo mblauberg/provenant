@@ -152,6 +152,8 @@ pub(crate) mod tests {
             executor: None,
             coverage: vec![],
             timeout_seconds: 60,
+            pool: None,
+            env_passthrough: Vec::new(),
         }
     }
     pub(crate) fn evidence(commit: &str) -> GateEvidence {

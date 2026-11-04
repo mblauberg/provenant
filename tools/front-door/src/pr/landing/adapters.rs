@@ -107,56 +107,8 @@ impl GhForge {
             })
             .collect())
     }
-    fn commit_runs(&self, commit: &str) -> Result<Vec<serde_json::Value>, LandingError> {
-        let endpoint = format!(
-            "repos/{{owner}}/{{repo}}/commits/{commit}/check-runs?per_page=100&filter=latest"
-        );
-        let pages: Vec<serde_json::Value> =
-            serde_json::from_slice(&self.get(&["--paginate", "--slurp", &endpoint])?).map_err(
-                |error| LandingError::Failed(format!("GitHub returned invalid JSON: {error}")),
-            )?;
-        let mut runs = Vec::new();
-        let mut declared = 0;
-        for page in pages {
-            declared = declared.max(page["total_count"].as_u64().unwrap_or(0));
-            runs.extend(
-                page["check_runs"]
-                    .as_array()
-                    .ok_or_else(|| LandingError::Failed("check runs are malformed".into()))?
-                    .iter()
-                    .cloned(),
-            );
-        }
-        // A short listing means a page was lost; the missing run could be the failing one.
-        if (runs.len() as u64) < declared {
-            return Err(LandingError::Failed(
-                "check run listing is incomplete".into(),
-            ));
-        }
-        Ok(runs)
-    }
 }
 
-fn check_result(status: &str, conclusion: Option<&str>) -> Result<GateResult, LandingError> {
-    Ok(match (status, conclusion) {
-        ("completed", Some("success")) => GateResult::Passed,
-        ("completed", Some("neutral")) => GateResult::Neutral,
-        ("completed", Some("skipped")) => GateResult::Skipped,
-        (
-            "completed",
-            Some(
-                "cancelled" | "failure" | "timed_out" | "action_required" | "startup_failure"
-                | "stale",
-            ),
-        ) => GateResult::Failed,
-        ("queued" | "in_progress" | "pending" | "waiting" | "requested", _) => GateResult::Pending,
-        _ => {
-            return Err(LandingError::Failed(format!(
-                "unknown check state {status}/{conclusion:?}"
-            )));
-        }
-    })
-}
 /// Fold per-check results: any failure fails, then pending, then missing,
 /// then a skipped or neutral check; only an all-passed set passes.
 pub(super) fn fold_results(results: impl IntoIterator<Item = GateResult>) -> GateResult {
@@ -287,34 +239,34 @@ impl Forge for GhForge {
     }
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError> {
         let commit = object_id(commit)?;
-        let runs = self.commit_runs(commit)?;
+        let head = commit
+            .parse()
+            .map_err(|_| LandingError::Failed("invalid commit id".into()))?;
+        let runs = wait::commit_checks("repos/{owner}/{repo}", head, &|args| {
+            self.reader().read(args)
+        })
+        .map_err(failed)?;
         let tree =
             self.json(&format!("repos/{{owner}}/{{repo}}/git/commits/{commit}"))?["tree"]["sha"]
                 .as_str()
                 .ok_or_else(|| LandingError::Failed("commit has no tree".into()))?
                 .to_owned();
-        let mut checks = Vec::new();
-        for run in &runs {
-            if run["head_sha"].as_str() != Some(commit) {
-                return Err(LandingError::Failed(
-                    "check run belongs to another commit".into(),
-                ));
-            }
-            checks.push(CheckEvidence {
-                name: run["name"]
-                    .as_str()
-                    .ok_or_else(|| LandingError::Failed("check run has no name".into()))?
-                    .to_owned(),
-                issuer: run["app"]["slug"]
-                    .as_str()
-                    .or_else(|| run["app"]["name"].as_str())
-                    .map(str::to_owned),
-                result: check_result(
-                    run["status"].as_str().unwrap_or_default(),
-                    run["conclusion"].as_str(),
-                )?,
-            });
-        }
+        let checks = runs
+            .into_iter()
+            .map(|run| CheckEvidence {
+                name: run.name,
+                issuer: run.app_slug,
+                result: match run.bucket.as_str() {
+                    "pass" => GateResult::Passed,
+                    "pending" => GateResult::Pending,
+                    "skipping" if run.conclusion.as_deref() == Some("neutral") => {
+                        GateResult::Neutral
+                    }
+                    "skipping" => GateResult::Skipped,
+                    _ => GateResult::Failed,
+                },
+            })
+            .collect::<Vec<_>>();
         let result = fold_results(checks.iter().map(|check| check.result.clone()));
         Ok(vec![GateEvidence {
             commit: commit.to_owned(),
@@ -460,10 +412,8 @@ impl Repo for GitRepo {
     fn fetch_target(&mut self, branch: &str) -> Result<String, LandingError> {
         let full = Self::branch_ref(branch)?;
         let remote = self.remote(branch)?;
-        let tracking = format!("refs/remotes/{remote}/{branch}");
-        let spec = format!("+{full}:{tracking}");
-        self.ok(&["fetch", "--no-tags", "--quiet", &remote, &spec])?;
-        let peeled = format!("{tracking}^{{commit}}");
+        self.ok(&["fetch", "--no-tags", "--quiet", "--refmap=", &remote, &full])?;
+        let peeled = "FETCH_HEAD^{commit}".to_owned();
         self.ok(&["rev-parse", "--verify", &peeled])
     }
     fn merge_tree(&mut self, base: &str, head: &str) -> Result<MergeTree, LandingError> {
@@ -590,15 +540,25 @@ fn bind_evidence(
             }
         })
         .collect();
+    let issuers: std::collections::BTreeSet<_> = checks
+        .iter()
+        .filter_map(|check| check.issuer.clone())
+        .collect();
+    let observed_issuer = (issuers.len() == 1)
+        .then(|| issuers.into_iter().next())
+        .flatten();
     Ok(GateEvidence {
         commit: observed.commit.clone(),
         tree: observed.tree.clone(),
         definition_digest: definition.digest.clone(),
         result: fold_results(checks.iter().map(|check| check.result.clone())),
+        issuer: definition
+            .issuer
+            .clone()
+            .or_else(|| observed_issuer.clone()),
+        pool: definition.pool.clone().or(observed_issuer),
         checks,
-        issuer: definition.issuer.clone(),
         coverage: definition.coverage.clone(),
-        pool: None,
         duration_seconds: None,
     })
 }
@@ -884,6 +844,8 @@ mod tests {
             executor: None,
             coverage: Vec::new(),
             timeout_seconds: 10,
+            pool: None,
+            env_passthrough: Vec::new(),
         }
     }
     fn candidate() -> Candidate {
@@ -950,6 +912,18 @@ mod tests {
         .unwrap();
         assert_eq!(result.result, GateResult::Passed);
         assert_eq!(result.definition_digest, "digest");
+        assert_eq!(result.issuer.as_deref(), Some("github-actions"));
+        assert_eq!(result.pool.as_deref(), Some("github-actions"));
+        let mut configured = definition(&["ci"], None);
+        configured.pool = Some("hosted".into());
+        let priced = observe_checks(&mut forge, &candidate(), &configured, 3, &mut |_| {}).unwrap();
+        assert_eq!(priced.pool.as_deref(), Some("hosted"));
+        let mut budget = provenant_cli::domains::BudgetSettings::default();
+        budget.rate_micros_per_minute.insert("hosted".into(), 60);
+        assert_eq!(
+            super::super::budget::estimate(&budget, &[(priced.pool.unwrap(), 2)]).unwrap(),
+            CostEstimate::Known { micros: 2 }
+        );
     }
 
     #[test]
@@ -1011,19 +985,6 @@ mod tests {
         assert_eq!(fold_results([Passed, Skipped]), Skipped);
         assert_eq!(fold_results([Passed, Passed]), Passed);
         assert_eq!(fold_results([]), Missing);
-    }
-
-    #[test]
-    fn check_states_map_and_unknown_states_are_errors() {
-        assert_eq!(
-            check_result("completed", Some("timed_out")).unwrap(),
-            GateResult::Failed
-        );
-        assert_eq!(
-            check_result("in_progress", None).unwrap(),
-            GateResult::Pending
-        );
-        assert!(check_result("completed", Some("novel")).is_err());
     }
 
     #[test]

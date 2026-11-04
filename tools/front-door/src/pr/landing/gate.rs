@@ -183,24 +183,48 @@ fn run_command(
     checkout: &std::path::Path,
     command: &str,
     deadline: std::time::Instant,
+    passthrough: &[String],
 ) -> Result<Run, LandingError> {
+    #[cfg(unix)]
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     // Command output goes to stderr so the JSON report on stdout stays clean.
     let script = format!("exec 1>&2\n{command}");
-    let mut child = Command::new("sh")
+    let mut command_process = Command::new("sh");
+    command_process
         .arg("-c")
         .arg(script)
         .current_dir(checkout)
-        .stdin(Stdio::null())
-        .process_group(0)
+        .stdin(Stdio::null());
+    for key in ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"] {
+        if !passthrough.iter().any(|allowed| allowed == key) {
+            command_process.env_remove(key);
+        }
+    }
+    #[cfg(unix)]
+    command_process.process_group(0);
+    let mut child = command_process
         .spawn()
         .map_err(|error| failed(format!("cannot start gate command: {error}")))?;
-    loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| failed(format!("cannot wait for gate command: {error}")))?
+    let cleanup = |child: &mut std::process::Child| {
+        #[cfg(unix)]
         {
+            let group = format!("-{}", child.id());
+            let _ = Command::new("kill").args(["-KILL", "--", &group]).output();
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    };
+    loop {
+        let status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                cleanup(&mut child);
+                return Err(failed(format!("cannot wait for gate command: {error}")));
+            }
+        };
+        if let Some(status) = status {
+            cleanup(&mut child);
             return Ok(if status.success() {
                 Run::Passed
             } else {
@@ -208,10 +232,7 @@ fn run_command(
             });
         }
         if std::time::Instant::now() >= deadline {
-            let group = format!("-{}", child.id());
-            let _ = Command::new("kill").args(["-KILL", "--", &group]).output();
-            let _ = child.kill();
-            let _ = child.wait();
+            cleanup(&mut child);
             return Ok(Run::TimedOut);
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -230,6 +251,15 @@ pub fn execute_commands(
 ) -> Result<GateEvidence, LandingError> {
     if definition.commands.is_empty() {
         return Err(failed("unmet gate: no gate commands are configured"));
+    }
+    if definition
+        .executor
+        .as_deref()
+        .is_some_and(|executor| executor != "local")
+    {
+        return Err(failed(
+            "unsupported command gate executor; only local is available",
+        ));
     }
     let started = std::time::Instant::now();
     let deadline = started + Duration::from_secs(definition.timeout_seconds);
@@ -259,7 +289,7 @@ pub fn execute_commands(
     let mut result = GateResult::Passed;
     let mut outcome = Ok(());
     for command in &definition.commands {
-        match run_command(&checkout, command, deadline) {
+        match run_command(&checkout, command, deadline, &definition.env_passthrough) {
             Ok(Run::Passed) => checks.push(CheckEvidence {
                 name: command.clone(),
                 issuer: None,
@@ -289,10 +319,7 @@ pub fn execute_commands(
     }
     remove_checkout(project, &checkout);
     outcome?;
-    let executor = definition
-        .executor
-        .clone()
-        .unwrap_or_else(|| "local".to_owned());
+    let executor = "local".to_owned();
     for check in &mut checks {
         check.issuer = Some(executor.clone());
     }
@@ -304,7 +331,7 @@ pub fn execute_commands(
         issuer: Some(executor),
         coverage: definition.coverage.clone(),
         result,
-        pool: None,
+        pool: definition.pool.clone(),
         duration_seconds: Some(started.elapsed().as_secs()),
     })
 }
@@ -335,7 +362,10 @@ fn ci_outstanding(
                 .any(|check| check.result == GateResult::Pending)
     });
     // `always` waits for a run to appear; `affected` waits only for runs that exist.
-    Ok(pending || (policy.mode == PrCiMode::Always && runs.is_empty()))
+    Ok(
+        pending
+            || (policy.mode == PrCiMode::Always && runs.iter().all(|run| run.checks.is_empty())),
+    )
 }
 
 /// Follow the configured pull-request CI evidence policy without bypassing forge requirements.
@@ -392,6 +422,8 @@ mod tests {
             executor: None,
             coverage: Vec::new(),
             timeout_seconds: 60,
+            pool: None,
+            env_passthrough: Vec::new(),
         }
     }
     fn pr(number: u64, head: &str) -> EligiblePr {
@@ -577,6 +609,57 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "exercise command process isolation"
+    )]
+    fn command_scrubs_credentials_and_cleans_background_on_success() {
+        use std::process::Command;
+        const MARKER: &str = "PROVENANT_GATE_HYGIENE_CHILD";
+        if std::env::var_os(MARKER).is_none() {
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "pr::landing::gate::tests::command_scrubs_credentials_and_cleans_background_on_success", "--nocapture"])
+                .env(MARKER, "1").env("GH_TOKEN", "gate-test").env("GITHUB_TOKEN", "gate-test").env("GH_ENTERPRISE_TOKEN", "gate-test").status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        assert!(matches!(
+            run_command(
+                std::path::Path::new("."),
+                "test -z \"$GH_TOKEN$GITHUB_TOKEN$GH_ENTERPRISE_TOKEN\"",
+                deadline,
+                &[]
+            )
+            .unwrap(),
+            Run::Passed
+        ));
+        assert!(matches!(
+            run_command(
+                std::path::Path::new("."),
+                "test \"$GH_TOKEN\" = gate-test && test -z \"$GITHUB_TOKEN$GH_ENTERPRISE_TOKEN\"",
+                deadline,
+                &["GH_TOKEN".into()]
+            )
+            .unwrap(),
+            Run::Passed
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("survived");
+        let command = format!("(sleep 1; touch '{}') &", marker.display());
+        assert!(matches!(
+            run_command(dir.path(), &command, deadline, &[]).unwrap(),
+            Run::Passed
+        ));
+        std::thread::sleep(Duration::from_millis(1200));
+        assert!(
+            !marker.exists(),
+            "background process survived successful command"
+        );
+    }
+
+    #[test]
     #[allow(
         clippy::disallowed_methods,
         reason = "test builds a scratch repository"
@@ -608,10 +691,10 @@ mod tests {
         let mut def = definition();
         def.kind = GateKind::Commands;
         def.commands = vec!["test -f f".into()];
-        def.executor = Some("local-pool".into());
+        def.executor = Some("local".into());
         let got = execute_commands(&dir, &cand, &def).unwrap();
         assert_eq!(got.result, GateResult::Passed);
-        assert_eq!(got.issuer.as_deref(), Some("local-pool"));
+        assert_eq!(got.issuer.as_deref(), Some("local"));
         assert!(got.duration_seconds.is_some());
         def.commands = vec!["test -f missing".into()];
         assert_eq!(
