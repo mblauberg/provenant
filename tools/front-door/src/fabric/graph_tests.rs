@@ -851,6 +851,18 @@ mod result_tests {
     }
 
     #[test]
+    fn graph_status_full_shows_each_member_source_commit() {
+        let mut run = graph_status_fixture();
+        let first = "1".repeat(40);
+        let second = "2".repeat(40);
+        run.checkpoint.nodes[1].source_commit = Some(first.clone());
+        run.checkpoint.nodes[2].source_commit = Some(second.clone());
+        let full = super::graph_human::graph_human_full(&run);
+        assert!(full.lines().any(|row| row.starts_with("  composite:") && row.contains(&format!("source={first}"))));
+        assert!(full.lines().any(|row| row.starts_with("  member:") && row.contains(&format!("source={second}"))));
+    }
+
+    #[test]
     fn cancelled_graph_status_shows_reason() {
         let mut run = graph_status_fixture();
         run.checkpoint.cancelled = true;

@@ -247,6 +247,7 @@ impl<'a> Service<'a> {
                 base_ref,
                 base,
                 head: task.head,
+                source_head: None,
                 route: task.route,
                 account: task.account,
                 fallback: task.fallback,
@@ -635,6 +636,7 @@ impl From<&RunError> for ErrorKind {
             RunError::ObjectImportLimit(_) => Self::ObjectImportLimit,
             RunError::Validation(_)
             | RunError::WriterHeadNotLaneBranch
+            | RunError::WriterSourceMismatch { .. }
             | RunError::ReviewAcceptanceRequired
             | RunError::InvalidBase(_)
             | RunError::TooLarge { .. } => Self::Invalid,

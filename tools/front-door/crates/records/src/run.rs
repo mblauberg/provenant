@@ -194,6 +194,9 @@ pub struct TaskRequest {
     /// Chair-verified review head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
+    /// Original pinned source commit when a continuation advances head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_head: Option<String>,
     /// Git base for host-written attempt context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
@@ -1161,6 +1164,7 @@ mod tests {
                 prompt_digest: CanonicalV1::file_digest(b"prompt"),
                 base: None,
                 head: None,
+                source_head: None,
                 base_ref: None,
                 route: RequestedRoute::Named {
                     extra: Default::default(),

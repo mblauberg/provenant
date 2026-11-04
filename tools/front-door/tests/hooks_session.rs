@@ -108,6 +108,7 @@ fn create_lane(rig: &TestRig) -> Result<String> {
                     title: None,
                     base: None,
                     head: None,
+                    source_head: None,
                     base_ref: None,
                     profile: Default::default(),
                     task_id,

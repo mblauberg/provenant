@@ -32,6 +32,12 @@ identity per graph, node, terminal attempt and generation. Budgets survive
 resumption; terminal receipts remain immutable. Only descendants blocked solely
 by the recovered node reopen. Graph outcome is reported beside settledness.
 
+A same-node writer policy continuation pins to its predecessor's settled head
+when that head descends from the node source. `source_head` retains the original
+pin even when the predecessor did not move HEAD; the lens diff base stays the
+node source. Preparation reports uncommitted predecessor paths and preserves
+their edits. A failed Git status refuses preparation.
+
 There is no generic reason/action language, separate scheduler, duplicate
 journal, counter or exclusion system, speculative crash restart, or long
 automatic quota-reset wait. Partial fan-in minimums are separate work.
@@ -42,6 +48,10 @@ writer authority or multiplying retries.
 **Test:** `crates/run/src/policy.rs::tests` covers the implemented decision
 and lineage contract; later budget, admission and recovery requirements are
 review gates until their slices land.
+
+The run continuation driver and graph worktree driver cover real successor
+custody, launch and guardian settlement. Native confinement is required for
+those launch checks; unavailable local backends report a skip.
 
 **Owner:** run owns decisions and publication; routing owns budget and
 exclusions; confinement owns census; fabric-runtime owns graph recovery.

@@ -28,7 +28,15 @@ thiserror = { workspace = true }
 toml_edit = { workspace = true }
 
 [dev-dependencies]
+provenant-test-support = { path = "../test-support" }
 provenant-os = { workspace = true, features = ["fixture"] }
 provenant-supervisor = { workspace = true, features = ["fixture"] }
 tempfile = { workspace = true }
 serde_json = { workspace = true }
+
+# Reuse the crate's private settlement fixtures with a same-binary guardian.
+[[test]]
+name = "writer_continuation"
+path = "src/lib.rs"
+harness = false
+required-features = ["fixture"]
