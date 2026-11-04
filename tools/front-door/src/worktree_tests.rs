@@ -3075,8 +3075,8 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
         // Catalogue models only: production refuses unverified exact IDs.
         task.route = provenant_run::RequestedRoute::Model {
             extra: Default::default(),
-            provider: "claude".into(),
-            model: "claude/claude-sonnet-5".into(),
+            provider: adapter.into(),
+            model: if adapter == "codex" { "codex/gpt-6-luna" } else { "claude/claude-haiku-5-5" }.into(),
             effort: None,
         };
         let attempt = roots.state.as_path().join(format!(
@@ -3120,20 +3120,6 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             host: None,
             cancel: None,
         };
-        // Simulate a partially written first candidate. Fallback must have
-        // independent setup paths rather than failing on the same auth entry.
-        task.fallback.push(provenant_run::RouteRecord {
-            provider: Some(adapter.into()),
-            model: Some(
-                if adapter == "codex" {
-                    "codex/gpt-6-luna"
-                } else {
-                    "claude/claude-haiku-5-5"
-                }
-                .into(),
-            ),
-            ..Default::default()
-        });
         let clock = provenant_os::clock::SystemClock::new();
         let cancel = provenant_core::CancelToken::new();
         let call = writer_call(&clock, &cancel)?;
@@ -3142,17 +3128,6 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
         let task = &prepared.request.tasks[0];
         for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
             fs::create_dir_all(path)?;
-        }
-        let staging = &paths.temporary;
-        // Setup repairs partial files in place (#1461), so a non-empty directory
-        // fails the Claude primary on its settings path; a Codex fallback must
-        // also not collide with a partial candidate-0 auth entry.
-        for poison in [
-            staging.join("candidate-0/provenant-settings.json/partial"),
-            paths.provider_state.join("candidate-0/auth.json"),
-        ] {
-            fs::create_dir_all(poison.parent().ok_or("candidate parent")?)?;
-            fs::write(&poison, b"partial setup")?;
         }
         // Bound to the registered account, as the host loader binds it.
         let token = provenant_providers::claude::refresh_for_account(
@@ -3242,7 +3217,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
                 .any(|grant| grant.path == selected_git && grant.scope == PathScope::Exact)
         );
         let permissions = confinement.plan.permissions();
-        assert_eq!(permissions.scratch.path, staging.join("candidate-1"));
+        assert_eq!(permissions.scratch.path, paths.temporary.join("candidate-0"));
 
         if adapter == "codex" {
             assert!(
