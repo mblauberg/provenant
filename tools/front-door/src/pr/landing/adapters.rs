@@ -540,13 +540,29 @@ fn bind_evidence(
             }
         })
         .collect();
-    let issuers: std::collections::BTreeSet<_> = checks
+    let matching: Vec<_> = observed
+        .checks
+        .iter()
+        .filter(|check| {
+            definition.checks.contains(&check.name)
+                && definition
+                    .issuer
+                    .as_ref()
+                    .is_none_or(|issuer| check.issuer.as_ref() == Some(issuer))
+        })
+        .collect();
+    let issuers: std::collections::BTreeSet<_> = matching
         .iter()
         .filter_map(|check| check.issuer.clone())
         .collect();
-    let observed_issuer = (issuers.len() == 1)
-        .then(|| issuers.into_iter().next())
-        .flatten();
+    let observed_issuer = if !matching.is_empty()
+        && matching.iter().all(|check| check.issuer.is_some())
+        && issuers.len() == 1
+    {
+        issuers.into_iter().next()
+    } else {
+        None
+    };
     Ok(GateEvidence {
         commit: observed.commit.clone(),
         tree: observed.tree.clone(),
@@ -570,11 +586,22 @@ pub(super) fn observe_checks(
     poll_seconds: u64,
     sleep: &mut dyn FnMut(Duration),
 ) -> Result<GateEvidence, LandingError> {
+    observe_checks_with(candidate, definition, poll_seconds, sleep, &mut || {
+        forge.checks(&candidate.commit)
+    })
+}
+
+fn observe_checks_with(
+    candidate: &Candidate,
+    definition: &GateDefinition,
+    poll_seconds: u64,
+    sleep: &mut dyn FnMut(Duration),
+    read: &mut dyn FnMut() -> Result<Vec<GateEvidence>, LandingError>,
+) -> Result<GateEvidence, LandingError> {
     let poll = poll_seconds.max(1);
     let mut elapsed = 0;
     loop {
-        let observed = forge
-            .checks(&candidate.commit)?
+        let observed = read()?
             .into_iter()
             .next()
             .ok_or_else(|| LandingError::Failed("forge returned no check evidence".into()))?;
@@ -639,36 +666,47 @@ impl AlarmSink for ChairAlarms {
     fn post(&mut self, alarm: &Alarm) -> Result<(), LandingError> {
         let text = alarm_text(alarm);
         let _ = writeln!(std::io::stderr().lock(), "{text}");
-        let Some(session) = &self.session else {
-            return Ok(());
-        };
-        let executable = std::env::current_exe()
-            .map_err(|error| LandingError::Failed(format!("cannot locate provenant: {error}")))?;
-        let executable = executable.to_string_lossy();
-        let output = execute_with(
-            &self.project,
-            &[
-                &executable,
-                "chair",
-                "message",
-                session,
-                "--text-stdin",
-                "--channel",
-                "cli",
-            ],
-            Duration::from_secs(30),
-            false,
-            Some(text.as_bytes()),
-        )
-        .map_err(failed)?;
-        if output.termination != Termination::Exit(0) {
-            return Err(LandingError::Failed(format!(
-                "chair message failed: {}",
-                String::from_utf8_lossy(&output.stderr.bytes).trim()
-            )));
-        }
-        Ok(())
+        deliver_alarm(self.session.as_deref(), &text, &mut |session, text| {
+            let executable = std::env::current_exe().map_err(|error| {
+                LandingError::Failed(format!("cannot locate provenant: {error}"))
+            })?;
+            let executable = executable.to_string_lossy();
+            let output = execute_with(
+                &self.project,
+                &[
+                    &executable,
+                    "chair",
+                    "message",
+                    session,
+                    "--text-stdin",
+                    "--channel",
+                    "cli",
+                ],
+                Duration::from_secs(30),
+                false,
+                Some(text.as_bytes()),
+            )
+            .map_err(failed)?;
+            if output.termination != Termination::Exit(0) {
+                return Err(LandingError::Failed(format!(
+                    "chair message failed: {}",
+                    String::from_utf8_lossy(&output.stderr.bytes).trim()
+                )));
+            }
+            Ok(())
+        })
     }
+}
+
+fn deliver_alarm(
+    session: Option<&str>,
+    text: &str,
+    send: &mut dyn FnMut(&str, &str) -> Result<(), LandingError>,
+) -> Result<(), LandingError> {
+    if let Some(session) = session {
+        send(session, text)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -927,6 +965,38 @@ mod tests {
     }
 
     #[test]
+    fn mixed_check_issuers_do_not_invent_a_pool() {
+        let checks = observed(&[
+            ("ci", Some("first"), GateResult::Passed),
+            ("ci", Some("second"), GateResult::Passed),
+        ]);
+        let evidence = bind_evidence(&candidate(), &definition(&["ci"], None), &checks).unwrap();
+        assert_eq!(evidence.pool, None);
+        assert_eq!(evidence.issuer, None);
+    }
+
+    #[test]
+    fn pending_check_is_polled_until_it_passes() {
+        let mut samples = std::collections::VecDeque::from([
+            observed(&[("ci", Some("app"), GateResult::Pending)]),
+            observed(&[("ci", Some("app"), GateResult::Passed)]),
+        ]);
+        let mut pauses = Vec::new();
+        let result = observe_checks_with(
+            &candidate(),
+            &definition(&["ci"], None),
+            3,
+            &mut |pause| pauses.push(pause),
+            &mut || Ok(vec![samples.pop_front().unwrap()]),
+        )
+        .unwrap();
+        assert_eq!(result.result, GateResult::Passed);
+        assert_eq!(result.duration_seconds, Some(3));
+        assert_eq!(pauses, [Duration::from_secs(3)]);
+        assert_eq!(result.pool.as_deref(), Some("app"));
+    }
+
+    #[test]
     fn gate_rejects_other_issuers_failures_and_foreign_trees() {
         let mut forge = FakeForge::default();
         forge.check_runs.insert(
@@ -999,6 +1069,29 @@ mod tests {
         assert!(direct_push_verdict(&push, &json!({}), &[]).is_err());
         assert!(direct_push_verdict(&json!({"permissions": {"push": false}}), &open, &[]).is_err());
         assert!(direct_push_verdict(&json!({}), &open, &[]).is_err());
+    }
+
+    #[test]
+    fn alarm_delivery_targets_chair_and_propagates_failure() {
+        let mut delivered = Vec::new();
+        deliver_alarm(None, "alarm", &mut |session, text| {
+            delivered.push((session.to_owned(), text.to_owned()));
+            Ok(())
+        })
+        .unwrap();
+        assert!(delivered.is_empty());
+        deliver_alarm(Some("chair"), "alarm", &mut |session, text| {
+            delivered.push((session.to_owned(), text.to_owned()));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(delivered, [("chair".into(), "alarm".into())]);
+        assert!(
+            deliver_alarm(Some("chair"), "alarm", &mut |_, _| Err(
+                LandingError::Failed("delivery failed".into())
+            ))
+            .is_err()
+        );
     }
 
     #[test]
