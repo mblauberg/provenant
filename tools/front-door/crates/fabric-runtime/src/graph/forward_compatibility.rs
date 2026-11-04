@@ -264,7 +264,8 @@ fn admission_recovery_capability() {
     let seed = || -> StoredCheckpoint { serde_json::from_value(stored()).unwrap() };
 
     let mut execution_base = seed();
-    execution_base.execution.review_base = Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap());
+    execution_base.execution.review_base =
+        Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap());
     assert!(matches!(
         decode_checkpoint(&bytes(execution_base), "g-test"),
         Err(JournalError::BadEnvelope)
@@ -298,7 +299,10 @@ fn admission_recovery_capability() {
     unsupported.execution.document.schema_version = 3;
     assert!(matches!(
         decode_checkpoint(&bytes(unsupported), "g-test"),
-        Err(JournalError::Decode(DecodeError::UnsupportedVersion { found: 3, .. }))
+        Err(JournalError::Decode(DecodeError::UnsupportedVersion {
+            found: 3,
+            ..
+        }))
     ));
 
     let mut bad_digest = seed();

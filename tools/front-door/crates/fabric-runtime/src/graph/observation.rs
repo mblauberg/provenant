@@ -34,13 +34,6 @@ fn routing_outcome(outcome: AttemptOutcome) -> provenant_routing::FallbackOutcom
     }
 }
 
-impl AttemptOutcome {
-    // Kept only until checkpoint validation is switched to the historical predicate.
-    pub(super) fn allows_route_fallback(self, access: AccessMode, launched: bool) -> bool {
-        historical_fallback_admissible(self, access, launched)
-    }
-}
-
 /// Legacy checkpoint validation accepts the historical rule, never as launch authority.
 pub(super) fn historical_fallback_admissible(
     outcome: AttemptOutcome,

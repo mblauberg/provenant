@@ -36,6 +36,9 @@ pub struct RoutingContext<'a> {
     /// scope and `now` in unix seconds. Routing performs no I/O; `None` reads
     /// every route as unknown. Only an `unavailable` verdict excludes a route.
     pub readiness: Option<ReadinessLookup<'a>>,
+    /// Fixture-only capability facts; production always uses the adapter table.
+    #[cfg(test)]
+    pub launch_specs: Option<&'a dyn Fn(&str) -> Option<provenant_records::AdapterSpec>>,
     pub access: &'a [AccessContext<'a>],
     pub now: provenant_core::WallTime,
     pub host: &'a str,
@@ -1355,9 +1358,16 @@ fn candidate(
     intent: RouteIntent,
 ) -> Result<RouteAlternative, RoutingError> {
     let entry = admissible(model, effort, context)?;
-    if let Some(spec) = provenant_records::AdapterSpec::get(model.adapter()) {
+    #[cfg(test)]
+    let spec = context
+        .launch_specs
+        .and_then(|lookup| lookup(model.adapter()))
+        .or_else(|| provenant_records::AdapterSpec::get(model.adapter()).copied());
+    #[cfg(not(test))]
+    let spec = provenant_records::AdapterSpec::get(model.adapter()).copied();
+    if let Some(spec) = spec {
         intent
-            .check_launch(spec, model.model(), effort)
+            .check_launch(&spec, model.model(), effort)
             .map_err(|error| RoutingError::UnsupportedLaunch(error.to_string()))?;
     }
     let access = context.access.iter().find(|a| a.adapter == model.adapter());

@@ -274,6 +274,7 @@ fn context<'a>(
         capacity_cooldowns: &[],
         accounts: &[],
         quota_policies: &[],
+        launch_specs: None,
         readiness: None,
         access: &[],
         now,
@@ -5325,4 +5326,101 @@ fn routing_default_matches_bundled_asset() {
         serde_json::to_value(RoutingConfig::default()).unwrap(),
         serde_json::to_value(asset).unwrap()
     );
+}
+
+#[test]
+fn mixed_capability_pool_filters_before_drawing_and_explicit_routes_refuse()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_records::{ADAPTER_SPECS, AdapterSpec, LaunchCapabilities, run::NetworkAccess};
+    let catalogue = Catalogue::bundled()?;
+    let mut config = RoutingConfig::default();
+    config.pools.insert(
+        "fixture-capabilities".into(),
+        vec![
+            RoutePoolMember {
+                model: ModelId::parse("cursor/gpt-5.3-codex-low")?,
+                weight: 1,
+                effort: None,
+                efforts: vec![],
+                free: false,
+            },
+            RoutePoolMember {
+                model: ModelId::parse("codex/gpt-6-luna")?,
+                weight: 0,
+                effort: None,
+                efforts: vec![],
+                free: false,
+            },
+        ],
+    );
+    let narrow = AdapterSpec {
+        launch: LaunchCapabilities {
+            write: false,
+            network: &[NetworkAccess::Provider],
+            ..ADAPTER_SPECS[2].launch
+        },
+        ..ADAPTER_SPECS[2]
+    };
+    let lookup = |adapter: &str| {
+        if adapter == "cursor" {
+            Some(narrow)
+        } else {
+            AdapterSpec::get(adapter).copied()
+        }
+    };
+    let mut cursor = availability();
+    cursor.adapter = "cursor".into();
+    let availability = [cursor, availability()];
+    let access = [
+        AccessContext {
+            adapter: "cursor",
+            disclosure_ref: "policy",
+            confinement_ref: "grant",
+        },
+        AccessContext {
+            adapter: "codex",
+            disclosure_ref: "policy",
+            confinement_ref: "grant",
+        },
+    ];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &availability;
+    ctx.access = &access;
+    ctx.launch_specs = Some(&lookup);
+    for (writes, network, expected) in [
+        (false, NetworkAccess::Provider, "cursor"),
+        (true, NetworkAccess::Provider, "codex"),
+        (false, NetworkAccess::Open, "codex"),
+    ] {
+        let mut query = request("cursor/gpt-5.3-codex-low")?;
+        query.choice = RouteChoice::NamedRoute(RouteName::parse("fixture-capabilities")?);
+        query.intent.writes = writes;
+        query.intent.network = Some(network);
+        let selected = resolve(&query, &ctx)?;
+        assert_eq!(
+            selected.adapter, expected,
+            "writes={writes} network={network:?}"
+        );
+        if expected == "codex" {
+            assert!(
+                selected
+                    .pool_selection
+                    .unwrap()
+                    .candidates
+                    .iter()
+                    .any(|candidate| candidate.model.starts_with("cursor/")
+                        && candidate.exclusion.is_some())
+            );
+        }
+        let mut explicit = request("cursor/gpt-5.3-codex-low")?;
+        explicit.intent = query.intent;
+        assert_eq!(
+            matches!(
+                resolve(&explicit, &ctx),
+                Err(RoutingError::UnsupportedLaunch(_))
+            ),
+            expected == "codex"
+        );
+    }
+    Ok(())
 }

@@ -1045,7 +1045,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 || (index + 1 < progress.attempts.len()
                     && (attempt.state != AttemptState::Terminal
                         || !attempt.outcome.is_some_and(|outcome| {
-                            outcome.allows_route_fallback(node.access, attempt.launched)
+                            historical_fallback_admissible(outcome, node.access, attempt.launched)
                         })))
             {
                 return Err(bad(
@@ -1069,7 +1069,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 Some(attempt) if attempt.state != AttemptState::Terminal => true,
                 Some(attempt) => {
                     attempt.outcome.is_some_and(|outcome| {
-                        outcome.allows_route_fallback(node.access, attempt.launched)
+                        historical_fallback_admissible(outcome, node.access, attempt.launched)
                     }) && progress.attempts.len() < node.routes.len()
                 }
                 None => false,
@@ -1102,7 +1102,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                     && match attempt.outcome {
                         Some(AttemptOutcome::TaskFailed | AttemptOutcome::OtherFailure) => true,
                         Some(outcome) if outcome != AttemptOutcome::Succeeded => {
-                            !outcome.allows_route_fallback(node.access, attempt.launched)
+                            !historical_fallback_admissible(outcome, node.access, attempt.launched)
                                 || progress.attempts.len() == node.routes.len()
                         }
                         _ => false,

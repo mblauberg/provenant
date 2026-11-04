@@ -176,7 +176,9 @@ fn admission_composite_exports_are_declared_capabilities() {
     malformed.nodes[0].composite.as_mut().unwrap().exports[0].node = "missing".into();
     assert!(loops::expand(&malformed, &[], &crate::config::GraphLimits::default()).is_err());
     let mut empty = document.clone();
-    empty.nodes[0].composite.as_mut().unwrap().exports[0].outputs.clear();
+    empty.nodes[0].composite.as_mut().unwrap().exports[0]
+        .outputs
+        .clear();
     assert!(loops::expand(&empty, &[], &crate::config::GraphLimits::default()).is_err());
     assert!(serde_json::from_value::<GraphDocument>(json!({
         "schema_version":1,"graph_id":"bad-output-kind","nodes":[{"id":"c","kind":"composite","access":"read_only","composite":{"nodes":[{"id":"x","access":"read_only"}],"exports":[{"node":"x","outputs":["unknown"]}]}}]

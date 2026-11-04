@@ -43,7 +43,7 @@ pub struct SkillLocation {
     pub suffix: &'static str,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct AdapterSpec {
     pub id: Harness,
     pub name: &'static str,
