@@ -128,8 +128,14 @@ pub struct SettledAttempt {
     pub receipt_pending: bool,
     pub tree_pending: bool,
     pub follow_pending: bool,
+    #[serde(default = "pending_local_follow_up")]
+    pub local_follow_pending: bool,
     pub cleanup_pending: bool,
 }
+fn pending_local_follow_up() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum SettledOutcome {

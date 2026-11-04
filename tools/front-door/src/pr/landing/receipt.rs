@@ -104,7 +104,7 @@ pub fn write_run_summary(
         std::process::id(),
         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
-    let value = serde_json::json!({"shadow": shadow, "outcomes": report.outcomes, "receipts": report.receipts, "warnings": report.warnings});
+    let value = serde_json::json!({"shadow": shadow, "outcomes": report.outcomes, "receipts": report.receipts, "warnings": report.warnings, "local_follow_up": report.local_steps});
     let bytes = serde_json::to_vec_pretty(&value).map_err(|e| failed("encode run summary", e))?;
     atomic_write(&receipt_dir(state).join(name), &bytes)
 }

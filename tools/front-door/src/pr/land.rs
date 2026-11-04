@@ -665,6 +665,85 @@ fn follow_up(
     Ok(steps)
 }
 
+/// Record the batch PR attribution before attempting its gate.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "bound forge reads for attribution"
+)]
+pub(super) fn batch_track(
+    project: &Path,
+    number: u64,
+    globals: &provenant_cli::Globals,
+) -> Result<()> {
+    let reader = super::wait::Reader {
+        project,
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+        retry_command: format!("provenant land {number}"),
+    };
+    let rest = super::rest_pull(&|argv| reader.read(argv), &number.to_string())?;
+    let head = rest.head.sha;
+    let repository = rest
+        .base
+        .repo
+        .as_ref()
+        .ok_or("pull request has no base repository")?
+        .full_name
+        .clone();
+    let view = from_rest(rest);
+    if !view.cross_repository {
+        let binding = (|| -> Result<()> {
+            let tracker = LandTracker::resolve(globals, &repository)?;
+            let bound = tracker.bind(&view.branch, number, head, &reader);
+            let closed = if matches!(view.state.as_str(), "CLOSED" | "MERGED") {
+                tracker.close(number, &view)
+            } else {
+                Ok(())
+            };
+            bound.and(closed)
+        })();
+        if let Err(error) = binding {
+            if error
+                .downcast_ref::<super::wait::Failure>()
+                .is_some_and(|failure| failure.code == "RATE_LIMITED")
+            {
+                return Err(error);
+            }
+            super::contributions::warn(Some(number), &error);
+        }
+    }
+    Ok(())
+}
+
+/// Run the existing local cleanup owner for a proven batch landing.
+pub(super) fn batch_follow_up(
+    project: &Path,
+    number: u64,
+    head: GitOid,
+    globals: &mut provenant_cli::Globals,
+    workers: &dyn WorkerObserver,
+) -> Result<serde_json::Value> {
+    let rest = super::rest_pull(
+        &|argv| super::execute(project, argv, false),
+        &number.to_string(),
+    )?;
+    if rest.head.sha != head {
+        return Err("pull request head changed before local cleanup".into());
+    }
+    let repository = rest.base.repo.as_ref().map(|repo| repo.full_name.clone());
+    let pull = from_rest(rest);
+    if !pull.cross_repository
+        && let Some(repository) = repository
+    {
+        let closed = LandTracker::resolve(globals, &repository)
+            .and_then(|tracker| tracker.close(number, &pull));
+        if let Err(error) = closed {
+            super::contributions::warn(Some(number), &error);
+        }
+    }
+    let steps = follow_up(project, &pull, head, globals, workers)?;
+    Ok(serde_json::to_value(steps)?)
+}
+
 /// Whether the local branch named like the pull request's may be cleaned up.
 enum Cleanup {
     /// The local branch tip, which the worktree removal must still find.

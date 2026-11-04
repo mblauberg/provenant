@@ -58,11 +58,12 @@ pub fn settle(
     attempt.settled = Some(SettledAttempt {
         record,
         outcomes,
-        landed_commit,
+        landed_commit: landed_commit.clone(),
         refusal,
         receipt_pending: true,
         tree_pending,
         follow_pending,
+        local_follow_pending: landed_commit.is_some(),
         cleanup_pending: true,
     });
     receipt::record_pending(state, attempt)
@@ -170,6 +171,30 @@ pub fn finish_settled(
             .as_mut()
             .ok_or_else(|| LandingError::Failed("missing settled state".into()))?
             .receipt_pending = false;
+        receipt::record_pending(state, attempt)?;
+    }
+    if attempt
+        .settled
+        .as_ref()
+        .ok_or_else(|| LandingError::Failed("missing settled state".into()))?
+        .local_follow_pending
+    {
+        for pr in &attempt
+            .settled
+            .as_ref()
+            .ok_or_else(|| LandingError::Failed("missing settled state".into()))?
+            .record
+            .pull_requests
+        {
+            let result = repo.follow_local(pr);
+            super::ports::sync_project(repo, forge, runner, alarms);
+            result?;
+        }
+        attempt
+            .settled
+            .as_mut()
+            .ok_or_else(|| LandingError::Failed("missing settled state".into()))?
+            .local_follow_pending = false;
         receipt::record_pending(state, attempt)?;
     }
     if attempt

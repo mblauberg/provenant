@@ -16,18 +16,22 @@ use std::{
 };
 
 /// The side-effect adapters used by the landing driver.
-pub type Adapters = (
+pub type Adapters<'a> = (
     Box<dyn Forge>,
-    Box<dyn Repo>,
+    Box<dyn Repo + 'a>,
     Box<dyn GateRunner>,
     Box<dyn AlarmSink>,
 );
 
 /// Construct the real forge, repository, gate and alarm adapters for a project.
-pub fn connect(project: &Path) -> Result<Adapters, LandingError> {
+pub fn connect<'a>(
+    project: &Path,
+    globals: &provenant_cli::Globals,
+    workers: &'a dyn provenant_confinement::worktrees::WorkerObserver,
+) -> Result<Adapters<'a>, LandingError> {
     Ok((
         Box::new(GhForge::new(project)),
-        Box::new(GitRepo::new(project)?),
+        Box::new(GitRepo::with_follow_up(project, globals, workers)?),
         Box::new(CheckGate::new(project)),
         Box::new(ChairAlarms::new(project)),
     ))
@@ -212,6 +216,9 @@ fn encode_branch(branch: &str) -> String {
 }
 
 impl Forge for GhForge {
+    fn set_project_path(&mut self, path: &Path) {
+        self.project = path.to_owned();
+    }
     fn repository_identity(&mut self) -> Result<String, LandingError> {
         use sha2::{Digest, Sha256};
         let repository = self.json("repos/{owner}/{repo}")?;
@@ -300,7 +307,16 @@ impl Forge for GhForge {
         let runs = wait::commit_checks("repos/{owner}/{repo}", head, &|args| {
             self.reader().read(args)
         })
-        .map_err(failed)?;
+        .map_err(|error| {
+            if error
+                .downcast_ref::<wait::Failure>()
+                .is_some_and(|failure| failure.code == "RATE_LIMITED")
+            {
+                LandingError::RateLimited(error.to_string())
+            } else {
+                LandingError::CiUnavailable(error.to_string())
+            }
+        })?;
         let tree =
             self.json(&format!("repos/{{owner}}/{{repo}}/git/commits/{commit}"))?["tree"]["sha"]
                 .as_str()
@@ -472,18 +488,43 @@ impl Forge for GhForge {
 // ----- Repo --------------------------------------------------------------
 
 /// Git plumbing in the project checkout. Refs live on the remote the target tracks.
-pub struct GitRepo {
+pub struct GitRepo<'a> {
     project: PathBuf,
     git: Git,
     remote: Option<String>,
+    local: Option<LocalFollowUp<'a>>,
 }
-impl GitRepo {
+struct LocalFollowUp<'a> {
+    globals: provenant_cli::Globals,
+    workers: &'a dyn provenant_confinement::worktrees::WorkerObserver,
+    reports: std::collections::BTreeMap<u64, serde_json::Value>,
+}
+impl<'a> GitRepo<'a> {
     pub fn new(project: &Path) -> Result<Self, LandingError> {
         Ok(Self {
             project: project.to_owned(),
             git: Git::new().map_err(failed)?,
             remote: None,
+            local: None,
         })
+    }
+    fn with_follow_up(
+        project: &Path,
+        globals: &provenant_cli::Globals,
+        workers: &'a dyn provenant_confinement::worktrees::WorkerObserver,
+    ) -> Result<Self, LandingError> {
+        let mut repo = Self::new(project)?;
+        repo.local = Some(LocalFollowUp {
+            globals: provenant_cli::Globals {
+                json: globals.json,
+                full: globals.full,
+                state_dir: globals.state_dir.clone(),
+                project: globals.project.clone(),
+            },
+            workers,
+            reports: Default::default(),
+        });
+        Ok(repo)
     }
     fn remote(&mut self, branch: &str) -> Result<String, LandingError> {
         if let Some(remote) = &self.remote {
@@ -573,7 +614,58 @@ impl GitRepo {
     }
 }
 
-impl Repo for GitRepo {
+impl Repo for GitRepo<'_> {
+    fn project_path(&self) -> Option<&Path> {
+        self.local.as_ref().map(|_| self.project.as_path())
+    }
+    fn follow_local(&mut self, pr: &EligiblePr) -> Result<(), LandingError> {
+        if let Some(local) = &mut self.local {
+            let head = provenant_core::GitOid::parse(&pr.head)
+                .map_err(|error| LandingError::Failed(error.to_string()))?;
+            let result = crate::pr::land::batch_follow_up(
+                &self.project,
+                pr.number,
+                head,
+                &mut local.globals,
+                local.workers,
+            );
+            if let Some(project) = &local.globals.project {
+                self.project = project.clone();
+            }
+            let steps = match result {
+                Ok(steps) => steps,
+                Err(error) => {
+                    let message = error.to_string();
+                    local.reports.insert(
+                        pr.number,
+                        serde_json::json!({"head": pr.head, "steps": [], "error": message}),
+                    );
+                    return Err(LandingError::LocalFollowUp(message));
+                }
+            };
+            let refused = steps
+                .as_array()
+                .is_some_and(|steps| steps.iter().any(|step| step["status"] == "refused"));
+            local.reports.insert(
+                pr.number,
+                serde_json::json!({"head": pr.head, "steps": steps}),
+            );
+            if refused {
+                return Err(LandingError::LocalFollowUp(format!(
+                    "cleanup for pull request #{} was refused; resolve the reported steps and rerun land",
+                    pr.number
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn take_local_reports(&mut self) -> std::collections::BTreeMap<u64, serde_json::Value> {
+        self.local
+            .as_mut()
+            .map(|local| std::mem::take(&mut local.reports))
+            .unwrap_or_default()
+    }
     fn fetch_target(&mut self, branch: &str) -> Result<String, LandingError> {
         let full = Self::branch_ref(branch)?;
         let remote = self.remote(branch)?;
@@ -883,6 +975,10 @@ fn observe_checks_with(
     }
 }
 impl GateRunner for CheckGate {
+    fn set_project_path(&mut self, path: &Path) {
+        self.project = path.to_owned();
+        self.forge.project = path.to_owned();
+    }
     #[allow(clippy::disallowed_methods)]
     fn gate(
         &mut self,
@@ -930,6 +1026,9 @@ fn alarm_text(alarm: &Alarm) -> String {
         .collect()
 }
 impl AlarmSink for ChairAlarms {
+    fn set_project_path(&mut self, path: &Path) {
+        self.project = path.to_owned();
+    }
     fn post(&mut self, alarm: &Alarm) -> Result<(), LandingError> {
         let text = alarm_text(alarm);
         let _ = writeln!(std::io::stderr().lock(), "{text}");
@@ -1015,7 +1114,7 @@ mod tests {
         _dir: tempfile::TempDir,
         work: PathBuf,
         bare: PathBuf,
-        repo: GitRepo,
+        repo: GitRepo<'static>,
     }
     fn rig() -> Rig {
         let dir = tempfile::tempdir().unwrap();

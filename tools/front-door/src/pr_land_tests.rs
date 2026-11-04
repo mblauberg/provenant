@@ -774,7 +774,7 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
     }
     let dir = std::env::var_os("FIXTURE_GH_DIR")
         .map(PathBuf::from)
-        .unwrap_or_default();
+        .unwrap_or_else(|| PathBuf::from("."));
     writeln!(
         fs::OpenOptions::new()
             .create(true)
@@ -784,6 +784,20 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
     )?;
     let normalised = call.replace("api --include ", "api ");
     match normalised.as_str() {
+        "api repos/{owner}/{repo}" => {
+            io::stdout().write_all(br#"{"default_branch":"main","html_url":"https://github.com/owner/repo","full_name":"owner/repo","permissions":{"push":true}}"#)?;
+        }
+        value if value.starts_with("api --paginate --slurp repos/{owner}/{repo}/pulls/") && value.ends_with("/reviews?per_page=100") => {
+            let head: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("head.json"))?)?;
+            io::stdout().write_all(&serde_json::to_vec(&serde_json::json!([[{"id": 1, "user": {"login": "reviewer"}, "state": "APPROVED", "commit_id": head["headRefOid"]}]]))?)?;
+        }
+        value if value.starts_with("api repos/{owner}/{repo}/git/commits/") => {
+            let commit = value.rsplit('/').next().ok_or("commit")?;
+            let output = provenant_os::fixture::git_command().current_dir(&dir).args(["rev-parse", &format!("{commit}^{{tree}}")]).output()?;
+            if !output.status.success() { return Err("cannot resolve fixture tree".into()); }
+            let tree = String::from_utf8(output.stdout)?.trim().to_owned();
+            io::stdout().write_all(&serde_json::to_vec(&serde_json::json!({"tree": {"sha": tree}}))?)?;
+        }
         value if (value.starts_with("api repos/{owner}/{repo}/pulls/") || value.starts_with("api repos/owner/repo/pulls/")) && !value.ends_with("/merge") => {
             let head: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("head.json"))?)?;
             let mut view: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("view.json"))?)?;
@@ -809,7 +823,7 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
                 "state": state,
                 "head": {"sha": head["headRefOid"], "ref": branch, "repo": {"full_name": head_repo}},
                 "base": {"sha": head["headRefOid"], "ref": base, "repo": {"full_name": "owner/repo"}},
-                "mergeable": mergeable, "mergeable_state": "clean", "title": view["title"].as_str().unwrap_or("fixture"),
+                "mergeable": mergeable, "mergeable_state": "clean", "title": view["title"].as_str().unwrap_or("fixture"), "user": {"login":"author"},
                 "merged_at": if merged { Some("2099-01-01T00:00:00Z") } else { None },
                 "closed_at": if view["state"] == "CLOSED" { Some("2020-01-01T00:00:00Z") } else { None },
                 "merge_commit_sha": view["mergeCommit"]["oid"]
@@ -881,30 +895,29 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
                 br#"{"baseRefName":"main","url":"https://github.com/owner/repo/pull/1668"}"#,
             )?;
         }
-        "api repos/owner/repo/branches/main" => {
+        "api repos/owner/repo/branches/main" | "api repos/{owner}/{repo}/branches/main" => {
             io::stdout().write_all(br#"{"protected":false}"#)?;
         }
-        "api --paginate --slurp repos/owner/repo/rules/branches/main?per_page=100" => {
+        "api --paginate --slurp repos/owner/repo/rules/branches/main?per_page=100" | "api --paginate --slurp repos/{owner}/{repo}/rules/branches/main?per_page=100" => {
             io::stdout().write_all(b"[[]]")?;
         }
         value
-            if value.starts_with("api --paginate --slurp repos/owner/repo/commits/")
+            if (value.starts_with("api --paginate --slurp repos/owner/repo/commits/") || value.starts_with("api --paginate --slurp repos/{owner}/{repo}/commits/"))
                 && value.ends_with("/statuses?per_page=100") =>
         {
             io::stdout().write_all(b"[[]]")?;
         }
         value
-            if value.starts_with("api --paginate --slurp repos/owner/repo/commits/")
+            if (value.starts_with("api --paginate --slurp repos/owner/repo/commits/") || value.starts_with("api --paginate --slurp repos/{owner}/{repo}/commits/"))
                 && value.ends_with("/check-runs?per_page=100&filter=latest") =>
         {
             if dir.join("checks-fail").exists() {
                 return Ok(1);
             }
-            let head: serde_json::Value =
-                serde_json::from_slice(&fs::read(dir.join("head.json"))?)?;
+            let commit = value.split("/commits/").nth(1).and_then(|part| part.split('/').next()).ok_or("check commit")?;
             io::stdout().write_all(&serde_json::to_vec(&serde_json::json!([{"check_runs":[{
-                "name":"build","head_sha":head["headRefOid"],"status":"completed","conclusion":"success","started_at":"2020-01-01T00:00:00Z"
-            }]}]))?)?;
+                "name":"build","head_sha":commit,"status":"completed","conclusion":"success","started_at":"2020-01-01T00:00:00Z"
+            }, {"name":"ci-status","head_sha":commit,"status":"completed","conclusion":"success","started_at":"2020-01-01T00:00:00Z"}]}]))?)?;
         }
         "pr checks 1668 --json bucket" | "pr checks 1668 --json name,bucket" => {
             if dir.join("checks-fail").exists() {
@@ -1098,6 +1111,34 @@ pub(crate) fn pr_land_merges_then_fetches_fast_forwards_and_prunes() -> Result {
     );
     assert!(text.contains("  worktree skipped"), "{text}");
     assert!(text.contains("  branch skipped"), "{text}");
+    Ok(())
+}
+
+pub(crate) fn pr_land_default_batch_gates_then_cleans_up() -> Result {
+    let landing = landing()?;
+    let rig = &landing.rig;
+    let mut view: serde_json::Value =
+        serde_json::from_slice(&fs::read(rig.project.join("view.json"))?)?;
+    view["state"] = "OPEN".into();
+    fs::write(rig.project.join("view.json"), serde_json::to_vec(&view)?)?;
+    let output = command(rig, &["land", NUMBER, "--json"])?;
+    let value = json(&output)?;
+    assert_eq!(code(&output), 0, "{value}");
+    assert_eq!(value["data"]["merged"], true, "{value}");
+    for step in ["fetch", "fast_forward", "worktree", "branch"] {
+        assert_eq!(status(&value, step)?, "done", "{value}");
+    }
+    let landed = git(rig, &["rev-parse", "main"])?;
+    assert_eq!(
+        git(rig, &["rev-parse", &format!("{landed}^2")])?,
+        landing.head
+    );
+    assert_eq!(
+        value["data"]["receipts"][0]["gate_evidence"]["result"], "passed",
+        "{value}"
+    );
+    assert!(!landing.worktree.exists());
+    assert!(!branch_exists(rig, "feat")?);
     Ok(())
 }
 
@@ -2225,15 +2266,21 @@ pub(crate) fn pr_land_changes_nothing_when_the_merge_does_not_happen() -> Result
         assert!(branch_exists(rig, "feat")?, "{flag}");
         assert_eq!(git(rig, &["rev-parse", "main"])?, landing.stale, "{flag}");
     }
-    // The current head is the default, and a pending merge cleans nothing.
+    // The default batch cannot publish or clean up when CI cannot be read.
     let landing = landing()?;
     fs::write(
         landing.rig.project.join("view.json"),
         r#"{"state":"OPEN","baseRefName":"main","headRefName":"feat","isCrossRepository":false}"#,
     )?;
-    let value = land(&landing)?;
+    fs::write(landing.rig.project.join("checks-fail"), "")?;
+    let output = command(&landing.rig, &["land", NUMBER, "--json"])?;
+    let value = json(&output)?;
+    assert_ne!(code(&output), 0, "{value}");
+    assert_eq!(value["error"]["code"], "CI_UNAVAILABLE", "{value}");
     assert_eq!(value["data"]["merged"], false);
     assert!(landing.worktree.exists());
+    assert!(branch_exists(&landing.rig, "feat")?);
+    assert_eq!(git(&landing.rig, &["rev-parse", "main"])?, landing.stale);
 
     // An unconfirmed merge must preserve real local worktrees and refs.
     let landing = self::landing()?;

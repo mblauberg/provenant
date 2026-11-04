@@ -23,6 +23,7 @@ pub struct Report {
     pub receipts: Vec<LandingReceipt>,
     pub outcomes: BTreeMap<u64, Outcome>,
     pub warnings: Vec<String>,
+    pub local_steps: BTreeMap<u64, serde_json::Value>,
 }
 
 fn fetch_target(repo: &mut dyn Repo, target: &str, shadow: bool) -> Result<String, LandingError> {
@@ -130,6 +131,7 @@ pub fn run(
             });
         }
     }
+    report.local_steps = repo.take_local_reports();
     let summary = receipt::write_run_summary(state, &report, shadow);
     match (result, summary) {
         (Ok(()), Ok(())) => Ok(report),
@@ -193,7 +195,25 @@ fn run_inner(
             seen.insert(*number) && report.outcomes.get(number) != Some(&Outcome::Landed)
         })
         .collect();
-    for numbers in unique.chunks(limit) {
+    let mut open = Vec::new();
+    for number in unique {
+        let info = forge.pull_request(number)?;
+        if info.state == super::ports::PullRequestState::Merged && !request.shadow {
+            let pr = EligiblePr {
+                number,
+                head: info.head,
+                approval: String::new(),
+                base_branch: info.base_branch,
+            };
+            report.outcomes.insert(number, Outcome::Landed);
+            let result = repo.follow_local(&pr);
+            super::ports::sync_project(repo, forge, runner, alarms);
+            result?;
+        } else {
+            open.push(number);
+        }
+    }
+    for numbers in open.chunks(limit) {
         let selected = candidate::select_batch(
             forge,
             numbers,
@@ -2621,6 +2641,69 @@ mod tests {
         ));
         assert_eq!(recovered[0].outcomes[&1], Outcome::Landed);
         assert_eq!(forge.merge_attempts, merges);
+        assert_eq!(repo.push_attempts, pushes);
+        assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn failed_gate_never_runs_local_follow_up() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
+        gate.check_result = Some(GateResult::Failed);
+        let state = tempfile::tempdir()?;
+        let _ = exercise(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[1],
+            false,
+            state.path(),
+        );
+        assert!(repo.local_followed.is_empty());
+        assert!(repo.push_attempts.iter().all(|name| name != "main"));
+        Ok(())
+    }
+
+    #[test]
+    fn confirmed_landing_retries_local_follow_up_before_clearing_marker()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
+        let state = tempfile::tempdir()?;
+        repo.fail_local = true;
+        assert!(
+            exercise(
+                &mut forge,
+                &mut repo,
+                &mut gate,
+                &settings,
+                &definition,
+                &[1],
+                false,
+                state.path()
+            )
+            .is_err()
+        );
+        assert_eq!(repo.local_followed, vec![1]);
+        assert_eq!(
+            receipt::pending(state.path(), "fake-repository", "main")?.len(),
+            1
+        );
+        let pushes = repo.push_attempts.clone();
+        repo.fail_local = false;
+        let report = exercise(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &settings,
+            &definition,
+            &[1],
+            false,
+            state.path(),
+        )?;
+        assert_eq!(report.outcomes[&1], Outcome::Landed);
+        assert_eq!(repo.local_followed, vec![1, 1]);
         assert_eq!(repo.push_attempts, pushes);
         assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
         Ok(())

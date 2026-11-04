@@ -184,8 +184,18 @@ pub struct FakeRepo {
     pub fail_fetch_on_push_refusal: Option<std::rc::Rc<std::cell::Cell<bool>>>,
     pub lose_push_response: bool,
     pub refuse_delete: bool,
+    pub fail_local: bool,
+    pub local_followed: Vec<u64>,
 }
 impl Repo for FakeRepo {
+    fn follow_local(&mut self, pr: &EligiblePr) -> Result<(), LandingError> {
+        self.local_followed.push(pr.number);
+        if self.fail_local {
+            Err(LandingError::Failed("local follow-up unavailable".into()))
+        } else {
+            Ok(())
+        }
+    }
     fn fetch_target(&mut self, branch: &str) -> Result<String, LandingError> {
         if self.fail_fetch.as_ref().is_some_and(|flag| flag.get()) {
             return Err(LandingError::Failed("fetch unavailable".into()));

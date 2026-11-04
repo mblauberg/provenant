@@ -235,6 +235,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "cross_project_writer_names_both_projects",
             "git_created_and_recreated_worktrees_are_dispatchable",
             "pr_land_merges_then_fetches_fast_forwards_and_prunes",
+            "pr_land_default_batch_gates_then_cleans_up",
             "pr_land_prunes_the_selected_merged_worktree",
             "pr_land_from_lane_ignores_only_its_callers",
             "pr_land_refuses_incomplete_worker_census",
@@ -344,6 +345,9 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 }
                 "remove_resolves_directory_names_and_remote_integration_refs" => {
                     remove_resolves_directory_names_and_remote_integration_refs()
+                }
+                "pr_land_default_batch_gates_then_cleans_up" => {
+                    crate::pr_land_tests::pr_land_default_batch_gates_then_cleans_up()
                 }
                 "pr_land_merges_then_fetches_fast_forwards_and_prunes" => {
                     crate::pr_land_tests::pr_land_merges_then_fetches_fast_forwards_and_prunes()

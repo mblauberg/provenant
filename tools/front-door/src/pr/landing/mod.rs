@@ -24,6 +24,12 @@ pub enum LandingError {
     UnmetGate(String),
     #[error("estimated cost {micros} micros exceeds the spending cap of {cap} micros")]
     SpendingCap { micros: u64, cap: u64 },
+    #[error("local follow-up incomplete: {0}")]
+    LocalFollowUp(String),
+    #[error("GitHub rate limit: {0}")]
+    RateLimited(String),
+    #[error("CI evidence unavailable: {0}")]
+    CiUnavailable(String),
     #[error("landing target moved too many times")]
     Contention,
     #[error("landing target moved during publication")]
@@ -80,13 +86,18 @@ pub(crate) fn run(
 ) -> u8 {
     match run_inner(options, globals, workers) {
         Ok(code) => code,
-        Err(error) => crate::fail(
-            "land",
-            provenant_records::Outcome::Refused,
-            "LAND_POLICY",
-            &error.to_string(),
-            globals,
-        ),
+        Err(error) => {
+            let code = error
+                .downcast_ref::<super::wait::Failure>()
+                .map_or("LAND_POLICY", |failure| failure.code);
+            crate::fail(
+                "land",
+                provenant_records::Outcome::Refused,
+                code,
+                &error.to_string(),
+                globals,
+            )
+        }
     }
 }
 
@@ -95,6 +106,22 @@ fn batch_response(
     failure: Option<LandingError>,
 ) -> provenant_records::CommandResult<serde_json::Value> {
     use provenant_records::{CommandError, CommandResult, Outcome};
+    let cleanup_error = match failure.as_ref() {
+        Some(LandingError::LocalFollowUp(message))
+            if report
+                .outcomes
+                .values()
+                .any(|outcome| *outcome == model::Outcome::Landed) =>
+        {
+            Some(message.clone())
+        }
+        _ => None,
+    };
+    let failure = if cleanup_error.is_some() {
+        None
+    } else {
+        failure
+    };
     let failure = failure.or_else(|| {
         report
             .outcomes
@@ -136,6 +163,8 @@ fn batch_response(
             (Outcome::Refused, "LAND_REFUSED")
         }
         Some(LandingError::UnmetGate(_)) => (Outcome::Failed, "LAND_GATE_UNMET"),
+        Some(LandingError::CiUnavailable(_)) => (Outcome::Unavailable, "CI_UNAVAILABLE"),
+        Some(LandingError::RateLimited(_)) => (Outcome::Unavailable, "RATE_LIMITED"),
         Some(LandingError::SpendingCap { .. }) => (Outcome::Refused, "LAND_SPENDING_CAP"),
         Some(LandingError::Conflict(_)) => (Outcome::Failed, "LAND_CONFLICT"),
         Some(LandingError::Unimplemented(_)) => (Outcome::Unavailable, "LAND_UNSUPPORTED"),
@@ -149,7 +178,30 @@ fn batch_response(
         }
         None => (Outcome::Failed, ""),
     };
-    let value = serde_json::json!({"receipts": report.receipts, "outcomes": report.outcomes, "warnings": report.warnings});
+    let mut value = serde_json::json!({"receipts": report.receipts, "outcomes": report.outcomes, "warnings": report.warnings, "local_follow_up": report.local_steps});
+    if report.outcomes.len() == 1
+        && let Some((&number, outcome)) = report.outcomes.iter().next()
+    {
+        let landed = *outcome == model::Outcome::Landed;
+        value["number"] = number.into();
+        value["merged"] = landed.into();
+        if let Some(error) = &cleanup_error {
+            value["cleanup_pending"] = true.into();
+            value["cleanup_error"] = error.clone().into();
+        }
+        if let Some(local) = report.local_steps.get(&number) {
+            if let Some(object) = value.as_object_mut() {
+                object.remove("local_follow_up");
+            }
+            value["head"] = local["head"].clone();
+            value["steps"] = local["steps"].clone();
+            value["cleanup_pending"] = (cleanup_error.is_some()
+                || local["steps"]
+                    .as_array()
+                    .is_some_and(|steps| steps.iter().any(|step| step["status"] == "refused")))
+            .into();
+        }
+    }
     let mut response = CommandResult::new("land", status, value);
     if let Some(error) = failure {
         response.error = Some(CommandError {
@@ -316,8 +368,14 @@ fn run_inner(
     if options.head.is_some() || options.wait.is_some() {
         return Err("--head and --wait apply only to single-pull-request landing".into());
     }
+    if !options.shadow {
+        for number in &options.numbers {
+            super::land::batch_track(&resolved.project, *number, globals)?;
+        }
+    }
     let definition = gate_definition(&effective.gate)?;
-    let (mut forge, mut repo, mut runner, mut alarms) = adapters::connect(&resolved.project)?;
+    let (mut forge, mut repo, mut runner, mut alarms) =
+        adapters::connect(&resolved.project, globals, workers)?;
     let target = forge.target_branch()?;
     let result = driver::run(
         &mut *forge,
@@ -350,6 +408,24 @@ fn run_inner(
             error.message,
             serde_json::to_string_pretty(&response.data)?
         ),
+        None if response.data["merged"] == true => {
+            let mut text = format!(
+                "merged #{} {}\n",
+                response.data["number"],
+                response.data["head"].as_str().unwrap_or("unknown")
+            );
+            if let Some(steps) = response.data["steps"].as_array() {
+                for step in steps {
+                    text.push_str(&format!(
+                        "  {} {}: {}\n",
+                        step["step"].as_str().unwrap_or(""),
+                        step["status"].as_str().unwrap_or(""),
+                        step["detail"].as_str().unwrap_or("")
+                    ));
+                }
+            }
+            text
+        }
         None => format!("{}\n", serde_json::to_string_pretty(&response.data)?),
     };
     Ok(crate::emit(&response, globals, &text, false))
@@ -453,6 +529,20 @@ mod response_tests {
             assert!(error.message.contains(detail));
             assert_eq!(response.data["outcomes"]["7"], "landed");
         }
+    }
+
+    #[test]
+    fn ci_read_and_rate_limit_keep_distinct_codes() {
+        let unavailable = batch_response(
+            driver::Report::default(),
+            Some(LandingError::CiUnavailable("unreadable checks".into())),
+        );
+        assert_eq!(unavailable.error.unwrap().code, "CI_UNAVAILABLE");
+        let limited = batch_response(
+            driver::Report::default(),
+            Some(LandingError::RateLimited("retry later".into())),
+        );
+        assert_eq!(limited.error.unwrap().code, "RATE_LIMITED");
     }
 
     #[test]

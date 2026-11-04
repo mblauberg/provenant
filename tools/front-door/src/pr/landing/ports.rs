@@ -23,6 +23,7 @@ pub struct Approval {
     pub reviewer: String,
 }
 pub trait Forge {
+    fn set_project_path(&mut self, _path: &std::path::Path) {}
     fn pull_request(&mut self, number: u64) -> Result<PullRequestInfo, LandingError>;
     fn repository_identity(&mut self) -> Result<String, LandingError>;
     fn target_branch(&mut self) -> Result<String, LandingError>;
@@ -74,7 +75,17 @@ pub enum MergeTree {
     Conflict,
 }
 pub trait Repo {
+    fn project_path(&self) -> Option<&std::path::Path> {
+        None
+    }
+    /// Complete local follow-up only after a landing is proven.
+    fn follow_local(&mut self, _pr: &EligiblePr) -> Result<(), LandingError> {
+        Ok(())
+    }
     fn fetch_target(&mut self, branch: &str) -> Result<String, LandingError>;
+    fn take_local_reports(&mut self) -> std::collections::BTreeMap<u64, serde_json::Value> {
+        Default::default()
+    }
     /// Fetch without changing any persistent reference, as required in shadow mode.
     fn fetch_target_untracked(&mut self, _branch: &str) -> Result<String, LandingError> {
         Err(LandingError::Unimplemented("untracked target fetch"))
@@ -101,6 +112,7 @@ pub trait Repo {
     fn tree_of(&mut self, commit: &str) -> Result<String, LandingError>;
 }
 pub trait GateRunner {
+    fn set_project_path(&mut self, _path: &std::path::Path) {}
     fn gate(
         &mut self,
         candidate: &Candidate,
@@ -109,5 +121,20 @@ pub trait GateRunner {
     ) -> Result<GateEvidence, LandingError>;
 }
 pub trait AlarmSink {
+    fn set_project_path(&mut self, _path: &std::path::Path) {}
     fn post(&mut self, alarm: &Alarm) -> Result<(), LandingError>;
+}
+
+/// Follow a relocated caller when cleanup removes its checkout.
+pub fn sync_project(
+    repo: &dyn Repo,
+    forge: &mut dyn Forge,
+    runner: &mut dyn GateRunner,
+    alarms: &mut dyn AlarmSink,
+) {
+    if let Some(path) = repo.project_path() {
+        forge.set_project_path(path);
+        runner.set_project_path(path);
+        alarms.set_project_path(path);
+    }
 }
