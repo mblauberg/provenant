@@ -23,8 +23,8 @@ pub(crate) fn linked_dynamic_libraries(
     linked_libraries_filtered(executable, |path| {
         path.is_file()
             && allowed(path)
-            && read_image(path).is_some_and(|image| {
-                image_header(&image).is_some_and(|(word, _)| word(&image, 12) == Some(MH_DYLIB))
+            && read_images(path).iter().any(|image| {
+                image_header(image).is_some_and(|(word, _)| word(image, 12) == Some(MH_DYLIB))
             })
     })
 }
@@ -49,7 +49,9 @@ fn linked_libraries_filtered(executable: &Path, allowed: impl Fn(&Path) -> bool)
     found
 }
 
-fn read_image(image: &Path) -> Option<Vec<u8>> {
+/// Every architecture slice of a thin or universal file. A process under
+/// Rosetta loads a slice other than the host's, so no slice is preferred.
+fn read_images(image: &Path) -> Vec<Vec<u8>> {
     use std::io::{Seek, SeekFrom};
     let read = |offset: u64| -> std::io::Result<Vec<u8>> {
         let mut file = std::fs::File::open(image)?;
@@ -58,17 +60,29 @@ fn read_image(image: &Path) -> Option<Vec<u8>> {
         file.take(HEADER_LIMIT).read_to_end(&mut bytes)?;
         Ok(bytes)
     };
-    let head = read(0).ok()?;
-    match slice_offset(&head)? {
-        0 => Some(head),
-        offset => read(offset).ok(),
+    let Ok(head) = read(0) else {
+        return Vec::new();
+    };
+    match slice_offsets(&head) {
+        None => Vec::new(),
+        Some(offsets) if offsets == [0] => vec![head],
+        Some(offsets) => offsets
+            .into_iter()
+            .filter_map(|offset| read(offset).ok())
+            .collect(),
     }
 }
 
 fn dependencies(image: &Path) -> Vec<String> {
-    read_image(image)
-        .and_then(|image| load_commands(&image))
-        .unwrap_or_default()
+    let mut names = Vec::new();
+    for slice in read_images(image) {
+        for name in load_commands(&slice).unwrap_or_default() {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names
 }
 
 fn be32(bytes: &[u8], at: usize) -> Option<u32> {
@@ -79,18 +93,11 @@ fn le32(bytes: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
 }
 
-/// Offset of the host architecture's image in a thin or universal file.
-fn slice_offset(bytes: &[u8]) -> Option<u64> {
-    const ARM64: u32 = 0x0100_000c;
-    const X86_64: u32 = 0x0100_0007;
-    let host = if cfg!(target_arch = "aarch64") {
-        ARM64
-    } else {
-        X86_64
-    };
+/// Offsets of every image in a thin (`[0]`) or universal file.
+fn slice_offsets(bytes: &[u8]) -> Option<Vec<u64>> {
     let magic = be32(bytes, 0)?;
     if !matches!(magic, 0xcafe_babe | 0xcafe_babf | 0xbeba_feca | 0xbfba_feca) {
-        return Some(0);
+        return Some(vec![0]);
     }
     let word = if matches!(magic, 0xbeba_feca | 0xbfba_feca) {
         le32
@@ -99,12 +106,10 @@ fn slice_offset(bytes: &[u8]) -> Option<u64> {
     };
     let wide = matches!(magic, 0xcafe_babf | 0xbfba_feca);
     let entry = if wide { 32 } else { 20 };
+    let mut offsets = Vec::new();
     for index in 0..usize::try_from(word(bytes, 4)?).ok()?.min(16) {
         let at = 8 + index * entry;
-        if word(bytes, at)? != host {
-            continue;
-        }
-        return Some(if wide {
+        offsets.push(if wide {
             if magic == 0xbfba_feca {
                 u64::from(word(bytes, at + 12)?) << 32 | u64::from(word(bytes, at + 8)?)
             } else {
@@ -114,7 +119,7 @@ fn slice_offset(bytes: &[u8]) -> Option<u64> {
             u64::from(word(bytes, at + 8)?)
         });
     }
-    None
+    Some(offsets)
 }
 
 type WordReader = fn(&[u8], usize) -> Option<u32>;
@@ -200,10 +205,11 @@ mod tests {
                     if universal {
                         image.extend(word(if wide { 0xcafe_babf } else { 0xcafe_babe }));
                         image.extend(word(1));
+                        // The other architecture's slice: a Rosetta process loads it.
                         image.extend(word(if cfg!(target_arch = "aarch64") {
-                            0x0100_000c
-                        } else {
                             0x0100_0007
+                        } else {
+                            0x0100_000c
                         }));
                         image.extend(word(0));
                         if wide {
