@@ -43,7 +43,9 @@ fn mutation_failed(error: Box<dyn std::error::Error>) -> LandingError {
     } else if error
         .downcast_ref::<wait::Failure>()
         .is_some_and(|failure| matches!(failure.code, "HEAD_MOVED" | "MERGE_NOT_ALLOWED"))
-        || error.to_string().contains("HTTP 422")
+        || ["HTTP 405", "HTTP 409", "HTTP 422"]
+            .iter()
+            .any(|code| error.to_string().contains(code))
     {
         LandingError::Refused(error.to_string())
     } else {
@@ -554,16 +556,14 @@ impl GitRepo {
         ) {
             Ok((0, ..)) => Ok(()),
             Ok((_, output, error))
-                if output.contains("[remote rejected]")
-                    || output.contains("[rejected]")
-                        && (output.contains("stale info")
-                            || output.contains("non-fast-forward")
-                            || output.contains("fetch first"))
-                    || error.contains("[remote rejected]")
-                    || error.contains("[rejected]")
-                        && (error.contains("stale info")
-                            || error.contains("non-fast-forward")
-                            || error.contains("fetch first")) =>
+                if ["stale info", "non-fast-forward", "fetch first"]
+                    .iter()
+                    .any(|reason| output.contains(reason) || error.contains(reason)) =>
+            {
+                Err(LandingError::TargetMoved)
+            }
+            Ok((_, output, error))
+                if output.contains("[remote rejected]") || error.contains("[remote rejected]") =>
             {
                 Err(LandingError::Refused(format!("git push refused: {error}")))
             }
@@ -1031,6 +1031,100 @@ mod tests {
     }
 
     #[test]
+    fn mutation_failures_classify_refusals_and_timeouts() {
+        for status in [405, 409, 422] {
+            let error = wait::failure("MERGE_FAILED", format!("HTTP {status} refusal"));
+            assert!(
+                matches!(mutation_failed(error), LandingError::Refused(_)),
+                "HTTP {status}"
+            );
+        }
+        assert!(matches!(
+            mutation_failed(Box::new(TimedOut)),
+            LandingError::PublicationUnknown
+        ));
+    }
+
+    #[test]
+    fn gh_identity_and_revert_adoption_use_real_adapter() {
+        use std::os::unix::fs::PermissionsExt;
+        const MARKER: &str = "PROVENANT_GH_ADAPTER_CHILD";
+        if let Some(project) = std::env::var_os(MARKER) {
+            let project = PathBuf::from(project);
+            git(&project, &["init", "-q"]);
+            git(
+                &project,
+                &["remote", "add", "origin", "git@github.com:Owner/Repo.git"],
+            );
+            let mut forge = GhForge::new(&project);
+            let ssh = forge.repository_identity().unwrap();
+            git(
+                &project,
+                &[
+                    "remote",
+                    "set-url",
+                    "origin",
+                    "https://github.com/owner/repo.git",
+                ],
+            );
+            assert_eq!(forge.repository_identity().unwrap(), ssh);
+            std::fs::write(project.join("repo.json"), r#"{"html_url":"https://github.com/Other/Repo","full_name":"Other/Repo","owner":{"login":"Other"}}"#).unwrap();
+            assert_ne!(forge.repository_identity().unwrap(), ssh);
+            std::fs::write(project.join("repo.json"), r#"{"html_url":"https://github.com/Owner/Repo","full_name":"Owner/Repo","owner":{"login":"Owner"}}"#).unwrap();
+            assert_eq!(
+                forge.open_revert(7, "land/revert/7", "main", "ci").unwrap(),
+                42
+            );
+            let calls = std::fs::read_to_string(project.join("calls")).unwrap();
+            assert_eq!(
+                calls
+                    .lines()
+                    .filter(|line| line.contains("--method POST"))
+                    .count(),
+                1
+            );
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let gh = dir.path().join("gh");
+        std::fs::write(&gh, r##"#!/bin/sh
+echo "$*" >> calls
+case "$*" in
+  *"--method POST"*) touch posted; echo 'HTTP 422 duplicate' >&2; exit 1 ;;
+  *"--paginate"*)
+    if test -e posted; then
+      echo '[[{"number":41,"head":{"ref":"land/revert/7","repo":{"full_name":"evil/repo"}},"base":{"ref":"main"},"title":"Revert pull request #7","body":"Reverts pull request #7 after post-merge check failure: ci."},{"number":42,"head":{"ref":"land/revert/7","repo":{"full_name":"Owner/Repo"}},"base":{"ref":"main"},"title":"Revert pull request #7","body":"Reverts pull request #7 after post-merge check failure: ci."}]]'
+    else echo '[[]]'; fi ;;
+  *) cat repo.json ;;
+esac
+"##).unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(dir.path().join("repo.json"), r#"{"html_url":"https://github.com/Owner/Repo","full_name":"Owner/Repo","owner":{"login":"Owner"}}"#).unwrap();
+        let path = format!(
+            "{}:{}",
+            dir.path().display(),
+            std::env::var("PATH").unwrap()
+        );
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "pr::landing::adapters::tests::gh_identity_and_revert_adoption_use_real_adapter",
+                "--nocapture",
+            ])
+            .env(MARKER, dir.path())
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn lost_revert_creation_response_adopts_matching_pull_request() {
         let mut lookups = 0;
         let result = reconcile_revert_creation(Err(LandingError::PublicationUnknown), || {
@@ -1220,7 +1314,7 @@ mod tests {
             .commit_tree(&tree, std::slice::from_ref(&base), "c")
             .unwrap();
         let stale = rig.repo.push_ref("main", &candidate, Some(&base));
-        assert!(matches!(stale, Err(LandingError::Refused(_))), "{stale:?}");
+        assert!(matches!(stale, Err(LandingError::TargetMoved)), "{stale:?}");
         assert_eq!(
             git(&rig.bare, &["rev-parse", "refs/heads/main"]),
             moved,

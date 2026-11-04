@@ -81,7 +81,12 @@ pub fn fast_forward(
     target: &str,
     candidate: &Candidate,
 ) -> Result<PublishResult, LandingError> {
-    if !repo.is_ancestor(&candidate.base, &candidate.commit)? {
+    if !repo
+        .is_ancestor(&candidate.base, &candidate.commit)
+        .map_err(|error| {
+            LandingError::Refused(format!("could not verify candidate ancestry: {error}"))
+        })?
+    {
         return Err(LandingError::Refused(
             "candidate does not descend from its base".into(),
         ));
@@ -103,13 +108,16 @@ pub fn rest_ordered(
     target: &str,
     candidate: &Candidate,
     method: MergeMethod,
+    landed: &mut Vec<String>,
 ) -> Result<PublishResult, LandingError> {
-    let mut landed = Vec::new();
     let mut expected = candidate.base.clone();
     for step in &candidate.steps {
         // The forge API cannot atomically bind the target; movement between this read
         // and the merge remains possible and the final tree check detects it.
-        if repo.fetch_target(target)? != expected {
+        if repo.fetch_target(target).map_err(|error| {
+            LandingError::Refused(format!("could not read target before merge: {error}"))
+        })? != expected
+        {
             return Err(LandingError::TargetMoved);
         }
         if !revalidate(
@@ -118,7 +126,10 @@ pub fn rest_ordered(
                 steps: vec![step.clone()],
                 ..candidate.clone()
             },
-        )?
+        )
+        .map_err(|error| {
+            LandingError::Refused(format!("could not revalidate before merge: {error}"))
+        })?
         .is_empty()
         {
             return Err(LandingError::PullRequestChanged(step.pr.number));
@@ -126,8 +137,12 @@ pub fn rest_ordered(
         expected = forge.merge(step.pr.number, &step.pr.head, method)?;
         landed.push(expected.clone());
     }
-    let actual_commit = repo.fetch_target(target)?;
-    let actual_tree = repo.tree_of(&actual_commit)?;
+    let actual_commit = repo.fetch_target(target).map_err(|error| {
+        LandingError::Refused(format!("could not read published target: {error}"))
+    })?;
+    let actual_tree = repo.tree_of(&actual_commit).map_err(|error| {
+        LandingError::Refused(format!("could not verify published tree: {error}"))
+    })?;
     let alarms = if actual_tree == candidate.tree {
         Vec::new()
     } else {
@@ -139,7 +154,10 @@ pub fn rest_ordered(
             ),
         }]
     };
-    Ok(PublishResult { landed, alarms })
+    Ok(PublishResult {
+        landed: landed.clone(),
+        alarms,
+    })
 }
 
 #[cfg(test)]
@@ -296,6 +314,56 @@ mod tests {
         ));
         Ok(())
     }
+    fn ordered_revalidation_rejects(change: &str) {
+        let mut forge = FakeForge::default();
+        prepare(&mut forge);
+        match change {
+            "head" => {
+                forge.heads.insert(2, "new-head".into());
+            }
+            "approval" => {
+                forge.approvals_at_head.remove(&(2, "head-2".into()));
+            }
+            "base" => {
+                forge.pull_requests.get_mut(&2).unwrap().base_branch = "other".into();
+            }
+            _ => unreachable!(),
+        }
+        let mut repo = FakeRepo {
+            target: "base".into(),
+            fetches: ["base".into(), "landed-1".into()].into(),
+            ..FakeRepo::default()
+        };
+        assert!(matches!(
+            rest_ordered(
+                &mut forge,
+                &mut repo,
+                "main",
+                &candidate(),
+                MergeMethod::Merge,
+                &mut Vec::new()
+            ),
+            Err(LandingError::PullRequestChanged(2))
+        ));
+        assert_eq!(
+            forge.merges.iter().map(|merge| merge.0).collect::<Vec<_>>(),
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn ordered_revalidates_head() {
+        ordered_revalidation_rejects("head");
+    }
+    #[test]
+    fn ordered_revalidates_approval() {
+        ordered_revalidation_rejects("approval");
+    }
+    #[test]
+    fn ordered_revalidates_base() {
+        ordered_revalidation_rejects("base");
+    }
+
     #[test]
     fn ordered_merge_stops_when_target_moves_between_merges() {
         let mut forge = FakeForge::default();
@@ -311,7 +379,8 @@ mod tests {
                 &mut repo,
                 "main",
                 &candidate(),
-                MergeMethod::Merge
+                MergeMethod::Merge,
+                &mut Vec::new()
             ),
             Err(LandingError::TargetMoved)
         ));
@@ -334,6 +403,7 @@ mod tests {
             "main",
             &candidate(),
             MergeMethod::Squash,
+            &mut Vec::new(),
         )?;
         assert_eq!(
             forge.merges,

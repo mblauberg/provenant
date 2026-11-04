@@ -375,7 +375,11 @@ fn run_inner(
                 consume_rebuild(&mut rebuilds, request.settings.max_rebuilds)?;
                 continue;
             }
-            if !request.shadow {
+            let publication = if request.shadow {
+                PublishResult::default()
+            } else {
+                // Write the intent before publishing, so a crash or lost response mid-publication
+                // leaves a marker for the next run to reconcile. Definite outcomes clear it below.
                 let attempt = PendingAttempt {
                     repository: repository.clone(),
                     target: request.target.into(),
@@ -386,15 +390,8 @@ fn run_inner(
                     publish: decision.clone(),
                     cost: cost.clone(),
                 };
-                cleanup_unpublished(
-                    receipt::record_pending(request.state, &attempt),
-                    repo,
-                    &candidate,
-                )?;
-            }
-            let publication = if request.shadow {
-                PublishResult::default()
-            } else {
+                receipt::record_pending(request.state, &attempt)?;
+                let mut progress = Vec::new();
                 let published = match decision.mode {
                     PublishMode::FastForward => {
                         publish::fast_forward(repo, request.target, &candidate)
@@ -405,53 +402,83 @@ fn run_inner(
                         request.target,
                         &candidate,
                         request.settings.method,
+                        &mut progress,
                     ),
                 };
                 match published {
                     Ok(landed) => landed,
                     Err(error) => {
-                        // Reconcile every failed publication, including ambiguous REST responses.
-                        // Proven outcomes clear their marker; unprovable outcomes retain it.
-                        recover(forge, repo, runner, alarms, &request, &repository, report)?;
-                        let moved = repo.fetch_target(request.target)? != base;
-                        let changed = match &error {
-                            LandingError::PullRequestChanged(number) => Some(*number),
-                            _ => None,
-                        };
-                        prs.retain(|pr| {
-                            if report.outcomes.get(&pr.number) == Some(&Outcome::Landed) {
-                                false
-                            } else if changed == Some(pr.number) {
-                                report.outcomes.insert(pr.number, Outcome::Excluded);
-                                false
-                            } else {
-                                true
+                        if !matches!(
+                            error,
+                            LandingError::Refused(_)
+                                | LandingError::TargetMoved
+                                | LandingError::PullRequestChanged(_)
+                        ) {
+                            recover(forge, repo, runner, alarms, &request, &repository, report)?;
+                            prs.retain(|pr| {
+                                report.outcomes.get(&pr.number) != Some(&Outcome::Landed)
+                            });
+                            if prs.is_empty() {
+                                break;
                             }
-                        });
-                        if prs.is_empty() {
+                            return Err(error);
+                        }
+                        // These successes are known in this run; the remaining operations
+                        // were either refused or never attempted.
+                        if !progress.is_empty() {
+                            let mut record = LandingReceipt::new(
+                                &candidate,
+                                request.policy.clone(),
+                                request.gate.clone(),
+                                evidence.clone(),
+                                decision.clone(),
+                                cost.clone(),
+                                false,
+                            );
+                            record.candidate_steps.truncate(progress.len());
+                            record.pull_requests.truncate(progress.len());
+                            record.outcomes.clear();
+                            for (step, sha) in candidate.steps.iter().zip(&progress) {
+                                record.outcomes.insert(step.pr.number, Outcome::Landed);
+                                report.outcomes.insert(step.pr.number, Outcome::Landed);
+                                record
+                                    .approved_to_landed
+                                    .insert(step.pr.head.clone(), sha.clone());
+                                record
+                                    .approved_to_landed
+                                    .insert(step.commit.clone(), sha.clone());
+                            }
+                            receipt::write_receipt(request.state, &record)?;
+                            let followed =
+                                postmerge::follow(forge, repo, runner, alarms, &mut record);
+                            receipt::write_receipt(request.state, &record)?;
+                            report.receipts.push(record);
+                            followed?;
+                        }
+                        repo.delete_ref(&candidate.ref_name, &candidate.commit)?;
+                        receipt::clear_pending(request.state, &repository, &candidate)?;
+                        prs.drain(..progress.len());
+                        if let LandingError::PullRequestChanged(number) = error {
+                            prs.retain(|pr| {
+                                if pr.number == number {
+                                    report.outcomes.insert(number, Outcome::Excluded);
+                                    false
+                                } else {
+                                    true
+                                }
+                            });
+                            if !prs.is_empty() {
+                                consume_rebuild(&mut rebuilds, request.settings.max_rebuilds)?;
+                                continue;
+                            }
                             break;
                         }
                         match error {
-                            LandingError::TargetMoved => {
+                            LandingError::TargetMoved if !prs.is_empty() => {
                                 consume_rebuild(&mut rebuilds, request.settings.max_rebuilds)?;
                                 continue;
                             }
-                            LandingError::PullRequestChanged(_) => {
-                                if moved {
-                                    consume_rebuild(&mut rebuilds, request.settings.max_rebuilds)?;
-                                }
-                                continue;
-                            }
-                            LandingError::Refused(_) if moved => {
-                                consume_rebuild(&mut rebuilds, request.settings.max_rebuilds)?;
-                                continue;
-                            }
-                            LandingError::Refused(_) => return Err(error),
-                            _ => {
-                                return Err(LandingError::Refused(format!(
-                                    "publication did not complete: {error}"
-                                )));
-                            }
+                            _ => return Err(error),
                         }
                     }
                 }
@@ -611,6 +638,7 @@ mod tests {
         };
         let settings = LandSettings {
             batch_wait_seconds: 0,
+            publish_settle_seconds: 0,
             pr_ci: provenant_cli::domains::PrCiSettings {
                 mode: provenant_cli::domains::PrCiMode::None,
                 ..Default::default()
@@ -739,7 +767,7 @@ mod tests {
     }
 
     #[test]
-    fn ordered_target_move_keeps_unresolved_open_pr_pending()
+    fn ordered_target_move_rebuilds_open_same_head_remainder()
     -> Result<(), Box<dyn std::error::Error>> {
         let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(2);
         forge.direct_push = false;
@@ -758,8 +786,6 @@ mod tests {
             moved.clone(),
             moved.clone(),
             moved.clone(),
-            moved.clone(),
-            moved.clone(),
             moved,
             second,
         ]
@@ -775,18 +801,22 @@ mod tests {
             false,
             state.path(),
         );
-        assert!(matches!(
-            result,
-            Err(LandingError::PublicationUnknownAt { .. })
-        ));
-        assert_eq!(gate.observed.len(), 1);
+        let report = result?;
+        assert_eq!(report.outcomes[&1], Outcome::Landed);
+        assert_eq!(report.outcomes[&2], Outcome::Landed);
+        assert!(
+            report
+                .receipts
+                .iter()
+                .any(|r| r.outcomes.get(&1) == Some(&Outcome::Landed))
+        );
         assert_eq!(
             forge.merges.iter().map(|merge| merge.0).collect::<Vec<_>>(),
-            vec![1]
+            vec![1, 2]
         );
         assert_eq!(
             receipt::pending(state.path(), "fake-repository", "main")?.len(),
-            1
+            0
         );
         Ok(())
     }
@@ -1099,7 +1129,7 @@ mod tests {
                 false,
                 state.path()
             ),
-            Err(LandingError::PublicationUnknownAt { .. })
+            Err(LandingError::Refused(_))
         ));
         assert_eq!(gate.observed.len(), 1);
         assert!(forge.merges.is_empty());
@@ -1195,10 +1225,11 @@ mod tests {
     }
 
     #[test]
-    fn refusal_retains_marker_until_retry_lands() -> Result<(), Box<dyn std::error::Error>> {
+    fn refusal_clears_marker_without_retry() -> Result<(), Box<dyn std::error::Error>> {
         let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
         repo.refuse_target_push = true;
         let state = tempfile::tempdir()?;
+        repo.pending_dir_to_observe = Some(state.path().join("landing/pending"));
         assert!(matches!(
             exercise(
                 &mut forge,
@@ -1210,28 +1241,26 @@ mod tests {
                 false,
                 state.path()
             ),
-            Err(LandingError::PublicationUnknownAt { .. })
+            Err(LandingError::Refused(_))
         ));
         assert_eq!(
             receipt::pending(state.path(), "fake-repository", "main")?.len(),
+            0
+        );
+        // The marker is written ahead of publication and cleared once the refusal is definite.
+        assert!(repo.saw_pending_on_target_push);
+        assert_eq!(
+            repo.push_attempts
+                .iter()
+                .filter(|name| name.as_str() == "main")
+                .count(),
             1
         );
-        repo.refuse_target_push = false;
-        let report = exercise(
-            &mut forge,
-            &mut repo,
-            &mut gate,
-            &settings,
-            &definition,
-            &[1],
-            false,
-            state.path(),
-        )?;
-        assert_eq!(report.outcomes[&1], Outcome::Landed);
         Ok(())
     }
     #[test]
-    fn in_flight_publication_keeps_pending_marker() -> Result<(), Box<dyn std::error::Error>> {
+    fn refused_recovery_push_settles_but_open_rest_remains_pending()
+    -> Result<(), Box<dyn std::error::Error>> {
         for mode in [PublishMode::FastForward, PublishMode::RestOrdered] {
             let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
             let policy = LandPolicy::resolve(
@@ -1294,6 +1323,106 @@ mod tests {
                 false,
                 &mut Vec::new(),
             );
+            if mode == PublishMode::FastForward {
+                result?;
+                assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(LandingError::PublicationUnknownAt { .. })
+                ));
+                assert_eq!(
+                    receipt::pending(state.path(), "fake-repository", "main")?.len(),
+                    1
+                );
+            }
+        }
+        Ok(())
+    }
+    fn recovery_does_not_retry_changed_pr(
+        mode: PublishMode,
+        change: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
+        let policy = LandPolicy::resolve(
+            &settings,
+            &BTreeMap::new(),
+            None,
+            None,
+            &LandOverride::default(),
+        )?;
+        let state = tempfile::tempdir()?;
+        let head = forge.pull_requests[&1].head.clone();
+        let candidate = Candidate {
+            base: repo.target.clone(),
+            commit: "candidate".into(),
+            tree: "tree".into(),
+            ref_name: "land/test".into(),
+            steps: vec![CandidateStep {
+                pr: EligiblePr {
+                    number: 1,
+                    head: head.clone(),
+                    approval: "approval-1".into(),
+                    base_branch: "main".into(),
+                },
+                commit: "candidate".into(),
+                tree: "tree".into(),
+            }],
+        };
+        repo.refs
+            .insert(candidate.ref_name.clone(), candidate.commit.clone());
+        match change {
+            "head" => {
+                forge.heads.insert(1, "new-head".into());
+                forge.pull_requests.get_mut(&1).unwrap().head = "new-head".into();
+            }
+            "approval" => {
+                forge.approvals_at_head.clear();
+            }
+            "base" => {
+                forge.pull_requests.get_mut(&1).unwrap().base_branch = "other".into();
+            }
+            "closed" => {
+                forge.pull_requests.get_mut(&1).unwrap().state =
+                    super::super::ports::PullRequestState::Closed;
+            }
+            _ => unreachable!(),
+        }
+        receipt::record_pending(
+            state.path(),
+            &PendingAttempt {
+                repository: "fake-repository".into(),
+                target: "main".into(),
+                candidate,
+                policy,
+                gate_definition: definition,
+                gate_evidence: super::super::receipt::tests::evidence("candidate"),
+                publish: PublishDecision {
+                    mode,
+                    reason: "fixture".into(),
+                },
+                cost: CostEstimate::Unknown {
+                    reason: "fixture".into(),
+                },
+            },
+        )?;
+        let result = reconcile::recover_pending(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &mut FakeAlarms::default(),
+            state.path(),
+            "fake-repository",
+            "main",
+            false,
+            &mut Vec::new(),
+        );
+        assert!(forge.merges.is_empty());
+        assert!(repo.pushes.is_empty());
+        if mode == PublishMode::FastForward || change == "head" || change == "closed" {
+            result?;
+            assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
+        } else {
             assert!(matches!(
                 result,
                 Err(LandingError::PublicationUnknownAt { .. })
@@ -1302,10 +1431,182 @@ mod tests {
                 receipt::pending(state.path(), "fake-repository", "main")?.len(),
                 1
             );
-            assert_eq!(repo.refs.get(&candidate.ref_name), Some(&candidate.commit));
         }
         Ok(())
     }
+    #[test]
+    fn recovery_revalidates_heads() -> Result<(), Box<dyn std::error::Error>> {
+        for mode in [PublishMode::FastForward, PublishMode::RestOrdered] {
+            recovery_does_not_retry_changed_pr(mode, "head")?;
+        }
+        Ok(())
+    }
+    #[test]
+    fn recovery_revalidates_approvals() -> Result<(), Box<dyn std::error::Error>> {
+        for mode in [PublishMode::FastForward, PublishMode::RestOrdered] {
+            recovery_does_not_retry_changed_pr(mode, "approval")?;
+        }
+        Ok(())
+    }
+    #[test]
+    fn recovery_revalidates_bases() -> Result<(), Box<dyn std::error::Error>> {
+        for mode in [PublishMode::FastForward, PublishMode::RestOrdered] {
+            recovery_does_not_retry_changed_pr(mode, "base")?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_does_not_retry_closed_pr() -> Result<(), Box<dyn std::error::Error>> {
+        for mode in [PublishMode::FastForward, PublishMode::RestOrdered] {
+            recovery_does_not_retry_changed_pr(mode, "closed")?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn successful_recovery_merge_records_returned_commit() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
+        let policy = LandPolicy::resolve(
+            &settings,
+            &BTreeMap::new(),
+            None,
+            None,
+            &LandOverride::default(),
+        )?;
+        let state = tempfile::tempdir()?;
+        let head = forge.pull_requests[&1].head.clone();
+        let candidate = Candidate {
+            base: repo.target.clone(),
+            commit: "candidate".into(),
+            tree: "tree".into(),
+            ref_name: "land/test".into(),
+            steps: vec![CandidateStep {
+                pr: EligiblePr {
+                    number: 1,
+                    head: head.clone(),
+                    approval: "approval-1".into(),
+                    base_branch: "main".into(),
+                },
+                commit: "candidate".into(),
+                tree: "tree".into(),
+            }],
+        };
+        repo.refs
+            .insert(candidate.ref_name.clone(), candidate.commit.clone());
+        repo.trees.insert("landed-1".into(), "tree".into());
+        receipt::record_pending(
+            state.path(),
+            &PendingAttempt {
+                repository: "fake-repository".into(),
+                target: "main".into(),
+                candidate,
+                policy,
+                gate_definition: definition,
+                gate_evidence: super::super::receipt::tests::evidence("candidate"),
+                publish: PublishDecision {
+                    mode: PublishMode::RestOrdered,
+                    reason: "fixture".into(),
+                },
+                cost: CostEstimate::Unknown {
+                    reason: "fixture".into(),
+                },
+            },
+        )?;
+        let mut recovered = Vec::new();
+        reconcile::recover_pending(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &mut FakeAlarms::default(),
+            state.path(),
+            "fake-repository",
+            "main",
+            false,
+            &mut recovered,
+        )?;
+        assert_eq!(forge.merges.len(), 1);
+        assert_eq!(recovered[0].approved_to_landed[&head], "landed-1");
+        assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_checks_target_before_each_ordered_retry() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (mut forge, mut repo, mut gate, settings, definition) = fixture(2);
+        let policy = LandPolicy::resolve(
+            &settings,
+            &BTreeMap::new(),
+            None,
+            None,
+            &LandOverride::default(),
+        )?;
+        let state = tempfile::tempdir()?;
+        let base = repo.target.clone();
+        let steps: Vec<_> = (1..=2)
+            .map(|n| CandidateStep {
+                pr: EligiblePr {
+                    number: n,
+                    head: forge.pull_requests[&n].head.clone(),
+                    approval: format!("approval-{n}"),
+                    base_branch: "main".into(),
+                },
+                commit: format!("step-{n}"),
+                tree: format!("tree-{n}"),
+            })
+            .collect();
+        let candidate = Candidate {
+            base: base.clone(),
+            commit: "step-2".into(),
+            tree: "tree-2".into(),
+            ref_name: "land/test".into(),
+            steps,
+        };
+        repo.refs
+            .insert(candidate.ref_name.clone(), candidate.commit.clone());
+        repo.fetches = [base.clone(), base, "landed-1".into()].into();
+        repo.trees.insert("landed-2".into(), "tree-2".into());
+        receipt::record_pending(
+            state.path(),
+            &PendingAttempt {
+                repository: "fake-repository".into(),
+                target: "main".into(),
+                candidate,
+                policy,
+                gate_definition: definition,
+                gate_evidence: super::super::receipt::tests::evidence("step-2"),
+                publish: PublishDecision {
+                    mode: PublishMode::RestOrdered,
+                    reason: "fixture".into(),
+                },
+                cost: CostEstimate::Unknown {
+                    reason: "fixture".into(),
+                },
+            },
+        )?;
+        let mut recovered = Vec::new();
+        reconcile::recover_pending(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &mut FakeAlarms::default(),
+            state.path(),
+            "fake-repository",
+            "main",
+            false,
+            &mut recovered,
+        )?;
+        assert_eq!(
+            forge.merges.iter().map(|merge| merge.0).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(recovered[0].pull_requests.len(), 2);
+        assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
+        Ok(())
+    }
+
     #[test]
     fn earlier_recovery_receipt_survives_later_unknown_attempt()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1392,8 +1693,7 @@ mod tests {
     }
 
     #[test]
-    fn ordered_merge_keeps_pending_if_forge_still_reports_original_head()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn ordered_merge_excludes_pr_changed_before_merge() -> Result<(), Box<dyn std::error::Error>> {
         let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
         forge.direct_push = false;
         forge
@@ -1410,16 +1710,10 @@ mod tests {
             false,
             state.path(),
         );
-        assert!(matches!(
-            result,
-            Err(LandingError::PublicationUnknownAt { .. })
-        ));
-        assert_eq!(forge.merges.len(), 1);
-        assert_eq!(forge.merges[0].1, format!("{:040x}", 1));
-        assert_eq!(
-            receipt::pending(state.path(), "fake-repository", "main")?.len(),
-            1
-        );
+        let report = result?;
+        assert_eq!(report.outcomes[&1], Outcome::Excluded);
+        assert!(forge.merges.is_empty());
+        assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
         Ok(())
     }
     #[test]
@@ -1578,7 +1872,7 @@ mod tests {
     }
 
     #[test]
-    fn ordered_refusal_preserves_landed_prefix_and_pending()
+    fn ordered_refusal_preserves_landed_prefix_without_pending()
     -> Result<(), Box<dyn std::error::Error>> {
         let (mut forge, mut repo, mut gate, settings, definition) = fixture(2);
         forge.direct_push = false;
@@ -1613,15 +1907,15 @@ mod tests {
         let Err(LandingError::RunFailed { cause, report }) = result else {
             panic!("expected refusal with partial report")
         };
-        assert!(matches!(*cause, LandingError::PublicationUnknownAt { .. }));
+        assert!(matches!(*cause, LandingError::Refused(_)));
         let response = super::super::batch_response(*report, Some(*cause));
-        assert_eq!(response.status, provenant_records::Outcome::Pending);
+        assert_eq!(response.status, provenant_records::Outcome::Refused);
         assert_eq!(
             response.error.as_ref().map(|error| error.code.as_str()),
-            Some("LAND_PUBLICATION_UNKNOWN")
+            Some("LAND_REFUSED")
         );
         assert_eq!(response.data["outcomes"]["1"], "landed");
-        assert_eq!(response.data["outcomes"]["2"], "pending_unknown");
+        assert_eq!(response.data["outcomes"]["2"], "excluded");
         assert!(
             response.data["receipts"]
                 .as_array()
@@ -1640,7 +1934,7 @@ mod tests {
         assert_eq!(recovered["candidate_steps"][0]["pr"]["number"], 1);
         assert_eq!(
             receipt::pending(state.path(), "fake-repository", "main")?.len(),
-            1
+            0
         );
         let summary = std::fs::read_dir(state.path().join("landing/receipts"))?
             .map(|entry| entry.map(|e| e.path()))
@@ -1654,7 +1948,7 @@ mod tests {
             .ok_or("missing run summary")?;
         let summary: serde_json::Value = serde_json::from_slice(&std::fs::read(summary)?)?;
         assert_eq!(summary["outcomes"]["1"], "landed");
-        assert_eq!(summary["outcomes"]["2"], "pending_unknown");
+        assert_eq!(summary["outcomes"]["2"], "excluded");
         assert!(
             summary["receipts"]
                 .as_array()

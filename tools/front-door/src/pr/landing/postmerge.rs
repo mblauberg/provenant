@@ -36,7 +36,10 @@ fn tip(receipt: &LandingReceipt) -> String {
 enum Observed {
     Passed,
     Failed(Vec<String>),
-    Unsettled(Vec<String>),
+    Unsettled {
+        failed: Vec<String>,
+        pending: Vec<String>,
+    },
 }
 
 fn observe(
@@ -47,7 +50,7 @@ fn observe(
 ) -> Result<Observed, LandingError> {
     let runs = forge.checks_with_timeout(commit, timeout)?;
     let mut failed = Vec::new();
-    let mut unsettled = false;
+    let mut pending = Vec::new();
     for name in names {
         let results: Vec<&GateResult> = runs
             .iter()
@@ -68,11 +71,11 @@ fn observe(
                 .iter()
                 .any(|r| matches!(r, GateResult::Pending | GateResult::Missing))
         {
-            unsettled = true;
+            pending.push(name.clone());
         }
     }
-    Ok(if unsettled {
-        Observed::Unsettled(failed)
+    Ok(if !pending.is_empty() {
+        Observed::Unsettled { failed, pending }
     } else if !failed.is_empty() {
         Observed::Failed(failed)
     } else {
@@ -154,6 +157,7 @@ fn add_cost(receipt: &mut LandingReceipt, cost: CostEstimate) {
 
 /// Recheck approvals after publication; follow configured checks, bisect failures,
 /// send alarms and respect revert-forward policy.
+#[allow(clippy::disallowed_methods, reason = "post-merge polling boundary")]
 pub fn follow(
     forge: &mut dyn Forge,
     repo: &mut dyn Repo,
@@ -161,8 +165,16 @@ pub fn follow(
     alarms: &mut dyn AlarmSink,
     receipt: &mut LandingReceipt,
 ) -> Result<(), LandingError> {
-    #[allow(clippy::disallowed_methods, reason = "post-merge polling boundary")]
-    follow_with(forge, repo, gate, alarms, receipt, &std::thread::sleep)
+    let started = std::time::Instant::now();
+    follow_with(
+        forge,
+        repo,
+        gate,
+        alarms,
+        receipt,
+        &std::thread::sleep,
+        &|| started.elapsed(),
+    )
 }
 
 fn follow_with(
@@ -172,6 +184,7 @@ fn follow_with(
     alarms: &mut dyn AlarmSink,
     receipt: &mut LandingReceipt,
     sleep: &dyn Fn(std::time::Duration),
+    clock: &dyn Fn() -> std::time::Duration,
 ) -> Result<(), LandingError> {
     if receipt.shadow {
         return Ok(());
@@ -201,44 +214,67 @@ fn follow_with(
         return Ok(());
     }
     let landed = tip(receipt);
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "measure post-merge follow duration"
-    )]
-    let started = std::time::Instant::now();
     let mut elapsed = 0;
+    let mut observed_failures = Vec::new();
+    let mut last_pending = post.checks.clone();
     let failed = loop {
-        let remaining = std::time::Duration::from_secs(post.timeout_seconds).saturating_sub(
-            started
-                .elapsed()
-                .max(std::time::Duration::from_secs(elapsed)),
-        );
+        let remaining = std::time::Duration::from_secs(post.timeout_seconds)
+            .saturating_sub(clock().max(std::time::Duration::from_secs(elapsed)));
         let observation = if remaining.is_zero() {
-            Observed::Unsettled(Vec::new())
+            Observed::Unsettled {
+                failed: Vec::new(),
+                pending: last_pending.clone(),
+            }
         } else {
             let result = observe(forge, &landed, &post.checks, remaining);
-            if started.elapsed() >= std::time::Duration::from_secs(post.timeout_seconds) {
-                Observed::Unsettled(Vec::new())
+            if clock() >= std::time::Duration::from_secs(post.timeout_seconds) {
+                match result? {
+                    Observed::Failed(failed) => Observed::Unsettled {
+                        failed,
+                        pending: last_pending.clone(),
+                    },
+                    Observed::Unsettled { failed, pending } => {
+                        Observed::Unsettled { failed, pending }
+                    }
+                    Observed::Passed => Observed::Unsettled {
+                        failed: Vec::new(),
+                        pending: last_pending.clone(),
+                    },
+                }
             } else {
                 result?
             }
         };
-        elapsed = elapsed.max(started.elapsed().as_secs());
+        elapsed = elapsed.max(clock().as_secs());
         match observation {
             Observed::Passed => break None,
             Observed::Failed(names) => break Some(names),
-            Observed::Unsettled(failed) if elapsed >= post.timeout_seconds => {
+            Observed::Unsettled { failed, pending } if elapsed >= post.timeout_seconds => {
+                for name in failed {
+                    if !observed_failures.contains(&name) {
+                        observed_failures.push(name);
+                    }
+                }
                 raise(
                     alarms,
                     receipt,
                     alarm(
                         "unsettled",
-                        format!("post-merge checks did not settle on {landed}"),
+                        format!(
+                            "post-merge checks {} did not settle on {landed}",
+                            pending.join(", ")
+                        ),
                     ),
                 )?;
-                break (!failed.is_empty()).then_some(failed);
+                break (!observed_failures.is_empty()).then_some(observed_failures);
             }
-            Observed::Unsettled(_) => {
+            Observed::Unsettled { failed, pending } => {
+                last_pending = pending;
+                for name in failed {
+                    if !observed_failures.contains(&name) {
+                        observed_failures.push(name);
+                    }
+                }
                 let pause = settings
                     .poll_seconds
                     .max(1)
@@ -248,7 +284,7 @@ fn follow_with(
             }
         }
     };
-    let seconds = started.elapsed().as_secs().max(elapsed);
+    let seconds = clock().as_secs().max(elapsed);
     let post_cost = match &post.pool {
         Some(pool) => super::budget::estimate(&settings.budget, &[(pool.clone(), seconds)])?,
         None => CostEstimate::Unknown {
@@ -348,7 +384,9 @@ fn follow_with(
             ),
             Err(error) => alarm(
                 "revert_forward_failed",
-                format!("could not open a revert for #{number}: {error}"),
+                format!(
+                    "could not open a revert for #{number}: {error}; inspect branch {branch} and retry creating the revert pull request manually"
+                ),
             ),
         };
         raise(alarms, receipt, outcome)?;
@@ -500,7 +538,10 @@ mod tests {
                 &["post".into()],
                 std::time::Duration::from_secs(1)
             )?,
-            Observed::Unsettled(vec!["post".into()])
+            Observed::Unsettled {
+                failed: vec!["post".into()],
+                pending: vec!["post".into()]
+            }
         );
         Ok(())
     }
@@ -592,10 +633,11 @@ mod tests {
     }
 
     #[test]
-    fn overrun_read_is_unsettled_even_if_it_passes() -> Result<(), LandingError> {
+    fn follow_passes_remaining_budget_to_each_read() -> Result<(), LandingError> {
         let mut r = rig(false, false, 1);
         let mut settings = r.receipt.policy.settings().unwrap();
-        settings.post_merge.timeout_seconds = 1;
+        settings.post_merge.timeout_seconds = 6;
+        settings.poll_seconds = 3;
         r.receipt.policy = crate::pr::landing::policy::LandPolicy::resolve(
             &settings,
             &BTreeMap::new(),
@@ -604,10 +646,78 @@ mod tests {
             &LandOverride::default(),
         )
         .unwrap();
-        post_result(&mut r, "l1", GateResult::Passed);
-        r.forge.check_delay = std::time::Duration::from_millis(1100);
-        run(&mut r)?;
+        let elapsed = std::cell::Cell::new(std::time::Duration::ZERO);
+        follow_with(
+            &mut r.forge,
+            &mut r.repo,
+            &mut r.gate,
+            &mut r.alarms,
+            &mut r.receipt,
+            &|duration| elapsed.set(elapsed.get() + duration),
+            &|| elapsed.get(),
+        )?;
+        assert_eq!(
+            r.forge.check_timeouts,
+            [
+                std::time::Duration::from_secs(6),
+                std::time::Duration::from_secs(3)
+            ]
+        );
         assert!(r.alarms.0.iter().any(|alarm| alarm.code == "unsettled"));
+        Ok(())
+    }
+
+    #[test]
+    fn deadline_keeps_failure_while_other_check_is_pending() -> Result<(), LandingError> {
+        let mut r = rig(true, false, 1);
+        let mut settings = r.receipt.policy.settings().unwrap();
+        settings.post_merge.timeout_seconds = 2;
+        settings.post_merge.checks = vec!["failed".into(), "pending".into()];
+        r.receipt.policy = crate::pr::landing::policy::LandPolicy::resolve(
+            &settings,
+            &BTreeMap::new(),
+            None,
+            None,
+            &LandOverride::default(),
+        )
+        .unwrap();
+        r.forge.check_runs.insert(
+            "l1".into(),
+            vec![GateEvidence {
+                checks: vec![
+                    CheckEvidence {
+                        name: "failed".into(),
+                        issuer: None,
+                        result: GateResult::Failed,
+                    },
+                    CheckEvidence {
+                        name: "pending".into(),
+                        issuer: None,
+                        result: GateResult::Pending,
+                    },
+                ],
+                ..super::super::receipt::tests::evidence("l1")
+            }],
+        );
+        let elapsed = std::cell::Cell::new(std::time::Duration::ZERO);
+        follow_with(
+            &mut r.forge,
+            &mut r.repo,
+            &mut r.gate,
+            &mut r.alarms,
+            &mut r.receipt,
+            &|duration| elapsed.set(elapsed.get() + duration),
+            &|| elapsed.get(),
+        )?;
+        assert!(
+            r.alarms
+                .0
+                .iter()
+                .any(|a| a.code == "unsettled" && a.message.contains("pending"))
+        );
+        assert!(r.alarms.0.iter().any(|a| a.code == "post_merge_failed"
+            && a.message.contains("failed")
+            && a.message.contains("#1")));
         Ok(())
     }
 
@@ -637,6 +747,7 @@ mod tests {
             &mut r.alarms,
             &mut r.receipt,
             &|_| {},
+            &|| std::time::Duration::ZERO,
         )?;
         assert_eq!(r.alarms.0[0].code, "unsettled");
         assert_eq!(r.receipt.cost, CostEstimate::Known { micros: 7 });

@@ -377,8 +377,9 @@ the publication mode based on direct-push authority and records why.
 A stale or non-fast-forward push, merge response 405, 409 or 422, or head
 mismatch is a definite refusal. The lander reconciles and receipts anything
 already landed; target movement consumes a rebuild, while another refusal is
-reported without leaving a pending marker. A lost or ambiguous response, such
-as a transport error, timeout or 5xx, leaves a pending marker. Before retry or
+reported without leaving a pending marker. The lander writes the marker before
+publishing, so an interrupted run also leaves one. A lost or ambiguous response,
+such as a transport error, timeout or 5xx, keeps the marker. Before retry or
 cleanup, recovery checks ancestry and forge state, clears the marker when the
 outcome is proved landed or not landed, and retains it only when still unknown.
 The error gives the marker path: inspect its JSON under the project state
@@ -414,7 +415,9 @@ omitted fields inherit. The project and tier tables accept the same fields.
 - `poll_seconds` controls initial CI polling; `--poll` overrides it.
 - `integration` selects `batch`, `single` or `forge_queue`; `batch_size` and
   `batch_wait_seconds` bound collection. `candidate_ref_prefix` names temporary
-  refs and `max_rebuilds` bounds rebuilds on target movement. The bundled CI
+  refs and `max_rebuilds` bounds rebuilds on target movement.
+  `publish_settle_seconds` defaults to 30 and controls the wait before recovery
+  re-observes a publication that cannot safely be retried. The bundled CI
   trigger covers `land/**`; if you change the prefix, update the CI trigger to
   match. `land --explain` warns on a non-default prefix. The contract's forge
   queue path is not yet implemented and `forge_queue` is rejected at runtime.

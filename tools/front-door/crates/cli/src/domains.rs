@@ -37,6 +37,7 @@ pub struct LandSettings {
     pub batch_wait_seconds: u64,
     pub candidate_ref_prefix: String,
     pub max_rebuilds: u64,
+    pub publish_settle_seconds: u64,
     pub gate: GateSettings,
     pub pr_ci: PrCiSettings,
     pub publish: Publication,
@@ -63,6 +64,8 @@ pub struct LandOverride {
     pub candidate_ref_prefix: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_rebuilds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publish_settle_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gate: Option<GateOverride>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -259,6 +262,7 @@ impl Default for LandSettings {
             batch_wait_seconds: 30,
             candidate_ref_prefix: "land/".into(),
             max_rebuilds: 3,
+            publish_settle_seconds: 30,
             gate: GateSettings::default(),
             pr_ci: PrCiSettings::default(),
             publish: Publication::Auto,
@@ -400,6 +404,7 @@ batch_size = 8
 batch_wait_seconds = 30
 candidate_ref_prefix = "land/"
 max_rebuilds = 3
+publish_settle_seconds = 30
 publish = "auto"
 method = "merge"
 [land.gate]
@@ -430,6 +435,7 @@ timeout_seconds = 60
     FieldMetadata::new("land.batch_wait_seconds", "int"),
     FieldMetadata::new("land.candidate_ref_prefix", "string"),
     FieldMetadata::new("land.max_rebuilds", "int"),
+    FieldMetadata::new("land.publish_settle_seconds", "int"),
     FieldMetadata::enumeration("land.gate.kind", &["checks", "commands"]),
     FieldMetadata::new("land.gate.checks", "array"),
     FieldMetadata::new("land.gate.issuer", "string"),
@@ -472,6 +478,8 @@ timeout_seconds = 60
     FieldMetadata::new("land.tiers.{tier}.candidate_ref_prefix", "string"),
     FieldMetadata::new("land.projects.{project}.max_rebuilds", "int"),
     FieldMetadata::new("land.tiers.{tier}.max_rebuilds", "int"),
+    FieldMetadata::new("land.projects.{project}.publish_settle_seconds", "int"),
+    FieldMetadata::new("land.tiers.{tier}.publish_settle_seconds", "int"),
     FieldMetadata::enumeration("land.projects.{project}.gate.kind", &["checks", "commands"]),
     FieldMetadata::enumeration("land.tiers.{tier}.gate.kind", &["checks", "commands"]),
     FieldMetadata::new("land.projects.{project}.gate.checks", "array"),
