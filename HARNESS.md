@@ -159,6 +159,11 @@ Review integration heads with the full mixed panel before landing.
 | `crucial` | 2 or more, covering every triggered lens. |
 | `terminal` | 3 or more, including an adversarial reviewer, plus explicit owner acceptance. |
 
+Dependency bot updates are exempt: a patch or minor version bump that changes
+only manifests and lockfiles may auto-merge on green CI with no reviewer. A major
+bump, a new dependency, or any change outside manifests and lockfiles takes at
+least one `routine` reviewer.
+
 Prefer reviewers outside every author and repairer family; at `crucial` use two
 non-author families when available. Record actual `adapter/model@effort`,
 family, lens, scope, unavailable legs, reasons, evidence, expiry and substitutions.

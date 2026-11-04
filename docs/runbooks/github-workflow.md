@@ -437,12 +437,15 @@ instead of the actual cause. If a PATH reduction is genuinely needed, start from
 the real `PATH` and subtract only the named executables under suspicion. Record
 the matrix and which single axis changed the outcome.
 
-### Dependabot patch-only auto-merge
+### Dependabot auto-merge
 
-The existing [`dependabot-automerge.yml`](../../.github/workflows/dependabot-automerge.yml)
-can queue eligible patch updates with `ci-status` as its only gate. This runtime
-exception does not establish the review ladder's coverage. Supply the required
-review before landing; the workflow needs a follow-up change to enforce it.
+Dependabot updates are exempt from review: a patch or minor version bump that
+changes only manifests and lockfiles may auto-merge once `ci-status` is green.
+A major bump, a new dependency, or any change outside manifests and lockfiles
+takes at least one `routine` reviewer.
+[`dependabot-automerge.yml`](../../.github/workflows/dependabot-automerge.yml)
+queues `gh pr merge --auto` for eligible updates; until #2844 lands it queues
+patch updates only, so land minor updates by hand after CI.
 
 ### After merge
 
