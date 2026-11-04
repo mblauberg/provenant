@@ -581,8 +581,17 @@ fn fake_council_provider_process() {
         for file in request["files"].as_array().unwrap() {
             let lens = file["label"].as_str().unwrap();
             let path = file["path"].as_str().unwrap();
-            assert!(prompt.contains(path));
-            let full = std::fs::read_to_string(path).unwrap();
+            let source = prompt
+                .lines()
+                .filter_map(|line| {
+                    line.strip_prefix("composite findings truncated: full member result: ")
+                        .and_then(|source| serde_json::from_str::<Value>(source).ok())
+                })
+                .find(|source| source["label"] == lens)
+                .unwrap();
+            let named_path = source["path"].as_str().unwrap();
+            assert_eq!(named_path, path);
+            let full = std::fs::read_to_string(named_path).unwrap();
             let block = full
                 .split_once("```findings\n")
                 .unwrap()
@@ -935,7 +944,13 @@ fn review_council_continues_when_lens_findings_exceed_the_cap() {
             prompt.contains("composite findings truncated"),
             "{id}: {prompt}"
         );
-        assert!(prompt.contains("/results/lenses--"), "{id}: {prompt}");
+        assert!(
+            prompt.contains(
+                "composite findings truncated: full member result: {\"label\":\"lenses--"
+            ),
+            "{id}: {prompt}"
+        );
+        assert!(!prompt.contains("/results/lenses--"), "{id}: {prompt}");
         let report = &owner.captured_results[&format!("fixture/{id}")];
         for lens in owner
             .launched

@@ -1218,8 +1218,8 @@ composite. If the combined export exceeds the count or byte limit, the composite
 keeps a severity-ranked subset, reserving each member's strongest finding when
 all such reservations fit. Severity ranks critical/blocking/P0, high/P1,
 medium/P2, low/P3, then informational/P4; unrecognised labels rank last.
-A warning gives the dropped count and member result paths and available attempt references; the composite result also carries the
-notice. When materialisation is capped or its listing is too long, an input index
+A warning gives the dropped count, members and available attempt references; the composite result also carries the
+notice. Downstream input listings identify the staged paths for those member results. When materialisation is capped or its listing is too long, an input index
 names the graph and every source, status, path, attempt reference and finding ID prefix. A member with findings
 but no attempt result supplies a materialised findings block instead. Consumers
 must read the full member results and account for omitted findings. Review-council verification and

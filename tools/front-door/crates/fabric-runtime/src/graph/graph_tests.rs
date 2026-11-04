@@ -3561,6 +3561,36 @@ fn long_upstream_listing_points_to_complete_index() {
 }
 
 #[test]
+fn truncation_notice_names_readable_staged_results() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reviews--a.md");
+    std::fs::write(&path, "full findings from a").unwrap();
+    let entries = vec![MaterialisedInput::File {
+        label: "reviews--a".into(),
+        path,
+        bytes: 20,
+        omitted: 0,
+    }];
+    let requests = vec![InputRequest {
+        label: "reviews--a".into(),
+        attempt_ref: None,
+        inline_findings: None,
+        finding_prefix: Some("reviews--a:".into()),
+    }];
+    let notice = render_files(&entries, &requests, None);
+    let source = notice
+        .lines()
+        .find_map(|line| line.strip_prefix("composite findings truncated: full member result: "))
+        .unwrap();
+    let source: serde_json::Value = serde_json::from_str(source).unwrap();
+    assert_eq!(source["label"], "reviews--a");
+    assert_eq!(
+        std::fs::read_to_string(source["path"].as_str().unwrap()).unwrap(),
+        "full findings from a"
+    );
+}
+
+#[test]
 fn a_host_without_materialisation_leaves_the_prompt_as_it_was() {
     let (document, mut owner) = parent_and_child(None);
     advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
@@ -5804,8 +5834,9 @@ fn composite_truncates_over_cap_findings_and_reaches_downstream() {
                 .contains(&format!("{} dropped", 2 * count - outputs.findings.len()))
         );
         assert!(
-            outputs.warnings[0].contains("/results/a")
-                && outputs.warnings[0].contains("/results/b")
+            outputs.warnings[0].contains("reviews--a")
+                && outputs.warnings[0].contains("reviews--b")
+                && !outputs.warnings[0].contains("/results/")
                 && outputs.warnings[0].contains("fixture/a")
                 && outputs.warnings[0].contains("fixture/b")
         );

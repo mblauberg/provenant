@@ -740,6 +740,17 @@ pub(super) fn render_files(
                 format!("- {label}: unavailable: {}", prefix(reason, 512))
             }
         };
+        if let MaterialisedInput::File { label, path, .. } = entry
+            && requests
+                .iter()
+                .any(|request| request.label == *label && request.finding_prefix.is_some())
+        {
+            let source = serde_json::json!({"label": label, "path": path});
+            text.push_str(&format!(
+                "composite findings truncated: full member result: {}\n",
+                source.to_string().replace('<', "\\u003c")
+            ));
+        }
         text.push_str(&line.replace('<', "\\u003c"));
         let label = match entry {
             MaterialisedInput::File { label, .. }

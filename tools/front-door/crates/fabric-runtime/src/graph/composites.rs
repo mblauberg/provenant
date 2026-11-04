@@ -385,10 +385,6 @@ fn outputs(
                     if !source.findings.is_empty() {
                         finding_members.push((
                             export.node.clone(),
-                            source
-                                .result
-                                .as_ref()
-                                .and_then(|result| result.path.clone()),
                             member
                                 .attempts
                                 .iter()
@@ -420,24 +416,16 @@ fn outputs(
     if total > MAX_FINDINGS || canonical_len(&selected.findings) > FINDINGS_BYTES {
         selected.findings = bounded_findings(std::mem::take(&mut selected.findings));
         let dropped = total - selected.findings.len();
-        let paths = finding_members
+        let members = finding_members
             .iter()
-            .map(|(name, path, reference)| {
-                // JSON quoting keeps control characters from breaking the notice
-                // into fake rows or hiding an inherited notice at a nested boundary.
-                let path = path
-                    .as_ref()
-                    .and_then(|path| serde_json::to_string(path).ok())
-                    .unwrap_or_else(|| "result path unavailable".into());
-                match reference {
-                    Some(reference) => format!("{name}: {path} (attempt {reference})"),
-                    None => format!("{name}: {path}"),
-                }
+            .map(|(name, reference)| match reference {
+                Some(reference) => format!("{name} (attempt {reference})"),
+                None => name.clone(),
             })
             .collect::<Vec<_>>()
             .join("; ");
         let warning = format!(
-            "composite findings truncated: {dropped} dropped; full member results: {paths}"
+            "composite findings truncated: {dropped} dropped; full member results in staged inputs: {members}"
         );
         let mut rest = warning.as_str();
         let mut notices = Vec::new();
@@ -453,7 +441,7 @@ fn outputs(
             && let Some(last) = notices.last_mut()
         {
             *last = format!(
-                "{}... full paths in composite result",
+                "{}... full members in composite result",
                 bounded(last, WARNING_BYTES - 40)
             );
         }

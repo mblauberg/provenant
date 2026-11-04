@@ -316,9 +316,11 @@ fn fixture() -> Result {
                 let entries: Vec<_> = prompt
                     .lines()
                     .filter_map(|line| {
-                        let (label, rest) = line.strip_prefix("- lenses--")?.split_once(": ")?;
-                        let (path, _) = rest.split_once(" (")?;
-                        Some((label.to_owned(), PathBuf::from(path)))
+                        let source = line
+                            .strip_prefix("composite findings truncated: full member result: ")?;
+                        let source: Value = serde_json::from_str(source).ok()?;
+                        let label = source["label"].as_str()?.strip_prefix("lenses--")?;
+                        Some((label.to_owned(), PathBuf::from(source["path"].as_str()?)))
                     })
                     .collect();
                 assert!(entries.len() >= 4, "{prompt}");
@@ -2647,6 +2649,9 @@ fn claude_dispatch(host_native: bool, pool: bool) -> Result {
 /// Whether graph fixtures can launch confined providers here.
 fn graph_fixture_available() -> Result<bool> {
     if !cfg!(target_os = "macos") {
+        provenant_test_support::skip_sandbox_dependent_test(
+            "graph fixture skipped: native confinement requires macOS",
+        )?;
         return Ok(false);
     }
     let executor = provenant_os::exec::SystemExecutor::new(1)?;
