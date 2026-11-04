@@ -19,8 +19,8 @@ def inventory(path):
                 rows.append(fields)
     if not rows:
         raise ValueError('native inventory is empty')
-    names = [row[0] for row in rows]
-    if len(set(names)) != len(names):
+    identities = [(row[5], row[0]) for row in rows]
+    if len(set(identities)) != len(identities):
         raise ValueError('duplicate native inventory test')
     return rows
 

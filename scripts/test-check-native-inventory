@@ -40,4 +40,21 @@ with tempfile.TemporaryDirectory() as directory:
     (root / 'native.json').write_text(json.dumps({'PROVENANT_CONFINEMENT_REQUIRED': '1'}))
     (root / 'duplicate.xml').write_text(report.read_text())
     assert module.check([row], listing, root)
+    (root / 'duplicate.xml').unlink()
+    # Names are scoped to a binary: two suites may legitimately use the same
+    # Rust module/test name, but each must supply its own execution evidence.
+    other_row = [*row[:5], 'other']
+    listing['rust-suites']['other'] = {'testcases': {name: {}}}
+    report.write_text(f'<testsuites><testsuite><testcase classname="suite" name="{name}"/><testcase classname="other" name="{name}"/></testsuite></testsuites>')
+    assert not module.check([row, other_row], listing, root)
+    inventory_file = root / 'inventory.md'
+    inventory_file.write_text('\n'.join('| ' + ' | '.join(f'`{v}`' if i in (0, 5) else v for i, v in enumerate(r)) + ' |' for r in [row, other_row]))
+    assert len(module.inventory(inventory_file)) == 2
+    inventory_file.write_text(inventory_file.read_text() + '\n' + inventory_file.read_text().splitlines()[0])
+    try:
+        module.inventory(inventory_file)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('duplicate binary/test identity accepted')
 print('Native inventory evidence fixtures passed.')
