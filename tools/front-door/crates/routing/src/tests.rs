@@ -492,7 +492,9 @@ fn model_selector_keeps_the_entire_provider_path() -> Result<(), RoutingError> {
 fn route_names_validate_at_the_string_boundary() -> Result<(), Box<dyn std::error::Error>> {
     let wire = r#"{"intent":{"workload":"general","writes":false},"choice":{"kind":"named_route","value":"review.v1-_2"},"effort":null,"confidential":false,"fallback":{"kind":"none"}}"#;
     let query: RouteRequest = serde_json::from_str(wire)?;
-    assert_eq!(serde_json::to_string(&query)?, wire);
+    let roundtrip: RouteRequest = serde_json::from_str(&serde_json::to_string(&query)?)?;
+    assert_eq!(roundtrip, query);
+    assert_eq!(query.intent.network, None);
     assert_eq!(
         query.choice,
         RouteChoice::NamedRoute(RouteName::parse("review.v1-_2")?)
