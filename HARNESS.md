@@ -167,6 +167,10 @@ changes may be reviewed together once they have merged into a batch, but risky
 changes are reviewed on their own head first. Evidence decides claims, never a
 majority vote.
 
+A verdict covers the diff it read. A later commit needs review only of its own
+delta, such as a repair or a conflict resolution; a clean merge of the base
+needs none. CI is different: the head that merges must be green.
+
 ## Load depth only when triggered
 
 - Intake and specification go to `scope`, and defect investigation to

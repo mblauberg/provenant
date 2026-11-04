@@ -27,8 +27,9 @@
 ## Evidence
 
 Base: `main` at `<sha>`. Head under review: `<branch>` at `<sha>`.
-A later commit invalidates every row below and the independent review;
-rerun both against the new head.
+Rows are bound to the head they ran on, and the merging head needs green CI.
+A later commit needs review only of its delta (a repair or a conflict
+resolution); a clean merge of the base needs none.
 
 <!-- Every row must be externally verifiable: an exact command with its
      result, or a linked artifact, bound to the exact head SHA. Never
