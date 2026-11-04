@@ -642,15 +642,12 @@ fn prepare(
     if !shell {
         setup.push(SetupStep::CreateDir(transcript_dir.clone()));
     }
-    let user_skills = input.home.join(".claude/skills");
-    let (skill_reads, skill_omitted) = if input.user_skills() && user_skills.is_dir() {
-        crate::user_skills_grants_with_omissions(&user_skills, Some(input.home))
-    } else {
-        (Vec::new(), Vec::new())
-    };
-    let mut omitted_discovery = crate::launch::OmittedGrant::skills(skill_omitted);
-    let discover_skills = !skill_reads.is_empty();
-    if shell || (discover_skills && input.account.is_some()) {
+    let staged_skills = input.stage_user_skills();
+    let user_skills = staged_skills.root.clone();
+    let skill_reads = user_skills.iter().map(subtree).collect::<Vec<_>>();
+    let mut omitted_discovery = Vec::new();
+    let discover_skills = user_skills.is_some();
+    if shell || discover_skills {
         let config = plan
             .private_state
             .as_ref()
@@ -659,7 +656,7 @@ fn prepare(
             .join("claude-config");
         env.push(("CLAUDE_CONFIG_DIR".into(), config.clone().into_os_string()));
         setup.push(SetupStep::CreateDir(config.clone()));
-        if discover_skills {
+        if let Some(user_skills) = &user_skills {
             setup.push(SetupStep::Symlink {
                 link: config.join("skills"),
                 target: user_skills.clone(),
@@ -725,6 +722,7 @@ fn prepare(
         cwd: input.cwd.to_owned(),
         setup,
         omitted_discovery,
+        user_skills: staged_skills,
         git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {

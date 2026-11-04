@@ -144,13 +144,10 @@ fn prepare(
             .to_str()
             .ok_or(ProviderError::InvalidPath)?
     );
-    let user_skills = crate::user_skills_directory("opencode", input.home, input.host_var)
-        .filter(|_| input.user_skills());
-    let (skill_reads, skill_omitted) = user_skills
-        .as_ref()
-        .map(|path| crate::user_skills_grants_with_omissions(path, Some(input.home)))
-        .unwrap_or_default();
-    let mut omitted_discovery = crate::launch::OmittedGrant::skills(skill_omitted);
+    let staged_skills = input.stage_user_skills();
+    let user_skills = staged_skills.root.clone();
+    let skill_reads = user_skills.iter().map(subtree).collect::<Vec<_>>();
+    let mut omitted_discovery = Vec::new();
     let mut permission = serde_json::json!({
         "edit": edit,
         "bash": edit,
@@ -297,6 +294,30 @@ fn prepare(
             target: input.provenant.git.to_owned(),
         },
     ];
+    // Mirror provider configuration as individual links; staged skills have their own tree.
+    let private_config = private.join("config");
+    if staged_skills.root.is_some() {
+        let private_opencode = private_config.join("opencode");
+        setup.push(SetupStep::CreateDir(private_opencode.clone()));
+        if let Ok(entries) = std::fs::read_dir(&config_dir) {
+            for entry in entries.flatten() {
+                if entry.file_name() != "skills"
+                    && entry.file_type().is_ok_and(|kind| !kind.is_symlink())
+                {
+                    setup.push(SetupStep::Symlink {
+                        link: private_opencode.join(entry.file_name()),
+                        target: entry.path(),
+                    });
+                }
+            }
+        }
+        if let Some(skills) = &staged_skills.root {
+            setup.push(SetupStep::Symlink {
+                link: private_opencode.join("skills"),
+                target: skills.clone(),
+            });
+        }
+    }
     // `shell` holds per-project shell state; the server creates its entry
     // while resolving the location, and refuses every request (HTTP 500)
     // when that mkdir is denied.
@@ -339,10 +360,7 @@ fn prepare(
     env.extend([
         ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
         ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-        (
-            "XDG_CONFIG_HOME".into(),
-            config_home.clone().into_os_string(),
-        ),
+        ("XDG_CONFIG_HOME".into(), private_config.into_os_string()),
         ("XDG_DATA_HOME".into(), data_home.clone().into_os_string()),
         (
             "XDG_CACHE_HOME".into(),
@@ -392,6 +410,7 @@ fn prepare(
         cwd: input.cwd.to_owned(),
         setup,
         omitted_discovery,
+        user_skills: staged_skills,
         git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {

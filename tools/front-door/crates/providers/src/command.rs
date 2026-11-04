@@ -141,6 +141,7 @@ fn prepare(
         cwd: input.cwd.to_owned(),
         setup,
         omitted_discovery,
+        user_skills: Default::default(),
         git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: profile,

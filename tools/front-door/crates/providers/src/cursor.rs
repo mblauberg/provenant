@@ -67,15 +67,9 @@ fn prepare(
     if config.is_dir() {
         authentication.push(subtree(config));
     }
-    let mut skill_reads = Vec::new();
+    let staged_skills = input.stage_user_skills();
+    let skill_reads = staged_skills.root.iter().map(subtree).collect::<Vec<_>>();
     let mut omitted_discovery = Vec::new();
-    if input.user_skills()
-        && let Some(skills) = crate::user_skills_directory("cursor", input.home, input.host_var)
-    {
-        let (reads, omitted) = crate::user_skills_grants_with_omissions(&skills, Some(input.home));
-        skill_reads = reads;
-        omitted_discovery = crate::launch::OmittedGrant::skills(omitted);
-    }
     let mut optional_reads = if access == Access::WorktreeWrite {
         crate::launch::git_global_files(&input.home.join(".config"))
     } else {
@@ -94,14 +88,51 @@ fn prepare(
         ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
         ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
     ]);
+    let private = &plan
+        .private_state
+        .as_ref()
+        .ok_or(ProviderError::UnsupportedPolicy)?
+        .path;
+    let mut setup = vec![SetupStep::CreateDir(chats.clone())];
+    if staged_skills.root.is_some() {
+        setup.push(SetupStep::CreateDir(private.join(".cursor")));
+        setup.push(SetupStep::CreateDir(private.join(".config")));
+        for (link, target) in [
+            (private.join(".cursor/chats"), chats.clone()),
+            (
+                private.join(".cursor/cli-config.json"),
+                input.home.join(".cursor/cli-config.json"),
+            ),
+            (
+                private.join(".config/cursor"),
+                input.home.join(".config/cursor"),
+            ),
+        ] {
+            if target.exists() || target == chats {
+                setup.push(SetupStep::Symlink { link, target });
+            }
+        }
+        if let Some(skills) = &staged_skills.root {
+            setup.push(SetupStep::Symlink {
+                link: private.join(".cursor/skills"),
+                target: skills.clone(),
+            });
+        }
+        for (key, value) in &mut env {
+            if key == "HOME" {
+                *value = private.into();
+            }
+        }
+    }
     Ok(LaunchSpec {
         argv,
         env,
         stdin: Stdin::Null,
         secret_input: None,
         cwd: input.cwd.to_owned(),
-        setup: vec![SetupStep::CreateDir(chats.clone())],
+        setup,
         omitted_discovery,
+        user_skills: staged_skills,
         git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {

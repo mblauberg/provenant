@@ -2343,6 +2343,7 @@ pub(super) fn fixture_input<'a>(
         home: std::path::Path::new("/fixture/home"),
         user: std::ffi::OsStr::new("fixture"),
         host_var: &|_| None,
+        skill_stage_max_bytes: 16 * 1024 * 1024,
         account: None,
         token,
         cwd,
@@ -4570,26 +4571,41 @@ fn codex_grants_host_user_skills_read_only_when_present() -> Result<(), Box<dyn 
         );
         std::fs::create_dir_all(&skills)?;
         let spec = prepare()?;
-        let spec = &spec.profile.spec;
+        let staged = spec.user_skills.root.as_ref().expect("staged skills");
         assert!(
-            spec.runtime_reads
-                .contains(&crate::launch::subtree(&skills)),
-            "{access:?}"
+            spec.profile
+                .spec
+                .runtime_reads
+                .contains(&crate::launch::subtree(staged))
+        );
+        assert!(
+            !spec
+                .profile
+                .spec
+                .runtime_reads
+                .iter()
+                .any(|grant| covers(grant, &skills))
         );
         let writable = spec
+            .profile
+            .spec
             .tool_writes
             .iter()
-            .chain(&spec.state_writes)
+            .chain(&spec.profile.spec.state_writes)
             .chain(
-                spec.authentication
+                spec.profile
+                    .spec
+                    .authentication
                     .iter()
                     .flat_map(|auth| &auth.in_place_writes),
             )
             .chain(std::iter::once(&plan.permissions().scratch))
             .chain(&plan.permissions().private_state);
-        for grant in writable {
-            assert!(!covers(grant, &skills), "{access:?}: {grant:?}");
-        }
+        assert!(
+            writable
+                .into_iter()
+                .all(|grant| !overlaps_skill(grant, staged))
+        );
         std::fs::remove_dir(&skills)?;
     }
     Ok(())
@@ -6812,19 +6828,25 @@ fn user_skills_grants_resolve_linked_roots_resources_and_cycles()
     std::os::unix::fs::symlink(&resource, deep.join("reference.md"))?;
     std::os::unix::fs::symlink(&root, target.join("cycle"))?;
     std::os::unix::fs::symlink(home.join("absent"), root.join("broken"))?;
-    let grants = crate::user_skills_grants(&home.join("skills"));
-    assert_eq!(grants.len(), 3);
-    assert!(grants.contains(&crate::launch::subtree(&root)));
-    assert!(grants.contains(&crate::launch::subtree(&target)));
-    assert!(grants.contains(&crate::launch::exact(&resource)));
-    for grant in &grants {
-        let anchor = match grant.scope {
-            provenant_confinement::permissions::PathScope::Subtree => grant.path.as_path(),
-            provenant_confinement::permissions::PathScope::Exact => grant.path.parent().unwrap(),
-        };
-        provenant_confinement::permissions::AnchoredDirectory::open_canonical(anchor)?;
-    }
-    assert!(crate::user_skills_grants(&home.join("absent")).is_empty());
+    let staged =
+        crate::skill_stage::capture(&home.join("skills"), &home.join("staged"), &home, 4096);
+    assert_eq!(staged.file_count, 1);
+    assert!(
+        staged
+            .warnings
+            .iter()
+            .any(|warning| warning.reason == "cycle")
+    );
+    assert!(
+        staged.setup().iter().any(
+            |step| matches!(step, SetupStep::WriteFile { bytes, .. } if bytes == b"reference")
+        )
+    );
+    assert!(
+        crate::skill_stage::capture(&home.join("absent"), &home.join("staged"), &home, 4096)
+            .root
+            .is_none()
+    );
     Ok(())
 }
 
@@ -6885,18 +6907,18 @@ fn opencode_skill_and_provider_config_omissions_keep_both_sources()
     let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
     input.home = &home;
     let spec = opencode::OpenCode.prepare(input)?;
+    assert!(
+        spec.user_skills
+            .warnings
+            .iter()
+            .any(|warning| warning.reason == "credential_root")
+    );
     assert_eq!(
         spec.omitted_discovery,
-        vec![
-            crate::launch::OmittedGrant {
-                path: secret.clone(),
-                source: crate::launch::OmissionSource::UserSkill,
-            },
-            crate::launch::OmittedGrant {
-                path: secret,
-                source: crate::launch::OmissionSource::ProviderConfig,
-            },
-        ]
+        vec![crate::launch::OmittedGrant {
+            path: secret,
+            source: crate::launch::OmissionSource::ProviderConfig,
+        }]
     );
     Ok(())
 }
@@ -6911,9 +6933,15 @@ fn discovered_skill_links_into_credential_roots_are_omitted()
     std::fs::create_dir_all(&skills)?;
     std::fs::create_dir_all(&secret)?;
     std::os::unix::fs::symlink(&secret, skills.join("linked"))?;
-    let (grants, omitted) = crate::user_skills_grants_with_omissions(&skills, Some(&home));
-    assert_eq!(grants, vec![crate::launch::subtree(&skills)]);
-    assert_eq!(omitted, vec![secret]);
+    let staged = crate::skill_stage::capture(&skills, &home.join("staged"), &home, 4096);
+    assert!(
+        staged
+            .warnings
+            .iter()
+            .any(|warning| warning.path == Path::new("linked")
+                && warning.reason == "credential_root")
+    );
+    assert_eq!(staged.file_count, 0);
     Ok(())
 }
 
@@ -6976,64 +7004,28 @@ fn assert_lane_user_skills(adapter: &str) -> Result<(), Box<dyn std::error::Erro
             input.home = &home;
             input.host_var = &host_var;
             let spec = provider.prepare(input)?;
-            let exposed = state == "discover" && !matches!(adapter, "agy" | "claude" | "cursor");
-            if matches!(adapter, "agy" | "claude" | "cursor") {
-                assert_eq!(
-                    spec.omitted_discovery,
-                    if state == "discover" {
-                        crate::launch::OmittedGrant::skills(vec![skills.clone()])
-                    } else {
-                        Vec::new()
-                    },
-                    "{adapter} {access:?} {state}"
-                );
-            }
-
-            if adapter == "opencode" {
+            let exposed = state == "discover";
+            assert_eq!(
+                spec.user_skills.root.is_some(),
+                exposed,
+                "{adapter} {access:?} {state}"
+            );
+            for path in [&skills, &target, &resource] {
                 assert!(
                     spec.profile
                         .spec
                         .runtime_reads
-                        .contains(&crate::launch::exact(&opencode_config))
-                );
-                let config: serde_json::Value = serde_json::from_str(
-                    spec.env
                         .iter()
-                        .find(|(key, _)| key == "OPENCODE_CONFIG_CONTENT")
-                        .unwrap()
-                        .1
-                        .to_str()
-                        .unwrap(),
-                )?;
-                assert_eq!(
-                    config["permission"]["read"][resource.to_str().unwrap()] == "allow",
-                    exposed
-                );
-                assert_eq!(
-                    config["permission"]["external_directory"][format!("{}/**", target.display())]
-                        == "allow",
-                    exposed
+                        .all(|grant| !covers(grant, path)),
+                    "{adapter} granted host skill path {path:?}"
                 );
             }
-            if adapter == "agy" && access == Access::ReadOnly {
-                for directory in [&target, resource.parent().unwrap()] {
-                    assert_eq!(
-                        spec.argv
-                            .windows(2)
-                            .any(|pair| pair[0] == "--add-dir" && pair[1] == directory.as_os_str()),
-                        exposed
-                    );
-                }
-            }
-            for path in [&skills, &target, &resource] {
-                assert_eq!(
+            if let Some(staged) = &spec.user_skills.root {
+                assert!(
                     spec.profile
                         .spec
                         .runtime_reads
-                        .iter()
-                        .any(|grant| covers(grant, path)),
-                    exposed,
-                    "{adapter} {access:?} {state}: {path:?}"
+                        .contains(&crate::launch::subtree(staged))
                 );
                 let writes = spec
                     .profile
@@ -7051,48 +7043,23 @@ fn assert_lane_user_skills(adapter: &str) -> Result<(), Box<dyn std::error::Erro
                     .chain(std::iter::once(&plan.permissions().scratch))
                     .chain(&plan.permissions().private_state);
                 assert!(
-                    writes.into_iter().all(|grant| !overlaps_skill(grant, path)),
-                    "{adapter} skill writable: {path:?}"
-                );
-            }
-            // Only the skills subtree is added, never the containing host config.
-            assert!(
-                !spec
-                    .profile
-                    .spec
-                    .runtime_reads
-                    .contains(&crate::launch::subtree(skills.parent().unwrap()))
-            );
-            let linked = spec.setup.iter().any(|step| {
-                matches!(step,
-                SetupStep::Symlink { target, .. } if target == &skills)
-            });
-            if adapter == "agy" || (adapter == "claude" && access == Access::WorktreeWrite) {
-                assert_eq!(linked, exposed, "{adapter} {access:?} {state}");
-            }
-            if adapter == "claude" {
-                assert!(
-                    !spec
-                        .argv
-                        .iter()
-                        .any(|arg| arg == "--disable-slash-commands")
+                    writes
+                        .into_iter()
+                        .all(|grant| !overlaps_skill(grant, staged))
                 );
                 assert!(
-                    spec.argv
-                        .iter()
-                        .any(|arg| arg.to_string_lossy().contains("Skill"))
+                    spec.setup.iter().any(|step| matches!(step,
+                    SetupStep::Symlink { target, .. } if target == staged)),
+                    "{adapter} must discover staged tree"
                 );
-                if exposed {
-                    assert!(spec.argv.windows(2).any(|pair| pair[0] == "--add-dir"
-                        && pair[1] == resource.parent().unwrap().as_os_str()));
-                    assert!(!spec.argv.iter().any(|arg| arg == resource.as_os_str()));
-                }
+                assert_eq!(spec.user_skills.file_count, 1);
             }
-            if adapter == "codex" && !enabled {
+            if adapter == "opencode" {
                 assert!(
-                    spec.env
-                        .iter()
-                        .any(|(key, value)| key == "HOME" && value == "/fixture/state")
+                    spec.profile
+                        .spec
+                        .runtime_reads
+                        .contains(&crate::launch::exact(&opencode_config))
                 );
             }
             if state == "off" {
@@ -7158,10 +7125,17 @@ fn claude_user_skills_use_private_placement_for_registered_readers()
     input.home = &home;
     input.account = Some(&account);
     let spec = crate::claude::Claude.prepare(input)?;
+    let staged = spec.user_skills.root.as_ref().expect("staged skills");
     assert!(
         spec.env
             .iter()
-            .any(|(key, value)| key == "CLAUDE_CONFIG_DIR" && value == account_dir.as_os_str())
+            .any(|(key, value)| key == "CLAUDE_CONFIG_DIR"
+                && value == "/fixture/state/claude-config")
+    );
+    assert!(
+        spec.setup
+            .iter()
+            .any(|step| matches!(step, SetupStep::Symlink { target, .. } if target == staged))
     );
     assert!(
         !spec

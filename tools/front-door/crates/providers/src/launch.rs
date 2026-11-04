@@ -55,6 +55,7 @@ pub struct OmittedGrant {
 }
 
 impl OmittedGrant {
+    #[cfg(test)]
     pub(crate) fn skills(paths: Vec<PathBuf>) -> Vec<Self> {
         paths
             .into_iter()
@@ -111,6 +112,8 @@ pub struct LaunchSpec {
     pub setup: Vec<SetupStep>,
     /// Discovered optional grants omitted by the credential guard.
     pub omitted_discovery: Vec<OmittedGrant>,
+    /// Exact staged skill content and warnings used by this launch.
+    pub user_skills: crate::StagedUserSkills,
     pub(crate) git_wrapper: crate::lane::GitWrapper,
     pub profile: ProviderProfile,
     /// Decoder state bound to any continuation identity.
@@ -137,6 +140,7 @@ pub struct PrepareInput<'a> {
     /// `std::env::var_os`; tests pass a fixed lookup so the profiles do not
     /// depend on the runner.
     pub host_var: &'a dyn Fn(&str) -> Option<OsString>,
+    pub skill_stage_max_bytes: u64,
     /// Claude's login token, read by the host outside the sandbox.
     /// Selected registered identity. Absent preserves the default login source.
     pub account: Option<&'a crate::identity::RegisteredAccount>,
@@ -153,6 +157,24 @@ pub struct PrepareInput<'a> {
 impl PrepareInput<'_> {
     pub fn user_skills(&self) -> bool {
         self.route.user_skills()
+    }
+
+    pub(crate) fn stage_user_skills(&self) -> crate::StagedUserSkills {
+        let Some(source) = self
+            .user_skills()
+            .then(|| locate_user_skills(&self.route.adapter, self.home, self.host_var))
+            .flatten()
+        else {
+            return crate::StagedUserSkills::default();
+        };
+        let scratch = &self.confined.permissions().scratch.path;
+        let Some(name) = scratch.file_name() else {
+            return crate::StagedUserSkills::default();
+        };
+        let mut name = name.to_os_string();
+        name.push(format!("-skills-{}", provenant_core::hex(&self.nonce)));
+        let destination = scratch.with_file_name(name);
+        crate::skill_stage::capture(&source, &destination, self.home, self.skill_stage_max_bytes)
     }
 }
 
@@ -776,87 +798,20 @@ pub(crate) fn subtree(path: impl Into<PathBuf>) -> PathGrant {
 }
 
 /// The native user skills location, without exposing the rest of host config.
-pub fn user_skills_directory(
+fn locate_user_skills(
     adapter: &str,
     home: &Path,
     host_var: &dyn Fn(&str) -> Option<OsString>,
 ) -> Option<PathBuf> {
-    let path = match adapter {
-        "claude" => home.join(".claude/skills"),
-        "codex" => home.join(".agents/skills"),
-        "agy" => home.join(".gemini/skills"),
-        "cursor" => home.join(".cursor/skills"),
-        "opencode" => host_var("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .unwrap_or_else(|| home.join(".config"))
-            .join("opencode/skills"),
-        _ => return None,
-    };
+    let location = provenant_records::AdapterSpec::get(adapter)?.skills?;
+    let path = location
+        .environment
+        .and_then(host_var)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(location.fallback))
+        .join(location.suffix);
     path.is_dir().then_some(path)
-}
-
-/// Canonical read-only grants, including linked skill resources. Directory
-/// identities bound traversal even when links form cycles; files need exact
-/// grants because a subtree grant requires a directory anchor.
-pub fn user_skills_grants(skills_dir: &Path) -> Vec<PathGrant> {
-    user_skills_grants_with_omissions(skills_dir, None).0
-}
-
-/// Return safe discovered grants and credential-root paths omitted from them.
-pub fn user_skills_grants_with_omissions(
-    skills_dir: &Path,
-    home: Option<&Path>,
-) -> (Vec<PathGrant>, Vec<PathBuf>) {
-    let Ok(root) = std::fs::canonicalize(skills_dir) else {
-        return (Vec::new(), Vec::new());
-    };
-    if provenant_confinement::refuses_lane_root(&root, true, home) {
-        return (Vec::new(), vec![root]);
-    }
-    if !root.is_dir() {
-        return (Vec::new(), Vec::new());
-    }
-    let mut omitted = Vec::new();
-    let mut grants = vec![subtree(&root)];
-    let mut pending = vec![root.clone()];
-    let mut visited = std::collections::BTreeSet::new();
-    let mut targets = std::collections::BTreeSet::new();
-    while let Some(directory) = pending.pop() {
-        if !visited.insert(directory.clone()) {
-            continue;
-        }
-        let Ok(entries) = std::fs::read_dir(directory) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Ok(target) = std::fs::canonicalize(&path) else {
-                continue;
-            };
-            if provenant_confinement::refuses_lane_root(&target, true, home) {
-                if !omitted.contains(&target) {
-                    omitted.push(target);
-                }
-                continue;
-            }
-            let is_dir = target.is_dir();
-            if entry.file_type().is_ok_and(|ft| ft.is_symlink())
-                && !target.starts_with(&root)
-                && targets.insert(target.clone())
-            {
-                grants.push(if is_dir {
-                    subtree(&target)
-                } else {
-                    exact(&target)
-                });
-            }
-            if is_dir {
-                pending.push(target);
-            }
-        }
-    }
-    (grants, omitted)
 }
 
 /// Lowercase RFC 4122 version 4 spelling of caller randomness.

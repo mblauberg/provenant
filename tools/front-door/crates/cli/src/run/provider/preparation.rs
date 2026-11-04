@@ -1183,6 +1183,7 @@ pub(super) fn prepare_candidates(
             home: &home,
             user: &user,
             host_var: &|key| std::env::var_os(key),
+            skill_stage_max_bytes: 16 * 1024 * 1024,
             account: account.as_ref(),
             token,
             cwd: &cwd,
@@ -1300,6 +1301,18 @@ pub(super) fn prepare_candidates(
         } else if adapter.id() == "cursor" {
             setup_roots.push(&home);
         }
+        if let Some(stage) = &spec.user_skills.root {
+            let result = apply_setup_directory(&[staging], stage)
+                .and_then(|_| apply_setup(spec.user_skills.setup(), &[stage], None));
+            if let Err(error) = result {
+                reasons.push(skip(
+                    &label,
+                    SkipKind::Setup,
+                    format!("skill staging failed: {error}"),
+                ));
+                continue;
+            }
+        }
         if let Err(error) = apply_setup(&spec.setup, &setup_roots, transcript_account) {
             reasons.push(skip(
                 &label,
@@ -1365,14 +1378,7 @@ pub(super) fn prepare_candidates(
         }
         provider.extra.insert(
             "user_skills".into(),
-            user_skills_exposure(
-                adapter.id(),
-                user_skills_mode,
-                &home,
-                &|key| std::env::var_os(key),
-                user_skills_origin,
-                &spec.omitted_discovery,
-            ),
+            user_skills_exposure(user_skills_mode, user_skills_origin, &spec.user_skills),
         );
         provider.extra.insert(
             "discovery_warnings".into(),
@@ -1590,27 +1596,24 @@ pub(super) fn discovery_warnings(
 
 /// Report the same provider-owned locations and grants used during prepare.
 fn user_skills_exposure(
-    adapter: &str,
     mode: provenant_records::UserSkillsMode,
-    home: &Path,
-    host_var: &dyn Fn(&str) -> Option<std::ffi::OsString>,
     origin: serde_json::Value,
-    omitted: &[provenant_providers::OmittedGrant],
+    staged: &provenant_providers::StagedUserSkills,
 ) -> serde_json::Value {
-    let directory = mode
-        .is_discover()
-        .then(|| provenant_providers::user_skills_directory(adapter, home, host_var))
-        .flatten();
-    let reads = directory
-        .as_ref()
-        .map(|path| provenant_providers::user_skills_grants_with_omissions(path, Some(home)).0)
-        .unwrap_or_default();
-    let warnings = discovery_warnings(omitted, home, true);
+    let warnings: Vec<_> = staged
+        .warnings
+        .iter()
+        .map(|warning| {
+            serde_json::json!({
+                "code": "user_skill_skipped", "reason": warning.reason, "path": warning.path.to_string_lossy(),
+            })
+        })
+        .collect();
     serde_json::json!({
         "mode": mode,
-        "exposed": !reads.is_empty(),
-        "directory": directory,
-        "read_grants": reads,
+        "exposed": staged.root.is_some(),
+        "directory": staged.source,
+        "staged_file_count": staged.file_count,
         "warnings": warnings,
         "source": origin,
     })
@@ -1620,100 +1623,16 @@ fn user_skills_exposure(
 mod user_skills_tests {
     use super::*;
     #[test]
-    fn agy_credential_skills_are_omitted_with_warning() -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let home = temp.path().canonicalize()?;
-        std::fs::create_dir_all(home.join(".gemini/skills"))?;
-        let record = user_skills_exposure(
-            "agy",
-            provenant_records::UserSkillsMode::Discover,
-            &home,
-            &|_| None,
-            serde_json::Value::Null,
-            &[provenant_providers::OmittedGrant {
-                path: home.join(".gemini/skills"),
-                source: provenant_providers::OmissionSource::UserSkill,
-            }],
-        );
-        assert_eq!(record["exposed"], false);
-        assert_eq!(record["read_grants"], serde_json::json!([]));
-        let warning = record["warnings"][0].as_str().ok_or("missing warning")?;
-        assert!(warning.contains("~/.gemini/skills"));
-        assert!(warning.contains("credential root"));
-        Ok(())
-    }
-
-    #[test]
-    fn user_skills_record_reports_mode_origin_and_canonical_grants()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let home = temp.path().canonicalize()?;
-        let skills = home.join(".agents/skills");
-        let target = home.join("release/skill");
-        std::fs::create_dir_all(&skills)?;
-        std::fs::create_dir_all(&target)?;
-        std::os::unix::fs::symlink(&target, skills.join("skill"))?;
+    fn receipt_uses_prepared_skill_facts() {
+        let staged = provenant_providers::StagedUserSkills::default();
         let origin = serde_json::json!({"key": "domains.lanes.user_skills", "origin": "compiled"});
         let record = user_skills_exposure(
-            "codex",
             provenant_records::UserSkillsMode::Discover,
-            &home,
-            &|_| None,
             origin.clone(),
-            &[],
+            &staged,
         );
-        assert_eq!(record["exposed"], true);
-        assert_eq!(record["directory"], serde_json::json!(skills));
-        assert_eq!(
-            record["read_grants"]
-                .as_array()
-                .ok_or("missing grants")?
-                .len(),
-            2
-        );
+        assert_eq!(record["exposed"], false);
+        assert_eq!(record["staged_file_count"], 0);
         assert_eq!(record["source"], origin);
-        let off = user_skills_exposure(
-            "codex",
-            provenant_records::UserSkillsMode::Off,
-            &home,
-            &|_| None,
-            serde_json::json!({"route_policy": ["rules[0]"]}),
-            &[],
-        );
-        assert_eq!(off["mode"], "off");
-        assert_eq!(off["exposed"], false);
-        assert_eq!(off["directory"], serde_json::Value::Null);
-        assert_eq!(off["read_grants"], serde_json::json!([]));
-        Ok(())
-    }
-
-    #[test]
-    fn omissions_land_under_their_own_source() {
-        let home = Path::new("/home/fixture");
-        let omitted = [
-            provenant_providers::OmittedGrant {
-                path: home.join("skills/linked"),
-                source: provenant_providers::OmissionSource::UserSkill,
-            },
-            provenant_providers::OmittedGrant {
-                path: home.join(".cargo/registry"),
-                source: provenant_providers::OmissionSource::Toolchain,
-            },
-        ];
-        let record = user_skills_exposure(
-            "codex",
-            provenant_records::UserSkillsMode::Off,
-            home,
-            &|_| None,
-            serde_json::Value::Null,
-            &omitted,
-        );
-        let skill = record["warnings"].as_array().expect("skill warnings");
-        assert_eq!(skill.len(), 1);
-        assert!(skill[0].as_str().unwrap().contains("~/skills/linked"));
-        let other = discovery_warnings(&omitted, home, false);
-        assert_eq!(other.len(), 1);
-        assert!(other[0].contains("~/.cargo/registry"));
-        assert!(!other[0].contains("skills"));
     }
 }

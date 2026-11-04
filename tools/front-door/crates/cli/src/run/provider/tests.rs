@@ -1385,23 +1385,28 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
                 |_| Ok(fake_agy.clone()),
                 None,
             )?;
-            let warning = prepared.route.extra["user_skills"]["warnings"][0]
-                .as_str()
-                .ok_or("missing agy warning")?;
-            assert!(warning.contains("~/.gemini/skills"), "{warning}");
-            assert_eq!(
-                prepared.route.extra["user_skills"]["warnings"],
-                serde_json::json!([warning]),
+            let skills = &prepared.route.extra["user_skills"];
+            assert_eq!(skills["exposed"], true);
+            assert!(
+                skills["warnings"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|warning| warning["code"] == "user_skill_skipped"
+                        && warning["reason"] == "cycle")
             );
-            assert_eq!(
-                prepared.route.extra["discovery_warnings"],
-                if write {
-                    serde_json::json!([warning])
-                } else {
-                    serde_json::json!([])
-                },
-                "writers discover the same path as both a skill and a toolchain"
-            );
+            let warnings = prepared.route.extra["discovery_warnings"]
+                .as_array()
+                .unwrap();
+            if write {
+                assert!(warnings.iter().any(|warning| {
+                    warning
+                        .as_str()
+                        .is_some_and(|text| text.contains("~/.gemini/skills"))
+                }));
+            } else {
+                assert!(warnings.is_empty());
+            }
             let confinement = prepared.confinement.as_ref().ok_or("missing confinement")?;
             assert!(
                 !confinement
@@ -1661,6 +1666,7 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
             home: &home,
             user: "fixture".as_ref(),
             host_var: &|_| None,
+            skill_stage_max_bytes: 16 * 1024 * 1024,
             account: Some(&codex_account),
             token: None,
             cwd: &project.join(".worktrees/writer"),
@@ -2560,6 +2566,7 @@ fn user_sessions_and_pruned_codex_state_remain_resumable() -> Result<(), Box<dyn
                 home: &home,
                 user: "fixture".as_ref(),
                 host_var: &|_| None,
+                skill_stage_max_bytes: 16 * 1024 * 1024,
                 account: Some(&account),
                 token: None,
                 cwd: &cwd,
@@ -3516,5 +3523,32 @@ fn absent_default_login_differs_from_directory_integrity_errors()
         AccountObservationError::VersionUnavailable("codex executable missing".into()).skip_kind(),
         SkipKind::Unavailable
     );
+    Ok(())
+}
+
+#[test]
+fn staged_skill_files_are_written_outside_writable_scratch()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let temporary = temp.path().join("tmp");
+    std::fs::create_dir_all(&temporary)?;
+    let scratch = temporary.join("candidate-0");
+    let stage = temporary.join("candidate-0-skills");
+    apply_setup_directory(&[&temporary], &scratch)?;
+    apply_setup_directory(&[&temporary], &stage)?;
+    apply_setup(
+        &[
+            SetupStep::CreateDir(stage.join("example")),
+            SetupStep::WriteFile {
+                path: stage.join("example/SKILL.md"),
+                bytes: b"staged".to_vec(),
+            },
+        ],
+        &[&stage],
+        None,
+    )?;
+    assert_eq!(std::fs::read(stage.join("example/SKILL.md"))?, b"staged");
+    assert!(!stage.starts_with(&scratch));
+    assert!(!scratch.starts_with(&stage));
     Ok(())
 }

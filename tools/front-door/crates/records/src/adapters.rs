@@ -34,11 +34,21 @@ pub enum QuotaProbeKind {
     LocalLedger,
 }
 
+/// Location of a provider's user skill tree relative to the host home or an
+/// absolute environment override. The fallback is relative to the home.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkillLocation {
+    pub environment: Option<&'static str>,
+    pub fallback: &'static str,
+    pub suffix: &'static str,
+}
+
 #[derive(Debug)]
 pub struct AdapterSpec {
     pub id: Harness,
     pub name: &'static str,
     pub binary: &'static str,
+    pub skills: Option<SkillLocation>,
     pub registered_account: bool,
     /// A registered account's directory is the client's configuration
     /// directory, which account settings sync keeps in step. False where it is
@@ -224,6 +234,11 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         id: Harness::Claude,
         name: "claude",
         binary: "claude",
+        skills: Some(SkillLocation {
+            environment: None,
+            fallback: ".claude",
+            suffix: "skills",
+        }),
         registered_account: true,
         account_config_dir: true,
         local_login: false,
@@ -271,6 +286,11 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         id: Harness::Codex,
         name: "codex",
         binary: "codex",
+        skills: Some(SkillLocation {
+            environment: None,
+            fallback: ".agents",
+            suffix: "skills",
+        }),
         registered_account: true,
         account_config_dir: true,
         local_login: false,
@@ -322,6 +342,11 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         id: Harness::Cursor,
         name: "cursor",
         binary: "cursor-agent",
+        skills: Some(SkillLocation {
+            environment: None,
+            fallback: ".cursor",
+            suffix: "skills",
+        }),
         registered_account: false,
         account_config_dir: false,
         local_login: true,
@@ -372,6 +397,11 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         id: Harness::Agy,
         name: "agy",
         binary: "agy",
+        skills: Some(SkillLocation {
+            environment: None,
+            fallback: ".gemini",
+            suffix: "skills",
+        }),
         registered_account: true,
         account_config_dir: false,
         local_login: true,
@@ -426,6 +456,11 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         id: Harness::Opencode,
         name: "opencode",
         binary: "opencode",
+        skills: Some(SkillLocation {
+            environment: Some("XDG_CONFIG_HOME"),
+            fallback: ".config",
+            suffix: "opencode/skills",
+        }),
         registered_account: false,
         account_config_dir: false,
         local_login: true,
@@ -478,6 +513,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         id: Harness::Command,
         name: "command",
         binary: "",
+        skills: None,
         registered_account: false,
         account_config_dir: false,
         local_login: false,
@@ -527,6 +563,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         id: Harness::HostNative,
         name: "host-native",
         binary: "",
+        skills: None,
         registered_account: false,
         account_config_dir: false,
         local_login: false,

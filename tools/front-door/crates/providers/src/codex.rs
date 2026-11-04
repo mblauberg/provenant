@@ -96,20 +96,20 @@ fn prepare(
     ];
     let mut runtime_reads = vec![subtree(package)];
     let tool_writes = Vec::new();
-    // Codex scans `$HOME/.agents/skills` at startup independently of
-    // CODEX_HOME. Grant the host's user skills read-only so the scan succeeds.
-    let user_skills = input.home.join(".agents/skills");
-    let (skill_reads, skill_omitted) = if input.user_skills() && user_skills.is_dir() {
-        crate::user_skills_grants_with_omissions(&user_skills, Some(input.home))
-    } else {
-        (Vec::new(), Vec::new())
-    };
-    let mut omitted_discovery = crate::launch::OmittedGrant::skills(skill_omitted);
-    runtime_reads.extend(skill_reads);
+    let staged_skills = input.stage_user_skills();
+    let mut omitted_discovery = Vec::new();
     let mut setup = vec![SetupStep::Symlink {
         link: codex_home.join("auth.json"),
         target: credential.clone(),
     }];
+    if let Some(skills) = &staged_skills.root {
+        runtime_reads.push(subtree(skills));
+        setup.push(SetupStep::CreateDir(codex_home.join(".agents")));
+        setup.push(SetupStep::Symlink {
+            link: codex_home.join(".agents/skills"),
+            target: skills.clone(),
+        });
+    }
     let path = format!("{}:/usr/bin:/bin", input.home.join(".cargo/bin").display());
     let mut env = base_env(input, &plan.scratch.path, &path);
     input
@@ -139,9 +139,7 @@ fn prepare(
         ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
         ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
     ]);
-    if !input.user_skills() {
-        // The startup scanner follows HOME independently of CODEX_HOME. An
-        // empty private home avoids a denied host-skills scan when opted out.
+    if staged_skills.root.is_some() || !input.user_skills() {
         for (key, value) in &mut env {
             if key == "HOME" {
                 *value = codex_home.into();
@@ -158,6 +156,7 @@ fn prepare(
         cwd: input.cwd.to_owned(),
         setup,
         omitted_discovery,
+        user_skills: staged_skills,
         git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {

@@ -16,7 +16,9 @@ pub mod host;
 pub mod identity;
 mod lane;
 mod launch;
+mod skill_stage;
 pub use lane::{BuildSlotGate, LaneRuntime};
+pub use skill_stage::{SkillWarning, StagedUserSkills};
 pub mod opencode;
 pub mod quota;
 pub mod quota_live;
@@ -27,7 +29,6 @@ pub mod update;
 pub use contract::*;
 pub use launch::{
     Access, LaunchSpec, OmissionSource, OmittedGrant, PrepareInput, Session, SetupStep, Stdin,
-    user_skills_directory, user_skills_grants, user_skills_grants_with_omissions,
 };
 pub use stream::*;
 

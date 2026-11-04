@@ -183,28 +183,27 @@ host default. Omit an override to inherit. A brief can still name or quote a
 skill explicitly when discovery is off. Project skills remain in the worktree;
 this setting controls host user skills only.
 
-| Provider | Host user skill directory | Lane placement |
-|---|---|---|
-| Claude | `~/.claude/skills` | Linked as `skills` in the private `CLAUDE_CONFIG_DIR` for writers and registered readers; default readers discover it at the host path. |
-| Codex | `~/.agents/skills` | Native HOME discovery, independent of private `CODEX_HOME`. With discovery off, HOME points at private state so its startup scan sees no host skills. |
-| agy | `~/.gemini/skills` | Linked into the private home's `.gemini/skills`. |
-| OpenCode | `$XDG_CONFIG_HOME/opencode/skills`, falling back to `~/.config/opencode/skills` | Native XDG discovery; relative XDG overrides are ignored. |
-| Cursor | `~/.cursor/skills` | Native user discovery ([Cursor skills](https://cursor.com/docs/skills)). |
+| Provider | Host user skill directory |
+|---|---|
+| Claude | `~/.claude/skills` |
+| Codex | `~/.agents/skills` |
+| agy | `~/.gemini/skills` |
+| OpenCode | `$XDG_CONFIG_HOME/opencode/skills`, falling back to `~/.config/opencode/skills`; relative XDG overrides are ignored |
+| Cursor | `~/.cursor/skills` |
 
-Missing directories are skipped silently. Grants cover canonical skill
-directories and resolved symlink targets, including installed skills under
-`~/.local/share/provenant/v1/releases/<digest>/` and linked resource files.
-These grants are read-only: no skill write or execute grant is added, and they
-do not expose the containing host configuration. OpenCode retains its existing
-provider configuration reads through separate grants that exclude `skills`. Existing worktree and credential scopes
-are unchanged. Reading a skill does not change nested dispatch policy.
-Very large linked collections remain subject to the sandbox's existing limit
-of 128 runtime read grants; discovery can be turned off for affected routes.
+The host copies selected skills to an attempt-owned tree before launch. The
+lane receives read-only access to that tree, and the provider discovers the
+staged copy. Links are followed into the copy, but targets in credential roots
+are skipped with a warning. Missing directories are skipped. Files exceeding
+the staging byte limit and entries that change during capture are skipped with
+a warning. The staged tree contains no links and receives no write grant.
+Project skills and selected-provider credential access keep their existing
+rules. Reading a skill does not change nested dispatch policy.
 
-Each attempt's applied route records `user_skills` with the requested mode,
-whether it was exposed, its host directory, canonical read grants and setting
-source. `provenant output ATTEMPT --json` includes that receipt; human output
-shows it as a `grant user_skills` line. Older attempts have no receipt.
+Each attempt's applied route records `user_skills` with its requested mode,
+whether skills were exposed, the home-relative source when available, staged
+file count, warnings and setting source. `provenant output ATTEMPT --json`
+includes that receipt; older attempts have no receipt.
 
 ## Claude network access
 

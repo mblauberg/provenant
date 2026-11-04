@@ -336,14 +336,10 @@ fn prepare(
         None => None,
     }
     .unwrap_or_else(|| input.home.join(KEYCHAIN));
-    let user_skills = input.home.join(".gemini/skills");
-    let (skill_reads, skill_omitted) = if input.user_skills() && user_skills.is_dir() {
-        crate::user_skills_grants_with_omissions(&user_skills, Some(input.home))
-    } else {
-        (Vec::new(), Vec::new())
-    };
-    let mut omitted_discovery = crate::launch::OmittedGrant::skills(skill_omitted);
-    let discover_skills = !skill_reads.is_empty();
+    let staged_skills = input.stage_user_skills();
+    let user_skills = staged_skills.root.clone();
+    let skill_reads = user_skills.iter().map(subtree).collect::<Vec<_>>();
+    let mut omitted_discovery = Vec::new();
     let mut argv: Vec<OsString> = [
         input.executable.as_os_str(),
         "--output-format".as_ref(),
@@ -360,7 +356,7 @@ fn prepare(
     }
     argv.push("--dangerously-skip-permissions".into());
     if access == Access::ReadOnly {
-        if discover_skills {
+        if let Some(user_skills) = &user_skills {
             // The skill loader reports paths through the private home link.
             argv.extend([
                 "--add-dir".into(),
@@ -419,7 +415,7 @@ fn prepare(
             target: keychain.clone(),
         },
     ];
-    if discover_skills {
+    if let Some(user_skills) = &user_skills {
         setup.push(SetupStep::CreateDir(home.join(".gemini")));
         setup.push(SetupStep::Symlink {
             link: home.join(".gemini/skills"),
@@ -465,6 +461,7 @@ fn prepare(
         cwd: input.cwd.to_owned(),
         setup,
         omitted_discovery,
+        user_skills: staged_skills,
         git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
