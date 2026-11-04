@@ -175,7 +175,11 @@ pub(super) fn prepare_command(
         settings.jobs(),
     );
     apply_setup(&spec.setup, &[&scratch, &paths.provider_state], None)?;
-    let warnings = super::preparation::discovery_warnings(&spec.omitted_discovery, &home);
+    let warnings: Vec<String> = spec
+        .omitted_discovery
+        .iter()
+        .map(|entry| super::preparation::omission_warning(entry, &home))
+        .collect();
     Ok(run::PreparedLaunch {
         skipped_routes: Vec::new(),
         argv: spec.argv,

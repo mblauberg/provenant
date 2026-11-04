@@ -1266,6 +1266,11 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
                 .as_str()
                 .ok_or("missing agy warning")?;
             assert!(warning.contains("~/.gemini/skills"), "{warning}");
+            assert_eq!(
+                prepared.route.extra["discovery_warnings"],
+                serde_json::json!([]),
+                "skill omissions must not appear as launch-grant warnings"
+            );
             let confinement = prepared.confinement.as_ref().ok_or("missing confinement")?;
             assert!(
                 !confinement

@@ -72,8 +72,9 @@ fn prepare(
     if input.user_skills()
         && let Some(skills) = crate::user_skills_directory("cursor", input.home, input.host_var)
     {
-        (skill_reads, omitted_discovery) =
-            crate::user_skills_grants_with_omissions(&skills, Some(input.home));
+        let (reads, omitted) = crate::user_skills_grants_with_omissions(&skills, Some(input.home));
+        skill_reads = reads;
+        omitted_discovery = crate::launch::OmittedGrant::skills(omitted);
     }
     let mut optional_reads = if access == Access::WorktreeWrite {
         crate::launch::git_global_files(&input.home.join(".config"))
@@ -84,6 +85,7 @@ fn prepare(
         &mut optional_reads,
         0,
         input.home,
+        crate::launch::OmissionSource::Toolchain,
         &mut omitted_discovery,
     );
     let chats = input.home.join(".cursor/chats");

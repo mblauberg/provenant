@@ -6697,9 +6697,21 @@ fn optional_discovered_grants_are_filtered_without_touching_required_grants()
     let required = crate::launch::subtree(&secret);
     let mut grants = vec![required.clone(), crate::launch::subtree(&optional)];
     let mut omitted = Vec::new();
-    crate::launch::filter_optional_grants(&mut grants, 1, &home, &mut omitted);
+    crate::launch::filter_optional_grants(
+        &mut grants,
+        1,
+        &home,
+        crate::launch::OmissionSource::Toolchain,
+        &mut omitted,
+    );
     assert_eq!(grants, vec![required]);
-    assert_eq!(omitted, vec![secret]);
+    assert_eq!(
+        omitted,
+        vec![crate::launch::OmittedGrant {
+            path: secret,
+            source: crate::launch::OmissionSource::Toolchain,
+        }]
+    );
     Ok(())
 }
 
@@ -6783,7 +6795,7 @@ fn assert_lane_user_skills(adapter: &str) -> Result<(), Box<dyn std::error::Erro
                 assert_eq!(
                     spec.omitted_discovery,
                     if state == "discover" {
-                        vec![skills.clone()]
+                        crate::launch::OmittedGrant::skills(vec![skills.clone()])
                     } else {
                         Vec::new()
                     },

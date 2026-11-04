@@ -643,11 +643,12 @@ fn prepare(
         setup.push(SetupStep::CreateDir(transcript_dir.clone()));
     }
     let user_skills = input.home.join(".claude/skills");
-    let (skill_reads, mut omitted_discovery) = if input.user_skills() && user_skills.is_dir() {
+    let (skill_reads, skill_omitted) = if input.user_skills() && user_skills.is_dir() {
         crate::user_skills_grants_with_omissions(&user_skills, Some(input.home))
     } else {
         (Vec::new(), Vec::new())
     };
+    let mut omitted_discovery = crate::launch::OmittedGrant::skills(skill_omitted);
     let discover_skills = !skill_reads.is_empty();
     if shell || (discover_skills && input.account.is_some()) {
         let config = plan

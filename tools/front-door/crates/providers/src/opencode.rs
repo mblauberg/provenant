@@ -124,10 +124,11 @@ fn prepare(
     );
     let user_skills = crate::user_skills_directory("opencode", input.home, input.host_var)
         .filter(|_| input.user_skills());
-    let (skill_reads, mut omitted_discovery) = user_skills
+    let (skill_reads, skill_omitted) = user_skills
         .as_ref()
         .map(|path| crate::user_skills_grants_with_omissions(path, Some(input.home)))
         .unwrap_or_default();
+    let mut omitted_discovery = crate::launch::OmittedGrant::skills(skill_omitted);
     let mut permission = serde_json::json!({
         "edit": edit,
         "bash": edit,
@@ -216,6 +217,7 @@ fn prepare(
             &mut runtime_reads,
             start,
             input.home,
+            crate::launch::OmissionSource::Toolchain,
             &mut omitted_discovery,
         );
     }
@@ -243,14 +245,20 @@ fn prepare(
     }
     if let Ok(config_dir) = std::fs::canonicalize(&config_dir)
         && provenant_confinement::refuses_lane_root(&config_dir, true, Some(input.home))
-        && !omitted_discovery.contains(&config_dir)
+        && !omitted_discovery
+            .iter()
+            .any(|entry| entry.path == config_dir)
     {
-        omitted_discovery.push(config_dir);
+        omitted_discovery.push(crate::launch::OmittedGrant {
+            path: config_dir,
+            source: crate::launch::OmissionSource::ProviderConfig,
+        });
     }
     crate::launch::filter_optional_grants(
         &mut runtime_reads,
         optional_start,
         input.home,
+        crate::launch::OmissionSource::ProviderConfig,
         &mut omitted_discovery,
     );
     runtime_reads.extend(skill_reads);
