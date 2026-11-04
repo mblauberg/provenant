@@ -9,18 +9,59 @@ pub fn decide(
     forge: &mut dyn Forge,
     target: &str,
     requested: Publication,
-    method: MergeMethod,
+    _method: MergeMethod,
 ) -> Result<PublishDecision, LandingError> {
-    let _ = (forge, target, requested, method);
-    Err(LandingError::Unimplemented("publish::decide"))
+    match requested {
+        Publication::RestOrdered => Ok(PublishDecision {
+            mode: PublishMode::RestOrdered,
+            reason: "land.publish explicitly selects rest_ordered".into(),
+        }),
+        Publication::FastForward => {
+            if !forge.may_push_directly(target)? {
+                return Err(LandingError::Failed(format!(
+                    "land.publish=fast_forward requires direct push permission for {target}"
+                )));
+            }
+            Ok(PublishDecision {
+                mode: PublishMode::FastForward,
+                reason: "land.publish explicitly selects fast_forward and direct push is permitted"
+                    .into(),
+            })
+        }
+        Publication::Auto => {
+            if forge.may_push_directly(target)? {
+                Ok(PublishDecision {
+                    mode: PublishMode::FastForward,
+                    reason: "direct push is permitted".into(),
+                })
+            } else {
+                Ok(PublishDecision {
+                    mode: PublishMode::RestOrdered,
+                    reason: "direct push is not permitted".into(),
+                })
+            }
+        }
+    }
 }
 /// Return PRs whose pinned head or approval changed immediately before publication.
 pub fn revalidate(
     forge: &mut dyn Forge,
     candidate: &Candidate,
 ) -> Result<Vec<EligiblePr>, LandingError> {
-    let _ = (forge, candidate);
-    Err(LandingError::Unimplemented("publish::revalidate"))
+    let mut excluded = Vec::new();
+    for step in &candidate.steps {
+        let pr = &step.pr;
+        let head = forge.head(pr.number)?;
+        if head != pr.head
+            || !forge
+                .approvals(pr.number, &pr.head)?
+                .iter()
+                .any(|approval| approval.reference == pr.approval)
+        {
+            excluded.push(pr.clone());
+        }
+    }
+    Ok(excluded)
 }
 /// Advance the target from the candidate base with an expected-old-value push.
 pub fn fast_forward(
@@ -28,8 +69,20 @@ pub fn fast_forward(
     target: &str,
     candidate: &Candidate,
 ) -> Result<PublishResult, LandingError> {
-    let _ = (repo, target, candidate);
-    Err(LandingError::Unimplemented("publish::fast_forward"))
+    if !repo.is_ancestor(&candidate.base, &candidate.commit)? {
+        return Err(LandingError::Failed(
+            "candidate does not descend from its base".into(),
+        ));
+    }
+    repo.push_ref(target, &candidate.commit, Some(&candidate.base))?;
+    Ok(PublishResult {
+        landed: candidate
+            .steps
+            .iter()
+            .map(|step| step.commit.clone())
+            .collect(),
+        alarms: Vec::new(),
+    })
 }
 /// Merge in order at pinned heads and record an alarm if the final tree differs from the gated tree.
 pub fn rest_ordered(
@@ -39,6 +92,172 @@ pub fn rest_ordered(
     candidate: &Candidate,
     method: MergeMethod,
 ) -> Result<PublishResult, LandingError> {
-    let _ = (forge, repo, target, candidate, method);
-    Err(LandingError::Unimplemented("publish::rest_ordered"))
+    let mut landed = Vec::new();
+    for step in &candidate.steps {
+        landed.push(forge.merge(step.pr.number, &step.pr.head, method)?);
+    }
+    let actual_commit = repo.fetch_target(target)?;
+    let actual_tree = repo.tree_of(&actual_commit)?;
+    let alarms = if actual_tree == candidate.tree {
+        Vec::new()
+    } else {
+        vec![Alarm {
+            code: "LAND_TREE_MISMATCH".into(),
+            message: format!(
+                "gated candidate {} tree {} differs from target commit {} tree {}",
+                candidate.commit, candidate.tree, actual_commit, actual_tree
+            ),
+        }]
+    };
+    Ok(PublishResult { landed, alarms })
+}
+
+#[cfg(test)]
+#[allow(
+    unused_imports,
+    reason = "custom worktree harness includes tests without the test runner"
+)]
+mod tests {
+    use super::*;
+    use crate::pr::landing::{
+        fakes::{FakeForge, FakeRepo},
+        ports::Approval,
+    };
+
+    fn candidate() -> Candidate {
+        let step = |number, head: &str, commit: &str| CandidateStep {
+            pr: EligiblePr {
+                number,
+                head: head.into(),
+                approval: format!("approval-{number}"),
+                base_branch: "main".into(),
+            },
+            commit: commit.into(),
+            tree: format!("tree-{number}"),
+        };
+        Candidate {
+            base: "base".into(),
+            steps: vec![step(1, "head-1", "step-1"), step(2, "head-2", "candidate")],
+            commit: "candidate".into(),
+            tree: "tree-2".into(),
+            ref_name: "land/test".into(),
+        }
+    }
+    #[test]
+    fn publication_decisions_respect_permission_and_explicit_mode() -> Result<(), LandingError> {
+        let mut forge = FakeForge::default();
+        let decision = decide(&mut forge, "main", Publication::Auto, MergeMethod::Merge)?;
+        assert_eq!(decision.mode, PublishMode::RestOrdered);
+        assert!(decision.reason.contains("not permitted"));
+        assert!(
+            decide(
+                &mut forge,
+                "main",
+                Publication::FastForward,
+                MergeMethod::Merge
+            )
+            .is_err()
+        );
+        forge.direct_push = true;
+        assert_eq!(
+            decide(&mut forge, "main", Publication::Auto, MergeMethod::Merge)?.mode,
+            PublishMode::FastForward
+        );
+        assert_eq!(
+            decide(&mut forge, "main", Publication::Auto, MergeMethod::Squash)?.mode,
+            PublishMode::FastForward
+        );
+        assert_eq!(
+            decide(
+                &mut forge,
+                "main",
+                Publication::FastForward,
+                MergeMethod::Rebase
+            )?
+            .mode,
+            PublishMode::FastForward
+        );
+        assert_eq!(
+            decide(
+                &mut forge,
+                "main",
+                Publication::RestOrdered,
+                MergeMethod::Merge
+            )?
+            .mode,
+            PublishMode::RestOrdered
+        );
+        Ok(())
+    }
+    #[test]
+    fn revalidation_excludes_changed_head_and_lost_approval() -> Result<(), LandingError> {
+        let mut forge = FakeForge::default();
+        forge.heads.insert(1, "changed".into());
+        forge.heads.insert(2, "head-2".into());
+        let c = candidate();
+        assert_eq!(
+            revalidate(&mut forge, &c)?,
+            vec![c.steps[0].pr.clone(), c.steps[1].pr.clone()]
+        );
+        forge.heads.insert(1, "head-1".into());
+        for step in &c.steps {
+            forge.approvals_at_head.insert(
+                (step.pr.number, step.pr.head.clone()),
+                vec![Approval {
+                    reference: step.pr.approval.clone(),
+                    reviewer: "reviewer".into(),
+                }],
+            );
+        }
+        assert!(revalidate(&mut forge, &c)?.is_empty());
+        Ok(())
+    }
+    #[test]
+    fn fast_forward_requires_ancestry_and_expected_base() -> Result<(), LandingError> {
+        let mut repo = FakeRepo {
+            target: "base".into(),
+            ..FakeRepo::default()
+        };
+        let c = candidate();
+        repo.fetch_target("main")?;
+        assert!(fast_forward(&mut repo, "main", &c).is_err());
+        repo.parents.insert("candidate".into(), vec!["base".into()]);
+        let result = fast_forward(&mut repo, "main", &c)?;
+        assert_eq!(result.landed, vec!["step-1", "candidate"]);
+        assert_eq!(
+            repo.pushes[0],
+            ("main".into(), "candidate".into(), Some("base".into()))
+        );
+        assert!(fast_forward(&mut repo, "main", &c).is_err());
+        Ok(())
+    }
+    #[test]
+    fn ordered_merge_pins_heads_and_alarms_on_tree_mismatch() -> Result<(), LandingError> {
+        let mut forge = FakeForge::default();
+        forge.heads.insert(1, "head-1".into());
+        forge.heads.insert(2, "head-2".into());
+        let mut repo = FakeRepo {
+            target: "actual".into(),
+            ..FakeRepo::default()
+        };
+        repo.trees.insert("actual".into(), "different".into());
+        let result = rest_ordered(
+            &mut forge,
+            &mut repo,
+            "main",
+            &candidate(),
+            MergeMethod::Squash,
+        )?;
+        assert_eq!(
+            forge.merges,
+            vec![
+                (1, "head-1".into(), MergeMethod::Squash),
+                (2, "head-2".into(), MergeMethod::Squash)
+            ]
+        );
+        assert_eq!(result.landed, vec!["landed-1", "landed-2"]);
+        assert!(result.alarms[0].message.contains("candidate tree tree-2"));
+        assert!(result.alarms[0].message.contains("actual tree different"));
+        Ok(())
+    }
 }
