@@ -4973,8 +4973,7 @@ fn lanes_read_the_host_pnpm_store_but_cannot_write_it() -> Result<(), Box<dyn st
     }
     let temp = tempfile::tempdir()?;
     let home = temp.path().join("home");
-    let mut reads = Vec::new();
-    let mut exec = Vec::new();
+    let mut requirements = crate::launch::ToolRequirements::default();
     let mut env = Vec::new();
     for store in ["Library/pnpm", ".local/share/pnpm"] {
         std::fs::create_dir_all(home.join(store))?;
@@ -4983,14 +4982,12 @@ fn lanes_read_the_host_pnpm_store_but_cannot_write_it() -> Result<(), Box<dyn st
         &home,
         Access::ReadOnly,
         &temp.path().join("cache"),
-        &mut reads,
-        &mut exec,
+        &mut requirements,
         &mut env,
-        &mut Vec::new(),
     );
     for store in ["Library/pnpm", ".local/share/pnpm"] {
         assert!(
-            reads.iter().any(|grant| {
+            requirements.reads.iter().any(|grant| {
                 grant.path == home.join(store) && grant.scope == PathScope::Subtree
             }),
             "{store}"
@@ -6414,12 +6411,12 @@ fn homebrew_node_tools_grant_the_prefix_but_not_var() -> Result<(), Box<dyn std:
     for name in ["bin", "Cellar", "etc", "var"] {
         std::fs::create_dir(prefix.join(name))?;
     }
-    let (mut reads, mut exec) = (Vec::new(), Vec::new());
+    let mut requirements = crate::launch::ToolRequirements::default();
     let mut env = vec![(
         std::ffi::OsString::from("PATH"),
         std::ffi::OsString::from("/usr/bin:/bin"),
     )];
-    crate::launch::homebrew_tools(prefix, &mut reads, &mut exec, &mut env);
+    crate::launch::homebrew_tools(prefix, &mut requirements, &mut env);
     let paths = |grants: &[provenant_confinement::permissions::PathGrant]| {
         grants
             .iter()
@@ -6428,11 +6425,11 @@ fn homebrew_node_tools_grant_the_prefix_but_not_var() -> Result<(), Box<dyn std:
     };
     // etc/ holds OpenSSL's configuration; var/ holds service data.
     assert_eq!(
-        paths(&reads),
+        paths(&requirements.reads),
         ["bin", "Cellar", "etc"].map(|name| prefix.join(name))
     );
     assert_eq!(
-        paths(&exec),
+        paths(&requirements.exec),
         ["bin", "Cellar"].map(|name| prefix.join(name))
     );
     assert_eq!(
@@ -6891,6 +6888,66 @@ fn optional_discovered_grants_are_filtered_without_touching_required_grants()
 }
 
 #[test]
+fn discovered_grants_in_credential_roots_are_omitted() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().canonicalize()?;
+    let credential = home.join(".gemini/private");
+    let node_prefix = credential.join("node-prefix");
+    std::fs::create_dir_all(credential.join("bin"))?;
+    std::fs::create_dir_all(node_prefix.join("bin"))?;
+    std::fs::create_dir_all(home.join(".rustup/toolchains"))?;
+    std::os::unix::fs::symlink(&credential, home.join(".cargo"))?;
+    let node_alias = home.join("node-prefix");
+    std::os::unix::fs::symlink(&node_prefix, &node_alias)?;
+
+    let plan = fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    let prompt = Prompt::new("fixture".into());
+    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.home = &home;
+    let mut spec = crate::codex::Codex.prepare(input)?;
+    assert!(
+        spec.omitted_discovery
+            .iter()
+            .any(|entry| entry.path == credential)
+    );
+    assert!(
+        spec.profile
+            .spec
+            .runtime_reads
+            .iter()
+            .all(|grant| !grant.path.starts_with(&credential))
+    );
+
+    // Feed an independently discovered Node prefix through the same resolver.
+    spec.tool_requirements = crate::launch::ToolRequirements::default();
+    crate::launch::homebrew_tools(&node_alias, &mut spec.tool_requirements, &mut spec.env);
+    spec.complete_tool_requirements(&plan, &home, Path::new("/fixture/repo"));
+    let node_bin = node_prefix.join("bin");
+    assert!(
+        spec.omitted_discovery
+            .iter()
+            .any(|entry| entry.path == node_bin)
+    );
+    assert!(
+        spec.profile
+            .spec
+            .tool_exec_roots
+            .iter()
+            .all(|grant| grant.path != node_alias.join("bin"))
+    );
+    assert!(
+        !spec
+            .applied_access()
+            .receipt(&home)
+            .to_string()
+            .contains(&home.display().to_string())
+    );
+    Ok(())
+}
+
+#[test]
 fn opencode_skill_and_provider_config_omissions_keep_both_sources()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -6945,6 +7002,23 @@ fn discovered_skill_links_into_credential_roots_are_omitted()
     Ok(())
 }
 
+fn test_macho(names: &[&str]) -> Vec<u8> {
+    let mut image = vec![0; 32];
+    image[..4].copy_from_slice(&0xfeed_facf_u32.to_le_bytes());
+    image[12..16].copy_from_slice(&6_u32.to_le_bytes());
+    image[16..20].copy_from_slice(&(names.len() as u32).to_le_bytes());
+    for name in names {
+        let size = (24 + name.len() + 1).next_multiple_of(8);
+        image.extend(0xc_u32.to_le_bytes());
+        image.extend((size as u32).to_le_bytes());
+        image.extend(24_u32.to_le_bytes());
+        image.resize(image.len() + 12, 0);
+        image.extend(name.as_bytes());
+        image.resize(image.len() + size - 24 - name.len(), 0);
+    }
+    image
+}
+
 fn assert_lane_user_skills(adapter: &str) -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let home = temp.path().canonicalize()?;
@@ -6971,6 +7045,14 @@ fn assert_lane_user_skills(adapter: &str) -> Result<(), Box<dyn std::error::Erro
     std::fs::create_dir_all(resource.parent().unwrap())?;
     std::fs::write(&resource, "fixture reference")?;
     std::os::unix::fs::symlink(&resource, target.join("reference.md"))?;
+    // Give every adapter a real, synthetic Mach-O closure so equality is
+    // checked for an applied library as well as an empty closure.
+    let library = home.join("libraries/libfixture.dylib");
+    let executable = home.join("package/bin/provider");
+    std::fs::create_dir_all(library.parent().unwrap())?;
+    std::fs::create_dir_all(executable.parent().unwrap())?;
+    std::fs::write(&library, test_macho(&[]))?;
+    std::fs::write(&executable, test_macho(&[library.to_str().unwrap()]))?;
     let prompt = Prompt::new("fixture".into());
     let token = fixture_token();
     let authentication = match adapter {
@@ -7002,8 +7084,36 @@ fn assert_lane_user_skills(adapter: &str) -> Result<(), Box<dyn std::error::Erro
                 Some(&token),
             );
             input.home = &home;
+            input.executable = &executable;
             input.host_var = &host_var;
             let spec = provider.prepare(input)?;
+            provenant_confinement::permissions::snapshot::render(
+                plan.permissions(),
+                &spec.profile,
+                &home,
+            )?;
+            assert_applied_access(&spec, &home);
+            assert!(
+                spec.applied_access()
+                    .libraries
+                    .contains(&crate::launch::exact(&library)),
+                "{adapter} {access:?} {state}"
+            );
+            for grant in &spec.applied_access().libraries {
+                assert_eq!(
+                    grant.scope,
+                    provenant_confinement::permissions::PathScope::Exact
+                );
+                assert!(
+                    provenant_confinement::write_grants(plan.permissions(), &spec.profile)
+                        .iter()
+                        .all(|write| !write.path.starts_with(&grant.path)
+                            && !grant.path.starts_with(&write.path))
+                );
+                assert!(spec.profile.spec.runtime_reads.iter().all(|read| read.scope
+                    != provenant_confinement::permissions::PathScope::Subtree
+                    || !grant.path.starts_with(&read.path)));
+            }
             let exposed = state == "discover";
             assert_eq!(
                 spec.user_skills.root.is_some(),
@@ -7068,6 +7178,149 @@ fn assert_lane_user_skills(adapter: &str) -> Result<(), Box<dyn std::error::Erro
             }
         }
     }
+    Ok(())
+}
+
+fn assert_applied_access(spec: &crate::LaunchSpec, home: &Path) {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::ffi::OsStrExt;
+    let applied = spec.applied_access();
+    for tool in spec.prepared_tools() {
+        for library in &tool.dependency_closure.libraries {
+            let grant = crate::launch::exact(library);
+            assert!(spec.profile.spec.runtime_reads.contains(&grant));
+            assert!(applied.libraries.contains(&grant));
+        }
+    }
+    assert_eq!(applied.toolchain_roots, spec.profile.spec.tool_exec_roots);
+    assert_eq!(applied.omitted_grants, spec.omitted_discovery);
+    assert_eq!(
+        applied.staged_content,
+        spec.user_skills.root.as_ref().map(crate::launch::subtree)
+    );
+    let receipt = applied.receipt(home);
+    assert_eq!(
+        receipt["libraries"].as_array().unwrap().len(),
+        applied.libraries.len()
+    );
+    assert_eq!(
+        receipt["toolchain_roots"].as_array().unwrap().len(),
+        applied.toolchain_roots.len()
+    );
+    assert_eq!(
+        receipt["omitted_grants"].as_array().unwrap().len(),
+        applied.omitted_grants.len()
+    );
+    for (key, grants) in [
+        ("libraries", &applied.libraries),
+        ("toolchain_roots", &applied.toolchain_roots),
+    ] {
+        for (reported, grant) in receipt[key].as_array().unwrap().iter().zip(grants) {
+            let mut digest = Sha256::new();
+            digest.update(b"provenant.applied-path.v1\0");
+            digest.update(grant.path.as_os_str().as_bytes());
+            assert_eq!(
+                reported["path_id"],
+                format!("sha256:{}", provenant_core::hex(&digest.finalize()))
+            );
+            assert_eq!(
+                reported["scope"],
+                serde_json::to_value(grant.scope).unwrap()
+            );
+        }
+    }
+    for (reported, omitted) in receipt["omitted_grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(&applied.omitted_grants)
+    {
+        let mut digest = Sha256::new();
+        digest.update(b"provenant.applied-path.v1\0");
+        digest.update(omitted.path.as_os_str().as_bytes());
+        assert_eq!(
+            reported["path_id"],
+            format!("sha256:{}", provenant_core::hex(&digest.finalize()))
+        );
+    }
+    assert!(!receipt.to_string().contains(&home.display().to_string()));
+}
+
+#[test]
+fn applied_access_matches_compiled_profile() -> Result<(), Box<dyn std::error::Error>> {
+    for spec in provenant_records::ADAPTER_SPECS
+        .iter()
+        .filter(|spec| spec.skills.is_some())
+    {
+        assert_lane_user_skills(spec.name)?;
+    }
+    let plan = fixture_access_plan(Access::ReadOnly, None, false);
+    let mut route = route("command", "");
+    route.account_key = None;
+    let prompt = Prompt::new("fixture".into());
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().canonicalize()?;
+    let library = home.join("library.dylib");
+    let executable = home.join("tool");
+    std::fs::write(&library, test_macho(&[]))?;
+    std::fs::write(&executable, test_macho(&[library.to_str().unwrap()]))?;
+    let argv = vec![executable.display().to_string()];
+    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.home = &home;
+    input.executable = &executable;
+    input.command = Some(crate::command::Invocation {
+        argv: &argv,
+        program: &executable,
+        runtimes: &[],
+    });
+    let mut spec = crate::command::Command.prepare(input)?;
+    let project_toolchain = home.join("project-toolchain");
+    std::fs::create_dir_all(&project_toolchain)?;
+    let project_grant = crate::launch::subtree(&project_toolchain);
+    let project_receipt = serde_json::json!({"exec_roots": [{"path": "./project-toolchain"}]});
+    spec.set_project_requirements(
+        vec![project_grant.clone()],
+        vec![project_grant.clone()],
+        vec![],
+        project_receipt.clone(),
+    );
+    spec.complete_tool_requirements(&plan, &home, Path::new("/fixture/repo"));
+    assert_eq!(spec.project_requirements_receipt(), Some(&project_receipt));
+    assert!(spec.profile.spec.runtime_reads.contains(&project_grant));
+    assert!(spec.profile.spec.tool_exec_roots.contains(&project_grant));
+    provenant_confinement::permissions::snapshot::render(plan.permissions(), &spec.profile, &home)?;
+    assert_applied_access(&spec, &home);
+    assert!(
+        spec.applied_access()
+            .libraries
+            .contains(&crate::launch::exact(&library))
+    );
+    Ok(())
+}
+
+#[test]
+fn lane_path_is_independent_of_host_dependency_path() -> Result<(), Box<dyn std::error::Error>> {
+    let plan = fixture_access_plan(Access::WorktreeWrite, Some("login"), false);
+    let mut route = route("codex", "fixture-model");
+    route.account_key = None;
+    let prompt = Prompt::new("fixture".into());
+    let login = |key: &str| (key == "PATH").then(|| "/host/login/bin:/usr/bin".into());
+    let daemon = |key: &str| (key == "PATH").then(|| "/host/daemon/bin:/bin".into());
+    let build = |host_var: &dyn Fn(&str) -> Option<std::ffi::OsString>| {
+        let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+        input.host_var = host_var;
+        crate::codex::Codex.prepare(input)
+    };
+    let login = build(&login)?;
+    let daemon = build(&daemon)?;
+    let path = |spec: &crate::LaunchSpec| {
+        spec.env
+            .iter()
+            .find(|(key, _)| key == "PATH")
+            .map(|(_, value)| value.clone())
+    };
+    assert_eq!(path(&login), path(&daemon));
+    assert_eq!(login.profile.spec, daemon.profile.spec);
     Ok(())
 }
 
@@ -7173,7 +7426,7 @@ fn staged_skills_native_probes() -> Result<(), Box<dyn std::error::Error>> {
                 &repo,
                 &fixture.join("scratch"),
                 &fixture.join("state"),
-                &fixture.join("bin"),
+                &fixture.join("package/bin"),
             ] {
                 std::fs::create_dir_all(dir)?;
             }
@@ -7197,7 +7450,7 @@ fn staged_skills_native_probes() -> Result<(), Box<dyn std::error::Error>> {
             let keychain = home.join("Library/Keychains/login.keychain-db");
             std::fs::create_dir_all(keychain.parent().ok_or("keychain parent")?)?;
             std::fs::write(keychain, b"fixture")?;
-            let executable = fixture.join("bin/provider");
+            let executable = fixture.join("package/bin/provider");
             std::fs::write(&executable, b"fixture")?;
             let authentication = match adapter {
                 "agy" => Some("keychain"),

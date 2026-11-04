@@ -322,6 +322,7 @@ fn prepare(
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
     let plan = input.confined.permissions();
+    let mut tool_requirements = crate::launch::ToolRequirements::default();
     if plan.selected_authentication.as_deref() != Some("keychain") {
         return Err(ProviderError::UnsupportedPolicy);
     }
@@ -339,7 +340,7 @@ fn prepare(
     let staged_skills = input.stage_user_skills();
     let user_skills = staged_skills.root.clone();
     let skill_reads = user_skills.iter().map(subtree).collect::<Vec<_>>();
-    let mut omitted_discovery = Vec::new();
+    let omitted_discovery = Vec::new();
     let mut argv: Vec<OsString> = [
         input.executable.as_os_str(),
         "--output-format".as_ref(),
@@ -423,8 +424,8 @@ fn prepare(
         });
     }
     // Both lanes run system commands; only writers get the additional tools.
-    let mut runtime_reads = skill_reads;
-    let mut tool_exec_roots = vec![
+    let runtime_reads = skill_reads;
+    let tool_exec_roots = vec![
         subtree("/bin"),
         subtree("/usr/bin"),
         subtree("/usr/libexec"),
@@ -434,23 +435,13 @@ fn prepare(
         ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
     ]);
     if shell {
-        crate::launch::rust_tools(
-            input,
-            access,
-            &mut runtime_reads,
-            &mut tool_exec_roots,
-            &mut env,
-            &mut setup,
-            &mut omitted_discovery,
-        );
+        crate::launch::rust_tools(input, access, &mut tool_requirements, &mut env, &mut setup);
         crate::launch::node_tools(
             input.home,
             access,
             crate::launch::lane_cache(input),
-            &mut runtime_reads,
-            &mut tool_exec_roots,
+            &mut tool_requirements,
             &mut env,
-            &mut omitted_discovery,
         );
     }
     Ok(LaunchSpec {
@@ -462,7 +453,7 @@ fn prepare(
         setup,
         omitted_discovery,
         user_skills: staged_skills,
-        prepared_tools: Vec::new(),
+        tool_requirements,
         git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {

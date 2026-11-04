@@ -522,6 +522,7 @@ fn prepare(
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
     let plan = input.confined.permissions();
+    let mut tool_requirements = crate::launch::ToolRequirements::default();
     // No credential path is granted: the token arrives through a pipe.
     if plan.selected_authentication.is_some() {
         return Err(ProviderError::UnsupportedPolicy);
@@ -645,7 +646,7 @@ fn prepare(
     let staged_skills = input.stage_user_skills();
     let user_skills = staged_skills.root.clone();
     let skill_reads = user_skills.iter().map(subtree).collect::<Vec<_>>();
-    let mut omitted_discovery = Vec::new();
+    let omitted_discovery = Vec::new();
     let discover_skills = user_skills.is_some();
     if shell || discover_skills {
         let config = plan
@@ -692,23 +693,13 @@ fn prepare(
     // Use the same read-only toolchain, public TLS configuration and CLT
     // selection as Codex. Access still controls private caches and writes.
     if toolchain {
-        crate::launch::rust_tools(
-            input,
-            access,
-            &mut runtime_reads,
-            &mut tool_exec_roots,
-            &mut env,
-            &mut setup,
-            &mut omitted_discovery,
-        );
+        crate::launch::rust_tools(input, access, &mut tool_requirements, &mut env, &mut setup);
         crate::launch::node_tools(
             input.home,
             access,
             crate::launch::lane_cache(input),
-            &mut runtime_reads,
-            &mut tool_exec_roots,
+            &mut tool_requirements,
             &mut env,
-            &mut omitted_discovery,
         );
     }
     let mut spec = LaunchSpec {
@@ -723,7 +714,7 @@ fn prepare(
         setup,
         omitted_discovery,
         user_skills: staged_skills,
-        prepared_tools: Vec::new(),
+        tool_requirements,
         git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
@@ -752,6 +743,7 @@ fn prepare(
         },
         stream,
     };
+    crate::launch::prepare_tool_requirements(input, &mut spec);
     input
         .provenant
         .grant(&mut spec.profile.spec, &mut spec.setup, true);

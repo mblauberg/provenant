@@ -41,6 +41,7 @@ fn prepare(
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
     let plan = input.confined.permissions();
+    let mut tool_requirements = crate::launch::ToolRequirements::default();
     if input.confined.codex_policy() != CodexPolicy::Clean
         || plan.selected_authentication.as_deref() != Some("login")
     {
@@ -88,7 +89,7 @@ fn prepare(
     // are readable through the runtime baseline; exec roots add exec, not
     // reads. No shared install prefix: its var/ stays unreadable.
     let package = package_root(input.executable)?;
-    let mut tool_exec_roots = vec![
+    let tool_exec_roots = vec![
         subtree("/bin"),
         subtree("/usr/bin"),
         subtree("/usr/libexec"),
@@ -97,7 +98,7 @@ fn prepare(
     let mut runtime_reads = vec![subtree(package)];
     let tool_writes = Vec::new();
     let staged_skills = input.stage_user_skills();
-    let mut omitted_discovery = Vec::new();
+    let omitted_discovery = Vec::new();
     let mut setup = vec![SetupStep::Symlink {
         link: codex_home.join("auth.json"),
         target: credential.clone(),
@@ -115,23 +116,13 @@ fn prepare(
     input
         .provenant
         .environment(&plan.scratch.path, &mut env, &mut setup, false)?;
-    crate::launch::rust_tools(
-        input,
-        access,
-        &mut runtime_reads,
-        &mut tool_exec_roots,
-        &mut env,
-        &mut setup,
-        &mut omitted_discovery,
-    );
+    crate::launch::rust_tools(input, access, &mut tool_requirements, &mut env, &mut setup);
     crate::launch::node_tools(
         input.home,
         access,
         crate::launch::lane_cache(input),
-        &mut runtime_reads,
-        &mut tool_exec_roots,
+        &mut tool_requirements,
         &mut env,
-        &mut omitted_discovery,
     );
     // Git may inspect global config even for status. Keep host hooks,
     // includes and credential helpers outside the lane's environment.
@@ -157,7 +148,7 @@ fn prepare(
         setup,
         omitted_discovery,
         user_skills: staged_skills,
-        prepared_tools: Vec::new(),
+        tool_requirements,
         git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
@@ -182,6 +173,7 @@ fn prepare(
         },
         stream,
     };
+    crate::launch::prepare_tool_requirements(input, &mut spec);
     input
         .provenant
         .grant(&mut spec.profile.spec, &mut spec.setup, false);

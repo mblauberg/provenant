@@ -229,6 +229,8 @@ the staging byte limit and entries that change during capture are skipped with
 a warning. If the staged tree cannot be written, the lane continues without
 user skills and records a warning. The staged tree contains no links and
 receives no write grant.
+`domains.lanes.skill_stage_max_bytes` sets the total capture limit (16 MiB by
+default); the receipt records its effective value and configuration origin.
 Project skills and selected-provider credential access keep their existing
 rules. Reading a skill does not change nested dispatch policy.
 

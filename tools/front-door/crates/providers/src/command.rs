@@ -95,39 +95,32 @@ fn prepare(
     };
     profile
         .tool_exec_roots
-        .extend(std::iter::once(exact(command.program)).chain(command.runtimes.iter().map(exact)));
+        .extend(command.runtimes.iter().map(exact));
     let mut setup = Vec::new();
-    let mut omitted_discovery = Vec::new();
+    let omitted_discovery = Vec::new();
+    let mut tool_requirements = crate::launch::ToolRequirements::default();
     if [".cargo/bin", ".rustup/toolchains"]
         .iter()
         .all(|path| input.home.join(path).is_dir())
     {
-        rust_tools(
-            input,
-            access,
-            &mut profile.runtime_reads,
-            &mut profile.tool_exec_roots,
-            &mut env,
-            &mut setup,
-            &mut omitted_discovery,
-        );
+        rust_tools(input, access, &mut tool_requirements, &mut env, &mut setup);
     } else {
         crate::launch::system_tools(
             access,
-            &mut profile.runtime_reads,
-            &mut profile.tool_exec_roots,
+            &mut tool_requirements.reads,
+            &mut tool_requirements.exec,
             &mut env,
         );
-        profile.tool_exec_roots.push(subtree(input.cwd));
+        let cwd = subtree(input.cwd);
+        tool_requirements.exec.push(cwd.clone());
+        tool_requirements.required_exec.push(cwd);
     }
     node_tools(
         input.home,
         access,
         scratch,
-        &mut profile.runtime_reads,
-        &mut profile.tool_exec_roots,
+        &mut tool_requirements,
         &mut env,
-        &mut omitted_discovery,
     );
     Ok(LaunchSpec {
         argv,
@@ -138,7 +131,7 @@ fn prepare(
         setup,
         omitted_discovery,
         user_skills: Default::default(),
-        prepared_tools: Vec::new(),
+        tool_requirements,
         git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: profile,

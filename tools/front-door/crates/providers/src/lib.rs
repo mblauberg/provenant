@@ -29,9 +29,8 @@ pub use swift::toolchain_available as swift_toolchain_available;
 pub mod update;
 pub use contract::*;
 pub use launch::{
-    Access, LaunchSpec, OmissionSource, OmittedGrant, PrepareInput, PreparedToolRequirement,
-    Session, SetupStep, Stdin,
-
+    Access, AppliedAccess, LaunchSpec, OmissionSource, OmittedGrant, PrepareInput,
+    PreparedToolRequirement, Session, SetupStep, Stdin,
 };
 pub use stream::*;
 
@@ -103,6 +102,7 @@ macro_rules! adapter {
                     continuation.bind_stream($id, &mut stream)?;
                 }
                 let mut spec = $prepare(&input, access, session, stream)?;
+                crate::launch::prepare_tool_requirements(&input, &mut spec);
                 crate::launch::private_git_objects(&input, &mut spec)?;
                 crate::launch::prepare_tool_requirements(&input, &mut spec);
                 Ok(spec)

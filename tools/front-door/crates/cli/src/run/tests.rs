@@ -3430,6 +3430,33 @@ fn grants_lines_list_each_applied_grant_and_stay_empty_for_older_attempts()
 }
 
 #[test]
+fn grants_lines_report_incomplete_tool_closure() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel).map_err(|f| f.message)?;
+    let store = trace_store(&temp, &call)?;
+    let prepared = trace_run(10, AttemptId::from_bytes([9; 16]), clock.wall_now()?)?;
+    store.create(&prepared, &call)?;
+    let mut record = store.record(prepared.attempts[0].attempt_id, &call)?;
+    record.applied_route = Some(run::RouteRecord {
+        extra: [(
+            "tool_closure".into(),
+            serde_json::json!([{
+                "tool": "rg", "outcome": "incomplete", "reason": "missing", "reasons": ["missing"]
+            }]),
+        )]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    });
+    assert!(
+        grants_lines(&record).contains("warning tool_closure_incomplete tool=rg reason=missing\n")
+    );
+    Ok(())
+}
+
+#[test]
 fn trace_chain_keeps_every_ancestor_of_a_long_chain() -> Result<(), Box<dyn std::error::Error>> {
     const LEN: u8 = 70;
     let temp = tempfile::tempdir()?;

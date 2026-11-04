@@ -237,6 +237,28 @@ Rendered profiles are pinned by
 `crates/providers/src/seatbelt_snapshots.rs::seatbelt_profiles_match_snapshots`.
 The rules below are what every profile must keep.
 
+### Tool requirements and runtime closure
+
+Launch preparation records selected executable requirements and resolves their
+Mach-O dependencies into exact read-only file grants. Closure results distinguish
+complete, incomplete and unsupported images. Missing, malformed,
+loader-relative, limit-bound and credential or protected-root dependencies are
+recorded in the receipt; dependencies covered by lane-owned roots are recorded
+as already covered and still traversed for their own dependencies.
+Trace output names the tool and reason without exposing dependency directories.
+An incomplete closure leaves the resolved grants in place and does not itself
+refuse launch. The host dependency-preparation PATH does not grant lane access.
+
+### Staged user content
+
+The host captures user skills in an attempt-owned tree and grants the lane read
+access to the staged copy. Links are copied as content rather than retained;
+links resolving into credential roots, cycles, changed entries and content
+exceeding the configured size bound are skipped with warnings. Optional grant
+discovery also omits credential-root targets with warnings. Required executable,
+worktree and configured grants keep the credential-root guard. Confinement
+limits access; it does not make a networked lane hermetic.
+
 ### Database IPC shares the host namespace
 
 Database IPC is denied by default in both writer and read-only profiles.
@@ -519,6 +541,8 @@ Git-internal roots. `~/.ssh`, `~/.aws`, `~/.kube`, `~/.secrets` and Cargo
 `credentials` are denied after every grant. Unsupported or nested
 confinement fails `ConfinementUnavailable` and never widens access; Linux has
 no backend.
+An optional discovered root that resolves into a credential root is omitted
+with a warning; required roots continue to fail closed.
 Literal discovery grants accept absent entries or real directories through
   held, revalidated parents. They refuse symlinks and other entry types and
   grant no reads of children beyond existing read roots. Anchor refusals during

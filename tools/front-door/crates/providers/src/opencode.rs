@@ -98,6 +98,7 @@ fn prepare(
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
     let plan = input.confined.permissions();
+    let mut tool_requirements = crate::launch::ToolRequirements::default();
     if plan.selected_authentication.is_some() {
         return Err(ProviderError::UnsupportedPolicy);
     }
@@ -356,23 +357,13 @@ fn prepare(
     ]);
     // Only lanes whose permissions allow bash can run the toolchain.
     if shell {
-        crate::launch::rust_tools(
-            input,
-            access,
-            &mut runtime_reads,
-            &mut tool_exec_roots,
-            &mut env,
-            &mut setup,
-            &mut omitted_discovery,
-        );
+        crate::launch::rust_tools(input, access, &mut tool_requirements, &mut env, &mut setup);
         crate::launch::node_tools(
             input.home,
             access,
             crate::launch::lane_cache(input),
-            &mut runtime_reads,
-            &mut tool_exec_roots,
+            &mut tool_requirements,
             &mut env,
-            &mut omitted_discovery,
         );
     }
     env.push(("OPENCODE_CONFIG_CONTENT".into(), config.into()));
@@ -394,7 +385,7 @@ fn prepare(
         setup,
         omitted_discovery,
         user_skills: staged_skills,
-        prepared_tools: Vec::new(),
+        tool_requirements,
         git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
@@ -1259,8 +1250,7 @@ mod tests {
             root.join("host/executable"),
             root.join("host/directory"),
         ];
-        // Every rejected image names another host dylib. It must not be
-        // reached through a rejected node of the closure.
+        // Already-covered images still contribute their own dependencies.
         let hidden = root.join("host/hidden.dylib");
         image(&hidden, 6, &[])?;
         for path in &denied {
@@ -1293,7 +1283,7 @@ mod tests {
             OpenCode.stream(None)?,
         )?;
         let tool = spec
-            .prepared_tools
+            .prepared_tools()
             .iter()
             .find(|tool| tool.executable == cached)
             .expect("cached rg has prepared closure facts");
@@ -1307,21 +1297,61 @@ mod tests {
                 .iter()
                 .any(|reason| matches!(reason, crate::IncompleteReason::Malformed(_)))
         );
-        assert_eq!(
-            tool.dependency_closure.libraries,
-            vec![first.clone(), second.clone()]
-        );
+        for path in [&first, &second, &denied[2], &hidden] {
+            assert!(
+                tool.dependency_closure.libraries.contains(path),
+                "{}",
+                path.display()
+            );
+            assert_eq!(std::fs::canonicalize(path)?, *path);
+            assert!(
+                spec.profile
+                    .spec
+                    .runtime_reads
+                    .iter()
+                    .all(|grant| grant.scope
+                        != provenant_confinement::permissions::PathScope::Subtree
+                        || !path.starts_with(&grant.path))
+            );
+            assert!(
+                provenant_confinement::write_grants(plan.permissions(), &spec.profile)
+                    .iter()
+                    .all(|grant| !path.starts_with(&grant.path) && !grant.path.starts_with(path))
+            );
+        }
+        for path in [&denied[3], &denied[4], &denied[5]] {
+            assert!(
+                tool.dependency_closure.already_covered.contains(path),
+                "{}",
+                path.display()
+            );
+        }
         assert!(
             tool.dependency_closure
                 .omitted
                 .contains(&root.join("host/.ssh/fixture.dylib"))
+        );
+        assert!(
+            tool.dependency_closure
+                .reasons
+                .iter()
+                .any(|reason| matches!(
+                    reason, crate::IncompleteReason::OmittedCredential(path)
+                        if path == &root.join("host/.ssh/fixture.dylib")
+                ))
+        );
+        assert!(
+            !tool
+                .receipt()
+                .to_string()
+                .contains(&root.display().to_string())
         );
         let profile = provenant_confinement::permissions::snapshot::render(
             plan.permissions(),
             &spec.profile,
             &home,
         )?;
-        for path in [&first, &second] {
+        for path in [&first, &second, &denied[2], &hidden] {
             assert!(
                 profile.contains(&format!(
                     "(allow file-read* (literal \"{}\"))",
@@ -1331,7 +1361,12 @@ mod tests {
                 path.display()
             );
         }
-        for path in denied.iter().chain([&hidden, &alias]) {
+        for path in denied
+            .iter()
+            .enumerate()
+            .filter_map(|(index, path)| (index != 2).then_some(path))
+            .chain([&alias])
+        {
             assert!(
                 !profile.contains(&format!(
                     "(allow file-read* (literal \"{}\"))",
@@ -1377,7 +1412,7 @@ mod tests {
             OpenCode.stream(None)?,
         )?;
         let requirement = spec
-            .prepared_tools
+            .prepared_tools()
             .iter()
             .find(|tool| tool.executable == cached)
             .expect("cached rg has prepared closure facts");

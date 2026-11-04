@@ -238,8 +238,7 @@ fn xcode_select_path() -> Option<PathBuf> {
 pub(crate) fn swift_tools(
     input: &PrepareInput<'_>,
     access: Access,
-    runtime_reads: &mut Vec<PathGrant>,
-    tool_exec_roots: &mut Vec<PathGrant>,
+    requirements: &mut crate::launch::ToolRequirements,
     env: &mut [(OsString, OsString)],
     setup: &mut Vec<SetupStep>,
 ) {
@@ -254,8 +253,8 @@ pub(crate) fn swift_tools(
             cache: &crate::launch::lane_cache(input).join("swift"),
             read_only: access == Access::ReadOnly,
         },
-        runtime_reads,
-        tool_exec_roots,
+        &mut requirements.reads,
+        &mut requirements.exec,
         env,
         setup,
     );

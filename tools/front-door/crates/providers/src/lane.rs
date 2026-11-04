@@ -1142,7 +1142,7 @@ mod tests {
             setup: Vec::new(),
             omitted_discovery: Vec::new(),
             user_skills: Default::default(),
-            prepared_tools: Vec::new(),
+            tool_requirements: Default::default(),
             git_wrapper: Default::default(),
             profile: provenant_confinement::permissions::ProviderProfile {
                 spec: ProviderProfileSpec::default(),

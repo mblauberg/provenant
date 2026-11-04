@@ -23,6 +23,16 @@ pub enum IncompleteReason {
     Missing(String),
     Malformed(PathBuf),
     Limit { max_libraries: usize },
+    OmittedCredential(PathBuf),
+    OmittedProtected(PathBuf),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LibraryAccess {
+    Grant,
+    AlreadyCovered,
+    OmitCredential,
+    OmitProtected,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,6 +42,8 @@ pub struct DependencyClosure {
     pub reasons: Vec<IncompleteReason>,
     /// Resolved libraries deliberately kept out of the closure by policy.
     pub omitted: Vec<PathBuf>,
+    /// Dependencies already reachable under an existing lane-owned root.
+    pub already_covered: Vec<PathBuf>,
 }
 
 impl DependencyClosure {
@@ -41,6 +53,7 @@ impl DependencyClosure {
             libraries: Vec::new(),
             reasons: Vec::new(),
             omitted: Vec::new(),
+            already_covered: Vec::new(),
         }
     }
 
@@ -48,6 +61,7 @@ impl DependencyClosure {
         libraries: Vec<PathBuf>,
         reasons: Vec<IncompleteReason>,
         omitted: Vec<PathBuf>,
+        already_covered: Vec<PathBuf>,
     ) -> Self {
         Self {
             outcome: if reasons.is_empty() {
@@ -58,6 +72,7 @@ impl DependencyClosure {
             libraries,
             reasons,
             omitted,
+            already_covered,
         }
     }
 }
@@ -66,13 +81,14 @@ impl DependencyClosure {
 /// recursion (for example lane-owned binaries and credential roots).
 pub(crate) fn dependency_closure(
     executable: &Path,
-    allowed: impl Fn(&Path) -> bool,
+    access: impl Fn(&Path) -> LibraryAccess,
 ) -> DependencyClosure {
     let Some(root_images) = read_images(executable) else {
         if has_macho_magic(executable) {
             return DependencyClosure::finish(
                 Vec::new(),
                 vec![IncompleteReason::Malformed(executable.to_owned())],
+                Vec::new(),
                 Vec::new(),
             );
         }
@@ -82,6 +98,7 @@ pub(crate) fn dependency_closure(
     let mut pending = vec![(executable.to_owned(), root_images)];
     let mut reasons = Vec::new();
     let mut omitted = Vec::new();
+    let mut already_covered = Vec::new();
     while let Some((image_path, images)) = pending.pop() {
         let mut names = Vec::new();
         for image in images {
@@ -121,16 +138,30 @@ pub(crate) fn dependency_closure(
                     continue;
                 }
             };
-            if found.contains(&path) {
+            if found.contains(&path) || already_covered.contains(&path) || omitted.contains(&path) {
                 continue;
             }
-            if !allowed(&path) {
-                if provenant_confinement::is_credential_root(&path) && !omitted.contains(&path) {
+            let covered = match access(&path) {
+                LibraryAccess::Grant => false,
+                LibraryAccess::AlreadyCovered => true,
+                LibraryAccess::OmitCredential => {
+                    add_reason(
+                        &mut reasons,
+                        IncompleteReason::OmittedCredential(path.clone()),
+                    );
                     omitted.push(path);
+                    continue;
                 }
-                continue;
-            }
-            if found.len() == LIBRARY_LIMIT {
+                LibraryAccess::OmitProtected => {
+                    add_reason(
+                        &mut reasons,
+                        IncompleteReason::OmittedProtected(path.clone()),
+                    );
+                    omitted.push(path);
+                    continue;
+                }
+            };
+            if found.len() + already_covered.len() == LIBRARY_LIMIT {
                 add_reason(
                     &mut reasons,
                     IncompleteReason::Limit {
@@ -159,13 +190,18 @@ pub(crate) fn dependency_closure(
                 continue;
             }
             if !is_dylib {
+                add_reason(&mut reasons, IncompleteReason::Malformed(path));
                 continue;
             }
-            found.push(path.clone());
+            if covered {
+                already_covered.push(path.clone());
+            } else {
+                found.push(path.clone());
+            }
             pending.push((path, images));
         }
     }
-    DependencyClosure::finish(found, reasons, omitted)
+    DependencyClosure::finish(found, reasons, omitted, already_covered)
 }
 
 fn add_reason(reasons: &mut Vec<IncompleteReason>, reason: IncompleteReason) {
@@ -319,7 +355,9 @@ fn load_commands(image: &[u8]) -> Option<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClosureOutcome, IncompleteReason, dependency_closure, load_commands};
+    use super::{
+        ClosureOutcome, IncompleteReason, LibraryAccess, dependency_closure, load_commands,
+    };
     use std::path::Path;
 
     fn image_with_dependencies(names: &[&str]) -> Vec<u8> {
@@ -352,7 +390,7 @@ mod tests {
             ]),
         )
         .unwrap();
-        let closure = dependency_closure(&root, |_| true);
+        let closure = dependency_closure(&root, |_| LibraryAccess::Grant);
         assert_eq!(closure.outcome, ClosureOutcome::Incomplete);
         assert!(closure.reasons.contains(&IncompleteReason::LoaderRelative(
             "@rpath/librelative.dylib".into()
@@ -366,6 +404,87 @@ mod tests {
                 .iter()
                 .any(|reason| matches!(reason, IncompleteReason::Malformed(_)))
         );
+        let mut truncated = image_with_dependencies(&["/usr/lib/libSystem.B.dylib"]);
+        truncated.truncate(40);
+        std::fs::write(&root, truncated).unwrap();
+        let truncated = dependency_closure(&root, |_| LibraryAccess::Grant);
+        assert_eq!(truncated.outcome, ClosureOutcome::Incomplete);
+        assert!(
+            truncated
+                .reasons
+                .iter()
+                .any(|reason| matches!(reason, IncompleteReason::Malformed(_)))
+        );
+    }
+
+    #[test]
+    fn closure_deduplicates_cycles_and_reports_all_loader_relative_forms() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let a = root.join("a.dylib");
+        let b = root.join("b.dylib");
+        let c = root.join("c.dylib");
+        std::fs::write(
+            &a,
+            image_with_dependencies(&[b.to_str().unwrap(), b.to_str().unwrap()]),
+        )
+        .unwrap();
+        std::fs::write(&b, image_with_dependencies(&[c.to_str().unwrap()])).unwrap();
+        std::fs::write(&c, image_with_dependencies(&[a.to_str().unwrap()])).unwrap();
+        let tool = root.join("tool");
+        std::fs::write(&tool, image_with_dependencies(&[a.to_str().unwrap()])).unwrap();
+        let closure = dependency_closure(&tool, |_| LibraryAccess::Grant);
+        assert_eq!(closure.outcome, ClosureOutcome::Complete);
+        assert_eq!(closure.libraries.len(), 3);
+        for library in [&a, &b, &c] {
+            assert!(closure.libraries.contains(library));
+        }
+        std::fs::write(
+            &tool,
+            image_with_dependencies(&[
+                "@rpath/a.dylib",
+                "@loader_path/b.dylib",
+                "@executable_path/c.dylib",
+            ]),
+        )
+        .unwrap();
+        let closure = dependency_closure(&tool, |_| LibraryAccess::Grant);
+        assert_eq!(closure.outcome, ClosureOutcome::Incomplete);
+        assert_eq!(closure.reasons.len(), 3);
+        assert!(
+            closure
+                .reasons
+                .iter()
+                .all(|reason| matches!(reason, IncompleteReason::LoaderRelative(_)))
+        );
+    }
+
+    #[test]
+    fn protected_dependency_is_omitted_without_reading() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let protected = root.join("protected.dylib");
+        std::fs::write(&protected, b"not a Mach-O image").unwrap();
+        let tool = root.join("tool");
+        std::fs::write(
+            &tool,
+            image_with_dependencies(&[protected.to_str().unwrap()]),
+        )
+        .unwrap();
+        let closure = dependency_closure(&tool, |path| {
+            if path == protected {
+                LibraryAccess::OmitProtected
+            } else {
+                LibraryAccess::Grant
+            }
+        });
+        assert_eq!(closure.outcome, ClosureOutcome::Incomplete);
+        assert_eq!(
+            closure.reasons,
+            vec![IncompleteReason::OmittedProtected(protected.clone())]
+        );
+        assert_eq!(closure.omitted, vec![protected]);
+        assert!(closure.libraries.is_empty());
     }
 
     #[test]
@@ -381,17 +500,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            dependency_closure(&image, |_| true),
+            dependency_closure(&image, |_| LibraryAccess::Grant),
             super::DependencyClosure {
                 outcome: ClosureOutcome::Complete,
                 libraries: Vec::new(),
                 reasons: Vec::new(),
                 omitted: Vec::new(),
+                already_covered: Vec::new(),
             }
         );
         std::fs::write(&image, b"plain text").unwrap();
         assert_eq!(
-            dependency_closure(&image, |_| true).outcome,
+            dependency_closure(&image, |_| LibraryAccess::Grant).outcome,
             ClosureOutcome::UnsupportedFormat
         );
     }
@@ -409,7 +529,7 @@ mod tests {
             image_with_dependencies(&[leaf.to_str().unwrap()]),
         )
         .unwrap();
-        let closure = dependency_closure(&executable, |_| true);
+        let closure = dependency_closure(&executable, |_| LibraryAccess::Grant);
         assert_eq!(closure.outcome, ClosureOutcome::Complete);
         assert_eq!(closure.libraries, vec![leaf]);
         assert!(!closure.libraries.iter().any(|path| path == Path::new("/")));
@@ -426,11 +546,30 @@ mod tests {
             .collect();
         let limited = root.join("limited-tool");
         std::fs::write(&limited, image_with_dependencies(&names)).unwrap();
-        let closure = dependency_closure(&limited, |_| true);
+        let closure = dependency_closure(&limited, |_| LibraryAccess::Grant);
         assert_eq!(closure.outcome, ClosureOutcome::Incomplete);
         assert_eq!(closure.libraries.len(), super::LIBRARY_LIMIT);
         assert!(closure.reasons.contains(&IncompleteReason::Limit {
             max_libraries: super::LIBRARY_LIMIT,
+        }));
+
+        for index in 0..dependencies.len() {
+            let next = dependencies
+                .get(index + 1)
+                .map(|path| path.to_str().unwrap());
+            let names = next.into_iter().collect::<Vec<_>>();
+            std::fs::write(&dependencies[index], image_with_dependencies(&names)).unwrap();
+        }
+        std::fs::write(
+            &limited,
+            image_with_dependencies(&[dependencies[0].to_str().unwrap()]),
+        )
+        .unwrap();
+        let chained = dependency_closure(&limited, |_| LibraryAccess::Grant);
+        assert_eq!(chained.outcome, ClosureOutcome::Incomplete);
+        assert_eq!(chained.libraries.len(), super::LIBRARY_LIMIT);
+        assert!(chained.reasons.contains(&IncompleteReason::Limit {
+            max_libraries: super::LIBRARY_LIMIT
         }));
     }
 
@@ -486,7 +625,7 @@ mod tests {
         )
         .unwrap();
 
-        let closure = dependency_closure(&executable, |_| true);
+        let closure = dependency_closure(&executable, |_| LibraryAccess::Grant);
         assert_eq!(closure.outcome, ClosureOutcome::Complete);
         let mut libraries = closure.libraries;
         libraries.sort();

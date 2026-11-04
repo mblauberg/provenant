@@ -25,6 +25,12 @@ impl StagedUserSkills {
     pub fn setup(&self) -> &[SetupStep] {
         &self.setup
     }
+
+    pub fn discard(&mut self) {
+        self.root = None;
+        self.file_count = 0;
+        self.setup.clear();
+    }
 }
 
 struct Capture<'a> {

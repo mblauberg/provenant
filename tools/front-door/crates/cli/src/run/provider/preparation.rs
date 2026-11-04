@@ -1185,7 +1185,7 @@ pub(super) fn prepare_candidates(
                 home: &home,
                 user: &user,
                 host_var: &|key| std::env::var_os(key),
-                skill_stage_max_bytes: 16 * 1024 * 1024,
+                skill_stage_max_bytes: config.domains.lanes.skill_stage_max_bytes,
                 account: account.as_ref(),
                 token,
                 cwd: &cwd,
@@ -1210,30 +1210,21 @@ pub(super) fn prepare_candidates(
                 continue;
             }
         };
-        if let Some(stage) = &spec.user_skills.root {
-            let result = apply_setup_directory(&[staging], stage)
-                .and_then(|_| apply_setup(spec.user_skills.setup(), &[stage], None));
-            if result.is_err() {
-                let source = spec.user_skills.source.take();
-                let warnings = std::mem::take(&mut spec.user_skills.warnings);
-                let mut without_skills = provider_route.clone();
-                without_skills.set_user_skills(false);
-                spec = match prepare(&without_skills) {
-                    Ok(spec) => spec,
-                    Err(error) => {
-                        reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
-                        continue;
-                    }
-                };
-                spec.user_skills.source = source;
-                spec.user_skills.warnings = warnings;
-                spec.user_skills
-                    .warnings
-                    .push(provenant_providers::SkillWarning {
-                        path: PathBuf::new(),
-                        reason: "staging_failed",
-                    });
-            }
+        if !materialize_user_skills(&mut spec.user_skills, |stage, setup| {
+            apply_setup_directory(&[staging], stage)
+                .and_then(|_| apply_setup(setup, &[stage], None))
+        }) {
+            let skills = std::mem::take(&mut spec.user_skills);
+            let mut without_skills = provider_route.clone();
+            without_skills.set_user_skills(false);
+            spec = match prepare(&without_skills) {
+                Ok(spec) => spec,
+                Err(error) => {
+                    reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
+                    continue;
+                }
+            };
+            spec.user_skills = skills;
         }
         if let Some(alias) = &paths.temporary_alias {
             alias_temporary_env(
@@ -1326,6 +1317,7 @@ pub(super) fn prepare_candidates(
             spec.argv
                 .splice(1..1, [argument.into(), scratch.as_os_str().to_owned()]);
         }
+        spec.complete_tool_requirements(&plan, &home, &cwd);
         let transcript_account = account
             .as_ref()
             .filter(|_| adapter.id() == provenant_records::Harness::Claude.spec().name)
@@ -1413,9 +1405,26 @@ pub(super) fn prepare_candidates(
                 .extra
                 .insert("dependency_preparation".into(), event.clone());
         }
+        let mut skills =
+            user_skills_exposure(user_skills_mode, user_skills_origin, &spec.user_skills);
+        skills["stage_max_bytes"] = serde_json::json!({
+            "value": config.domains.lanes.skill_stage_max_bytes,
+            "origin": config.origins.get("domains.lanes.skill_stage_max_bytes"),
+            "key": "domains.lanes.skill_stage_max_bytes",
+        });
+        provider.extra.insert("user_skills".into(), skills);
         provider.extra.insert(
-            "user_skills".into(),
-            user_skills_exposure(user_skills_mode, user_skills_origin, &spec.user_skills),
+            "tool_closure".into(),
+            serde_json::Value::Array(
+                spec.prepared_tools()
+                    .iter()
+                    .map(|tool| tool.receipt())
+                    .collect(),
+            ),
+        );
+        provider.extra.insert(
+            "applied_access".into(),
+            spec.applied_access().receipt(&home),
         );
         provider.extra.insert(
             "discovery_warnings".into(),
@@ -1612,8 +1621,13 @@ pub(super) fn omission_warning(entry: &provenant_providers::OmittedGrant, home: 
         .path
         .strip_prefix(home)
         .map(|relative| format!("~/{}", relative.display()))
-        .unwrap_or_else(|_| entry.path.display().to_string());
-    format!("omitted discovered grant {display}: credential root guard")
+        .unwrap_or_else(|_| "<external path; inspect on host>".into());
+    let guard = if provenant_confinement::refuses_lane_root(&entry.path, true, Some(home)) {
+        "credential root guard"
+    } else {
+        "protected root guard"
+    };
+    format!("omitted discovered grant {display}: {guard}")
 }
 
 /// Warnings for omitted grants of one kind. Skill omissions belong under
@@ -1632,6 +1646,25 @@ pub(super) fn discovery_warnings(
 }
 
 /// Report the same provider-owned locations and grants used during prepare.
+/// Materialize the captured tree; an I/O failure drops only optional skills.
+fn materialize_user_skills(
+    staged: &mut provenant_providers::StagedUserSkills,
+    setup: impl FnOnce(&Path, &[SetupStep]) -> Result<(), String>,
+) -> bool {
+    let Some(root) = &staged.root else {
+        return true;
+    };
+    if setup(root, staged.setup()).is_ok() {
+        return true;
+    }
+    staged.discard();
+    staged.warnings.push(provenant_providers::SkillWarning {
+        path: PathBuf::new(),
+        reason: "staging_failed",
+    });
+    false
+}
+
 fn user_skills_exposure(
     mode: provenant_records::UserSkillsMode,
     origin: serde_json::Value,
@@ -1659,6 +1692,33 @@ fn user_skills_exposure(
 #[cfg(test)]
 mod user_skills_tests {
     use super::*;
+    #[test]
+    fn staging_setup_failure_continues_without_skills() {
+        let mut staged = provenant_providers::StagedUserSkills::default();
+        staged.root = Some(PathBuf::from("/attempt/skills"));
+        staged.source = Some("~/.agents/skills".into());
+        staged.file_count = 3;
+        assert!(!materialize_user_skills(&mut staged, |_, _| Err(
+            "injected I/O failure".into()
+        )));
+        assert!(staged.root.is_none());
+        assert_eq!(staged.file_count, 0);
+        assert_eq!(staged.source.as_deref(), Some("~/.agents/skills"));
+        assert!(
+            staged
+                .warnings
+                .iter()
+                .any(|warning| warning.reason == "staging_failed")
+        );
+        let record = user_skills_exposure(
+            provenant_records::UserSkillsMode::Discover,
+            serde_json::Value::Null,
+            &staged,
+        );
+        assert_eq!(record["exposed"], false);
+        assert_eq!(record["warnings"][0]["reason"], "staging_failed");
+    }
+
     #[test]
     fn receipt_uses_prepared_skill_facts() {
         let staged = provenant_providers::StagedUserSkills::default();

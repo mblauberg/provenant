@@ -93,7 +93,28 @@ pub(super) fn apply(
     plan: &ConfinedPlan,
     context: Context<'_>,
 ) -> Value {
-    apply_to(&mut spec.env, &mut spec.profile, plan, context)
+    // Resolve against a copy of the current profile, then transfer only the
+    // validated additions to the provider-owned requirements resolver.
+    let mut candidate = provenant_confinement::permissions::ProviderProfile {
+        spec: spec.profile.spec.clone(),
+        observations: spec.profile.observations.clone(),
+    };
+    let read_start = candidate.spec.runtime_reads.len();
+    let exec_start = candidate.spec.tool_exec_roots.len();
+    let write_start = candidate.spec.tool_writes.len();
+    let home = context.home;
+    let cwd = context.cwd;
+    let receipt = apply_to(&mut spec.env, &mut candidate, plan, context);
+    spec.set_project_requirements(
+        candidate.spec.runtime_reads[read_start..].to_vec(),
+        candidate.spec.tool_exec_roots[exec_start..].to_vec(),
+        candidate.spec.tool_writes[write_start..].to_vec(),
+        receipt,
+    );
+    spec.complete_tool_requirements(plan, home, cwd);
+    spec.project_requirements_receipt()
+        .cloned()
+        .unwrap_or(serde_json::Value::Null)
 }
 
 fn apply_to(
