@@ -28,11 +28,13 @@ expected base without force; the latter merges pinned heads in order through the
 forge after checking the expected target before each merge. A target change can
 still race that check and the merge; the resulting-tree comparison alarms as a
 backstop. `method` applies only to `rest_ordered`. Forge rules and
-required checks remain in force. Definite refusals are reconciled and receipted
-without a pending marker;
-a moved target consumes a rebuild. Ambiguous responses leave a marker until
-ancestry and forge state prove the outcome. Recovery of a landing repeats the
-approval recheck, post-merge follow, receipt and candidate-ref cleanup.
+required checks remain in force. A publishing marker precedes publication;
+once the outcome is definite it becomes a settled marker with the outcomes and
+remaining follow-up steps. Only a publishing marker can authorise a retry.
+Recovery completes the settled steps and deletes the marker last. A moved target
+consumes a rebuild. Ambiguous responses leave a publishing marker until ancestry
+and forge state prove the outcome. Recovery of a landing completes the approval
+recheck, post-merge follow, receipt, tree comparison and candidate-ref cleanup.
 A lease push still in flight after the configured settle window can land after
 recovery concludes it did not land and clears the marker, leaving no receipt.
 The window bounds this residual race; setting it to zero removes that wait.

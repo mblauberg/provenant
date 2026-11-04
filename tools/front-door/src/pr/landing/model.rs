@@ -114,6 +114,28 @@ pub struct PendingAttempt {
     pub gate_evidence: GateEvidence,
     pub publish: PublishDecision,
     pub cost: CostEstimate,
+    #[serde(default)]
+    pub settled: Option<SettledAttempt>,
+}
+
+/// A definite publication outcome. This phase never authorises publication.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SettledAttempt {
+    pub record: LandingReceipt,
+    pub outcomes: BTreeMap<u64, SettledOutcome>,
+    pub landed_commit: Option<String>,
+    pub refusal: Option<String>,
+    pub receipt_pending: bool,
+    pub tree_pending: bool,
+    pub follow_pending: bool,
+    pub cleanup_pending: bool,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum SettledOutcome {
+    Landed { commit: String },
+    Refused,
+    NotLanded,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LandingReceipt {

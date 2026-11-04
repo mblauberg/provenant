@@ -19,6 +19,214 @@ fn valid_for_retry(forge: &mut dyn Forge, attempt: &PendingAttempt) -> bool {
                 })
         })
 }
+/// Persist the definite outcome before performing any fallible follow-up.
+pub fn settle(
+    state: &std::path::Path,
+    attempt: &mut PendingAttempt,
+    record: LandingReceipt,
+    refusal: Option<String>,
+) -> Result<(), LandingError> {
+    let landed_commit = record
+        .pull_requests
+        .last()
+        .and_then(|pr| record.approved_to_landed.get(&pr.head))
+        .cloned();
+    let tree_pending =
+        landed_commit.is_some() && record.pull_requests.len() == attempt.candidate.steps.len();
+    let follow_pending = landed_commit.is_some();
+    let mut refused = false;
+    let outcomes = attempt
+        .candidate
+        .steps
+        .iter()
+        .map(|step| {
+            let result = if let Some(commit) = record.approved_to_landed.get(&step.pr.head) {
+                SettledOutcome::Landed {
+                    commit: commit.clone(),
+                }
+            } else if refusal.is_some()
+                && (!refused || attempt.publish.mode == PublishMode::FastForward)
+            {
+                refused = true;
+                SettledOutcome::Refused
+            } else {
+                SettledOutcome::NotLanded
+            };
+            (step.pr.number, result)
+        })
+        .collect();
+    attempt.settled = Some(SettledAttempt {
+        record,
+        outcomes,
+        landed_commit,
+        refusal,
+        receipt_pending: true,
+        tree_pending,
+        follow_pending,
+        cleanup_pending: true,
+    });
+    receipt::record_pending(state, attempt)
+}
+
+/// Resume only follow-up work from a definite outcome. Checkpoint each completed step.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "follow-up uses the landing boundaries"
+)]
+pub fn finish_settled(
+    forge: &mut dyn Forge,
+    repo: &mut dyn Repo,
+    runner: &mut dyn GateRunner,
+    alarms: &mut dyn AlarmSink,
+    state: &std::path::Path,
+    attempt: &mut PendingAttempt,
+) -> Result<LandingReceipt, LandingError> {
+    if attempt
+        .settled
+        .as_ref()
+        .ok_or_else(|| LandingError::Failed("missing settled state".into()))?
+        .receipt_pending
+    {
+        receipt::write_receipt(
+            state,
+            &attempt
+                .settled
+                .as_ref()
+                .ok_or_else(|| LandingError::Failed("missing settled state".into()))?
+                .record,
+        )?;
+        attempt
+            .settled
+            .as_mut()
+            .ok_or_else(|| LandingError::Failed("missing settled state".into()))?
+            .receipt_pending = false;
+        receipt::record_pending(state, attempt)?;
+    }
+    if attempt
+        .settled
+        .as_ref()
+        .ok_or_else(|| LandingError::Failed("missing settled state".into()))?
+        .tree_pending
+    {
+        let settled = attempt
+            .settled
+            .as_mut()
+            .ok_or_else(|| LandingError::Failed("missing settled state".into()))?;
+        let commit = settled
+            .landed_commit
+            .as_ref()
+            .ok_or_else(|| LandingError::Failed("missing landed commit".into()))?;
+        let tree = repo.tree_of(commit)?;
+        if tree != attempt.candidate.tree {
+            settled.record.alarms.push(Alarm {
+                code: "LAND_TREE_MISMATCH".into(),
+                message: format!(
+                    "gated tree {} differs from landed commit {} tree {}",
+                    attempt.candidate.tree, commit, tree
+                ),
+            });
+        }
+        settled.tree_pending = false;
+        settled.receipt_pending = true;
+        receipt::record_pending(state, attempt)?;
+    }
+    if attempt
+        .settled
+        .as_ref()
+        .ok_or_else(|| LandingError::Failed("missing settled state".into()))?
+        .follow_pending
+    {
+        let settled = attempt
+            .settled
+            .as_mut()
+            .ok_or_else(|| LandingError::Failed("missing settled state".into()))?;
+        for alarm in &settled.record.alarms {
+            alarms.post(alarm)?;
+        }
+        let followed = postmerge::follow(forge, repo, runner, alarms, &mut settled.record);
+        if followed.is_ok() {
+            settled.follow_pending = false;
+        }
+        settled.receipt_pending = true;
+        receipt::record_pending(state, attempt)?;
+        followed?;
+    }
+    if attempt
+        .settled
+        .as_ref()
+        .ok_or_else(|| LandingError::Failed("missing settled state".into()))?
+        .receipt_pending
+    {
+        receipt::write_receipt(
+            state,
+            &attempt
+                .settled
+                .as_ref()
+                .ok_or_else(|| LandingError::Failed("missing settled state".into()))?
+                .record,
+        )?;
+        attempt
+            .settled
+            .as_mut()
+            .ok_or_else(|| LandingError::Failed("missing settled state".into()))?
+            .receipt_pending = false;
+        receipt::record_pending(state, attempt)?;
+    }
+    if attempt
+        .settled
+        .as_ref()
+        .ok_or_else(|| LandingError::Failed("missing settled state".into()))?
+        .cleanup_pending
+    {
+        repo.delete_ref(&attempt.candidate.ref_name, &attempt.candidate.commit)?;
+        attempt
+            .settled
+            .as_mut()
+            .ok_or_else(|| LandingError::Failed("missing settled state".into()))?
+            .cleanup_pending = false;
+        receipt::record_pending(state, attempt)?;
+    }
+    let record = attempt
+        .settled
+        .as_ref()
+        .ok_or_else(|| LandingError::Failed("missing settled state".into()))?
+        .record
+        .clone();
+    receipt::clear_pending(state, &attempt.repository, &attempt.candidate)?;
+    Ok(record)
+}
+#[allow(
+    clippy::too_many_arguments,
+    reason = "recovery reports durable progress on failure"
+)]
+fn finish_recovery(
+    forge: &mut dyn Forge,
+    repo: &mut dyn Repo,
+    runner: &mut dyn GateRunner,
+    alarms: &mut dyn AlarmSink,
+    state: &std::path::Path,
+    attempt: &mut PendingAttempt,
+    recovered: &mut Vec<LandingReceipt>,
+) -> Result<(), LandingError> {
+    recovered.push(
+        attempt
+            .settled
+            .as_ref()
+            .ok_or_else(|| LandingError::Failed("missing settled state".into()))?
+            .record
+            .clone(),
+    );
+    let result = finish_settled(forge, repo, runner, alarms, state, attempt);
+    *recovered
+        .last_mut()
+        .ok_or_else(|| LandingError::Failed("missing recovered receipt".into()))? = attempt
+        .settled
+        .as_ref()
+        .ok_or_else(|| LandingError::Failed("missing settled state".into()))?
+        .record
+        .clone();
+    result.map(|_| ())
+}
 /// Recover pending publications before selection, retaining unprovable outcomes.
 /// In shadow mode, refuse when recovery would mutate a ref.
 #[allow(
@@ -36,7 +244,51 @@ pub fn recover_pending(
     shadow: bool,
     recovered: &mut Vec<LandingReceipt>,
 ) -> Result<(), LandingError> {
-    for attempt in receipt::pending(state, repository, target)? {
+    #[allow(clippy::disallowed_methods, reason = "allow publication to settle")]
+    recover_pending_with(
+        forge,
+        repo,
+        runner,
+        alarms,
+        state,
+        repository,
+        target,
+        shadow,
+        recovered,
+        &std::thread::sleep,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "recovery uses the landing boundaries and injectable wait"
+)]
+pub(crate) fn recover_pending_with(
+    forge: &mut dyn Forge,
+    repo: &mut dyn Repo,
+    runner: &mut dyn GateRunner,
+    alarms: &mut dyn AlarmSink,
+    state: &std::path::Path,
+    repository: &str,
+    target: &str,
+    shadow: bool,
+    recovered: &mut Vec<LandingReceipt>,
+    sleep: &dyn Fn(std::time::Duration),
+) -> Result<(), LandingError> {
+    for mut attempt in receipt::pending(state, repository, target)? {
+        if shadow {
+            return Err(LandingError::RecoveryRequired {
+                marker: receipt::pending_path(state, repository, &attempt.candidate)?,
+            });
+        }
+        if attempt.settled.is_some() {
+            let refusal = attempt.settled.as_ref().and_then(|s| s.refusal.clone());
+            finish_recovery(forge, repo, runner, alarms, state, &mut attempt, recovered)?;
+            if let Some(reason) = refusal {
+                return Err(LandingError::Refused(reason));
+            }
+            continue;
+        }
         let marker = receipt::pending_path(state, repository, &attempt.candidate)?;
         let unknown = || LandingError::PublicationUnknownAt {
             marker: marker.clone(),
@@ -55,7 +307,7 @@ pub fn recover_pending(
                 clippy::disallowed_methods,
                 reason = "allow the original publication to settle"
             )]
-            std::thread::sleep(std::time::Duration::from_secs(
+            sleep(std::time::Duration::from_secs(
                 settings.publish_settle_seconds,
             ));
             settled = true;
@@ -76,19 +328,31 @@ pub fn recover_pending(
                     | LandingError::TargetMoved
                     | LandingError::PullRequestChanged(_))
             ) {
-                // The retry is definitely refused; later observation or cleanup must
-                // not leave an intent that authorizes another push.
-                receipt::clear_pending(state, repository, &attempt.candidate)?;
+                let mut record = LandingReceipt::new(
+                    &attempt.candidate,
+                    attempt.policy.clone(),
+                    attempt.gate_definition.clone(),
+                    attempt.gate_evidence.clone(),
+                    attempt.publish.clone(),
+                    attempt.cost.clone(),
+                    false,
+                );
+                record.pull_requests.clear();
+                record.candidate_steps.clear();
+                for step in &attempt.candidate.steps {
+                    record.outcomes.insert(step.pr.number, Outcome::Excluded);
+                }
+                settle(
+                    state,
+                    &mut attempt,
+                    record,
+                    Some("publication retry refused".into()),
+                )?;
+                finish_recovery(forge, repo, runner, alarms, state, &mut attempt, recovered)?;
+                return Err(LandingError::Refused("publication retry refused".into()));
             }
             if retry.is_err() {
-                #[allow(
-                    clippy::disallowed_methods,
-                    reason = "allow the original publication to settle"
-                )]
-                std::thread::sleep(std::time::Duration::from_secs(
-                    settings.publish_settle_seconds,
-                ));
-                settled = true;
+                return Err(unknown());
             }
             tip = repo.fetch_target(target).map_err(|_| unknown())?;
         }
@@ -127,9 +391,7 @@ pub fn recover_pending(
                 };
                 match (pr.state, pr.merged_commit) {
                     (PullRequestState::Merged, Some(commit))
-                        if pr.head == step.pr.head
-                            && pr.base_branch == step.pr.base_branch
-                            && (settled || repo.is_ancestor(&commit, &tip).unwrap_or(false)) =>
+                        if pr.head == step.pr.head && pr.base_branch == step.pr.base_branch =>
                     {
                         Some(commit)
                     }
@@ -149,7 +411,7 @@ pub fn recover_pending(
                                     clippy::disallowed_methods,
                                     reason = "allow the original publication to settle"
                                 )]
-                                std::thread::sleep(std::time::Duration::from_secs(
+                                sleep(std::time::Duration::from_secs(
                                     settings.publish_settle_seconds,
                                 ));
                                 match forge.pull_request(step.pr.number) {
@@ -183,51 +445,14 @@ pub fn recover_pending(
                                 ) => {
                                     // No earlier step is unknown when a retry is attempted. All
                                     // remaining operations were never attempted by this retry.
-                                    receipt::clear_pending(state, repository, &attempt.candidate)?;
                                     refused = true;
                                     None
                                 }
+                                // A lost retry response remains uncertain until recovery observes it.
                                 Err(_) => {
-                                    #[allow(
-                                        clippy::disallowed_methods,
-                                        reason = "allow the original publication to settle"
-                                    )]
-                                    std::thread::sleep(std::time::Duration::from_secs(
-                                        settings.publish_settle_seconds,
-                                    ));
-                                    tip = repo.fetch_target(target).map_err(|_| unknown())?;
-                                    match forge.pull_request(step.pr.number) {
-                                        Ok(pr)
-                                            if pr.state == PullRequestState::Merged
-                                                && pr.head == step.pr.head
-                                                && pr.base_branch == step.pr.base_branch =>
-                                        {
-                                            match pr.merged_commit {
-                                                Some(commit) => Some(commit),
-                                                _ => {
-                                                    unproven = true;
-                                                    outcomes.insert(
-                                                        step.pr.number,
-                                                        Outcome::PendingUnknown,
-                                                    );
-                                                    continue;
-                                                }
-                                            }
-                                        }
-                                        Ok(pr)
-                                            if pr.state == PullRequestState::Closed
-                                                || pr.state == PullRequestState::Open
-                                                || pr.head != step.pr.head =>
-                                        {
-                                            None
-                                        }
-                                        _ => {
-                                            unproven = true;
-                                            outcomes
-                                                .insert(step.pr.number, Outcome::PendingUnknown);
-                                            continue;
-                                        }
-                                    }
+                                    unproven = true;
+                                    outcomes.insert(step.pr.number, Outcome::PendingUnknown);
+                                    continue;
                                 }
                             }
                         } else if settled {
@@ -237,7 +462,7 @@ pub fn recover_pending(
                                 clippy::disallowed_methods,
                                 reason = "allow the original publication to settle"
                             )]
-                            std::thread::sleep(std::time::Duration::from_secs(
+                            sleep(std::time::Duration::from_secs(
                                 settings.publish_settle_seconds,
                             ));
                             match forge.pull_request(step.pr.number) {
@@ -278,11 +503,11 @@ pub fn recover_pending(
         }
         let mut record = LandingReceipt::new(
             &attempt.candidate,
-            attempt.policy,
-            attempt.gate_definition,
-            attempt.gate_evidence,
-            attempt.publish,
-            attempt.cost,
+            attempt.policy.clone(),
+            attempt.gate_definition.clone(),
+            attempt.gate_evidence.clone(),
+            attempt.publish.clone(),
+            attempt.cost.clone(),
             false,
         );
         record
@@ -301,55 +526,23 @@ pub fn recover_pending(
         record.pull_requests = landed_prs;
         record.outcomes = outcomes;
         record.approved_to_landed = mapping;
-        if !record.pull_requests.is_empty()
-            && record.pull_requests.len() == attempt.candidate.steps.len()
-        {
-            let last = record
-                .pull_requests
-                .last()
-                .and_then(|pr| record.approved_to_landed.get(&pr.head))
-                .ok_or(LandingError::PublicationUnknown)?;
-            let verified = if record.publish.mode == PublishMode::RestOrdered {
-                repo.fetch_target(target).map_err(|_| unknown())?
-            } else {
-                last.clone()
-            };
-            let tree = repo.tree_of(&verified).map_err(|_| unknown())?;
-            if tree != attempt.candidate.tree {
-                record.alarms.push(Alarm {
-                    code: "LAND_TREE_MISMATCH".into(),
-                    message: format!(
-                        "gated tree {} differs from landed commit {} tree {}",
-                        attempt.candidate.tree, verified, tree
-                    ),
-                });
-            }
-        }
-        if unproven && record.pull_requests.is_empty() {
-            return Err(LandingError::PublicationUnknownAt {
-                marker: receipt::pending_path(state, repository, &attempt.candidate)?,
-            });
-        }
-        receipt::write_receipt(state, &record)?;
-        recovered.push(record.clone());
-        for alarm in &record.alarms {
-            alarms.post(alarm)?;
-        }
-        if !record.pull_requests.is_empty() {
-            let followed = postmerge::follow(forge, repo, runner, alarms, &mut record);
-            receipt::write_receipt(state, &record)?;
-            if let Some(saved) = recovered.last_mut() {
-                *saved = record.clone();
-            }
-            followed?;
-        }
         if unproven {
-            return Err(LandingError::PublicationUnknownAt {
-                marker: receipt::pending_path(state, repository, &attempt.candidate)?,
-            });
+            if !record.pull_requests.is_empty() {
+                receipt::write_receipt(state, &record)?;
+                recovered.push(record);
+            }
+            return Err(unknown());
         }
-        repo.delete_ref(&attempt.candidate.ref_name, &attempt.candidate.commit)?;
-        receipt::clear_pending(state, repository, &attempt.candidate)?;
+        settle(
+            state,
+            &mut attempt,
+            record,
+            refused.then(|| "publication retry refused".into()),
+        )?;
+        finish_recovery(forge, repo, runner, alarms, state, &mut attempt, recovered)?;
+        if refused {
+            return Err(LandingError::Refused("publication retry refused".into()));
+        }
     }
     Ok(())
 }

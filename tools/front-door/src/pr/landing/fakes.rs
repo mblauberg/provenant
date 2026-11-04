@@ -3,12 +3,18 @@ use super::{LandingError, model::*, ports::*};
 use provenant_cli::domains::MergeMethod;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+type WaitReads = (
+    std::rc::Rc<std::cell::Cell<bool>>,
+    std::rc::Rc<std::cell::Cell<usize>>,
+);
+
 #[derive(Default)]
 pub struct FakeForge {
     pub target_branch: String,
     pub shared_target: Option<std::rc::Rc<std::cell::RefCell<String>>>,
     pub move_after_merge: Option<(u64, String)>,
     pub pull_requests: BTreeMap<u64, PullRequestInfo>,
+    pub after_wait_reads: Option<WaitReads>,
     pub heads: BTreeMap<u64, String>,
     pub head_reads: BTreeMap<u64, VecDeque<String>>,
     pub approvals_at_head: BTreeMap<(u64, String), Vec<Approval>>,
@@ -19,8 +25,13 @@ pub struct FakeForge {
     pub direct_push: bool,
     pub lose_merge_response: bool,
     pub lose_merge_response_at: Option<u64>,
+    pub hide_merge_commit_at: Option<u64>,
     pub refuse_merge: Option<u64>,
+    pub fail_settle_write_on_refusal: bool,
+    pub fail_merge: Option<u64>,
+    pub fail_fetch_after_merge: Option<std::rc::Rc<std::cell::Cell<bool>>>,
     pub fail_fetch_on_refusal: Option<std::rc::Rc<std::cell::Cell<bool>>>,
+    pub fail_approvals: Option<std::rc::Rc<std::cell::Cell<bool>>>,
     pub valid_merge_ids: bool,
     pub merges: Vec<(u64, String, MergeMethod)>,
     pub merge_attempts: Vec<u64>,
@@ -31,6 +42,11 @@ impl Forge for FakeForge {
         Ok("fake-repository".into())
     }
     fn pull_request(&mut self, number: u64) -> Result<PullRequestInfo, LandingError> {
+        if let Some((waited, reads)) = &self.after_wait_reads
+            && waited.get()
+        {
+            reads.set(reads.get() + 1);
+        }
         self.pull_requests
             .get(&number)
             .cloned()
@@ -53,6 +69,9 @@ impl Forge for FakeForge {
             .ok_or_else(|| LandingError::Failed("missing head".into()))
     }
     fn approvals(&mut self, number: u64, head: &str) -> Result<Vec<Approval>, LandingError> {
+        if self.fail_approvals.as_ref().is_some_and(|flag| flag.get()) {
+            return Err(LandingError::Failed("approvals unavailable".into()));
+        }
         Ok(self
             .approvals_at_head
             .get(&(number, head.into()))
@@ -84,13 +103,23 @@ impl Forge for FakeForge {
         if self.head(number)? != head {
             return Err(LandingError::Failed("head moved".into()));
         }
+        if self.fail_merge == Some(number) {
+            return Err(LandingError::Failed("transport unavailable".into()));
+        }
         if self.refuse_merge == Some(number) {
+            if self.fail_settle_write_on_refusal {
+                super::receipt::FAIL_SETTLE_WRITE.with(|flag| flag.set(true));
+                self.fail_settle_write_on_refusal = false;
+            }
             if let Some(flag) = &self.fail_fetch_on_refusal {
                 flag.set(true);
             }
             return Err(LandingError::Refused("merge refused".into()));
         }
         self.merges.push((number, head.into(), method));
+        if let Some(flag) = &self.fail_fetch_after_merge {
+            flag.set(true);
+        }
         let landed = if self.valid_merge_ids {
             format!("{:040x}", 2000 + number)
         } else {
@@ -105,7 +134,8 @@ impl Forge for FakeForge {
         }
         if let Some(pr) = self.pull_requests.get_mut(&number) {
             pr.state = PullRequestState::Merged;
-            pr.merged_commit = Some(landed.clone());
+            pr.merged_commit =
+                (self.hide_merge_commit_at != Some(number)).then_some(landed.clone());
         }
         if self.lose_merge_response || self.lose_merge_response_at == Some(number) {
             return Err(LandingError::Failed("lost response".into()));
@@ -151,6 +181,7 @@ pub struct FakeRepo {
     pub saw_pending_on_target_push: bool,
     pub refuse_push: bool,
     pub refuse_target_push: bool,
+    pub fail_fetch_on_push_refusal: Option<std::rc::Rc<std::cell::Cell<bool>>>,
     pub lose_push_response: bool,
     pub refuse_delete: bool,
 }
@@ -215,6 +246,9 @@ impl Repo for FakeRepo {
                 });
         }
         if self.refuse_push || (self.refuse_target_push && name == self.target_ref) {
+            if let Some(flag) = &self.fail_fetch_on_push_refusal {
+                flag.set(true);
+            }
             return Err(LandingError::Refused("push refused".into()));
         }
         if self.refs.get(name).map(String::as_str) != expected_old {
@@ -330,9 +364,12 @@ impl GateRunner for FakeGate {
     }
 }
 #[derive(Default)]
-pub struct FakeAlarms(pub Vec<Alarm>);
+pub struct FakeAlarms(pub Vec<Alarm>, pub bool);
 impl AlarmSink for FakeAlarms {
     fn post(&mut self, alarm: &Alarm) -> Result<(), LandingError> {
+        if self.1 {
+            return Err(LandingError::Failed("alarm unavailable".into()));
+        }
         self.0.push(alarm.clone());
         Ok(())
     }
