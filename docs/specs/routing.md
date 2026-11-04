@@ -88,11 +88,12 @@ stop resumes the same session when the adapter's launch table allows resume, aft
 a quarter of jitter drawn from the attempt ID (default 30), capped by
 `domains.routing.capacity_retry_max_seconds` (default 600) and by
 `domains.routing.retry_delay_ceiling_seconds` (default 3600), the ceiling on any
-sealed wait. Each wait is configurable up to a week. A settled capacity stop
-without a session and a quota stop do not automatically switch route or account;
-the user can choose a new route after reviewing the result. This avoids retrying
-work whose provider has already launched. Scoped admission still excludes a
-spent account. The retry seals its earliest launch time, and every launcher
+sealed wait. Each wait is configurable up to a week. A quota-stopped writer
+with an unfinished recorded handoff may continue its retained worktree on the
+same model using another eligible account, when the account was not pinned.
+This continuation waits for released custody and remains within the retry budget.
+Other settled capacity stops without a session and quota stops do not automatically
+switch route or account. Scoped admission still excludes a spent account. The retry seals its earliest launch time, and every launcher
 defers the same-session successor until that time. The successor's admission
 window opens when the wait ends, and each attempt records its continuation row.
 The lane's reason names the retry and its attempt number.
@@ -109,7 +110,8 @@ The lane's reason names the retry and its attempt number.
   `crates/cli/src/run.rs::tests::capacity_and_quota_settlements_retry_within_their_bounds`;
   `crates/cli/src/route.rs::tests::refused_account_falls_through_to_another_for_the_same_model`;
   `crates/cli/src/route.rs::tests::review_substitution_skips_refused_unused_families`;
-  `tests/dispatch_provider.rs::capacity_settlement_resumes_the_same_session`
+  `tests/dispatch_provider.rs::capacity_settlement_resumes_the_same_session`;
+  `tests/dispatch_provider.rs::interrupted_progress_recovers_on_another_account_in_the_same_worktree`
 - Owner: `crates/cli/src/run.rs`
 
 ### One resolution, bounded alternatives

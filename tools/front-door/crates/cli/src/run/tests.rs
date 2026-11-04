@@ -933,12 +933,13 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
     assert!(assess_recovered(&rooted)?.retry.is_none());
     assert!(assess_recovered(&Registry::default())?.retry.is_some());
     const NOW: i64 = 1_800_000_000;
-    let assess_at =
-        |record: &run::AttemptRecord,
-         _task: &run::TaskRequest,
-         decoded: &run::Decoded,
-         attempt: u64,
-         _others: bool| { assess_settlement_retry(&config, record, decoded, attempt, NOW) };
+    let assess_at = |record: &run::AttemptRecord,
+                     _task: &run::TaskRequest,
+                     decoded: &run::Decoded,
+                     attempt: u64,
+                     _others: bool| {
+        assess_settlement_retry(&config, record, decoded, attempt, NOW, false)
+    };
     let assess = |task: &run::TaskRequest, decoded: &run::Decoded, attempt: u64, others: bool| {
         assess_at(&record, task, decoded, attempt, others)
     };
@@ -1000,6 +1001,13 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
         "You've hit your weekly limit",
     );
     assert!(assess(&task, &quota, 1, true).retry.is_none());
+    let recovery = assess_settlement_retry(&config, &record, &quota, 1, NOW, true)
+        .retry
+        .ok_or("verified handoff continuation")?;
+    assert!(!recovery.resume);
+    assert!(
+        matches!(&recovery.route, run::RequestedRoute::Model { model, .. } if model == "codex/gpt-6-luna")
+    );
     let mut pinned = task.clone();
     pinned.account = Some("work".into());
     assert!(assess(&pinned, &quota, 1, true).retry.is_none());
@@ -1009,7 +1017,7 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
         ..Default::default()
     };
     assert!(
-        assess_settlement_retry(&off, &record, &quota, 1, NOW)
+        assess_settlement_retry(&off, &record, &quota, 1, NOW, false)
             .retry
             .is_none()
     );
@@ -1021,7 +1029,7 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
         retry_delay_ceiling_seconds: 7_200,
         ..Default::default()
     };
-    let capped = assess_settlement_retry(&tuned, &record, &capacity, 4, NOW)
+    let capped = assess_settlement_retry(&tuned, &record, &capacity, 4, NOW, false)
         .retry
         .ok_or("tuned retry")?;
     assert_eq!(capped.max_attempts, 6);
@@ -1030,7 +1038,7 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
         retry_delay_ceiling_seconds: 45,
         ..tuned
     };
-    let ceiled = assess_settlement_retry(&ceiling, &record, &capacity, 1, NOW)
+    let ceiled = assess_settlement_retry(&ceiling, &record, &capacity, 1, NOW, false)
         .retry
         .ok_or("ceiled retry")?;
     assert_eq!(wait(&ceiled), Some(45));

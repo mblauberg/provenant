@@ -89,14 +89,52 @@ pub(super) fn capacity_reason(reason: &str) -> bool {
         .is_some_and(|rest| rest.starts_with(": "))
 }
 
-/// A capacity stop may continue its existing session within the configured
-/// retry budget. A settled attempt never automatically switches routes.
+/// Check that another registered account can continue on the same model.
+pub(super) fn unspent_alternative<'k>(
+    keys: impl IntoIterator<Item = &'k str>,
+    quota: &[provenant_quota::AccountRecord],
+    policies: &[provenant_quota::QuotaPolicy],
+    spent_key: &str,
+    model: &ModelId,
+    catalogue: &provenant_routing::Catalogue,
+    now: i64,
+) -> bool {
+    let adapter = model.adapter();
+    let model_pool = catalogue.quota_pool(model);
+    let pools = catalogue.admission_pools(model);
+    let admission = provenant_quota::Admission {
+        policies,
+        now_unix_seconds: now,
+        records: quota,
+        pools: &pools,
+    };
+    let spent = |key: &str| {
+        admission
+            .account_block(adapter, key, model.model())
+            .map_or(true, |block| block.is_some())
+            || quota.iter().any(|record| {
+                record.account.adapter == adapter
+                    && record.account.account_key == key
+                    && record.snapshot.as_ref().is_some_and(|snapshot| {
+                        provenant_routing::quota_reading_spent(snapshot, model, model_pool, now)
+                    })
+            })
+    };
+    keys.into_iter().any(|key| {
+        key != spent_key
+            && provenant_records::AdapterSpec::get(adapter)
+                .is_none_or(|spec| spec.account_serves_model(key, model.model()))
+            && !spent(key)
+    })
+}
+
 pub(super) fn assess_settlement_retry(
     config: &provenant_routing::RoutingConfig,
     record: &run::AttemptRecord,
     decoded: &run::Decoded,
     policy_attempt: u64,
     now_unix_seconds: i64,
+    quota_handoff_recovery: bool,
 ) -> run::ResultAssessment {
     let max_attempts = u64::from(config.settlement_retries) + 1;
     let capacity = decoded.outcome == run::Outcome::ModelUnavailable
@@ -109,15 +147,15 @@ pub(super) fn assess_settlement_retry(
         return Default::default();
     }
     // A settled provider has left local preparation. Route or account
-    // switching is denied by the shared policy. Same-session continuation is
-    // not a route switch and remains available for a capacity stop.
+    // switching is denied by the shared policy. Verified handoff recovery and
+    // same-session continuation use the existing model and retained work.
     let session = decoded.session.as_deref().is_some_and(|s| !s.is_empty())
         && route
             .provider
             .as_deref()
             .and_then(provenant_records::AdapterSpec::get)
             .is_some_and(|spec| spec.launch.resume);
-    if !capacity || !session {
+    if !(capacity && session || quota && quota_handoff_recovery) {
         return Default::default();
     }
     let Some(route_choice) =
@@ -134,7 +172,7 @@ pub(super) fn assess_settlement_retry(
     else {
         return Default::default();
     };
-    let resume = true;
+    let resume = capacity;
     // Linear backoff with up to a quarter more, drawn from the attempt ID so
     // lanes that hit the same capacity error do not retry in step.
     let backoff_seconds = if capacity {
@@ -150,9 +188,17 @@ pub(super) fn assess_settlement_retry(
     } else {
         0
     };
-    let instruction = "This session stopped because the provider was at capacity. Continue the original task from where it stopped and complete its verification.".to_owned();
+    let instruction = if resume {
+        "This session stopped because the provider was at capacity. Continue the original task from where it stopped and complete its verification."
+    } else {
+        "The previous attempt stopped at the account usage limit. Inspect the retained worktree and continue the unfinished task using its handoff; complete its verification."
+    }.to_owned();
     let next = policy_attempt + 1;
-    let action = "retrying this session";
+    let action = if resume {
+        "retrying this session"
+    } else {
+        "continuing from the handoff on the next eligible account"
+    };
     let wait = if backoff_seconds == 0 {
         String::new()
     } else {
