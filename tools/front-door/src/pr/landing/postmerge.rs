@@ -36,7 +36,7 @@ fn tip(receipt: &LandingReceipt) -> String {
 enum Observed {
     Passed,
     Failed(Vec<String>),
-    Unsettled,
+    Unsettled(Vec<String>),
 }
 
 fn observe(
@@ -54,16 +54,26 @@ fn observe(
             .filter(|check| &check.name == name)
             .map(|check| &check.result)
             .collect();
-        if results.iter().any(|r| matches!(r, GateResult::Failed)) {
+        if results.iter().any(|r| {
+            matches!(
+                r,
+                GateResult::Failed | GateResult::Skipped | GateResult::Neutral
+            )
+        }) {
             failed.push(name.clone());
-        } else if results.is_empty() || !results.iter().all(|r| matches!(r, GateResult::Passed)) {
+        }
+        if results.is_empty()
+            || results
+                .iter()
+                .any(|r| matches!(r, GateResult::Pending | GateResult::Missing))
+        {
             unsettled = true;
         }
     }
-    Ok(if !failed.is_empty() {
+    Ok(if unsettled {
+        Observed::Unsettled(failed)
+    } else if !failed.is_empty() {
         Observed::Failed(failed)
-    } else if unsettled {
-        Observed::Unsettled
     } else {
         Observed::Passed
     })
@@ -78,8 +88,24 @@ fn bisect(
     receipt: &LandingReceipt,
     definition: &GateDefinition,
     poll_seconds: u64,
+    costs: &mut Vec<Option<(String, u64)>>,
 ) -> Option<u64> {
     let steps = &receipt.candidate_steps;
+    let full = Candidate {
+        base: receipt.base.clone(),
+        steps: steps.clone(),
+        commit: receipt.candidate.clone(),
+        tree: receipt.tree.clone(),
+        ref_name: format!("{}-prefix-full", receipt.candidate_ref),
+    };
+    repo.push_ref(&full.ref_name, &full.commit, None).ok()?;
+    let full_verdict = gate.gate(&full, definition, poll_seconds);
+    let _ = repo.delete_ref(&full.ref_name, &full.commit);
+    let full_verdict = full_verdict.ok();
+    costs.push(full_verdict.as_ref().and_then(evidence_duration));
+    if full_verdict?.result != GateResult::Failed {
+        return None;
+    }
     let (mut low, mut high) = (1, steps.len());
     while low < high {
         let mid = (low + high) / 2;
@@ -95,13 +121,33 @@ fn bisect(
         let verdict = gate.gate(&prefix, definition, poll_seconds);
         // The prefix ref is scratch; a failed delete leaves a stray ref but no wrong verdict.
         let _ = repo.delete_ref(&prefix.ref_name, &prefix.commit);
-        match verdict.ok()?.result {
+        let verdict = verdict.ok();
+        costs.push(verdict.as_ref().and_then(evidence_duration));
+        match verdict?.result {
             GateResult::Passed => low = mid + 1,
             GateResult::Failed => high = mid,
             _ => return None,
         }
     }
     steps.get(low.checked_sub(1)?).map(|step| step.pr.number)
+}
+
+fn evidence_duration(evidence: &GateEvidence) -> Option<(String, u64)> {
+    Some((evidence.pool.clone()?, evidence.duration_seconds?))
+}
+
+fn add_cost(receipt: &mut LandingReceipt, cost: CostEstimate) {
+    receipt.cost = match (&receipt.cost, cost) {
+        (CostEstimate::Known { micros: prior }, CostEstimate::Known { micros }) => {
+            CostEstimate::Known {
+                micros: prior.saturating_add(micros),
+            }
+        }
+        (CostEstimate::Unknown { reason }, _) => CostEstimate::Unknown {
+            reason: reason.clone(),
+        },
+        (_, CostEstimate::Unknown { reason }) => CostEstimate::Unknown { reason },
+    };
 }
 
 /// Recheck approvals after publication; follow configured checks, bisect failures,
@@ -112,6 +158,18 @@ pub fn follow(
     gate: &mut dyn GateRunner,
     alarms: &mut dyn AlarmSink,
     receipt: &mut LandingReceipt,
+) -> Result<(), LandingError> {
+    #[allow(clippy::disallowed_methods, reason = "post-merge polling boundary")]
+    follow_with(forge, repo, gate, alarms, receipt, &std::thread::sleep)
+}
+
+fn follow_with(
+    forge: &mut dyn Forge,
+    repo: &mut dyn Repo,
+    gate: &mut dyn GateRunner,
+    alarms: &mut dyn AlarmSink,
+    receipt: &mut LandingReceipt,
+    sleep: &dyn Fn(std::time::Duration),
 ) -> Result<(), LandingError> {
     if receipt.shadow {
         return Ok(());
@@ -141,11 +199,49 @@ pub fn follow(
         return Ok(());
     }
     let landed = tip(receipt);
-    let failed = match observe(forge, &landed, &post.checks)? {
-        Observed::Passed => return Ok(()),
-        // Nothing to blame yet; a later run observes the settled result.
-        Observed::Unsettled => return Ok(()),
-        Observed::Failed(names) => names,
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "measure post-merge follow duration"
+    )]
+    let started = std::time::Instant::now();
+    let mut elapsed = 0;
+    let failed = loop {
+        let observation = observe(forge, &landed, &post.checks)?;
+        elapsed = elapsed.max(started.elapsed().as_secs());
+        match observation {
+            Observed::Passed => break None,
+            Observed::Failed(names) => break Some(names),
+            Observed::Unsettled(failed) if elapsed >= post.timeout_seconds => {
+                raise(
+                    alarms,
+                    receipt,
+                    alarm(
+                        "unsettled",
+                        format!("post-merge checks did not settle on {landed}"),
+                    ),
+                )?;
+                break (!failed.is_empty()).then_some(failed);
+            }
+            Observed::Unsettled(_) => {
+                let pause = settings
+                    .poll_seconds
+                    .max(1)
+                    .min(post.timeout_seconds - elapsed);
+                sleep(std::time::Duration::from_secs(pause));
+                elapsed += pause;
+            }
+        }
+    };
+    let seconds = started.elapsed().as_secs().max(elapsed);
+    let post_cost = match &post.pool {
+        Some(pool) => super::budget::estimate(&settings.budget, &[(pool.clone(), seconds)])?,
+        None => CostEstimate::Unknown {
+            reason: "post-merge pool unavailable".into(),
+        },
+    };
+    add_cost(receipt, post_cost);
+    let Some(failed) = failed else {
+        return Ok(());
     };
     let mut message = format!(
         "post-merge check {} failed on {} at {landed}",
@@ -153,20 +249,46 @@ pub fn follow(
         receipt.publish_target()
     );
     let mut culprit = None;
+    let mut bisect_costs = Vec::new();
     if post.bisect {
         culprit = match receipt.candidate_steps.len() {
             0 => None,
             1 => Some(receipt.candidate_steps[0].pr.number),
             _ => {
                 let mut definition = receipt.gate_definition.clone();
+                definition.kind = provenant_cli::domains::GateKind::Checks;
                 definition.checks = post.checks.clone();
-                bisect(repo, gate, receipt, &definition, settings.poll_seconds)
+                definition.commands.clear();
+                definition.issuer = None;
+                definition.pool = post.pool.clone();
+                definition.timeout_seconds = post.timeout_seconds;
+                bisect(
+                    repo,
+                    gate,
+                    receipt,
+                    &definition,
+                    settings.poll_seconds,
+                    &mut bisect_costs,
+                )
             }
         };
         match culprit {
             Some(number) => message.push_str(&format!("; first failing pull request is #{number}")),
             None => message.push_str("; bisection could not isolate a pull request"),
         }
+    }
+    if !bisect_costs.is_empty() {
+        let cost = if bisect_costs.iter().any(Option::is_none) {
+            CostEstimate::Unknown {
+                reason: "post-merge bisection pool or duration unavailable".into(),
+            }
+        } else {
+            super::budget::estimate(
+                &settings.budget,
+                &bisect_costs.into_iter().flatten().collect::<Vec<_>>(),
+            )?
+        };
+        add_cost(receipt, cost);
     }
     raise(alarms, receipt, alarm("post_merge_failed", message))?;
 
@@ -225,6 +347,7 @@ mod tests {
                 checks: Some(vec!["post".into()]),
                 bisect: Some(bisect),
                 revert_forward: Some(revert),
+                ..PostMergeOverride::default()
             }),
             ..LandOverride::default()
         };
@@ -308,6 +431,35 @@ mod tests {
     }
 
     #[test]
+    fn pending_run_keeps_a_failed_check_unsettled() -> Result<(), LandingError> {
+        let mut r = rig(false, false, 1);
+        let checks = vec![
+            CheckEvidence {
+                name: "post".into(),
+                issuer: None,
+                result: GateResult::Failed,
+            },
+            CheckEvidence {
+                name: "post".into(),
+                issuer: None,
+                result: GateResult::Pending,
+            },
+        ];
+        r.forge.check_runs.insert(
+            "l1".into(),
+            vec![GateEvidence {
+                checks,
+                ..super::super::receipt::tests::evidence("l1")
+            }],
+        );
+        assert_eq!(
+            observe(&mut r.forge, "l1", &["post".into()])?,
+            Observed::Unsettled(vec!["post".into()])
+        );
+        Ok(())
+    }
+
+    #[test]
     fn green_post_merge_check_raises_nothing() -> Result<(), LandingError> {
         let mut r = rig(true, true, 2);
         post_result(&mut r, "l2", GateResult::Passed);
@@ -347,10 +499,11 @@ mod tests {
         let mut r = rig(true, false, 4);
         post_result(&mut r, "l4", GateResult::Failed);
         // Prefix 2 passes, prefix 3 fails: pull request 3 is the culprit.
+        r.gate.results.push_back(verdict("s4", GateResult::Failed));
         r.gate.results.push_back(verdict("s2", GateResult::Passed));
         r.gate.results.push_back(verdict("s3", GateResult::Failed));
         run(&mut r)?;
-        assert_eq!(r.gate.observed, ["s2", "s3"]);
+        assert_eq!(r.gate.observed, ["s4", "s2", "s3"]);
         assert!(r.alarms.0[0].message.contains("#3"));
         assert!(r.forge.reverts.is_empty());
         assert!(r.repo.refs.is_empty());
@@ -361,6 +514,7 @@ mod tests {
     fn revert_forward_opens_only_when_enabled() -> Result<(), LandingError> {
         let mut r = rig(true, true, 2);
         post_result(&mut r, "l2", GateResult::Failed);
+        r.gate.results.push_back(verdict("s2", GateResult::Failed));
         r.gate.results.push_back(verdict("s1", GateResult::Passed));
         run(&mut r)?;
         assert_eq!(r.forge.reverts, [(2, "l2".to_string())]);
@@ -375,6 +529,7 @@ mod tests {
     fn inconclusive_bisection_blames_nobody_and_opens_no_revert() -> Result<(), LandingError> {
         let mut r = rig(true, true, 3);
         post_result(&mut r, "l3", GateResult::Failed);
+        r.gate.results.push_back(verdict("s3", GateResult::Failed));
         r.gate.results.push_back(verdict("s2", GateResult::Pending));
         run(&mut r)?;
         assert!(r.forge.reverts.is_empty());
@@ -383,10 +538,101 @@ mod tests {
     }
 
     #[test]
-    fn unsettled_checks_and_shadow_runs_do_nothing() -> Result<(), LandingError> {
-        let mut r = rig(true, true, 2);
+    fn timeout_raises_unsettled_and_accounts_for_pool() -> Result<(), LandingError> {
+        let mut r = rig(true, false, 2);
+        let mut settings = r.receipt.policy.settings().unwrap();
+        settings.post_merge.timeout_seconds = 2;
+        settings.post_merge.pool = Some("post".into());
+        settings
+            .budget
+            .rate_micros_per_minute
+            .insert("post".into(), 60);
+        r.receipt.policy = crate::pr::landing::policy::LandPolicy::resolve(
+            &settings,
+            &BTreeMap::new(),
+            None,
+            None,
+            &LandOverride::default(),
+        )
+        .unwrap();
+        r.receipt.cost = CostEstimate::Known { micros: 5 };
+        follow_with(
+            &mut r.forge,
+            &mut r.repo,
+            &mut r.gate,
+            &mut r.alarms,
+            &mut r.receipt,
+            &|_| {},
+        )?;
+        assert_eq!(r.alarms.0[0].code, "unsettled");
+        assert_eq!(r.receipt.cost, CostEstimate::Known { micros: 7 });
+        assert!(r.forge.reverts.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn bisection_runs_are_included_in_post_merge_cost() -> Result<(), LandingError> {
+        let mut r = rig(true, false, 2);
+        let mut settings = r.receipt.policy.settings().unwrap();
+        settings.post_merge.pool = Some("post".into());
+        settings
+            .budget
+            .rate_micros_per_minute
+            .insert("post".into(), 60);
+        r.receipt.policy = crate::pr::landing::policy::LandPolicy::resolve(
+            &settings,
+            &BTreeMap::new(),
+            None,
+            None,
+            &LandOverride::default(),
+        )
+        .unwrap();
+        r.receipt.cost = CostEstimate::Known { micros: 5 };
+        post_result(&mut r, "l2", GateResult::Failed);
+        for (commit, result, seconds) in
+            [("s2", GateResult::Failed, 3), ("s1", GateResult::Passed, 2)]
+        {
+            let mut evidence = verdict(commit, result);
+            evidence.pool = Some("post".into());
+            evidence.duration_seconds = Some(seconds);
+            r.gate.results.push_back(evidence);
+        }
         run(&mut r)?;
-        assert!(r.alarms.0.is_empty());
+        assert_eq!(r.receipt.cost, CostEstimate::Known { micros: 10 });
+        Ok(())
+    }
+
+    #[test]
+    fn unpriced_bisection_run_keeps_cost_unknown() -> Result<(), LandingError> {
+        let mut r = rig(true, false, 2);
+        let mut settings = r.receipt.policy.settings().unwrap();
+        settings.post_merge.pool = Some("post".into());
+        settings
+            .budget
+            .rate_micros_per_minute
+            .insert("post".into(), 60);
+        r.receipt.policy = crate::pr::landing::policy::LandPolicy::resolve(
+            &settings,
+            &BTreeMap::new(),
+            None,
+            None,
+            &LandOverride::default(),
+        )
+        .unwrap();
+        r.receipt.cost = CostEstimate::Known { micros: 5 };
+        post_result(&mut r, "l2", GateResult::Failed);
+        r.gate.results.push_back(verdict("s2", GateResult::Failed));
+        r.gate.results.push_back(verdict("s1", GateResult::Passed));
+        run(&mut r)?;
+        assert!(
+            matches!(&r.receipt.cost, CostEstimate::Unknown { reason } if reason.contains("bisection"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn shadow_runs_do_nothing() -> Result<(), LandingError> {
+        let mut r = rig(true, true, 2);
         post_result(&mut r, "l2", GateResult::Failed);
         r.receipt.shadow = true;
         run(&mut r)?;

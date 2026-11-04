@@ -93,6 +93,10 @@ pub struct GateOverride {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub executor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env_passthrough: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coverage: Option<Vec<String>>,
@@ -116,6 +120,10 @@ pub struct PostMergeOverride {
     pub bisect: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revert_forward: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -162,6 +170,8 @@ pub struct GateSettings {
     pub issuer: Option<String>,
     pub commands: Vec<String>,
     pub executor: Option<String>,
+    pub pool: Option<String>,
+    pub env_passthrough: Vec<String>,
     pub timeout_seconds: u64,
     pub coverage: Vec<String>,
 }
@@ -173,6 +183,8 @@ impl Default for GateSettings {
             issuer: None,
             commands: Vec::new(),
             executor: None,
+            pool: None,
+            env_passthrough: Vec::new(),
             timeout_seconds: 3600,
             coverage: Vec::new(),
         }
@@ -192,12 +204,25 @@ impl Default for PrCiSettings {
         }
     }
 }
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PostMergeSettings {
     pub checks: Vec<String>,
     pub bisect: bool,
     pub revert_forward: bool,
+    pub pool: Option<String>,
+    pub timeout_seconds: u64,
+}
+impl Default for PostMergeSettings {
+    fn default() -> Self {
+        Self {
+            checks: Vec::new(),
+            bisect: false,
+            revert_forward: false,
+            pool: None,
+            timeout_seconds: 3600,
+        }
+    }
 }
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -275,6 +300,11 @@ impl DomainConfig for PrSettings {
             }
         };
         let land = &self.land;
+        check(
+            land.post_merge.timeout_seconds == 0,
+            "land.post_merge.timeout_seconds",
+            "range",
+        );
         check(land.poll_seconds == 0, "land.poll_seconds", "range");
         check(land.batch_size == 0, "land.batch_size", "range");
         check(
@@ -321,6 +351,10 @@ impl DomainConfig for PrSettings {
             for (name, value) in overrides {
                 let prefix = format!("land.{layer}.{name}");
                 for (field, invalid) in [
+                    (
+                        "post_merge.timeout_seconds",
+                        value.post_merge.as_ref().and_then(|p| p.timeout_seconds) == Some(0),
+                    ),
                     ("poll_seconds", value.poll_seconds == Some(0)),
                     ("batch_size", value.batch_size == Some(0)),
                     (
@@ -372,6 +406,7 @@ method = "merge"
 kind = "checks"
 checks = ["ci-status"]
 commands = []
+env_passthrough = []
 timeout_seconds = 3600
 coverage = []
 [land.pr_ci]
@@ -380,6 +415,7 @@ mode = "always"
 checks = []
 bisect = false
 revert_forward = false
+timeout_seconds = 3600
 [land.budget.rate_micros_per_minute]
 [land.local_gate]
 mode = "warn"
@@ -399,12 +435,16 @@ timeout_seconds = 60
     FieldMetadata::new("land.gate.issuer", "string"),
     FieldMetadata::new("land.gate.commands", "array"),
     FieldMetadata::new("land.gate.executor", "string"),
+    FieldMetadata::new("land.gate.pool", "string"),
+    FieldMetadata::new("land.gate.env_passthrough", "array"),
     FieldMetadata::int("land.gate.timeout_seconds", 1, i64::MAX),
     FieldMetadata::new("land.gate.coverage", "array"),
     FieldMetadata::enumeration("land.pr_ci.mode", &["always", "opt_in", "affected", "none"]),
     FieldMetadata::new("land.pr_ci.label", "string"),
     FieldMetadata::enumeration("land.publish", &["auto", "rest_ordered", "fast_forward"]),
     FieldMetadata::enumeration("land.method", &["merge", "squash", "rebase"]),
+    FieldMetadata::new("land.post_merge.pool", "string"),
+    FieldMetadata::int("land.post_merge.timeout_seconds", 1, i64::MAX),
     FieldMetadata::new("land.post_merge.checks", "array"),
     FieldMetadata::new("land.post_merge.bisect", "bool"),
     FieldMetadata::new("land.post_merge.revert_forward", "bool"),
@@ -440,6 +480,10 @@ timeout_seconds = 60
     FieldMetadata::new("land.tiers.{tier}.gate.issuer", "string"),
     FieldMetadata::new("land.projects.{project}.gate.commands", "array"),
     FieldMetadata::new("land.tiers.{tier}.gate.commands", "array"),
+    FieldMetadata::new("land.projects.{project}.gate.pool", "string"),
+    FieldMetadata::new("land.projects.{project}.gate.env_passthrough", "array"),
+    FieldMetadata::new("land.tiers.{tier}.gate.pool", "string"),
+    FieldMetadata::new("land.tiers.{tier}.gate.env_passthrough", "array"),
     FieldMetadata::new("land.projects.{project}.gate.executor", "string"),
     FieldMetadata::new("land.tiers.{tier}.gate.executor", "string"),
     FieldMetadata::int("land.projects.{project}.gate.timeout_seconds", 1, i64::MAX),
@@ -469,6 +513,14 @@ timeout_seconds = 60
         &["merge", "squash", "rebase"],
     ),
     FieldMetadata::enumeration("land.tiers.{tier}.method", &["merge", "squash", "rebase"]),
+    FieldMetadata::new("land.projects.{project}.post_merge.pool", "string"),
+    FieldMetadata::int(
+        "land.projects.{project}.post_merge.timeout_seconds",
+        1,
+        i64::MAX,
+    ),
+    FieldMetadata::new("land.tiers.{tier}.post_merge.pool", "string"),
+    FieldMetadata::int("land.tiers.{tier}.post_merge.timeout_seconds", 1, i64::MAX),
     FieldMetadata::new("land.projects.{project}.post_merge.checks", "array"),
     FieldMetadata::new("land.tiers.{tier}.post_merge.checks", "array"),
     FieldMetadata::new("land.projects.{project}.post_merge.bisect", "bool"),

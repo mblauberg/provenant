@@ -90,6 +90,12 @@ mod tests {
             estimate(&s, &[("fast".into(), 90), ("fast".into(), 1)])?,
             CostEstimate::Known { micros: 910_000 }
         );
+        let mut fractional = s.clone();
+        fractional.rate_micros_per_minute.insert("fast".into(), 1);
+        assert_eq!(
+            estimate(&fractional, &[("fast".into(), 1)])?,
+            CostEstimate::Known { micros: 1 }
+        );
         Ok(())
     }
 

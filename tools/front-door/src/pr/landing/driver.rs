@@ -639,6 +639,8 @@ mod tests {
             executor: None,
             coverage: vec![],
             timeout_seconds: 3600,
+            pool: None,
+            env_passthrough: Vec::new(),
         };
         let mut forge = FakeForge::default();
         let mut repo = FakeRepo::default();

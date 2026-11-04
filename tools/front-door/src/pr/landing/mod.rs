@@ -211,6 +211,8 @@ fn run_inner(
         executor: effective.gate.executor.clone(),
         coverage: effective.gate.coverage.clone(),
         timeout_seconds: effective.gate.timeout_seconds,
+        pool: effective.gate.pool.clone(),
+        env_passthrough: effective.gate.env_passthrough.clone(),
     };
     let (mut forge, mut repo, mut runner, mut alarms) = adapters::connect(&resolved.project)?;
     let target = forge.target_branch()?;

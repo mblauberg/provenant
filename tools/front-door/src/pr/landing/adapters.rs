@@ -113,56 +113,8 @@ impl GhForge {
             })
             .collect())
     }
-    fn commit_runs(&self, commit: &str) -> Result<Vec<serde_json::Value>, LandingError> {
-        let endpoint = format!(
-            "repos/{{owner}}/{{repo}}/commits/{commit}/check-runs?per_page=100&filter=latest"
-        );
-        let pages: Vec<serde_json::Value> =
-            serde_json::from_slice(&self.get(&["--paginate", "--slurp", &endpoint])?).map_err(
-                |error| LandingError::Failed(format!("GitHub returned invalid JSON: {error}")),
-            )?;
-        let mut runs = Vec::new();
-        let mut declared = 0;
-        for page in pages {
-            declared = declared.max(page["total_count"].as_u64().unwrap_or(0));
-            runs.extend(
-                page["check_runs"]
-                    .as_array()
-                    .ok_or_else(|| LandingError::Failed("check runs are malformed".into()))?
-                    .iter()
-                    .cloned(),
-            );
-        }
-        // A short listing means a page was lost; the missing run could be the failing one.
-        if (runs.len() as u64) < declared {
-            return Err(LandingError::Failed(
-                "check run listing is incomplete".into(),
-            ));
-        }
-        Ok(runs)
-    }
 }
 
-fn check_result(status: &str, conclusion: Option<&str>) -> Result<GateResult, LandingError> {
-    Ok(match (status, conclusion) {
-        ("completed", Some("success")) => GateResult::Passed,
-        ("completed", Some("neutral")) => GateResult::Neutral,
-        ("completed", Some("skipped")) => GateResult::Skipped,
-        (
-            "completed",
-            Some(
-                "cancelled" | "failure" | "timed_out" | "action_required" | "startup_failure"
-                | "stale",
-            ),
-        ) => GateResult::Failed,
-        ("queued" | "in_progress" | "pending" | "waiting" | "requested", _) => GateResult::Pending,
-        _ => {
-            return Err(LandingError::Failed(format!(
-                "unknown check state {status}/{conclusion:?}"
-            )));
-        }
-    })
-}
 /// Fold per-check results: any failure fails, then pending, then missing,
 /// then a skipped or neutral check; only an all-passed set passes.
 pub(super) fn fold_results(results: impl IntoIterator<Item = GateResult>) -> GateResult {
@@ -293,34 +245,34 @@ impl Forge for GhForge {
     }
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError> {
         let commit = object_id(commit)?;
-        let runs = self.commit_runs(commit)?;
+        let head = commit
+            .parse()
+            .map_err(|_| LandingError::Failed("invalid commit id".into()))?;
+        let runs = wait::commit_checks("repos/{owner}/{repo}", head, &|args| {
+            self.reader().read(args)
+        })
+        .map_err(failed)?;
         let tree =
             self.json(&format!("repos/{{owner}}/{{repo}}/git/commits/{commit}"))?["tree"]["sha"]
                 .as_str()
                 .ok_or_else(|| LandingError::Failed("commit has no tree".into()))?
                 .to_owned();
-        let mut checks = Vec::new();
-        for run in &runs {
-            if run["head_sha"].as_str() != Some(commit) {
-                return Err(LandingError::Failed(
-                    "check run belongs to another commit".into(),
-                ));
-            }
-            checks.push(CheckEvidence {
-                name: run["name"]
-                    .as_str()
-                    .ok_or_else(|| LandingError::Failed("check run has no name".into()))?
-                    .to_owned(),
-                issuer: run["app"]["slug"]
-                    .as_str()
-                    .or_else(|| run["app"]["name"].as_str())
-                    .map(str::to_owned),
-                result: check_result(
-                    run["status"].as_str().unwrap_or_default(),
-                    run["conclusion"].as_str(),
-                )?,
-            });
-        }
+        let checks = runs
+            .into_iter()
+            .map(|run| CheckEvidence {
+                name: run.name,
+                issuer: run.app_slug,
+                result: match run.bucket.as_str() {
+                    "pass" => GateResult::Passed,
+                    "pending" => GateResult::Pending,
+                    "skipping" if run.conclusion.as_deref() == Some("neutral") => {
+                        GateResult::Neutral
+                    }
+                    "skipping" => GateResult::Skipped,
+                    _ => GateResult::Failed,
+                },
+            })
+            .collect::<Vec<_>>();
         let result = fold_results(checks.iter().map(|check| check.result.clone()));
         Ok(vec![GateEvidence {
             commit: commit.to_owned(),
@@ -483,10 +435,8 @@ impl Repo for GitRepo {
     fn fetch_target(&mut self, branch: &str) -> Result<String, LandingError> {
         let full = Self::branch_ref(branch)?;
         let remote = self.remote(branch)?;
-        let tracking = format!("refs/remotes/{remote}/{branch}");
-        let spec = format!("+{full}:{tracking}");
-        self.ok(&["fetch", "--no-tags", "--quiet", &remote, &spec])?;
-        let peeled = format!("{tracking}^{{commit}}");
+        self.ok(&["fetch", "--no-tags", "--quiet", "--refmap=", &remote, &full])?;
+        let peeled = "FETCH_HEAD^{commit}".to_owned();
         self.ok(&["rev-parse", "--verify", &peeled])
     }
     fn merge_tree(&mut self, base: &str, head: &str) -> Result<MergeTree, LandingError> {
@@ -624,15 +574,41 @@ fn bind_evidence(
             }
         })
         .collect();
+    let matching: Vec<_> = observed
+        .checks
+        .iter()
+        .filter(|check| {
+            definition.checks.contains(&check.name)
+                && definition
+                    .issuer
+                    .as_ref()
+                    .is_none_or(|issuer| check.issuer.as_ref() == Some(issuer))
+        })
+        .collect();
+    let issuers: std::collections::BTreeSet<_> = matching
+        .iter()
+        .filter_map(|check| check.issuer.clone())
+        .collect();
+    let observed_issuer = if !matching.is_empty()
+        && matching.iter().all(|check| check.issuer.is_some())
+        && issuers.len() == 1
+    {
+        issuers.into_iter().next()
+    } else {
+        None
+    };
     Ok(GateEvidence {
         commit: observed.commit.clone(),
         tree: observed.tree.clone(),
         definition_digest: definition.digest.clone(),
         result: fold_results(checks.iter().map(|check| check.result.clone())),
+        issuer: definition
+            .issuer
+            .clone()
+            .or_else(|| observed_issuer.clone()),
+        pool: definition.pool.clone().or(observed_issuer),
         checks,
-        issuer: definition.issuer.clone(),
         coverage: definition.coverage.clone(),
-        pool: None,
         duration_seconds: None,
     })
 }
@@ -644,11 +620,22 @@ pub(super) fn observe_checks(
     poll_seconds: u64,
     sleep: &mut dyn FnMut(Duration),
 ) -> Result<GateEvidence, LandingError> {
+    observe_checks_with(candidate, definition, poll_seconds, sleep, &mut || {
+        forge.checks(&candidate.commit)
+    })
+}
+
+fn observe_checks_with(
+    candidate: &Candidate,
+    definition: &GateDefinition,
+    poll_seconds: u64,
+    sleep: &mut dyn FnMut(Duration),
+    read: &mut dyn FnMut() -> Result<Vec<GateEvidence>, LandingError>,
+) -> Result<GateEvidence, LandingError> {
     let poll = poll_seconds.max(1);
     let mut elapsed = 0;
     loop {
-        let observed = forge
-            .checks(&candidate.commit)?
+        let observed = read()?
             .into_iter()
             .next()
             .ok_or_else(|| LandingError::Failed("forge returned no check evidence".into()))?;
@@ -713,36 +700,47 @@ impl AlarmSink for ChairAlarms {
     fn post(&mut self, alarm: &Alarm) -> Result<(), LandingError> {
         let text = alarm_text(alarm);
         let _ = writeln!(std::io::stderr().lock(), "{text}");
-        let Some(session) = &self.session else {
-            return Ok(());
-        };
-        let executable = std::env::current_exe()
-            .map_err(|error| LandingError::Failed(format!("cannot locate provenant: {error}")))?;
-        let executable = executable.to_string_lossy();
-        let output = execute_with(
-            &self.project,
-            &[
-                &executable,
-                "chair",
-                "message",
-                session,
-                "--text-stdin",
-                "--channel",
-                "cli",
-            ],
-            Duration::from_secs(30),
-            false,
-            Some(text.as_bytes()),
-        )
-        .map_err(failed)?;
-        if output.termination != Termination::Exit(0) {
-            return Err(LandingError::Failed(format!(
-                "chair message failed: {}",
-                String::from_utf8_lossy(&output.stderr.bytes).trim()
-            )));
-        }
-        Ok(())
+        deliver_alarm(self.session.as_deref(), &text, &mut |session, text| {
+            let executable = std::env::current_exe().map_err(|error| {
+                LandingError::Failed(format!("cannot locate provenant: {error}"))
+            })?;
+            let executable = executable.to_string_lossy();
+            let output = execute_with(
+                &self.project,
+                &[
+                    &executable,
+                    "chair",
+                    "message",
+                    session,
+                    "--text-stdin",
+                    "--channel",
+                    "cli",
+                ],
+                Duration::from_secs(30),
+                false,
+                Some(text.as_bytes()),
+            )
+            .map_err(failed)?;
+            if output.termination != Termination::Exit(0) {
+                return Err(LandingError::Failed(format!(
+                    "chair message failed: {}",
+                    String::from_utf8_lossy(&output.stderr.bytes).trim()
+                )));
+            }
+            Ok(())
+        })
     }
+}
+
+fn deliver_alarm(
+    session: Option<&str>,
+    text: &str,
+    send: &mut dyn FnMut(&str, &str) -> Result<(), LandingError>,
+) -> Result<(), LandingError> {
+    if let Some(session) = session {
+        send(session, text)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -939,6 +937,8 @@ mod tests {
             executor: None,
             coverage: Vec::new(),
             timeout_seconds: 10,
+            pool: None,
+            env_passthrough: Vec::new(),
         }
     }
     fn candidate() -> Candidate {
@@ -1005,6 +1005,50 @@ mod tests {
         .unwrap();
         assert_eq!(result.result, GateResult::Passed);
         assert_eq!(result.definition_digest, "digest");
+        assert_eq!(result.issuer.as_deref(), Some("github-actions"));
+        assert_eq!(result.pool.as_deref(), Some("github-actions"));
+        let mut configured = definition(&["ci"], None);
+        configured.pool = Some("hosted".into());
+        let priced = observe_checks(&mut forge, &candidate(), &configured, 3, &mut |_| {}).unwrap();
+        assert_eq!(priced.pool.as_deref(), Some("hosted"));
+        let mut budget = provenant_cli::domains::BudgetSettings::default();
+        budget.rate_micros_per_minute.insert("hosted".into(), 60);
+        assert_eq!(
+            super::super::budget::estimate(&budget, &[(priced.pool.unwrap(), 2)]).unwrap(),
+            CostEstimate::Known { micros: 2 }
+        );
+    }
+
+    #[test]
+    fn mixed_check_issuers_do_not_invent_a_pool() {
+        let checks = observed(&[
+            ("ci", Some("first"), GateResult::Passed),
+            ("ci", Some("second"), GateResult::Passed),
+        ]);
+        let evidence = bind_evidence(&candidate(), &definition(&["ci"], None), &checks).unwrap();
+        assert_eq!(evidence.pool, None);
+        assert_eq!(evidence.issuer, None);
+    }
+
+    #[test]
+    fn pending_check_is_polled_until_it_passes() {
+        let mut samples = std::collections::VecDeque::from([
+            observed(&[("ci", Some("app"), GateResult::Pending)]),
+            observed(&[("ci", Some("app"), GateResult::Passed)]),
+        ]);
+        let mut pauses = Vec::new();
+        let result = observe_checks_with(
+            &candidate(),
+            &definition(&["ci"], None),
+            3,
+            &mut |pause| pauses.push(pause),
+            &mut || Ok(vec![samples.pop_front().unwrap()]),
+        )
+        .unwrap();
+        assert_eq!(result.result, GateResult::Passed);
+        assert_eq!(result.duration_seconds, Some(3));
+        assert_eq!(pauses, [Duration::from_secs(3)]);
+        assert_eq!(result.pool.as_deref(), Some("app"));
     }
 
     #[test]
@@ -1069,19 +1113,6 @@ mod tests {
     }
 
     #[test]
-    fn check_states_map_and_unknown_states_are_errors() {
-        assert_eq!(
-            check_result("completed", Some("timed_out")).unwrap(),
-            GateResult::Failed
-        );
-        assert_eq!(
-            check_result("in_progress", None).unwrap(),
-            GateResult::Pending
-        );
-        assert!(check_result("completed", Some("novel")).is_err());
-    }
-
-    #[test]
     fn direct_push_unknown_is_not_allowed_with_a_reason() {
         let push = json!({"permissions": {"push": true}});
         let open = json!({"protected": false});
@@ -1093,6 +1124,29 @@ mod tests {
         assert!(direct_push_verdict(&push, &json!({}), &[]).is_err());
         assert!(direct_push_verdict(&json!({"permissions": {"push": false}}), &open, &[]).is_err());
         assert!(direct_push_verdict(&json!({}), &open, &[]).is_err());
+    }
+
+    #[test]
+    fn alarm_delivery_targets_chair_and_propagates_failure() {
+        let mut delivered = Vec::new();
+        deliver_alarm(None, "alarm", &mut |session, text| {
+            delivered.push((session.to_owned(), text.to_owned()));
+            Ok(())
+        })
+        .unwrap();
+        assert!(delivered.is_empty());
+        deliver_alarm(Some("chair"), "alarm", &mut |session, text| {
+            delivered.push((session.to_owned(), text.to_owned()));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(delivered, [("chair".into(), "alarm".into())]);
+        assert!(
+            deliver_alarm(Some("chair"), "alarm", &mut |_, _| Err(
+                LandingError::Failed("delivery failed".into())
+            ))
+            .is_err()
+        );
     }
 
     #[test]

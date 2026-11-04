@@ -34,6 +34,10 @@ pub struct GateDefinition {
     pub executor: Option<String>,
     pub coverage: Vec<String>,
     pub timeout_seconds: u64,
+    #[serde(default)]
+    pub pool: Option<String>,
+    #[serde(default)]
+    pub env_passthrough: Vec<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
