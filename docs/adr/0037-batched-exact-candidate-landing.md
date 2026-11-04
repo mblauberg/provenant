@@ -13,7 +13,9 @@ commit SHAs, so the landing history must preserve or map them.
 
 ## Decision
 
-Use a batched candidate by default. From the fetched target, chain one merge
+Use a batched candidate by default, including an unflagged single PR under
+`integration = "batch"`. `--wait`, `--head` and `integration = "single"`
+retain the single-PR path. From the fetched target, chain one merge
 commit per eligible pull request in order, with the approved head as its second
 parent. Gate the final candidate's exact commit and tree before publication;
 recheck heads and approvals and rebuild and re-gate when the target moves. No
@@ -23,17 +25,29 @@ conflict isolates the conflicting pull request after the clean prefix is gated.
 `auto` publication selects `fast_forward` when the landing identity can advance
 the target directly, and `rest_ordered` otherwise. The former advances from the
 expected base without force; the latter merges pinned heads in order through the
-forge and checks the resulting tree against the candidate. Forge rules and
-required checks remain in force. An unknown outcome is reconciled before retry
-or cleanup.
+forge after checking the expected target before each merge. A target change can
+still race that check and the merge; the resulting-tree comparison alarms as a
+backstop. `method` applies only to `rest_ordered`. Forge rules and
+required checks remain in force. Definite refusals are reconciled and receipted
+without a pending marker;
+a moved target consumes a rebuild. Ambiguous responses leave a marker until
+ancestry and forge state prove the outcome. Recovery of a landing repeats the
+approval recheck, post-merge follow, receipt and candidate-ref cleanup.
 
-Receipts retain policy sources, candidate and gate evidence, publication,
+Every PR receives an outcome receipt, including in shadow; shadow records the
+selected publication mode, reason and split. Receipts retain policy sources,
+candidate and gate evidence, publication,
 outcomes, cost and alarms, including a mapping from approved to landed SHAs for
 methods that rewrite them. A configurable fast local pre-push gate catches cheap
 failures early. Post-merge checks can bisect a failed batch and alarm; automatic
 revert-forward requires explicit configuration. Pool rates and durations inform
 cost estimates: an advisory amount warns, while an explicit cap refuses excess
-spend; unknown prices remain unknown.
+priced spend only; unknown cost never refuses. `gate.pool` and
+`post_merge.pool` name cost pools, with the check issuer app slug as a checks
+gate fallback. Post-merge follow polls until checks settle or its timeout raises
+an `unsettled` alarm. Command gates scrub forge token environment variables
+unless explicitly passed through. Candidate CI must trigger on the configured
+ref prefix.
 
 ## Alternatives and consequences
 

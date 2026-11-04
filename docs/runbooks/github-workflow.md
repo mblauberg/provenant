@@ -292,8 +292,9 @@ same-family substitution, through a different lens without reducing the count,
 when cross-family review is unavailable. This
 repository is a personal harness, not production: by user directive, repository auto-merge is enabled
 and agents merge directly. An agent merges a pull request once it has passed
-its tier's planned independent review coverage and the required landing gates
-pass, without waiting for the user. `gh pr
+its tier's planned independent review coverage and `ci-status` is green on the
+exact PR head for single-PR landing or on the candidate for batch landing,
+without waiting for the user. Forge-required checks also remain mandatory. `gh pr
 merge --auto` may be queued once those gates are met.
 
 `ci-status` is the single required check on branch protection. It is the
@@ -344,8 +345,10 @@ provenant land 148 149 --shadow
 provenant land --tier substantial --explain --json
 ```
 
-Multiple numbers select the batch path; `--batch` selects it for one pull
-request. A plain single number uses the existing single-PR path. `--shadow`
+Multiple numbers select the batch path; with `integration = "batch"`, a plain
+single number also runs as a batch of one, with the exact-candidate gate and
+`auto` publication. `--batch` explicitly selects the batch path for one PR.
+`--wait`, `--head` or `integration = "single"` select the single-PR path. `--shadow`
 builds and gates the candidate and records the decisions without publishing;
 only the candidate ref may change. `--tier` selects a risk-tier override.
 `--explain --json` needs no numbers and reports effective policy values and
@@ -357,17 +360,39 @@ The approved head is each merge commit's second parent. A gate on the final
 candidate binds its commit, tree, definition, issuer and coverage; missing,
 skipped, neutral or mismatched required evidence does not pass. A red batch
 splits into ordered prefixes; a conflict isolates the PR after the clean prefix.
-The lander rechecks heads and approvals and rebuilds and re-gates if the target
-moves, up to the configured limit. No PR branch needs updating.
+The lander rechecks heads, base branches and approvals; retargeted PRs are
+excluded. It rebuilds and re-gates if the target moves, up to the configured
+limit. No PR branch needs updating.
 
 `fast_forward` advances the target from the expected base without force.
-`rest_ordered` merges pinned heads through the forge in order and alarms if the
-resulting tree differs from the gated tree. `auto` selects between them based on
-direct-push authority and records why. Unknown publication outcomes are
-reconciled before retry or cleanup. Receipts record the base, candidate, gate,
-policy sources, outcomes, cost and alarms, and map approved SHAs to landed SHAs.
-Post-merge checks can bisect failures and raise an alarm; revert-forward PRs
-require explicit authorisation.
+`rest_ordered` checks the target before each merge against the expected base or
+previous merge commit, then merges pinned heads through the forge in order. A
+mismatch stops publication and rebuilds the remainder within `max_rebuilds`.
+A target update can still race between that check and the forge merge; the final
+tree comparison alarms if the result differs from the gated tree. `auto` selects
+the publication mode based on direct-push authority and records why.
+
+A stale or non-fast-forward push, merge response 405, 409 or 422, or head
+mismatch is a definite refusal. The lander reconciles and receipts anything
+already landed; target movement consumes a rebuild, while another refusal is
+reported without leaving a pending marker. A lost or ambiguous response, such
+as a transport error, timeout or 5xx, leaves a pending marker. Before retry or
+cleanup, recovery checks ancestry and forge state, clears the marker when the
+outcome is proved landed or not landed, and retains it only when still unknown.
+The error gives the marker path: inspect its JSON under the project state
+`landing/pending/`, and compare its candidate and PR heads with the target's
+ancestry and forge PR state. Do not remove it just to force a retry. When
+recovery confirms a landing it repeats the approval recheck and alarms,
+post-merge follow, receipt and candidate-ref cleanup.
+
+Every PR receives an outcome receipt, including landed, red, conflicted,
+excluded or pending-unknown outcomes. Shadow receipts include the publish mode
+and reason and split decisions; no publication occurs. Gate failures name each
+unmet check and why it was unmet: missing, failed, skipped or neutral, wrong
+issuer, or another tree. Receipts also retain base, candidate, gate, policy
+sources, cost and alarms and map approved SHAs to landed SHAs. Post-merge
+checks can bisect failures and raise an alarm; revert-forward PRs require
+explicit authorisation.
 
 #### Landing settings
 
@@ -380,21 +405,31 @@ omitted fields inherit. The project and tier tables accept the same fields.
 - `poll_seconds` controls initial CI polling; `--poll` overrides it.
 - `integration` selects `batch`, `single` or `forge_queue`; `batch_size` and
   `batch_wait_seconds` bound collection. `candidate_ref_prefix` names temporary
-  refs and `max_rebuilds` bounds rebuilds on target movement. The contract's
-  forge queue path is not yet implemented.
+  refs and `max_rebuilds` bounds rebuilds on target movement. The bundled CI
+  trigger covers `land/**`; if you change the prefix, update the CI trigger to
+  match. `land --explain` warns on a non-default prefix. The contract's forge
+  queue path is not yet implemented and `forge_queue` is rejected at runtime.
 - `gate.kind` selects checks or commands. `gate.checks` and `gate.issuer` name
   required checks and optional issuer; `gate.commands` and `gate.executor`
   specify a command plan and its executor. `gate.timeout_seconds` and
-  `gate.coverage` bind its limit and declared coverage.
+  `gate.coverage` bind its limit and declared coverage. Command gates remove
+  `GH_TOKEN`, `GITHUB_TOKEN` and `GH_ENTERPRISE_TOKEN` from the environment
+  unless named in `gate.env_passthrough`; the command process group is stopped
+  on every exit.
 - `pr_ci.mode` selects `always`, `opt_in`, `affected` or `none`; `pr_ci.label`
   names the opt-in label. This policy cannot bypass forge-required checks.
 - `publish` selects `auto`, `rest_ordered` or `fast_forward`; `method` selects
-  `merge`, `squash` or `rebase`.
+  `merge`, `squash` or `rebase` for `rest_ordered` only.
 - `post_merge.checks`, `post_merge.bisect` and `post_merge.revert_forward`
   configure the follow-up plan, failure isolation and revert authority.
+  `post_merge.timeout_seconds` defaults to 3600; follow polls until all checks
+  settle or the timeout raises an `unsettled` alarm.
 - `budget.rate_micros_per_minute.<pool>` prices a pool; `budget.advisory_micros`
   warns and `budget.cap_micros` sets a spending boundary, in millionths of the
-  configured currency. Unknown prices are reported as unknown.
+  configured currency. `gate.pool` and `post_merge.pool` select the pools for
+  gate and post-merge duration; a checks gate falls back to the check issuer
+  app slug when no gate pool is configured. Unknown cost never refuses; the
+  cap refuses only priced spend.
 - `local_gate.mode` is `warn`, `enforce` or `off`; `local_gate.commands` and
   `local_gate.timeout_seconds` configure the fast pre-push plan. With no commands
   nothing runs. A failure warns or blocks according to the mode.
@@ -403,7 +438,8 @@ For a migration from a bespoke lander, see [landing migration](landing-migration
 
 ### Single-PR landing
 
-`provenant land 148 --wait` waits up to one hour for CI, merges at the verified
+The single-PR path, selected with `--wait`, `--head` or `integration = "single"`,
+uses the following behaviour. `provenant land 148 --wait` waits up to one hour for CI, merges at the verified
 PR head, then runs the local follow-up below. `--wait=30m` changes the limit,
 up to four hours; omit `--wait` for one check. `--head <reviewed-sha>` pins
 the reviewed head. Waiting reads check runs and legacy statuses by the pinned commit SHA,
@@ -420,8 +456,10 @@ Landing reads pull request and check data over REST and sends a merge request
 pinned to the verified SHA. Pending checks are sampled initially after 30
 seconds, then with backoff up to four times that interval. Set the host default
 with `domains.pr.land.poll_seconds` in the state-root `config.toml`, or pass
-`--poll SECONDS` for one invocation. `land 148 --explain` shows the effective
-interval and retry budget with their sources. The `--wait` duration also bounds retries of
+`--poll SECONDS` for one invocation. `land --explain --json` reports the
+effective landing policy and its sources; it does not report the single-PR retry
+budget. That budget defaults to 60 seconds without `--wait` and otherwise uses
+the requested wait duration. The `--wait` duration also bounds retries of
 GitHub rate limits; `RATE_LIMITED` reports the reset and a retry command.
 Without server timing, secondary limits wait at least a minute and back off,
 following [GitHub's rate-limit guidance](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#exceeding-the-rate-limit).
@@ -501,8 +539,10 @@ branches and worktrees, unmerged ones included, is the chair's judgement.
 The live `Protect main` ruleset sets `strict_required_status_checks_policy: false`,
 so branch protection does not require the head to be up to date with `main`.
 For batch landing, `ci-status` gates the candidate; changes that conflict are
-reported through the ordered split. Review head-move rules still apply, with A
-and B in shadow until enforced.
+reported through the ordered split. For overlapping single-PR landings, use a
+serial merge train: merge one, update the next onto the new `main`, rerun
+exact-head checks and apply the review ladder head-move rules before merging.
+The ladder keeps rules A and B in shadow until enforced.
 
 ### Rust build cache
 
