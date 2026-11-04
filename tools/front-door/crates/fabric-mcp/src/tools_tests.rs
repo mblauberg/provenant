@@ -542,7 +542,9 @@ fn coordination_store_errors_include_safe_context() {
         source: std::io::Error::other("private"),
     }));
     let detail = io.structured_error();
-    assert_eq!(detail["path"], "/state/inbox.db");
+    assert_eq!(detail["code"], "io");
+    assert!(detail.get("path").is_none_or(serde_json::Value::is_null));
+    assert!(!detail.to_string().contains("/state/inbox.db"));
     assert!(!detail.to_string().contains("private"));
 }
 

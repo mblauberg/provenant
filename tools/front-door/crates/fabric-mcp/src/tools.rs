@@ -1390,6 +1390,15 @@ impl ServiceError {
                 if let Some(revision) = data.get("revision").and_then(Value::as_u64) {
                     value["revision"] = revision.into();
                 }
+                if self.code() == CONTROL_UNSUPPORTED
+                    && let Ok(receipt) = serde_json::from_value::<
+                        provenant_records::control::ControlReceipt,
+                    >(data.clone())
+                    && receipt.state == provenant_records::control::ControlState::Unsupported
+                {
+                    value["state"] = serde_json::json!(receipt.state);
+                    value["operation_id"] = serde_json::json!(receipt.operation_id);
+                }
                 value
             }
             Self::Invalid(error) => serde_json::json!({"code":self.code(),"path":error.path}),
