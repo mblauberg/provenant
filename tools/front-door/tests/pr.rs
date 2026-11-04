@@ -459,7 +459,7 @@ fn land_plain_singleton_uses_batch_driver() -> Result {
     let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_ne!(code(&output), 0, "an unapproved PR must not land");
     assert_eq!(report["data"]["outcomes"]["1668"], "excluded", "{report}");
-    assert!(report["error"].is_null(), "{report}");
+    assert_eq!(report["error"]["code"], "LAND_REFUSED", "{report}");
     let calls = fs::read_to_string(rig.project.join("gh-calls"))?.replace("api --include ", "api ");
     assert!(calls.contains("api repos/{owner}/{repo}"), "{calls}");
     assert!(
@@ -512,6 +512,34 @@ fn land_explains_poll_and_budget_sources() -> Result {
     assert_eq!(
         cli["data"]["fields"]["poll_seconds"]["source"]["layer"],
         "invocation"
+    );
+    assert_eq!(cli["data"]["retry_budget_seconds"], 90);
+    assert_eq!(cli["data"]["retry_budget_source"], "--wait");
+    let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let binding = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(fs::canonicalize(rig.project.join(".git"))?)?,
+    )?;
+    fs::write(
+        rig.state.join("config.toml"),
+        format!(
+            "schema_version=1\n[domains.pr.land.projects.\"{}\"]\npoll_seconds=21\n[domains.pr.land.tiers.crucial]\npoll_seconds=12\n",
+            binding.project_id()
+        ),
+    )?;
+    let project = show(&["land", "--explain", "--json"])?;
+    assert_eq!(project["data"]["fields"]["poll_seconds"]["value"], 21);
+    assert_eq!(
+        project["data"]["fields"]["poll_seconds"]["source"]["layer"],
+        "project"
+    );
+    let tier = show(&["land", "--explain", "--tier", "crucial", "--json"])?;
+    assert_eq!(tier["data"]["fields"]["poll_seconds"]["value"], 12);
+    assert_eq!(
+        tier["data"]["fields"]["poll_seconds"]["source"]["layer"],
+        "tier"
     );
     assert!(!rig.project.join("gh-calls").exists());
     Ok(())

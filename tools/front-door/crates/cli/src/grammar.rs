@@ -119,7 +119,7 @@ pub enum Command {
         #[arg(long)]
         shadow: bool,
         /// Apply the named landing risk tier
-        #[arg(long)]
+        #[arg(long, value_parser = parse_landing_tier)]
         tier: Option<String>,
         /// Pin a reviewed head instead of using the current PR head
         #[arg(long, hide = true)]
@@ -1558,4 +1558,12 @@ pub struct Status {
     /// Include full records and older lanes
     #[arg(long)]
     pub all: bool,
+}
+
+fn parse_landing_tier(value: &str) -> Result<String, String> {
+    serde_json::from_value::<provenant_records::workflow::RiskTier>(serde_json::Value::String(
+        value.into(),
+    ))
+    .map(|_| value.to_owned())
+    .map_err(|_| "expected routine, substantial, crucial or terminal".into())
 }

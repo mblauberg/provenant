@@ -135,3 +135,34 @@ pub struct LandingReceipt {
     pub alarms: Vec<Alarm>,
     pub shadow: bool,
 }
+
+impl LandingReceipt {
+    pub fn new(
+        candidate: &Candidate,
+        policy: LandPolicy,
+        gate_definition: GateDefinition,
+        gate_evidence: GateEvidence,
+        publish: PublishDecision,
+        cost: CostEstimate,
+        shadow: bool,
+    ) -> Self {
+        Self {
+            policy,
+            base: candidate.base.clone(),
+            candidate: candidate.commit.clone(),
+            tree: candidate.tree.clone(),
+            candidate_ref: candidate.ref_name.clone(),
+            candidate_steps: candidate.steps.clone(),
+            pull_requests: candidate.steps.iter().map(|step| step.pr.clone()).collect(),
+            gate_definition,
+            gate_evidence,
+            publish,
+            outcomes: BTreeMap::new(),
+            split: Vec::new(),
+            approved_to_landed: BTreeMap::new(),
+            cost,
+            alarms: Vec::new(),
+            shadow,
+        }
+    }
+}

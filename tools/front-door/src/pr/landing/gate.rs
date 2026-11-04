@@ -10,76 +10,110 @@ fn failed(message: impl Into<String>) -> LandingError {
     LandingError::Failed(message.into())
 }
 
-/// Evaluate the gate named by `definition` against `evidence`, ignoring commit binding.
-fn evaluate(
-    definition: &GateDefinition,
-    evidence: &GateEvidence,
-) -> Result<GateResult, LandingError> {
-    if evidence.definition_digest != definition.digest {
-        return Err(failed(
-            "gate evidence was produced for a different gate definition",
-        ));
-    }
-    match definition.kind {
-        GateKind::Checks => evaluate_checks(definition, evidence),
-        GateKind::Commands => evaluate_commands(definition, evidence),
-    }
+fn check_issues(definition: &GateDefinition, evidence: &GateEvidence) -> Vec<(String, GateResult)> {
+    let names = if definition.kind == GateKind::Commands {
+        &definition.commands
+    } else {
+        &definition.checks
+    };
+    names
+        .iter()
+        .filter_map(|name| {
+            let named: Vec<_> = evidence
+                .checks
+                .iter()
+                .filter(|check| check.name == *name)
+                .collect();
+            let matching: Vec<_> = named
+                .iter()
+                .filter(|check| {
+                    definition.kind == GateKind::Commands
+                        || definition
+                            .issuer
+                            .as_ref()
+                            .is_none_or(|issuer| check.issuer.as_ref() == Some(issuer))
+                })
+                .collect();
+            if matching.is_empty() {
+                return Some((
+                    format!(
+                        "{name}: {}",
+                        if named.is_empty() {
+                            "missing"
+                        } else {
+                            "wrong issuer"
+                        }
+                    ),
+                    GateResult::Missing,
+                ));
+            }
+            let issues: Vec<_> = matching
+                .iter()
+                .filter(|check| check.result != GateResult::Passed)
+                .collect();
+            if issues.is_empty() {
+                None
+            } else {
+                let result = if issues.iter().any(|check| {
+                    matches!(
+                        check.result,
+                        GateResult::Missing | GateResult::Skipped | GateResult::Neutral
+                    )
+                }) {
+                    GateResult::Missing
+                } else if issues
+                    .iter()
+                    .any(|check| check.result == GateResult::Failed)
+                {
+                    GateResult::Failed
+                } else {
+                    GateResult::Pending
+                };
+                Some((
+                    format!(
+                        "{name}: {}",
+                        issues
+                            .iter()
+                            .map(|check| format!("{:?}", check.result).to_lowercase())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    result,
+                ))
+            }
+        })
+        .collect()
 }
 
 fn evaluate_checks(
     definition: &GateDefinition,
-    evidence: &GateEvidence,
+    issues: &[(String, GateResult)],
 ) -> Result<GateResult, LandingError> {
     if definition.checks.is_empty() {
         return Err(failed("unmet gate: no required checks are configured"));
     }
-    let mut failed_check = false;
-    let mut pending = false;
-    for name in &definition.checks {
-        let mut matching = evidence.checks.iter().filter(|check| {
-            check.name == *name
-                && definition
-                    .issuer
-                    .as_ref()
-                    .is_none_or(|issuer| check.issuer.as_ref() == Some(issuer))
-        });
-        // Several runs of one name can exist; a pass needs every run to pass.
-        let mut seen = false;
-        for check in matching.by_ref() {
-            seen = true;
-            match check.result {
-                GateResult::Passed => {}
-                GateResult::Failed => {
-                    failed_check = true;
-                }
-                GateResult::Pending => {
-                    pending = true;
-                }
-                GateResult::Missing | GateResult::Skipped | GateResult::Neutral => {
-                    return Err(failed(format!(
-                        "unmet gate: required check {name} is {}",
-                        format!("{:?}", check.result).to_lowercase()
-                    )));
-                }
-            }
-        }
-        if !seen {
-            let issuer = definition
-                .issuer
-                .as_ref()
-                .map_or(String::new(), |issuer| format!(" from issuer {issuer}"));
-            return Err(failed(format!(
-                "unmet gate: required check {name}{issuer} is missing"
-            )));
-        }
+    if issues
+        .iter()
+        .any(|(_, state)| *state == GateResult::Missing)
+    {
+        return Err(failed(format!(
+            "unmet gate: {}",
+            issues
+                .iter()
+                .map(|(message, _)| message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        )));
     }
-    Ok(if failed_check {
-        GateResult::Failed
-    } else if pending {
-        GateResult::Pending
-    } else {
-        GateResult::Passed
-    })
+    Ok(
+        if issues.iter().any(|(_, state)| *state == GateResult::Failed) {
+            GateResult::Failed
+        } else if !issues.is_empty() {
+            GateResult::Pending
+        } else {
+            GateResult::Passed
+        },
+    )
 }
 
 fn evaluate_commands(
@@ -113,43 +147,48 @@ fn evaluate_commands(
     }
 }
 
-/// Validate provenance and binding, returning the observed gate result; invalid evidence is an error.
-pub fn validate_evidence(
+/// Evaluate provenance, binding and check diagnostics once for the driver.
+pub fn assess_evidence(
     candidate: &Candidate,
     definition: &GateDefinition,
     evidence: &GateEvidence,
-) -> Result<GateResult, LandingError> {
-    if evidence.commit != candidate.commit || evidence.tree != candidate.tree {
-        return Err(failed(format!(
+) -> (Result<GateResult, LandingError>, String) {
+    let issues = check_issues(definition, evidence);
+    let names = if definition.kind == GateKind::Commands {
+        &definition.commands
+    } else {
+        &definition.checks
+    };
+    let wrong_tree = evidence.commit != candidate.commit || evidence.tree != candidate.tree;
+    let unmet = if wrong_tree {
+        names
+            .iter()
+            .map(|name| format!("{name}: evidence is for another commit or tree"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    } else {
+        issues
+            .iter()
+            .map(|(message, _)| message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+    let result = if wrong_tree {
+        Err(failed(format!(
             "gate evidence is bound to commit {} tree {}, not candidate {} tree {}",
             evidence.commit, evidence.tree, candidate.commit, candidate.tree
-        )));
-    }
-    evaluate(definition, evidence)
-}
-
-/// Prove whether a pull request run covers the candidate tree and definition.
-///
-/// Only a singleton batch can be proven: the pull request head's tree must equal
-/// the candidate tree and the passing evidence must satisfy the same definition.
-pub fn pr_run_covers(
-    candidate: &Candidate,
-    definition: &GateDefinition,
-    evidence: &GateEvidence,
-) -> Result<bool, LandingError> {
-    let [step] = candidate.steps.as_slice() else {
-        return Ok(false);
+        )))
+    } else if evidence.definition_digest != definition.digest {
+        Err(failed(
+            "gate evidence was produced for a different gate definition",
+        ))
+    } else {
+        match definition.kind {
+            GateKind::Checks => evaluate_checks(definition, &issues),
+            GateKind::Commands => evaluate_commands(definition, evidence),
+        }
     };
-    if step.tree != candidate.tree
-        || evidence.commit != step.pr.head
-        || evidence.tree != candidate.tree
-    {
-        return Ok(false);
-    }
-    Ok(matches!(
-        evaluate(definition, evidence),
-        Ok(GateResult::Passed)
-    ))
+    (result, unmet)
 }
 
 /// Remove a gate checkout through git only; never delete a path directly.
@@ -177,7 +216,7 @@ enum Run {
 
 #[allow(
     clippy::disallowed_methods,
-    reason = "gate command execution owns its wall-clock timeout"
+    reason = "bound each command to the gate deadline"
 )]
 fn run_command(
     checkout: &std::path::Path,
@@ -185,58 +224,35 @@ fn run_command(
     deadline: std::time::Instant,
     passthrough: &[String],
 ) -> Result<Run, LandingError> {
-    #[cfg(unix)]
-    use std::os::unix::process::CommandExt;
-    use std::process::{Command, Stdio};
-    // Command output goes to stderr so the JSON report on stdout stays clean.
-    let script = format!("exec 1>&2\n{command}");
-    let mut command_process = Command::new("sh");
-    command_process
-        .arg("-c")
-        .arg(script)
-        .current_dir(checkout)
-        .stdin(Stdio::null());
-    for key in ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"] {
-        if !passthrough.iter().any(|allowed| allowed == key) {
-            command_process.env_remove(key);
-        }
+    use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+    let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+    if timeout.is_zero() {
+        return Ok(Run::TimedOut);
     }
-    #[cfg(unix)]
-    command_process.process_group(0);
-    let mut child = command_process
-        .spawn()
-        .map_err(|error| failed(format!("cannot start gate command: {error}")))?;
-    let cleanup = |child: &mut std::process::Child| {
-        #[cfg(unix)]
-        {
-            let group = format!("-{}", child.id());
-            let _ = Command::new("kill").args(["-KILL", "--", &group]).output();
-        }
-        let _ = child.kill();
-        let _ = child.wait();
-    };
-    loop {
-        let status = match child.try_wait() {
-            Ok(status) => status,
-            Err(error) => {
-                cleanup(&mut child);
-                return Err(failed(format!("cannot wait for gate command: {error}")));
-            }
-        };
-        if let Some(status) = status {
-            cleanup(&mut child);
-            return Ok(if status.success() {
-                Run::Passed
-            } else {
-                Run::Failed
-            });
-        }
-        if std::time::Instant::now() >= deadline {
-            cleanup(&mut child);
-            return Ok(Run::TimedOut);
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    let argv = ["sh".into(), "-c".into(), command.into()];
+    let env: Vec<_> = std::env::vars_os()
+        .filter(|(key, _)| {
+            !["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"]
+                .iter()
+                .any(|name| key == name && !passthrough.iter().any(|allowed| allowed == name))
+        })
+        .collect();
+    let mut options = ExecOptions::new(&argv, checkout, timeout);
+    options.env = Some(&env);
+    options.cleanup_process_group = true;
+    let outcome = SystemExecutor::new(1)
+        .and_then(|executor| executor.execute(options))
+        .map_err(|error| failed(format!("cannot execute gate command: {error:?}")))?;
+    use std::io::Write;
+    let _ = std::io::stderr().write_all(&outcome.stdout.bytes);
+    let _ = std::io::stderr().write_all(&outcome.stderr.bytes);
+    Ok(if outcome.timed_out {
+        Run::TimedOut
+    } else if outcome.termination == Termination::Exit(0) {
+        Run::Passed
+    } else {
+        Run::Failed
+    })
 }
 
 /// Execute a configured command plan in an isolated candidate checkout.
@@ -412,6 +428,13 @@ mod tests {
     use crate::pr::landing::fakes::FakeForge;
     use std::cell::Cell;
 
+    fn validate_evidence(
+        candidate: &Candidate,
+        definition: &GateDefinition,
+        evidence: &GateEvidence,
+    ) -> Result<GateResult, LandingError> {
+        assess_evidence(candidate, definition, evidence).0
+    }
     fn definition() -> GateDefinition {
         GateDefinition {
             kind: GateKind::Checks,
@@ -524,6 +547,19 @@ mod tests {
         assert!(validate_evidence(&candidate(1), &definition(), &other).is_err());
     }
     #[test]
+    fn command_gate_reports_the_failed_command() {
+        let mut def = definition();
+        def.kind = GateKind::Commands;
+        def.commands = vec!["cargo test --example fixture".into()];
+        let mut red = evidence(GateResult::Failed, None);
+        red.result = GateResult::Failed;
+        red.checks[0].name = def.commands[0].clone();
+        let (result, unmet) = assess_evidence(&candidate(1), &def, &red);
+        assert_eq!(result.unwrap(), GateResult::Failed);
+        assert_eq!(unmet, "cargo test --example fixture: failed");
+    }
+
+    #[test]
     fn command_gate_checks_executor_coverage_and_result() {
         let mut def = definition();
         def.kind = GateKind::Commands;
@@ -553,19 +589,6 @@ mod tests {
         skipped.result = GateResult::Skipped;
         assert!(validate_evidence(&candidate(1), &def, &skipped).is_err());
     }
-    #[test]
-    fn pr_run_covers_only_a_singleton_with_the_same_tree() {
-        let mut run = evidence(GateResult::Passed, None);
-        run.commit = "h0".into();
-        assert!(pr_run_covers(&candidate(1), &definition(), &run).unwrap());
-        assert!(!pr_run_covers(&candidate(2), &definition(), &run).unwrap());
-        run.tree = "other".into();
-        assert!(!pr_run_covers(&candidate(1), &definition(), &run).unwrap());
-        let mut failing = evidence(GateResult::Failed, None);
-        failing.commit = "h0".into();
-        assert!(!pr_run_covers(&candidate(1), &definition(), &failing).unwrap());
-    }
-
     fn pending_forge() -> FakeForge {
         let mut forge = FakeForge::default();
         forge

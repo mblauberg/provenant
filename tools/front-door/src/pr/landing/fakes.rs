@@ -14,6 +14,7 @@ pub struct FakeForge {
     pub labels: BTreeMap<u64, Vec<String>>,
     pub direct_push: bool,
     pub lose_merge_response: bool,
+    pub lose_merge_response_at: Option<u64>,
     pub refuse_merge: Option<u64>,
     pub valid_merge_ids: bool,
     pub merges: Vec<(u64, String, MergeMethod)>,
@@ -74,7 +75,7 @@ impl Forge for FakeForge {
             pr.state = PullRequestState::Merged;
             pr.merged_commit = Some(landed.clone());
         }
-        if self.lose_merge_response {
+        if self.lose_merge_response || self.lose_merge_response_at == Some(number) {
             return Err(LandingError::Failed("lost response".into()));
         }
         Ok(landed)
@@ -170,7 +171,7 @@ impl Repo for FakeRepo {
             return Err(LandingError::Refused("push refused".into()));
         }
         if self.refs.get(name).map(String::as_str) != expected_old {
-            return Err(LandingError::Failed("ref moved".into()));
+            return Err(LandingError::Refused("ref moved".into()));
         }
         self.refs.insert(name.into(), commit.into());
         if name == self.target_ref {
@@ -297,6 +298,20 @@ impl AlarmSink for FakeAlarms {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_expected_old_push_is_refused() -> Result<(), LandingError> {
+        let mut repo = FakeRepo {
+            target: "new".into(),
+            ..FakeRepo::default()
+        };
+        repo.fetch_target("main")?;
+        assert!(matches!(
+            repo.push_ref("main", "candidate", Some("old")),
+            Err(LandingError::Refused(_))
+        ));
+        Ok(())
+    }
 
     #[test]
     fn lost_merge_response_leaves_observable_forge_state() -> Result<(), LandingError> {

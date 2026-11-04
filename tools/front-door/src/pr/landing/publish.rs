@@ -82,7 +82,7 @@ pub fn fast_forward(
     candidate: &Candidate,
 ) -> Result<PublishResult, LandingError> {
     if !repo.is_ancestor(&candidate.base, &candidate.commit)? {
-        return Err(LandingError::Failed(
+        return Err(LandingError::Refused(
             "candidate does not descend from its base".into(),
         ));
     }
@@ -290,8 +290,33 @@ mod tests {
             repo.pushes[0],
             ("main".into(), "candidate".into(), Some("base".into()))
         );
-        assert!(fast_forward(&mut repo, "main", &c).is_err());
+        assert!(matches!(
+            fast_forward(&mut repo, "main", &c),
+            Err(LandingError::Refused(_))
+        ));
         Ok(())
+    }
+    #[test]
+    fn ordered_merge_stops_when_target_moves_between_merges() {
+        let mut forge = FakeForge::default();
+        prepare(&mut forge);
+        let mut repo = FakeRepo {
+            target: "base".into(),
+            fetches: ["base".into(), "moved".into()].into(),
+            ..FakeRepo::default()
+        };
+        assert!(matches!(
+            rest_ordered(
+                &mut forge,
+                &mut repo,
+                "main",
+                &candidate(),
+                MergeMethod::Merge
+            ),
+            Err(LandingError::TargetMoved)
+        ));
+        assert_eq!(forge.merges.len(), 1);
+        assert_eq!(forge.merges[0].0, 1);
     }
     #[test]
     fn ordered_merge_pins_heads_and_alarms_on_tree_mismatch() -> Result<(), LandingError> {

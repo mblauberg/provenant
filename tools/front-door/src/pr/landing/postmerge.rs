@@ -91,11 +91,12 @@ fn bisect(
     costs: &mut Vec<Option<(String, u64)>>,
 ) -> Option<u64> {
     let steps = &receipt.candidate_steps;
+    let last = steps.last()?;
     let full = Candidate {
         base: receipt.base.clone(),
         steps: steps.clone(),
-        commit: receipt.candidate.clone(),
-        tree: receipt.tree.clone(),
+        commit: last.commit.clone(),
+        tree: last.tree.clone(),
         ref_name: format!("{}-prefix-full", receipt.candidate_ref),
     };
     repo.push_ref(&full.ref_name, &full.commit, None).ok()?;
