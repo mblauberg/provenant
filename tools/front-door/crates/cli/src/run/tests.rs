@@ -2328,7 +2328,9 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
     let state = root.join("state");
     let project = root.join("project");
     std::fs::create_dir_all(&home)?;
+    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(&state)?;
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
     std::fs::create_dir_all(&project)?;
     for args in [
         vec!["init", "-q"],
@@ -2491,7 +2493,9 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
     let state = root.join("state");
     let project = root.join("project");
     std::fs::create_dir_all(&home)?;
+    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(&state)?;
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
     std::fs::create_dir_all(&project)?;
     for args in [
         vec!["init", "-q"],
