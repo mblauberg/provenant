@@ -138,6 +138,13 @@ authority. The test always audits unplaceable processes and checks a same-user
 sleep occupant; without the variable it reports that the clean-Free assertion
 was skipped.
 
+The host `[domains.run]` settings `grant_limit` (default 128) and
+`profile_limit_bytes` (default 524288) bound the total plan roots and each
+provider grant family, and the rendered macOS sandbox profile respectively.
+Raise either positive integer when a lane needs more capacity. The profile
+travels in an argument, so the operating system can still impose its own
+transport limit. These settings do not bypass path, credential, or Git checks.
+
 `confinement.census_exclude_ancestors` controls whether run admission excludes the
 invoking process's ancestor chain (such as the invoking shell) from live-writer detection.
 This strict boolean defaults to `true`. When set to `false`, only the invoking process

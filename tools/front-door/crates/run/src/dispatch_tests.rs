@@ -7997,7 +7997,7 @@ fn read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt
 }
 
 #[test]
-fn write_grants_are_bounded_at_admission_and_read_and_preserve_git_digest() -> TestResult {
+fn write_grants_wire_bound_and_git_digest_are_preserved() -> TestResult {
     use std::os::unix::ffi::OsStringExt;
 
     let temp = tempfile::tempdir()?;
@@ -8016,24 +8016,16 @@ fn write_grants_are_bounded_at_admission_and_read_and_preserve_git_digest() -> T
         scope: PathScope::Subtree,
     };
     let mut applied = admission::AppliedWriteGrants {
-        grants: vec![grant.clone(); provenant_confinement::MAX_WRITE_GRANTS + 1],
+        grants: vec![grant.clone(); 1025],
         git_grants_digest: Some(provenant_core::Digest::from_bytes([7; 32])),
     };
     let mut record = store.record(id, &call)?;
-    assert!(matches!(
-        store.mark_starting(&record, &route(), &[], &applied, None, &call),
-        Err(RunError::Validation("invalid write grants"))
-    ));
     record.write_grants = applied.grants.clone();
-    assert!(matches!(
-        reader::validate_attempt(&record),
-        Err(RunError::Validation("invalid write grants"))
-    ));
-    applied.grants.pop();
+    reader::validate_attempt(&record)?;
     assert!(reader::valid_write_grants(&applied.grants));
     assert!(reader::write_grants_fit(&applied.grants));
     // Native bytes double in the wire encoding, exceeding the cap even
-    // though the raw path is smaller. Old records still decode by count.
+    // though the raw path is smaller. Existing records remain readable.
     let mut path = b"/fixture/".to_vec();
     path.extend(vec![b'x'; 128 * 1024]);
     path.push(0xff);

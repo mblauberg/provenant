@@ -287,7 +287,10 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
         ))?;
         return Ok(());
     }
-    let backend = MacOsSandboxBackend { ready: true };
+    let backend = MacOsSandboxBackend {
+        ready: true,
+        limits: ProfileLimits::default(),
+    };
     // Existing hard links in the scratch, the worktree and its ignored
     // build and dependency trees do not refuse the launch: the sandbox
     // denies new links, and the few Git control files are checked directly.

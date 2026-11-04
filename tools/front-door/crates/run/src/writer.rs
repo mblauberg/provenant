@@ -4,8 +4,8 @@ use crate::{PathCheck, Result, RunError, WriterRequest};
 use provenant_confinement::{
     ConfinedPlan, UtilityBudget, UtilityRuntime, VerifiedWorktree,
     permissions::{
-        AccessMode, AnchoredDirectory, Anchors, BackendContext, ProviderProfile,
-        prepare_writer_directories, required_anchors, system_backend,
+        AccessMode, AnchoredDirectory, Anchors, BackendContext, ProfileLimits, ProviderProfile,
+        prepare_writer_directories, required_anchors, system_backend_with_limits,
     },
     repo::GitRefName,
     worktrees,
@@ -369,12 +369,21 @@ impl LaunchConfinement {
     ) -> Result<Vec<OsString>> {
         let executor =
             SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
-        let backend = system_backend(&BackendContext {
-            executor: &executor,
-            cancel,
-            #[cfg(target_os = "macos")]
-            env: &[],
-        })
+        let config = provenant_confinement::run_config::RunConfig::read(&self.state_root)
+            .map_err(error("read launch resource limits", None))?;
+        let limits = ProfileLimits {
+            grant_limit: config.grant_limit,
+            profile_limit_bytes: config.profile_limit_bytes,
+        };
+        let backend = system_backend_with_limits(
+            &BackendContext {
+                executor: &executor,
+                cancel,
+                #[cfg(target_os = "macos")]
+                env: &[],
+            },
+            limits,
+        )
         .map_err(RunError::Confinement)?;
         let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
         // Run holds writer custody here: create the derived ref parents and the

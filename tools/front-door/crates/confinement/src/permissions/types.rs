@@ -65,7 +65,7 @@ pub enum PermissionError {
     #[error("nested confinement is unsupported by this backend")]
     NestedConfinementUnsupported,
     #[error(
-        "compiled profile is {bytes} bytes, over the {limit}-byte launch limit (profiles travel in argv); reduce the read, write or executable roots this lane is granted"
+        "compiled profile is {bytes} bytes, over the configured {limit}-byte limit; reduce granted roots or raise domains.run.profile_limit_bytes (the OS may impose its own argv limit)"
     )]
     ProfileTooLarge { bytes: usize, limit: usize },
     #[error("{family} exceeds its bound of {limit}: {path:?}")]

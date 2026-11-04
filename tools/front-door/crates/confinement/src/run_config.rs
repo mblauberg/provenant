@@ -20,6 +20,8 @@ const DEFAULTS: &str = r#"writer_writes = []
 review_exempt = ["docs/release-notes/next.d/", "docs/specs/", "Cargo.lock", ".tracker-input"]
 push_conflict_markers = true
 brief_read_root_warnings = true
+profile_limit_bytes = 524288
+grant_limit = 128
 
 [projects]
 "#;
@@ -53,8 +55,20 @@ pub struct RunConfig {
         alias = "warn_brief_read_root"
     )]
     pub brief_read_root_warnings: bool,
+    /// Maximum rendered Seatbelt profile size, in bytes.
+    #[serde(default = "default_profile_limit_bytes")]
+    pub profile_limit_bytes: usize,
+    /// Maximum path grants in each profile family and in the plan.
+    #[serde(default = "default_grant_limit")]
+    pub grant_limit: usize,
     #[serde(default)]
     pub projects: BTreeMap<String, ProjectRunConfig>,
+}
+fn default_profile_limit_bytes() -> usize {
+    512 * 1024
+}
+fn default_grant_limit() -> usize {
+    128
 }
 fn default_true() -> bool {
     true
@@ -88,6 +102,8 @@ impl Default for RunConfig {
             review_exempt: default_review_exempt(),
             push_conflict_markers: true,
             brief_read_root_warnings: true,
+            profile_limit_bytes: default_profile_limit_bytes(),
+            grant_limit: default_grant_limit(),
             projects: BTreeMap::new(),
         }
     }
@@ -197,6 +213,17 @@ fn valid_writer_writes(field: &str, paths: &[PathBuf], errors: &mut Vec<SectionE
 impl DomainConfig for RunConfig {
     fn validate(&self) -> Vec<SectionError> {
         let mut errors = Vec::new();
+        for (field, value) in [
+            ("profile_limit_bytes", self.profile_limit_bytes),
+            ("grant_limit", self.grant_limit),
+        ] {
+            if value == 0 {
+                errors.push(SectionError {
+                    field: field.into(),
+                    code: "range",
+                });
+            }
+        }
         valid_patterns("review_exempt", &self.review_exempt, &mut errors);
         valid_writer_writes("writer_writes", &self.writer_writes, &mut errors);
         for (project, settings) in &self.projects {
@@ -233,6 +260,8 @@ fn project_key(key: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }
 pub const FIELD_METADATA: &[FieldMetadata] = &[
+    FieldMetadata::new("profile_limit_bytes", "int"),
+    FieldMetadata::new("grant_limit", "int"),
     FieldMetadata::new("push_conflict_markers", "bool"),
     FieldMetadata::new("brief_read_root_warnings", "bool"),
     FieldMetadata::new("warn_brief_read_roots", "bool"),
@@ -259,6 +288,37 @@ mod tests {
         .into_iter()
         .map(|error| error.field)
         .collect()
+    }
+    #[test]
+    fn launch_resource_defaults_can_be_raised() -> Result<(), Box<dyn std::error::Error>> {
+        let defaults: RunConfig = toml_edit::de::from_str("")?;
+        assert_eq!(defaults.grant_limit, 128);
+        assert_eq!(defaults.profile_limit_bytes, 512 * 1024);
+        let raised: RunConfig =
+            toml_edit::de::from_str("grant_limit = 2048\nprofile_limit_bytes = 2097152\n")?;
+        assert!(raised.validate().is_empty());
+        assert_eq!(
+            (raised.grant_limit, raised.profile_limit_bytes),
+            (2048, 2097152)
+        );
+        let state = tempfile::tempdir()?;
+        std::fs::write(
+            state.path().join("config.toml"),
+            "schema_version=1\n[domains.run]\ngrant_limit=2048\nprofile_limit_bytes=2097152\n",
+        )?;
+        let loaded = RunConfig::read(state.path())?;
+        assert_eq!(
+            (loaded.grant_limit, loaded.profile_limit_bytes),
+            (2048, 2097152)
+        );
+        let invalid: RunConfig = toml_edit::de::from_str("grant_limit = 0")?;
+        assert!(
+            invalid
+                .validate()
+                .iter()
+                .any(|error| error.field == "grant_limit")
+        );
+        Ok(())
     }
     #[test]
     fn accepts_absolute_directories() {

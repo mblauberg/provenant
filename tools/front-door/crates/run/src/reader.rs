@@ -1005,16 +1005,15 @@ impl RunStore {
     }
 }
 pub(crate) fn valid_write_grants(grants: &[WriteGrantRecord]) -> bool {
-    grants.len() <= provenant_confinement::MAX_WRITE_GRANTS
-        && grants.iter().all(|grant| {
-            grant
-                .path
-                .to_path_buf()
-                .is_ok_and(|path| path.is_absolute())
-        })
+    grants.iter().all(|grant| {
+        grant
+            .path
+            .to_path_buf()
+            .is_ok_and(|path| path.is_absolute())
+    })
 }
 
-/// Launch-time bound only; stored records are validated by count.
+/// Launch-time wire-size bound; stored records remain readable.
 pub(crate) fn write_grants_fit(grants: &[WriteGrantRecord]) -> bool {
     valid_write_grants(grants)
         && provenant_records::CanonicalV1::bytes(&grants).is_ok_and(|bytes| {

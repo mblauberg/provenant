@@ -94,11 +94,6 @@ impl ConfinedPlan {
         if p.nested_confinement {
             return Err(PermissionError::NestedConfinementUnsupported.into());
         }
-        if p.read_roots.len() + p.protected_roots.len() + p.secret_roots.len() + p.write_roots.len()
-            > 128
-        {
-            return Err(PlanError::InvalidRoots);
-        }
         for grant in &p.write_roots {
             crate::permissions::validate_noncredential_grant(grant)
                 .map_err(|error| error.with_credential_path(&grant.path, None))?;
