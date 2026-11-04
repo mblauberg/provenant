@@ -602,7 +602,7 @@ pub(super) fn verify_private_scratch(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(super) fn render_profile(
     plan: &PlanPermissions,
     profile: &ProviderProfile,

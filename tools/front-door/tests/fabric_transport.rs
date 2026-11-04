@@ -650,7 +650,7 @@ fn rust_mcp_negotiates_lists_tools_and_persists_mail_without_interpreters() -> R
     let replies = mcp(
         &rig,
         &[
-            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}}),
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}}), // timebomb: allow MCP protocol version, not compared with the clock
             json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
             json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
             json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fabric_context","arguments":{"op":"inspect"}}}),
@@ -659,7 +659,7 @@ fn rust_mcp_negotiates_lists_tools_and_persists_mail_without_interpreters() -> R
     )?;
     assert_eq!(
         replies.iter().find(|r| r["id"] == 1).ok_or("initialise")?["result"]["protocolVersion"],
-        "2025-11-25"
+        "2025-11-25" // timebomb: allow MCP protocol version, not compared with the clock
     );
     let list = &replies.iter().find(|r| r["id"] == 2).ok_or("catalogue")?["result"]["tools"];
     let names: Vec<_> = list
@@ -1010,6 +1010,10 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
             .ok_or("account key")?;
         support::register_account(&rig, "claude", "pro", &key, &directory)?;
         if scenario == "quota" {
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "the quota record must be fresh against the CLI's live clock"
+            )]
             let now = i64::try_from(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)?

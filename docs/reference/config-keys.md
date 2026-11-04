@@ -480,6 +480,18 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
   "host_run_settings": {
     "path": "domains.run",
     "settings": {
+      "grant_limit": {
+        "allowed": "1 or more",
+        "default": "128",
+        "effect": "Maximum total plan roots and maximum entries in each provider grant family. Increase for lanes needing more roots.",
+        "type": "int"
+      },
+      "profile_limit_bytes": {
+        "allowed": "1 or more bytes",
+        "default": "524288",
+        "effect": "Maximum rendered macOS sandbox profile size. Increase for lanes with many grants; profiles pass through argv and may still hit OS limits.",
+        "type": "int"
+      },
       "projects.{project}.writer_writes": {
         "allowed": "up to 16 absolute, safe directory paths outside credential roots",
         "default": "host writer_writes",
