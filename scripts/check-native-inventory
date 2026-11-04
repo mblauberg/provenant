@@ -13,7 +13,9 @@ def inventory(path):
     for line in path.read_text().splitlines():
         if line.startswith('| `'):
             fields = [field.strip().strip('`') for field in line.strip('|').split('|')]
-            if len(fields) == 5 and fields[1] == 'macOS':
+            if len(fields) > 1 and fields[1] == 'macOS':
+                if len(fields) != 6 or any(not field for field in fields):
+                    raise ValueError(f'malformed native inventory row: {line}')
                 rows.append(fields)
     if not rows:
         raise ValueError('native inventory is empty')
@@ -24,8 +26,7 @@ def inventory(path):
 
 
 def check(rows, listing, results):
-    suites = listing['rust-suites'].values()
-    names = {name for suite in suites for name in suite['testcases']}
+    suites = listing['rust-suites']
     errors = []
     reports = {}
     for path in results.glob('*.xml'):
@@ -33,14 +34,14 @@ def check(rows, listing, results):
             reports[path.stem] = list(ET.parse(path).getroot().iter('testcase'))
         except (OSError, ET.ParseError) as error:
             errors.append(f'{path.name}: invalid JUnit report: {error}')
-    for name, platform, lane, variables, tools in rows:
-        if not name or name not in names:
-            errors.append(f'{name}: absent from macOS nextest list')
+    for name, platform, lane, variables, tools, binary in rows:
+        if not name or name not in suites.get(binary, {}).get('testcases', {}):
+            errors.append(f'{name}: absent from macOS nextest list for {binary}')
         try:
             controls = json.loads((results / f'{lane}.json').read_text())
             cases = reports[lane]
-            matches = [case for case in cases if case.get('name') == name]
-            total = sum(case.get('name') == name for cases in reports.values() for case in cases)
+            matches = [case for case in cases if case.get('name') == name and case.get('classname') == binary]
+            total = sum(case.get('name') == name and case.get('classname') == binary for cases in reports.values() for case in cases)
             if len(matches) != 1 or total != 1 or any(case.find(tag) is not None for case in matches for tag in ('skipped', 'failure', 'error')):
                 errors.append(f'{name}: {lane} must contain exactly one passing testcase across all invocations (found {total})')
             for var in variables.split(', '):
