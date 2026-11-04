@@ -50,6 +50,7 @@ flowchart TB
     MCP --> Runtime["fabric-runtime"]
     Runtime --> Run
     Runtime --> FabricStore["fabric-store"]
+    Runtime --> Routing
     Run --> Routing["routing"]
     Run --> Quota["quota"]
     Run --> Providers["providers"]
