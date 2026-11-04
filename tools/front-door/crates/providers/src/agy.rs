@@ -462,6 +462,7 @@ fn prepare(
         setup,
         omitted_discovery,
         user_skills: staged_skills,
+        prepared_tools: Vec::new(),
         git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {

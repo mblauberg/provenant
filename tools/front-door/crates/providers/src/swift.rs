@@ -280,6 +280,7 @@ fn install(
     };
     runtime_reads.extend(toolchain.reads());
     tool_exec_roots.extend(toolchain.executables());
+    crate::launch::add_existing_tool(&toolchain.swift, tool_exec_roots);
     let bin = install.scratch.join("bin");
     let create = SetupStep::CreateDir(bin.clone());
     if !setup.contains(&create) {

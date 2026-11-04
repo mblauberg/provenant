@@ -54,6 +54,14 @@ pub struct OmittedGrant {
     pub source: OmissionSource,
 }
 
+/// Resolved facts for one executable requirement in the compiled lane.
+/// Receipts consume this value; they never repeat dependency discovery.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedToolRequirement {
+    pub executable: PathBuf,
+    pub dependency_closure: crate::dylib::DependencyClosure,
+}
+
 impl OmittedGrant {
     #[cfg(test)]
     pub(crate) fn skills(paths: Vec<PathBuf>) -> Vec<Self> {
@@ -114,6 +122,8 @@ pub struct LaunchSpec {
     pub omitted_discovery: Vec<OmittedGrant>,
     /// Exact staged skill content and warnings used by this launch.
     pub user_skills: crate::StagedUserSkills,
+    /// Executables and their resolved Mach-O dependency closures.
+    pub prepared_tools: Vec<PreparedToolRequirement>,
     pub(crate) git_wrapper: crate::lane::GitWrapper,
     pub profile: ProviderProfile,
     /// Decoder state bound to any continuation identity.
@@ -300,10 +310,6 @@ pub(crate) fn private_git_objects(
             *path = value;
         }
         spec.profile.spec.process_executables.push(exact(git));
-        spec.profile
-            .spec
-            .runtime_reads
-            .extend(crate::dylib::linked_libraries(git).into_iter().map(exact));
         return Ok(());
     }
     let scratch = &input.confined.permissions().scratch.path;
@@ -350,12 +356,71 @@ pub(crate) fn private_git_objects(
         .spec
         .process_executables
         .extend([exact("/bin/sh"), exact(input.provenant.git)]);
-    spec.profile.spec.runtime_reads.extend(
-        crate::dylib::linked_libraries(input.provenant.git)
-            .into_iter()
-            .map(exact),
-    );
     Ok(())
+}
+
+/// Resolve all exact executable requirements in the profile once, then use
+/// those same facts both to add exact read grants and to report preparation.
+pub(crate) fn prepare_tool_requirements(input: &PrepareInput<'_>, spec: &mut LaunchSpec) {
+    use provenant_confinement::permissions::PathScope;
+
+    let mut executables = Vec::new();
+    for grant in spec
+        .profile
+        .spec
+        .process_executables
+        .iter()
+        .chain(&spec.profile.spec.tool_exec_roots)
+    {
+        if grant.scope == PathScope::Exact && !executables.contains(&grant.path) {
+            executables.push(grant.path.clone());
+        }
+    }
+    let already_prepared: std::collections::HashSet<_> = spec
+        .prepared_tools
+        .iter()
+        .map(|tool| tool.executable.clone())
+        .collect();
+    for executable in executables {
+        if already_prepared.contains(&executable) {
+            continue;
+        }
+        let mut excluded = vec![input.cwd, &input.confined.permissions().scratch.path];
+        if let Some(private_state) = &input.confined.permissions().private_state {
+            excluded.push(&private_state.path);
+        }
+        if input.route.adapter == "opencode" {
+            // OpenCode's cached search tool is private attempt content. Its
+            // closure never extends the provider's grants back into host home.
+            excluded.push(input.home);
+        }
+        let closure = crate::dylib::dependency_closure(&executable, |path| {
+            !excluded.iter().any(|root| path.starts_with(root))
+                && !provenant_confinement::is_credential_root(path)
+        });
+        for path in &closure.omitted {
+            if !spec
+                .omitted_discovery
+                .iter()
+                .any(|omitted| omitted.path == *path && omitted.source == OmissionSource::Toolchain)
+            {
+                spec.omitted_discovery.push(OmittedGrant {
+                    path: path.clone(),
+                    source: OmissionSource::Toolchain,
+                });
+            }
+        }
+        for library in &closure.libraries {
+            let grant = exact(library);
+            if !spec.profile.spec.runtime_reads.contains(&grant) {
+                spec.profile.spec.runtime_reads.push(grant);
+            }
+        }
+        spec.prepared_tools.push(PreparedToolRequirement {
+            executable,
+            dependency_closure: closure,
+        });
+    }
 }
 
 #[cfg(test)]
@@ -414,6 +479,17 @@ pub(crate) fn lane_cache<'a>(input: &'a PrepareInput<'_>) -> &'a Path {
         provenant_confinement::permissions::AccessMode::WorktreeWrite(authority) => {
             &authority.cargo_cache().path
         }
+    }
+}
+
+/// Keep the selected files visible to the single closure resolver even when
+/// their broader toolchain root is also granted.
+pub(crate) fn add_existing_tool(executable: &Path, tool_exec_roots: &mut Vec<PathGrant>) {
+    if let Ok(executable) = std::fs::canonicalize(executable)
+        && executable.is_file()
+        && !tool_exec_roots.iter().any(|grant| grant.path == executable)
+    {
+        tool_exec_roots.push(exact(executable));
     }
 }
 
@@ -501,6 +577,9 @@ fn rust_toolchain(
         subtree(cargo.join("bin")),
         subtree(rustup.join("toolchains")),
     ]);
+    for name in ["cargo", "rustc", "rustfmt", "clippy-driver"] {
+        add_existing_tool(&cargo.join("bin").join(name), tool_exec_roots);
+    }
     let cargo_home = cache.join("cargo-home");
     if access == Access::ReadOnly {
         // Offline builds from the already-extracted shared sources. The
@@ -745,6 +824,9 @@ pub(crate) fn homebrew_tools(
             .into_iter()
             .map(subtree),
     );
+    for name in ["node", "npm", "pnpm", "corepack"] {
+        add_existing_tool(&prefix.join("bin").join(name), tool_exec_roots);
+    }
     if let Some((_, path)) = env.iter_mut().find(|(key, _)| key == "PATH") {
         path.push(":");
         path.push(prefix.join("bin"));

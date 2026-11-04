@@ -224,11 +224,6 @@ fn prepare(
     let data_home = xdg("XDG_DATA_HOME", ".local/share");
     let data = data_home.join("opencode");
     let mut runtime_reads = vec![subtree(package), subtree(&data)];
-    runtime_reads.extend(
-        crate::dylib::linked_libraries(input.provenant.git)
-            .into_iter()
-            .map(exact),
-    );
     if access == Access::WorktreeWrite {
         let start = runtime_reads.len();
         runtime_reads.extend(crate::launch::git_global_files(&config_home));
@@ -342,18 +337,6 @@ fn prepare(
         let rg = private.join("cache/opencode/bin/rg");
         // Resolve install-name symlinks to exact files, accepting libraries by
         // content regardless of the host's package manager or PATH ordering.
-        let excluded: Vec<_> = [input.home, private.as_path(), &plan.scratch.path, input.cwd]
-            .into_iter()
-            .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
-            .collect();
-        runtime_reads.extend(
-            crate::dylib::linked_dynamic_libraries(&rg, |path| {
-                !excluded.iter().any(|root| path.starts_with(root))
-                    && !provenant_confinement::is_credential_root(path)
-            })
-            .into_iter()
-            .map(exact),
-        );
         tool_exec_roots.push(exact(rg));
         tool_exec_roots.push(exact("/usr/bin/grep"));
     }
@@ -402,7 +385,7 @@ fn prepare(
     ] {
         env.push((key.into(), "1".into()));
     }
-    Ok(LaunchSpec {
+    let mut spec = LaunchSpec {
         argv,
         env,
         stdin: Stdin::Bytes(input.prompt.text().as_bytes().to_vec()),
@@ -411,6 +394,7 @@ fn prepare(
         setup,
         omitted_discovery,
         user_skills: staged_skills,
+        prepared_tools: Vec::new(),
         git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
@@ -443,7 +427,9 @@ fn prepare(
             observations: Default::default(),
         },
         stream,
-    })
+    };
+    crate::launch::prepare_tool_requirements(input, &mut spec);
+    Ok(spec)
 }
 
 /// The server's own cause for a failed HTTP request, from its log lines
@@ -1306,6 +1292,30 @@ mod tests {
             Session::Fresh,
             OpenCode.stream(None)?,
         )?;
+        let tool = spec
+            .prepared_tools
+            .iter()
+            .find(|tool| tool.executable == cached)
+            .expect("cached rg has prepared closure facts");
+        assert_eq!(
+            tool.dependency_closure.outcome,
+            crate::ClosureOutcome::Incomplete
+        );
+        assert!(
+            tool.dependency_closure
+                .reasons
+                .iter()
+                .any(|reason| matches!(reason, crate::IncompleteReason::Malformed(_)))
+        );
+        assert_eq!(
+            tool.dependency_closure.libraries,
+            vec![first.clone(), second.clone()]
+        );
+        assert!(
+            tool.dependency_closure
+                .omitted
+                .contains(&root.join("host/.ssh/fixture.dylib"))
+        );
         let profile = provenant_confinement::permissions::snapshot::render(
             plan.permissions(),
             &spec.profile,
@@ -1366,6 +1376,14 @@ mod tests {
             Session::Fresh,
             OpenCode.stream(None)?,
         )?;
+        let requirement = spec
+            .prepared_tools
+            .iter()
+            .find(|tool| tool.executable == cached)
+            .expect("cached rg has prepared closure facts");
+        for library in &requirement.dependency_closure.libraries {
+            assert!(spec.profile.spec.runtime_reads.contains(&exact(library)));
+        }
         let profile = provenant_confinement::permissions::snapshot::render(
             plan.permissions(),
             &spec.profile,

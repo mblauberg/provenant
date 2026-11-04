@@ -187,13 +187,10 @@ impl crate::LaunchSpec {
             .spec
             .process_executables
             .push(exact(git_path.as_str()));
-        self.profile.spec.runtime_reads.extend(
-            std::iter::once(exact(git_path.as_str())).chain(
-                crate::dylib::linked_libraries(Path::new(&git_path))
-                    .into_iter()
-                    .map(exact),
-            ),
-        );
+        self.profile
+            .spec
+            .runtime_reads
+            .push(exact(git_path.as_str()));
         if let Some(prefix) = Path::new(&git_path).parent().and_then(Path::parent) {
             let core = prefix.join("libexec/git-core");
             if core.is_dir() {
@@ -495,11 +492,6 @@ impl LaneRuntime<'_> {
             exact(self.state.join("host-id")),
         ]);
         // Homebrew Git links pcre2 and gettext from sibling kegs.
-        profile.runtime_reads.extend(
-            crate::dylib::linked_libraries(self.git)
-                .into_iter()
-                .map(exact),
-        );
         profile
             .runtime_reads
             .push(subtree(self.state.join("projects")));
@@ -1150,6 +1142,7 @@ mod tests {
             setup: Vec::new(),
             omitted_discovery: Vec::new(),
             user_skills: Default::default(),
+            prepared_tools: Vec::new(),
             git_wrapper: Default::default(),
             profile: provenant_confinement::permissions::ProviderProfile {
                 spec: ProviderProfileSpec::default(),
