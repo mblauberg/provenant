@@ -274,7 +274,7 @@ fn parse_findings(
                 .as_object()
                 .ok_or_else(|| fail("id", "invalid upstream finding"))?
             {
-                if field != "disposition" && field != "reason" {
+                if field != "disposition" && field != "reason" && field != "propagates" {
                     entry.entry(field.clone()).or_insert_with(|| value.clone());
                 }
             }
@@ -379,6 +379,8 @@ pub(super) fn selected_findings(
         !snapshot.iter().any(|(other, candidate)| {
             other != source
                 && candidate.id == finding.id
+                && candidate.extra.get("propagates").and_then(|v| v.as_str())
+                    == Some(format!("{source}:{}", finding.id).as_str())
                 && positions.get(other).is_some_and(|index| {
                     plan.nodes[*index].inputs.iter().any(|input| {
                         input.node == *source

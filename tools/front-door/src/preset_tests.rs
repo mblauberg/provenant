@@ -622,7 +622,11 @@ fn fake_council_provider_process() {
                     text.push_str(&format!("DISPOSITION {proof}\n"));
                 }
                 if structured.len() < 32 {
-                    structured.push(json!({"id":qualified,"severity":"high","file":"a.rs","summary":"issue","status":"open","disposition":"rejected","reason":"evidence refutes it","verification":"falsified"}));
+                    let mut item = json!({"id":qualified,"severity":"high","file":"a.rs","summary":"issue","status":"open","disposition":"rejected","reason":"evidence refutes it","verification":"falsified"});
+                    if id == "verify" {
+                        item["propagates"] = json!(format!("lenses:{qualified}"));
+                    }
+                    structured.push(item);
                 }
             }
         }
@@ -3339,6 +3343,37 @@ stages = [
         json!([
             {"node": "second", "outputs": ["result", "findings"]},
             {"node": "first", "outputs": ["result", "findings"]}
+        ])
+    );
+    layers.insert("test", "custom-inputs", r#"
+stages = [
+  { id = "first", prompt = "First" },
+  { id = "second", prompt = "Second" },
+  { id = "synthesis", prompt = "Synthesise", depends_on = ["first"], dispositions = ["accepted"], inputs = [{ node = "first", outputs = ["result", "findings"] }, { node = "second", outputs = ["result"] }] },
+]
+"#).unwrap();
+    let expanded = expand(&layers, "custom-inputs", "brief", &[]).unwrap();
+    assert_eq!(
+        node(&expanded.document, "synthesis")["inputs"],
+        json!([
+            {"node": "first", "outputs": ["result", "findings"]},
+            {"node": "second", "outputs": ["result", "findings"]}
+        ])
+    );
+
+    layers.insert("test", "missing-input", r#"
+stages = [
+  { id = "first", prompt = "First" },
+  { id = "second", prompt = "Second" },
+  { id = "synthesis", prompt = "Synthesise", depends_on = ["first"], dispositions = ["accepted"], inputs = [{ node = "first", outputs = ["result"] }] },
+]
+"#).unwrap();
+    let expanded = expand(&layers, "missing-input", "brief", &[]).unwrap();
+    assert_eq!(
+        node(&expanded.document, "synthesis")["inputs"],
+        json!([
+            {"node": "first", "outputs": ["result", "findings"]},
+            {"node": "second", "outputs": ["findings"]}
         ])
     );
 }

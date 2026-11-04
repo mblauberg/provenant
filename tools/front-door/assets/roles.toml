@@ -329,7 +329,9 @@ every finding verbatim with one of UPHELD, FALSIFIED or UNVERIFIABLE and your
 evidence. Add any finding the lenses missed and mark it NEW. Do not edit files.
 ${local_check_policy}
 End with a findings block (schema_version 1) whose entries keep each finding's
-id and add "verification": "upheld", "falsified" or "unverifiable".
+id and add "verification": "upheld", "falsified" or "unverifiable". For each
+propagated finding add "propagates": "<input-node-id>:<finding-id>" naming
+the selected input node and its original finding ID. Do not add it to new findings.
 Carry any listed unavailable lenses into your result. If composite findings are
 truncated, read every listed full member result and verify every finding, including
 those omitted from the bounded export. Apply the listed finding ID prefix to each

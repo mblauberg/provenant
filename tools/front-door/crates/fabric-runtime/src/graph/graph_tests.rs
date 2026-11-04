@@ -1362,7 +1362,9 @@ fn synthesis_disposes_once_of_findings_propagated_through_verifier() {
             terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
             terminal_with_result(
                 AttemptOutcome::Succeeded,
-                &findings_text(&entry(",\"verification\":\"upheld\"")),
+                &findings_text(&entry(
+                    ",\"verification\":\"upheld\",\"propagates\":\"lens:F1\"",
+                )),
             ),
             terminal_with_result(
                 AttemptOutcome::Succeeded,
@@ -1382,6 +1384,98 @@ fn synthesis_disposes_once_of_findings_propagated_through_verifier() {
     let finding = &run.checkpoint.nodes[2].outputs.as_ref().unwrap().findings[0];
     assert_eq!(finding.id, "F1");
     assert_eq!(finding.extra["verification"], "upheld");
+}
+
+#[test]
+fn dependent_reviewers_with_independent_same_ids_require_distinct_dispositions() {
+    let a = node("a", route("first"));
+    let mut b = node("b", route("first"));
+    b.depends_on = vec!["a".into()];
+    b.inputs = vec![GraphInput {
+        extra: Default::default(),
+        node: "a".into(),
+        outputs: vec![OutputKind::Result],
+    }];
+    let mut synthesis = node("synthesis", route("first"));
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.depends_on = vec!["a".into(), "b".into()];
+    synthesis.inputs = ["a", "b"]
+        .into_iter()
+        .map(|id| GraphInput {
+            extra: Default::default(),
+            node: id.into(),
+            outputs: vec![OutputKind::Findings],
+        })
+        .collect();
+    for (decisions, expected) in [
+        (
+            r#"{"id":"a:F1","disposition":"accepted","reason":"yes"}"#,
+            NodeState::Failed,
+        ),
+        (
+            r#"{"id":"a:F1","disposition":"accepted","reason":"yes"},{"id":"b:F1","disposition":"rejected","reason":"no"}"#,
+            NodeState::Succeeded,
+        ),
+    ] {
+        let mut owner = FakeOwner {
+            observations: [
+                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+                terminal_with_result(
+                    AttemptOutcome::Succeeded,
+                    &findings_text(
+                        &entry("").replace("\"summary\":\"s\"", "\"summary\":\"other\""),
+                    ),
+                ),
+                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(decisions)),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let run = advance(
+            &graph(vec![a.clone(), b.clone(), synthesis.clone()]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
+        assert!(owner.prompts[2].contains("a:F1") && owner.prompts[2].contains("b:F1"));
+        assert_eq!(run.checkpoint.nodes[2].state, expected);
+    }
+}
+
+#[test]
+fn unknown_disposition_does_not_hide_an_undisposed_finding_on_replay() {
+    let mut synthesis = node("synthesis", route("first"));
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.depends_on = vec!["review".into()];
+    synthesis.inputs = vec![GraphInput {
+        extra: Default::default(),
+        node: "review".into(),
+        outputs: vec![OutputKind::Findings],
+    }];
+    let document = graph(vec![node("review", route("first")), synthesis]);
+    let upstream = format!("{},{}", entry(""), entry("").replace("F1", "F2"));
+    let decisions = r#"{"id":"F1","disposition":"accepted","reason":"yes"},{"id":"F9","disposition":"rejected","reason":"no"}"#;
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&upstream)),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(decisions)),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.checkpoint.nodes[1].state, NodeState::Failed);
+    assert_eq!(
+        run.checkpoint.nodes[1].advance_error_code.as_deref(),
+        Some("disposition_count")
+    );
+    let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
+    assert_eq!(replay.checkpoint.nodes[1].state, NodeState::Failed);
+    assert_eq!(
+        replay.checkpoint.nodes[1].advance_error_code.as_deref(),
+        Some("disposition_count")
+    );
 }
 
 #[test]
