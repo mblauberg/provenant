@@ -7,7 +7,19 @@ fn text(value: &Value) -> String {
         .map_or_else(|| value.to_string(), str::to_owned)
 }
 
-pub(super) fn human(data: &Value) -> String {
+fn first_sentence(doc: &str) -> &str {
+    doc.char_indices()
+        .find(|(index, character)| {
+            *character == '.'
+                && doc[index + 1..]
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_whitespace)
+        })
+        .map_or(doc, |(index, _)| &doc[..=index])
+}
+
+pub(super) fn human(data: &Value, full: bool) -> String {
     if let Some(presets) = data["presets"].as_array() {
         let mut rows = vec![vec![
             "NAME".into(),
@@ -66,7 +78,38 @@ pub(super) fn human(data: &Value) -> String {
                 output.push_str(&format!("\n{label}\n"));
                 if let Some(map) = value.as_object() {
                     for (name, value) in map {
-                        output.push_str(&format!("  {name}: {}\n", text(value)));
+                        if key == "parameters" && !full {
+                            let spec = super::is_spec(value);
+                            let default_value = if spec {
+                                value.get("default")
+                            } else {
+                                Some(value)
+                            };
+                            let kind = spec
+                                .then_some(value)
+                                .and_then(|value| value.get("type"))
+                                .and_then(Value::as_str)
+                                .unwrap_or_else(|| match default_value {
+                                    Some(Value::Bool(_)) => "boolean",
+                                    Some(Value::Number(number))
+                                        if number.is_i64() || number.is_u64() =>
+                                    {
+                                        "integer"
+                                    }
+                                    Some(Value::Number(_)) => "number",
+                                    Some(Value::String(_)) => "string",
+                                    Some(Value::Array(_)) => "list",
+                                    Some(Value::Object(_)) => "table",
+                                    _ => "-",
+                                });
+                            let default =
+                                default_value.map_or_else(|| "-".into(), Value::to_string);
+                            let doc = value.get("doc").and_then(Value::as_str).unwrap_or("");
+                            let first = first_sentence(doc);
+                            output.push_str(&format!("  {name}  {kind}  {default}  {first}\n"));
+                        } else {
+                            output.push_str(&format!("  {name}: {}\n", text(value)));
+                        }
                     }
                 } else if let Some(items) = value.as_array() {
                     for item in items {
@@ -77,12 +120,33 @@ pub(super) fn human(data: &Value) -> String {
                 }
             }
         }
-        output.push_str("\nOrigins\n");
-        if let Some(origins) = data["origins"].as_object() {
-            for (path, origin) in origins {
-                output.push_str(&format!("  {path}: {}\n", text(origin)));
+        if full {
+            output.push_str("\nOrigins\n");
+            if let Some(origins) = data["origins"].as_object() {
+                for (path, origin) in origins {
+                    output.push_str(&format!("  {path}: {}\n", text(origin)));
+                }
             }
         }
+        return output;
+    }
+    if !full && let Some(parameters) = data.get("parameters").and_then(Value::as_array) {
+        let names = parameters
+            .iter()
+            .filter_map(|p| p["name"].as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut output = format!("Preset {}\n", text(&data["name"]));
+        for (label, key) in [
+            ("Summary", "summary"),
+            ("Cost", "cost"),
+            ("Use when", "select_when"),
+        ] {
+            if let Some(value) = data["pattern"].get(key) {
+                output.push_str(&format!("{label}: {}\n", text(value)));
+            }
+        }
+        output.push_str(&format!("Parameters: {names}\n"));
         return output;
     }
     serde_json::to_string_pretty(data).unwrap_or_default() + "\n"

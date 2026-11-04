@@ -122,23 +122,37 @@ impl RunStore {
     pub fn gc_temporary(
         &self,
         expected: &Directory,
+        days: u64,
+        logs_days: u64,
         now: WallTime,
         dry_run: bool,
         call: &Request<'_>,
     ) -> Result<ProviderStateGc> {
-        self.gc_retention(expected, 7, 30, now, dry_run, true, None, call)
+        self.gc_retention(expected, days, logs_days, now, dry_run, true, None, call)
     }
 
     /// Pressure collection restricted to the selected project identities.
+    #[allow(clippy::too_many_arguments)]
     pub fn gc_temporary_for_projects(
         &self,
         expected: &Directory,
+        days: u64,
+        logs_days: u64,
         now: WallTime,
         dry_run: bool,
         projects: &[provenant_core::ProjectId],
         call: &Request<'_>,
     ) -> Result<ProviderStateGc> {
-        self.gc_retention(expected, 7, 30, now, dry_run, true, Some(projects), call)
+        self.gc_retention(
+            expected,
+            days,
+            logs_days,
+            now,
+            dry_run,
+            true,
+            Some(projects),
+            call,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1444,6 +1458,8 @@ mod tests {
         fs::write(attempt.join("stdout.log"), vec![1; 200_000])?;
         let scoped = store.gc_temporary_for_projects(
             &Directory::open_anchor(context.state_root.as_path())?,
+            7,
+            30,
             WallTime::from_micros(200 + 31 * DAY_MICROS)?,
             false,
             &[provenant_core::ProjectId::from_bytes([99; 16])],
@@ -1453,6 +1469,8 @@ mod tests {
         assert!(attempt.join("tmp/payload").is_file());
         let report = store.gc_temporary(
             &Directory::open_anchor(context.state_root.as_path())?,
+            7,
+            30,
             WallTime::from_micros(200 + 31 * DAY_MICROS)?,
             false,
             &call,

@@ -462,8 +462,7 @@ Preset TOML files are named `NAME.toml` under
 and `.provenant/presets/` in the selected project. Values merge in bundled,
 user, repository and `--set PATH=TOML_VALUE` order. `preset list` lists names
 with each pattern's level, summary and cost; `preset show NAME` displays merged
-values and their origins; `preset explain NAME` renders the pattern, typed
-parameters, stages and roles without creating state. `extends` selects
+values and a typed parameter table; `--full` includes origins. `preset explain NAME` lists parameter names, with the pattern, typed parameters, stages and roles under `--full`, without creating state. `extends` selects
 another preset's defaults. A same-name override omits `extends` and supplies
 only its changes. Stage roles come from a role library (bundled `roles.toml`,
 then user and repository `roles.toml`, then a preset's own `[roles.*]`), listed

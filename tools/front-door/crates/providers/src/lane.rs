@@ -52,16 +52,22 @@ impl crate::LaunchSpec {
             true,
         )
     }
-    /// Restore selected environment before Claude starts each Bash command.
-    pub fn configure_claude_shell(&mut self, scratch: &Path) -> Result<(), ProviderError> {
-        let path = scratch.join("bin/claude-shell");
+    /// Restore selected environment before the provider starts a shell command.
+    pub fn configure_shell(
+        &mut self,
+        scratch: &Path,
+        adapter: &provenant_records::AdapterSpec,
+    ) -> Result<(), ProviderError> {
+        let Some((relative, selector)) = adapter.shell_prefix else {
+            return Ok(());
+        };
+        let path = scratch.join(relative);
         self.setup.push(SetupStep::CreateDir(scratch.join("bin")));
         self.setup.push(SetupStep::WriteExecutable {
             path: path.clone(),
             bytes: claude_shell(&self.env)?,
         });
-        self.env
-            .push(("CLAUDE_CODE_SHELL_PREFIX".into(), path.into_os_string()));
+        self.env.push((selector.into(), path.into_os_string()));
         Ok(())
     }
     /// Put a `cargo` shim first on the lane's PATH. Cargo commands that compile
@@ -1142,6 +1148,7 @@ mod tests {
             secret_input: None,
             cwd: PathBuf::from("/"),
             setup: Vec::new(),
+            omitted_discovery: Vec::new(),
             git_wrapper: Default::default(),
             profile: provenant_confinement::permissions::ProviderProfile {
                 spec: ProviderProfileSpec::default(),

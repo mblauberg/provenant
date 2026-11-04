@@ -112,6 +112,8 @@ pub(super) fn own_worktree(
                     {
                         return Err(worktrees::WorktreeError::BranchExistsWithBase {
                             branch: branch.clone(),
+                            head: info.head,
+                            base,
                         });
                     }
                     let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
@@ -125,10 +127,13 @@ pub(super) fn own_worktree(
                     }
                     match info.writer {
                         WriterState::Free => {}
-                        WriterState::Busy | WriterState::Live => {
+                        WriterState::Busy => {
                             return Err(worktrees::WorktreeError::WriterBusy {
                                 holder: owner.and_then(|owner| owner.attempt_id),
                             });
+                        }
+                        WriterState::Live => {
+                            return Err(worktrees::live_refusal(context.workers, &info.path));
                         }
                         WriterState::Unknown => {
                             let settled = owner

@@ -3304,19 +3304,22 @@ fn opencode_writer_gets_the_rust_toolchain_in_its_lane_cache()
             .contains(&crate::launch::subtree(home.join(".cargo")))
     );
     // Read-only lanes deny bash, so they get no toolchain: only the search
-    // binary OpenCode's grep and glob tools execute.
+    // binaries OpenCode's grep and glob tools execute.
     let plan = fixture_access_plan(Access::ReadOnly, None, false);
     let spec = prepare(&home, &plan)?;
     assert_eq!(
         spec.profile.spec.tool_exec_roots,
-        [crate::launch::exact(
-            plan.permissions()
-                .private_state
-                .as_ref()
-                .unwrap()
-                .path
-                .join("cache/opencode/bin/rg")
-        )]
+        [
+            crate::launch::exact(
+                plan.permissions()
+                    .private_state
+                    .as_ref()
+                    .unwrap()
+                    .path
+                    .join("cache/opencode/bin/rg")
+            ),
+            crate::launch::exact("/usr/bin/grep"),
+        ]
     );
     assert!(spec.env.iter().all(|(name, _)| name != "CARGO_HOME"));
     Ok(())
@@ -3665,18 +3668,20 @@ fn cursor_cli_only_account_matches_desktop_identity() {
         if let Some(config) = config {
             std::fs::write(directory.path().join("cli-config.json"), config).unwrap();
         }
-        assert!(matches!(
-            crate::accounts::detect(
-                &NoDesktop,
-                "cursor",
-                Path::new("/bin/cursor-agent"),
-                Path::new("/home/test"),
-                OsStr::new("test"),
-                directory.path(),
-                directory.path(),
-            ),
-            Err(ProviderError::UnknownIdentity)
-        ));
+        let result = crate::accounts::detect(
+            &NoDesktop,
+            "cursor",
+            Path::new("/bin/cursor-agent"),
+            Path::new("/home/test"),
+            OsStr::new("test"),
+            directory.path(),
+            directory.path(),
+        );
+        if config.is_none() {
+            assert!(matches!(result, Err(ProviderError::CredentialNotFound)));
+        } else {
+            assert!(matches!(result, Err(ProviderError::UnknownIdentity)));
+        }
     }
 }
 
@@ -3817,7 +3822,42 @@ fn agy_account_probe_logs_under_the_host_probe_root() {
     )
     .unwrap();
     assert!(key.starts_with("agy-google-"));
-    assert_eq!(std::fs::read_dir(&host_root).unwrap().count(), 0);
+    // Only the non-secret identity cache survives; the log and private probe
+    // directory are still removed before detection returns.
+    let entries: Vec<_> = std::fs::read_dir(&host_root)
+        .unwrap()
+        .map(|e| e.unwrap())
+        .collect();
+    assert_eq!(entries.len(), 1);
+    assert!(
+        entries[0]
+            .file_name()
+            .to_string_lossy()
+            .starts_with("agy-identity-")
+    );
+    assert_eq!(
+        crate::agy::cached_identity(
+            &host_root,
+            Path::new("/home/test"),
+            provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new()),
+        )
+        .as_deref(),
+        Some(key.as_str())
+    );
+    // A second dispatch identity lookup consumes that unexpired observation.
+    assert_eq!(
+        crate::accounts::detect(
+            &provenant_os::exec::SystemExecutor::new(1).unwrap(),
+            "agy",
+            Path::new("/does-not-exist/agy"),
+            Path::new("/home/test"),
+            OsStr::new("test"),
+            Path::new("/home/test"),
+            &host_root,
+        )
+        .unwrap(),
+        key
+    );
 }
 
 #[test]
@@ -3991,6 +4031,8 @@ fn registration_keeps_other_executor_failures_as_unknown_identity() {
     }
     let state = tempfile::tempdir().unwrap();
     let agy = tempfile::tempdir().unwrap();
+    let cursor = tempfile::tempdir().unwrap();
+    std::fs::write(cursor.path().join("state.vscdb"), b"fixture").unwrap();
     write_agy_keychain(agy.path());
     for adapter in ["claude", "cursor", "agy"] {
         for busy in [false, true] {
@@ -4002,6 +4044,8 @@ fn registration_keeps_other_executor_failures_as_unknown_identity() {
                 OsStr::new("test"),
                 if adapter == "agy" {
                     agy.path()
+                } else if adapter == "cursor" {
+                    cursor.path()
                 } else {
                     Path::new("/home/test/identity")
                 },
@@ -4926,6 +4970,7 @@ fn lanes_read_the_host_pnpm_store_but_cannot_write_it() -> Result<(), Box<dyn st
         &mut reads,
         &mut exec,
         &mut env,
+        &mut Vec::new(),
     );
     for store in ["Library/pnpm", ".local/share/pnpm"] {
         assert!(
@@ -6650,6 +6695,105 @@ fn free_plan_notional_value_and_extra_directories_parse_and_validate() {
 }
 
 #[test]
+fn adapter_sign_in_stderr_has_a_typed_auth_cause() {
+    let fixtures: &[(&dyn Adapter, &[u8])] = &[
+        (
+            &cursor::Cursor,
+            include_bytes!("../../../tests/fixtures/providers/cursor/auth-required.stderr"),
+        ),
+        (
+            &codex::Codex,
+            include_bytes!("../../../tests/fixtures/providers/codex/auth-required.stderr"),
+        ),
+        (
+            &opencode::OpenCode,
+            include_bytes!("../../../tests/fixtures/providers/opencode/auth-required.stderr"),
+        ),
+        (
+            &agy::Agy,
+            include_bytes!("../../../tests/fixtures/providers/agy/auth-required.stderr"),
+        ),
+    ];
+    for (adapter, stderr) in fixtures {
+        assert_eq!(
+            adapter.failure_cause(stderr),
+            FailureCause::AuthRequired,
+            "{}",
+            adapter.id()
+        );
+        for unrelated in [
+            "connection closed",
+            "tool request failed: Unauthorized",
+            "application request unauthenticated",
+            "tool request failed: invalid API key",
+            "tool documentation mentions opencode auth login",
+        ] {
+            assert_eq!(
+                adapter.failure_cause(unrelated.as_bytes()),
+                FailureCause::Provider,
+                "{}: {unrelated}",
+                adapter.id()
+            );
+        }
+    }
+}
+
+#[test]
+fn identity_probes_preserve_auth_failures_only_from_intact_captures() {
+    use provenant_os::exec::{
+        CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
+    };
+    struct SignedOut<'a>(&'a [u8], bool);
+    impl Executor for SignedOut<'_> {
+        fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+            assert!(matches!(
+                options.stderr,
+                provenant_os::exec::StreamPolicy::Capture { .. }
+            ));
+            Ok(ExecOutcome {
+                termination: Termination::Exit(1),
+                stdout: Default::default(),
+                stderr: CapturedStream {
+                    bytes: self.0.to_vec(),
+                    truncated: self.1,
+                    ..Default::default()
+                },
+                timed_out: false,
+                drain_truncated: false,
+                overflow_stopped: false,
+                cancelled: false,
+                elapsed_micros: 0,
+            })
+        }
+    }
+    let scratch = tempfile::tempdir().unwrap();
+    for (adapter, capture) in [
+        (
+            "agy",
+            include_bytes!("../../../tests/fixtures/providers/agy/auth-required.stderr").as_slice(),
+        ),
+        ("claude", b"Not logged in".as_slice()),
+    ] {
+        for truncated in [false, true] {
+            let result = accounts::detect(
+                &SignedOut(capture, truncated),
+                adapter,
+                Path::new("/fixture/agy"),
+                scratch.path(),
+                OsStr::new("fixture"),
+                scratch.path(),
+                scratch.path(),
+            );
+            if truncated {
+                assert!(matches!(result, Err(ProviderError::UnknownIdentity)));
+            } else {
+                assert!(matches!(result, Err(ProviderError::CredentialUnavailable)));
+            }
+        }
+    }
+}
+
+#[test]
 fn user_skills_grants_resolve_linked_roots_resources_and_cycles()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -6681,6 +6825,95 @@ fn user_skills_grants_resolve_linked_roots_resources_and_cycles()
         provenant_confinement::permissions::AnchoredDirectory::open_canonical(anchor)?;
     }
     assert!(crate::user_skills_grants(&home.join("absent")).is_empty());
+    Ok(())
+}
+
+#[test]
+fn optional_discovered_grants_are_filtered_without_touching_required_grants()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().canonicalize()?;
+    let secret = home.join(".gemini/private");
+    let optional = home.join("optional");
+    std::fs::create_dir_all(&secret)?;
+    std::os::unix::fs::symlink(&secret, &optional)?;
+    let required = crate::launch::subtree(&secret);
+    let mut grants = vec![
+        required.clone(),
+        crate::launch::subtree(&optional),
+        crate::launch::subtree(&secret),
+    ];
+    let mut omitted = crate::launch::OmittedGrant::skills(vec![secret.clone()]);
+    crate::launch::filter_optional_grants(
+        &mut grants,
+        1,
+        &home,
+        crate::launch::OmissionSource::Toolchain,
+        &mut omitted,
+    );
+    assert_eq!(grants, vec![required]);
+    assert_eq!(
+        omitted,
+        vec![
+            crate::launch::OmittedGrant {
+                path: secret.clone(),
+                source: crate::launch::OmissionSource::UserSkill,
+            },
+            crate::launch::OmittedGrant {
+                path: secret,
+                source: crate::launch::OmissionSource::Toolchain,
+            },
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn opencode_skill_and_provider_config_omissions_keep_both_sources()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().canonicalize()?;
+    let secret = home.join(".gemini/skills");
+    std::fs::create_dir_all(&secret)?;
+    std::fs::create_dir_all(home.join(".config"))?;
+    std::os::unix::fs::symlink(&secret, home.join(".config/opencode"))?;
+    std::os::unix::fs::symlink(&secret, secret.join("skills"))?;
+    let mut route = route("opencode", "fixture-model");
+    route.account_key = None;
+    let plan = fixture_access_plan(Access::ReadOnly, None, false);
+    let prompt = Prompt::new("fixture".into());
+    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.home = &home;
+    let spec = opencode::OpenCode.prepare(input)?;
+    assert_eq!(
+        spec.omitted_discovery,
+        vec![
+            crate::launch::OmittedGrant {
+                path: secret.clone(),
+                source: crate::launch::OmissionSource::UserSkill,
+            },
+            crate::launch::OmittedGrant {
+                path: secret,
+                source: crate::launch::OmissionSource::ProviderConfig,
+            },
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn discovered_skill_links_into_credential_roots_are_omitted()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().canonicalize()?;
+    let skills = home.join("skills");
+    let secret = home.join(".gemini/private");
+    std::fs::create_dir_all(&skills)?;
+    std::fs::create_dir_all(&secret)?;
+    std::os::unix::fs::symlink(&secret, skills.join("linked"))?;
+    let (grants, omitted) = crate::user_skills_grants_with_omissions(&skills, Some(&home));
+    assert_eq!(grants, vec![crate::launch::subtree(&skills)]);
+    assert_eq!(omitted, vec![secret]);
     Ok(())
 }
 
@@ -6743,7 +6976,19 @@ fn assert_lane_user_skills(adapter: &str) -> Result<(), Box<dyn std::error::Erro
             input.home = &home;
             input.host_var = &host_var;
             let spec = provider.prepare(input)?;
-            let exposed = state == "discover";
+            let exposed = state == "discover" && !matches!(adapter, "agy" | "claude" | "cursor");
+            if matches!(adapter, "agy" | "claude" | "cursor") {
+                assert_eq!(
+                    spec.omitted_discovery,
+                    if state == "discover" {
+                        crate::launch::OmittedGrant::skills(vec![skills.clone()])
+                    } else {
+                        Vec::new()
+                    },
+                    "{adapter} {access:?} {state}"
+                );
+            }
+
             if adapter == "opencode" {
                 assert!(
                     spec.profile
@@ -6916,14 +7161,13 @@ fn claude_user_skills_use_private_placement_for_registered_readers()
     assert!(
         spec.env
             .iter()
-            .any(|(key, value)| key == "CLAUDE_CONFIG_DIR"
-                && value == "/fixture/state/claude-config")
+            .any(|(key, value)| key == "CLAUDE_CONFIG_DIR" && value == account_dir.as_os_str())
     );
     assert!(
-        spec.setup
+        !spec
+            .setup
             .iter()
-            .any(|step| matches!(step, SetupStep::Symlink { link, target }
-        if link == Path::new("/fixture/state/claude-config/skills") && target == &skills))
+            .any(|step| matches!(step, SetupStep::Symlink { target, .. } if target == &skills))
     );
     assert!(
         spec.profile

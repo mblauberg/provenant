@@ -203,7 +203,7 @@ if [ -n "$source_dir" ]; then
         RUSTC_WRAPPER=.cargo/rustc-wrapper.sh
         export CARGO_TARGET_DIR CARGO_BUILD_BUILD_DIR RUSTC_WRAPPER
         cargo build --release --locked --bin provenant </dev/null &&
-        cargo run --release --locked --example package-release -- --out "$release" </dev/null
+        cargo run --release --locked --bin package-release -- --out "$release" </dev/null
     ) || die 5 'Build or packaging failed'
 else
     if [ -z "$tag" ] && [ -f "$0" ] && command -v git >/dev/null 2>&1; then

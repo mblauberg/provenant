@@ -33,8 +33,9 @@ fn writer_dependency_preparation_installs_skips_and_reports_failure()
         "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PWD/pnpm.log\"\nif [ \"$(basename \"$PWD\")\" = failing ]; then echo 'fixture stderr tail' >&2; exit 7; fi\nmkdir -p node_modules\ntouch node_modules/.modules.yaml\n",
     )?;
     std::fs::set_permissions(&pnpm, std::fs::Permissions::from_mode(0o700))?;
-    let locate = |name: &str| {
-        super::find_command_on_path(name, std::slice::from_ref(&bin))
+    let locate = || {
+        std::env::join_paths([bin.as_path(), Path::new("/usr/bin"), Path::new("/bin")])
+            .map(|path| (path, "fixture"))
             .map_err(|error| error.to_string())
     };
     let cancel = provenant_core::CancelToken::new();
@@ -54,6 +55,18 @@ fn writer_dependency_preparation_installs_skips_and_reports_failure()
     assert_eq!(installed["outcome"], "installed");
     assert_eq!(installed["command"], "pnpm install --frozen-lockfile");
     assert_eq!(log(&fresh), "install --frozen-lockfile\n");
+
+    let fallback_tree = worktree("fallback")?;
+    let fallback = || {
+        super::dependency_path_with_fallback(
+            || Err("probe failed".into()),
+            Some(locate()?.0),
+            &cancel,
+        )
+    };
+    let installed = super::prepare_writer_dependencies(&fallback_tree, true, &fallback, &cancel)?;
+    assert_eq!(installed["path_source"], "daemon_fallback");
+    assert_eq!(log(&fallback_tree), "install --frozen-lockfile\n");
 
     // The completion marker marks an installed tree, so a second call skips.
     let skipped = super::prepare_writer_dependencies(&fresh, true, &locate, &cancel)?;
@@ -75,6 +88,102 @@ fn writer_dependency_preparation_installs_skips_and_reports_failure()
     assert!(error.contains("fixture stderr tail"));
     Ok(())
 }
+#[test]
+fn writer_preparation_uses_login_path_for_pnpm_and_node() -> Result<(), Box<dyn std::error::Error>>
+{
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir()?;
+    let root = super::canonical(temp.path())?;
+    // Neither directory is on the test process PATH. Keep node separate from
+    // pnpm to catch fixes that only prepend pnpm's parent directory.
+    let bin = root.join("pnpm bin");
+    let node_bin = root.join("node bin");
+    std::fs::create_dir_all(&bin)?;
+    std::fs::create_dir_all(&node_bin)?;
+    let path = std::env::join_paths([&bin, &node_bin])?;
+    let shell = root.join("login-shell");
+    let pnpm = bin.join("pnpm");
+    let node = node_bin.join("node");
+    // Model a login startup file which prints a banner, then configures PATH.
+    std::fs::write(
+        &shell,
+        format!(
+            "#!/bin/sh\n[ \"$1\" = -lc ] || exit 2\nprintf 'login banner\\n'\nexport PATH='{}'\neval \"$2\"\n",
+            path.to_string_lossy()
+        ),
+    )?;
+    std::fs::write(&pnpm, "#!/usr/bin/env node\n")?;
+    std::fs::write(&node, "#!/bin/sh\nprintf '%s\\n' \"$*\" > node.log\n")?;
+    for executable in [&shell, &pnpm, &node] {
+        std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let cancel = provenant_core::CancelToken::new();
+    let search_path =
+        || super::login_dependency_path(&shell, &root, &cancel).map(|path| (path, "login_shell"));
+    assert_eq!(search_path()?.0, path);
+    std::fs::write(root.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n")?;
+    let installed = super::prepare_writer_dependencies(&root, true, &search_path, &cancel)?;
+    assert_eq!(installed["outcome"], "installed");
+    assert_eq!(installed["path_source"], "login_shell");
+    assert_eq!(
+        std::fs::read_to_string(root.join("node.log"))?,
+        format!("{} install --frozen-lockfile\n", pnpm.display())
+    );
+
+    // A failed or cancelled shell must not fall back to the daemon PATH.
+    cancel.cancel();
+    assert!(
+        search_path()
+            .expect_err("cancelled probe")
+            .contains("cancelled")
+    );
+    Ok(())
+}
+
+#[test]
+fn writer_preparation_path_fallback_and_cancellation() {
+    let cancel = provenant_core::CancelToken::new();
+    let daemon = std::ffi::OsString::from("/daemon/bin");
+    let fallback = || {
+        super::dependency_path_with_fallback(
+            || Err("probe failed".into()),
+            Some(daemon.clone()),
+            &cancel,
+        )
+    };
+    assert_eq!(fallback().unwrap(), (daemon.clone(), "daemon_fallback"));
+    assert_eq!(
+        super::dependency_path_with_fallback(|| Err("probe failed".into()), None, &cancel,)
+            .unwrap_err(),
+        "probe failed"
+    );
+    cancel.cancel();
+    assert!(fallback().unwrap_err().contains("cancelled"));
+}
+
+#[test]
+fn writer_preparation_missing_pnpm_names_searched_path() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    std::fs::write(
+        temp.path().join("pnpm-lock.yaml"),
+        "lockfileVersion: '9.0'\n",
+    )?;
+    let path = std::env::join_paths([temp.path()])?;
+    let cancel = provenant_core::CancelToken::new();
+    let error = super::prepare_writer_dependencies(
+        temp.path(),
+        true,
+        &|| Ok((path.clone(), "fixture")),
+        &cancel,
+    )
+    .expect_err("missing pnpm is refused");
+    assert!(error.starts_with("dependency_tool_not_found:"));
+    assert!(error.contains(&format!("searched PATH={}", path.to_string_lossy())));
+    assert!(error.contains("source: fixture"));
+    assert!(error.contains("pnpm --version"));
+    Ok(())
+}
+
 #[test]
 fn nested_result_policy_uses_a_reliable_route_without_broadening_authority()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -547,6 +656,15 @@ fn agy_account_whose_isolated_keychain_vanished_is_refused()
 
     // Registered with its own keychain, the account observes under its own HOME.
     assert_eq!(observe()?.account_key.as_deref(), Some(key.as_str()));
+    // An unexpired identity probe still checks the routed registration. A
+    // stale routed key must never launch as the currently signed-in account.
+    let mut stale = entry.clone();
+    stale.key = "agy-google-000000000000".into();
+    let mismatch = observe_account(&stale, Path::new("/fixture/agy"), &probe, "r", 101)
+        .expect_err("cached fingerprint must reject the stale routed key")
+        .to_string();
+    assert!(mismatch.contains("changed identity"), "{mismatch}");
+    assert_eq!(agy.probed_homes.lock().unwrap().len(), 1);
     // With the keychain gone, the probe must not sign in as the first account.
     std::fs::remove_file(&keychain)?;
     let error = observe()
@@ -1198,6 +1316,137 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         },
         &call,
     )?;
+    // Exercise the actual adapter, sandbox compiler and fixture executable in both lane modes.
+    #[cfg(target_os = "macos")]
+    {
+        use provenant_confinement::permissions::{
+            AccessMode, AnchoredDirectory, Anchors, BackendContext, prepare_writer_directories,
+            required_anchors, system_backend,
+        };
+        let skill_root = home.join(".gemini/skills");
+        std::fs::create_dir_all(&skill_root)?;
+        // Skill discovery and Rust discovery omit the same canonical root.
+        // Repeated read/exec grants for that root collapse within Toolchain.
+        std::os::unix::fs::symlink(&skill_root, skill_root.join("bin"))?;
+        std::os::unix::fs::symlink(&skill_root, home.join(".cargo"))?;
+        std::fs::create_dir_all(home.join(".rustup/toolchains"))?;
+        let login = home.join("Library/Keychains/login.keychain-db");
+        std::fs::create_dir_all(login.parent().unwrap())?;
+        std::fs::write(&login, b"fixture")?;
+        let fake_agy = assets.join("agy");
+        std::fs::write(&fake_agy, b"#!/bin/sh\nprintf 'agy 1.0.0\\n'\n")?;
+        std::fs::set_permissions(&fake_agy, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::write(state.join("config.toml"), "schema_version = 1\n")?;
+        let backend = system_backend(&BackendContext {
+            executor: &executor,
+            cancel: &cancel,
+            env: &[],
+        });
+        if let Err(error) = &backend {
+            provenant_test_support::skip_sandbox_dependent_test(format!(
+                "agy fixture execution requires native sandbox: {error}"
+            ))?;
+        }
+        for (n, write) in [(7u8, true), (8u8, false)] {
+            let mut request = task.clone();
+            request.route = run::RequestedRoute::Model {
+                extra: Default::default(),
+                provider: "agy".into(),
+                model: "agy/gemini-3.8-flash".into(),
+                effort: None,
+            };
+            request.fallback.clear();
+            if !write {
+                request.writer = None;
+            }
+            let attempt_id = AttemptId::from_bytes([n; 16]);
+            let attempt = state.join(format!("runs/{run_id}/attempts/{attempt_id}"));
+            let paths = run::LaunchPaths {
+                attempt_id,
+                operation_id: OperationId::parse(&format!("agy-fixture-{n}"))?,
+                task_index: 0,
+                lane_depth: 1,
+                run_id,
+                deadline_unix_ms: u64::MAX,
+                scratch: attempt.join("scratch"),
+                provider_state: attempt.join("provider-state"),
+                temporary: attempt.join("tmp"),
+                temporary_alias: None,
+            };
+            for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
+                std::fs::create_dir_all(path)?;
+            }
+            let prepared = prepare_with(
+                &registry,
+                &request,
+                "fixture",
+                &paths,
+                None,
+                |_| Ok(fake_agy.clone()),
+                None,
+            )?;
+            let warning = prepared.route.extra["user_skills"]["warnings"][0]
+                .as_str()
+                .ok_or("missing agy warning")?;
+            assert!(warning.contains("~/.gemini/skills"), "{warning}");
+            assert_eq!(
+                prepared.route.extra["user_skills"]["warnings"],
+                serde_json::json!([warning]),
+            );
+            assert_eq!(
+                prepared.route.extra["discovery_warnings"],
+                if write {
+                    serde_json::json!([warning])
+                } else {
+                    serde_json::json!([])
+                },
+                "writers discover the same path as both a skill and a toolchain"
+            );
+            let confinement = prepared.confinement.as_ref().ok_or("missing confinement")?;
+            assert!(
+                !confinement
+                    .profile
+                    .spec
+                    .runtime_reads
+                    .iter()
+                    .any(|grant| grant.path == skill_root)
+            );
+            let writer = confinement
+                .writer
+                .as_ref()
+                .map(|writer| (&writer.worktree, &writer.branch));
+            if let (Some((worktree, branch)), AccessMode::WorktreeWrite(authority)) =
+                (writer, &confinement.plan.permissions().mode)
+            {
+                prepare_writer_directories(worktree, branch, authority, &home)?;
+            }
+            let directories =
+                required_anchors(confinement.plan.permissions(), &confinement.profile, writer)
+                    .into_iter()
+                    .map(AnchoredDirectory::open_canonical)
+                    .collect::<Result<Vec<_>, _>>()?;
+            let anchors = Anchors {
+                home: &home,
+                directories: &directories,
+                worktree: writer,
+            };
+            let compiled = provenant_confinement::permissions::snapshot::compile(
+                confinement.plan.permissions(),
+                &confinement.profile,
+                &anchors,
+            )?;
+            if backend.is_err() {
+                continue;
+            }
+            let argv = compiled.command(&prepared.argv, &attempt_id)?;
+            let mut options = ExecOptions::new(&argv, &prepared.cwd, Duration::from_secs(10));
+            options.env = Some(&prepared.environment);
+            let result = executor.execute(options)?;
+            assert_eq!(result.termination, Termination::Exit(0), "{result:?}");
+            assert!(String::from_utf8_lossy(&result.stdout.bytes).contains("agy 1.0.0"));
+        }
+        std::fs::remove_file(home.join(".cargo"))?;
+    }
     std::fs::write(
         state.join("config.toml"),
         format!(
@@ -1291,9 +1540,8 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
             &confinement.profile,
         );
         for path in [&skills, &skill_target] {
-            assert_eq!(
-                reads.iter().any(|grant| grant.path == *path),
-                expected,
+            assert!(
+                !reads.iter().any(|grant| grant.path == *path),
                 "{settings}: {path:?}"
             );
             assert!(
@@ -1304,7 +1552,19 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
             );
         }
         let receipt = &prepared.route.extra["user_skills"];
-        assert_eq!(receipt["exposed"], expected, "{settings}");
+        assert_eq!(receipt["exposed"], false, "{settings}");
+        assert_eq!(
+            receipt["warnings"].as_array().unwrap().len(),
+            usize::from(expected)
+        );
+        if expected {
+            assert!(
+                receipt["warnings"][0]
+                    .as_str()
+                    .unwrap()
+                    .contains("~/.cursor/skills")
+            );
+        }
         if source == "route" {
             assert!(receipt["source"]["route_policy"].is_array());
         } else {
@@ -3190,5 +3450,71 @@ fn a_task_may_read_only_its_own_nodes_graph_inputs() -> Result<(), Box<dyn std::
     std::fs::remove_dir(inputs("g", "mine"))?;
     std::os::unix::fs::symlink(inputs("g", "sibling"), inputs("g", "mine"))?;
     assert!(check(Some(&mine), &inputs("g", "mine")).is_err());
+    Ok(())
+}
+
+#[test]
+fn prelaunch_login_failures_keep_auth_when_availability_is_absent()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_providers::{ProviderError, accounts::Registration};
+    let entries: Vec<Registration> = ["work", "personal"].into_iter().map(|label| {
+        serde_json::from_value(serde_json::json!({"adapter": "codex", "label": label, "key": label, "directory": format!("/fixture/{label}")}))
+    }).collect::<Result<_, _>>()?;
+    let route: ResolvedRoute = serde_json::from_value(serde_json::json!({
+        "adapter": "codex", "model": "example", "catalogue_revision": "fixture",
+        "host": "fixture", "alternatives": [], "exclusions": [],
+        "confidentiality": {"evidence_ref": "fixture"}, "eligibility": "eligible",
+        "readiness": {"status": "unavailable", "reason": "unknown_availability"}
+    }))?;
+    let mut failures = std::collections::BTreeMap::new();
+    for (entry, error) in entries.iter().zip([
+        ProviderError::LoginRequired,
+        ProviderError::CredentialNotFound,
+    ]) {
+        let AccountObservationError::AuthRequired(detail) =
+            account_observation_error(entry, &error)
+        else {
+            panic!("login failure lost its type")
+        };
+        assert!(detail.contains("codex login"));
+        failures.insert((entry.adapter.clone(), entry.key.clone()), detail);
+    }
+    assert!(unavailable_auth_detail(&route, None, &entries, &failures).is_some());
+    failures.remove(&("codex".into(), "personal".into()));
+    assert!(unavailable_auth_detail(&route, None, &entries, &failures).is_none());
+    assert!(unavailable_auth_detail(&route, Some("work"), &entries, &failures).is_some());
+    assert!(matches!(
+        account_observation_error(&entries[0], &ProviderError::IdentityMismatch),
+        AccountObservationError::Other(_)
+    ));
+    Ok(())
+}
+
+#[test]
+fn absent_default_login_differs_from_directory_integrity_errors()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let missing = temp.path().join("missing-codex");
+    assert_eq!(
+        default_directory_error(&missing, "not found".into()).skip_kind(),
+        SkipKind::AuthRequired
+    );
+    assert_eq!(
+        default_directory_error(temp.path(), "permission denied".into()).skip_kind(),
+        SkipKind::Account
+    );
+    #[cfg(unix)]
+    {
+        let broken = temp.path().join("broken-link");
+        std::os::unix::fs::symlink(&missing, &broken)?;
+        assert_eq!(
+            default_directory_error(&broken, "broken link".into()).skip_kind(),
+            SkipKind::Account
+        );
+    }
+    assert_eq!(
+        AccountObservationError::VersionUnavailable("codex executable missing".into()).skip_kind(),
+        SkipKind::Unavailable
+    );
     Ok(())
 }

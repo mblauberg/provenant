@@ -36,6 +36,66 @@ pub enum SetupStep {
     Symlink { link: PathBuf, target: PathBuf },
 }
 
+/// Where an omitted optional grant was discovered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OmissionSource {
+    /// A user skill folder or a resource linked from one.
+    UserSkill,
+    /// A shared toolchain or tool configuration (Rust, Node, Git).
+    Toolchain,
+    /// The provider's own configuration discovery.
+    ProviderConfig,
+}
+
+/// An optional grant left out by the credential guard, with its source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OmittedGrant {
+    pub path: PathBuf,
+    pub source: OmissionSource,
+}
+
+impl OmittedGrant {
+    pub(crate) fn skills(paths: Vec<PathBuf>) -> Vec<Self> {
+        paths
+            .into_iter()
+            .map(|path| Self {
+                path,
+                source: OmissionSource::UserSkill,
+            })
+            .collect()
+    }
+}
+
+/// Remove optional discoveries that resolve into credential roots, retaining evidence.
+pub(crate) fn filter_optional_grants(
+    grants: &mut Vec<PathGrant>,
+    start: usize,
+    home: &Path,
+    source: OmissionSource,
+    omitted: &mut Vec<OmittedGrant>,
+) {
+    let mut index = start;
+    while index < grants.len() {
+        let target = std::fs::canonicalize(&grants[index].path).ok();
+        if let Some(target) =
+            target.filter(|path| provenant_confinement::refuses_lane_root(path, true, Some(home)))
+        {
+            grants.remove(index);
+            if !omitted
+                .iter()
+                .any(|entry| entry.path == target && entry.source == source)
+            {
+                omitted.push(OmittedGrant {
+                    path: target,
+                    source,
+                });
+            }
+        } else {
+            index += 1;
+        }
+    }
+}
+
 /// A provider launch ready for confinement. The launcher performs `setup`,
 /// anchors `required_anchors(plan, &profile, worktree)`, compiles the plan with
 /// `profile`, and runs `ConfinedLaunch::command(&argv)` with exactly `env`.
@@ -49,6 +109,8 @@ pub struct LaunchSpec {
     pub secret_input: Option<provenant_os::exec::SecretInput>,
     pub cwd: PathBuf,
     pub setup: Vec<SetupStep>,
+    /// Discovered optional grants omitted by the credential guard.
+    pub omitted_discovery: Vec<OmittedGrant>,
     pub(crate) git_wrapper: crate::lane::GitWrapper,
     pub profile: ProviderProfile,
     /// Decoder state bound to any continuation identity.
@@ -347,7 +409,10 @@ pub(crate) fn rust_tools(
     tool_exec_roots: &mut Vec<PathGrant>,
     env: &mut Vec<(OsString, OsString)>,
     setup: &mut Vec<SetupStep>,
+    omitted: &mut Vec<OmittedGrant>,
 ) {
+    let reads_start = runtime_reads.len();
+    let exec_start = tool_exec_roots.len();
     // Subtree grants must anchor to existing directories. Keep this decision
     // here so every adapter gets the same system-tool fallback on non-Rust
     // hosts; the grants below it hold either way.
@@ -369,6 +434,20 @@ pub(crate) fn rust_tools(
             tool_exec_roots.push(subtree(core));
         }
     }
+    filter_optional_grants(
+        runtime_reads,
+        reads_start,
+        input.home,
+        OmissionSource::Toolchain,
+        omitted,
+    );
+    filter_optional_grants(
+        tool_exec_roots,
+        exec_start,
+        input.home,
+        OmissionSource::Toolchain,
+        omitted,
+    );
     // Repository scripts (a Cargo rustc wrapper, test runners, `./scripts/*`)
     // run directly, whether or not Rust is installed. Children inherit this
     // profile, so exec stays confined; read and write grants and the protected
@@ -537,7 +616,10 @@ pub(crate) fn node_tools(
     runtime_reads: &mut Vec<PathGrant>,
     tool_exec_roots: &mut Vec<PathGrant>,
     env: &mut Vec<(OsString, OsString)>,
+    omitted: &mut Vec<OmittedGrant>,
 ) {
+    let reads_start = runtime_reads.len();
+    let exec_start = tool_exec_roots.len();
     for prefix in ["/opt/homebrew", "/usr/local"].map(Path::new) {
         if prefix.join("bin/node").exists() {
             homebrew_tools(prefix, runtime_reads, tool_exec_roots, env);
@@ -585,6 +667,20 @@ pub(crate) fn node_tools(
                 ("COREPACK_ENABLE_PROJECT_SPEC".into(), "0".into()),
                 ("COREPACK_ENABLE_DOWNLOAD".into(), "0".into()),
             ]);
+            filter_optional_grants(
+                runtime_reads,
+                reads_start,
+                home,
+                OmissionSource::Toolchain,
+                omitted,
+            );
+            filter_optional_grants(
+                tool_exec_roots,
+                exec_start,
+                home,
+                OmissionSource::Toolchain,
+                omitted,
+            );
             return;
         }
     }
@@ -704,12 +800,24 @@ pub fn user_skills_directory(
 /// identities bound traversal even when links form cycles; files need exact
 /// grants because a subtree grant requires a directory anchor.
 pub fn user_skills_grants(skills_dir: &Path) -> Vec<PathGrant> {
+    user_skills_grants_with_omissions(skills_dir, None).0
+}
+
+/// Return safe discovered grants and credential-root paths omitted from them.
+pub fn user_skills_grants_with_omissions(
+    skills_dir: &Path,
+    home: Option<&Path>,
+) -> (Vec<PathGrant>, Vec<PathBuf>) {
     let Ok(root) = std::fs::canonicalize(skills_dir) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
-    if !root.is_dir() {
-        return Vec::new();
+    if provenant_confinement::refuses_lane_root(&root, true, home) {
+        return (Vec::new(), vec![root]);
     }
+    if !root.is_dir() {
+        return (Vec::new(), Vec::new());
+    }
+    let mut omitted = Vec::new();
     let mut grants = vec![subtree(&root)];
     let mut pending = vec![root.clone()];
     let mut visited = std::collections::BTreeSet::new();
@@ -726,6 +834,12 @@ pub fn user_skills_grants(skills_dir: &Path) -> Vec<PathGrant> {
             let Ok(target) = std::fs::canonicalize(&path) else {
                 continue;
             };
+            if provenant_confinement::refuses_lane_root(&target, true, home) {
+                if !omitted.contains(&target) {
+                    omitted.push(target);
+                }
+                continue;
+            }
             let is_dir = target.is_dir();
             if entry.file_type().is_ok_and(|ft| ft.is_symlink())
                 && !target.starts_with(&root)
@@ -742,7 +856,7 @@ pub fn user_skills_grants(skills_dir: &Path) -> Vec<PathGrant> {
             }
         }
     }
-    grants
+    (grants, omitted)
 }
 
 /// Lowercase RFC 4122 version 4 spelling of caller randomness.

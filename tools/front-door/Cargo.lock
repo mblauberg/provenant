@@ -545,6 +545,7 @@ dependencies = [
  "provenant-run",
  "provenant-supervisor",
  "provenant-telemetry",
+ "provenant-test-support",
  "provenant-workflow",
  "regex",
  "rusqlite",
@@ -630,6 +631,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
+ "toml_edit",
 ]
 
 [[package]]

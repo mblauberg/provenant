@@ -99,7 +99,7 @@ impl ConfinementBackend for MacOsSandboxBackend {
         if !self.ready {
             return Err(PermissionError::BackendUnavailable);
         }
-        compile_sbpl(plan, profile, anchors)
+        compile_sbpl_with_diagnostic(plan, profile, anchors)
     }
 }
 

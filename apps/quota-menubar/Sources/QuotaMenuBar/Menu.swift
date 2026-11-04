@@ -221,7 +221,7 @@ enum QuotaMenu {
         case 0:
             if let shown {
                 let used = shown.usedPercent ?? 0
-                row.value = Fmt.percent(used)
+                row.value = Fmt.used(shown)
                 row.icon = .ring(used / 100, used >= alert ? .orange : .green)
                 parts = [windowName(shown), Fmt.resets(shown.resetAt, now: now)]
                 parts += account.spentPools(now: now).map { Fmt.spent($0, now: now) }
@@ -244,7 +244,7 @@ enum QuotaMenu {
             // Stale, unknown or unsupported: the last reading keeps its figure, dimmed, beside when it was taken.
             if let shown {
                 let used = shown.usedPercent ?? 0
-                row.value = Fmt.percent(used)
+                row.value = Fmt.used(shown)
                 row.dimValue = true
                 row.icon = .ring(used / 100, .secondary)
                 let when = account.observedAt.map { "last checked \(Fmt.ago($0, now: now))" }

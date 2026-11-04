@@ -38,6 +38,8 @@ pub enum PermissionError {
     BroadRoot,
     #[error("credential root requires a selected fixture-backed mechanism")]
     CredentialRoot,
+    #[error("credential root guard refused {path}: {guard}")]
+    CredentialRootAt { path: String, guard: &'static str },
     #[error("permission root overlaps a protected path")]
     ProtectedOverlap,
     #[error("required held path anchor is missing or changed")]
@@ -95,6 +97,36 @@ pub enum PermissionError {
     },
     #[error("lane cache contents exceed the sweep depth bound")]
     CacheSweepDepth,
+}
+
+impl PermissionError {
+    /// Add the refused path to a credential guard error.
+    pub fn with_credential_path(self, path: &Path, home: Option<&Path>) -> Self {
+        if matches!(self, Self::CredentialRoot) {
+            let env_home = std::env::var_os("HOME").map(PathBuf::from);
+            Self::credential_root_at(path, home.or(env_home.as_deref()))
+        } else {
+            self
+        }
+    }
+
+    /// Preserve the requested path and identify the guard in user-facing refusals.
+    pub fn credential_root_at(path: &Path, home: Option<&Path>) -> Self {
+        let path = home
+            .and_then(|home| path.strip_prefix(home).ok())
+            .map(|relative| {
+                if relative.as_os_str().is_empty() {
+                    "~".to_owned()
+                } else {
+                    format!("~/{}", relative.display())
+                }
+            })
+            .unwrap_or_else(|| path.display().to_string());
+        Self::CredentialRootAt {
+            path,
+            guard: "credential root",
+        }
+    }
 }
 
 #[cfg(test)]

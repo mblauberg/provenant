@@ -32,6 +32,95 @@ const SECURITY: &str = "/usr/bin/security";
 const SHELL: &str = "/bin/zsh";
 const KEYCHAIN: &str = "Library/Keychains/login.keychain-db";
 
+/// A short-lived, non-secret identity observation shared by quota and dispatch.
+/// Keychain metadata invalidates it on a normal sign-in change before expiry.
+const IDENTITY_TTL: i64 = 30;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct IdentityProbe {
+    key: String,
+    observed: i64,
+    stamp: Option<(u64, u64, u64, i64, i64)>,
+}
+
+fn identity_file(directory: &std::path::Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let digest = provenant_records::CanonicalV1::file_digest(directory.as_os_str().as_bytes());
+    format!(
+        "agy-identity-{}.json",
+        digest.to_string().trim_start_matches("sha256:")
+    )
+}
+
+pub(crate) type KeychainStamp = (u64, u64, u64, i64, i64);
+
+pub(crate) fn keychain_stamp(directory: &std::path::Path) -> Option<KeychainStamp> {
+    use std::os::unix::fs::MetadataExt;
+    let stat = std::fs::metadata(directory.join(KEYCHAIN)).ok()?;
+    Some((
+        stat.dev(),
+        stat.ino(),
+        stat.len(),
+        stat.mtime(),
+        stat.mtime_nsec(),
+    ))
+}
+
+pub(crate) fn cached_identity(
+    state: &std::path::Path,
+    directory: &std::path::Path,
+    now: i64,
+) -> Option<String> {
+    let root = provenant_os::fs::Directory::open_anchor(state).ok()?;
+    let bytes = root
+        .read_bounded(identity_file(directory).as_ref(), 4096)
+        .ok()?;
+    let probe: IdentityProbe = serde_json::from_slice(&bytes).ok()?;
+    (probe.observed <= now
+        && now < probe.observed.saturating_add(IDENTITY_TTL)
+        && probe.stamp == keychain_stamp(directory)
+        && probe.key.strip_prefix("agy-google-").is_some_and(|hash| {
+            hash.len() == 12 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        }))
+    .then_some(probe.key)
+}
+
+pub(crate) fn remember_identity(
+    state: &std::path::Path,
+    directory: &std::path::Path,
+    key: &str,
+    now: i64,
+    expected_stamp: Option<KeychainStamp>,
+) -> bool {
+    let current_stamp = keychain_stamp(directory);
+    if current_stamp != expected_stamp {
+        return false;
+    }
+    let publish = || -> Result<(), Box<dyn std::error::Error>> {
+        let root = provenant_os::fs::Directory::open_anchor(state)?;
+        let bytes = serde_json::to_vec(&IdentityProbe {
+            key: key.into(),
+            observed: now,
+            stamp: current_stamp,
+        })?;
+        root.atomic_write(
+            identity_file(directory).as_ref(),
+            ".agy-identity-",
+            &bytes,
+            provenant_os::fs::PublishMode::Replace,
+        )?
+        .require_durable()?;
+        Ok(())
+    };
+    publish().is_ok()
+}
+
+pub(crate) fn forget_identity(state: &std::path::Path, directory: &std::path::Path) {
+    if let Ok(root) = provenant_os::fs::Directory::open_anchor(state) {
+        let _ = root.unlink(identity_file(directory).as_ref());
+    }
+}
+
 /// The keychain an account signs in with, from its registered directory.
 ///
 /// A directory that is the user's real `home` is the shared login keychain
@@ -248,12 +337,13 @@ fn prepare(
     }
     .unwrap_or_else(|| input.home.join(KEYCHAIN));
     let user_skills = input.home.join(".gemini/skills");
-    let discover_skills = input.user_skills() && user_skills.is_dir();
-    let skill_reads = if discover_skills {
-        crate::user_skills_grants(&user_skills)
+    let (skill_reads, skill_omitted) = if input.user_skills() && user_skills.is_dir() {
+        crate::user_skills_grants_with_omissions(&user_skills, Some(input.home))
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
+    let mut omitted_discovery = crate::launch::OmittedGrant::skills(skill_omitted);
+    let discover_skills = !skill_reads.is_empty();
     let mut argv: Vec<OsString> = [
         input.executable.as_os_str(),
         "--output-format".as_ref(),
@@ -355,6 +445,7 @@ fn prepare(
             &mut tool_exec_roots,
             &mut env,
             &mut setup,
+            &mut omitted_discovery,
         );
         crate::launch::node_tools(
             input.home,
@@ -363,6 +454,7 @@ fn prepare(
             &mut runtime_reads,
             &mut tool_exec_roots,
             &mut env,
+            &mut omitted_discovery,
         );
     }
     Ok(LaunchSpec {
@@ -372,6 +464,7 @@ fn prepare(
         secret_input: None,
         cwd: input.cwd.to_owned(),
         setup,
+        omitted_discovery,
         git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
@@ -612,4 +705,44 @@ fn resets_in(message: &str) -> Option<u64> {
     let rest = lower[lower.rfind(MARKER)? + MARKER.len()..].trim_start();
     let total = crate::duration::suffix_seconds(rest)?;
     (1..=7 * 86_400).contains(&total).then_some(total)
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn agy_identity_cache_expires_and_invalidates_when_keychain_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("home");
+        let keychain = directory.join(KEYCHAIN);
+        std::fs::create_dir_all(keychain.parent().unwrap()).unwrap();
+        std::fs::write(&keychain, "synthetic").unwrap();
+        let key = "agy-google-0123456789ab";
+        let stamp = keychain_stamp(&directory);
+        assert!(remember_identity(temp.path(), &directory, key, 100, stamp));
+        assert_eq!(
+            cached_identity(temp.path(), &directory, 100).as_deref(),
+            Some(key)
+        );
+        assert_eq!(
+            cached_identity(temp.path(), &directory, 129).as_deref(),
+            Some(key)
+        );
+        assert!(cached_identity(temp.path(), &directory, 99).is_none());
+        assert!(cached_identity(temp.path(), &directory, 130).is_none());
+        assert!(cached_identity(temp.path(), &temp.path().join("other"), 101).is_none());
+        std::fs::write(&keychain, "changed synthetic keychain").unwrap();
+        assert!(cached_identity(temp.path(), &directory, 101).is_none());
+        let new_stamp = keychain_stamp(&directory);
+        assert!(remember_identity(
+            temp.path(),
+            &directory,
+            key,
+            102,
+            new_stamp
+        ));
+        forget_identity(temp.path(), &directory);
+        assert!(cached_identity(temp.path(), &directory, 103).is_none());
+    }
 }

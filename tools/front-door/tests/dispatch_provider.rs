@@ -255,6 +255,13 @@ fn fixture() -> Result {
             r###""text":"## Findings\nOK\n## Evidence\nFixture checked.\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"finished\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```""###,
         );
         io::stdout().write_all(frames.as_bytes())?;
+        io::stdout().flush()?;
+        if prompt.contains("free limit then hang") {
+            // Keep the process and its pipes live until the guardian stops it.
+            loop {
+                std::thread::park();
+            }
+        }
         return Ok(());
     }
     if args.iter().skip(1).any(|v| v == "-p") {
@@ -1330,6 +1337,120 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
     cleanup.disarm();
     Ok(())
 }
+/// Medium: injected lifecycle ticks and real durable attempt settlement; no sleeps.
+fn opencode_usage_limit_settlement_is_bounded() -> Result {
+    use provenant_os::capture::{FrameDecoder, FrameEvent};
+    use provenant_supervisor::machine::{self, Budgets, Effect, Event, State, StopReason, Tick};
+
+    // Prose about quota is not a provider refusal and must not stop a turn.
+    let decoder = provenant_providers::opencode::OpenCode;
+    assert_eq!(
+        decoder.decode(br#"{"type":"text","sessionID":"ses_x","part":{"text":"free limit"}}"#)?,
+        FrameEvent::Progress
+    );
+    for stdout in [
+        include_bytes!("fixtures/providers/opencode/v2.2.0-free-limit.jsonl").as_slice(),
+        include_bytes!("fixtures/providers/opencode/free-limit.jsonl").as_slice(),
+        br#"{"type":"provider.quota","message":"Go usage limit exceeded"}"#.as_slice(),
+    ] {
+        let (state, _) = machine::step(
+            State::prepared(Budgets::new(3_600_000)),
+            Event::Started,
+            Tick::at(0),
+        );
+        let event = match decoder.decode(stdout)? {
+            FrameEvent::Terminal => Event::Terminal,
+            FrameEvent::ProtocolRejected => Event::ProtocolRejected,
+            FrameEvent::Progress => Event::Progress,
+        };
+        let (state, effects) = machine::step(state, event, Tick::at(10));
+        assert_eq!(effects, [Effect::CloseStdin]);
+        // The provider is still alive. At most the existing flush budget may
+        // elapse before cleanup; the hour-long attempt deadline is irrelevant.
+        let (_, effects) = machine::step(state, Event::Silence, Tick::at(2_010));
+        assert_eq!(
+            effects,
+            [Effect::DeliverStop(StopReason::PostTerminalCleanup)]
+        );
+        let (_rig, terminal) = persisted_attempt_with(
+            "opencode",
+            "opencode/opencode/glm-5.3-flash-free",
+            ("zen", "fixture-zen"),
+            stdout,
+            b"",
+            143,
+            PersistedAttemptOptions {
+                stop_reason: Some(StopReason::PostTerminalCleanup),
+                ..Default::default()
+            },
+        )?;
+        assert!(
+            matches!(
+                terminal.state,
+                provenant_run::AttemptState::Terminal {
+                    outcome: provenant_run::Outcome::QuotaLimited,
+                    ..
+                }
+            ),
+            "{:?}",
+            terminal.state
+        );
+    }
+    Ok(())
+}
+
+/// Medium: real attempt settlement with a synthetic provider that never exits.
+fn opencode_usage_limit_stops_hanging_provider() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let mut rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
+    let bin = rig.root.join("provider/bin");
+    fs::create_dir_all(&bin)?;
+    rig.copy_executable(&std::env::current_exe()?, &bin.join("opencode"))?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    let prompt = rig.root.join("prompt.md");
+    fs::write(&prompt, "free limit then hang")?;
+    let out = rig.command(&[
+        "dispatch",
+        "--model",
+        "opencode/opencode/glm-5.3-flash-free",
+        "--operation-id",
+        "opencode-hanging-limit",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt")?,
+        "--wait",
+        "5s",
+        "--json",
+    ])?;
+    assert_eq!(code(&out), 0, "{out:?}");
+    let dispatched: Value = serde_json::from_slice(&out.stdout.bytes)?;
+    let run = dispatched["data"]["run_id"].as_str().ok_or("run")?;
+    let out = rig.command(&["lanes", "--id", run, "--json"])?;
+    assert_eq!(code(&out), 0, "{out:?}");
+    let lanes: Value = serde_json::from_slice(&out.stdout.bytes)?;
+    let lane = &lanes["data"]["lanes"][0];
+    assert_eq!(lane["state"], "quota_limited", "{lane}");
+    let attempt = rig
+        .state
+        .join("runs")
+        .join(run)
+        .join("attempts")
+        .join(lane["attempt_id"].as_str().ok_or("attempt")?);
+    let exit: Value = serde_json::from_slice(&fs::read(attempt.join("process-exit.json"))?)?;
+    // Cleanup, rather than a natural exit or the attempt wall deadline, must
+    // have ended the provider. The dispatch wait bounds the settlement above.
+    assert_eq!(exit["stop_reason"], "post_terminal_cleanup", "{exit}");
+    assert_eq!(exit["terminal_observed"], true, "{exit}");
+    cleanup.disarm();
+    Ok(())
+}
+
 fn opencode_dispatch_observes_v2_wal_session() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -2205,7 +2326,7 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
             .err()
             .ok_or("unconfigured host-native entry was accepted")?;
     assert_eq!(
-        error,
+        error.to_string(),
         "host-native absent is not configured in domains.fabric.host_native"
     );
     assert_eq!(fs::read_dir(&paths.temporary)?.count(), 0);
@@ -2344,7 +2465,7 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
             .err()
             .ok_or("host agent was silently replaced by its provider's policy fallback")?;
     assert_eq!(
-        error,
+        error.to_string(),
         "host-native requires its configured model; use graph routes for non-native fallback"
     );
     Ok(())
@@ -3133,6 +3254,7 @@ struct PersistedAttemptOptions {
     nonterminal: bool,
     lost_before_route: bool,
     stalled_import: bool,
+    stop_reason: Option<provenant_supervisor::machine::StopReason>,
 }
 
 fn persisted_attempt_with(
@@ -3361,7 +3483,7 @@ fn persisted_attempt_with(
         },
         termination: Some(Termination::Exit(exit_code)),
         never_spawned: false,
-        stop_reason: None,
+        stop_reason: options.stop_reason,
         delivered_signals: vec![],
         reaped: vec![],
         omitted_reaped: 0,
@@ -4600,6 +4722,8 @@ fn main() -> ExitCode {
                 "capacity_settlement_resumes_the_same_session",
                 "fixture_guardian_exits_when_sigkilled_test_owner_dies",
                 "review_fans_out_and_collects_fake_provider",
+                "opencode_usage_limit_settlement_is_bounded",
+                "opencode_usage_limit_stops_hanging_provider",
                 "opencode_dispatch_observes_v2_wal_session",
                 "opus_writer_dispatch_advises_a_cheaper_route",
                 "claude_dispatch_refreshes_registered_account",
@@ -4654,6 +4778,12 @@ fn main() -> ExitCode {
                     "fixture_guardian_exits_when_sigkilled_test_owner_dies" => fixture_guardian_exits_when_sigkilled_test_owner_dies(),
                     "review_fans_out_and_collects_fake_provider" => review_fans_out_and_collects_fake_provider(),
                     "review_council_overcap_runs_through_fake_providers" => review_council_overcap_runs_through_fake_providers(),
+                    "opencode_usage_limit_settlement_is_bounded" => {
+                        opencode_usage_limit_settlement_is_bounded()
+                    }
+                    "opencode_usage_limit_stops_hanging_provider" => {
+                        opencode_usage_limit_stops_hanging_provider()
+                    }
                     "opencode_dispatch_observes_v2_wal_session" => {
                         opencode_dispatch_observes_v2_wal_session()
                     }

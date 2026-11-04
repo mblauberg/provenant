@@ -9,6 +9,17 @@ results. The [cross-cutting decisions](README.md#cross-cutting-decisions)
 define the envelope, exit codes and wait budgets. The machine-readable help
 catalogue owns command syntax; the generated [CLI reference](../reference/cli.md)
 lists every leaf, flag and bound. Paths are relative to `tools/front-door/`.
+Numeric range and requirement builders in `crates/cli/src/metadata.rs` install
+clap rules and retain their catalogue metadata from the same declaration;
+clap does not expose those rules through public getters. Compact help uses
+command markers and the grammar's descriptions. Explicit and automatic
+preset selection share one incompatible-flag table.
+
+Waits, lane watches and time-based `--since` filters share a whole-number span
+grammar: bare seconds or the suffix `s`, `m`, `h` or `d`. Waits and watches
+retain their four-hour runtime limit; since filters also accept dates and
+RFC3339 timestamps. Git-revision and console-cursor `--since` options keep
+their own types.
 
 ## Agent output
 

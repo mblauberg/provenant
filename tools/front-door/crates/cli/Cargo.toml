@@ -12,7 +12,7 @@ fixture = ["provenant-run/fixture", "provenant-supervisor/fixture", "provenant-r
 [dependencies]
 provenant-os = { workspace = true }
 provenant-quota = { workspace = true }
-clap = { workspace = true }
+clap = { workspace = true, features = ["unstable-ext"] }
 jiff = { workspace = true }
 libc = { workspace = true }
 provenant-config = { workspace = true }
@@ -35,6 +35,8 @@ toml_edit = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+provenant-confinement = { workspace = true, features = ["snapshot"] }
+provenant-test-support = { path = "../test-support" }
 provenant-os = { workspace = true, features = ["fixture"] }
 provenant-fabric-runtime = { workspace = true, features = ["retained-seed"] }
 tempfile = { workspace = true }
