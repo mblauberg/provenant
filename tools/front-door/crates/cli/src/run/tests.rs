@@ -2245,7 +2245,6 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
             (
                 roots
                     .iter()
-                    .cloned()
                     .map(|root| (root.clone(), WorkerState::Unknown))
                     .collect(),
                 roots
