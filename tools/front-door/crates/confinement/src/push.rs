@@ -26,7 +26,7 @@ pub enum PushRefusal {
     )]
     LinkedWorktree,
     #[error(
-        "non-fast-forward update is refused; integrate the remote first with `git fetch origin && git merge origin/my-topic`, then push again"
+        "non-fast-forward update to the default branch is refused; integrate the remote first with `git fetch origin && git merge origin/main` (or the default branch), then push again"
     )]
     NonFastForward,
     #[error(
