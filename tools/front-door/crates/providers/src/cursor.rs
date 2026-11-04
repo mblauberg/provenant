@@ -102,6 +102,7 @@ fn prepare(
         cwd: input.cwd.to_owned(),
         setup: vec![SetupStep::CreateDir(chats.clone())],
         omitted_discovery,
+        prepared_tools: Vec::new(),
         git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {

@@ -89,17 +89,13 @@ fn prepare(
         deny_credential_access: true,
         deny_network: input.confined.permissions().network
             == provenant_records::run::NetworkAccess::Provider,
-        runtime_reads: std::iter::once(input.executable)
-            .chain(command.runtimes.iter().map(std::path::PathBuf::as_path))
-            .flat_map(crate::dylib::linked_libraries)
-            .map(exact)
-            .collect(),
+        runtime_reads: Vec::new(),
         tool_exec_roots: vec![subtree("/bin"), subtree("/usr/bin")],
         ..Default::default()
     };
     profile
         .tool_exec_roots
-        .extend(command.runtimes.iter().map(exact));
+        .extend(std::iter::once(exact(command.program)).chain(command.runtimes.iter().map(exact)));
     let mut setup = Vec::new();
     let mut omitted_discovery = Vec::new();
     if [".cargo/bin", ".rustup/toolchains"]
@@ -141,6 +137,7 @@ fn prepare(
         cwd: input.cwd.to_owned(),
         setup,
         omitted_discovery,
+        prepared_tools: Vec::new(),
         git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: profile,
