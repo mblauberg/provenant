@@ -463,8 +463,7 @@ pub(super) fn prepare_candidates(
     wait: Option<u64>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route {
-        return prepare_command(registry, task, paths, resume, locate, provider, name)
-            .map_err(PrepareError::from);
+        return prepare_command(registry, task, paths, resume, locate, provider, name);
     }
     check_launch_prompt(prompt_text, paths, None)?;
     if task.fallback.is_empty()
@@ -766,13 +765,18 @@ pub(super) fn prepare_candidates(
                 (e.label == label || e.key == label)
                     && requested_adapter.is_none_or(|adapter| e.adapter == adapter)
             });
-            let entry = matching.next().ok_or_else(|| {
-                format!("account {label} is not registered for the requested route")
+            let entry = matching.next().ok_or_else(|| PrepareError::Candidates {
+                message: format!("account {label} is not registered for the requested route"),
+                plans: Vec::new(),
+                skipped_routes: Vec::new(),
+                fallback_outcome: Some(
+                    provenant_records::run::PreparationFailure::AdapterUnavailable,
+                ),
             })?;
             if matching.any(|other| other.key != entry.key) {
-                return Err(format!(
+                return Err(PrepareError::Other(format!(
                     "account alias {label} is ambiguous; use its exact registered key"
-                ));
+                )));
             }
             Ok(entry.key.as_str())
         })

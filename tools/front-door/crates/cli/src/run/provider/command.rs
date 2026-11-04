@@ -1,5 +1,14 @@
 use super::*;
 
+fn unavailable(message: String) -> PrepareError {
+    PrepareError::Candidates {
+        message,
+        plans: Vec::new(),
+        skipped_routes: Vec::new(),
+        fallback_outcome: Some(provenant_records::run::PreparationFailure::AdapterUnavailable),
+    }
+}
+
 /// Resolve only a host-configured entry. The result enters the ordinary lane
 /// launcher, supervisor, guardian and settlement path below this edge.
 pub(super) fn prepare_command(
@@ -10,10 +19,12 @@ pub(super) fn prepare_command(
     locate: &dyn Fn(&str) -> Result<PathBuf, String>,
     provider: &str,
     name: &str,
-) -> Result<run::PreparedLaunch, String> {
+) -> Result<run::PreparedLaunch, PrepareError> {
     use provenant_providers::Adapter;
     if provider != "command" {
-        return Err(format!("{provider} has no named model-less entries"));
+        return Err(unavailable(format!(
+            "{provider} has no named model-less entries"
+        )));
     }
     AdapterSpec::get(provider)
         .ok_or("unknown adapter")?
@@ -27,10 +38,11 @@ pub(super) fn prepare_command(
     let roots = registry.roots.ok_or("routing context is unavailable")?;
     let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
         .map_err(|error| error.to_string())?;
-    let command =
-        config.domains.fabric.commands.get(name).ok_or_else(|| {
-            format!("command {name} is not configured in domains.fabric.commands")
-        })?;
+    let command = config.domains.fabric.commands.get(name).ok_or_else(|| {
+        unavailable(format!(
+            "command {name} is not configured in domains.fabric.commands"
+        ))
+    })?;
     let program = command
         .argv
         .first()
@@ -40,9 +52,9 @@ pub(super) fn prepare_command(
     let invocation = if program.contains('/') {
         cwd.join(program)
     } else {
-        locate(program)?
+        locate(program).map_err(unavailable)?
     };
-    let executable = canonical(&invocation)?;
+    let executable = canonical(&invocation).map_err(unavailable)?;
     let runtimes = command
         .runtimes
         .iter()

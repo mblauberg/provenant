@@ -981,7 +981,7 @@ fn mcp_client_default_selects_its_own_inbox_and_run_binding_is_honest() -> Resul
 }
 
 #[test]
-fn graph_run_stops_fallback_without_preparation_evidence() -> Result {
+fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
     let rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
     std::fs::write(
@@ -1008,11 +1008,8 @@ fn graph_run_stops_fallback_without_preparation_evidence() -> Result {
     assert_eq!(run["data"]["status"], "complete");
     let node = &run["data"]["checkpoint"]["nodes"][0];
     assert_eq!(node["state"], "failed");
-    // An unconfigured fixture route has no typed local-preparation evidence.
-    // Refuse fallback rather than infer safety from a pre-launch outcome.
     let attempts = node["attempts"].as_array().ok_or("attempts")?;
-    assert_eq!(attempts.len(), 1);
-    assert_eq!(node["advance_error_code"], "fallback_evidence_unavailable");
+    assert_eq!(attempts.len(), 2, "{node}");
     let identity = rig.command(&["fabric", "identity", "--json"])?;
     let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
     let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
@@ -1037,7 +1034,7 @@ fn graph_run_stops_fallback_without_preparation_evidence() -> Result {
         cancel: &cancel,
     };
     let store = provenant_run::RunStore::open(&context, &call)?;
-    for (attempt, account) in attempts.iter().zip(["work"]) {
+    for (attempt, account) in attempts.iter().zip(["work", "pro"]) {
         assert_eq!(attempt["state"], "terminal");
         assert_eq!(attempt["launched"], false);
         assert_eq!(attempt["outcome"], "adapter_unavailable");
@@ -1048,7 +1045,10 @@ fn graph_run_stops_fallback_without_preparation_evidence() -> Result {
             .split_once('/')
             .ok_or("reference")?;
         let record = store.record(id.parse()?, &call)?;
-        assert_eq!(record.preparation_failure, None);
+        assert_eq!(
+            record.preparation_failure,
+            Some(provenant_records::run::PreparationFailure::AdapterUnavailable)
+        );
         assert_eq!(
             store.request(record.run_id, &call)?.tasks[0]
                 .account
