@@ -2956,6 +2956,10 @@ fn generator_evaluator_ends_with_an_evaluator_over_the_lens_list() {
     );
     let evaluate = node(&expanded.document, "evaluate");
     assert_eq!(evaluate["kind"], "synthesise");
+    assert_eq!(
+        evaluate["inputs"][0],
+        json!({"node":"lens", "outputs":["findings"]})
+    );
     assert_eq!(route(evaluate)["alias"], "principal");
     assert_eq!(evaluate["source"]["node"], "implement");
     assert_eq!(evaluate["review_base"], "main");
