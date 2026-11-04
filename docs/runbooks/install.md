@@ -110,7 +110,7 @@ only its publish step receives `GITHUB_TOKEN`. Before tagging, commit
 
 On the host, outside a Fabric lane, build the binary and run the release packaging binary.
 Choose a fresh absolute output directory outside every repository checkout. The
-output's parent directory must already exist. The example copies the exact asset
+output's parent directory must already exist. The packager copies the exact asset
 inventory digested by `build.rs`, reads the binary's `--version --json` identity,
 and runs the install path's bounded version and help smoke before publishing
 `release.json` last. It refuses existing output directories and asset drift.
