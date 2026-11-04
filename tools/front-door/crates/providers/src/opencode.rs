@@ -292,10 +292,13 @@ fn prepare(
     ];
     // Mirror provider configuration as individual links; staged skills have their own tree.
     let private_config = private.join("config");
-    if staged_skills.root.is_some() {
+    {
         let private_opencode = private_config.join("opencode");
         setup.push(SetupStep::CreateDir(private_opencode.clone()));
-        if let Ok(entries) = std::fs::read_dir(&config_dir) {
+        if let Ok(canonical) = std::fs::canonicalize(&config_dir)
+            && !provenant_confinement::refuses_lane_root(&canonical, true, Some(input.home))
+            && let Ok(entries) = std::fs::read_dir(&config_dir)
+        {
             for entry in entries.flatten() {
                 if entry.file_name() != "skills"
                     && entry.file_type().is_ok_and(|kind| !kind.is_symlink())
@@ -1825,7 +1828,7 @@ mod tests {
     }
 
     #[test]
-    fn xdg_homes_follow_absolute_host_variables() {
+    fn xdg_data_home_follows_absolute_host_variable() {
         let plan = crate::tests::read_only_plan("/fixture", None);
         let route = crate::tests::route("opencode", "fixture-model");
         let prompt = crate::Prompt::new("fixture".into());
@@ -1857,7 +1860,7 @@ mod tests {
                 .find(|(name, _)| name == key)
                 .map(|(_, value)| value.clone())
         };
-        assert_eq!(env("XDG_CONFIG_HOME"), Some("/xdg/config".into()));
+        assert_eq!(env("XDG_CONFIG_HOME"), Some("/fixture/state/config".into()));
         // A relative XDG path is ignored, as the XDG base directory spec says.
         assert_eq!(
             env("XDG_DATA_HOME"),

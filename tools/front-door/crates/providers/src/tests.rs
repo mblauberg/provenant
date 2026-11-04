@@ -294,7 +294,7 @@ fn command_runtimes_include_only_exact_linked_library_reads()
 
     let temp = tempfile::tempdir()?;
     let library = temp.path().join("libcustom.dylib");
-    std::fs::write(&library, b"fixture dependency")?;
+    std::fs::write(&library, test_macho(&[]))?;
     let library = library.canonicalize()?;
     let name = library.to_str().ok_or("library path")?;
     // A thin Mach-O load command, enough for the production dependency reader.
@@ -302,6 +302,7 @@ fn command_runtimes_include_only_exact_linked_library_reads()
     image[..4].copy_from_slice(&0xfeed_facf_u32.to_le_bytes());
     image[16..20].copy_from_slice(&1_u32.to_le_bytes());
     let size = (24 + name.len() + 1).next_multiple_of(8);
+    image[20..24].copy_from_slice(&u32::try_from(size)?.to_le_bytes());
     image.extend(0xc_u32.to_le_bytes());
     image.extend(u32::try_from(size)?.to_le_bytes());
     image.extend(24_u32.to_le_bytes());
@@ -3196,7 +3197,7 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
             );
             let config_home = Path::new(env("XDG_CONFIG_HOME").expect("config home"));
             let data_home = Path::new(env("XDG_DATA_HOME").expect("data home"));
-            assert!(!config_home.starts_with("/fixture/state"));
+            assert_eq!(config_home, Path::new("/fixture/state/config"));
             assert!(!data_home.starts_with("/fixture/state"));
             if config_home.join("opencode/skills").is_dir() {
                 assert!(
