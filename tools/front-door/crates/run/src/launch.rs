@@ -572,7 +572,10 @@ fn child_access_within_impl(
             })
         {
             return Err(RunError::Confinement(if diagnostic {
-                provenant_confinement::permissions::PermissionError::credential_root_at(root, home)
+                provenant_confinement::permissions::PermissionError::CredentialGrant {
+                    path: root.clone(),
+                    access: if read { "read" } else { "write" },
+                }
             } else {
                 provenant_confinement::permissions::PermissionError::CredentialRoot
             }));
@@ -673,9 +676,15 @@ mod release_root_tests {
         let child = parent.clone();
         let error = child_access_with_diagnostic(&parent, &child, &home.join("state"), Some(&home))
             .unwrap_err();
-        let message = error.to_string();
-        assert!(message.contains("~/.gemini/skills"), "{message}");
-        assert!(message.contains("credential root"), "{message}");
+        let local = error.diagnostic(provenant_records::diagnostic::Destination::Local);
+        let remote = error.diagnostic(provenant_records::diagnostic::Destination::Remote {
+            repository: None,
+            home: Some(&home),
+        });
+        assert!(local.detail.unwrap().contains(&root.display().to_string()));
+        let detail = remote.detail.unwrap();
+        assert!(detail.contains("~/.gemini/skills"), "{detail}");
+        assert!(detail.contains("read grant"), "{detail}");
         Ok(())
     }
 

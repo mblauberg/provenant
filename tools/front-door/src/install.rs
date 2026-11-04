@@ -389,6 +389,7 @@ fn install_error_result(command: &str, error: &InstallError) -> CommandResult<In
     let (status, code) = error_class(error);
     let mut result = CommandResult::new(command, status, InstallData::failure(error));
     result.error = Some(CommandError {
+        diagnostic: None,
         code: code.into(),
         message: error.to_string(),
         cause: None,
@@ -1544,6 +1545,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
             );
             if !success {
                 result.error = Some(CommandError {
+                    diagnostic: None,
                     code: "UPGRADE_FAILED".into(),
                     message: "Some hosts failed to upgrade; inspect host results and rerun upgrade"
                         .into(),

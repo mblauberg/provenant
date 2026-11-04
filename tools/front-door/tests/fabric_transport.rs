@@ -1912,6 +1912,8 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     for (error, expected_operation) in [
         (
             FacadeError::Io {
+                delivery_limit: None,
+                delivery_stage: None,
                 operation: "submit: access database".into(),
                 path: None,
             },
@@ -1919,6 +1921,8 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         ),
         (
             FacadeError::Io {
+                delivery_limit: None,
+                delivery_stage: None,
                 operation: "spawn peer".into(),
                 path: None,
             },
@@ -3601,15 +3605,22 @@ fn writer_disk_refusal_keeps_its_reason_through_graph_mcp_and_dispatch() -> Resu
              "route":{"adapter":"codex","model":"codex/gpt-6-luna","effort":"low"}}
         ]}))?,
     )?;
-    let reason = |message: &Value| -> Result {
+    let reason = |message: &Value, local: bool| -> Result {
         let message = message.as_str().ok_or("refusal reason")?;
         assert!(message.contains("insufficient disk space on "), "{message}");
-        assert!(
-            message.contains(worktree)
-                || message.contains(rig.state.to_str().ok_or("state")?)
-                || message.contains(rig.home.to_str().ok_or("home")?),
-            "{message}"
-        );
+        if local {
+            assert!(
+                message.contains(worktree)
+                    || message.contains(rig.state.to_str().ok_or("state")?)
+                    || message.contains(rig.home.to_str().ok_or("home")?),
+                "{message}"
+            );
+        } else {
+            assert!(
+                !message.contains(rig.root.to_str().ok_or("root")?),
+                "{message}"
+            );
+        }
         let (_, available) = message.rsplit_once(": ").ok_or("available bytes")?;
         let (bytes, _) = available
             .split_once(" bytes available, floor ")
@@ -3619,7 +3630,6 @@ fn writer_disk_refusal_keeps_its_reason_through_graph_mcp_and_dispatch() -> Resu
             message.contains("floor 18446744073709551615 bytes"),
             "{message}"
         );
-        assert!(message.contains("provenant gc"), "{message}");
         Ok(())
     };
     let (status, graph) = json_command(
@@ -3636,7 +3646,13 @@ fn writer_disk_refusal_keeps_its_reason_through_graph_mcp_and_dispatch() -> Resu
     assert_eq!(status, 1, "{graph}");
     assert_eq!(graph["status"], "refused", "{graph}");
     assert_eq!(graph["error"]["code"], "dispatch_refused", "{graph}");
-    reason(&graph["error"]["message"])?;
+    reason(&graph["error"]["message"], false)?;
+    assert!(
+        graph["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("provenant gc")
+    );
 
     // Submission is exposed as fabric_run op=submit in the current MCP schema.
     let replies = mcp(
@@ -3655,7 +3671,13 @@ fn writer_disk_refusal_keeps_its_reason_through_graph_mcp_and_dispatch() -> Resu
         result["structuredContent"]["code"], "dispatch_refused",
         "{result}"
     );
-    reason(&result["structuredContent"]["message"])?;
+    reason(&result["structuredContent"]["message"], false)?;
+    assert!(
+        result["structuredContent"]["next"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("provenant gc")
+    );
 
     let prompt = rig.root.join("prompt.txt");
     std::fs::write(&prompt, "fixture")?;
@@ -3679,7 +3701,13 @@ fn writer_disk_refusal_keeps_its_reason_through_graph_mcp_and_dispatch() -> Resu
     assert_eq!(status, 1, "{dispatch}");
     assert_eq!(dispatch["status"], "refused", "{dispatch}");
     assert_eq!(dispatch["error"]["code"], "DISK_FLOOR", "{dispatch}");
-    reason(&dispatch["error"]["message"])?;
+    reason(&dispatch["error"]["message"], true)?;
+    assert!(
+        dispatch["error"]["next"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("provenant gc")
+    );
     assert!(!rig.state.join("runs").exists());
     rig.assert_legacy_unchanged()
 }

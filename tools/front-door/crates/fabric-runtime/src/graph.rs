@@ -583,30 +583,17 @@ fn launch_retry_kind(error: &(dyn Error + 'static)) -> bool {
             | FacadeError::HomeUnavailable
             | FacadeError::Io { .. }
             | FacadeError::DispatchUnobserved { .. }
-            | FacadeError::HostDeliveryIo { .. }
+            | FacadeError::HostDeliveryStage { .. }
+            | FacadeError::HostDeliveryLimit { .. }
             | FacadeError::LaunchUnknown { .. }
     )
 }
 
-/// A permanent refusal's remedy, as recorded for status beside the reason.
-fn launch_remedy(error: &(dyn Error + 'static), graph_id: &str) -> String {
-    use crate::coordination::facade::FacadeError;
-    if error.downcast_ref::<FacadeError>().is_some_and(|error| {
-        matches!(
-            error,
-            FacadeError::ConfinementRefused
-                | FacadeError::LaneDepth
-                | FacadeError::LaneCoordinationRefused
-        )
-    }) {
-        format!(
-            "check the host's capacity and the access the node declares; fix the cause, cancel this graph with `provenant fabric graph cancel {graph_id}`, then rerun the document under a new graph_id"
-        )
-    } else {
-        format!(
-            "fix the node's route, worktree or inputs in the graph document, cancel this graph with `provenant fabric graph cancel {graph_id}`, then rerun the document under a new graph_id"
-        )
-    }
+fn launch_diagnostic(error: &(dyn Error + 'static)) -> provenant_records::diagnostic::Diagnostic {
+    error
+        .downcast_ref::<crate::coordination::facade::FacadeError>()
+        .map(crate::coordination::facade::FacadeError::diagnostic)
+        .unwrap_or_else(|| provenant_records::diagnostic::Diagnostic::new("launch_failed"))
 }
 
 /// Apply a persisted disposition to a node whose launch errored while its
@@ -649,13 +636,18 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
             retry.wake_at = DurationMicros::from_seconds(delay.as_secs())
                 .ok()
                 .and_then(|duration| now.checked_add(duration).ok());
-            retry.reason = Some(bounded(&error.to_string(), MAX_ADVANCE_ERROR_BYTES));
+            let projected = launch_diagnostic(error);
+            retry.reason = Some(bounded(
+                projected.detail.as_deref().unwrap_or(&projected.code),
+                MAX_ADVANCE_ERROR_BYTES,
+            ));
             asks::refresh_wake(checkpoint);
             return journal.save(checkpoint).map_err(GraphError::Journal);
         }
     }
     // A permanent refusal, or a retry budget spent: block the node with the
     // reason and a remedy, and keep the refusal visible in graph status.
+    let graph_id = checkpoint.graph_id.clone();
     let progress = &mut checkpoint.nodes[index];
     let id = &progress.id;
     let code = if retrying {
@@ -664,10 +656,39 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
         "launch_refused"
     };
     progress.advance_error_code = Some(code.into());
-    progress.advance_error = Some(format!(
-        "node {id}: the launch failed: {}; {}",
-        bounded(&error.to_string(), MAX_ADVANCE_ERROR_BYTES),
-        launch_remedy(error, &checkpoint.graph_id)
+    let projected = launch_diagnostic(error);
+    let detail = projected.detail.as_deref().unwrap_or(&projected.code);
+    let action = projected
+        .next
+        .as_deref()
+        .unwrap_or("inspect the node's inputs and state before retrying");
+    let error: &(dyn Error + 'static) = error;
+    let recovery = if error
+        .downcast_ref::<crate::coordination::facade::FacadeError>()
+        .is_some_and(|e| {
+            matches!(
+                e,
+                crate::coordination::facade::FacadeError::LaunchUnknown { .. }
+            )
+        }) {
+        String::new()
+    } else if graph_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    {
+        format!(
+            "; after correcting the cause, cancel with `provenant fabric graph cancel {graph_id}` and rerun with a new graph_id"
+        )
+    } else {
+        "; inspect and cancel the graph before rerunning with a new graph_id".into()
+    };
+    progress.advance_error = Some(bounded(
+        &format!(
+            "node {}: the launch failed [{}]: {detail}; {action}{recovery}",
+            provenant_records::diagnostic::safe_text(id),
+            projected.code
+        ),
+        MAX_ADVANCE_ERROR_BYTES,
     ));
     progress.state = NodeState::Blocked;
     // Keep the attempt row even when launch handoff is uncertain. A guardian

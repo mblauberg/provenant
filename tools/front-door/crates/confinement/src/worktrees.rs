@@ -122,6 +122,8 @@ pub enum WorktreeError {
     IncompleteCensus { detail: String },
     #[error("worktree writer or registration is unknown")]
     UnknownWriter,
+    #[error("worktree writer or registration is unknown at {}", .path.display())]
+    UnknownWriterAt { path: PathBuf },
     #[error("Git marks the worktree {}", if *.locked { "locked" } else { "prunable" })]
     GitEntryHeld { locked: bool },
     #[error("worktree operation was cancelled")]
@@ -193,7 +195,10 @@ impl WorktreeError {
     /// Refusals that mean Provenant cannot prove who owns the tree. Callers
     /// that retain such a tree treat every one of them alike.
     pub fn is_custody_unknown(&self) -> bool {
-        matches!(self, Self::UnknownWriter | Self::GitEntryHeld { .. })
+        matches!(
+            self,
+            Self::UnknownWriter | Self::UnknownWriterAt { .. } | Self::GitEntryHeld { .. }
+        )
     }
 
     /// The operator's next step for a refusal that has one.
@@ -219,7 +224,7 @@ impl WorktreeError {
             Self::GitOperationInProgress => {
                 "run `git -C PATH status` and complete or abort the Git operation before retrying"
             }
-            Self::UnknownWriter => {
+            Self::UnknownWriter | Self::UnknownWriterAt { .. } => {
                 "run `provenant worktree list` and inspect the registration and writer state before retrying"
             }
             Self::IncompleteCensus { .. } => {
@@ -346,6 +351,16 @@ pub enum WriterState {
     Unknown,
 }
 
+/// Observed lane-ownership registration; absence does not prove custody is free.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnerStatus {
+    Registered,
+    Unowned,
+    Unknown,
+    Primary,
+}
+
 /// CLI result facts are serialize-only. Its absolute path is emitted through
 /// the explicit root-plus-PathWire envelope below, never lossy `Path::display`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -355,6 +370,7 @@ pub struct WorktreeInfo {
     pub head: GitOid,
     pub dirty: WorktreeCondition,
     pub writer: WriterState,
+    pub owner: OwnerStatus,
 }
 
 impl Serialize for WorktreeInfo {
@@ -363,12 +379,16 @@ impl Serialize for WorktreeInfo {
         S: Serializer,
     {
         let path = AbsolutePathWire::from_path(&self.path).map_err(serde::ser::Error::custom)?;
-        let mut state = serializer.serialize_struct("WorktreeInfo", 5)?;
+        let mut state = serializer.serialize_struct("WorktreeInfo", 7)?;
         state.serialize_field("path", &path)?;
         state.serialize_field("branch", &self.branch)?;
         state.serialize_field("head", &self.head)?;
         state.serialize_field("dirty", &self.dirty)?;
         state.serialize_field("writer", &self.writer)?;
+        state.serialize_field("owner", &self.owner)?;
+        if self.owner == OwnerStatus::Unowned {
+            state.serialize_field("next", "This checkout has no Provenant lane owner; it may have been created outside Provenant. Inspect its custody, then select it explicitly with --worktree <path>.")?;
+        }
         state.end()
     }
 }

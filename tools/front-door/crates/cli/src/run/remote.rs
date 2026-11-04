@@ -166,7 +166,7 @@ fn peer_failure_fail(failure: PeerFailure) -> Fail {
     }
     let (status, kind) = crate::fabric::facade_outcome(&error);
     Fail {
-        detail: Some(error),
+        detail: Some(Box::new(error)),
         ..Fail::new(status, kind, format!("peer: {message}"))
     }
 }

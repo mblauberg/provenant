@@ -219,6 +219,7 @@ fn fail_with_repair(
 ) -> u8 {
     let mut result = CommandResult::new(command, status, ());
     result.error = Some(CommandError {
+        diagnostic: None,
         code: code.into(),
         message: message.into(),
         cause: None,
@@ -377,6 +378,7 @@ fn sync_registered_account(
         Err(message) => {
             reply.result.status = Outcome::Error;
             reply.result.error = Some(CommandError {
+                diagnostic: None,
                 code: "ACCOUNT_SYNC".into(),
                 message: format!(
                     "account registered, but syncing managed content failed: {message}"
@@ -705,6 +707,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                             serde_json::Value::Null,
                         );
                         result.error = Some(CommandError {
+                            diagnostic: None,
                             code: "ACCOUNT".into(),
                             message,
                             cause: None,
@@ -1164,6 +1167,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                     Err(message) => {
                         reply.result.status = Outcome::Invalid;
                         reply.result.error = Some(CommandError {
+                            diagnostic: None,
                             code: "EXPERIMENT_REPORT".into(),
                             message,
                             cause: None,

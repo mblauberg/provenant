@@ -1382,6 +1382,7 @@ pub(crate) fn execute(
         && !merged
     {
         report.error = Some(CommandError {
+            diagnostic: None,
             code: failure_code.into(),
             message: format!("fail #{number} {expected}: {error}"),
             cause: None,
@@ -1738,6 +1739,7 @@ mod graph_land_tests {
     fn report(data: serde_json::Value, code: Option<&str>) -> CommandResult<serde_json::Value> {
         let mut report = CommandResult::new("land", Outcome::Error, data);
         report.error = code.map(|code| CommandError {
+            diagnostic: None,
             code: code.into(),
             message: "fail #7".into(),
             cause: None,

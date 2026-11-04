@@ -314,6 +314,10 @@ The CLI and MCP render one typed category per run error, and peer replies
 keep their error code over the wire. MCP errors include a message and recovery
 hint, and validation identifies the expected value. Uncertain mutations carry
 their `operation_id`.
+Graph launch diagnostics and MCP projections select safe details and actions
+from the typed refusal before persisting or transporting them. An unanchored
+host path or an arbitrary source error is omitted; uncertain handoffs name the
+operation to inspect instead of directing a new launch.
 - Why: people and agents act on the code.
 - Test: `crates/cli/src/fabric.rs::upgrade_and_peer_version_refusals_match_on_both_edges`;
   `src/fabric.rs::peer_run_errors_stay_typed_through_cli_rendering`

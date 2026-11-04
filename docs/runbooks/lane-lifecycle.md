@@ -119,6 +119,10 @@ writer custody is free. Dirty trees, held locks and observed live writers still 
 `--base` is supplied for a branch that already exists, Provenant accepts the branch only when
 it already contains that base (reusing its existing worktree or creating one); otherwise the refusal
 names the branch head and the base, and says to omit `--base` to reuse it.
+If a linked checkout has no Provenant lane-owner record, the worktree list
+shows that fact separately from its observed writer state. It may have been
+created outside Provenant. Inspect custody and use `--worktree <path>` to select
+the checkout explicitly; an unknown writer remains unknown until checked.
 
 A refusal that says repository authority could not be revalidated includes the
 underlying repository error and its reason. Inspect that reason and the

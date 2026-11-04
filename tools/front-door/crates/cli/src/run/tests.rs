@@ -1072,17 +1072,23 @@ fn host_delivery_limit_keeps_its_text_as_typed_io_detail() {
         });
         assert_eq!(failure.message, text);
         assert_eq!(failure.kind, ErrorKind::Io);
-        let detail = failure.detail.expect("typed detail");
-        assert_eq!(detail.code(), "io");
-        assert_eq!(detail.to_string(), text);
+        let detail = failure.projection.expect("typed detail");
+        assert!(matches!(
+            detail.fact,
+            Some(provenant_records::diagnostic::DiagnosticFact::DeliveryLimit(_))
+        ));
+        assert_eq!(detail.code, "IO");
+        assert_eq!(detail.detail.as_deref(), Some(text));
     }
     let failure = super::Fail::from(provenant_run::RunError::Delivery(
         provenant_records::run::WriterDeliveryStage::Prepare,
     ));
-    assert_eq!(
-        failure.detail.expect("stage detail").to_string(),
-        failure.message
-    );
+    let detail = failure.projection.expect("stage detail");
+    assert!(matches!(
+        detail.fact,
+        Some(provenant_records::diagnostic::DiagnosticFact::DeliveryStage(_))
+    ));
+    assert_eq!(detail.detail.as_deref(), Some(failure.message.as_str()));
 }
 
 #[test]
@@ -1890,6 +1896,47 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
         .ok_or("PR destination")?;
     check_delivery_branch(&project, &pr.branch).map_err(|error| error.message)?;
     assert!(pr.open_pr);
+    let native_path = root.join("native checkout");
+    run_git(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "native-branch",
+            native_path.to_str().ok_or("path")?,
+            "HEAD",
+        ],
+    )?;
+    let refused = super::own_worktree(
+        &super::OwnedWorktree {
+            branch: "native-branch".into(),
+            host,
+            created_at: WallTime::from_micros(2)?,
+        },
+        Some("HEAD"),
+        &OperationId::parse("native-branch-refusal")?,
+        &edge,
+        &Unknown,
+        |_| false,
+        &mut None,
+        &clock,
+        &cancel,
+    )
+    .unwrap_err();
+    let failure: super::Fail = refused.into();
+    let action = failure
+        .projection
+        .as_ref()
+        .and_then(|value| value.next.as_deref())
+        .ok_or("missing next action")?;
+    assert!(
+        action.contains(&format!("--worktree '{}'", native_path.display())),
+        "{action}"
+    );
+    let writer = run::resolve_writer(roots.state.as_path(), &project, &native_path)?;
+    assert_eq!(writer.worktree, native_path);
     for origin in [
         None,
         Some(WorktreeOrigin::Lane),
@@ -6212,4 +6259,33 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
         )??;
     }
     Ok(())
+}
+
+#[test]
+fn projected_cli_error_omits_unsafe_source_and_keeps_bounded_fields() {
+    let failure = super::Fail::from(provenant_run::RunError::Io(std::io::Error::other(
+        "TOKEN_SENTINEL\u{1b}",
+    )));
+    let reply = super::reply("run", Err(failure));
+    let wire = serde_json::to_value(&reply.result).unwrap();
+    assert_eq!(wire["error"]["code"], "IO");
+    assert_eq!(wire["error"]["category"], "error");
+    assert!(wire["error"].get("detail").is_none());
+    assert!(!wire.to_string().contains("TOKEN_SENTINEL"));
+    let mut rendered = Vec::new();
+    crate::render::render(
+        &reply.result,
+        crate::render::RenderMode::Human {
+            text: "",
+            summary: None,
+            read_only: false,
+        },
+        &mut rendered,
+    )
+    .unwrap();
+    assert!(
+        !String::from_utf8(rendered)
+            .unwrap()
+            .contains("TOKEN_SENTINEL")
+    );
 }

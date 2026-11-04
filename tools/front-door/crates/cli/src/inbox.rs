@@ -1208,6 +1208,7 @@ pub fn run(
                 Some(InboxResult::Control { receipt }),
             );
             result.error = Some(CommandError {
+            diagnostic: None,
                 code: provenant_records::control::CONTROL_UNSUPPORTED.into(),
                 message,
                 cause: None,
@@ -1223,6 +1224,7 @@ pub fn run(
             let (status, code) = error.outcome_code();
             let mut result = CommandResult::new(path, status, None);
             result.error = Some(CommandError {
+            diagnostic: None,
                 code: code.into(),
                 message: error.to_string(),
                 cause: match &error { Error::NoProject(cause) => Some(cause.clone()), _ => None },

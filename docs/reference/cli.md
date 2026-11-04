@@ -5056,6 +5056,9 @@ which may be reworded.
 | `TIMEOUT` | The wait budget expired. |
 | `PEER` | The peer host returned an error. |
 | `WRITER_SCOPE` | The writer worktree scope was refused. |
+| `WRITER_BUSY` | The writer or its lock is held by another operation. |
+| `WRITER_UNKNOWN` | Writer custody could not be determined. |
+| `CREDENTIAL_ROOT` | A requested grant overlaps a credential root. |
 | `WRITER_PROJECT_MISMATCH` | The writer worktree belongs to a different project than the selected one. |
 | `CONFINEMENT` | Confinement refused the requested access. |
 | `DISK_FLOOR` | Free disk space is below gc.free_floor; run `provenant gc --apply`. |

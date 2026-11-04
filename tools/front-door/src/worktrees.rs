@@ -323,6 +323,7 @@ const GC_REPAIR: &str =
 fn gc_failure<'a>(data: &'a GcData, message: &str, detailed: bool) -> CommandResult<GcOutput<'a>> {
     let mut result = CommandResult::new("gc", Outcome::Error, gc_result_data(data, detailed));
     result.error = Some(provenant_records::CommandError {
+        diagnostic: None,
         code: "GC".into(),
         message: format!("{message}\n{}{GC_REPAIR}", gc_data_summary(data)),
         cause: None,
@@ -1404,6 +1405,7 @@ mod human_tests {
             head: GitOid::parse(&"4a".repeat(20))?,
             dirty: worktrees::WorktreeCondition::Dirty,
             writer: worktrees::WriterState::Live,
+            owner: worktrees::OwnerStatus::Unknown,
         })
     }
 
@@ -1422,7 +1424,7 @@ mod human_tests {
         assert_eq!(
             rendered("/Users/alice/Repos/example-app")?,
             format!(
-                "branch=refs/heads/master dirty=dirty head={head} \
+                "branch=refs/heads/master dirty=dirty head={head} owner=unknown \
                  path=/Users/alice/Repos/example-app writer=live\n"
             )
         );
@@ -1443,6 +1445,24 @@ mod human_tests {
         let value = serde_json::to_value(info("/Users/alice/app")?)?;
         assert_eq!(value["path"]["kind"], "path");
         assert_eq!(value["path"]["relative"]["path"], "Users/alice/app");
+        Ok(())
+    }
+
+    #[test]
+    fn worktree_list_distinguishes_unowned_from_uncertain_custody() -> Check {
+        let mut tree = info("/repo/native checkout")?;
+        tree.owner = worktrees::OwnerStatus::Unowned;
+        tree.writer = worktrees::WriterState::Unknown;
+        let value = serde_json::to_value(&tree)?;
+        assert_eq!(value["owner"], "unowned");
+        assert_eq!(value["writer"], "unknown");
+        assert!(value["next"].as_str().unwrap().contains("--worktree"));
+        assert!(
+            human(serde_json::to_value(Data::Listed(vec![tree.clone()]))?).contains("--worktree")
+        );
+        tree.owner = worktrees::OwnerStatus::Unknown;
+        assert!(serde_json::to_value(&tree)?.get("next").is_none());
+        assert_eq!(tree.writer, worktrees::WriterState::Unknown);
         Ok(())
     }
 }
