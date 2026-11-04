@@ -226,7 +226,8 @@ fn run_inner(
     let integration: Integration =
         serde_json::from_value(policy.fields["integration"].value.clone())?;
     let explicit_batch = options.batch || options.shadow || options.numbers.len() > 1;
-    let use_batch = explicit_batch;
+    let use_batch = explicit_batch
+        || (integration == Integration::Batch && options.head.is_none() && options.wait.is_none());
     if integration == Integration::Single && explicit_batch {
         return Err("single integration accepts one pull request without batch or shadow".into());
     }
