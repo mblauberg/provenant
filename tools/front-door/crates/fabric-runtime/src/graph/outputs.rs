@@ -745,7 +745,7 @@ pub(super) fn render_files(
                 .iter()
                 .any(|request| request.label == *label && request.finding_prefix.is_some())
         {
-            let source = serde_json::json!({"label": label, "path": path});
+            let source = serde_json::json!({"label": label, "path": path.to_string_lossy()});
             text.push_str(&format!(
                 "composite findings truncated: full member result: {}\n",
                 source.to_string().replace('<', "\\u003c")
