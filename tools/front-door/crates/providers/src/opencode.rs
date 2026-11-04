@@ -288,7 +288,12 @@ fn prepare(
         // and installs it there when absent. The lane sets XDG_CACHE_HOME to
         // its private state, whose grant already covers the read, so grant
         // exactly that binary for execution, alongside system grep. No shell is enabled.
-        tool_exec_roots.push(exact(private.join("cache/opencode/bin/rg")));
+        let rg = private.join("cache/opencode/bin/rg");
+        // Seatbelt resolves Homebrew's install-name symlinks to these files.
+        // Canonical literals also satisfy the held-parent checks, which reject
+        // symlink grants, without granting a library directory.
+        runtime_reads.extend(crate::dylib::linked_libraries(&rg).into_iter().map(exact));
+        tool_exec_roots.push(exact(rg));
         tool_exec_roots.push(exact("/usr/bin/grep"));
     }
     env.extend([
@@ -1157,6 +1162,75 @@ mod tests {
         assert!(profile.contains("(allow file-read* (subpath \"/fixture/provider-state\"))"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn cached_search_library_closure_is_read_only_and_literal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::symlink;
+        use std::path::Path;
+
+        fn image(path: &Path, dependency: Option<&Path>) -> std::io::Result<()> {
+            let mut bytes = vec![0; 32];
+            bytes[..4].copy_from_slice(&0xfeed_facf_u32.to_le_bytes());
+            if let Some(dependency) = dependency {
+                let name = dependency.to_str().unwrap().as_bytes();
+                bytes[16..20].copy_from_slice(&1_u32.to_le_bytes());
+                let size = (24 + name.len() + 1).next_multiple_of(8);
+                bytes.extend(0xc_u32.to_le_bytes());
+                bytes.extend((size as u32).to_le_bytes());
+                bytes.extend(24_u32.to_le_bytes());
+                bytes.resize(56, 0);
+                bytes.extend(name);
+                bytes.resize(32 + size, 0);
+            }
+            std::fs::write(path, bytes)
+        }
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let lib = root.join("cellar/lib");
+        std::fs::create_dir_all(&lib)?;
+        symlink("cellar", root.join("opt"))?;
+        let first = root.join("opt/lib/first.dylib");
+        let second = lib.join("second.dylib");
+        image(&lib.join("first.dylib"), Some(&second))?;
+        image(&second, None)?;
+        image(&lib.join("unrelated.dylib"), None)?;
+        let cached = root.join("state/cache/opencode/bin/rg");
+        std::fs::create_dir_all(cached.parent().unwrap())?;
+        let plan = crate::tests::read_only_plan(root.to_str().unwrap(), None);
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        let input = crate::tests::fixture_input(&route, &plan, &prompt, &root, None);
+        let render = || -> Result<String, Box<dyn std::error::Error>> {
+            let spec = prepare(
+                &input,
+                Access::ReadOnly,
+                Session::Fresh,
+                OpenCode.stream(None)?,
+            )?;
+            Ok(provenant_confinement::permissions::snapshot::render(
+                plan.permissions(),
+                &spec.profile,
+                input.home,
+            )?)
+        };
+        let before = render()?;
+        image(&cached, Some(&first))?;
+        let after = render()?;
+        let added: Vec<_> = after
+            .lines()
+            .filter(|line| !before.lines().any(|old| old == *line))
+            .collect();
+        for path in [&lib.join("first.dylib"), &second] {
+            let rule = format!("(allow file-read* (literal \"{}\"))", path.display());
+            assert!(added.contains(&rule.as_str()), "missing {rule}: {added:?}");
+        }
+        assert_eq!(added.len(), 2, "unexpected grants: {added:?}");
+        assert!(!after.contains("(allow process-exec (subpath"));
+        Ok(())
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     #[allow(clippy::disallowed_methods)]
@@ -1497,6 +1571,11 @@ mod tests {
             fs::create_dir(project_parent.join(name)).unwrap();
             fs::set_permissions(project_parent.join(name), fs::Permissions::from_mode(0o700))
                 .unwrap();
+        }
+        let cached = project_parent.join("state/cache/opencode/bin/rg");
+        if access == Access::ReadOnly && std::path::Path::new("/opt/homebrew/bin/rg").is_file() {
+            fs::create_dir_all(cached.parent().unwrap()).unwrap();
+            fs::copy("/opt/homebrew/bin/rg", &cached).unwrap();
         }
         let plan = crate::tests::read_only_plan(project_parent.to_str().unwrap(), None);
         let route = crate::tests::route("opencode", "fixture-model");
