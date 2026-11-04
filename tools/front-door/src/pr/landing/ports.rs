@@ -24,10 +24,18 @@ pub struct Approval {
 }
 pub trait Forge {
     fn pull_request(&mut self, number: u64) -> Result<PullRequestInfo, LandingError>;
+    fn repository_identity(&mut self) -> Result<String, LandingError>;
     fn target_branch(&mut self) -> Result<String, LandingError>;
     fn head(&mut self, number: u64) -> Result<String, LandingError>;
     fn approvals(&mut self, number: u64, head: &str) -> Result<Vec<Approval>, LandingError>;
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError>;
+    fn checks_with_timeout(
+        &mut self,
+        commit: &str,
+        _timeout: std::time::Duration,
+    ) -> Result<Vec<GateEvidence>, LandingError> {
+        self.checks(commit)
+    }
     fn merge(
         &mut self,
         number: u64,
@@ -39,6 +47,14 @@ pub trait Forge {
     /// Whether this adapter can open revert-forward pull requests.
     fn supports_revert_forward(&self) -> bool {
         false
+    }
+    fn find_revert(
+        &mut self,
+        _number: u64,
+        _branch: &str,
+        _target: &str,
+    ) -> Result<Option<u64>, LandingError> {
+        Ok(None)
     }
     /// Open a pull request reverting a landed pull request's commits; returns its number.
     fn open_revert(
@@ -58,8 +74,6 @@ pub enum MergeTree {
     Conflict,
 }
 pub trait Repo {
-    /// Stable opaque identity for scoping recovery records to a repository.
-    fn repository_identity(&mut self, target: &str) -> Result<String, LandingError>;
     fn fetch_target(&mut self, branch: &str) -> Result<String, LandingError>;
     /// Fetch without changing any persistent reference, as required in shadow mode.
     fn fetch_target_untracked(&mut self, _branch: &str) -> Result<String, LandingError> {

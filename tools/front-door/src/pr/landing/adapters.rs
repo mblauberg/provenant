@@ -61,25 +61,47 @@ fn object_id(value: &str) -> Result<&str, LandingError> {
     }
 }
 
+fn reconcile_revert_creation(
+    result: Result<Vec<u8>, LandingError>,
+    lookup: impl FnOnce() -> Result<Option<u64>, LandingError>,
+) -> Result<u64, LandingError> {
+    let parsed = result.and_then(|bytes| {
+        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+            LandingError::Failed(format!("invalid revert pull request response: {e}"))
+        })?;
+        value["number"].as_u64().ok_or_else(|| {
+            LandingError::Failed("revert pull request response has no number".into())
+        })
+    });
+    match parsed {
+        Ok(number) => Ok(number),
+        Err(error) => lookup()?.ok_or(error),
+    }
+}
+
 // ----- Forge -------------------------------------------------------------
 
 /// GitHub through the `gh` REST edge, with the shared pacing and rate-limit retry.
 pub struct GhForge {
     project: PathBuf,
     budget: Duration,
+    deadline: Option<std::time::Instant>,
 }
 impl GhForge {
     pub fn new(project: &Path) -> Self {
         Self {
             project: project.to_owned(),
             budget: Duration::from_secs(120),
+            deadline: None,
         }
     }
     #[allow(clippy::disallowed_methods)]
     fn reader(&self) -> wait::Reader<'_> {
         wait::Reader {
             project: &self.project,
-            deadline: std::time::Instant::now() + self.budget,
+            deadline: self
+                .deadline
+                .unwrap_or_else(|| std::time::Instant::now() + self.budget),
             retry_command: "provenant land".into(),
         }
     }
@@ -188,6 +210,31 @@ fn encode_branch(branch: &str) -> String {
 }
 
 impl Forge for GhForge {
+    fn repository_identity(&mut self) -> Result<String, LandingError> {
+        use sha2::{Digest, Sha256};
+        let repository = self.json("repos/{owner}/{repo}")?;
+        let url = repository["html_url"]
+            .as_str()
+            .ok_or_else(|| LandingError::Failed("repository has no canonical URL".into()))?;
+        let name = repository["full_name"]
+            .as_str()
+            .ok_or_else(|| LandingError::Failed("repository has no canonical name".into()))?;
+        let host = url
+            .split('/')
+            .nth(2)
+            .filter(|host| !host.is_empty())
+            .ok_or_else(|| LandingError::Failed("repository has invalid canonical URL".into()))?;
+        let identity = format!(
+            "{}/{}",
+            host.to_ascii_lowercase(),
+            name.to_ascii_lowercase()
+        );
+        Ok(Sha256::digest(identity.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect())
+    }
+
     fn pull_request(&mut self, number: u64) -> Result<PullRequestInfo, LandingError> {
         let pull =
             rest_pull(&|argv| self.reader().read(argv), &number.to_string()).map_err(failed)?;
@@ -286,6 +333,17 @@ impl Forge for GhForge {
             duration_seconds: None,
         }])
     }
+    #[allow(clippy::disallowed_methods)]
+    fn checks_with_timeout(
+        &mut self,
+        commit: &str,
+        timeout: Duration,
+    ) -> Result<Vec<GateEvidence>, LandingError> {
+        self.deadline = Some(std::time::Instant::now() + timeout);
+        let result = self.checks(commit);
+        self.deadline = None;
+        result
+    }
     fn merge(
         &mut self,
         number: u64,
@@ -329,6 +387,38 @@ impl Forge for GhForge {
     fn supports_revert_forward(&self) -> bool {
         true
     }
+    fn find_revert(
+        &mut self,
+        number: u64,
+        branch: &str,
+        target: &str,
+    ) -> Result<Option<u64>, LandingError> {
+        let title = format!("Revert pull request #{number}");
+        let body = format!("Reverts pull request #{number} after post-merge check failure:");
+        let repository = self.json("repos/{owner}/{repo}")?;
+        let owner = repository["owner"]["login"]
+            .as_str()
+            .ok_or_else(|| LandingError::Failed("repository has no owner".into()))?;
+        let endpoint = format!(
+            "repos/{{owner}}/{{repo}}/pulls?state=open&head={}:{}&base={}&per_page=100",
+            encode_branch(owner),
+            encode_branch(branch),
+            encode_branch(target)
+        );
+        let pulls = self.pages(&endpoint)?;
+        Ok(pulls
+            .iter()
+            .find(|pr| {
+                pr["head"]["ref"].as_str() == Some(branch)
+                    && pr["base"]["ref"].as_str() == Some(target)
+                    && pr["head"]["repo"]["full_name"] == repository["full_name"]
+                    && pr["title"].as_str() == Some(&title)
+                    && pr["body"]
+                        .as_str()
+                        .is_some_and(|value| value.starts_with(&body))
+            })
+            .and_then(|pr| pr["number"].as_u64()))
+    }
     fn open_revert(
         &mut self,
         number: u64,
@@ -339,7 +429,12 @@ impl Forge for GhForge {
         let title = format!("Revert pull request #{number}");
         let body =
             format!("Reverts pull request #{number} after post-merge check failure: {checks}.");
-        let bytes = self.get(&[
+        if let Some(existing) = self.find_revert(number, branch, target)? {
+            return Ok(existing);
+        }
+        let args = [
+            "gh",
+            "api",
             "repos/{owner}/{repo}/pulls",
             "--method",
             "POST",
@@ -351,13 +446,15 @@ impl Forge for GhForge {
             &format!("head={branch}"),
             "-f",
             &format!("base={target}"),
-        ])?;
-        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
-            LandingError::Failed(format!("invalid revert pull request response: {e}"))
-        })?;
-        value["number"].as_u64().ok_or_else(|| {
-            LandingError::Failed("revert pull request response has no number".into())
-        })
+        ];
+        let result = execute_with(&self.project, &args, self.budget, false, None);
+        let response = match result {
+            Ok(output) if output.termination == Termination::Exit(0) => Ok(output.stdout.bytes),
+            other => Err(LandingError::Failed(format!(
+                "revert pull request creation failed: {other:?}"
+            ))),
+        };
+        reconcile_revert_creation(response, || self.find_revert(number, branch, target))
     }
     fn labels(&mut self, number: u64) -> Result<Vec<String>, LandingError> {
         Ok(self
@@ -416,8 +513,15 @@ impl GitRepo {
             return Ok(());
         }
         let remote = self.remote("")?;
-        self.ok(&["fetch", "--no-tags", "--quiet", &remote, commit])
-            .map(|_| ())
+        self.ok(&[
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "--quiet",
+            &remote,
+            commit,
+        ])
+        .map(|_| ())
     }
     fn branch_ref(name: &str) -> Result<String, LandingError> {
         if !plain_ref(name) || name.starts_with("refs/") {
@@ -470,27 +574,29 @@ impl GitRepo {
 }
 
 impl Repo for GitRepo {
-    fn repository_identity(&mut self, target: &str) -> Result<String, LandingError> {
-        use sha2::{Digest, Sha256};
-        let remote = self.remote(target)?;
-        let url = self.ok(&["remote", "get-url", &remote])?;
-        Ok(Sha256::digest(url.as_bytes())
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect())
-    }
     fn fetch_target(&mut self, branch: &str) -> Result<String, LandingError> {
         let full = Self::branch_ref(branch)?;
         let remote = self.remote(branch)?;
-        self.ok(&["fetch", "--no-tags", "--quiet", "--refmap=", &remote, &full])?;
-        let peeled = "FETCH_HEAD^{commit}".to_owned();
-        self.ok(&["rev-parse", "--verify", &peeled])
+        let output = self.ok(&["ls-remote", "--refs", &remote, &full])?;
+        let (commit, reference) = output
+            .split_once('\t')
+            .ok_or_else(|| LandingError::Failed(format!("target ref not found: {full}")))?;
+        if reference != full {
+            return Err(LandingError::Failed("unexpected target ref".into()));
+        }
+        let commit = object_id(commit)?.to_owned();
+        self.ok(&[
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "--quiet",
+            &remote,
+            &commit,
+        ])?;
+        Ok(commit)
     }
     fn fetch_target_untracked(&mut self, branch: &str) -> Result<String, LandingError> {
-        let full = Self::branch_ref(branch)?;
-        let remote = self.remote(branch)?;
-        self.ok(&["fetch", "--no-tags", "--quiet", "--refmap=", &remote, &full])?;
-        self.ok(&["rev-parse", "--verify", "FETCH_HEAD^{commit}"])
+        self.fetch_target(branch)
     }
     fn revert_commit(&mut self, target: &str, landed: &str) -> Result<String, LandingError> {
         self.ensure(target)?;
@@ -925,6 +1031,20 @@ mod tests {
     }
 
     #[test]
+    fn lost_revert_creation_response_adopts_matching_pull_request() {
+        let mut lookups = 0;
+        let result = reconcile_revert_creation(Err(LandingError::PublicationUnknown), || {
+            lookups += 1;
+            Ok(Some(42))
+        });
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(lookups, 1);
+        assert!(
+            reconcile_revert_creation(Err(LandingError::PublicationUnknown), || Ok(None)).is_err()
+        );
+    }
+
+    #[test]
     fn revert_commit_uses_current_target_and_publishes_only_new_branch() {
         let mut rig = rig();
         git(&rig.work, &["config", "user.name", "test"]);
@@ -982,7 +1102,13 @@ mod tests {
         git(&other, &["config", "commit.gpgsign", "false"]);
         let moved = commit_file(&other, "new", "new\n");
         git(&other, &["push", "-q", "origin", "main"]);
+        let sentinel = format!("{base}\t\tbranch 'other' of elsewhere\n");
+        std::fs::write(rig.work.join(".git/FETCH_HEAD"), &sentinel).unwrap();
         assert_eq!(rig.repo.fetch_target_untracked("main").unwrap(), moved);
+        assert_eq!(
+            std::fs::read_to_string(rig.work.join(".git/FETCH_HEAD")).unwrap(),
+            sentinel
+        );
         assert_eq!(
             git(
                 &rig.work,
@@ -1008,8 +1134,6 @@ mod tests {
             &rig.work,
             &["remote", "set-url", "origin", "missing-origin"],
         );
-        let identity = rig.repo.repository_identity("main").unwrap();
-        assert_eq!(identity.len(), 64);
         assert_eq!(
             rig.repo.fetch_target("main").unwrap(),
             git(&rig.work, &["rev-parse", "HEAD"])

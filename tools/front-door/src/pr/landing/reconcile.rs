@@ -27,22 +27,45 @@ pub fn recover_pending(
         let unknown = || LandingError::PublicationUnknownAt {
             marker: marker.clone(),
         };
-        let tip = if shadow {
+        let mut tip = if shadow {
             repo.fetch_target_untracked(target)
         } else {
             repo.fetch_target(target)
         }
         .map_err(|_| unknown())?;
+        if !shadow
+            && attempt.publish.mode == PublishMode::FastForward
+            && tip == attempt.candidate.base
+        {
+            // The identical lease is safe even if the original push is still running.
+            let _ = repo.push_ref(
+                target,
+                &attempt.candidate.commit,
+                Some(&attempt.candidate.base),
+            );
+            tip = repo.fetch_target(target).map_err(|_| unknown())?;
+        }
         let exact = repo
             .is_ancestor(&attempt.candidate.commit, &tip)
             .map_err(|_| unknown())?;
+        let fast_unpublished = attempt.publish.mode == PublishMode::FastForward
+            && !exact
+            && tip != attempt.candidate.base;
         let mut mapping = BTreeMap::new();
         let mut outcomes = BTreeMap::new();
         let mut landed_prs = Vec::new();
         let mut unproven = false;
-        for step in &attempt.candidate.steps {
+        for (index, step) in attempt.candidate.steps.iter().enumerate() {
             let landed = if exact {
                 Some(step.commit.clone())
+            } else if attempt.publish.mode == PublishMode::FastForward {
+                if fast_unpublished {
+                    None
+                } else {
+                    unproven = true;
+                    outcomes.insert(step.pr.number, Outcome::PendingUnknown);
+                    continue;
+                }
             } else {
                 let pr = match forge.pull_request(step.pr.number) {
                     Ok(pr) => pr,
@@ -59,7 +82,36 @@ pub fn recover_pending(
                     {
                         Some(commit)
                     }
-                    (PullRequestState::Open | PullRequestState::Closed, _) => None,
+                    (PullRequestState::Closed, _) => None,
+                    (PullRequestState::Open, _) if pr.head != step.pr.head => None,
+                    (PullRequestState::Open, _) => {
+                        // Retry the same pinned operation; a refusal or another lost response
+                        // cannot prove the original request has stopped processing.
+                        let expected = landed_prs
+                            .last()
+                            .and_then(|pr: &EligiblePr| mapping.get(&pr.head))
+                            .unwrap_or(&attempt.candidate.base);
+                        let approved = pr.base_branch == step.pr.base_branch
+                            && forge.approvals(step.pr.number, &step.pr.head).is_ok_and(
+                                |approvals| {
+                                    approvals
+                                        .iter()
+                                        .any(|approval| approval.reference == step.pr.approval)
+                                },
+                            );
+                        if !shadow
+                            && !unproven
+                            && approved
+                            && landed_prs.len() == index
+                            && &tip == expected
+                        {
+                            let method = attempt.policy.settings().map_err(|_| unknown())?.method;
+                            let _ = forge.merge(step.pr.number, &step.pr.head, method);
+                        }
+                        unproven = true;
+                        outcomes.insert(step.pr.number, Outcome::PendingUnknown);
+                        continue;
+                    }
                     _ => {
                         unproven = true;
                         outcomes.insert(step.pr.number, Outcome::PendingUnknown);

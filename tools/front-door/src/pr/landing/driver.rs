@@ -171,7 +171,7 @@ fn run_inner(
                 .into(),
         );
     }
-    let repository = repo.repository_identity(request.target)?;
+    let repository = forge.repository_identity()?;
     recover(forge, repo, runner, alarms, &request, &repository, report)?;
     let limit = usize::try_from(request.settings.batch_size)
         .map_err(|_| LandingError::Failed("batch size exceeds platform limit".into()))?;
@@ -739,7 +739,7 @@ mod tests {
     }
 
     #[test]
-    fn ordered_target_move_recovers_prefix_and_rebuilds_rest()
+    fn ordered_target_move_keeps_unresolved_open_pr_pending()
     -> Result<(), Box<dyn std::error::Error>> {
         let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(2);
         forge.direct_push = false;
@@ -765,7 +765,7 @@ mod tests {
         ]
         .into();
         let state = tempfile::tempdir()?;
-        let report = exercise(
+        let result = exercise(
             &mut forge,
             &mut repo,
             &mut gate,
@@ -774,21 +774,19 @@ mod tests {
             &[1, 2],
             false,
             state.path(),
-        )?;
-        assert_eq!(report.outcomes[&1], Outcome::Landed);
-        assert_eq!(report.outcomes[&2], Outcome::Landed);
-        assert_eq!(gate.observed.len(), 2);
+        );
+        assert!(matches!(
+            result,
+            Err(LandingError::PublicationUnknownAt { .. })
+        ));
+        assert_eq!(gate.observed.len(), 1);
         assert_eq!(
-            report.receipts[0]
-                .pull_requests
-                .iter()
-                .map(|pr| pr.number)
-                .collect::<Vec<_>>(),
+            forge.merges.iter().map(|merge| merge.0).collect::<Vec<_>>(),
             vec![1]
         );
         assert_eq!(
-            forge.merges.iter().map(|merge| merge.0).collect::<Vec<_>>(),
-            vec![1, 2]
+            receipt::pending(state.path(), "fake-repository", "main")?.len(),
+            1
         );
         Ok(())
     }
@@ -1101,7 +1099,7 @@ mod tests {
                 false,
                 state.path()
             ),
-            Err(LandingError::Refused(_))
+            Err(LandingError::PublicationUnknownAt { .. })
         ));
         assert_eq!(gate.observed.len(), 1);
         assert!(forge.merges.is_empty());
@@ -1197,8 +1195,7 @@ mod tests {
     }
 
     #[test]
-    fn definite_refusal_clears_marker_and_allows_next_run() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn refusal_retains_marker_until_retry_lands() -> Result<(), Box<dyn std::error::Error>> {
         let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
         repo.refuse_target_push = true;
         let state = tempfile::tempdir()?;
@@ -1213,9 +1210,12 @@ mod tests {
                 false,
                 state.path()
             ),
-            Err(LandingError::Refused(_))
+            Err(LandingError::PublicationUnknownAt { .. })
         ));
-        assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
+        assert_eq!(
+            receipt::pending(state.path(), "fake-repository", "main")?.len(),
+            1
+        );
         repo.refuse_target_push = false;
         let report = exercise(
             &mut forge,
@@ -1228,6 +1228,82 @@ mod tests {
             state.path(),
         )?;
         assert_eq!(report.outcomes[&1], Outcome::Landed);
+        Ok(())
+    }
+    #[test]
+    fn in_flight_publication_keeps_pending_marker() -> Result<(), Box<dyn std::error::Error>> {
+        for mode in [PublishMode::FastForward, PublishMode::RestOrdered] {
+            let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
+            let policy = LandPolicy::resolve(
+                &settings,
+                &BTreeMap::new(),
+                None,
+                None,
+                &LandOverride::default(),
+            )?;
+            let state = tempfile::tempdir()?;
+            let base = repo.target.clone();
+            let pr = &forge.pull_requests[&1];
+            let candidate = Candidate {
+                base: base.clone(),
+                commit: "candidate".into(),
+                tree: "tree".into(),
+                ref_name: "land/test".into(),
+                steps: vec![CandidateStep {
+                    pr: EligiblePr {
+                        number: 1,
+                        head: pr.head.clone(),
+                        approval: "approval-1".into(),
+                        base_branch: "main".into(),
+                    },
+                    commit: "candidate".into(),
+                    tree: "tree".into(),
+                }],
+            };
+            repo.refs
+                .insert(candidate.ref_name.clone(), candidate.commit.clone());
+            repo.refuse_target_push = true;
+            repo.target_ref = "main".into();
+            forge.refuse_merge = Some(1);
+            receipt::record_pending(
+                state.path(),
+                &PendingAttempt {
+                    repository: "fake-repository".into(),
+                    target: "main".into(),
+                    candidate: candidate.clone(),
+                    policy,
+                    gate_definition: definition.clone(),
+                    gate_evidence: super::super::receipt::tests::evidence("candidate"),
+                    publish: PublishDecision {
+                        mode,
+                        reason: "test".into(),
+                    },
+                    cost: CostEstimate::Unknown {
+                        reason: "test".into(),
+                    },
+                },
+            )?;
+            let result = reconcile::recover_pending(
+                &mut forge,
+                &mut repo,
+                &mut gate,
+                &mut FakeAlarms::default(),
+                state.path(),
+                "fake-repository",
+                "main",
+                false,
+                &mut Vec::new(),
+            );
+            assert!(matches!(
+                result,
+                Err(LandingError::PublicationUnknownAt { .. })
+            ));
+            assert_eq!(
+                receipt::pending(state.path(), "fake-repository", "main")?.len(),
+                1
+            );
+            assert_eq!(repo.refs.get(&candidate.ref_name), Some(&candidate.commit));
+        }
         Ok(())
     }
     #[test]
@@ -1316,7 +1392,7 @@ mod tests {
     }
 
     #[test]
-    fn ordered_merge_excludes_head_changed_after_initial_revalidation()
+    fn ordered_merge_keeps_pending_if_forge_still_reports_original_head()
     -> Result<(), Box<dyn std::error::Error>> {
         let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
         forge.direct_push = false;
@@ -1324,7 +1400,7 @@ mod tests {
             .head_reads
             .insert(1, [format!("{:040x}", 1), "changed".into()].into());
         let state = tempfile::tempdir()?;
-        let report = exercise(
+        let result = exercise(
             &mut forge,
             &mut repo,
             &mut gate,
@@ -1333,10 +1409,17 @@ mod tests {
             &[1],
             false,
             state.path(),
-        )?;
-        assert_eq!(report.outcomes[&1], Outcome::Excluded);
-        assert!(forge.merges.is_empty());
-        assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
+        );
+        assert!(matches!(
+            result,
+            Err(LandingError::PublicationUnknownAt { .. })
+        ));
+        assert_eq!(forge.merges.len(), 1);
+        assert_eq!(forge.merges[0].1, format!("{:040x}", 1));
+        assert_eq!(
+            receipt::pending(state.path(), "fake-repository", "main")?.len(),
+            1
+        );
         Ok(())
     }
     #[test]
@@ -1495,7 +1578,7 @@ mod tests {
     }
 
     #[test]
-    fn ordered_refusal_preserves_landed_prefix_and_clears_pending()
+    fn ordered_refusal_preserves_landed_prefix_and_pending()
     -> Result<(), Box<dyn std::error::Error>> {
         let (mut forge, mut repo, mut gate, settings, definition) = fixture(2);
         forge.direct_push = false;
@@ -1530,15 +1613,15 @@ mod tests {
         let Err(LandingError::RunFailed { cause, report }) = result else {
             panic!("expected refusal with partial report")
         };
-        assert!(matches!(*cause, LandingError::Refused(_)));
+        assert!(matches!(*cause, LandingError::PublicationUnknownAt { .. }));
         let response = super::super::batch_response(*report, Some(*cause));
-        assert_eq!(response.status, provenant_records::Outcome::Refused);
+        assert_eq!(response.status, provenant_records::Outcome::Pending);
         assert_eq!(
             response.error.as_ref().map(|error| error.code.as_str()),
-            Some("LAND_REFUSED")
+            Some("LAND_PUBLICATION_UNKNOWN")
         );
         assert_eq!(response.data["outcomes"]["1"], "landed");
-        assert_eq!(response.data["outcomes"]["2"], "excluded");
+        assert_eq!(response.data["outcomes"]["2"], "pending_unknown");
         assert!(
             response.data["receipts"]
                 .as_array()
@@ -1555,7 +1638,10 @@ mod tests {
             .unwrap();
         assert_eq!(recovered["candidate_steps"].as_array().unwrap().len(), 1);
         assert_eq!(recovered["candidate_steps"][0]["pr"]["number"], 1);
-        assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
+        assert_eq!(
+            receipt::pending(state.path(), "fake-repository", "main")?.len(),
+            1
+        );
         let summary = std::fs::read_dir(state.path().join("landing/receipts"))?
             .map(|entry| entry.map(|e| e.path()))
             .collect::<Result<Vec<_>, _>>()?
@@ -1568,7 +1654,7 @@ mod tests {
             .ok_or("missing run summary")?;
         let summary: serde_json::Value = serde_json::from_slice(&std::fs::read(summary)?)?;
         assert_eq!(summary["outcomes"]["1"], "landed");
-        assert_eq!(summary["outcomes"]["2"], "excluded");
+        assert_eq!(summary["outcomes"]["2"], "pending_unknown");
         assert!(
             summary["receipts"]
                 .as_array()
