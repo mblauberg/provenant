@@ -4904,10 +4904,14 @@ fn dispatch_refuses_low_disk_writers() -> Result {
     assert_eq!(value["status"], "refused", "{value}");
     let message = value["error"]["message"].as_str().ok_or("message")?;
     assert!(
-        message.contains("available")
-            && message.contains("floor 18446744073709551615")
-            && message.contains("provenant gc"),
+        message.contains("available") && message.contains("floor 18446744073709551615"),
         "{message}"
+    );
+    assert!(
+        value["error"]["repair"]
+            .as_str()
+            .is_some_and(|repair| repair.contains("provenant gc")),
+        "{value}"
     );
     assert!(!rig.state.join("runs").exists());
     let reader = ok(
