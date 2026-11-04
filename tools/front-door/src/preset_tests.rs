@@ -775,7 +775,11 @@ fn fake_council_provider_process() {
                     text.push_str(&format!("DISPOSITION {proof}\n"));
                 }
                 if structured.len() < 32 {
-                    structured.push(json!({"id":qualified,"severity":"high","file":"a.rs","summary":"issue","status":"open","disposition":"rejected","reason":"evidence refutes it","verification":"falsified"}));
+                    let mut item = json!({"id":qualified,"severity":"high","file":"a.rs","summary":"issue","status":"open","disposition":"rejected","reason":"evidence refutes it","verification":"falsified"});
+                    if id == "verify" {
+                        item["propagates"] = json!(format!("lenses:{qualified}"));
+                    }
+                    structured.push(item);
                 }
             }
         }
@@ -792,6 +796,7 @@ fn fake_council_provider_process() {
 
 #[derive(Default)]
 struct PresetOwner {
+    council_findings: bool,
     /// Nodes whose result carries `VERDICT: FAIL`.
     failing: Vec<String>,
     many_findings: bool,
@@ -898,6 +903,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
             std::fs::read_to_string(output_path).unwrap()
         } else if self.failing.contains(&key.node_id) {
             "Blocked on the user.\nVERDICT: FAIL\n".into()
+        } else if self.council_findings && key.node_id == "verify" {
+            "```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"a.rs\",\"summary\":\"fixture finding\",\"status\":\"open\"}]}\n```\nVERDICT: PASS\n".into()
+        } else if self.council_findings && key.node_id == "synthesis" {
+            "```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"disposition\":\"rejected\",\"reason\":\"falsified\"}]}\n```\nVERDICT: PASS\n".into()
         } else {
             format!(
                 "Evidence checked for {}.\n```findings\n{{\"schema_version\":1,\"findings\":[]}}\n```\nVERDICT: PASS\n",
@@ -1091,7 +1100,36 @@ fn review_council_continues_when_lens_findings_exceed_the_cap() {
             .outputs
             .as_ref()
             .unwrap();
-        assert_eq!(output.findings.len(), 32, "{id}");
+        if id == "verify" {
+            assert_eq!(output.findings.len(), 32);
+        } else {
+            // The structured decisions cover 32 verifier findings. Of those, 28
+            // also appear in the capped lens export; settlement retains both copies.
+            // The overflow proof covers the remaining lens findings.
+            let lenses = run
+                .checkpoint
+                .nodes
+                .iter()
+                .find(|n| n.id == "lenses")
+                .unwrap();
+            let originals = &lenses.outputs.as_ref().unwrap().findings;
+            let verifier = run
+                .checkpoint
+                .nodes
+                .iter()
+                .find(|n| n.id == "verify")
+                .unwrap();
+            let copies = &verifier.outputs.as_ref().unwrap().findings;
+            assert_eq!(originals.len(), 32);
+            assert_eq!(copies.len(), 32);
+            assert_eq!(output.findings.len(), 60);
+            assert!(
+                output
+                    .findings
+                    .iter()
+                    .all(|f| f.disposition.as_deref() == Some("rejected"))
+            );
+        }
         let prompt = &owner.prompts.iter().find(|(node, _)| node == id).unwrap().1;
         assert!(
             prompt.contains("composite findings truncated"),
@@ -1262,10 +1300,25 @@ fn bundled_presets_complete_through_the_real_scheduler_and_replay() {
         let document = bundled_fixture(name);
         let config = provenant_fabric_runtime::config::GraphConfig::default();
         let limits = config.limits.clone();
-        let mut owner = PresetOwner::default();
+        let mut owner = PresetOwner {
+            council_findings: name == "review-council",
+            ..Default::default()
+        };
         let mut journal = PresetJournal::default();
         let run = advance_with_budget(&document, &mut owner, &mut journal, &limits, &config.budget)
             .unwrap_or_else(|error| panic!("{name}: {error}"));
+        if name == "review-council" {
+            let synthesis = run
+                .checkpoint
+                .nodes
+                .iter()
+                .find(|node| node.id == "synthesis")
+                .unwrap();
+            assert_eq!(
+                synthesis.outputs.as_ref().unwrap().findings[0].summary,
+                "fixture finding"
+            );
+        }
         assert_eq!(
             run.status,
             GraphStatus::Complete,
@@ -2812,6 +2865,14 @@ fn review_council_verifies_between_the_lenses_and_the_synthesis() {
         synthesis["depends_on"],
         json!(["verify", "lenses", "subject"])
     );
+    assert_eq!(
+        synthesis["inputs"],
+        json!([
+            {"node": "verify", "outputs": ["result", "findings"]},
+            {"node": "lenses", "outputs": ["result", "findings"]},
+            {"node": "subject", "outputs": ["findings"]}
+        ])
+    );
     assert!(
         verify["inputs"]
             .as_array()
@@ -3446,6 +3507,59 @@ fn substitutions_and_origins_travel_in_the_retained_graph_document() {
         serde_json::from_value(expanded.document.clone()).unwrap();
     let again = serde_json::to_value(&typed).unwrap();
     assert_eq!(again["provenance"], *provenance);
+}
+
+#[test]
+fn synthesis_selects_findings_from_implicit_and_explicit_dependencies() {
+    let mut layers = Layers::empty();
+    layers.insert("test", "mixed-dependencies", r#"
+stages = [
+  { id = "first", prompt = "First" },
+  { id = "second", prompt = "Second" },
+  { id = "synthesis", prompt = "Synthesise", depends_on = ["first"], dispositions = ["accepted", "rejected"] },
+]
+"#).unwrap();
+    let expanded = expand(&layers, "mixed-dependencies", "brief", &[]).unwrap();
+    let synthesis = node(&expanded.document, "synthesis");
+    assert_eq!(synthesis["depends_on"], json!(["second", "first"]));
+    assert_eq!(
+        synthesis["inputs"],
+        json!([
+            {"node": "second", "outputs": ["result", "findings"]},
+            {"node": "first", "outputs": ["result", "findings"]}
+        ])
+    );
+    layers.insert("test", "custom-inputs", r#"
+stages = [
+  { id = "first", prompt = "First" },
+  { id = "second", prompt = "Second" },
+  { id = "synthesis", prompt = "Synthesise", depends_on = ["first"], dispositions = ["accepted"], inputs = [{ node = "first", outputs = ["result", "findings"] }, { node = "second", outputs = ["result"] }] },
+]
+"#).unwrap();
+    let expanded = expand(&layers, "custom-inputs", "brief", &[]).unwrap();
+    assert_eq!(
+        node(&expanded.document, "synthesis")["inputs"],
+        json!([
+            {"node": "first", "outputs": ["result", "findings"]},
+            {"node": "second", "outputs": ["result", "findings"]}
+        ])
+    );
+
+    layers.insert("test", "missing-input", r#"
+stages = [
+  { id = "first", prompt = "First" },
+  { id = "second", prompt = "Second" },
+  { id = "synthesis", prompt = "Synthesise", depends_on = ["first"], dispositions = ["accepted"], inputs = [{ node = "first", outputs = ["result"] }] },
+]
+"#).unwrap();
+    let expanded = expand(&layers, "missing-input", "brief", &[]).unwrap();
+    assert_eq!(
+        node(&expanded.document, "synthesis")["inputs"],
+        json!([
+            {"node": "first", "outputs": ["result", "findings"]},
+            {"node": "second", "outputs": ["findings"]}
+        ])
+    );
 }
 
 #[test]

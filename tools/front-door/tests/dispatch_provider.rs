@@ -353,7 +353,11 @@ fn fixture() -> Result {
                             json!({"id":id,"disposition":status,"reason":"evidence refutes it"})
                         ));
                         if structured.len() < 32 {
-                            structured.push(json!({"id":id,"severity":"high","file":"a.rs","summary":"fixture finding","status":"open","verification":"falsified","disposition":"rejected","reason":"evidence refutes it"}));
+                            let mut finding = json!({"id":id,"severity":"high","file":"a.rs","summary":"fixture finding","status":"open","verification":"falsified","disposition":"rejected","reason":"evidence refutes it"});
+                            if prompt.contains("Verify the lens findings for:") {
+                                finding["propagates"] = json!(format!("lenses:{id}"));
+                            }
+                            structured.push(finding);
                         }
                         count += 1;
                     }
@@ -454,7 +458,7 @@ fn fixture() -> Result {
         .windows(2)
         .find(|pair| pair[0] == "-m")
         .map(|pair| pair[1].as_str());
-    if !prompt.contains("missing") {
+    if !prompt.contains("fixture missing rollout") {
         // Real rollouts record tool output. A printed credential must be
         // scrubbed from this transcript at settlement, not only from captures.
         let recorded = if prompt.contains("fixture printed credential") {
@@ -508,7 +512,21 @@ fn fixture() -> Result {
         }
         return Ok(());
     }
-    let answer = if prompt.contains("fixture partial stop") {
+    let answer = if prompt.contains("fixture council findings") {
+        let entries = if prompt.contains("Frame the immutable review subject for:") {
+            json!([])
+        } else if prompt.contains("Reconcile independent review findings") {
+            json!([{"id":"F1","disposition":"rejected","reason":"falsified"}])
+        } else if prompt.contains("Verify the lens findings for:") {
+            json!([{"id":"lenses--lens-correctness-spec:F1","severity":"high","file":"a.rs","summary":"fixture finding","status":"open","verification":"falsified","propagates":"lenses:lenses--lens-correctness-spec:F1"}])
+        } else {
+            json!([{"id":"F1","severity":"high","file":"a.rs","summary":"fixture finding","status":"open"}])
+        };
+        format!(
+            "```findings\n{}\n```\nVERDICT: PASS{DONE_FENCE}\n",
+            json!({"schema_version":1,"findings":entries})
+        )
+    } else if prompt.contains("fixture partial stop") {
         format!(
             "```handoff\n{}\n```",
             json!({"schema_version":2,"status":"stopped_early","note":"Fixture stopped partway.","remaining":["rest"],"decisions":[],"verify":[]})
@@ -1100,6 +1118,92 @@ fn capacity_settlement_resumes_the_same_session() -> Result {
     cleanup.disarm();
     Ok(())
 }
+fn review_council_resolves_identity_only_dispositions() -> Result {
+    if !graph_fixture_available().map_err(|e| format!("sandbox: {e}"))? {
+        return Ok(());
+    }
+    let rig = policy_codex_fixture().map_err(|e| format!("fixture: {e}"))?;
+    let cleanup = rig.process_cleanup();
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml")).map_err(|e| format!("config open: {e}"))?,
+        "\n[domains.routing.pools]\njunior=[{{model='codex/gpt-6-luna',effort='low'}}]\nsenior=[{{model='codex/gpt-6-luna',effort='low'}}]\nprincipal=[{{model='codex/gpt-6-luna',effort='low'}}]"
+    ).map_err(|e| format!("config write: {e}"))?;
+    let git = std::env::var_os("PROVENANT_GIT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/usr/bin/git"));
+    let commit = rig
+        .execute(
+            &git,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "Initial",
+            ],
+            None,
+        )
+        .map_err(|e| format!("git: {e}"))?;
+    assert_eq!(code(&commit), 0);
+    let brief = rig.root.join("council-brief.txt");
+    fs::write(&brief, "fixture council findings").map_err(|e| format!("brief: {e}"))?;
+    let started = rig
+        .command(&[
+            "run",
+            "--preset",
+            "review-council",
+            "--prompt-file",
+            brief.to_str().ok_or("brief")?,
+            "--set",
+            "parameters.review_shape=\"quick\"",
+            "--plan",
+            "off",
+            "--wait",
+            "1s",
+            "--json",
+        ])
+        .map_err(|e| format!("start: {e}"))?;
+    let started: Value = serde_json::from_slice(&started.stdout.bytes)?;
+    let id = started["data"]["graph"]["checkpoint"]["graph_id"]
+        .as_str()
+        .ok_or_else(|| format!("missing graph id: {started}"))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let output = rig
+            .command(&["fabric", "graph", "status", id, "--json"])
+            .map_err(|e| format!("status: {e}"))?;
+        let status: Value = serde_json::from_slice(&output.stdout.bytes)?;
+        if status["data"]["status"] == "complete" {
+            let nodes = status["data"]["checkpoint"]["nodes"]
+                .as_array()
+                .ok_or("nodes")?;
+            let synthesis = nodes
+                .iter()
+                .find(|node| node["id"] == "synthesis")
+                .ok_or("synthesis")?;
+            assert_eq!(synthesis["state"], "succeeded", "{status}");
+            assert_eq!(synthesis["outputs"]["verdict"], "VERDICT: PASS", "{status}");
+            assert_eq!(
+                synthesis["outputs"]["findings"][0]["summary"], "fixture finding",
+                "{status}"
+            );
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "council did not complete: {status}"
+        );
+        std::thread::park_timeout(std::time::Duration::from_millis(50));
+    }
+    cleanup.disarm();
+    Ok(())
+}
+
 fn review_fans_out_and_collects_fake_provider() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -1648,7 +1752,10 @@ fn printed_credentials_leave_no_plaintext_in_run_files() -> Result {
 }
 
 fn codex_dispatch_observes_rollout() -> Result {
-    for (index, prompt) in ["reply OK", "missing", "mismatch"].iter().enumerate() {
+    for (index, prompt) in ["reply OK", "fixture missing rollout", "mismatch"]
+        .iter()
+        .enumerate()
+    {
         let mut rig = TestRig::new()?;
         let cleanup = rig.process_cleanup();
         // The production read-only profile anchors the host Rust runtime roots.
@@ -4725,6 +4832,7 @@ fn main() -> ExitCode {
                 "interrupted_progress_recovers_on_another_account_in_the_same_worktree",
                 "capacity_settlement_resumes_the_same_session",
                 "fixture_guardian_exits_when_sigkilled_test_owner_dies",
+                "review_council_resolves_identity_only_dispositions",
                 "review_fans_out_and_collects_fake_provider",
                 "opencode_usage_limit_settlement_is_bounded",
                 "opencode_usage_limit_stops_hanging_provider",
@@ -4780,6 +4888,7 @@ fn main() -> ExitCode {
                     "interrupted_progress_recovers_on_another_account_in_the_same_worktree" => interrupted_progress_recovers_on_another_account_in_the_same_worktree(),
                     "capacity_settlement_resumes_the_same_session" => capacity_settlement_resumes_the_same_session(),
                     "fixture_guardian_exits_when_sigkilled_test_owner_dies" => fixture_guardian_exits_when_sigkilled_test_owner_dies(),
+                    "review_council_resolves_identity_only_dispositions" => review_council_resolves_identity_only_dispositions(),
                     "review_fans_out_and_collects_fake_provider" => review_fans_out_and_collects_fake_provider(),
                     "review_council_overcap_runs_through_fake_providers" => review_council_overcap_runs_through_fake_providers(),
                     "opencode_usage_limit_settlement_is_bounded" => {
