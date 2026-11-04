@@ -556,10 +556,98 @@ impl provenant_fabric_runtime::graph::GraphJournal for PresetJournal {
     }
 }
 
+/// The fake provider runs in a separate process and reads the files named in
+/// its brief, as a real provider must do when a composite export is truncated.
+#[test]
+fn fake_council_provider_process() {
+    let Some(request) = std::env::var_os("PROVENANT_TEST_COUNCIL_REQUEST") else {
+        return;
+    };
+    let request: Value = serde_json::from_slice(&std::fs::read(request).unwrap()).unwrap();
+    let id = request["id"].as_str().unwrap();
+    let prompt = request["prompt"].as_str().unwrap();
+    let text = if id.starts_with("lenses--") {
+        let findings: Vec<_> = (0..10).map(|i| json!({"id":format!("F{i}"),"severity":"high","file":"a.rs","summary":"issue","status":"open"})).collect();
+        format!(
+            "```findings\n{}\n```\nVERDICT: PASS\n",
+            json!({"schema_version":1,"findings":findings})
+        )
+    } else if ["verify", "synthesis"].contains(&id) {
+        assert!(prompt.contains("composite findings truncated:"));
+        let mut text = String::new();
+        let mut structured = Vec::new();
+        let mut omitted = false;
+        let mut changed = false;
+        for file in request["files"].as_array().unwrap() {
+            let lens = file["label"].as_str().unwrap();
+            let path = file["path"].as_str().unwrap();
+            let source = prompt
+                .lines()
+                .filter_map(|line| {
+                    line.strip_prefix("composite findings truncated: full member result: ")
+                        .and_then(|source| serde_json::from_str::<Value>(source).ok())
+                })
+                .find(|source| source["label"] == lens)
+                .unwrap();
+            let named_path = source["path"].as_str().unwrap();
+            assert_eq!(named_path, path);
+            let full = std::fs::read_to_string(named_path).unwrap();
+            let block = full
+                .split_once("```findings\n")
+                .unwrap()
+                .1
+                .split_once("```")
+                .unwrap()
+                .0;
+            let findings: Value = serde_json::from_str(block).unwrap();
+            for (index, finding) in findings["findings"].as_array().unwrap().iter().enumerate() {
+                let qualified = format!("{lens}:{}", finding["id"].as_str().unwrap());
+                text.push_str(&format!("{qualified}: rejected, evidence refutes it\n"));
+                if id == request["omit_stage"].as_str().unwrap_or("") && !omitted {
+                    omitted = true;
+                } else {
+                    let status = if id == "verify" {
+                        "falsified"
+                    } else if request["mismatch_proof"] == true && !changed {
+                        changed = true;
+                        "accepted"
+                    } else {
+                        "rejected"
+                    };
+                    let proof = if request["reference_proof"] == true {
+                        json!({"member":lens,"index":index,"disposition":status,"reason":"evidence refutes it"})
+                    } else {
+                        json!({"id":qualified,"disposition":status,"reason":"evidence refutes it"})
+                    };
+                    text.push_str(&format!("DISPOSITION {proof}\n"));
+                }
+                if structured.len() < 32 {
+                    structured.push(json!({"id":qualified,"severity":"high","file":"a.rs","summary":"issue","status":"open","disposition":"rejected","reason":"evidence refutes it","verification":"falsified"}));
+                }
+            }
+        }
+        text.push_str(&format!(
+            "```findings\n{}\n```\nVERDICT: PASS\n",
+            json!({"schema_version":1,"findings":structured})
+        ));
+        text
+    } else {
+        "framed\nVERDICT: PASS\n".into()
+    };
+    std::fs::write(request["output"].as_str().unwrap(), text).unwrap();
+}
+
 #[derive(Default)]
 struct PresetOwner {
     /// Nodes whose result carries `VERDICT: FAIL`.
     failing: Vec<String>,
+    many_findings: bool,
+    omit_overflow_proof: bool,
+    omit_verifier_proof: bool,
+    mismatch_proof: bool,
+    reference_proof: bool,
+    input_dir: Option<tempfile::TempDir>,
+    captured_results: std::collections::BTreeMap<String, String>,
     launched: Vec<String>,
     /// The brief each launched node received, inputs included.
     prompts: Vec<(String, String)>,
@@ -583,6 +671,36 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
         })))
     }
 
+    fn materialise_inputs(
+        &mut self,
+        key: &provenant_fabric_runtime::graph::AttemptKey,
+        requests: &[provenant_fabric_runtime::graph::InputRequest],
+        _: usize,
+    ) -> Option<provenant_fabric_runtime::graph::MaterialisedInputs> {
+        use provenant_fabric_runtime::graph::{MaterialisedInput, MaterialisedInputs};
+        let dir = self.input_dir.as_ref()?.path().join(&key.node_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let entries = requests
+            .iter()
+            .map(|request| {
+                let text = &self.captured_results[request.attempt_ref.as_ref().unwrap()];
+                let path = dir.join(&request.label);
+                std::fs::write(&path, text).unwrap();
+                MaterialisedInput::File {
+                    label: request.label.clone(),
+                    path,
+                    bytes: text.len() as u64,
+                    omitted: 0,
+                }
+            })
+            .collect();
+        Some(MaterialisedInputs {
+            index: None,
+            directory: Some(dir),
+            entries,
+        })
+    }
+
     fn observe_or_start(
         &mut self,
         key: &provenant_fabric_runtime::graph::AttemptKey,
@@ -599,16 +717,43 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
         self.contexts.push(node.context.clone());
         let mut result =
             provenant_records::result_capture::ResultCapture::new(node.required_verdict);
-        result.push(if self.failing.contains(&key.node_id) {
-            b"Blocked on the user.\nVERDICT: FAIL\n".as_slice()
+        let text = if self.many_findings {
+            let directory = self.input_dir.as_ref().unwrap().path();
+            let request_path = directory.join(format!("request-{}.json", key.node_id));
+            let output_path = directory.join(format!("output-{}.txt", key.node_id));
+            let files: Vec<_> = self
+                .launched
+                .iter()
+                .filter(|id| id.starts_with("lenses--") && *id != &key.node_id)
+                .map(|id| json!({"label": id, "path": directory.join(&key.node_id).join(id)}))
+                .collect();
+            std::fs::write(&request_path, serde_json::to_vec(&json!({"id":key.node_id,"prompt":node.prompt,"files":files,"output":output_path,"reference_proof":self.reference_proof,"mismatch_proof":self.mismatch_proof,"omit_stage":if self.omit_verifier_proof { "verify" } else if self.omit_overflow_proof { "synthesis" } else { "" }})).unwrap()).unwrap();
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "the test exercises a separate fake-provider process"
+            )]
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "preset_tests::fake_council_provider_process"])
+                .env("PROVENANT_TEST_COUNCIL_REQUEST", &request_path)
+                .output()
+                .unwrap();
+            assert!(
+                child.status.success(),
+                "{}",
+                String::from_utf8_lossy(&child.stdout)
+            );
+            std::fs::read_to_string(output_path).unwrap()
+        } else if self.failing.contains(&key.node_id) {
+            "Blocked on the user.\nVERDICT: FAIL\n".into()
         } else {
             format!(
                 "Evidence checked for {}.\n```findings\n{{\"schema_version\":1,\"findings\":[]}}\n```\nVERDICT: PASS\n",
                 key.node_id
             )
-            .leak()
-                .as_bytes()
-        });
+        };
+        result.push(text.as_bytes());
+        self.captured_results
+            .insert(format!("fixture/{}", key.node_id), text);
         let commit = if access == AccessMode::WorktreeWrite {
             Some(format!("{:040x}", self.launched.len()))
         } else {
@@ -628,7 +773,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
             launched: true,
             result: Some(Box::new(result.finish())),
             result_warning: None,
-            result_path: None,
+            result_path: self
+                .many_findings
+                .then(|| format!("/results/{}", key.node_id)),
             branch: (access == AccessMode::WorktreeWrite).then(|| format!("lane/{}", key.node_id)),
             commit,
         })
@@ -746,6 +893,207 @@ fn preset_wait_prepares_scratch_once_across_polls() {
         assert_eq!(path, std::path::Path::new(".provenant/scratch"));
     }
     assert_eq!(calls, 1);
+}
+
+#[test]
+fn review_council_continues_when_lens_findings_exceed_the_cap() {
+    use provenant_fabric_runtime::graph::{GraphStatus, NodeState, advance_with_budget};
+    let document = bundled_fixture("review-council");
+    let config = provenant_fabric_runtime::config::GraphConfig::default();
+    let mut owner = PresetOwner {
+        many_findings: true,
+        input_dir: Some(tempfile::tempdir().unwrap()),
+        ..Default::default()
+    };
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut PresetJournal::default(),
+        &config.limits,
+        &config.budget,
+    )
+    .unwrap();
+    assert_eq!(
+        run.status,
+        GraphStatus::Complete,
+        "{:?}",
+        run.checkpoint.nodes
+    );
+    for id in ["verify", "synthesis"] {
+        assert_eq!(
+            run.checkpoint
+                .nodes
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap()
+                .state,
+            NodeState::Succeeded
+        );
+        let output = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .unwrap()
+            .outputs
+            .as_ref()
+            .unwrap();
+        assert_eq!(output.findings.len(), 32, "{id}");
+        let prompt = &owner.prompts.iter().find(|(node, _)| node == id).unwrap().1;
+        assert!(
+            prompt.contains("composite findings truncated"),
+            "{id}: {prompt}"
+        );
+        assert!(
+            prompt.contains(
+                "composite findings truncated: full member result: {\"label\":\"lenses--"
+            ),
+            "{id}: {prompt}"
+        );
+        assert!(!prompt.contains("/results/lenses--"), "{id}: {prompt}");
+        let report = &owner.captured_results[&format!("fixture/{id}")];
+        for lens in owner
+            .launched
+            .iter()
+            .filter(|name| name.starts_with("lenses--"))
+        {
+            for i in 0..10 {
+                assert!(report.contains(&format!("{lens}:F{i}: rejected")));
+            }
+        }
+    }
+}
+
+#[test]
+fn review_council_accepts_compact_overflow_dispositions() {
+    use provenant_fabric_runtime::graph::{GraphStatus, advance_with_budget};
+    let document = bundled_fixture("review-council");
+    let config = provenant_fabric_runtime::config::GraphConfig::default();
+    let mut owner = PresetOwner {
+        many_findings: true,
+        reference_proof: true,
+        input_dir: Some(tempfile::tempdir().unwrap()),
+        ..Default::default()
+    };
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut PresetJournal::default(),
+        &config.limits,
+        &config.budget,
+    )
+    .unwrap();
+    assert_eq!(
+        run.status,
+        GraphStatus::Complete,
+        "{:?}",
+        run.checkpoint.nodes
+    );
+}
+
+#[test]
+fn review_council_refuses_a_missing_overflow_disposition() {
+    use provenant_fabric_runtime::graph::{NodeState, advance_with_budget};
+    let document = bundled_fixture("review-council");
+    let config = provenant_fabric_runtime::config::GraphConfig::default();
+    let mut owner = PresetOwner {
+        many_findings: true,
+        omit_overflow_proof: true,
+        input_dir: Some(tempfile::tempdir().unwrap()),
+        ..Default::default()
+    };
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut PresetJournal::default(),
+        &config.limits,
+        &config.budget,
+    )
+    .unwrap();
+    let synthesis = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "synthesis")
+        .unwrap();
+    assert_eq!(synthesis.state, NodeState::Failed);
+    assert_eq!(
+        synthesis.advance_error_code.as_deref(),
+        Some("disposition_overflow_incomplete")
+    );
+}
+
+#[test]
+fn review_council_refuses_a_missing_overflow_verification() {
+    use provenant_fabric_runtime::graph::{NodeState, advance_with_budget};
+    let document = bundled_fixture("review-council");
+    let config = provenant_fabric_runtime::config::GraphConfig::default();
+    let mut owner = PresetOwner {
+        many_findings: true,
+        omit_verifier_proof: true,
+        input_dir: Some(tempfile::tempdir().unwrap()),
+        ..Default::default()
+    };
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut PresetJournal::default(),
+        &config.limits,
+        &config.budget,
+    )
+    .unwrap();
+    let verify = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "verify")
+        .unwrap();
+    assert_eq!(verify.state, NodeState::Failed);
+    assert_eq!(
+        verify.advance_error_code.as_deref(),
+        Some("disposition_overflow_incomplete")
+    );
+    assert_eq!(
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "synthesis")
+            .unwrap()
+            .state,
+        NodeState::Blocked
+    );
+}
+
+#[test]
+fn review_council_refuses_conflicting_overflow_dispositions() {
+    use provenant_fabric_runtime::graph::{NodeState, advance_with_budget};
+    let document = bundled_fixture("review-council");
+    let config = provenant_fabric_runtime::config::GraphConfig::default();
+    let mut owner = PresetOwner {
+        many_findings: true,
+        mismatch_proof: true,
+        input_dir: Some(tempfile::tempdir().unwrap()),
+        ..Default::default()
+    };
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut PresetJournal::default(),
+        &config.limits,
+        &config.budget,
+    )
+    .unwrap();
+    let synthesis = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "synthesis")
+        .unwrap();
+    assert_eq!(synthesis.state, NodeState::Failed);
+    assert_eq!(
+        synthesis.advance_error_code.as_deref(),
+        Some("disposition_overflow_inconsistent")
+    );
 }
 
 #[test]
@@ -2307,7 +2655,10 @@ fn review_council_verifies_between_the_lenses_and_the_synthesis() {
     assert_eq!(route(verify)["alias"], "verifier");
     assert_eq!(verify["depends_on"], json!(["lenses", "subject"]));
     let synthesis = node(&expanded.document, "synthesis");
-    assert_eq!(synthesis["depends_on"], json!(["verify", "subject"]));
+    assert_eq!(
+        synthesis["depends_on"],
+        json!(["verify", "lenses", "subject"])
+    );
     assert!(
         verify["inputs"]
             .as_array()
