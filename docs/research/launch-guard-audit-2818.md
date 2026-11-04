@@ -1,6 +1,6 @@
 # Launch-preparation refusal audit for #2818
 
-This is an integration inventory, not a claim that the guard audit is complete. Intrinsic process and backend representation limits must be distinguished from optional policy defaults.
+This inventory classifies launch refusals by their cause. Resource bounds are implementation limits, not claims about intrinsic operating-system limits.
 The relevant owners are `confinement` (plan, permission validation, rendering,
 anchors, Git and cache), `providers` (adapter admission, credential reads,
 provider launch builders, lane setup and tool discovery), and `run/src/launch.rs`
@@ -16,13 +16,10 @@ classes below are those of ADR 0035.
 | Optional discovered credential-root grants, `providers::launch::filter_optional_grants` | Loosened | Omit and record a warning; the required grant guard is unchanged. |
 | User skills, `providers::skill_stage` and CLI preparation | Loosened | A selected tree is staged; credential-linked, cyclic, changing, oversized and unsupported entries are skipped with warnings. A staging write failure retries without skills and warns. |
 | Invalid project exec and shared roots, `cli::run::provider::project_paths` | Loosened | Ignore the entry and record its key and reason; no unvalidated grant is applied. |
-| Unsupported capability or invalid selected executable, prompt/argument shape, `providers::{contract,launch,agy,cursor,command}` | Open | Distinguish authority and process requirements from configurable policy. `Prompt::check_argv` caps argv text at 64 KiB; top-level launches spill larger prompts to an attempt file, while nested argv launches still refuse. The bound protects process arguments, but its fixed threshold and nested fallback need assessment. |
-| Profile size and grant bounds, `permissions::{render,validation}` | Open | `ProfileTooLarge` and `BoundExceeded` still refuse; distinguish OS transport limits from optional discoveries and expose configurable bounds where possible. |
+| Unsupported capability or invalid selected executable, prompt/argument shape, `providers::{contract,launch,agy,cursor,command}` | Classified | Capability refusal preserves the selected adapter’s declared authority; an invalid executable is an unavailable required input. `ProviderError::PromptTooLarge` is a fixed process-argument resource bound, not an OS maximum: top-level launches spill to a file, while nested argv launches refuse rather than silently change their contract. |
+| Profile size and grant bounds, `permissions::{render,validation}` | Classified | `PermissionError::ProfileTooLarge` is the renderer’s 512 KiB implementation resource bound, not a proven OS transport maximum. `BoundExceeded` identifies either a grant-count resource bound or the Git control-directory scan bound; the latter preserves complete integrity validation. These refusals do not omit grants or weaken the compiled profile. |
 | Non-UTF-8 SBPL path, `permissions::render` | Kept | Intrinsic backend representation limitation: the current SBPL encoder cannot express this path losslessly. |
 | Cache traversal depth and sweep failures, `confinement::cache` | Outside scope | Cache GC reports these after a sweep; they are not launch preparation. |
-| Backend unavailable, probe cancelled, process execution and setup I/O, `confinement::{permissions,plan}` and `run::launch` | Open | Distinguish unavailable enforcement or uncertain handoff (authority/integrity) from optional preparation I/O. |
+| Backend unavailable, probe cancelled, process execution and setup I/O, `confinement::{permissions,plan}` and `run::launch` | Classified | `PermissionError::{BackendUnavailable, BackendNotAvailable, NestedConfinementUnsupported}` are enforcement/authority refusals. `PermissionError::Cancelled` and uncertain process handoff preserve custody and object integrity; `PermissionError::{Execution, Filesystem}` and required setup I/O fail preparation rather than claiming a launch. Optional skill staging I/O is handled by the warning and retry described above. |
 
-The open families above prevent claiming the #2818 guard-audit acceptance as
-complete. A line-by-line disposition of the remaining propagation sites is
-still required; neither an error type nor a filename alone establishes a
-boundary class. The unchanged guard and native escape tests remain mandatory.
+The unchanged guard and native escape tests remain mandatory.
