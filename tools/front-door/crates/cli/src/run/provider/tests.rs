@@ -1557,19 +1557,11 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
             );
         }
         let receipt = &prepared.route.extra["user_skills"];
-        assert_eq!(receipt["exposed"], false, "{settings}");
-        assert_eq!(
-            receipt["warnings"].as_array().unwrap().len(),
-            usize::from(expected)
-        );
-        if expected {
-            assert!(
-                receipt["warnings"][0]
-                    .as_str()
-                    .unwrap()
-                    .contains("~/.cursor/skills")
-            );
-        }
+        // The linked target is an empty, safe directory: discovery stages
+        // an empty tree without granting its original location.
+        assert_eq!(receipt["exposed"], expected, "{settings}");
+        assert_eq!(receipt["staged_file_count"], 0);
+        assert!(receipt["warnings"].as_array().unwrap().is_empty());
         if source == "route" {
             assert!(receipt["source"]["route_policy"].is_array());
         } else {
