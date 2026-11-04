@@ -1775,7 +1775,7 @@ pub(super) fn discovery_warnings(
 }
 
 /// Report the same provider-owned locations and grants used during prepare.
-/// Materialize the captured tree; an I/O failure drops only optional skills.
+/// Materialise the captured tree; an I/O failure drops only optional skills.
 fn materialise_user_skills(
     staged: &mut provenant_providers::StagedUserSkills,
     setup: impl FnOnce(&Path, &[SetupStep]) -> Result<(), String>,

@@ -24,7 +24,7 @@ pub struct RouteIntent {
 }
 
 impl RouteIntent {
-    /// Check the normalized launch controls against one adapter's declared capabilities.
+    /// Check the normalised launch controls against one adapter's declared capabilities.
     pub fn check_launch(
         self,
         spec: &provenant_records::AdapterSpec,
