@@ -1533,7 +1533,7 @@ impl RunStore {
         if matches!(decoded.outcome, Outcome::Succeeded | Outcome::Uncommitted) {
             let refusal = if exit.termination != Some(Termination::Exit(0)) {
                 Some("provider exited unsuccessfully")
-            } else if !decoded.complete || decoded.result.is_empty() {
+            } else if !decoded.complete {
                 Some("provider result is empty or incomplete")
             } else if !crate::reader::verified_route(
                 record.resolved_route.as_ref(),
@@ -1612,6 +1612,15 @@ impl RunStore {
                     None => note,
                 });
             }
+        }
+        // Assess a complete, verified successful response before rejecting an
+        // empty result: the configured result-quality policy may recover it.
+        // Without such a policy an empty response still cannot succeed.
+        if decoded.result.is_empty()
+            && matches!(decoded.outcome, Outcome::Succeeded | Outcome::Uncommitted)
+        {
+            decoded.outcome = Outcome::Failed;
+            decoded.reason = Some("provider result is empty or incomplete".into());
         }
         // Decoding can reveal credential markers hidden by JSON escapes in
         // the already-filtered capture. Seal only a filtered rendering.

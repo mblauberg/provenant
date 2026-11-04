@@ -2956,6 +2956,7 @@ pub(super) struct Fake {
     partial: Vec<PartialSignal>,
     /// Report `QuotaLimited` only when this exact sealed stderr arrives.
     quota_stderr: Option<&'static [u8]>,
+    assess_empty: bool,
 }
 
 #[test]
@@ -2987,6 +2988,35 @@ fn policy_refusal_skips_provider_preparation_and_preserves_sibling_progress() ->
 }
 
 impl Providers for Fake {
+    fn assess_result(
+        &self,
+        _: &TaskRequest,
+        record: &AttemptRecord,
+        decoded: &Decoded,
+        _: Option<&provenant_records::handoff::Handoff>,
+        _: Option<&crate::HolderContext>,
+        _: u64,
+    ) -> std::result::Result<crate::ResultAssessment, String> {
+        if self.assess_empty
+            && decoded.outcome == Outcome::Succeeded
+            && decoded.complete
+            && decoded.result.is_empty()
+        {
+            return Ok(crate::ResultAssessment {
+                refusal: Some("empty result rejected by policy".into()),
+                retry: Some(crate::PolicyRetry {
+                    schema_version: 1,
+                    route: record.requested_route.clone(),
+                    resume: false,
+                    max_attempts: 2,
+                    instruction: "Try again".into(),
+                    not_before_unix_seconds: None,
+                }),
+                note: None,
+            });
+        }
+        Ok(Default::default())
+    }
     fn check_policy(&self, task: &TaskRequest) -> std::result::Result<(), String> {
         if self.policy_task == Some(task.task_id) {
             return Err("insufficient disk space; run `provenant gc`".into());
@@ -3275,6 +3305,47 @@ fn settlement_scrubs_provider_session_history() -> TestResult {
         );
         assert!(text.contains("[REDACTED]"));
     }
+    Ok(())
+}
+
+#[test]
+fn empty_success_is_assessed_before_settlement_rejects_it() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(&dir, "stdout.log", b"", CAPTURE_LIMIT)?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        observed: Some(route()),
+        answer: Some(String::new()),
+        assess_empty: true,
+        ..Fake::default()
+    };
+    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    assert!(matches!(
+        record.state,
+        AttemptState::Terminal {
+            outcome: Outcome::Failed,
+            ..
+        }
+    ));
+    assert!(store.staged_policy_retry(&record)?.is_some());
     Ok(())
 }
 

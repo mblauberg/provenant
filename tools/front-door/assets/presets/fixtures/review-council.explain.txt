@@ -1,6 +1,6 @@
 Graph <id>
 Admission: {"status":"admitted"}
-Inspection: {"dependency_depth":4,"edges":21,"limit_reason":null,"max_attempts":22,"nodes":12,"prompt_bytes":36354}
+Inspection: {"dependency_depth":4,"edges":22,"limit_reason":null,"max_attempts":22,"nodes":12,"prompt_bytes":37780}
 Preset selection: review-council (override)
 Review shape: deep (by_risk; size=unknown; kind=unknown; risk=crucial)
 plan: auto -> off (review subject is not large (size=unknown))
