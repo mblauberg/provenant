@@ -1619,6 +1619,30 @@ fn golden(name: &str, actual: &str) -> Result<(), Box<dyn std::error::Error>> {
     golden_in("assets/presets/fixtures", name, actual)
 }
 
+// Prompt lengths include the checkout path before the displayed path is scrubbed.
+fn scrub_prompt_bytes(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            if line.starts_with("Inspection: ")
+                && let Some(start) = line.find("\"prompt_bytes\":")
+            {
+                let value_start = start + "\"prompt_bytes\":".len();
+                let value_end = value_start
+                    + line[value_start..]
+                        .bytes()
+                        .take_while(u8::is_ascii_digit)
+                        .count();
+                let mut line = line.to_owned();
+                line.replace_range(value_start..value_end, "<bytes>");
+                line
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn golden_in(dir: &str, name: &str, actual: &str) -> Result<(), Box<dyn std::error::Error>> {
     let actual = format!("{}\n", actual.trim_end());
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1630,7 +1654,8 @@ fn golden_in(dir: &str, name: &str, actual: &str) -> Result<(), Box<dyn std::err
     }
     let expected = std::fs::read_to_string(&path).unwrap_or_default();
     assert_eq!(
-        actual, expected,
+        scrub_prompt_bytes(&actual),
+        scrub_prompt_bytes(&expected),
         "{name}: rerun with UPDATE_GOLDEN=1 to refresh"
     );
     Ok(())
