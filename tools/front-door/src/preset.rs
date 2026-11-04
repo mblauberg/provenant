@@ -968,10 +968,6 @@ pub fn expand_with(
     let id = format!("preset-{}", &digest[7..39]);
     check_expansion(&nodes, "", 0)?;
     check_selections(&nodes)?;
-    // Only a graph that states a review field is schema 2; every other preset
-    // keeps its v1 document and digest.
-    let schema_version = if carries_review_field(&nodes) { 2 } else { 1 };
-    let mut document = json!({"schema_version":schema_version,"graph_id":id,"context":{"preset":name,"pattern":name},"nodes":nodes});
     let bases = layers.review_bases.take();
     if bases.len() > 1 {
         return Err(format!(
@@ -979,6 +975,15 @@ pub fn expand_with(
             bases.into_iter().collect::<Vec<_>>().join(", ")
         ));
     }
+    // A graph that states a review field, including the document-level review
+    // base, is schema 2: the runtime refuses a v1 document that carries one.
+    // Every other preset keeps its v1 document and digest.
+    let schema_version = if carries_review_field(&nodes) || !bases.is_empty() {
+        2
+    } else {
+        1
+    };
+    let mut document = json!({"schema_version":schema_version,"graph_id":id,"context":{"preset":name,"pattern":name},"nodes":nodes});
     if let Some(base) = bases.into_iter().next() {
         document["review_base"] = json!(base);
     }

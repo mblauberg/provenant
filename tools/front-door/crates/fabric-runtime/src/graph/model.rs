@@ -306,7 +306,16 @@ impl GraphDocument {
         Ok(expanded)
     }
 
+    /// The checks admission applies to a submitted document, without running
+    /// it: the schema version against the fields it carries, then the
+    /// expanded plan against `limits`. A document that passes here is not
+    /// refused as invalid when it is submitted.
+    pub fn validate(&self, limits: &crate::config::GraphLimits) -> Result<(), String> {
+        validate_plan_with_limits(self, limits).map(|_| ())
+    }
+
     pub fn inspect(&self, limits: &crate::config::GraphLimits) -> Result<GraphInspection, String> {
+        validate_schema(self).map_err(String::from)?;
         let expanded = self.expanded(limits)?;
         let generous = crate::config::GraphLimits {
             nodes: usize::MAX,
