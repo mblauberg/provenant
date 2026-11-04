@@ -17,6 +17,25 @@ fn fragments_cannot_inject_persisted_topology_through_extra_fields() {
 }
 
 #[test]
+fn admission_planner_fragment_capability() {
+    let fragment = json!({
+        "schema_version": 1,
+        "nodes": [{
+            "id": "child", "access": "read_only", "goal": "Do a slice",
+            "acceptance_checks": ["Check it"], "route": {"alias": "senior"},
+            "family_group": "group"
+        }]
+    });
+    let output = format!("```fragment\n{}\n```", fragment);
+    let mut owner = fixture_owner(&[&output]);
+    let run = advance(&planner(4), &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+    assert!(run.checkpoint.pause_reason.as_deref().unwrap().contains("schema version"), "{:?}", run.checkpoint.pause_reason);
+    assert!(run.checkpoint.expansions.is_empty());
+}
+
+#[test]
 fn raw_expansion_rejects_each_injected_topology_field() {
     let doc = planner(2);
     let output = result(vec![slice("child", &[])]);

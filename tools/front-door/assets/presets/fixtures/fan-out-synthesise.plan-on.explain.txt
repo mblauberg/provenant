@@ -1,7 +1,11 @@
 Graph <id>
+Admission: {"status":"admitted"}
+Inspection: {"dependency_depth":1,"edges":1,"limit_reason":null,"max_attempts":4,"nodes":2,"prompt_bytes":2255}
 Preset selection: fan-out-synthesise (override)
 plan: on -> on (planning requested)
 Planner route: principal
+Pending "planner_authority": "Planner authority is checked when the plan runs."
+Pending "route_readiness": "Route readiness and quota are checked before launch."
 plan  role=plan.shape tier=principal family=any kind=plan access=read_only worktree=-
   pattern worker:
     worker  role=- tier=${route} family=any kind=- access=read_only worktree=-

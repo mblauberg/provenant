@@ -161,10 +161,13 @@ provenant run --preset scout-swarm --prompt-file brief.md \
   --read-root /absolute/path/to/another-worktree --concurrency 4 --wait 30m
 ```
 
-`--explain` creates no graph state. Human output groups children under their
-composite and shows roles, tiers, scopes, worktrees, selected inputs, attempt
-bounds, acceptance and effective limits. `--json --explain` includes the exact
-graph and origins. The same resolved graph has the same ID, so retrying its
+`--explain` creates no graph state. It reports the same admission result as
+submission, separate inspection metrics, and pending source, worktree,
+delivery-target, planner-authority and route-readiness checks derived from the
+document. Human output then groups children under their composite and shows
+roles, tiers, scopes, worktrees, selected inputs, attempt bounds, acceptance
+and effective limits. `--json --explain` includes the exact graph and origins.
+The same resolved graph has the same ID, so retrying its
 submission observes the existing graph. Change the prompt or parameters when
 you intend a separate run.
 

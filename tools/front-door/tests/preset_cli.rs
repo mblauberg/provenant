@@ -1045,6 +1045,77 @@ fn explain_does_not_create_state() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn explain_admission_matches_submission() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let state = temp.path().join("state");
+    std::fs::create_dir(&state)?;
+    std::fs::write(
+        state.join("config.toml"),
+        "schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 1\n",
+    )?;
+    let prompt = temp.path().join("prompt");
+    std::fs::write(&prompt, "brief")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let run = |explain: bool| -> Result<std::process::Output, Box<dyn std::error::Error>> {
+        let mut command = fixture_cli();
+        command
+            .current_dir(&root)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["--json", "--state-dir"])
+            .arg(&state)
+            .args(["run", "--preset", "fan-out", "--prompt-file"])
+            .arg(&prompt)
+            .args(["--set", "parameters.width=2"]);
+        if explain {
+            command.arg("--explain");
+        }
+        Ok(command.output()?)
+    };
+    let explained = run(true)?;
+    assert!(
+        explained.status.success(),
+        "{}",
+        String::from_utf8_lossy(&explained.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&explained.stdout)?;
+    assert_eq!(value["data"]["admission"]["status"], "refused");
+    let reason = value["data"]["admission"]["reason"]
+        .as_str()
+        .ok_or("missing admission reason")?;
+    assert!(reason.contains("limits.nodes"), "{reason}");
+    assert!(!value["data"].get("execution").is_some());
+    assert!(!value["data"].get("validation_error").is_some());
+
+    let submitted = run(false)?;
+    assert!(!submitted.status.success());
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&submitted.stdout),
+        String::from_utf8_lossy(&submitted.stderr)
+    );
+    assert!(output.contains("limits.nodes"), "{output}");
+    fn has_graph_journal(path: &std::path::Path) -> std::io::Result<bool> {
+        if !path.exists() {
+            return Ok(false);
+        }
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() && has_graph_journal(&entry.path())? {
+                return Ok(true);
+            }
+            if file_type.is_file() && entry.file_name().to_string_lossy().starts_with("graph-") {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    assert!(!has_graph_journal(&state)?);
+    Ok(())
+}
+
+#[test]
 fn explain_applies_writer_read_root_and_concurrency_bindings_without_state()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;

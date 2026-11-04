@@ -563,7 +563,10 @@ pub(super) fn decode_checkpoint(
             .iter()
             .any(|expansion| expansion.review.is_some() || nodes_have_v2(&expansion.nodes));
     // Matches validate_schema: version 2 may omit every v2 field.
-    if !matches!(document.schema_version, 1 | 2) || document.schema_version < u64::from(minimum_schema_version(document)) || document.schema_version == 1 && has_v2 {
+    if !matches!(document.schema_version, 1 | 2)
+        || document.schema_version < u64::from(minimum_schema_version(document))
+        || document.schema_version == 1 && has_v2
+    {
         return Err(JournalError::BadEnvelope);
     }
     let digest = CanonicalV1::record_digest(

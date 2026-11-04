@@ -1,5 +1,8 @@
 Graph <id>
+Admission: {"status":"admitted"}
+Inspection: {"dependency_depth":0,"edges":0,"limit_reason":null,"max_attempts":4,"nodes":2,"prompt_bytes":20}
 Preset selection: fan-out (override)
 plan: off -> off (planning turned off)
+Pending "route_readiness": "Route readiness and quota are checked before launch."
 branch-1  role=- tier=senior family=any kind=- access=read_only worktree=-
 branch-2  role=- tier=senior family=any kind=- access=read_only worktree=-

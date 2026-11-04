@@ -3172,6 +3172,74 @@ fn family(node: &Value) -> String {
     }
 }
 
+pub(super) fn pending_checks(document: &Value) -> Vec<Value> {
+    let mut ids = BTreeSet::new();
+    fn walk(nodes: &[Value], ids: &mut BTreeSet<String>) {
+        for node in nodes {
+            if node
+                .get("source")
+                .and_then(Value::as_object)
+                .is_some_and(|source| source.get("type").and_then(Value::as_str) != Some("commit"))
+            {
+                ids.insert("source".into());
+            }
+            if node["access"] == "worktree_write" {
+                ids.insert("worktree".into());
+            }
+            if node["kind"] == "plan" {
+                ids.insert("planner_authority".into());
+            }
+            let kind = node["kind"].as_str();
+            let agent = !matches!(
+                kind,
+                Some("composite" | "loop" | "land" | "gate" | "decide")
+            );
+            if agent {
+                ids.insert("route_readiness".into());
+            }
+            for key in ["composite", "loop"] {
+                if let Some(children) = node
+                    .pointer(&format!("/{key}/nodes"))
+                    .or_else(|| node.pointer(&format!("/{key}/body")))
+                    .and_then(Value::as_array)
+                {
+                    walk(children, ids);
+                }
+            }
+        }
+    }
+    walk(
+        document["nodes"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default(),
+        &mut ids,
+    );
+    if document["delivery"]
+        .as_str()
+        .is_some_and(|d| d == "pr" || d.starts_with("integrate:"))
+        || document["nodes"].as_array().into_iter().flatten().any(|n| {
+            n["delivery"]
+                .as_str()
+                .is_some_and(|d| d == "pr" || d.starts_with("integrate:"))
+        })
+    {
+        ids.insert("delivery_target".into());
+    }
+    ids.into_iter()
+        .map(|id| {
+            let reason = match id.as_str() {
+                "source" => "Source binding must be resolved and verified at execution.",
+                "worktree" => "Writer worktree ownership is checked at execution.",
+                "delivery_target" => "Delivery target is checked before delivery.",
+                "planner_authority" => "Planner authority is checked when the plan runs.",
+                _ => "Route readiness and quota are checked before launch.",
+            };
+            json!({"id":id,"reason":reason})
+        })
+        .collect()
+}
+
 fn explain_tree(nodes: &[Value], indent: usize, text: &mut String) {
     for node in nodes {
         let field = |name: &str| node.get(name).and_then(Value::as_str).unwrap_or("-");
@@ -3266,17 +3334,34 @@ fn explain(
         let document: provenant_fabric_runtime::graph::GraphDocument =
             serde_json::from_value(expansion.document.clone()).map_err(|e| e.to_string())?;
         let limits = config.domains.fabric.graph.limits.clone();
+        let admission = document.admit(&limits);
         let inspection = document.inspect(&limits);
-        Ok((limits, inspection))
+        Ok((limits, admission, inspection))
     })();
-    let (limits, metrics, validation_error) = match inspection {
-        Ok((limits, Ok(metrics))) => (json!(limits), json!(metrics), Value::Null),
-        Ok((limits, Err(error))) => (json!(limits), Value::Null, json!(error)),
-        Err(error) => (Value::Null, Value::Null, json!(error)),
+    let (limits, admission, metrics) = match inspection {
+        Ok((limits, Ok(()), Ok(metrics))) => {
+            (json!(limits), json!({"status":"admitted"}), json!(metrics))
+        }
+        Ok((limits, Err(reason), metrics)) => (
+            json!(limits),
+            json!({"status":"refused","reason":reason}),
+            metrics.map_or(Value::Null, |m| json!(m)),
+        ),
+        Ok((limits, Ok(()), Err(reason))) => (
+            json!(limits),
+            json!({"status":"admitted"}),
+            json!({"unavailable":reason}),
+        ),
+        Err(error) => (
+            Value::Null,
+            json!({"status":"refused","reason":error}),
+            Value::Null,
+        ),
     };
+    let pending = pending_checks(&expansion.document);
     let mut human = format!(
-        "Graph {}\nLimits: {}\nExecution: {}\n",
-        expansion.document["graph_id"], limits, metrics
+        "Graph {}\nLimits: {}\nAdmission: {}\nInspection: {}\n",
+        expansion.document["graph_id"], limits, admission, metrics
     );
     if let Some(context) = expansion.document.get("context") {
         human.push_str(&format!(
@@ -3294,8 +3379,8 @@ fn explain(
             human.push_str(&format!("Planner route: {}\n", decision.route));
         }
     }
-    if !validation_error.is_null() {
-        human.push_str(&format!("Requires configuration: {validation_error}\n"));
+    for item in &pending {
+        human.push_str(&format!("Pending {}: {}\n", item["id"], item["reason"]));
     }
     if let Some(nodes) = expansion.document["nodes"].as_array() {
         explain_tree(nodes, 0, &mut human);
@@ -3322,7 +3407,7 @@ fn explain(
     for warning in &expansion.warnings {
         human.push_str(&format!("Warning: {warning}\n"));
     }
-    let mut data = json!({"roles": expansion.roles, "substitutions": expansion.substitutions, "graph": expansion.document, "origins": expansion.origins, "limits":limits,"execution":metrics,"validation_error":validation_error,"review_shape":expansion.review_shape,"plan":expansion.plan.as_ref().map(planner::Decision::to_json)});
+    let mut data = json!({"roles": expansion.roles, "substitutions": expansion.substitutions, "graph": expansion.document, "origins": expansion.origins, "limits":limits,"admission":admission,"inspection":metrics,"pending":pending,"review_shape":expansion.review_shape,"plan":expansion.plan.as_ref().map(planner::Decision::to_json)});
     if !brief_warnings.is_empty() {
         data["warnings"] = json!(brief_warnings);
     }

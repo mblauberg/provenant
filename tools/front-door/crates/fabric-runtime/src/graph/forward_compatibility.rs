@@ -230,7 +230,7 @@ fn review_schema_versions_and_legacy_digests() {
 #[test]
 fn journal_accepts_v2_and_rejects_v1_review_fields() {
     let mut record: StoredCheckpoint = serde_json::from_value(stored()).unwrap();
-    record.execution.document.review_base = Some("main".into());
+    record.execution.document.review_base = Some("base".into());
     record.execution.document.schema_version = 2;
     record.digest = CanonicalV1::record_digest(
         "fabric-graph-checkpoint",
@@ -246,5 +246,65 @@ fn journal_accepts_v2_and_rejects_v1_review_fields() {
     assert!(matches!(
         decode_checkpoint(&bytes, "g-test"),
         Err(JournalError::BadEnvelope)
+    ));
+}
+
+#[test]
+fn admission_recovery_capability() {
+    fn bytes(mut record: StoredCheckpoint) -> Vec<u8> {
+        record.digest = CanonicalV1::record_digest(
+            "fabric-graph-checkpoint",
+            2,
+            &(&record.checkpoint, &record.execution),
+        )
+        .unwrap()
+        .to_string();
+        serde_json::to_vec(&record).unwrap()
+    }
+    let seed = || -> StoredCheckpoint { serde_json::from_value(stored()).unwrap() };
+
+    let mut execution_base = seed();
+    execution_base.execution.review_base = Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap());
+    assert!(matches!(
+        decode_checkpoint(&bytes(execution_base), "g-test"),
+        Err(JournalError::BadEnvelope)
+    ));
+
+    let mut expansion = seed();
+    expansion.checkpoint.expansions.push(
+        serde_json::from_value(json!({
+            "source":"planner","continuation":false,
+            "nodes":[{"id":"added","access":"read_only","family_group":"group"}]
+        }))
+        .unwrap(),
+    );
+    assert!(matches!(
+        decode_checkpoint(&bytes(expansion), "g-test"),
+        Err(JournalError::BadEnvelope)
+    ));
+
+    let mut node = seed();
+    node.execution.document.nodes[0].family_group = Some("group".into());
+    assert!(matches!(
+        decode_checkpoint(&bytes(node), "g-test"),
+        Err(JournalError::BadEnvelope)
+    ));
+
+    let mut plain_v2 = seed();
+    plain_v2.execution.document.schema_version = 2;
+    assert!(decode_checkpoint(&bytes(plain_v2), "g-test").is_ok());
+
+    let mut unsupported = seed();
+    unsupported.execution.document.schema_version = 3;
+    assert!(matches!(
+        decode_checkpoint(&bytes(unsupported), "g-test"),
+        Err(JournalError::Decode(DecodeError::UnsupportedVersion { found: 3, .. }))
+    ));
+
+    let mut bad_digest = seed();
+    bad_digest.digest = "sha256:bad".into();
+    assert!(matches!(
+        decode_checkpoint(&serde_json::to_vec(&bad_digest).unwrap(), "g-test"),
+        Err(JournalError::BadDigest)
     ));
 }
