@@ -493,7 +493,9 @@ fn window_matches(
         }
         PacingWindow::Daily => window.window_seconds == Some(86_400) || name.ends_with("daily"),
         PacingWindow::Rolling => {
-            adapter == "opencode" && (name.ends_with("five_hour") || name.ends_with("rolling"))
+            provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
+                spec.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
+            }) && (name.ends_with("five_hour") || name.ends_with("rolling"))
         }
     }
 }
@@ -660,6 +662,12 @@ fn pace_snapshot_factor(
         .iter()
         .filter(|w| selected_window(w, profile, adapter, model_pool))
         .filter_map(|window| {
+            if snapshot.details.as_ref().is_some_and(|details| {
+                details.coverage.as_deref() == Some("partial")
+                    && !details.calibration_active(&window.pool, now)
+            }) {
+                return None;
+            }
             let duration = window.window_seconds?;
             if duration == 0 {
                 return None;
@@ -673,11 +681,12 @@ fn pace_snapshot_factor(
             let reset_known = window.resets_unix_seconds.is_some_and(|reset| reset > now);
             let reset = match window.resets_unix_seconds {
                 Some(reset) if reset > now => reset,
-                None if adapter == "opencode"
-                    && snapshot
-                        .details
-                        .as_ref()
-                        .is_some_and(|d| d.source.as_deref() == Some("local-ledger")) =>
+                None if provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
+                    spec.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
+                }) && snapshot
+                    .details
+                    .as_ref()
+                    .is_some_and(|d| d.source.as_deref() == Some("local-ledger")) =>
                 {
                     now.checked_add(i64::try_from(duration).ok()?)?
                 }
@@ -762,7 +771,10 @@ fn pacing_factor_basis_points(
         }
         _ => detail,
     };
-    let detail = if model.adapter() == "opencode" && model.model().starts_with("opencode-go/") {
+    let detail = if provenant_records::AdapterSpec::get(model.adapter())
+        .and_then(|spec| spec.allowance_prefix)
+        .is_some_and(|prefix| model.model().starts_with(prefix))
+    {
         let observation = go_quota_observation(model, account, context);
         let details = observation.and_then(|o| o.snapshot.details.as_ref());
         if details.is_some_and(|d| d.coverage.as_deref() == Some("complete")) {
@@ -968,7 +980,9 @@ fn pacing_reserve_window(
             percent > 0
                 && (window.resets_unix_seconds.is_some_and(|reset| reset > now)
                     || (window.resets_unix_seconds.is_none()
-                        && adapter == "opencode"
+                        && provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
+                            spec.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
+                        })
                         && snapshot
                             .details
                             .as_ref()
@@ -1292,13 +1306,16 @@ fn admissible<'c>(
 /// OpenCode accepts only its catalogued routes. An explicit model outside the
 /// four flash entries is refused with the admitted routes named.
 fn refuse_unlisted_opencode(model: &ModelId, catalogue: &Catalogue) -> Result<(), RoutingError> {
-    if model.adapter() != "opencode" || catalogue.model(model).is_some() {
+    if !provenant_records::AdapterSpec::get(model.adapter())
+        .is_some_and(|spec| spec.catalogue_models_only)
+        || catalogue.model(model).is_some()
+    {
         return Ok(());
     }
     let admitted = catalogue
         .models()
         .iter()
-        .filter(|entry| entry.model.adapter() == "opencode")
+        .filter(|entry| entry.model.adapter() == model.adapter())
         .map(|entry| entry.model.as_str())
         .collect::<Vec<_>>();
     Err(RoutingError::UnlistedOpenCodeModel {

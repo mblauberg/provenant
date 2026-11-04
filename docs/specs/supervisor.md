@@ -878,13 +878,12 @@ retained directory access; a reported team proves neither trusted signer
 provenance nor safe cwd behaviour. See [configuration](../runbooks/configuration.md#unreadable-process-census-exceptions)
 for entry syntax and validation.
 
-The host owner sets the strict host-only boolean
-`confinement.census_host_list_complete = true` after listing their host's
-unreadable daemons. Its default is `false`; the declaration grants no exception
-and changes no runtime custody decision. Without complete host coverage, land
-cleanup is expected to report the first unlisted daemon rather than remove the
-worktree. Non-platform diagnostics include `CS_OPS_TEAMID` (or `unavailable`),
-so the owner can configure an exact executable/signer pair.
+After listing unreadable daemons, the host owner can set
+`PROVENANT_CENSUS_HOST_LIST_COMPLETE=1` for native acceptance. This test-only
+declaration grants no exception and changes no runtime custody decision.
+Without complete host coverage, land cleanup is expected to report the first
+unlisted daemon rather than remove the worktree. Non-platform diagnostics
+include `CS_OPS_TEAMID` (or `unavailable`).
 
 Native acceptance always audits every unplaceable process from the actual
 census pass, printing its pid, executable path, real/effective/saved uids, signing flags, team and
@@ -943,7 +942,7 @@ has admissible built-in evidence and reports each one's pid, path, all three
 uids, signing flags, team and failed condition; unavailable fields are explicit.
 It places a same-user `/bin/sleep` child inside and requires the existing
 stronger `Live` refusal with a placing detail. Only when
-`confinement.census_host_list_complete=true` does it also assert clean `Free`;
+`PROVENANT_CENSUS_HOST_LIST_COMPLETE` is set does it also assert clean `Free`;
 otherwise it explicitly logs that assertion's skip and why. Incomplete process
 enumeration fails the audit. Its main marker appears after the unconditional
 audit and sleep assertions. The isolated WindowServer fixture selects

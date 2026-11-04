@@ -7,6 +7,12 @@ OpenCode) are enabled by default in every access and session mode with a launch
 form; recordings serve replay tests only. Use `provenant route list`
 to inspect the catalogue; readiness is decided at dispatch.
 
+`AdapterSpec` owns credential metadata watch files, authentication markers, login
+hints, compaction environment controls and allowance prefixes. Credential watches
+inspect metadata only. Recognised missing or expired provider logins settle as
+`auth_required`, including when every candidate is skipped before launch.
+Read-only graph nodes can then try their next declared route.
+
 ## Launch capabilities
 
 One declared table per adapter (`AdapterSpec::launch` in
@@ -261,6 +267,19 @@ Unregistered and registered agy behave differently at launch:
   Google account against the registered key and skips the route if it differs
   (`changed identity; re-register it`). Register every account you route to.
 
+Quota probes also verify the signed-in fingerprint. When it changes, the old
+key is marked `account_mismatch` and excluded from routing. Provenant updates
+that directory's registration to the new key under the config lock, preserving
+its label and settings; the new account appears on the next quota pass. A
+concurrent manual registration takes precedence; if the new identity is already
+registered under another account, automatic rebinding is refused and Provenant
+prompts to inspect accounts with `provenant accounts list` while keeping the stale
+key excluded from routing. Dispatch can reuse a verified
+fingerprint for 30 seconds, capturing keychain metadata before probing to guard
+against concurrent sign-ins; a keychain metadata change or a new quota probe
+invalidates the cached observation earlier. No credentials or email addresses
+are stored in this cache.
+
 Register the first account, the one signed in on your own login keychain,
 with the home directory itself:
 
@@ -368,7 +387,17 @@ without reinstalling. Once a writer's head and route are verified, and before
 its provider starts, Provenant runs `pnpm install --frozen-lockfile` on the
 host when the worktree has `pnpm-lock.yaml` and no `node_modules/.modules.yaml`
 (pnpm's completion marker), so a partial `node_modules` is repaired. The
-install is bounded, runs outside the sandbox, and is cancelled with the
+install resolves pnpm using the host account's login-shell PATH, and passes
+that PATH to pnpm so it can also find node when the peer daemon has a narrower
+PATH. The login-shell probe runs from the account home, is bounded to ten
+seconds, and is cancelled with the dispatch. If pnpm is missing,
+`dependency_tool_not_found` names the searched PATH; install pnpm on that host
+and check `pnpm --version` in its login shell before retrying. If the probe fails, preparation falls back to the host process PATH and records
+`daemon_fallback` as the PATH source in the dependency preparation outcome; a
+missing pnpm refusal also names that source and the searched PATH. If no daemon
+PATH is available, `dependency_path_unavailable` reports the probe failure.
+Cancellation stops preparation without falling back.
+The install is bounded, runs outside the sandbox, and is cancelled with the
 dispatch, with its process group cleaned up. Disable it with
 `--knob lanes.prepare_deps=false` or the `lanes.prepare_deps` config key. An
 install failure refuses the lane and includes the command, the exit status or

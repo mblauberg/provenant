@@ -279,7 +279,9 @@ impl Admission<'_> {
             .iter()
             .find(|r| r.account.adapter == route.adapter && r.account.account_key == *key);
         let snapshot = self.fresh_snapshot(&route.adapter, record);
-        let go_model = route.adapter == "opencode" && route.model.starts_with("opencode-go/");
+        let go_model = provenant_records::AdapterSpec::get(&route.adapter)
+            .and_then(|spec| spec.allowance_prefix)
+            .is_some_and(|prefix| route.model.starts_with(prefix));
         if let Some(snapshot) = snapshot {
             if snapshot.status == QuotaStatus::AuthRequired {
                 return Err(QuotaError::Refused("authentication required"));

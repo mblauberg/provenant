@@ -2150,8 +2150,10 @@ impl BinaryRunOwner<'_> {
                     {
                         Ok(info)
                     }
-                    Some(_) => Err(WorktreeError::BranchExistsWithBase {
+                    Some(info) => Err(WorktreeError::BranchExistsWithBase {
                         branch: spec.branch.clone(),
+                        head: info.head,
+                        base,
                     }
                     .into()),
                     None => {

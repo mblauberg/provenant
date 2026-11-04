@@ -1083,7 +1083,7 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
                     if outcome != Outcome::Unsettled && r.exit_evidence.is_some() => {}
                 (
                     Some(TerminalEvidence::PreLaunchRefusal),
-                    Outcome::Rejected | Outcome::Cancelled,
+                    Outcome::Rejected | Outcome::Cancelled | Outcome::AuthRequired,
                 ) if r.provider_launched == Some(false) => {}
                 (Some(TerminalEvidence::EffectiveCancellation), Outcome::Cancelled) => {}
                 (Some(TerminalEvidence::ImportCancellation), Outcome::Cancelled)
@@ -1111,8 +1111,10 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
                 return Err(RunError::Validation("terminal exit artifact"));
             }
             Some(_) => {}
-            None if matches!(outcome, Outcome::Rejected | Outcome::Cancelled)
-                && r.started_at.is_none() => {}
+            None if matches!(
+                outcome,
+                Outcome::Rejected | Outcome::Cancelled | Outcome::AuthRequired
+            ) && r.started_at.is_none() => {}
             None if lost => {}
             None => return Err(RunError::Validation("terminal exit evidence missing")),
         }

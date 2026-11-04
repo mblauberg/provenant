@@ -613,6 +613,70 @@ cat "$HOME/agy-usage"
     rig.assert_legacy_unchanged()
 }
 
+#[test]
+fn agy_quota_reports_rebind_failure_and_recovery_on_stderr() -> Result {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let mut rig = quota_rig()?;
+    support::clear_accounts(&rig)?;
+    let key = |email: &str| -> Result<String> {
+        let fingerprint =
+            provenant_providers::identity::fingerprint(email).ok_or("fixture fingerprint")?;
+        Ok(format!("agy-google-{}", &fingerprint[..12]))
+    };
+    let old = key("old@example.test")?;
+    let new = key("new@example.test")?;
+    let other = rig.root.join("other-home");
+    fs::create_dir(&other)?;
+    support::register_account(&rig, "agy", "work", &old, &rig.home)?;
+    support::register_account(&rig, "agy", "other", &new, &other)?;
+    let config = fs::read(rig.state.join("config.toml"))?;
+    let bin = rig.root.join("bin");
+    fs::create_dir(&bin)?;
+    let agy = bin.join("agy");
+    fs::write(
+        &agy,
+        r#"#!/bin/sh
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--log-file" ]; then shift; log=$1; fi
+    shift
+done
+printf 'OAuth: authenticated successfully as new@example.test\n' > "$log"
+cat "$HOME/agy-usage"
+"#,
+    )?;
+    fs::set_permissions(&agy, fs::Permissions::from_mode(0o700))?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../crates/providers/src/quota/fixtures/agy.json"
+    ))?;
+    fs::write(
+        rig.home.join("agy-usage"),
+        serde_json::to_vec(&fixture["payload"])?,
+    )?;
+    let out = rig.command(&["quota", "tick", "--adapter", "agy", "--json"])?;
+    assert_eq!(code(&out), 0);
+    let stderr = String::from_utf8(out.stderr.bytes)?;
+    assert!(
+        stderr.contains("failed to reconcile agy account switch"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("agy identity is already registered"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("provenant accounts list"), "{stderr}");
+    let refused: serde_json::Value = serde_json::from_slice(&fs::read(
+        rig.state.join("quota").join(&old).join("agy.json"),
+    )?)?;
+    assert_eq!(refused["last_error"], "account_mismatch");
+    assert_eq!(fs::read(rig.state.join("config.toml"))?, config);
+    rig.assert_legacy_unchanged()
+}
+
 /// A second agy account signed in under its own `HOME` registers and probes as
 /// a separate account: its own key, its own quota record and its own row.
 #[test]

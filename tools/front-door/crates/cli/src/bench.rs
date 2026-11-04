@@ -1,4 +1,5 @@
 //! Frozen benchmark command grammar and split selection.
+use crate::metadata::CatalogueArg;
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -49,7 +50,7 @@ pub enum Bench {
 #[derive(Debug, Args)]
 pub struct Mine {
     /// Maximum tasks to propose (1 to 100)
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=100))]
+    #[arg(long, catalog_u64_range = 1..=100)]
     pub limit: Option<u64>,
 }
 
@@ -69,7 +70,7 @@ pub struct Run {
     #[arg(long, value_enum, default_value = "acceptance")]
     pub split: Split,
     /// Maximum tasks to run (1 to 100)
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=100))]
+    #[arg(long, catalog_u64_range = 1..=100)]
     pub limit: Option<u64>,
 }
 

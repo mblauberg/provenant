@@ -306,6 +306,7 @@ impl LiveQuota {
         }
         markers.retain(|key, _| {
             self.accounts
+                .borrow()
                 .iter()
                 .any(|a| a.scope.adapter == "claude" && a.scope.account_key == *key)
         });

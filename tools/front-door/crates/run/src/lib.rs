@@ -53,8 +53,9 @@ pub use delivery::HostDeliveryContext;
 pub use git_context::{GitContext, continuation_history, resolve_git_base, review_merge_base};
 pub use holder::{HolderContext, HostLaunchContext, RootSeed, RunHolder, SealedTask};
 pub use launch::{
-    Decoded, LaunchPaths, PreparedLaunch, PreparedStart, Providers, QUEUED_RUNS_PAGE_SIZE,
-    RefusalKind, Started, ValidatedChild, access_root_allowed, capture_plan, concurrency,
+    Decoded, LaunchPaths, PrepareRefusal, PreparedLaunch, PreparedStart, Providers,
+    QUEUED_RUNS_PAGE_SIZE, RefusalKind, Started, ValidatedChild, access_root_allowed, capture_plan,
+    concurrency,
 };
 pub use overview::{OverviewAttempt, OverviewState, RunOverview};
 pub use plan::read_only_plan;

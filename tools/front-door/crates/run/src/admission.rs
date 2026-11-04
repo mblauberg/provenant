@@ -29,8 +29,8 @@ pub(crate) struct AppliedWriteGrants {
 /// concurrency. The writer caps are configurable below these
 /// (`domains.fabric.lanes.max_writer_lanes`, default 40, and
 /// `max_project_writer_lanes`, default 30).
-pub const HOST_ACTIVE: u64 = 64;
-pub const PROJECT_ACTIVE: u64 = 32;
+pub const HOST_ACTIVE: u64 = provenant_config::WRITER_LANES_CEILING;
+pub const PROJECT_ACTIVE: u64 = provenant_config::PROJECT_WRITER_LANES_CEILING;
 pub const HOST_QUEUED: u64 = 256;
 
 /// Floors and windows recorded on each ticket at submission. A task queued
