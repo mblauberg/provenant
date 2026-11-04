@@ -496,7 +496,9 @@ impl RunError {
                 if let Some(action) = error.repair() {
                     diagnostic = diagnostic.next(action);
                 }
-                if let WorktreeError::UnknownWriterAt { path } = error {
+                if let WorktreeError::UnknownWriterAt { path }
+                | WorktreeError::CensusUnknown { path, .. } = error
+                {
                     if let Some(path) = safe_path(path, destination) {
                         diagnostic =
                             diagnostic.detail(format!("writer custody is unknown for {path}"));
@@ -506,6 +508,18 @@ impl RunError {
                             "inspect custody, then select the checkout with --worktree {path}"
                         ));
                     }
+                }
+                if let WorktreeError::WriterBusy {
+                    holder: Some(holder),
+                } = error
+                {
+                    diagnostic = diagnostic
+                        .detail(format!("worktree writer is busy, held by attempt {holder}"));
+                }
+                if let WorktreeError::DetachedWorktree { head } = error {
+                    diagnostic = diagnostic
+                        .detail(format!("detached HEAD at {head}"))
+                        .next("create a branch or remove --worktree and pass --mode read-only");
                 }
                 if matches!(error, WorktreeError::Dirty(_)) {
                     diagnostic = diagnostic.detail("the writer worktree has uncommitted edits");
@@ -529,6 +543,13 @@ impl RunError {
                     diagnostic = diagnostic
                         .detail(fact.detail())
                         .fact(DiagnosticFact::DeliveryLimit(fact));
+                }
+            }
+            Self::UnsafePath { path, check } => {
+                if let Some(path) = safe_path(path, destination) {
+                    diagnostic = diagnostic.detail(format!(
+                        "run-store path {path} is not private or contained: {check}"
+                    ));
                 }
             }
             Self::GenerationConflict { current_generation } => {

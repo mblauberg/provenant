@@ -128,7 +128,7 @@ pub enum WorktreeError {
     /// evidence was incomplete. The public refusal text and code stay the same
     /// as `UnknownWriter`; lifecycle consumers get a typed retry cause.
     #[error("worktree writer or registration is unknown")]
-    CensusUnknown { detail: String },
+    CensusUnknown { detail: String, path: PathBuf },
     #[error("Git marks the worktree {}", if *.locked { "locked" } else { "prunable" })]
     GitEntryHeld { locked: bool },
     #[error("worktree operation was cancelled")]

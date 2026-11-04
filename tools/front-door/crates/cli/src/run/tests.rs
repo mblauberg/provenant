@@ -1044,10 +1044,8 @@ fn unsafe_store_path_reason_survives_cli_conversion() {
         path: "runs/example/process.json".into(),
         check: provenant_run::PathCheck::Links,
     });
-    assert_eq!(
-        failure.message,
-        "run-store path runs/example/process.json is not private or contained: link count"
-    );
+    assert!(failure.message.contains("runs/example/process.json"));
+    assert!(failure.message.contains("link count"));
 }
 
 #[test]
@@ -1585,9 +1583,15 @@ fn dispatch_existing_worktree_checks_custody_and_replays() -> Result<(), Box<dyn
                 .ok_or("detached error")?
                 .message;
             assert!(message.contains("detached HEAD at"), "{message}");
+            let action = detached
+                .result
+                .error
+                .as_ref()
+                .and_then(|error| error.repair.as_deref())
+                .unwrap_or_default();
             assert!(
-                message.contains("remove --worktree and pass --mode read-only"),
-                "{message}"
+                action.contains("remove --worktree and pass --mode read-only"),
+                "{action}"
             );
             assert!(
                 session
@@ -2367,12 +2371,13 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
     );
     match census_error {
         Err(super::OwnWorktreeError::Other(run::RunError::Writer(
-            provenant_confinement::worktrees::WorktreeError::CensusUnknown { detail },
+            provenant_confinement::worktrees::WorktreeError::CensusUnknown { detail, .. },
         ))) => assert_eq!(detail, "injected census incomplete"),
         other => panic!("expected typed census refusal, got {other:?}"),
     }
     assert_eq!(counted.0.load(std::sync::atomic::Ordering::SeqCst), 1);
     let census_unknown = worktrees::WorktreeError::CensusUnknown {
+        path: path.clone(),
         detail: "injected census incomplete".into(),
     };
     assert_eq!(
