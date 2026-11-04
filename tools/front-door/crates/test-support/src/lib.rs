@@ -34,9 +34,25 @@ pub fn wait_for<T: std::fmt::Debug>(
 /// requires native confinement. The ordinal makes skips visible and countable
 /// in captured test output.
 pub fn skip_sandbox_dependent_test(reason: impl Display) -> Result<(), String> {
-    missing_prerequisite(
-        std::env::var_os("PROVENANT_CONFINEMENT_REQUIRED").is_some(),
+    report_unavailable_sandbox(
+        reason.to_string(),
+        &|name| std::env::var_os(name),
+        &mut std::io::stderr(),
+        &SKIP_COUNT,
+    )
+}
+
+fn report_unavailable_sandbox(
+    reason: String,
+    environment: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+    output: &mut impl Write,
+    count: &AtomicUsize,
+) -> Result<(), String> {
+    report_missing_prerequisite(
+        environment("PROVENANT_CONFINEMENT_REQUIRED").is_some(),
         reason,
+        output,
+        count,
     )
 }
 
@@ -70,6 +86,29 @@ fn report_missing_prerequisite(
 mod tests {
     use super::report_missing_prerequisite;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn unavailable_sandbox_uses_injected_requirement_and_reports_local_skip() {
+        for control in [None, Some("1")] {
+            let mut output = Vec::new();
+            let count = AtomicUsize::new(0);
+            let result = super::report_unavailable_sandbox(
+                "sandbox executable unavailable".into(),
+                &|name| {
+                    assert_eq!(name, "PROVENANT_CONFINEMENT_REQUIRED");
+                    control.map(Into::into)
+                },
+                &mut output,
+                &count,
+            );
+            assert_eq!(result.is_err(), control.is_some());
+            if control.is_none() {
+                assert!(String::from_utf8(output).unwrap().contains("SKIP #1:"));
+            } else {
+                assert!(output.is_empty());
+            }
+        }
+    }
 
     #[test]
     fn bounded_wait_returns_the_reached_observation() {
