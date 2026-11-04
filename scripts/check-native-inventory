@@ -10,13 +10,23 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def inventory(path):
     rows = []
+    in_table = False
     for line in path.read_text().splitlines():
-        if line.startswith('| `'):
-            fields = [field.strip().strip('`') for field in line.strip('|').split('|')]
-            if len(fields) > 1 and fields[1] == 'macOS':
-                if len(fields) != 6 or any(not field for field in fields):
-                    raise ValueError(f'malformed native inventory row: {line}')
-                rows.append(fields)
+        if line.startswith('| Exact test name |'):
+            in_table = True
+            continue
+        if not in_table:
+            continue
+        if not line.startswith('|'):
+            break
+        if line.startswith('|---'):
+            continue
+        fields = [field.strip() for field in line.strip('|').split('|')]
+        if (len(fields) != 6 or any(not field for field in fields)
+                or not fields[0].startswith('`') or not fields[0].endswith('`')
+                or fields[1] != 'macOS'):
+            raise ValueError(f'malformed native inventory row: {line}')
+        rows.append([field.strip('`') for field in fields])
     if not rows:
         raise ValueError('native inventory is empty')
     identities = [(row[5], row[0]) for row in rows]

@@ -322,7 +322,7 @@ fn source_fast_forward_advances_clean_tree_and_preserves_ignored_output()
     fixture.run(&["add", ".gitignore"])?;
     fixture.run(&["commit", "-m", "ignore build output"])?;
     let test = TestContext::new(&fixture)?;
-    let context = test.context();
+    let mut context = test.context();
     let info = create(
         &context,
         WorktreeCreate {
@@ -341,7 +341,14 @@ fn source_fast_forward_advances_clean_tree_and_preserves_ignored_output()
     fs::create_dir_all(&hooks)?;
     fs::write(hooks.join("post-merge"), "#!/bin/sh\n: > hook-ran\n")?;
     fs::set_permissions(hooks.join("post-merge"), fs::Permissions::from_mode(0o700))?;
+    let session = CensusSession::new(&test.workers, &test.clock);
+    context.workers = &session;
     fast_forward(&context, &info.path, target, &cancel())?;
+    assert_eq!(
+        session.observed_at(),
+        None,
+        "mutation must invalidate the custody census"
+    );
     let actual = list(&context, &cancel())?
         .into_iter()
         .find(|entry| entry.path == info.path)
@@ -1598,7 +1605,8 @@ fn gc_foreign_merged_clean_is_opt_in_immediate_and_requires_complete_census()
                 .map(|reason| RetainedBranch {
                     branch: "native".into(),
                     reason,
-                    detail: None,
+                    detail: (scenario == "unknown")
+                        .then(|| "worker census did not prove the tree free".into()),
                 })
                 .collect::<Vec<_>>(),
             "{scenario}"
@@ -2559,57 +2567,90 @@ fn removal_refreshes_session_after_output_preparation() -> Result<(), Box<dyn Er
             self.complete_required
         }
     }
-    for complete_required in [false, true] {
-        let fixture = Fixture::new()?;
-        fs::write(fixture.root.join(".git/info/exclude"), "target/\n")?;
-        let test = TestContext::new(&fixture)?;
-        let mut context = test.context();
-        let info = create(
-            &context,
-            WorktreeCreate {
-                branch: "late-worker".into(),
-                base: None,
-            },
-            &cancel(),
-        )?;
-        let artifact = info.path.join("target/artifact");
-        fs::create_dir(info.path.join("target"))?;
-        fs::write(&artifact, "output")?;
-        let observer = AppearingAfterPreparation {
-            artifact: artifact.clone(),
-            calls: Default::default(),
-            complete_required,
-        };
-        let session = CensusSession::new(&observer, &test.clock);
-        context.workers = &session;
-        let result = remove_with_output(
-            &context,
-            WorktreeRemove::Name {
-                name: "late-worker".into(),
-                discard: false,
-                integration: None,
-                expected_head: None,
-            },
-            &cancel(),
-            &provenant_config::ProjectGcSettings {
-                regenerable: vec!["target".into()],
-                ..Default::default()
-            },
-        );
-        assert!(
-            matches!(
-                result,
-                Err(WorktreeError::LiveWriter | WorktreeError::LiveProcess(_))
-            ),
-            "{result:?}"
-        );
-        assert!(
-            !artifact.exists(),
-            "output preparation must precede the late observation"
-        );
-        assert!(info.path.is_dir());
-        assert!(observer.calls.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+    let fixture = Fixture::new()?;
+    fs::write(fixture.root.join(".git/info/exclude"), "target/\n")?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let info = create(
+        &context,
+        WorktreeCreate {
+            branch: "late-worker".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let artifact = info.path.join("target/artifact");
+    fs::create_dir(info.path.join("target"))?;
+    fs::write(&artifact, "output")?;
+    let observer = AppearingAfterPreparation {
+        artifact: artifact.clone(),
+        calls: Default::default(),
+        complete_required: false,
+    };
+    let session = CensusSession::new(&observer, &test.clock);
+    context.workers = &session;
+    let result = remove_with_output(
+        &context,
+        WorktreeRemove::Name {
+            name: "late-worker".into(),
+            discard: false,
+            integration: None,
+            expected_head: None,
+        },
+        &cancel(),
+        &provenant_config::ProjectGcSettings {
+            regenerable: vec!["target".into()],
+            ..Default::default()
+        },
+    );
+    assert!(
+        matches!(
+            result,
+            Err(WorktreeError::LiveWriter | WorktreeError::LiveProcess(_))
+        ),
+        "{result:?}"
+    );
+    assert!(
+        !artifact.exists(),
+        "output preparation must precede the late observation"
+    );
+    assert!(info.path.is_dir());
+    assert!(observer.calls.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+    Ok(())
+}
+
+#[test]
+fn custody_refresh_rechecks_a_cached_free_observation() -> Result<(), Box<dyn Error>> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Appearing(AtomicUsize);
+    impl WorkerObserver for Appearing {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            let state = if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                WorkerState::Free
+            } else {
+                WorkerState::Live
+            };
+            roots.iter().cloned().map(|root| (root, state)).collect()
+        }
+        fn requires_complete_census(&self) -> bool {
+            true
+        }
     }
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let observer = Appearing(AtomicUsize::new(0));
+    let session = CensusSession::new(&observer, &test.clock);
+    assert_eq!(
+        session.observe_roots(std::slice::from_ref(&fixture.root))[&fixture.root],
+        WorkerState::Free
+    );
+    context.workers = &session;
+    assert!(matches!(
+        lifecycle::refresh_census_under_custody(&context, &fixture.root),
+        Err(WorktreeError::LiveWriter | WorktreeError::LiveProcess(_))
+    ));
+    assert_eq!(observer.0.load(Ordering::SeqCst), 2);
     Ok(())
 }
 
@@ -2835,7 +2876,7 @@ fn gc_managed_removal_needs_a_fresh_free_census_under_custody() -> Result<(), Bo
             vec![RetainedBranch {
                 branch: "gc-census-flip".into(),
                 reason: RetainReason::UnknownWriter,
-                detail: None,
+                detail: Some("process 968: cwd unreadable; policy_condition=approved daemon directory required; configure confinement.census_ignore_unreadable; path=\"/Library/Developer/CoreSimulator/Resources/bin/simdiskimaged\", team_id=platform".into()),
             }]
         );
         assert!(lane.path.is_dir());
@@ -2878,7 +2919,7 @@ fn gc_preview_and_apply_both_retain_a_managed_tree_with_an_unknown_census()
             vec![RetainedBranch {
                 branch: "gc-census-unknown".into(),
                 reason: RetainReason::UnknownWriter,
-                detail: dry_run.then(|| "process 968: cwd unreadable; policy_condition=approved daemon directory required; configure confinement.census_ignore_unreadable; path=\"/Library/Developer/CoreSimulator/Resources/bin/simdiskimaged\", team_id=platform".into()),
+                detail: Some("process 968: cwd unreadable; policy_condition=approved daemon directory required; configure confinement.census_ignore_unreadable; path=\"/Library/Developer/CoreSimulator/Resources/bin/simdiskimaged\", team_id=platform".into()),
             }],
             "dry_run={dry_run}"
         );

@@ -48,9 +48,18 @@ with tempfile.TemporaryDirectory() as directory:
     report.write_text(f'<testsuites><testsuite><testcase classname="suite" name="{name}"/><testcase classname="other" name="{name}"/></testsuite></testsuites>')
     assert not module.check([row, other_row], listing, root)
     inventory_file = root / 'inventory.md'
-    inventory_file.write_text('\n'.join('| ' + ' | '.join(f'`{v}`' if i in (0, 5) else v for i, v in enumerate(r)) + ' |' for r in [row, other_row]))
+    inventory_file.write_text('| Exact test name | Platform | Invocation | Environment | Tools | Binary |\n' + '\n'.join('| ' + ' | '.join(f'`{v}`' if i in (0, 5) else v for i, v in enumerate(r)) + ' |' for r in [row, other_row]))
     assert len(module.inventory(inventory_file)) == 2
-    inventory_file.write_text(inventory_file.read_text() + '\n' + inventory_file.read_text().splitlines()[0])
+    unquoted = inventory_file.read_text().replace('`example::native_test`', 'example::native_test', 1)
+    inventory_file.write_text(unquoted)
+    try:
+        module.inventory(inventory_file)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('unquoted inventory row accepted')
+    inventory_file.write_text('| Exact test name | Platform | Invocation | Environment | Tools | Binary |\n' + '\n'.join('| ' + ' | '.join(f'`{v}`' if i in (0, 5) else v for i, v in enumerate(r)) + ' |' for r in [row, other_row]))
+    inventory_file.write_text(inventory_file.read_text() + '\n' + inventory_file.read_text().splitlines()[1])
     try:
         module.inventory(inventory_file)
     except ValueError:

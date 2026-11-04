@@ -70,6 +70,65 @@ fn session_reuses_evidence_and_refreshes_at_epoch_boundaries() -> Result<(), Box
 }
 
 #[test]
+fn session_acquires_with_captured_policy_during_aba() -> Result<(), Box<dyn Error>> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    struct Changing {
+        policy_b: AtomicBool,
+        acquisitions: AtomicUsize,
+    }
+    impl WorkerObserver for Changing {
+        fn observe_roots(&self, _: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            panic!("acquisition must use the captured policy")
+        }
+        fn epoch_policy(&self) -> Option<CensusEpochPolicy> {
+            Some(CensusEpochPolicy {
+                exclude_ancestors: self.policy_b.load(Ordering::SeqCst),
+                ..CensusEpochPolicy::default()
+            })
+        }
+        fn observe_captured_policy(
+            &self,
+            roots: &[PathBuf],
+            _: bool,
+            policy: &CensusEpochPolicy,
+        ) -> WorkerEvidence {
+            self.acquisitions.fetch_add(1, Ordering::SeqCst);
+            self.policy_b.store(true, Ordering::SeqCst);
+            let state = if policy.exclude_ancestors {
+                WorkerState::Free
+            } else {
+                WorkerState::Live
+            };
+            self.policy_b.store(false, Ordering::SeqCst);
+            WorkerEvidence {
+                states: roots.iter().cloned().map(|root| (root, state)).collect(),
+                ..WorkerEvidence::default()
+            }
+        }
+    }
+    let fixture = Fixture::new()?;
+    let clock = provenant_core::TestClock::new(
+        provenant_os::clock::SystemClock.wall_now()?,
+        provenant_core::MonoTime::from_micros(1),
+    );
+    let observer = Changing {
+        policy_b: AtomicBool::new(false),
+        acquisitions: AtomicUsize::new(0),
+    };
+    let session = CensusSession::new(&observer, &clock);
+    assert_eq!(
+        session.observe_roots(std::slice::from_ref(&fixture.root))[&fixture.root],
+        WorkerState::Live
+    );
+    assert_eq!(
+        session.observe_roots(std::slice::from_ref(&fixture.root))[&fixture.root],
+        WorkerState::Live
+    );
+    assert_eq!(observer.acquisitions.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[test]
 fn session_refusal_uses_decision_evidence_and_missing_root_is_unknown() -> Result<(), Box<dyn Error>>
 {
     use std::sync::atomic::{AtomicUsize, Ordering};

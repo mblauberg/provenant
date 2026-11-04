@@ -10,6 +10,11 @@ impl ScratchPreparationError {
     fn is_transient(&self) -> bool {
         use provenant_confinement::worktrees::WorktreeError;
         use provenant_os::fs::FsError;
+        if self.0.admission_cause()
+            == Some(provenant_confinement::worktrees::AdmissionCause::RegistryLockTimeout)
+        {
+            return true;
+        }
         matches!(
             &self.0,
             WorktreeError::Filesystem(FsError::LockTimeout { .. })
@@ -343,6 +348,15 @@ fn shell_path(path: &std::path::Path) -> String {
 mod tests {
     use super::private_graph_directory_refusal;
     use std::path::Path;
+
+    #[test]
+    fn registry_lock_timeout_retries_only_after_admission() {
+        use super::{ScratchPreparationError, retry_scratch_poll};
+        use provenant_confinement::worktrees::WorktreeError;
+        let error = ScratchPreparationError(WorktreeError::RegistryLockTimeout);
+        assert!(retry_scratch_poll(&error, true));
+        assert!(!retry_scratch_poll(&error, false));
+    }
 
     #[test]
     fn refusal_names_the_path_mode_and_repair() {
