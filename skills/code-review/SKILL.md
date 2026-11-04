@@ -38,6 +38,8 @@ which prints the selected shape, lenses and the reason without dispatching. Laun
 one independent read-only sub-agent per selected lens in parallel. Include the cross-family leg the review ladder asks for,
 then have the chair synthesise findings and dispositions across the panel.
 
+Review a stacked PR against its own base; do not re-review lower PRs. See the [stacked PR workflow](../../docs/runbooks/github-workflow.md#stacked-pull-requests).
+
 ## Independence
 
 - The reviewer is read-only and reads the pinned commit with `git show` and

@@ -300,6 +300,7 @@ rejects private paths, symlinks, secrets, personal home paths and evidence
 that cannot be read within the byte bounds. It reads no unrelated refs and
 never fetches, publishes or rewrites history.
 
-Publication used a fresh root commit, `a39c7b7e`. History rewrites stay gated
-behind explicit user authority. Never push private pre-publication refs merely
-because the current tree is clean.
+Publication used a fresh root commit, `a39c7b7e`. Rewriting `main` or any other
+shared branch, locally or by push, stays gated behind explicit user authority;
+only a writer's own unmerged branches may be rewritten freely. Never push
+private pre-publication refs merely because the current tree is clean.
