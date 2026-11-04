@@ -14,7 +14,7 @@ final class ReportTests: XCTestCase {
         {"schema_version":1,"command":"quota show","status":"ok","error":null,"data":{
          "schema_version":1,"generated_unix_seconds":1899680400,
          "accounts":[{"account":{"adapter":"codex","account_key":"a","label":"A"},"status":"available","refreshing":false,
-         "snapshot":{"windows":[{"pool":"primary","used_basis_points":2400,"resets_unix_seconds":1899698400}],"details":{"coverage":"partial"}}}],
+         "snapshot":{"windows":[{"pool":"primary","used_basis_points":2456,"resets_unix_seconds":1899698400}],"details":{"coverage":"partial"}}}],
          "sources":[],"coverage":{"total":1,"known":1},"refreshing_ids":[],"report_path":"/tmp/report"}}
         """#
         let report = try decodeShow(json)

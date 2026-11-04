@@ -5,7 +5,7 @@ use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::
 use provenant_confinement::permissions::{NetworkEndpoint, ProviderProfile, ProviderProfileSpec};
 use serde::Deserialize;
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 pub struct OpenCode;
 
 /// Only a typed quota refusal ends a live attempt; ordinary text and malformed
@@ -289,37 +289,19 @@ fn prepare(
         // its private state, whose grant already covers the read, so grant
         // exactly that binary for execution, alongside system grep. No shell is enabled.
         let rg = private.join("cache/opencode/bin/rg");
-        // Seatbelt resolves Homebrew's install-name symlinks to these files.
-        // Canonical literals also satisfy the held-parent checks, which reject
-        // symlink grants, without granting a library directory.
-        // Resolve the host-selected rg, not the lane-writable cached copy, to
-        // discover its package-manager Cellar. Never trust a root in lane state.
-        let excluded: Vec<_> = [input.home, private.as_path(), input.cwd]
+        // Resolve install-name symlinks to exact files, accepting libraries by
+        // content regardless of the host's package manager or PATH ordering.
+        let excluded: Vec<_> = [input.home, private.as_path(), &plan.scratch.path, input.cwd]
             .into_iter()
             .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
             .collect();
-        let roots: Vec<_> = (input.host_var)("PATH")
-            .into_iter()
-            .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
-            .map(|dir| dir.join("rg"))
-            .find_map(|path| std::fs::canonicalize(path).ok().filter(|p| p.is_file()))
-            .into_iter()
-            .flat_map(|path| {
-                path.ancestors()
-                    .find(|p| p.file_name().is_some_and(|n| n == "Cellar"))
-                    .map(Path::to_path_buf)
-            })
-            .filter(|root| {
-                !excluded
-                    .iter()
-                    .any(|p| root.starts_with(p) || p.starts_with(root))
-            })
-            .collect();
-        let root_refs: Vec<_> = roots.iter().map(PathBuf::as_path).collect();
         runtime_reads.extend(
-            crate::dylib::linked_libraries_within(&rg, &root_refs)
-                .into_iter()
-                .map(exact),
+            crate::dylib::linked_dynamic_libraries(&rg, |path| {
+                !excluded.iter().any(|root| path.starts_with(root))
+                    && !provenant_confinement::is_credential_root(path)
+            })
+            .into_iter()
+            .map(exact),
         );
         tool_exec_roots.push(exact(rg));
         tool_exec_roots.push(exact("/usr/bin/grep"));
@@ -1192,55 +1174,76 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn cached_search_library_closure_is_read_only_and_literal()
+    fn cached_search_library_grants_follow_content_and_exclude_lane_paths()
     -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::symlink;
         use std::path::Path;
 
-        fn image(path: &Path, dependency: Option<&Path>) -> std::io::Result<()> {
+        fn image(path: &Path, file_type: u32, dependencies: &[&Path]) -> std::io::Result<()> {
             let mut bytes = vec![0; 32];
             bytes[..4].copy_from_slice(&0xfeed_facf_u32.to_le_bytes());
-            if let Some(dependency) = dependency {
+            bytes[12..16].copy_from_slice(&file_type.to_le_bytes());
+            bytes[16..20].copy_from_slice(&(dependencies.len() as u32).to_le_bytes());
+            for dependency in dependencies {
                 let name = dependency.to_str().unwrap().as_bytes();
-                bytes[16..20].copy_from_slice(&1_u32.to_le_bytes());
+                let start = bytes.len();
                 let size = (24 + name.len() + 1).next_multiple_of(8);
                 bytes.extend(0xc_u32.to_le_bytes());
                 bytes.extend((size as u32).to_le_bytes());
                 bytes.extend(24_u32.to_le_bytes());
-                bytes.resize(56, 0);
+                bytes.resize(start + 24, 0);
                 bytes.extend(name);
-                bytes.resize(32 + size, 0);
+                bytes.resize(start + size, 0);
             }
+            std::fs::create_dir_all(path.parent().unwrap())?;
             std::fs::write(path, bytes)
         }
 
         let temp = tempfile::tempdir()?;
         let root = temp.path().canonicalize()?;
-        let cellar = root.join("host/Cellar");
-        let lib = cellar.join("libs/1/lib");
-        std::fs::create_dir_all(&lib)?;
-        symlink("Cellar", root.join("host/opt"))?;
-        let first = root.join("host/opt/libs/1/lib/first.dylib");
-        let second = lib.join("second.dylib");
-        image(&lib.join("first.dylib"), Some(&second))?;
-        image(&second, None)?;
-        image(&lib.join("unrelated.dylib"), None)?;
-        let host_bin = cellar.join("rg/1/bin");
-        std::fs::create_dir_all(&host_bin)?;
-        image(&host_bin.join("rg"), None)?;
         let lane = root.join("lane");
+        let cwd = lane.join("repo");
+        let home = lane.join("home");
+        let first = root.join("host/arbitrary/first.dylib");
+        let second = root.join("host/other/second.dylib");
+        image(&first, 6, &[&second])?;
+        image(&second, 6, &[])?;
+        let alias = root.join("host/alias.dylib");
+        symlink(&first, &alias)?;
+        let denied = [
+            home.join("Documents/plain.txt"),
+            root.join("host/Cellar/plain.txt"),
+            home.join("fixture.dylib"),
+            lane.join("state/fixture.dylib"),
+            lane.join("scratch/fixture.dylib"),
+            cwd.join("fixture.dylib"),
+            root.join("host/.ssh/fixture.dylib"),
+            root.join("host/executable"),
+            root.join("host/directory"),
+        ];
+        // Every rejected image names another host dylib. It must not be
+        // reached through a rejected node of the closure.
+        let hidden = root.join("host/hidden.dylib");
+        image(&hidden, 6, &[])?;
+        for path in &denied {
+            image(path, 6, &[&hidden])?;
+        }
+        std::fs::write(&denied[0], "plain text")?;
+        std::fs::write(&denied[1], "plain text")?;
+        image(&denied[7], 2, &[&hidden])?;
+        std::fs::remove_file(&denied[8])?;
+        std::fs::create_dir(&denied[8])?;
         let cached = lane.join("state/cache/opencode/bin/rg");
-        std::fs::create_dir_all(cached.parent().unwrap())?;
-        image(&cached, Some(&first))?;
-        let found = crate::dylib::linked_libraries_within(&cached, &[&cellar]);
-        assert_eq!(found.len(), 2);
-        assert!(found.contains(&lib.join("first.dylib")));
-        assert!(found.contains(&second));
+        let mut dependencies = vec![alias.as_path()];
+        dependencies.extend(denied.iter().map(|path| path.as_path()));
+        image(&cached, 2, &dependencies)?;
+        // A non-executable, unrelated rg earlier on PATH cannot suppress grants.
+        let host_bin = root.join("host/bin");
+        std::fs::create_dir_all(&host_bin)?;
+        std::fs::write(host_bin.join("rg"), "unrelated")?;
         let plan = crate::tests::read_only_plan(lane.to_str().unwrap(), None);
         let route = crate::tests::route("opencode", "fixture-model");
         let prompt = crate::Prompt::new("fixture".into());
-        let cwd = lane.join("repo");
-        let home = lane.join("home");
         let mut input = crate::tests::fixture_input(&route, &plan, &prompt, &cwd, None);
         input.home = &home;
         let host_var = |name: &str| (name == "PATH").then(|| host_bin.clone().into_os_string());
@@ -1256,58 +1259,27 @@ mod tests {
             &spec.profile,
             &home,
         )?;
-        for path in [&lib.join("first.dylib"), &second] {
-            assert!(profile.contains(&format!(
-                "(allow file-read* (literal \"{}\"))",
+        for path in [&first, &second] {
+            assert!(
+                profile.contains(&format!(
+                    "(allow file-read* (literal \"{}\"))",
+                    path.display()
+                )),
+                "{}",
                 path.display()
-            )));
+            );
+        }
+        for path in denied.iter().chain([&hidden, &alias]) {
+            assert!(
+                !profile.contains(&format!(
+                    "(allow file-read* (literal \"{}\"))",
+                    path.display()
+                )),
+                "{}",
+                path.display()
+            );
         }
         assert!(!profile.contains("(allow process-exec (subpath"));
-        Ok(())
-    }
-
-    #[test]
-    fn cached_rg_cannot_name_arbitrary_host_files() -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let root = temp.path().canonicalize()?;
-        let home = root.join("home");
-        let secret = home.join("Documents/secret.txt");
-        std::fs::create_dir_all(secret.parent().unwrap())?;
-        std::fs::write(&secret, "secret")?;
-        let cached = root.join("state/cache/opencode/bin/rg");
-        std::fs::create_dir_all(cached.parent().unwrap())?;
-        let name = secret.to_str().unwrap().as_bytes();
-        let size = (24 + name.len() + 1).next_multiple_of(8);
-        let mut bytes = vec![0; 32];
-        bytes[..4].copy_from_slice(&0xfeed_facf_u32.to_le_bytes());
-        bytes[16..20].copy_from_slice(&1_u32.to_le_bytes());
-        bytes.extend(0xc_u32.to_le_bytes());
-        bytes.extend((size as u32).to_le_bytes());
-        bytes.extend(24_u32.to_le_bytes());
-        bytes.resize(56, 0);
-        bytes.extend(name);
-        bytes.resize(32 + size, 0);
-        std::fs::write(cached, bytes)?;
-        let plan = crate::tests::read_only_plan(root.to_str().unwrap(), None);
-        let route = crate::tests::route("opencode", "fixture-model");
-        let prompt = crate::Prompt::new("fixture".into());
-        let mut input = crate::tests::fixture_input(&route, &plan, &prompt, &root, None);
-        input.home = &home;
-        let spec = prepare(
-            &input,
-            Access::ReadOnly,
-            Session::Fresh,
-            OpenCode.stream(None)?,
-        )?;
-        let profile = provenant_confinement::permissions::snapshot::render(
-            plan.permissions(),
-            &spec.profile,
-            &home,
-        )?;
-        assert!(!profile.contains(&format!(
-            "(allow file-read* (literal \"{}\"))",
-            secret.display()
-        )));
         Ok(())
     }
 

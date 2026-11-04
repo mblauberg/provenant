@@ -273,7 +273,7 @@ final class ScreenModelTests: XCTestCase {
     func testPartialQuotaSnapshotIsLowerBound() throws {
         let json = #"""
         {"generated_unix_seconds": 1, "accounts": [{"account": {"adapter": "codex", "account_key": "a", "label": "A"},
-          "status": "available", "snapshot": {"windows": [{"pool": "primary", "used_basis_points": 2400}],
+          "status": "available", "snapshot": {"windows": [{"pool": "primary", "used_basis_points": 2456}],
           "details": {"coverage": "partial"}}}]}
         """#
         let decoder = JSONDecoder()
@@ -281,7 +281,9 @@ final class ScreenModelTests: XCTestCase {
         let show = try decoder.decode(QuotaShow.self, from: Data(json.utf8))
         let window = try XCTUnwrap(QuotaPanelModel.snapshot(show, history: nil).rows.first?.windows.first)
         XCTAssertTrue(window.lowerBound)
-        XCTAssertEqual(window.percent, 24)
+        XCTAssertEqual(window.percent, 24.56)
+        XCTAssertEqual(window.displayPercent, 24)
+        XCTAssertEqual(window.value, "≥24%")
     }
 
     func testQuotaShowsAccountsAndSurvivesMissingHistory() async {

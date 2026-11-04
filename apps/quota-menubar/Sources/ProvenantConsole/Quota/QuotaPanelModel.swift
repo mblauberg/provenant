@@ -15,6 +15,8 @@ struct QuotaRow: Identifiable, Equatable, Sendable {
         let percent: Double
         let resetsAt: Date?
         let lowerBound: Bool
+        var displayPercent: Int { Int(percent.rounded(lowerBound ? .down : .toNearestOrAwayFromZero)) }
+        var value: String { "\(lowerBound ? "≥" : "")\(displayPercent)%" }
     }
     struct Refusal: Equatable, Sendable {
         let model: String
