@@ -648,6 +648,42 @@ fn model_policy_results_check_sections_and_bound_continuations()
             .is_none()
     );
     record.continuation = None;
+    // Failed, uncommitted and input-required outcomes cannot escalate even
+    // when their result fails the quality check.
+    for outcome in [
+        run::Outcome::Failed,
+        run::Outcome::Uncommitted,
+        run::Outcome::InputRequired,
+    ] {
+        decoded.outcome = outcome;
+        assert!(
+            model_assessment(&gemini, task, &record, &decoded, record.attempt_number)?
+                .retry
+                .is_none()
+        );
+    }
+    decoded.outcome = run::Outcome::Succeeded;
+    decoded.complete = false;
+    assert!(
+        model_assessment(&gemini, task, &record, &decoded, record.attempt_number)?
+            .retry
+            .is_none()
+    );
+    decoded.complete = true;
+    let mut pinned = task.clone();
+    pinned.account = Some("work".into());
+    assert!(
+        model_assessment(&gemini, &pinned, &record, &decoded, record.attempt_number)?
+            .retry
+            .is_none()
+    );
+    let mut writer = task.clone();
+    writer.access.write_roots.push(temp.path().to_owned());
+    assert!(
+        model_assessment(&gemini, &writer, &record, &decoded, record.attempt_number)?
+            .retry
+            .is_none()
+    );
     decoded.result = "unstructured answer".into();
     let decision = model_assessment(&gemini, task, &record, &decoded, record.attempt_number)?;
     assert!(decision.refusal.is_none() && decision.retry.is_none());
@@ -751,175 +787,6 @@ fn model_policy_results_check_sections_and_bound_continuations()
         let assessment =
             super::assess_model_result(&terra, task, &record, &decoded, handoff.as_ref(), 1)?;
         assert!(assessment.retry.is_none() && assessment.refusal.is_none());
-    }
-    Ok(())
-}
-#[test]
-fn an_alternate_account_is_spent_only_by_routing_rule_or_a_live_refusal()
--> Result<(), Box<dyn std::error::Error>> {
-    use provenant_quota::{AccountRecord, AccountScope, QuotaSnapshot, QuotaStatus, QuotaWindow};
-    use std::os::unix::fs::PermissionsExt;
-    let temp = tempfile::tempdir()?;
-    let state = temp.path().canonicalize()?.join("state");
-    std::fs::create_dir_all(&state)?;
-    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
-    let model = ModelId::parse("codex/gpt-6-luna")?;
-    let now = 1_800_000_000;
-    let scope = |key: &str| AccountScope {
-        adapter: "codex".into(),
-        account_key: key.into(),
-        label: key.into(),
-    };
-    let exhausted = |key: &str, resets: i64| {
-        let mut record = AccountRecord::empty(scope(key));
-        record.snapshot = Some(QuotaSnapshot {
-            schema_version: 1,
-            account: scope(key),
-            revision: 0,
-            status: QuotaStatus::Exhausted,
-            observed_unix_seconds: now - 7_200,
-            source_ref: "fixture".into(),
-            authority_ref: None,
-            windows: vec![QuotaWindow {
-                pool: "seven_day".into(),
-                window_seconds: Some(604_800),
-                used_basis_points: 10_000,
-                resets_unix_seconds: Some(resets),
-            }],
-            details: None,
-        });
-        record
-    };
-    let keys = ["work", "other"];
-    let catalogue = provenant_routing::Catalogue::bundled()?;
-    let policies = provenant_providers::quota_policies(provenant_providers::REGISTRY);
-    let alternative = |quota: &[AccountRecord]| {
-        unspent_alternative(keys, quota, &policies, "work", &model, &catalogue, now)
-    };
-    // Unknown is not spent.
-    assert!(alternative(&[]));
-    // An exhausted reading binds until its full windows reset, as routing has it.
-    assert!(!alternative(&[exhausted("other", now + 3_600)]));
-    assert!(alternative(&[exhausted("other", now - 60)]));
-    // A live refusal recorded by a settlement, read back from the cache.
-    crate::quota::persist_provider_refusal(
-        &state,
-        &run::RouteRecord {
-            provider: Some("codex".into()),
-            model: Some("codex/gpt-6-luna".into()),
-            account_key: Some("other".into()),
-            account_label: Some("other".into()),
-            ..Default::default()
-        },
-        None,
-        now - 60,
-        None,
-    )?;
-    let cache = crate::quota::read_cache_at(&state)?;
-    assert!(!alternative(&cache));
-    // It holds only that model, and only for its hour.
-    let other = ModelId::parse("codex/gpt-6.1-sol")?;
-    assert!(unspent_alternative(
-        keys, &cache, &policies, "work", &other, &catalogue, now
-    ));
-    assert!(unspent_alternative(
-        keys,
-        &cache,
-        &policies,
-        "work",
-        &model,
-        &catalogue,
-        now + 3_600
-    ));
-    // A persisted account mismatch is spent too, as admission has it.
-    let mut mismatched = AccountRecord::empty(scope("other"));
-    mismatched.last_error = Some(provenant_quota::ProbeFailure::AccountMismatch);
-    assert!(!alternative(&[mismatched]));
-    // The spent account itself never counts.
-    assert!(!unspent_alternative(
-        ["work"],
-        &[],
-        &policies,
-        "work",
-        &model,
-        &catalogue,
-        now
-    ));
-    Ok(())
-}
-#[test]
-fn settlement_alternates_read_the_configured_polling_interval_like_admission()
--> Result<(), Box<dyn std::error::Error>> {
-    use provenant_quota::{
-        AccountRecord, AccountScope, PollingIntervals, QuotaSnapshot, QuotaStatus, QuotaWindow,
-        Refusal, Settings,
-    };
-    let model = ModelId::parse("agy/gemini-3.8-flash")?;
-    let now = 1_800_000_000;
-    let scope = AccountScope {
-        adapter: "agy".into(),
-        account_key: "other".into(),
-        label: "other".into(),
-    };
-    // A refusal, then a comparable reading with headroom that is older than
-    // agy's default 1200 s timer interval but inside a configured 3600 s one.
-    let mut record = AccountRecord::empty(scope.clone());
-    record.refusals.push(Refusal {
-        extra: Default::default(),
-        account: scope.clone(),
-        model: model.model().into(),
-        pool: Some("gemini".into()),
-        observed_unix_seconds: now - 2_000,
-        resets_unix_seconds: None,
-    });
-    record.snapshot = Some(QuotaSnapshot {
-        schema_version: 1,
-        account: scope,
-        revision: 0,
-        status: QuotaStatus::Available,
-        observed_unix_seconds: now - 1_500,
-        source_ref: "fixture".into(),
-        authority_ref: None,
-        windows: vec![QuotaWindow {
-            pool: "gemini".into(),
-            window_seconds: Some(604_800),
-            used_basis_points: 1_000,
-            resets_unix_seconds: Some(now + 3_600),
-        }],
-        details: None,
-    });
-    let catalogue = provenant_routing::Catalogue::bundled()?;
-    let pools = catalogue.admission_pools(&model);
-    let mut configured = Settings::default();
-    configured.polling_intervals.insert(
-        "agy".into(),
-        PollingIntervals {
-            timer_seconds: Some(3_600),
-            panel_seconds: None,
-        },
-    );
-    for (settings, cleared) in [(Settings::default(), false), (configured, true)] {
-        let (records, policies) =
-            crate::route::account_evidence(&settings, vec![record.clone()], now);
-        let blocked = provenant_quota::Admission {
-            policies: &policies,
-            now_unix_seconds: now,
-            records: &records,
-            pools: &pools,
-        }
-        .account_block("agy", "other", model.model())?
-        .is_some();
-        let alternative = unspent_alternative(
-            ["work", "other"],
-            &records,
-            &policies,
-            "work",
-            &model,
-            &catalogue,
-            now,
-        );
-        assert_eq!(blocked, !cleared);
-        assert_eq!(alternative, cleared, "assess must agree with admission");
     }
     Ok(())
 }
@@ -1066,13 +933,12 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
     assert!(assess_recovered(&rooted)?.retry.is_none());
     assert!(assess_recovered(&Registry::default())?.retry.is_some());
     const NOW: i64 = 1_800_000_000;
-    let assess_at = |record: &run::AttemptRecord,
-                     task: &run::TaskRequest,
-                     decoded: &run::Decoded,
-                     attempt: u64,
-                     others: bool| {
-        assess_settlement_retry(&config, |_, _| others, task, record, decoded, attempt, NOW)
-    };
+    let assess_at =
+        |record: &run::AttemptRecord,
+         _task: &run::TaskRequest,
+         decoded: &run::Decoded,
+         attempt: u64,
+         _others: bool| { assess_settlement_retry(&config, record, decoded, attempt, NOW) };
     let assess = |task: &run::TaskRequest, decoded: &run::Decoded, attempt: u64, others: bool| {
         assess_at(&record, task, decoded, attempt, others)
     };
@@ -1107,85 +973,43 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
         .collect();
     assert!(draws.len() > 1, "{draws:?}");
     assert!(assess(&task, &capacity, 3, false).retry.is_none());
-    // Without a session a pool route is drawn again, fresh.
+    // A launched attempt cannot switch route or account automatically.
     let sessionless = decoded(
         run::Outcome::ModelUnavailable,
         None,
         "provider capacity: Selected model is at capacity",
     );
-    let redraw = assess(&task, &sessionless, 1, false)
-        .retry
-        .ok_or("redraw")?;
-    assert!(!redraw.resume);
-    assert_eq!(redraw.route, task.route);
-    // A read-only lane takes its first fallback; a writer keeps its route.
     let mut fallback = task.clone();
     fallback.fallback = vec![run::RouteRecord {
         provider: Some("claude".into()),
         model: Some("claude/claude-sonnet-5-5".into()),
         ..Default::default()
     }];
-    let read_only = assess(&fallback, &sessionless, 1, false)
-        .retry
-        .ok_or("fallback")?;
-    assert!(
-        matches!(&read_only.route, run::RequestedRoute::Model { model, .. } if model == "claude/claude-sonnet-5-5")
-    );
+    assert!(assess(&fallback, &sessionless, 1, false).retry.is_none());
     fallback.access.write_roots.push(temp.path().to_owned());
-    let writer = assess(&fallback, &sessionless, 1, false)
-        .retry
-        .ok_or("writer")?;
-    assert_eq!(writer.route, fallback.route);
-    assert!(writer.instruction.contains("git status"));
-    assert!(writer.instruction.contains("already pushed"));
-    // Other model failures are not capacity.
+    assert!(assess(&fallback, &sessionless, 1, false).retry.is_none());
     let unavailable = decoded(
         run::Outcome::ModelUnavailable,
         Some("thread"),
         "provider model unavailable: no route",
     );
     assert!(assess(&task, &unavailable, 1, true).retry.is_none());
-    // A spent account redraws at once; an exact model needs another
-    // registered account, and a pinned account is never swapped.
     let quota = decoded(
         run::Outcome::QuotaLimited,
         None,
         "You've hit your weekly limit",
     );
-    // A named route on its only account, or every other account spent,
-    // has nowhere to go: a redraw could reach the spent account again
-    // through another model.
-    assert!(assess(&task, &quota, 1, false).retry.is_none());
-    let spent = assess(&task, &quota, 1, true);
-    let retry = spent.retry.ok_or("quota retry")?;
-    assert!(!retry.resume && retry.not_before_unix_seconds.is_none());
-    // It keeps the applied model, so admission refuses the spent account
-    // and resolution falls through to another for that model.
-    assert!(
-        matches!(&retry.route, run::RequestedRoute::Model { model, .. } if model == "codex/gpt-6-luna")
-    );
-    assert_eq!(
-        spent.note.as_deref(),
-        Some("retrying on the next eligible account (attempt 2 of 3)")
-    );
+    assert!(assess(&task, &quota, 1, true).retry.is_none());
     let mut pinned = task.clone();
     pinned.account = Some("work".into());
     assert!(assess(&pinned, &quota, 1, true).retry.is_none());
-    let mut exact = task.clone();
-    exact.route = input.request.tasks[0].route.clone();
-    assert!(assess(&exact, &quota, 1, false).retry.is_none());
-    assert!(
-        matches!(&assess(&exact, &quota, 1, true).retry.ok_or("exact")?.route, run::RequestedRoute::Model { model, .. } if model == "codex/gpt-6-luna")
-    );
-    exact.account = Some("work".into());
-    assert!(assess(&exact, &quota, 1, true).retry.is_none());
     // Zero retries turns the behaviour off.
     let off = provenant_routing::RoutingConfig {
         settlement_retries: 0,
         ..Default::default()
     };
     assert!(
-        assess_settlement_retry(&off, |_, _| true, &task, &record, &quota, 1, NOW)
+        assess_settlement_retry(&off, &record, &quota, 1, NOW)
             .retry
             .is_none()
     );
@@ -1197,7 +1021,7 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
         retry_delay_ceiling_seconds: 7_200,
         ..Default::default()
     };
-    let capped = assess_settlement_retry(&tuned, |_, _| false, &task, &record, &capacity, 4, NOW)
+    let capped = assess_settlement_retry(&tuned, &record, &capacity, 4, NOW)
         .retry
         .ok_or("tuned retry")?;
     assert_eq!(capped.max_attempts, 6);
@@ -1206,7 +1030,7 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
         retry_delay_ceiling_seconds: 45,
         ..tuned
     };
-    let ceiled = assess_settlement_retry(&ceiling, |_, _| false, &task, &record, &capacity, 1, NOW)
+    let ceiled = assess_settlement_retry(&ceiling, &record, &capacity, 1, NOW)
         .retry
         .ok_or("ceiled retry")?;
     assert_eq!(wait(&ceiled), Some(45));

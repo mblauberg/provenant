@@ -172,6 +172,7 @@ pub struct Decoded {
 pub struct PrepareRefusal {
     pub message: String,
     pub skipped_routes: Vec<SkippedRoute>,
+    pub fallback_outcome: Option<provenant_records::run::PreparationFailure>,
 }
 impl PrepareRefusal {
     pub fn auth_required(&self) -> bool {
@@ -187,6 +188,7 @@ impl From<String> for PrepareRefusal {
         Self {
             message,
             skipped_routes: Vec::new(),
+            fallback_outcome: None,
         }
     }
 }
@@ -1424,6 +1426,15 @@ impl RunStore {
                     .transpose()?;
                 // Every launcher, the settling guardian or a later sweep, waits
                 // for the retry's sealed launch time.
+                if record.continuation.as_deref() == Some("policy_fallback") {
+                    let released = prior
+                        .as_ref()
+                        .is_some_and(|prior| self.custody_released(prior, call).unwrap_or(false));
+                    if !released {
+                        started.push(Started::Deferred(id));
+                        continue;
+                    }
+                }
                 let not_before = match &prior {
                     Some(prior) => self
                         .staged_policy_retry(prior)?
@@ -1569,7 +1580,7 @@ impl RunStore {
                         Outcome::Rejected
                     };
                     let reason = refusal.message;
-                    match self.withdraw(
+                    match self.withdraw_with_preparation_failure(
                         id,
                         AttemptState::Queued {
                             extra: Default::default(),
@@ -1577,6 +1588,7 @@ impl RunStore {
                         outcome,
                         &reason,
                         now()?,
+                        refusal.fallback_outcome,
                         call,
                     ) {
                         Ok(Some(_)) => crate::writer::settle_launch_staging(&attempt)?,

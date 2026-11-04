@@ -146,6 +146,16 @@ pub enum ReviewResolveError {
 pub trait AttemptOwner {
     type Error: Error + 'static;
 
+    /// Re-read host-owned proof of a pre-custody preparation refusal and
+    /// released custody. Missing or unverifiable proof never authorizes a route.
+    fn preparation_fallback_evidence(
+        &mut self,
+        _key: &AttemptKey,
+        _reference: &str,
+    ) -> Result<Option<provenant_records::run::PreparationFailure>, Self::Error> {
+        Ok(None)
+    }
+
     /// Resolve a deferred review; hosts without support fail closed.
     fn resolve_review(
         &mut self,
@@ -1526,9 +1536,25 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     }
                     Some(last)
                         if last.outcome.is_some_and(|outcome| {
-                            outcome.allows_route_fallback(node.access, last.launched)
+                            historical_fallback_admissible(outcome, node.access, last.launched)
                         }) =>
                     {
+                        let Some(outcome) = last.outcome else { break };
+                        let evidence = last.attempt_ref.as_deref().and_then(|reference| {
+                            owner
+                                .preparation_fallback_evidence(&last.key, reference)
+                                .ok()
+                                .flatten()
+                        });
+                        if !live_fallback_allowed(outcome, last.launched, evidence) {
+                            let progress = &mut checkpoint.nodes[node_index];
+                            progress.state = NodeState::Failed;
+                            progress.advance_error_code =
+                                Some("fallback_evidence_unavailable".into());
+                            progress.advance_error = Some("Cannot verify local preparation and released custody for route fallback.".into());
+                            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                            break;
+                        }
                         progress.attempts.len()
                     }
                     Some(_) => break,
@@ -2004,6 +2030,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     }
                     Err(error) => return Err(GraphError::Run(error)),
                 };
+                let fallback_evidence = match &observation {
+                    AttemptObservation::Terminal {
+                        attempt_ref: Some(reference),
+                        ..
+                    } => owner
+                        .preparation_fallback_evidence(&key, reference)
+                        .ok()
+                        .flatten(),
+                    _ => None,
+                };
                 let mut usage_error = None;
                 let mut cost_error = None;
                 let usage = if let AttemptObservation::Terminal {
@@ -2237,7 +2273,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 AttemptOutcome::AuthRequired
                                 | AttemptOutcome::UsageLimited
                                 | AttemptOutcome::AdapterUnavailable => {
-                                    if !outcome.allows_route_fallback(node.access, launched)
+                                    if !live_fallback_allowed(outcome, launched, fallback_evidence)
                                         || route_index + 1 == node.routes.len()
                                     {
                                         if outcome == AttemptOutcome::UsageLimited {
@@ -2256,6 +2292,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                                 ),
                                                 MAX_ADVANCE_ERROR_BYTES,
                                             ));
+                                        }
+                                        if !live_fallback_allowed(
+                                            outcome,
+                                            launched,
+                                            fallback_evidence,
+                                        ) && route_index + 1 < node.routes.len()
+                                        {
+                                            progress.advance_error_code =
+                                                Some("fallback_evidence_unavailable".into());
+                                            progress.advance_error = Some("Cannot verify local preparation and released custody for route fallback.".into());
                                         }
                                         progress.state = NodeState::Failed;
                                         false

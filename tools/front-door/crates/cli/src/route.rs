@@ -1117,6 +1117,33 @@ pub(crate) fn resolve_dispatch(
     excluded_families: Option<(&[String], bool, &[String])>,
     rules: &[provenant_routing::ExclusionRule],
 ) -> Result<provenant_records::ResolvedRoute, DispatchError> {
+    resolve_dispatch_rejecting(
+        request,
+        roots,
+        account,
+        seed,
+        availability,
+        access,
+        host,
+        excluded_families,
+        rules,
+        &[],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_dispatch_rejecting(
+    request: &provenant_routing::RouteRequest,
+    roots: &Roots,
+    account: Option<&str>,
+    seed: (&str, u64),
+    availability: &[AvailabilityRecord],
+    access: &[AccessContext<'_>],
+    host: &str,
+    excluded_families: Option<(&[String], bool, &[String])>,
+    rules: &[provenant_routing::ExclusionRule],
+    rejected: &[ModelId],
+) -> Result<provenant_records::ResolvedRoute, DispatchError> {
     let catalogue = Catalogue::bundled()?;
     let (excluded_families, required, preferred) = match excluded_families {
         Some((families, required, preferred)) => (Some(families), required, preferred),
@@ -1142,6 +1169,8 @@ pub(crate) fn resolve_dispatch(
         .chain(&preferred_excluded)
         .cloned()
         .collect();
+    let with_rejected =
+        |members: &[ModelId]| members.iter().chain(rejected).cloned().collect::<Vec<_>>();
     let selected = resolve_dispatch_excluding(
         request,
         roots,
@@ -1150,7 +1179,7 @@ pub(crate) fn resolve_dispatch(
         availability,
         access,
         host,
-        &combined,
+        &with_rejected(&combined),
         rules,
     );
     // The unused families have no member to take: none is eligible, or the one
@@ -1177,7 +1206,7 @@ pub(crate) fn resolve_dispatch(
             availability,
             access,
             host,
-            &excluded,
+            &with_rejected(&excluded),
             rules,
         );
         match (relaxed, selected) {
@@ -1213,7 +1242,7 @@ pub(crate) fn resolve_dispatch(
             availability,
             access,
             host,
-            &[],
+            rejected,
             rules,
         );
         match (relaxed, selected) {

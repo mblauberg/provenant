@@ -187,9 +187,10 @@ the lenses it chose with the expansion, and a replay never measures again. Pass
 `size` or `review_shape` to fix the panel when the graph expands. A graph has
 one review base, so deferred reviews that name different bases are refused.
 
-A read-only node on a pool name lists its alias twice, so a first attempt that
-hits a usage limit falls back to a different model of the same pool; the retry
-excludes the model already tried. An exact model, a route table with an adapter
+A read-only node on a pool name lists its alias twice. A typed usage refusal
+that is confirmed to have stayed in local preparation can use the second entry,
+excluding the model already tried. A launched attempt does not automatically
+switch routes. An exact model, a route table with an adapter
 and model, and any writer keep a single route. A route table without an alias,
 or without an adapter and a model, is refused by name.
 
