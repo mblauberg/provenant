@@ -239,6 +239,7 @@ fn fixture() -> Result {
         let mut prompt = String::new();
         io::stdin().read_to_string(&mut prompt)?;
         if prompt.contains("fixture owner lifetime probe") {
+            // Keep the synthetic provider alive while its owner's lifetime is tested.
             std::thread::sleep(std::time::Duration::from_secs(60));
             return Ok(());
         }
@@ -4399,25 +4400,22 @@ fn fixture_owner_repro(ready_path: &std::path::Path) -> Result {
     ])?;
     // The provider is still running when the one-second wait ends (exit 124).
     assert!(matches!(code(&output), 0 | 124), "{output:?}");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let identity = provenant_test_support::wait_for(
+        &format!(
+            "guardian identity; dispatch output: {}",
+            String::from_utf8_lossy(&output.stdout.bytes)
+        ),
+        std::time::Duration::from_secs(10),
+        || find_guardian_identity(&rig.state),
+        |result| !matches!(result, Ok(None)),
+    )??
+    .ok_or("guardian identity missing")?;
+    fs::write(
+        ready_path,
+        serde_json::to_vec(&json!({"root": rig.root, "guardian": identity}))?,
+    )?;
     loop {
-        if let Some(identity) = find_guardian_identity(&rig.state)? {
-            fs::write(
-                ready_path,
-                serde_json::to_vec(&json!({"root": rig.root, "guardian": identity}))?,
-            )?;
-            break;
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(format!(
-                "fixture guardian identity was not published; dispatch output: {}",
-                String::from_utf8_lossy(&output.stdout.bytes)
-            )
-            .into());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
-    loop {
+        // Keep the owner alive until the parent kills it to test guardian cleanup.
         std::thread::sleep(std::time::Duration::from_secs(60));
     }
 }
@@ -4452,42 +4450,39 @@ fn fixture_guardian_exits_when_sigkilled_test_owner_dies() -> Result {
     let mut child = std::process::Command::new(std::env::current_exe()?)
         .env("PROVENANT_FIXTURE_OWNER_REPRO", &ready)
         .spawn()?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while !ready.exists() && std::time::Instant::now() < deadline {
-        if let Some(status) = child.try_wait()? {
-            return Err(format!("fixture owner repro exited early: {status}").into());
+    let observation = provenant_test_support::wait_for(
+        "fixture owner readiness",
+        std::time::Duration::from_secs(20),
+        || child.try_wait().map(|status| (ready.exists(), status)),
+        |result| !matches!(result, Ok((false, None))),
+    );
+    let (is_ready, status) = match observation {
+        Ok(result) => result?,
+        Err(error) => {
+            child.kill()?;
+            let _ = child.wait()?;
+            return Err(error.into());
         }
-        std::thread::sleep(std::time::Duration::from_millis(25));
+    };
+    if let Some(status) = status {
+        return Err(format!("fixture owner repro exited early: {status}").into());
     }
-    if !ready.exists() {
-        child.kill()?;
-        let _ = child.wait()?;
-        return Err("fixture owner repro did not publish readiness".into());
-    }
+    assert!(is_ready);
     let record: Value = serde_json::from_slice(&fs::read(&ready)?)?;
     let identity: provenant_supervisor::census::ProcessIdentity =
         serde_json::from_value(record["guardian"].clone())?;
     child.kill()?;
     let status = child.wait()?;
     assert_eq!(status.signal(), Some(9));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while std::time::Instant::now() < deadline {
-        match SystemProcessObserver.observe(identity.pid) {
-            ProcessObservation::Present(fact) if fact.identity == identity => {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            _ => {
-                fs::remove_file(&ready)?;
-                fs::remove_dir_all(record["root"].as_str().ok_or("fixture root")?)?;
-                return Ok(());
-            }
-        }
-    }
-    Err(format!(
-        "fixture guardian {} survived its killed owner",
-        identity.pid
-    )
-    .into())
+    provenant_test_support::wait_for(
+        &format!("guardian {} exit after owner death", identity.pid),
+        std::time::Duration::from_secs(30),
+        || SystemProcessObserver.observe(identity.pid),
+        |observation| !matches!(observation, ProcessObservation::Present(fact) if fact.identity == identity),
+    )?;
+    fs::remove_file(&ready)?;
+    fs::remove_dir_all(record["root"].as_str().ok_or("fixture root")?)?;
+    Ok(())
 }
 
 fn main() -> ExitCode {

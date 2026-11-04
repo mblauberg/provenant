@@ -3,7 +3,9 @@ use std::{io, path::Path};
 
 #[path = "fixture_git.rs"]
 mod fixture_git;
-pub use fixture_git::{git_command, git_command_at, git_env, run_git, scrub_git_env};
+pub use fixture_git::{
+    fixture_git_settings, git_command, git_command_at, git_env, run_git, scrub_git_env,
+};
 
 /// Create a temporary directory beneath the canonical environment temporary root.
 ///

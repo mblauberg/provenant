@@ -1316,19 +1316,33 @@ mod tests {
         Ok(())
     }
 
+    fn search_tool(path: &std::ffi::OsStr, required: bool) -> Result<Option<PathBuf>, String> {
+        let rg = std::env::split_paths(path)
+            .map(|dir| dir.join("rg"))
+            .find(|path| path.is_file());
+        if rg.is_none() {
+            provenant_test_support::missing_prerequisite(required, "rg for native search")?;
+        }
+        Ok(rg)
+    }
+
+    #[test]
+    fn missing_native_search_tool_obeys_required_control() {
+        let path = tempfile::tempdir().unwrap();
+        let error = search_tool(path.path().as_os_str(), true).unwrap_err();
+        assert!(error.contains("rg"));
+        assert_eq!(search_tool(path.path().as_os_str(), false).unwrap(), None);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     #[allow(clippy::disallowed_methods)]
     fn read_only_search_runs_in_native_profile() -> Result<(), Box<dyn std::error::Error>> {
-        let Some(rg) = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-            .map(|dir| dir.join("rg"))
-            .find(|path| path.is_file())
+        let Some(rg) = search_tool(
+            &std::env::var_os("PATH").unwrap_or_default(),
+            std::env::var_os("PROVENANT_CONFINEMENT_REQUIRED").is_some(),
+        )?
         else {
-            // CI installs ripgrep and sets PROVENANT_CONFINEMENT_REQUIRED, so
-            // this skip fails there instead of passing silently.
-            provenant_test_support::skip_sandbox_dependent_test(
-                "rg is required for the native search test",
-            )?;
             return Ok(());
         };
         let temp = tempfile::tempdir()?;

@@ -61,6 +61,7 @@ pub fn fast_forward(
         return Err(WorktreeError::IdentityChanged);
     }
     if current.head != head {
+        context.workers.invalidate();
         let outcome = execute_git_mutation(
             context.executor,
             repo,
@@ -87,10 +88,33 @@ pub fn list(
     context: &WorktreeContext<'_>,
     cancel: &CancelToken,
 ) -> Result<Vec<WorktreeInfo>, WorktreeError> {
+    Ok(list_with_observation(context, cancel)?
+        .into_iter()
+        .map(|observation| observation.info)
+        .collect())
+}
+
+/// The native census and registration/custody provenance for one inventory row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorktreeObservation {
+    pub info: WorktreeInfo,
+    pub observed: WorkerState,
+    pub registration_unknown: bool,
+}
+
+/// Like [`list`], preserving the native observation and whether registration
+/// or on-disk custody was itself unresolved. Admission callers use these
+/// typed facts to distinguish incomplete census from unresolved custody.
+pub fn list_with_observation(
+    context: &WorktreeContext<'_>,
+    cancel: &CancelToken,
+) -> Result<Vec<WorktreeObservation>, WorktreeError> {
     validate_binding(context)?;
-    let _lock = repository_lock(context, LockMode::Exclusive, cancel)?;
-    context.repo.revalidate()?;
-    let entries = read_worktrees(context, cancel)?;
+    let entries = {
+        let _lock = repository_lock(context, LockMode::Exclusive, cancel)?;
+        context.repo.revalidate()?;
+        read_worktrees(context, cancel)?
+    };
     // A stale Git registration must not hide the remaining worktrees from GC.
     let candidates: Vec<_> = entries
         .iter()
@@ -110,35 +134,45 @@ pub fn list(
             .get(&path)
             .copied()
             .unwrap_or(WorkerState::Unknown);
-        let (dirty, writer) = if path == primary {
+        let (dirty, writer, registration_unknown) = if path == primary {
             (
                 worktree_dirty_at(context, context.repo, cancel)
                     .unwrap_or(WorktreeCondition::Unknown),
                 combine_worker_state(WorkerState::Unknown, observed),
+                true,
             )
         } else {
             match verify_probed_worktree(context, &path, cancel) {
-                Ok(worktree) => (
-                    worktree_dirty_at(context, worktree.repo(), cancel)
-                        .unwrap_or(WorktreeCondition::Unknown),
-                    if entry.locked || entry.prunable {
-                        WriterState::Unknown
+                Ok(worktree) => {
+                    let disk = if entry.locked || entry.prunable {
+                        WorkerState::Unknown
                     } else {
-                        combine_worker_state(
-                            disk_writer_state(context.project_state, &path),
-                            observed,
-                        )
-                    },
-                ),
-                Err(_) => (WorktreeCondition::Unknown, WriterState::Unknown),
+                        disk_writer_state(context.project_state, &path)
+                    };
+                    (
+                        worktree_dirty_at(context, worktree.repo(), cancel)
+                            .unwrap_or(WorktreeCondition::Unknown),
+                        if entry.locked || entry.prunable {
+                            WriterState::Unknown
+                        } else {
+                            combine_worker_state(disk, observed)
+                        },
+                        entry.locked || entry.prunable || disk == WorkerState::Unknown,
+                    )
+                }
+                Err(_) => (WorktreeCondition::Unknown, WriterState::Unknown, true),
             }
         };
-        result.push(WorktreeInfo {
-            path,
-            branch: branch_text,
-            head: entry.head,
-            dirty,
-            writer,
+        result.push(WorktreeObservation {
+            info: WorktreeInfo {
+                path,
+                branch: branch_text,
+                head: entry.head,
+                dirty,
+                writer,
+            },
+            observed,
+            registration_unknown,
         });
     }
     Ok(result)
@@ -544,6 +578,8 @@ pub(super) fn execute_mutation(
     mutation: GitMutation,
     cancel: &CancelToken,
 ) -> Result<(), WorktreeError> {
+    // A failed or timed-out mutation may still have changed repository state.
+    context.workers.invalidate();
     let outcome = execute_git_mutation(
         context.executor,
         context.repo,
@@ -671,7 +707,7 @@ pub(super) fn remove_tree(
         entry,
         expected_head,
         cancel,
-        &|| true,
+        &|| Ok(()),
         Some(output),
         Repository::Held,
     )
@@ -682,7 +718,7 @@ pub(super) fn remove_tree_when(
     entry: &GitWorktree,
     expected_head: GitOid,
     cancel: &CancelToken,
-    eligible: &dyn Fn() -> bool,
+    eligible: &dyn Fn() -> Result<(), WorktreeError>,
     output: Option<&provenant_config::ProjectGcSettings>,
     repository: Repository<'_>,
 ) -> Result<RemovedTree, WorktreeError> {
@@ -698,9 +734,7 @@ pub(super) fn remove_tree_when(
     let mut locked = lock_worktree_for_mutation(context, entry, cancel)?;
     context.repo.revalidate()?;
     tree_unchanged(&read_worktrees(context, cancel)?, entry, expected_head)?;
-    if !eligible() {
-        return Err(WorktreeError::UnknownWriter);
-    }
+    eligible()?;
     let prepared =
         worktree_dirty_at(context, locked.verified.repo(), cancel)? == WorktreeCondition::Ignored;
     if prepared {
@@ -712,6 +746,9 @@ pub(super) fn remove_tree_when(
             &settings.keep,
             cancel,
         )?;
+        if matches!(repository, Repository::Held) {
+            refresh_census_under_custody(context, &canonical)?;
+        }
     }
     // Output preparation can take time. Recheck registration, head and lane
     // eligibility before removing the tree while writer exclusion is held.
@@ -719,15 +756,18 @@ pub(super) fn remove_tree_when(
         Repository::Held => None,
         Repository::Acquire { .. } => {
             // Any slow census happens before the repository lock is taken.
-            if prepared && !eligible() {
-                return Err(WorktreeError::UnknownWriter);
+            if prepared {
+                eligible()?;
             }
             Some(repository_lock(context, LockMode::Exclusive, cancel)?)
         }
     };
     tree_unchanged(&read_worktrees(context, cancel)?, entry, expected_head)?;
     let fenced = match repository {
-        Repository::Held => eligible(),
+        Repository::Held => {
+            eligible()?;
+            true
+        }
         Repository::Acquire { lanes } => lanes(),
     };
     if !fenced {
@@ -774,6 +814,32 @@ pub(super) fn remove_tree_when(
         _writer: writer,
         repository: repository_guard,
     })
+}
+
+/// Output preparation can take long enough for a native process to enter the
+/// tree. Refresh under the retained writer lease before a held-repository
+/// removal; land requires complete Free, ordinary custody rejects only a
+/// positive occupant as before.
+pub(super) fn refresh_census_under_custody(
+    context: &WorktreeContext<'_>,
+    root: &Path,
+) -> Result<(), WorktreeError> {
+    context.workers.invalidate();
+    let (states, details) = context
+        .workers
+        .observe_roots_with_details(std::slice::from_ref(&root.to_path_buf()));
+    match states.get(root).copied().unwrap_or(WorkerState::Unknown) {
+        WorkerState::Free => Ok(()),
+        WorkerState::Unknown if !context.workers.requires_complete_census() => Ok(()),
+        WorkerState::Unknown => Err(WorktreeError::IncompleteCensus {
+            detail: details
+                .get(root)
+                .cloned()
+                .unwrap_or_else(|| context.workers.incomplete_census_detail()),
+        }),
+        WorkerState::Live => Err(live_refusal(context.workers, root)),
+        WorkerState::Busy => Err(WorktreeError::LockBusy),
+    }
 }
 
 #[allow(clippy::print_stderr)]
@@ -873,6 +939,9 @@ pub(super) fn pin_branch_ref(
 }
 
 pub(super) fn retain_reason(error: &WorktreeError) -> RetainReason {
+    if error.admission_cause() == Some(AdmissionCause::RegistryLockTimeout) {
+        return RetainReason::LockBusy;
+    }
     match error {
         WorktreeError::Dirty(_) | WorktreeError::IgnoredPaths(_) => RetainReason::Dirty,
         WorktreeError::GitOperationInProgress => RetainReason::GitOperationInProgress,

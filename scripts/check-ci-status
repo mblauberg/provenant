@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""Evaluate the aggregate CI gate, including missing jobs."""
+import json
+import os
+import sys
+
+REQUIRED = frozenset({"macos-scope", "generated-reference", "rust-lint", "rust", "rust-macos-tests", "rust-macos-release", "rust-dependencies", "generic-checks"})
+MACOS = frozenset({"rust-macos-tests", "rust-macos-release"})
+
+
+def failures(needs, run_macos):
+    errors = []
+    for name in sorted(REQUIRED | needs.keys()):
+        result = needs.get(name, {}).get("result", "absent")
+        if result != "success" and not (name in MACOS and result == "skipped" and run_macos == "false"):
+            errors.append(f"{name}={result}")
+    return errors
+
+
+def main():
+    try:
+        needs = json.loads(os.environ["NEEDS_JSON"])
+        run_macos = os.environ["RUN_MACOS"]
+        if not isinstance(needs, dict) or run_macos not in ("true", "false"):
+            raise ValueError("invalid needs or macOS selection")
+        errors = failures(needs, run_macos)
+    except (KeyError, ValueError, TypeError) as error:
+        print(f"Invalid CI status input: {error}", file=sys.stderr)
+        return 1
+    if errors:
+        print("Blocking job results: " + ", ".join(errors), file=sys.stderr)
+        return 1
+    print("All required jobs succeeded or were explicitly unselected.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

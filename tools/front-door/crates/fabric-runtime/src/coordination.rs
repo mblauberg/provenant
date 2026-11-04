@@ -1367,11 +1367,12 @@ mod tests {
         assert_upgrade(&error, "database schema", version as u64);
     }
 
-    struct TickingClock(std::cell::Cell<i64>);
+    struct TickingClock(std::sync::Mutex<i64>);
     impl Clock for TickingClock {
         fn wall_now(&self) -> Result<WallTime, provenant_core::TimeError> {
-            let now = self.0.get();
-            self.0.set(now + 1);
+            let mut value = self.0.lock().unwrap();
+            let now = *value;
+            *value += 1;
             WallTime::from_micros(now)
         }
         fn mono_now(&self) -> MonoTime {
@@ -1403,7 +1404,7 @@ mod tests {
             .resolve(&Resolver)
             .expect("isolated state root")
             .state;
-        let clock = TickingClock(std::cell::Cell::new(2_000_000_000_000_000));
+        let clock = TickingClock(std::sync::Mutex::new(2_000_000_000_000_000));
         let backoff = ThreadPause;
         let budget = WaitBudget::cli(clock.mono_now(), 5).expect("test budget");
         let cancel = CancelToken::new();
@@ -1436,42 +1437,44 @@ mod tests {
     }
 
     struct AdvancingClock {
-        wall: std::cell::Cell<i64>,
-        mono: std::cell::Cell<u64>,
+        wall: std::sync::Mutex<i64>,
+        mono: std::sync::Mutex<u64>,
     }
     impl AdvancingClock {
         fn new() -> Self {
             Self {
-                wall: std::cell::Cell::new(2_000_000_000_000_000),
-                mono: std::cell::Cell::new(0),
+                wall: std::sync::Mutex::new(2_000_000_000_000_000),
+                mono: std::sync::Mutex::new(0),
             }
         }
         fn budget(&self) -> WaitBudget {
-            WaitBudget::cli(MonoTime::from_micros(self.mono.get()), 10).expect("wait budget")
+            WaitBudget::cli(MonoTime::from_micros(*self.mono.lock().unwrap()), 10)
+                .expect("wait budget")
         }
     }
     impl Clock for AdvancingClock {
         fn wall_now(&self) -> Result<WallTime, provenant_core::TimeError> {
-            WallTime::from_micros(self.wall.get())
+            WallTime::from_micros(*self.wall.lock().unwrap())
         }
         fn mono_now(&self) -> MonoTime {
-            MonoTime::from_micros(self.mono.get())
+            MonoTime::from_micros(*self.mono.lock().unwrap())
         }
         fn wait_until(&self, deadline: MonoTime) -> Result<(), provenant_core::TimeError> {
             let now = self.mono_now();
             if deadline > now {
                 let duration = DurationMicros::from_micros(deadline.as_micros() - now.as_micros());
-                let wall = WallTime::from_micros(self.wall.get())?.checked_add(duration)?;
-                self.wall.set(wall.as_micros());
-                self.mono.set(deadline.as_micros());
+                let wall =
+                    WallTime::from_micros(*self.wall.lock().unwrap())?.checked_add(duration)?;
+                *self.wall.lock().unwrap() = wall.as_micros();
+                *self.mono.lock().unwrap() = deadline.as_micros();
             }
             Ok(())
         }
     }
     impl Pause for AdvancingClock {
         fn wait(&self, duration: DurationMicros, _: &CancelToken) {
-            self.wall.set(self.wall.get() + duration.as_micros() as i64);
-            self.mono.set(self.mono.get() + duration.as_micros());
+            *self.wall.lock().unwrap() += duration.as_micros() as i64;
+            *self.mono.lock().unwrap() += duration.as_micros();
         }
     }
 
@@ -1870,9 +1873,7 @@ mod tests {
         else {
             panic!("landing acquire result")
         };
-        clock
-            .wall
-            .set(landing.expires_at.expect("lease expiry").as_micros());
+        *clock.wall.lock().unwrap() = landing.expires_at.expect("lease expiry").as_micros();
 
         assert!(matches!(
             service.landing(
@@ -1893,28 +1894,29 @@ mod tests {
         ));
     }
 
-    struct SimulatedClock(std::cell::Cell<u64>);
+    struct SimulatedClock(std::sync::Mutex<u64>);
     impl Clock for SimulatedClock {
         fn mono_now(&self) -> MonoTime {
-            MonoTime::from_micros(self.0.get())
+            MonoTime::from_micros(*self.0.lock().unwrap())
         }
         fn wall_now(&self) -> Result<WallTime, provenant_core::TimeError> {
             WallTime::from_micros(2_000_000_000_000_000)
         }
         fn wait_until(&self, deadline: MonoTime) -> Result<(), provenant_core::TimeError> {
-            self.0.set(self.0.get().max(deadline.as_micros()));
+            let mut value = self.0.lock().unwrap();
+            *value = (*value).max(deadline.as_micros());
             Ok(())
         }
     }
     impl Pause for SimulatedClock {
         fn wait(&self, duration: DurationMicros, _: &CancelToken) {
-            self.0.set(self.0.get() + duration.as_micros());
+            *self.0.lock().unwrap() += duration.as_micros();
         }
     }
     #[test]
     fn expired_event_and_landing_waits_are_data_using_the_injected_clock() {
         let fixture = Fixture::new();
-        let clock = SimulatedClock(std::cell::Cell::new(0));
+        let clock = SimulatedClock(std::sync::Mutex::new(0));
         let cancel = CancelToken::new();
         let budget = || WaitBudget::mcp(clock.mono_now(), 5).expect("budget");
         let service = LocalCoordination::open(
@@ -1956,7 +1958,7 @@ mod tests {
             .expect("expired wait is data");
         let value = serde_json::to_value(result).expect("result");
         assert_eq!(value["timed_out"], true);
-        assert_eq!(clock.0.get(), 1_000_000);
+        assert_eq!(*clock.0.lock().unwrap(), 1_000_000);
         let EventsResult::Read { cursor, .. } = service
             .events(
                 EventsInput::Read {
@@ -1988,9 +1990,9 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(clock.0.get(), 2_000_000);
+        assert_eq!(*clock.0.lock().unwrap(), 2_000_000);
         let expired = budget();
-        clock.0.set(7_000_000);
+        *clock.0.lock().unwrap() = 7_000_000;
         assert!(matches!(
             service.events(
                 EventsInput::Read {

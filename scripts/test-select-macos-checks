@@ -47,6 +47,16 @@ if grep -F 'tools/front-door/main.rs' "$tmp/log" >/dev/null; then
   exit 1
 fi
 
+# Inventory-only edits must exercise the evidence gate on macOS.
+git -C "$repo" checkout -q --detach "$common"
+mkdir -p "$repo/docs/runbooks"
+printf '%s\n' inventory > "$repo/docs/runbooks/ci.md"
+git -C "$repo" add .
+git -C "$repo" commit -qm 'update native inventory'
+head=$(git -C "$repo" rev-parse HEAD)
+result=$(run_selector)
+test "$result" = 'run_macos=true'
+
 # A topic change under tools/front-door/ selects macOS checks.
 mkdir -p "$repo/tools/front-door"
 printf '%s\n' topic > "$repo/tools/front-door/topic.rs"
