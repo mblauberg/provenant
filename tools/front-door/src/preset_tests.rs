@@ -3328,7 +3328,7 @@ fn synthesis_selects_findings_from_implicit_and_explicit_dependencies() {
 stages = [
   { id = "first", prompt = "First" },
   { id = "second", prompt = "Second" },
-  { id = "synthesis", prompt = "Synthesize", depends_on = ["first"], dispositions = ["accepted", "rejected"] },
+  { id = "synthesis", prompt = "Synthesise", depends_on = ["first"], dispositions = ["accepted", "rejected"] },
 ]
 "#).unwrap();
     let expanded = expand(&layers, "mixed-dependencies", "brief", &[]).unwrap();

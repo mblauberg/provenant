@@ -454,7 +454,7 @@ fn fixture() -> Result {
         .windows(2)
         .find(|pair| pair[0] == "-m")
         .map(|pair| pair[1].as_str());
-    if !prompt.contains("missing") {
+    if !prompt.contains("fixture missing rollout") {
         // Real rollouts record tool output. A printed credential must be
         // scrubbed from this transcript at settlement, not only from captures.
         let recorded = if prompt.contains("fixture printed credential") {
@@ -1122,7 +1122,7 @@ fn review_council_resolves_identity_only_dispositions() -> Result {
         OpenOptions::new()
             .append(true)
             .open(rig.state.join("config.toml")).map_err(|e| format!("config open: {e}"))?,
-        "\n[domains.routing.routes.junior]\nmodel='codex/gpt-6-luna'\neffort='low'\n[domains.routing.routes.senior]\nmodel='codex/gpt-6-luna'\neffort='low'\n[domains.routing.routes.principal]\nmodel='codex/gpt-6-luna'\neffort='low'"
+        "\n[domains.routing.pools]\njunior=[{{model='codex/gpt-6-luna',effort='low'}}]\nsenior=[{{model='codex/gpt-6-luna',effort='low'}}]\nprincipal=[{{model='codex/gpt-6-luna',effort='low'}}]"
     ).map_err(|e| format!("config write: {e}"))?;
     let git = std::env::var_os("PROVENANT_GIT")
         .map(PathBuf::from)
@@ -1746,7 +1746,10 @@ fn printed_credentials_leave_no_plaintext_in_run_files() -> Result {
 }
 
 fn codex_dispatch_observes_rollout() -> Result {
-    for (index, prompt) in ["reply OK", "missing", "mismatch"].iter().enumerate() {
+    for (index, prompt) in ["reply OK", "fixture missing rollout", "mismatch"]
+        .iter()
+        .enumerate()
+    {
         let mut rig = TestRig::new()?;
         let cleanup = rig.process_cleanup();
         // The production read-only profile anchors the host Rust runtime roots.
