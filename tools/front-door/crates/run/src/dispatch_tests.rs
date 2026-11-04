@@ -4745,6 +4745,67 @@ fn memory_floor_refuses_both_lane_classes() -> TestResult {
 }
 
 #[test]
+fn admission_uses_injected_memory_floor_and_host_facts() -> TestResult {
+    use provenant_os::sys::resources::ProcessBudget;
+    use provenant_supervisor::census::ProcessIdentity;
+
+    struct HostFacts(u64);
+    impl Resources for HostFacts {
+        fn memory(&self) -> std::io::Result<MemorySample> {
+            Ok(MemorySample {
+                available_bytes: self.0,
+                total_bytes: 100,
+            })
+        }
+        fn disk(&self, _: &Directory) -> std::io::Result<u64> {
+            Ok(u64::MAX)
+        }
+        fn process_budget(&self) -> std::io::Result<ProcessBudget> {
+            Ok(ProcessBudget {
+                used: 1,
+                limit: 100,
+            })
+        }
+        fn guardian_identity(&self) -> Option<ProcessIdentity> {
+            Some(ProcessIdentity {
+                boot: "test-boot".into(),
+                pid: 42,
+                native_start: 1,
+                group_id: 42,
+                session_id: 42,
+            })
+        }
+    }
+
+    // Exercise both sides of the injected 1% floor. No host memory or process
+    // table is consulted, and the virtual clock supplies the admission time.
+    for (available, fits) in [(0, false), (1, true), (2, true), (100, true)] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let mut store = RunStore::open(&context(temp.path())?, &call)?;
+        store.set_admission_policy(AdmissionPolicy {
+            memory_floor_basis_points: 100,
+            admission_seconds: 1,
+            ..AdmissionPolicy::default()
+        });
+        let run = lane(60, false);
+        let id = starting(&store, &run, &call)?;
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let admitted = store.admit(id, &attempt, &HostFacts(available), &clock, &cancel);
+        if fits {
+            let admitted = admitted?;
+            assert!(matches!(admitted.state, AttemptState::Running { .. }));
+            assert_eq!(admitted.started_at, Some(clock.wall_now()?));
+        } else {
+            assert!(matches!(admitted, Err(RunError::Refused)));
+            assert_eq!(clock.mono_now(), MonoTime::from_micros(1_000_000));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn project_cap_allows_up_to_32_active_lanes() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());

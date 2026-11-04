@@ -1983,7 +1983,10 @@ mod disk_admission_tests {
         struct Limited;
         impl Resources for Limited {
             fn memory(&self) -> std::io::Result<provenant_os::sys::resources::MemorySample> {
-                SystemResources.memory()
+                Ok(provenant_os::sys::resources::MemorySample {
+                    available_bytes: 100,
+                    total_bytes: 100,
+                })
             }
             fn disk(&self, _: &Directory) -> std::io::Result<u64> {
                 Ok(u64::MAX)

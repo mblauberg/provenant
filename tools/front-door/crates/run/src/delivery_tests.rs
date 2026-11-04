@@ -3224,15 +3224,20 @@ impl PrepareFixture {
             // child can briefly share the dropped lock's open file description
             // until it execs. Retry for about five seconds.
             let mut resumed = None;
-            for _ in 0..500 {
-                resumed = crate::settlement::Guard::claim(&attempt, scope, &clock)?;
-                if resumed.is_some() {
-                    break;
-                }
-                #[allow(clippy::disallowed_methods)]
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            settlement = resumed.ok_or("resumed owner")?;
+            provenant_test_support::wait_for(
+                "resumed settlement owner",
+                Duration::from_secs(5),
+                || {
+                    let result = crate::settlement::Guard::claim(&attempt, scope, &clock);
+                    let ready = !matches!(result, Ok(None));
+                    resumed = Some(result);
+                    ready
+                },
+                |ready| *ready,
+            )?;
+            settlement = resumed
+                .ok_or("no claim attempted")??
+                .ok_or("resumed owner")?;
         }
         let review = launch.terminal(
             &state,
@@ -4477,7 +4482,7 @@ fn terminal_attributes_only_the_pinned_head_after_branch_advances()
 fn automatic_integration_does_not_hold_application_locks_during_git()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     use provenant_os::fs::LockMode;
-    use std::{ffi::OsStr, time::Instant};
+    use std::ffi::OsStr;
     let mut fixture = PrepareFixture::new()?;
     fixture.git(&["push", "origin", "HEAD:refs/heads/integration"])?;
     fixture.request = HostDeliveryContext::destination(
@@ -4518,11 +4523,13 @@ fn automatic_integration_does_not_hold_application_locks_during_git()
     std::thread::scope(
         |scope| -> std::result::Result<(), Box<dyn std::error::Error>> {
             let worker = scope.spawn(|| host.integrate(&fixture.writer, &fixture.request, head));
-            let started = Instant::now();
-            while !entered.exists() && started.elapsed() < Duration::from_secs(5) {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            let seen = entered.exists();
+            let seen = provenant_test_support::wait_for(
+                "integration fetch",
+                Duration::from_secs(5),
+                || entered.exists(),
+                |seen| *seen,
+            )
+            .is_ok();
             let available = seen
                 && ["provenant-lane-setup.lock", &integrate]
                     .iter()
@@ -4548,7 +4555,6 @@ fn automatic_integration_does_not_hold_application_locks_during_git()
 #[allow(clippy::disallowed_methods)]
 fn delivery_cancellation_stops_its_running_git_child()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
-    use std::time::Instant;
     let mut fixture = PrepareFixture::new()?;
     let native = provenant_os::git::git_executable().ok_or("Git unavailable")?;
     let wrapper = fixture.root.join("blocked-delivery-git");
@@ -4566,11 +4572,13 @@ fn delivery_cancellation_stops_its_running_git_child()
     std::thread::scope(
         |scope| -> std::result::Result<(), Box<dyn std::error::Error>> {
             let worker = scope.spawn(|| host.head(&fixture.writer));
-            let started = Instant::now();
-            while !entered.exists() && started.elapsed() < Duration::from_secs(5) {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            let seen = entered.exists();
+            let seen = provenant_test_support::wait_for(
+                "delivery Git child",
+                Duration::from_secs(5),
+                || entered.exists(),
+                |seen| *seen,
+            )
+            .is_ok();
             cancel.cancel();
             assert!(matches!(
                 worker.join().map_err(|_| "delivery panicked")?,

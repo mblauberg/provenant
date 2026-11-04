@@ -4,6 +4,14 @@ Anchor: .github/workflows/ci.yml
 
 ## Rust front-door tests
 
+Keep fixtures independent of host capacity and time. At admission boundaries,
+inject `Resources` observations and an `AdmissionPolicy`, and use
+`provenant_core::TestClock` for deadlines and spacing. Keep production defaults
+in tests that exercise the defaults themselves. For asynchronous effects,
+use `provenant_test_support::wait_for` with a named condition and a bounded
+deadline; signal the condition where possible instead of relying on a delay.
+Tests of native process or filesystem behaviour may still need real host facts.
+
 Pull requests run the tests for one changed Rust workspace crate and every
 workspace package that depends on it, using a deterministic `cargo metadata`
 dependency graph. Both nextest hash partitions keep their existing partition

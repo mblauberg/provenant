@@ -1013,7 +1013,10 @@ mod process_wait_tests {
     struct Full;
     impl Resources for Full {
         fn memory(&self) -> std::io::Result<MemorySample> {
-            SystemResources.memory()
+            Ok(MemorySample {
+                available_bytes: 100,
+                total_bytes: 100,
+            })
         }
         fn disk(&self, _: &Directory) -> std::io::Result<u64> {
             Ok(u64::MAX)
@@ -1059,7 +1062,10 @@ mod process_wait_tests {
     }
     impl Resources for Probes {
         fn memory(&self) -> std::io::Result<MemorySample> {
-            SystemResources.memory()
+            Ok(MemorySample {
+                available_bytes: 100,
+                total_bytes: 100,
+            })
         }
         fn disk(&self, _: &Directory) -> std::io::Result<u64> {
             Ok(u64::MAX)
