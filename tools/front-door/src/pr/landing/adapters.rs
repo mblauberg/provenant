@@ -696,7 +696,17 @@ impl Repo for GitRepo {
             args.push(object_id(parent)?);
         }
         args.extend(["-m", message]);
-        self.ok(&args)
+        self.ok(&args).map_err(|error| match error {
+            LandingError::Failed(message)
+                if message.contains("identity unknown")
+                    || message.contains("unable to auto-detect email address") =>
+            {
+                LandingError::Failed(format!(
+                    "{message}; configure Git user.name and user.email for candidate commits"
+                ))
+            }
+            other => other,
+        })
     }
     fn push_ref(
         &mut self,
@@ -979,7 +989,7 @@ mod tests {
     use std::process::Command;
 
     fn git(dir: &Path, args: &[&str]) -> String {
-        let out = Command::new("git")
+        let out = provenant_os::fixture::git_command()
             .args(args)
             .current_dir(dir)
             .env("GIT_AUTHOR_NAME", "t")
@@ -1018,6 +1028,8 @@ mod tests {
         );
         git(&work, &["init", "-q", "-b", "main"]);
         git(&work, &["config", "commit.gpgsign", "false"]);
+        git(&work, &["config", "user.name", "Test Fixture"]);
+        git(&work, &["config", "user.email", "fixture@example.invalid"]);
         git(&work, &["remote", "add", "origin", bare.to_str().unwrap()]);
         commit_file(&work, "a", "a\n");
         git(&work, &["push", "-q", "origin", "main"]);
@@ -1256,6 +1268,55 @@ esac
     }
 
     #[test]
+    fn commit_tree_without_identity_reports_configuration() {
+        const MARKER: &str = "PROVENANT_MISSING_GIT_IDENTITY_TEST";
+        if std::env::var_os(MARKER).is_some() {
+            let mut rig = rig();
+            git(&rig.work, &["config", "--unset", "user.name"]);
+            git(&rig.work, &["config", "--unset", "user.email"]);
+            git(&rig.work, &["config", "user.useConfigOnly", "true"]);
+            let base = git(&rig.work, &["rev-parse", "HEAD"]);
+            let tree = rig.repo.tree_of(&base).unwrap();
+            let error = rig
+                .repo
+                .commit_tree(&tree, &[base], "candidate")
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("configure Git user.name and user.email"),
+                "{error}"
+            );
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "pr::landing::adapters::tests::commit_tree_without_identity_reports_configuration",
+            ])
+            .env(MARKER, "1")
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_COUNT", "0")
+            .env_remove("GIT_CONFIG_GLOBAL")
+            .env_remove("GIT_AUTHOR_NAME")
+            .env_remove("GIT_AUTHOR_EMAIL")
+            .env_remove("GIT_COMMITTER_NAME")
+            .env_remove("GIT_COMMITTER_EMAIL")
+            .env_remove("EMAIL")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn commit_tree_records_parents_in_order_and_tree_of_reads_it_back() {
         let mut rig = rig();
         let base = git(&rig.work, &["rev-parse", "HEAD"]);
@@ -1332,7 +1393,7 @@ esac
         rig.repo.delete_ref("land/x", &candidate).unwrap();
         rig.repo.delete_ref("land/x", &candidate).unwrap();
         assert!(
-            Command::new("git")
+            provenant_os::fixture::git_command()
                 .args(["rev-parse", "--verify", "-q", "refs/heads/land/x"])
                 .current_dir(&rig.bare)
                 .output()

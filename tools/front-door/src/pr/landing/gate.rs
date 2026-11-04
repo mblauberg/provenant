@@ -708,7 +708,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = provenant_os::fixture::git_command()
                 .arg("-C")
                 .arg(&dir)
                 .args(["-c", "user.name=t", "-c", "user.email=t@t"])

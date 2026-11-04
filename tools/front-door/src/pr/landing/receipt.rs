@@ -27,18 +27,17 @@ fn pending_dir(state: &Path) -> PathBuf {
 }
 
 /// Serialize pending-state recovery and publication across local land processes.
-pub fn lock(state: &Path) -> Result<std::fs::File, LandingError> {
+pub fn lock(state: &Path) -> Result<provenant_os::fs::LockGuard, LandingError> {
     let directory = state.join("landing");
     std::fs::create_dir_all(&directory).map_err(|e| failed("create landing state directory", e))?;
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(directory.join("publication.lock"))
-        .map_err(|e| failed("open landing lock", e))?;
-    provenant_os::sys::fs::try_flock(&file, provenant_os::fs::LockMode::Exclusive)
-        .map_err(|e| failed("another landing may be running", e))?;
-    Ok(file)
+    let directory = provenant_os::fs::Directory::open_anchor(&directory)
+        .map_err(|e| failed("open landing state directory", e))?;
+    directory
+        .try_lock(
+            "publication.lock".as_ref(),
+            provenant_os::fs::LockMode::Exclusive,
+        )
+        .map_err(|e| failed("another landing may be running", e))
 }
 
 fn receipt_dir(state: &Path) -> PathBuf {
@@ -286,6 +285,16 @@ pub(crate) mod tests {
             cost: CostEstimate::Known { micros: 1 },
             settled: None,
         }
+    }
+
+    #[test]
+    fn publication_lock_excludes_other_landings_until_released() -> Result<(), LandingError> {
+        let dir = tempfile::tempdir().map_err(|e| failed("tmp", e))?;
+        let held = lock(dir.path())?;
+        assert!(lock(dir.path()).is_err());
+        drop(held);
+        let _next = lock(dir.path())?;
+        Ok(())
     }
 
     #[test]
