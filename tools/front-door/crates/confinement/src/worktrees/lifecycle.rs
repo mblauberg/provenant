@@ -151,7 +151,11 @@ pub fn list_with_observation(
                     (
                         worktree_dirty_at(context, worktree.repo(), cancel)
                             .unwrap_or(WorktreeCondition::Unknown),
-                        combine_worker_state(disk, observed),
+                        if entry.locked || entry.prunable {
+                            WriterState::Unknown
+                        } else {
+                            combine_worker_state(disk, observed)
+                        },
                         entry.locked || entry.prunable || disk == WorkerState::Unknown,
                     )
                 }

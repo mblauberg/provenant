@@ -2470,6 +2470,41 @@ fn inventory_census_runs_after_repository_snapshot_lock_is_released() -> Result<
     Ok(())
 }
 
+#[test]
+fn locked_registration_stays_unknown_when_census_reports_live() -> Result<(), Box<dyn Error>> {
+    struct LiveWorkers;
+    impl WorkerObserver for LiveWorkers {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, WorkerState::Live))
+                .collect()
+        }
+    }
+
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let path = fixture.root.join(".worktrees/locked-live");
+    fixture.run(&[
+        "worktree",
+        "add",
+        "-b",
+        "locked-live",
+        path.to_str().ok_or("path")?,
+    ])?;
+    fixture.run(&["worktree", "lock", path.to_str().ok_or("path")?])?;
+    context.workers = &LiveWorkers;
+
+    let listed = list(&context, &cancel())?
+        .into_iter()
+        .find(|entry| entry.path == path)
+        .ok_or("locked linked worktree missing from inventory")?;
+    assert_eq!(listed.writer, WriterState::Unknown);
+    Ok(())
+}
+
 /// Free until the `unknown_from`th call (1-based), then unobservable.
 struct FlippingWorkers {
     calls: std::sync::atomic::AtomicUsize,
