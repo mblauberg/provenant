@@ -414,7 +414,9 @@ omitted fields inherit. The project and tier tables accept the same fields.
 - `poll_seconds` controls initial CI polling; `--poll` overrides it.
 - `integration` selects `batch`, `single` or `forge_queue`; `batch_size` and
   `batch_wait_seconds` bound collection. `candidate_ref_prefix` names temporary
-  refs and `max_rebuilds` bounds rebuilds on target movement. The bundled CI
+  refs and `max_rebuilds` bounds rebuilds on target movement.
+  `publish_settle_seconds` defaults to 30 and controls the wait before recovery
+  re-observes a publication that cannot safely be retried. The bundled CI
   trigger covers `land/**`; if you change the prefix, update the CI trigger to
   match. `land --explain` warns on a non-default prefix. The contract's forge
   queue path is not yet implemented and `forge_queue` is rejected at runtime.

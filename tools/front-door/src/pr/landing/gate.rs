@@ -641,10 +641,18 @@ mod tests {
         use std::process::Command;
         const MARKER: &str = "PROVENANT_GATE_HYGIENE_CHILD";
         if std::env::var_os(MARKER).is_none() {
-            let status = Command::new(std::env::current_exe().unwrap())
+            let output = Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "pr::landing::gate::tests::command_scrubs_credentials_and_cleans_background_on_success", "--nocapture"])
-                .env(MARKER, "1").env("GH_TOKEN", "gate-test").env("GITHUB_TOKEN", "gate-test").env("GH_ENTERPRISE_TOKEN", "gate-test").status().unwrap();
-            assert!(status.success());
+                .env(MARKER, "1").env("GH_TOKEN", "gate-test").env("GITHUB_TOKEN", "gate-test").env("GH_ENTERPRISE_TOKEN", "gate-test").output().unwrap();
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+                "child did not run the hygiene test"
+            );
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             return;
         }
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -669,17 +677,25 @@ mod tests {
             Run::Passed
         ));
         let dir = tempfile::tempdir().unwrap();
-        let marker = dir.path().join("survived");
-        let command = format!("(sleep 1; touch '{}') &", marker.display());
-        assert!(matches!(
-            run_command(dir.path(), &command, deadline, &[]).unwrap(),
-            Run::Passed
-        ));
-        std::thread::sleep(Duration::from_millis(1200));
-        assert!(
-            !marker.exists(),
-            "background process survived successful command"
-        );
+        for (suffix, expected_success) in [("0", true), ("1", false)] {
+            let pid_path = dir.path().join(format!("pid-{suffix}"));
+            let command = format!(
+                "sleep 60 & echo $! > '{}'; test -z \"$GH_TOKEN$GITHUB_TOKEN$GH_ENTERPRISE_TOKEN\"; exit {suffix}",
+                pid_path.display()
+            );
+            let result = run_command(dir.path(), &command, deadline, &[]).unwrap();
+            assert!(matches!(result, Run::Passed) == expected_success);
+            let pid = std::fs::read_to_string(pid_path).unwrap();
+            let status = Command::new("ps")
+                .args(["-o", "stat=", "-p", pid.trim()])
+                .output()
+                .unwrap();
+            let state = String::from_utf8_lossy(&status.stdout);
+            assert!(
+                state.trim().is_empty() || state.trim().starts_with('Z'),
+                "background process still running: {state}"
+            );
+        }
     }
 
     #[test]

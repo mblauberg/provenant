@@ -12,6 +12,7 @@ pub struct FakeForge {
     pub approvals_at_head: BTreeMap<(u64, String), Vec<Approval>>,
     pub check_runs: BTreeMap<String, Vec<GateEvidence>>,
     pub check_delay: std::time::Duration,
+    pub check_timeouts: Vec<std::time::Duration>,
     pub labels: BTreeMap<u64, Vec<String>>,
     pub direct_push: bool,
     pub lose_merge_response: bool,
@@ -60,6 +61,14 @@ impl Forge for FakeForge {
             std::thread::sleep(self.check_delay);
         }
         Ok(self.check_runs.get(commit).cloned().unwrap_or_default())
+    }
+    fn checks_with_timeout(
+        &mut self,
+        commit: &str,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<GateEvidence>, LandingError> {
+        self.check_timeouts.push(timeout);
+        self.checks(commit)
     }
     fn merge(
         &mut self,
@@ -120,6 +129,9 @@ pub struct FakeRepo {
     pub trees: BTreeMap<String, String>,
     pub parents: BTreeMap<String, Vec<String>>,
     pub pushes: Vec<(String, String, Option<String>)>,
+    pub push_attempts: Vec<String>,
+    pub pending_dir_to_observe: Option<std::path::PathBuf>,
+    pub saw_pending_on_target_push: bool,
     pub refuse_push: bool,
     pub refuse_target_push: bool,
     pub lose_push_response: bool,
@@ -172,6 +184,13 @@ impl Repo for FakeRepo {
         commit: &str,
         expected_old: Option<&str>,
     ) -> Result<(), LandingError> {
+        self.push_attempts.push(name.into());
+        if name == self.target_ref {
+            self.saw_pending_on_target_push =
+                self.pending_dir_to_observe.as_ref().is_some_and(|dir| {
+                    std::fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_some())
+                });
+        }
         if self.refuse_push || (self.refuse_target_push && name == self.target_ref) {
             return Err(LandingError::Refused("push refused".into()));
         }

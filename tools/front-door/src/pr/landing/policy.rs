@@ -278,6 +278,7 @@ mod tests {
             "p".into(),
             LandOverride {
                 batch_size: Some(4),
+                publish_settle_seconds: Some(12),
                 gate: Some(GateOverride {
                     timeout_seconds: Some(50),
                     ..GateOverride::default()
@@ -289,6 +290,7 @@ mod tests {
             "high".into(),
             LandOverride {
                 batch_size: Some(2),
+                publish_settle_seconds: Some(7),
                 ..LandOverride::default()
             },
         );
@@ -301,6 +303,7 @@ mod tests {
             ..LandOverride::default()
         };
         let base = LandPolicy::resolve(&settings, &origins, None, None, &LandOverride::default())?;
+        assert_eq!(base.fields["publish_settle_seconds"].value, 30);
         assert_eq!(base.fields["batch_size"].value, 7);
         assert_eq!(base.fields["batch_size"].source.layer, "host");
         assert!(base.fields["batch_size"].source.path.is_some());
@@ -312,6 +315,11 @@ mod tests {
             None,
             &LandOverride::default(),
         )?;
+        assert_eq!(project.fields["publish_settle_seconds"].value, 12);
+        assert_eq!(
+            project.fields["publish_settle_seconds"].source.layer,
+            "project"
+        );
         assert_eq!(project.fields["batch_size"].value, 4);
         assert_eq!(project.fields["batch_size"].source.layer, "project");
         assert_eq!(project.fields["gate.timeout_seconds"].value, 50);
@@ -322,6 +330,8 @@ mod tests {
             Some("high"),
             &LandOverride::default(),
         )?;
+        assert_eq!(tier.fields["publish_settle_seconds"].value, 7);
+        assert_eq!(tier.fields["publish_settle_seconds"].source.layer, "tier");
         assert_eq!(tier.fields["batch_size"].value, 2);
         assert_eq!(tier.fields["batch_size"].source.layer, "tier");
         let effective =

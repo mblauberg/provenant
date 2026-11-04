@@ -2,9 +2,23 @@ use super::{
     LandingError,
     model::*,
     ports::{AlarmSink, Forge, GateRunner, PullRequestState, Repo},
-    postmerge, receipt,
+    postmerge, publish, receipt,
 };
 use std::collections::BTreeMap;
+// A closed PR must never be published by a retry. A merged REST prefix may
+// remain part of the attempt, but a fast-forward retry requires all PRs open.
+fn valid_for_retry(forge: &mut dyn Forge, attempt: &PendingAttempt) -> bool {
+    publish::revalidate(forge, &attempt.candidate).is_ok_and(|excluded| excluded.is_empty())
+        && attempt.candidate.steps.iter().all(|step| {
+            forge
+                .pull_request(step.pr.number)
+                .is_ok_and(|pr| match pr.state {
+                    PullRequestState::Open => true,
+                    PullRequestState::Merged => attempt.publish.mode == PublishMode::RestOrdered,
+                    PullRequestState::Closed => false,
+                })
+        })
+}
 /// Recover pending publications before selection, retaining unprovable outcomes.
 /// In shadow mode, refuse when recovery would mutate a ref.
 #[allow(
@@ -33,16 +47,39 @@ pub fn recover_pending(
             repo.fetch_target(target)
         }
         .map_err(|_| unknown())?;
-        if !shadow
+        let settings = attempt.policy.settings().map_err(|_| unknown())?;
+        let mut settled = false;
+        let can_retry = !shadow && valid_for_retry(forge, &attempt);
+        if !shadow && !can_retry {
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "allow the original publication to settle"
+            )]
+            std::thread::sleep(std::time::Duration::from_secs(
+                settings.publish_settle_seconds,
+            ));
+            settled = true;
+            tip = repo.fetch_target(target).map_err(|_| unknown())?;
+        }
+        if can_retry
             && attempt.publish.mode == PublishMode::FastForward
             && tip == attempt.candidate.base
         {
-            // The identical lease is safe even if the original push is still running.
-            let _ = repo.push_ref(
+            let retry = repo.push_ref(
                 target,
                 &attempt.candidate.commit,
                 Some(&attempt.candidate.base),
             );
+            if retry.is_err() {
+                #[allow(
+                    clippy::disallowed_methods,
+                    reason = "allow the original publication to settle"
+                )]
+                std::thread::sleep(std::time::Duration::from_secs(
+                    settings.publish_settle_seconds,
+                ));
+                settled = true;
+            }
             tip = repo.fetch_target(target).map_err(|_| unknown())?;
         }
         let exact = repo
@@ -50,7 +87,7 @@ pub fn recover_pending(
             .map_err(|_| unknown())?;
         let fast_unpublished = attempt.publish.mode == PublishMode::FastForward
             && !exact
-            && tip != attempt.candidate.base;
+            && (tip != attempt.candidate.base || settled);
         let mut mapping = BTreeMap::new();
         let mut outcomes = BTreeMap::new();
         let mut landed_prs = Vec::new();
@@ -78,39 +115,84 @@ pub fn recover_pending(
                 match (pr.state, pr.merged_commit) {
                     (PullRequestState::Merged, Some(commit))
                         if pr.head == step.pr.head
-                            && repo.is_ancestor(&commit, &tip).unwrap_or(false) =>
+                            && pr.base_branch == step.pr.base_branch
+                            && (settled || repo.is_ancestor(&commit, &tip).unwrap_or(false)) =>
                     {
                         Some(commit)
                     }
                     (PullRequestState::Closed, _) => None,
-                    (PullRequestState::Open, _) if pr.head != step.pr.head => None,
+                    (_, _) if pr.head != step.pr.head => None,
                     (PullRequestState::Open, _) => {
-                        // Retry the same pinned operation; a refusal or another lost response
-                        // cannot prove the original request has stopped processing.
                         let expected = landed_prs
                             .last()
                             .and_then(|pr: &EligiblePr| mapping.get(&pr.head))
                             .unwrap_or(&attempt.candidate.base);
-                        let approved = pr.base_branch == step.pr.base_branch
-                            && forge.approvals(step.pr.number, &step.pr.head).is_ok_and(
-                                |approvals| {
-                                    approvals
-                                        .iter()
-                                        .any(|approval| approval.reference == step.pr.approval)
-                                },
-                            );
-                        if !shadow
-                            && !unproven
-                            && approved
-                            && landed_prs.len() == index
-                            && &tip == expected
-                        {
-                            let method = attempt.policy.settings().map_err(|_| unknown())?.method;
-                            let _ = forge.merge(step.pr.number, &step.pr.head, method);
+                        if can_retry && !unproven && landed_prs.len() == index && &tip == expected {
+                            // A previous recovered merge may have advanced the target; read it
+                            // again before each ordered retry to detect intervening movement.
+                            tip = repo.fetch_target(target).map_err(|_| unknown())?;
+                            if &tip != expected {
+                                unproven = true;
+                                outcomes.insert(step.pr.number, Outcome::PendingUnknown);
+                                continue;
+                            }
+                            let retry = if valid_for_retry(forge, &attempt) {
+                                forge.merge(step.pr.number, &step.pr.head, settings.method)
+                            } else {
+                                Err(LandingError::PublicationUnknown)
+                            };
+                            match retry {
+                                Ok(commit) => {
+                                    tip = commit.clone();
+                                    Some(commit)
+                                }
+                                Err(_) => {
+                                    #[allow(
+                                        clippy::disallowed_methods,
+                                        reason = "allow the original publication to settle"
+                                    )]
+                                    std::thread::sleep(std::time::Duration::from_secs(
+                                        settings.publish_settle_seconds,
+                                    ));
+                                    tip = repo.fetch_target(target).map_err(|_| unknown())?;
+                                    match forge.pull_request(step.pr.number) {
+                                        Ok(pr)
+                                            if pr.state == PullRequestState::Merged
+                                                && pr.head == step.pr.head
+                                                && pr.base_branch == step.pr.base_branch =>
+                                        {
+                                            match pr.merged_commit {
+                                                Some(commit) => Some(commit),
+                                                _ => {
+                                                    unproven = true;
+                                                    outcomes.insert(
+                                                        step.pr.number,
+                                                        Outcome::PendingUnknown,
+                                                    );
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                        Ok(pr)
+                                            if pr.state == PullRequestState::Closed
+                                                || pr.head != step.pr.head =>
+                                        {
+                                            None
+                                        }
+                                        _ => {
+                                            unproven = true;
+                                            outcomes
+                                                .insert(step.pr.number, Outcome::PendingUnknown);
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            unproven = true;
+                            outcomes.insert(step.pr.number, Outcome::PendingUnknown);
+                            continue;
                         }
-                        unproven = true;
-                        outcomes.insert(step.pr.number, Outcome::PendingUnknown);
-                        continue;
                     }
                     _ => {
                         unproven = true;
