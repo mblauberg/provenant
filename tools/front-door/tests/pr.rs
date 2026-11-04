@@ -836,7 +836,7 @@ fn fake_gh(args: &[String]) -> Result<u8> {
     let normalised = call.replace("api --include ", "api ");
     match normalised.as_str() {
         "api repos/{owner}/{repo}" => {
-            io::stdout().write_all(br#"{"default_branch":"main"}"#)?;
+            io::stdout().write_all(br#"{"default_branch":"main","html_url":"https://github.com/owner/repo","full_name":"owner/repo","owner":{"login":"owner"}}"#)?;
         }
         "api --paginate --slurp repos/{owner}/{repo}/pulls/1668/reviews?per_page=100" => {
             io::stdout().write_all(b"[[]]")?;

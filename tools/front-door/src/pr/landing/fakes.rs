@@ -11,6 +11,7 @@ pub struct FakeForge {
     pub head_reads: BTreeMap<u64, VecDeque<String>>,
     pub approvals_at_head: BTreeMap<(u64, String), Vec<Approval>>,
     pub check_runs: BTreeMap<String, Vec<GateEvidence>>,
+    pub check_delay: std::time::Duration,
     pub labels: BTreeMap<u64, Vec<String>>,
     pub direct_push: bool,
     pub lose_merge_response: bool,
@@ -21,6 +22,9 @@ pub struct FakeForge {
     pub reverts: Vec<(u64, String, String, String)>,
 }
 impl Forge for FakeForge {
+    fn repository_identity(&mut self) -> Result<String, LandingError> {
+        Ok("fake-repository".into())
+    }
     fn pull_request(&mut self, number: u64) -> Result<PullRequestInfo, LandingError> {
         self.pull_requests
             .get(&number)
@@ -50,7 +54,11 @@ impl Forge for FakeForge {
             .cloned()
             .unwrap_or_default())
     }
+    #[allow(clippy::disallowed_methods, reason = "simulate a slow forge in tests")]
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError> {
+        if !self.check_delay.is_zero() {
+            std::thread::sleep(self.check_delay);
+        }
         Ok(self.check_runs.get(commit).cloned().unwrap_or_default())
     }
     fn merge(
@@ -118,9 +126,6 @@ pub struct FakeRepo {
     pub refuse_delete: bool,
 }
 impl Repo for FakeRepo {
-    fn repository_identity(&mut self, _target: &str) -> Result<String, LandingError> {
-        Ok("fake-repository".into())
-    }
     fn fetch_target(&mut self, branch: &str) -> Result<String, LandingError> {
         if let Some(next) = self.fetches.pop_front() {
             self.target = next;

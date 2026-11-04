@@ -43,8 +43,9 @@ fn observe(
     forge: &mut dyn Forge,
     commit: &str,
     names: &[String],
+    timeout: std::time::Duration,
 ) -> Result<Observed, LandingError> {
-    let runs = forge.checks(commit)?;
+    let runs = forge.checks_with_timeout(commit, timeout)?;
     let mut failed = Vec::new();
     let mut unsettled = false;
     for name in names {
@@ -207,7 +208,21 @@ fn follow_with(
     let started = std::time::Instant::now();
     let mut elapsed = 0;
     let failed = loop {
-        let observation = observe(forge, &landed, &post.checks)?;
+        let remaining = std::time::Duration::from_secs(post.timeout_seconds).saturating_sub(
+            started
+                .elapsed()
+                .max(std::time::Duration::from_secs(elapsed)),
+        );
+        let observation = if remaining.is_zero() {
+            Observed::Unsettled(Vec::new())
+        } else {
+            let result = observe(forge, &landed, &post.checks, remaining);
+            if started.elapsed() >= std::time::Duration::from_secs(post.timeout_seconds) {
+                Observed::Unsettled(Vec::new())
+            } else {
+                result?
+            }
+        };
         elapsed = elapsed.max(started.elapsed().as_secs());
         match observation {
             Observed::Passed => break None,
@@ -306,9 +321,24 @@ fn follow_with(
             let landed_commit = landed_commit.ok_or_else(|| {
                 LandingError::Failed(format!("no landed commit recorded for #{number}"))
             })?;
+            if let Some(existing) = forge.find_revert(number, &branch, &target)? {
+                return Ok(existing);
+            }
             let base = repo.fetch_target(&target)?;
             let commit = repo.revert_commit(&base, &landed_commit)?;
-            repo.push_ref(&branch, &commit, None)?;
+            if let Err(error) = repo.push_ref(&branch, &commit, None) {
+                if let Some(existing) = forge.find_revert(number, &branch, &target)? {
+                    return Ok(existing);
+                }
+                // A previous run may have created the branch before its POST.
+                // Adopt it only when it has the same base and revert tree.
+                let existing = repo.fetch_target(&branch)?;
+                if !repo.is_ancestor(&base, &existing)?
+                    || repo.tree_of(&existing)? != repo.tree_of(&commit)?
+                {
+                    return Err(error);
+                }
+            }
             forge.open_revert(number, &branch, &target, &failed.join(", "))
         })();
         let outcome = match result {
@@ -464,7 +494,12 @@ mod tests {
             }],
         );
         assert_eq!(
-            observe(&mut r.forge, "l1", &["post".into()])?,
+            observe(
+                &mut r.forge,
+                "l1",
+                &["post".into()],
+                std::time::Duration::from_secs(1)
+            )?,
             Observed::Unsettled(vec!["post".into()])
         );
         Ok(())
@@ -553,6 +588,26 @@ mod tests {
         run(&mut r)?;
         assert!(r.forge.reverts.is_empty());
         assert!(r.alarms.0[0].message.contains("could not isolate"));
+        Ok(())
+    }
+
+    #[test]
+    fn overrun_read_is_unsettled_even_if_it_passes() -> Result<(), LandingError> {
+        let mut r = rig(false, false, 1);
+        let mut settings = r.receipt.policy.settings().unwrap();
+        settings.post_merge.timeout_seconds = 1;
+        r.receipt.policy = crate::pr::landing::policy::LandPolicy::resolve(
+            &settings,
+            &BTreeMap::new(),
+            None,
+            None,
+            &LandOverride::default(),
+        )
+        .unwrap();
+        post_result(&mut r, "l1", GateResult::Passed);
+        r.forge.check_delay = std::time::Duration::from_millis(1100);
+        run(&mut r)?;
+        assert!(r.alarms.0.iter().any(|alarm| alarm.code == "unsettled"));
         Ok(())
     }
 
