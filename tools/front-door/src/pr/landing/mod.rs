@@ -20,6 +20,10 @@ pub enum LandingError {
     Failed(String),
     #[error("candidate conflicts at pull request {0}")]
     Conflict(u64),
+    #[error("required gate did not pass: {0}")]
+    UnmetGate(String),
+    #[error("estimated cost {micros} micros exceeds the spending cap of {cap} micros")]
+    SpendingCap { micros: u64, cap: u64 },
     #[error("landing target moved too many times")]
     Contention,
     #[error("landing target moved during publication")]
@@ -95,6 +99,28 @@ fn batch_response(
     failure: Option<LandingError>,
 ) -> provenant_records::CommandResult<serde_json::Value> {
     use provenant_records::{CommandError, CommandResult, Outcome};
+    let failure = failure.or_else(|| {
+        report
+            .outcomes
+            .values()
+            .any(|outcome| *outcome == model::Outcome::Red)
+            .then(|| {
+                LandingError::UnmetGate(
+                    report
+                        .warnings
+                        .iter()
+                        .filter(|warning| warning.contains("failed gate checks:"))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                )
+            })
+    });
+    let failure = failure.or_else(|| {
+        report.outcomes.iter().find_map(|(number, outcome)| {
+            (*outcome == model::Outcome::Conflicted).then_some(LandingError::Conflict(*number))
+        })
+    });
     let (status, code) = match failure.as_ref() {
         Some(
             LandingError::PublicationUnknown
@@ -107,6 +133,8 @@ fn batch_response(
         Some(LandingError::Refused(_) | LandingError::PullRequestChanged(_)) => {
             (Outcome::Refused, "LAND_REFUSED")
         }
+        Some(LandingError::UnmetGate(_)) => (Outcome::Failed, "LAND_GATE_UNMET"),
+        Some(LandingError::SpendingCap { .. }) => (Outcome::Refused, "LAND_SPENDING_CAP"),
         Some(LandingError::Conflict(_)) => (Outcome::Failed, "LAND_CONFLICT"),
         Some(LandingError::Unimplemented(_)) => (Outcome::Unavailable, "LAND_UNSUPPORTED"),
         Some(_) => (Outcome::Failed, "LAND_FAILED"),
@@ -333,6 +361,36 @@ mod response_tests {
         assert!(error.message.contains("/state/landing/pending/marker.json"));
         assert!(error.message.contains("rerun land"));
         assert_eq!(response.data["outcomes"]["7"], "pending_unknown");
+    }
+
+    #[test]
+    fn gate_conflict_and_cap_errors_preserve_prior_outcomes() {
+        for (failure, code, detail) in [
+            (
+                LandingError::UnmetGate("build: missing".into()),
+                "LAND_GATE_UNMET",
+                "build",
+            ),
+            (LandingError::Conflict(9), "LAND_CONFLICT", "9"),
+            (
+                LandingError::SpendingCap {
+                    micros: 11,
+                    cap: 10,
+                },
+                "LAND_SPENDING_CAP",
+                "10",
+            ),
+        ] {
+            let report = driver::Report {
+                outcomes: std::collections::BTreeMap::from([(7, model::Outcome::Landed)]),
+                ..Default::default()
+            };
+            let response = batch_response(report, Some(failure));
+            let error = response.error.unwrap();
+            assert_eq!(error.code, code);
+            assert!(error.message.contains(detail));
+            assert_eq!(response.data["outcomes"]["7"], "landed");
+        }
     }
 
     #[test]

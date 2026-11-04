@@ -270,7 +270,7 @@ fn run_inner(
                     if !request.shadow {
                         repo.delete_ref(&candidate.ref_name, &candidate.commit)?;
                     }
-                    return Err(LandingError::Failed(format!(
+                    return Err(LandingError::UnmetGate(format!(
                         "{error}; {}",
                         unmet_checks(&candidate, request.gate, &evidence)
                     )));
@@ -368,19 +368,11 @@ fn run_inner(
                 break;
             }
             if result != GateResult::Passed {
-                let checks = evidence
-                    .checks
-                    .iter()
-                    .filter(|check| check.result != GateResult::Passed)
-                    .map(|check| check.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let checks = unmet_checks(&candidate, request.gate, &evidence);
                 if !request.shadow {
                     repo.delete_ref(&candidate.ref_name, &candidate.commit)?;
                 }
-                return Err(LandingError::Failed(format!(
-                    "required gate did not pass: {checks}"
-                )));
+                return Err(LandingError::UnmetGate(checks));
             }
             let decision = cleanup_unpublished(
                 publish::decide(

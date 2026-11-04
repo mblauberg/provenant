@@ -40,7 +40,7 @@ candidate and gate evidence, publication,
 outcomes, cost and alarms, including a mapping from approved to landed SHAs for
 methods that rewrite them. A configurable fast local pre-push gate catches cheap
 failures early. Post-merge checks can bisect a failed batch and alarm; automatic
-revert-forward requires explicit configuration. Pool rates and durations inform
+revert-forward requires explicit configuration. It creates a mainline-parent revert on the current target, pushes an expected-absent revert branch and opens a PR naming the culprit and failed checks; failures raise an alarm. Batch errors retain prior PR outcomes in the result envelope and use distinct codes for contention, conflict, unmet gates, unknown publication and spending caps. Pool rates and durations inform
 cost estimates: an advisory amount warns, while an explicit cap refuses excess
 priced spend only; unknown cost never refuses. `gate.pool` and
 `post_merge.pool` name cost pools, with the check issuer app slug as a checks

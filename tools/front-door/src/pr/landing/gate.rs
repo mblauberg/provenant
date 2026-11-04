@@ -56,10 +56,10 @@ fn evaluate_checks(
                     pending = true;
                 }
                 GateResult::Missing | GateResult::Skipped | GateResult::Neutral => {
-                    return Err(failed(
-                        format!("unmet gate: required check {name} is {:?}", check.result)
-                            .to_lowercase(),
-                    ));
+                    return Err(failed(format!(
+                        "unmet gate: required check {name} is {}",
+                        format!("{:?}", check.result).to_lowercase()
+                    )));
                 }
             }
         }

@@ -46,9 +46,10 @@ pub fn check(
             if let Some(cap) = settings.cap_micros
                 && *micros > cap
             {
-                return Err(LandingError::Failed(format!(
-                    "estimated cost {micros} micros exceeds the spending cap of {cap} micros"
-                )));
+                return Err(LandingError::SpendingCap {
+                    micros: *micros,
+                    cap,
+                });
             }
             Ok(settings
                 .advisory_micros
