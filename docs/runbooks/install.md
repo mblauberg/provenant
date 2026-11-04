@@ -108,7 +108,7 @@ only its publish step receives `GITHUB_TOKEN`. Before tagging, commit
 
 ## Build a staged release
 
-On the host, outside a Fabric lane, build the binary and run the build-only Cargo example.
+On the host, outside a Fabric lane, build the binary and run the release packaging binary.
 Choose a fresh absolute output directory outside every repository checkout. The
 output's parent directory must already exist. The example copies the exact asset
 inventory digested by `build.rs`, reads the binary's `--version --json` identity,
@@ -125,7 +125,7 @@ export RUSTC_WRAPPER=".cargo/rustc-wrapper.sh"
 RELEASE_PARENT="$(mktemp -d)"
 RELEASE="$RELEASE_PARENT/release"
 cargo build --release --locked --bin provenant
-cargo run --locked --example package-release -- --out "$RELEASE"
+cargo run --locked --bin package-release -- --out "$RELEASE"
 rm -rf -- "$CARGO_PARENT"
 unset CARGO_TARGET_DIR CARGO_PARENT RUSTC_WRAPPER
 ```
@@ -441,7 +441,7 @@ Then rerun install with `--adopt-existing` to replace managed MCP entries that
 still name the old binary and state. Stopping the agent and removing these
 links remain manual steps.
 
-`build.rs` stamps the source and asset digests, and the packaging example
+`build.rs` stamps the source and asset digests, and the packaging binary
 produces the typed `release.json`. The CLI grammar is described in
 [cli.md](../specs/cli.md); `help --json` describes the command
 surface without resolving roots or creating state.
