@@ -892,7 +892,7 @@ pub(super) fn prepare_candidates(
                     .intent
                     .check_launch(spec, &route.model, route.effort.as_deref())
         {
-            reasons.push(skip(&label, SkipKind::Refused, &error.to_string()));
+            reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
             continue;
         }
         let effective = config.domains.routing.model_policy.effective(
@@ -1318,7 +1318,7 @@ pub(super) fn prepare_candidates(
                 continue;
             }
         };
-        if !materialize_user_skills(&mut spec.user_skills, |stage, setup| {
+        if !materialise_user_skills(&mut spec.user_skills, |stage, setup| {
             apply_setup_directory(&[staging], stage)
                 .and_then(|_| apply_setup(setup, &[stage], None))
         }) {
@@ -1767,7 +1767,7 @@ pub(super) fn discovery_warnings(
 
 /// Report the same provider-owned locations and grants used during prepare.
 /// Materialize the captured tree; an I/O failure drops only optional skills.
-fn materialize_user_skills(
+fn materialise_user_skills(
     staged: &mut provenant_providers::StagedUserSkills,
     setup: impl FnOnce(&Path, &[SetupStep]) -> Result<(), String>,
 ) -> bool {
@@ -1818,7 +1818,7 @@ mod user_skills_tests {
         staged.root = Some(PathBuf::from("/attempt/skills"));
         staged.source = Some("~/.agents/skills".into());
         staged.file_count = 3;
-        assert!(!materialize_user_skills(&mut staged, |_, _| Err(
+        assert!(!materialise_user_skills(&mut staged, |_, _| Err(
             "injected I/O failure".into()
         )));
         assert!(staged.root.is_none());

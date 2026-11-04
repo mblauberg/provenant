@@ -73,6 +73,14 @@ pub struct TerminalPublication<'a> {
     /// Why the attempt is flagged as a partial finish, if it is.
     pub partial_signals: Vec<PartialSignal>,
 }
+pub(crate) struct Withdrawal<'a> {
+    pub expected: AttemptState,
+    pub outcome: Outcome,
+    pub reason: &'a str,
+    pub finished_at: WallTime,
+    pub failure: Option<provenant_records::run::PreparationFailure>,
+}
+
 impl RunStore {
     /// A sealed decision is not a certificate that an unfinished import can
     /// relinquish its reservation or private object inputs: the import must
@@ -740,11 +748,13 @@ impl RunStore {
     ) -> Result<Option<AttemptRecord>> {
         self.withdraw_with_preparation_failure(
             id,
-            expected,
-            outcome,
-            reason,
-            finished_at,
-            None,
+            Withdrawal {
+                expected,
+                outcome,
+                reason,
+                finished_at,
+                failure: None,
+            },
             call,
         )
     }
@@ -753,13 +763,16 @@ impl RunStore {
     pub(crate) fn withdraw_with_preparation_failure(
         &self,
         id: AttemptId,
-        expected: AttemptState,
-        outcome: Outcome,
-        reason: &str,
-        finished_at: WallTime,
-        failure: Option<provenant_records::run::PreparationFailure>,
+        withdrawal: Withdrawal<'_>,
         call: &Request<'_>,
     ) -> Result<Option<AttemptRecord>> {
+        let Withdrawal {
+            expected,
+            outcome,
+            reason,
+            finished_at,
+            failure,
+        } = withdrawal;
         if failure.is_some() && !matches!(expected, AttemptState::Queued { .. }) {
             return Err(RunError::Validation(
                 "preparation evidence requires queued attempt",

@@ -924,7 +924,7 @@ mod tests {
     }
 
     #[test]
-    fn normalized_launch_requirements_use_adapter_capabilities() {
+    fn normalised_launch_requirements_use_adapter_capabilities() {
         use provenant_records::run::NetworkAccess;
         use provenant_records::{ADAPTER_SPECS, AdapterSpec, LaunchCapabilities, LaunchField};
         let narrow = AdapterSpec {

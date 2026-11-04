@@ -178,7 +178,7 @@ pub enum FacadeError {
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
-            serialize_with = "serialize_invalid_detail"
+            serialize_with = "serialise_invalid_detail"
         )]
         detail: Option<String>,
     },
@@ -228,19 +228,19 @@ pub enum FacadeError {
     WriterUnknown,
     #[error("a requested credential-root grant was refused")]
     CredentialRoot {
-        #[serde(serialize_with = "serialize_grant_access")]
+        #[serde(serialize_with = "serialise_grant_access")]
         access: String,
     },
     #[error("{}", dispatch_message(reason, disk.as_ref()))]
     DispatchRefused {
-        #[serde(serialize_with = "serialize_dispatch_reason")]
+        #[serde(serialize_with = "serialise_dispatch_reason")]
         reason: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         disk: Option<DiskPressure>,
     },
     #[error("{reason}")]
     DispatchUnobserved {
-        #[serde(serialize_with = "serialize_unobserved_reason")]
+        #[serde(serialize_with = "serialise_unobserved_reason")]
         reason: String,
     },
     #[serde(serialize_with = "delivery_stage_wire", skip_deserializing)]
@@ -259,7 +259,7 @@ pub enum FacadeError {
         "worktree {path:?} is not registered with Provenant; create a writer with `provenant worktree create <new-branch> --base <branch>`"
     )]
     WorktreeUnregistered {
-        #[serde(serialize_with = "serialize_unanchored_path")]
+        #[serde(serialize_with = "serialise_unanchored_path")]
         path: String,
     },
     #[error(
@@ -291,9 +291,9 @@ pub enum FacadeError {
     Timeout,
     #[error("I/O operation {operation:?} failed at {path:?}")]
     Io {
-        #[serde(serialize_with = "serialize_io_operation")]
+        #[serde(serialize_with = "serialise_io_operation")]
         operation: String,
-        #[serde(serialize_with = "serialize_unanchored_optional_path")]
+        #[serde(serialize_with = "serialise_unanchored_optional_path")]
         path: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         delivery_limit: Option<provenant_records::diagnostic::DeliveryLimit>,
@@ -333,14 +333,14 @@ fn dispatch_message(reason: &str, disk: Option<&DiskPressure>) -> String {
     }
 }
 
-fn serialize_unanchored_path<S: serde::Serializer>(
+fn serialise_unanchored_path<S: serde::Serializer>(
     _: &str,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     serializer.serialize_str("inspect worktree registration")
 }
 
-fn serialize_grant_access<S: serde::Serializer>(
+fn serialise_grant_access<S: serde::Serializer>(
     access: &str,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
@@ -351,28 +351,28 @@ fn serialize_grant_access<S: serde::Serializer>(
     })
 }
 
-fn serialize_dispatch_reason<S: serde::Serializer>(
+fn serialise_dispatch_reason<S: serde::Serializer>(
     _: &str,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     serializer.serialize_str("dispatch was refused; inspect the request and access policy")
 }
 
-fn serialize_unobserved_reason<S: serde::Serializer>(
+fn serialise_unobserved_reason<S: serde::Serializer>(
     _: &str,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     serializer.serialize_str("disk observation failed")
 }
 
-fn serialize_unanchored_optional_path<S: serde::Serializer>(
+fn serialise_unanchored_optional_path<S: serde::Serializer>(
     _: &Option<String>,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     Option::<String>::None.serialize(serializer)
 }
 
-fn serialize_io_operation<S: serde::Serializer>(
+fn serialise_io_operation<S: serde::Serializer>(
     operation: &str,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
@@ -576,7 +576,7 @@ fn safe_invalid_detail(detail: &str) -> Option<String> {
     None
 }
 
-fn serialize_invalid_detail<S: serde::Serializer>(
+fn serialise_invalid_detail<S: serde::Serializer>(
     detail: &Option<String>,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {

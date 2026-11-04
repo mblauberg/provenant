@@ -44,7 +44,7 @@ impl FallbackPolicy {
 }
 
 /// Validate pre-existing graph history under the rule that wrote it. This is
-/// for interpreting stored checkpoints only and must not authorize a launch.
+/// for interpreting stored checkpoints only and must not authorise a launch.
 pub fn historical_fallback_admissible(
     outcome: FallbackOutcome,
     writer: bool,

@@ -3406,8 +3406,10 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
     use provenant_quota::{AccountRecord, Calibration, QuotaDetails, QuotaStatus, QuotaWindow};
     let catalogue = Catalogue::bundled()?;
     let model = "opencode/opencode-go/deepseek-v4.1-flash";
-    let mut config = RoutingConfig::default();
-    config.allow_unknown_partial_headroom = true;
+    let mut config = RoutingConfig {
+        allow_unknown_partial_headroom: true,
+        ..RoutingConfig::default()
+    };
     config.pacing.accounts.insert(
         "go".into(),
         PacingProfile {

@@ -1591,13 +1591,15 @@ impl RunStore {
                     let reason = refusal.message;
                     match self.withdraw_with_preparation_failure(
                         id,
-                        AttemptState::Queued {
-                            extra: Default::default(),
+                        crate::store::Withdrawal {
+                            expected: AttemptState::Queued {
+                                extra: Default::default(),
+                            },
+                            outcome,
+                            reason: &reason,
+                            finished_at: now()?,
+                            failure: refusal.fallback_outcome,
                         },
-                        outcome,
-                        &reason,
-                        now()?,
-                        refusal.fallback_outcome,
                         call,
                     ) {
                         Ok(Some(_)) => crate::writer::settle_launch_staging(&attempt)?,

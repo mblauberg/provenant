@@ -19,6 +19,9 @@ pub struct AccessContext<'a> {
     pub disclosure_ref: &'a str,
     pub confinement_ref: &'a str,
 }
+#[cfg(test)]
+type LaunchSpecLookup<'a> = &'a dyn Fn(&str) -> Option<provenant_records::AdapterSpec>;
+
 pub struct RoutingContext<'a> {
     /// Preview-only account policy selection. It never supplies availability.
     pub policy_account_hint: Option<&'a str>,
@@ -38,7 +41,7 @@ pub struct RoutingContext<'a> {
     pub readiness: Option<ReadinessLookup<'a>>,
     /// Fixture-only capability facts; production always uses the adapter table.
     #[cfg(test)]
-    pub launch_specs: Option<&'a dyn Fn(&str) -> Option<provenant_records::AdapterSpec>>,
+    pub launch_specs: Option<LaunchSpecLookup<'a>>,
     pub access: &'a [AccessContext<'a>],
     pub now: provenant_core::WallTime,
     pub host: &'a str,
