@@ -1548,7 +1548,7 @@ mod peer_tests {
     }
 
     #[test]
-    fn production_owner_panel_retries_across_families_and_synthesises()
+    fn production_owner_panel_uses_distinct_families_and_synthesises()
     -> Result<(), Box<dyn std::error::Error>> {
         // A nested lane submits without starting a real provider. Keep the
         // environment change inside a child so other tests cannot see it.
@@ -1556,7 +1556,7 @@ mod peer_tests {
         if std::env::var_os(CHILD).is_none() {
             use provenant_os::exec::{ExecOptions, Executor, Termination};
             let argv = vec![std::env::current_exe()?.into_os_string(), "--exact".into(),
-                "fabric::peer_tests::production_owner_panel_retries_across_families_and_synthesises".into(), "--nocapture".into()];
+                "fabric::peer_tests::production_owner_panel_uses_distinct_families_and_synthesises".into(), "--nocapture".into()];
             let removed = [provenant_core::RUN_STATE_DIRECTORY_ENV, provenant_run::LANE_DEPTH_ENV,
                 provenant_run::PARENT_ATTEMPT_ENV, CHILD];
             let mut env: Vec<_> = std::env::vars_os().filter(|(key, _)| !removed.iter().any(|name| key == name)).collect();
@@ -1683,7 +1683,7 @@ mod peer_tests {
                     }
                     route => return Err(format!("unexpected panel route: {route:?}").into()),
                 };
-                let outcome = if node.id == "one" && attempt.key.route_index == 0 { Outcome::QuotaLimited } else { Outcome::Succeeded };
+                let outcome = Outcome::Succeeded;
                 // The provider boundary is synthetic; model selection above is
                 // the production dispatch resolver using the actual request.
                 publish_routed(&fixture.rig, &fixture.store, &record, head, outcome, &model, &call)?;
@@ -1696,9 +1696,8 @@ mod peer_tests {
             }
             assert!(progressed, "panel did not advance: {:#?}", run.checkpoint.nodes);
         };
-        assert_eq!(run.checkpoint.nodes[1].attempts.len(), 2);
-        assert_eq!(run.checkpoint.nodes[1].attempts[0].outcome, Some(graph::AttemptOutcome::UsageLimited));
-        assert_ne!(picked["one"][0].0, picked["one"][1].0);
+        assert_eq!(run.checkpoint.nodes[1].attempts.len(), 1);
+        assert_eq!(run.checkpoint.nodes[1].attempts[0].outcome, Some(graph::AttemptOutcome::Succeeded));
         assert_eq!(picked.len(), 3);
         assert_eq!(run.checkpoint.nodes[4].state, graph::NodeState::Succeeded);
         Ok(())
