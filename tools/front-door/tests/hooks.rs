@@ -274,7 +274,12 @@ fn check_push_policy(rig: &TestRig) -> Result {
         (
             format!("refs/heads/main {first} refs/heads/main {second}\n"),
             1,
-            "non-fast-forward update is refused; integrate the remote first with `git fetch origin && git merge origin/my-topic`",
+            "non-fast-forward update to the default branch is refused; integrate the remote first with `git fetch origin && git merge origin/main`",
+        ),
+        (
+            format!("refs/heads/topic {first} refs/heads/topic {second}\n"),
+            0,
+            "",
         ),
         (
             format!("refs/heads/main {second} refs/heads/main {first}\n"),

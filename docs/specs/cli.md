@@ -668,8 +668,8 @@ The guard is advisory: confinement and custody stay authoritative.
 ### Pre-push refuses data loss
 
 `hook git pre-push` refuses default-branch deletion, non-fast-forward
-updates, pushes from linked worktrees to the default branch and, by default,
-literal conflict markers, each with an accepted example on stderr. The
+updates to the default branch, pushes from linked worktrees to the default
+branch and, by default, literal conflict markers, each with an accepted example on stderr. The
 conflict-marker check is advisory and `[domains.run] push_conflict_markers =
 false` turns it off; the other refusals remain. It identifies the default
 branch from the remote's advertisement, refuses when any inspection fails,
