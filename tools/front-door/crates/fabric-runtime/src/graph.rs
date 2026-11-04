@@ -2115,6 +2115,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 } else {
                     truncated_finding_ids(node, &plan, &checkpoint, &positions)
                 };
+                let marker_inputs = propagation_inputs(node, &plan, &checkpoint, &positions);
                 let mut settled_result = None;
                 let retry_was_pending;
                 let should_continue = {
@@ -2168,6 +2169,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 commit,
                                 &upstream_findings,
                             );
+                            let marker_warnings = propagation_warnings(&outputs, &marker_inputs);
+                            if !marker_warnings.is_empty() {
+                                outputs.warnings.truncate(MAX_WARNINGS.saturating_sub(2));
+                                outputs.warnings.extend(marker_warnings);
+                            }
                             if node.access == AccessMode::ReadOnly
                                 && node.role.as_deref().is_some_and(|role| {
                                     role == "lens"

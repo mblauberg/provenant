@@ -648,11 +648,13 @@ pub(super) fn disposition_error(
         .collect::<std::collections::BTreeSet<_>>()
     {
         let count = outputs.findings.iter().filter(|f| &f.id == id).count();
-        if count != 1 {
+        let copies = upstream.iter().filter(|f| &f.id == id).count();
+        if count != copies {
             return Some((
                 "disposition_count",
                 format!(
-                    "upstream finding {id} needs exactly one disposition of {allowed}; found {count}"
+                    "upstream finding {id} needs exactly one disposition of {allowed}; found {}",
+                    count / copies
                 ),
             ));
         }

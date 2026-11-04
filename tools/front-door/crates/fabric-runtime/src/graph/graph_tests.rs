@@ -1392,8 +1392,8 @@ fn composite_qualified_propagation_resolves_identity_only_disposition() {
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version":1, "graph_id":"composite-propagation", "nodes":[
             {"id":"lenses", "kind":"composite", "access":"read_only", "composite":{
-                "nodes":[{"id":"lens", "access":"read_only", "prompt":"review", "route":{"alias":"senior"}}],
-                "exports":[{"node":"lens", "outputs":["findings"]}]
+                "nodes":[{"id":"lens-correctness-spec", "access":"read_only", "prompt":"review", "route":{"alias":"senior"}}],
+                "exports":[{"node":"lens-correctness-spec", "outputs":["findings"]}]
             }},
             {"id":"verify", "access":"read_only", "prompt":"verify", "route":{"alias":"senior"},
              "depends_on":["lenses"], "inputs":[{"node":"lenses", "outputs":["findings"]}]},
@@ -1402,9 +1402,13 @@ fn composite_qualified_propagation_resolves_identity_only_disposition() {
              "dispositions":["accepted", "rejected", "deferred"]}
         ]
     })).unwrap();
-    let propagated =
-        entry(",\"verification\":\"upheld\",\"propagates\":\"lenses:lenses--lens:F1\"")
-            .replace("\"id\":\"F1\"", "\"id\":\"lenses--lens:F1\"");
+    let propagated = entry(
+        ",\"verification\":\"upheld\",\"propagates\":\"lenses:lenses--lens-correctness-spec:F1\"",
+    )
+    .replace(
+        "\"id\":\"F1\"",
+        "\"id\":\"lenses--lens-correctness-spec:F1\"",
+    );
     let mut owner = FakeOwner {
         observations: [
             terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
@@ -1431,13 +1435,21 @@ fn composite_qualified_propagation_resolves_identity_only_disposition() {
         synthesis.advance_error
     );
     let findings = &synthesis.outputs.as_ref().unwrap().findings;
-    assert_eq!(findings.len(), 1);
-    assert_eq!(findings[0].id, "lenses--lens:F1");
-    assert_eq!(findings[0].extra["verification"], "upheld");
+    assert_eq!(findings.len(), 2);
+    assert!(
+        findings
+            .iter()
+            .all(|f| f.id == "lenses--lens-correctness-spec:F1")
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.extra.get("verification").is_some_and(|v| v == "upheld"))
+    );
 }
 
 #[test]
-fn qualified_propagations_replace_colliding_originals() {
+fn qualified_propagations_group_colliding_originals() {
     let input = |id: &str| GraphInput {
         extra: Default::default(),
         node: id.into(),
@@ -1494,14 +1506,16 @@ fn qualified_propagations_replace_colliding_originals() {
     );
     let prompt = &owner.prompts[3];
     assert!(prompt.contains("a-verified") && prompt.contains("b-verified"));
-    assert!(!prompt.contains("a-original") && !prompt.contains("b-original"));
+    assert!(prompt.contains("a-original") && prompt.contains("b-original"));
     let findings = &run.checkpoint.nodes[3].outputs.as_ref().unwrap().findings;
     assert_eq!(
         findings.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
-        vec!["a:F1", "b:F1"]
+        vec!["a:F1", "a:F1", "b:F1", "b:F1"]
     );
-    assert_eq!(findings[0].extra["verification"], "a-verified");
-    assert_eq!(findings[1].extra["verification"], "b-verified");
+    assert_eq!(findings[0].extra["original"], "a-original");
+    assert_eq!(findings[1].extra["verification"], "a-verified");
+    assert_eq!(findings[2].extra["original"], "b-original");
+    assert_eq!(findings[3].extra["verification"], "b-verified");
 }
 
 #[test]
@@ -1538,7 +1552,7 @@ fn multiple_verifiers_share_one_disposition_and_keep_evidence() {
             ),
             terminal_with_result(
                 AttemptOutcome::Succeeded,
-                &findings_text(r#"{"id":"F1","disposition":"accepted","reason":"verified"}"#),
+                &findings_text(r#"{"id":"F1","disposition":"accepted","reason":"verified","verification":"combined"}"#),
             ),
         ]
         .into(),
@@ -1564,14 +1578,265 @@ fn multiple_verifiers_share_one_disposition_and_keep_evidence() {
     let prompt = &owner.prompts[3];
     assert!(prompt.contains("evidence-one") && prompt.contains("evidence-two"));
     assert!(!prompt.contains("verify:F1") && !prompt.contains("verify2:F1"));
+    let findings = &run.checkpoint.nodes[3].outputs.as_ref().unwrap().findings;
+    assert_eq!(findings.len(), 3);
+    assert!(
+        findings
+            .iter()
+            .all(|f| f.id == "F1" && f.disposition.as_deref() == Some("accepted"))
+    );
+    assert_eq!(findings[1].extra["verification"], "evidence-one");
+    assert_eq!(findings[2].extra["verification"], "evidence-two");
+}
+
+#[test]
+fn chain_resolves_rendered_markers_and_preserves_every_copy() {
+    let input = |id: &str| GraphInput {
+        extra: Default::default(),
+        node: id.into(),
+        outputs: vec![OutputKind::Findings],
+    };
+    let mut v1 = node("v1", route("first"));
+    v1.depends_on = vec!["a".into(), "b".into()];
+    v1.inputs = vec![input("a"), input("b")];
+    let mut v2 = node("v2", route("first"));
+    v2.depends_on = vec!["v1".into()];
+    v2.inputs = vec![input("v1")];
+    let mut synth = node("synthesis", route("first"));
+    synth.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synth.depends_on = vec!["a".into(), "b".into(), "v1".into(), "v2".into()];
+    synth.inputs = vec![input("a"), input("b"), input("v1"), input("v2")];
+    let propagated = entry(",\"evidence\":\"middle\",\"propagates\":\"a:a:F1\"");
+    let last = entry(",\"evidence\":\"last\",\"propagates\":\"v1:F1\"");
+    let decisions = r#"{"id":"a:F1","disposition":"accepted","reason":"yes"},{"id":"b:F1","disposition":"rejected","reason":"no"}"#;
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(&entry(",\"evidence\":\"first\"")),
+            ),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&propagated)),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&last)),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(decisions)),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![
+            node("a", route("first")),
+            node("b", route("first")),
+            v1,
+            v2,
+            synth,
+        ]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    let progress = &run.checkpoint.nodes[4];
     assert_eq!(
-        run.checkpoint.nodes[3]
+        progress.state,
+        NodeState::Succeeded,
+        "{:?}",
+        progress.advance_error
+    );
+    let findings = &progress.outputs.as_ref().unwrap().findings;
+    assert_eq!(findings.len(), 4);
+    let copies: Vec<_> = findings.iter().filter(|f| f.id == "a:F1").collect();
+    assert_eq!(copies.len(), 3);
+    for (finding, evidence) in copies.iter().zip(["first", "middle", "last"]) {
+        assert_eq!(finding.extra["evidence"], evidence);
+        assert_eq!(finding.disposition.as_deref(), Some("accepted"));
+        assert!(owner.prompts[4].contains(evidence));
+    }
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.id == "b:F1" && f.disposition.as_deref() == Some("rejected"))
+    );
+}
+
+#[test]
+fn result_only_inputs_do_not_change_rendered_finding_ids() {
+    let input = |id: &str, output| GraphInput {
+        extra: Default::default(),
+        node: id.into(),
+        outputs: vec![output],
+    };
+    let mut verify = node("verify", route("first"));
+    verify.depends_on = vec!["a".into(), "b".into(), "c".into()];
+    verify.inputs = vec![
+        input("a", OutputKind::Result),
+        input("b", OutputKind::Findings),
+        input("c", OutputKind::Findings),
+    ];
+    let mut synth = node("synthesis", route("first"));
+    synth.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synth.depends_on = vec!["b".into(), "verify".into()];
+    synth.inputs = vec![
+        input("b", OutputKind::Findings),
+        input("verify", OutputKind::Findings),
+    ];
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(&entry("").replace("\"id\":\"F1\"", "\"id\":\"b:F1\"")),
+            ),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(&entry(",\"propagates\":\"b:b:F1\"")),
+            ),
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(r#"{"id":"F1","disposition":"accepted","reason":"yes"}"#),
+            ),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![
+            node("a", route("first")),
+            node("b", route("first")),
+            node("c", route("first")),
+            verify,
+            synth,
+        ]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        run.checkpoint.nodes[4].state,
+        NodeState::Succeeded,
+        "{:?}",
+        run.checkpoint.nodes[4].advance_error
+    );
+    assert_eq!(
+        run.checkpoint.nodes[4]
             .outputs
             .as_ref()
             .unwrap()
             .findings
             .len(),
-        1
+        2
+    );
+    assert!(
+        !run.checkpoint.nodes[3]
+            .outputs
+            .as_ref()
+            .unwrap()
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("unresolved propagates"))
+    );
+}
+
+#[test]
+fn qualified_id_collision_requires_three_distinct_dispositions() {
+    let input = |id: &str| GraphInput {
+        extra: Default::default(),
+        node: id.into(),
+        outputs: vec![OutputKind::Findings],
+    };
+    for (decisions, expected) in [
+        (
+            r#"{"id":"a:F1","disposition":"accepted","reason":"yes"},{"id":"b:F1","disposition":"rejected","reason":"no"}"#,
+            NodeState::Failed,
+        ),
+        (
+            r#"{"id":"a:F1:1","disposition":"accepted","reason":"yes"},{"id":"b:F1","disposition":"rejected","reason":"no"},{"id":"a:F1","disposition":"deferred","reason":"later"}"#,
+            NodeState::Succeeded,
+        ),
+    ] {
+        let mut synth = node("synthesis", route("first"));
+        synth.dispositions = DISPOSITIONS.map(String::from).to_vec();
+        synth.depends_on = vec!["a".into(), "b".into(), "c".into()];
+        synth.inputs = vec![input("a"), input("b"), input("c")];
+        let mut owner = FakeOwner {
+            observations: [
+                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+                terminal_with_result(
+                    AttemptOutcome::Succeeded,
+                    &findings_text(&entry("").replace("\"id\":\"F1\"", "\"id\":\"a:F1\"")),
+                ),
+                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(decisions)),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let run = advance(
+            &graph(vec![
+                node("a", route("first")),
+                node("b", route("first")),
+                node("c", route("first")),
+                synth,
+            ]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            run.checkpoint.nodes[3].state, expected,
+            "{:?}",
+            run.checkpoint.nodes[3].advance_error
+        );
+    }
+}
+
+#[test]
+fn unresolved_marker_warns_and_remains_an_independent_identity() {
+    let input = |id: &str| GraphInput {
+        extra: Default::default(),
+        node: id.into(),
+        outputs: vec![OutputKind::Findings],
+    };
+    let mut verify = node("verify", route("first"));
+    verify.depends_on = vec!["a".into()];
+    verify.inputs = vec![input("a")];
+    let mut synth = node("synthesis", route("first"));
+    synth.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synth.depends_on = vec!["a".into(), "verify".into()];
+    synth.inputs = vec![input("a"), input("verify")];
+    let decisions = r#"{"id":"a:F1","disposition":"accepted","reason":"yes"},{"id":"verify:F1","disposition":"rejected","reason":"no"}"#;
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(&entry(",\"propagates\":\"not-an-input:F1\"")),
+            ),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(decisions)),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![node("a", route("first")), verify, synth]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert!(
+        run.checkpoint.nodes[1]
+            .outputs
+            .as_ref()
+            .unwrap()
+            .warnings
+            .iter()
+            .any(|w| w.contains("unresolved propagates marker") && w.contains("not-an-input"))
+    );
+    assert_eq!(run.checkpoint.nodes[2].state, NodeState::Succeeded);
+    let findings = &run.checkpoint.nodes[2].outputs.as_ref().unwrap().findings;
+    assert_eq!(
+        findings.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
+        ["a:F1", "verify:F1"]
     );
 }
 

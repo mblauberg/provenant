@@ -1235,15 +1235,23 @@ SHA-256 identity and disposition hashes while checking, without adding the full
 set to the checkpoint. Verifiers use upheld, falsified or unverifiable for this
 check; synthesis uses its declared dispositions. New findings still belong in
 the structured block.
-When directly selected sources share an id, their ids are qualified with the
-source node id in the synthesis input.
+Each finding has a structural root: the producing input node and its stored id.
 When a downstream node propagates a finding, it declares
-`"propagates": "<input-node-id>:<finding-id>"` on that entry. If synthesis
-selects both the original and the downstream finding, this marker identifies
-the enriched copy as the same finding, even if its displayed id differs. Copies
-propagated from the same origin remain visible with a shared identity, so one
-disposition settles them all. A matching id and dependency alone do
-not establish propagation; independent findings need separate dispositions.
+`"propagates": "<input-node-id>:<finding-id>"` on that entry. The named node
+must be an input selecting findings or a result; the finding id may be its stored
+id or the id rendered to the propagator. Resolution follows propagation chains
+to the first root. An unresolved or ambiguous marker leaves the finding
+independent and records a warning in the producing node's outputs. A matching id
+and dependency alone do not establish propagation.
+
+All selected copies of one root, including originals and intermediate copies,
+remain visible with their own evidence and share one display identity. The root's
+stored id is used when unique among groups; otherwise a qualified id is chosen
+without colliding with any other group's display id, including ids containing
+colons. One disposition settles the group. Settled outputs record that disposition
+and reason on every copy, retaining each copy's evidence even when the decision
+supplies a field already present in that copy. Independent findings need separate
+dispositions.
 Use the exported qualified id. A bare id is also accepted when it matches exactly
 one selected upstream identity; ambiguous or unknown identity-only references fail
 and name the id. New findings still require all descriptive fields.
