@@ -61,6 +61,7 @@ pub fn fast_forward(
         return Err(WorktreeError::IdentityChanged);
     }
     if current.head != head {
+        context.workers.invalidate();
         let outcome = execute_git_mutation(
             context.executor,
             repo,
@@ -715,7 +716,7 @@ pub(super) fn remove_tree(
         entry,
         expected_head,
         cancel,
-        &|| true,
+        &|| Ok(()),
         Some(output),
         Repository::Held,
     )
@@ -726,7 +727,7 @@ pub(super) fn remove_tree_when(
     entry: &GitWorktree,
     expected_head: GitOid,
     cancel: &CancelToken,
-    eligible: &dyn Fn() -> bool,
+    eligible: &dyn Fn() -> Result<(), WorktreeError>,
     output: Option<&provenant_config::ProjectGcSettings>,
     repository: Repository<'_>,
 ) -> Result<RemovedTree, WorktreeError> {
@@ -742,9 +743,7 @@ pub(super) fn remove_tree_when(
     let mut locked = lock_worktree_for_mutation(context, entry, cancel)?;
     context.repo.revalidate()?;
     tree_unchanged(&read_worktrees(context, cancel)?, entry, expected_head)?;
-    if !eligible() {
-        return Err(WorktreeError::UnknownWriter);
-    }
+    eligible()?;
     let prepared =
         worktree_dirty_at(context, locked.verified.repo(), cancel)? == WorktreeCondition::Ignored;
     if prepared {
@@ -766,15 +765,18 @@ pub(super) fn remove_tree_when(
         Repository::Held => None,
         Repository::Acquire { .. } => {
             // Any slow census happens before the repository lock is taken.
-            if prepared && !eligible() {
-                return Err(WorktreeError::UnknownWriter);
+            if prepared {
+                eligible()?;
             }
             Some(repository_lock(context, LockMode::Exclusive, cancel)?)
         }
     };
     tree_unchanged(&read_worktrees(context, cancel)?, entry, expected_head)?;
     let fenced = match repository {
-        Repository::Held => eligible(),
+        Repository::Held => {
+            eligible()?;
+            true
+        }
         Repository::Acquire { lanes } => lanes(),
     };
     if !fenced {
@@ -828,7 +830,7 @@ pub(super) fn remove_tree_when(
 /// tree. Refresh under the retained writer lease before a held-repository
 /// removal; land requires complete Free, ordinary custody rejects only a
 /// positive occupant as before.
-fn refresh_census_under_custody(
+pub(super) fn refresh_census_under_custody(
     context: &WorktreeContext<'_>,
     root: &Path,
 ) -> Result<(), WorktreeError> {
@@ -947,6 +949,9 @@ pub(super) fn pin_branch_ref(
 }
 
 pub(super) fn retain_reason(error: &WorktreeError) -> RetainReason {
+    if error.admission_cause() == Some(AdmissionCause::RegistryLockTimeout) {
+        return RetainReason::LockBusy;
+    }
     match error {
         WorktreeError::Dirty(_) | WorktreeError::IgnoredPaths(_) => RetainReason::Dirty,
         WorktreeError::GitOperationInProgress => RetainReason::GitOperationInProgress,

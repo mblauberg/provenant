@@ -217,13 +217,15 @@ pub fn prune_owned(
         head,
         cancel,
         &|| {
-            (policy.terminal)(path)
+            ((policy.terminal)(path)
                 && (policy.no_live_lanes)(path)
                 && verify_worktree(context.repo, path)
                     .ok()
                     .and_then(|tree| load_owner(&tree).ok().flatten())
                     .as_ref()
-                    == Some(&owner)
+                    == Some(&owner))
+            .then_some(())
+            .ok_or(WorktreeError::UnknownWriter)
         },
         Some(&provenant_config::ProjectGcSettings {
             regenerable: policy.regenerable.to_vec(),

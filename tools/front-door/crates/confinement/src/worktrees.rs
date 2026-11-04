@@ -173,6 +173,9 @@ pub enum AdmissionCause {
     RegistryLockTimeout,
     CensusIncomplete,
     RegistrationOrCustodyUnknown,
+    LiveWriter,
+    DirtyTree,
+    PermanentFailure,
 }
 
 fn dirty_suffix(paths: &str) -> String {
@@ -194,7 +197,11 @@ impl WorktreeError {
             Self::UnknownWriter | Self::UnknownWriterAt { .. } | Self::GitEntryHeld { .. } => {
                 Some(AdmissionCause::RegistrationOrCustodyUnknown)
             }
-            _ => None,
+            Self::LockBusy | Self::LiveWriter | Self::LiveProcess(_) | Self::WriterBusy { .. } => {
+                Some(AdmissionCause::LiveWriter)
+            }
+            Self::Dirty(_) | Self::IgnoredPaths(_) => Some(AdmissionCause::DirtyTree),
+            _ => Some(AdmissionCause::PermanentFailure),
         }
     }
 
@@ -499,6 +506,10 @@ mod tests {
     #[test]
     fn admission_causes_keep_transient_observation_distinct_from_custody() {
         assert_eq!(
+            lifecycle::retain_reason(&WorktreeError::RegistryLockTimeout),
+            RetainReason::LockBusy
+        );
+        assert_eq!(
             WorktreeError::RegistryLockTimeout.admission_cause(),
             Some(AdmissionCause::RegistryLockTimeout)
         );
@@ -513,8 +524,18 @@ mod tests {
             WorktreeError::UnknownWriter.admission_cause(),
             Some(AdmissionCause::RegistrationOrCustodyUnknown)
         );
-        assert_eq!(WorktreeError::LockBusy.admission_cause(), None);
-        assert_eq!(WorktreeError::Dirty(String::new()).admission_cause(), None);
+        assert_eq!(
+            WorktreeError::LockBusy.admission_cause(),
+            Some(AdmissionCause::LiveWriter)
+        );
+        assert_eq!(
+            WorktreeError::Dirty(String::new()).admission_cause(),
+            Some(AdmissionCause::DirtyTree)
+        );
+        assert_eq!(
+            WorktreeError::InvalidRequest.admission_cause(),
+            Some(AdmissionCause::PermanentFailure)
+        );
     }
 
     #[test]

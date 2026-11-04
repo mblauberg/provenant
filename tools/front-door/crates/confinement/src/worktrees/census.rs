@@ -87,7 +87,10 @@ impl<'a> CensusSession<'a> {
             .iter()
             .map(|root| (root.clone(), root_identity(root)))
             .collect();
-        let mut evidence = self.inner.observe_evidence(roots, for_land);
+        let mut evidence = match &policy {
+            Some(policy) => self.inner.observe_captured_policy(roots, for_land, policy),
+            None => self.inner.observe_evidence(roots, for_land),
+        };
         for root in roots {
             evidence
                 .states
@@ -211,6 +214,16 @@ pub trait WorkerObserver: Send + Sync {
             holders: BTreeMap::new(),
             details,
         }
+    }
+
+    /// Acquire with the same policy used to identify the session epoch.
+    fn observe_captured_policy(
+        &self,
+        roots: &[PathBuf],
+        for_land: bool,
+        _policy: &CensusEpochPolicy,
+    ) -> WorkerEvidence {
+        self.observe_evidence(roots, for_land)
     }
 
     /// Discard command-local evidence before a custody or mutation boundary.
@@ -353,6 +366,18 @@ impl WorkerObserver for CensusPolicyWorkers<'_> {
                 ..WorkerEvidence::default()
             };
         };
+        self.inner.observe_evidence_with_policy(
+            roots,
+            &policy.entries,
+            for_land || policy.exclude_ancestors,
+        )
+    }
+    fn observe_captured_policy(
+        &self,
+        roots: &[PathBuf],
+        for_land: bool,
+        policy: &CensusEpochPolicy,
+    ) -> WorkerEvidence {
         self.inner.observe_evidence_with_policy(
             roots,
             &policy.entries,
