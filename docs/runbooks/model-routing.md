@@ -39,8 +39,10 @@ affect pacing unless an
 active dashboard calibration still binds that window. Calibrated windows with
 no current reset use a full remaining window for conservative pacing; see
 [Go calibration](configuration.md#opencode-go-quota-calibration). Go pool
-members remain eligible without floors, using the local ledger as a lower
-bound. Route diagnostics identify uncalibrated windows. Missing quota data uses
+members with uncalibrated partial windows are ineligible by default. Set
+`routing.allow_unknown_partial_headroom` to `true` to accept unknown headroom;
+observed exhaustion still blocks the route. Route diagnostics identify the
+setting, its source and uncalibrated windows. Missing quota data uses
 1.0. `spend` and `max` use 1.0; admission handles
 provider quota refusals, and a paid route remains eligible while credits
 remain. If no weighted member is ready, the first ready zero-weight member is
@@ -67,7 +69,9 @@ a recorded reset stays exhausted without a displayed expiry.
 Omit `--effort` on OpenCode free routes: their recorded model controls do not
 support effort, so an explicit value is refused before launch.
 `--confidential` excludes members and fallbacks that train on or retain prompts, or are unclassified.
-There is no classifier or route-synonym inference. Effort is set only when the
+Pool selection skips adapters that cannot support the requested write or network
+mode; an unsupported explicit route is refused. Launch preparation checks the
+selected adapter again. There is no classifier or route-synonym inference. Effort is set only when the
 catalogue contains an exact recorded control; unsupported effort is refused.
 `route resolve MODEL` reports the recorded supported efforts, including when a
 model takes none. Uncatalogued exact IDs remain available as unverified models;

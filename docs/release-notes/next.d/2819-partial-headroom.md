@@ -1,0 +1,5 @@
+## Behaviour changes
+### Accounts, quota and routing
+
+- Exclude uncalibrated partial quota headroom by default during selection and admission. Set `routing.allow_unknown_partial_headroom` to accept it; an observed exhausted lower bound still blocks the route (#2819).
+- Check requested write and network controls against adapter capabilities before selecting a route and again during launch preparation (#2819).

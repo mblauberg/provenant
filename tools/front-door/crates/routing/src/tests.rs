@@ -232,6 +232,7 @@ fn read_heavy_routing_records_cache_preference_without_forcing_edit_work()
             intent: RouteIntent {
                 workload,
                 writes: false,
+                ..Default::default()
             },
             choice: RouteChoice::NamedRoute(RouteName::parse("cachetest")?),
             effort: None,
@@ -1834,6 +1835,7 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
     let write = crate::RouteIntent {
         workload: crate::Workload::General,
         writes: true,
+        ..Default::default()
     };
     let model = crate::ModelId::parse("codex/gpt-6.1-terra")?;
     for text in [
@@ -3404,6 +3406,7 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
     let catalogue = Catalogue::bundled()?;
     let model = "opencode/opencode-go/deepseek-v4.1-flash";
     let mut config = RoutingConfig::default();
+    config.allow_unknown_partial_headroom = true;
     config.pacing.accounts.insert(
         "go".into(),
         PacingProfile {
@@ -3458,6 +3461,32 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
         resets_unix_seconds: None,
     })
     .collect();
+    // Selection and admission treat the same uncalibrated lower bound alike.
+    let mut default_config = config.clone();
+    default_config.allow_unknown_partial_headroom = false;
+    let observations = [duplicate(&raw)];
+    let mut ctx = context(&catalogue, &default_config, now()?);
+    ctx.availability = &availability;
+    ctx.access = &access;
+    ctx.quota = &observations;
+    let explicit = request(model)?;
+    let refused = resolve(&explicit, &ctx)?;
+    assert!(matches!(
+        refused.readiness,
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::UnknownPartialHeadroom,
+            ..
+        }
+    ));
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &availability;
+    ctx.access = &access;
+    ctx.quota = &observations;
+    assert!(matches!(
+        resolve(&explicit, &ctx)?.readiness,
+        RouteReadiness::Ready { .. }
+    ));
+
     let mut settings = provenant_quota::Settings::default();
     settings.calibration.insert(
         "go".into(),
@@ -4239,7 +4268,11 @@ fn read_only_policy_model_stays_in_junior_and_senior_pools_for_read_only_work()
     };
     let gemini_exclusion = |pool: &str, writes: bool, workload| {
         let request = RouteRequest {
-            intent: RouteIntent { workload, writes },
+            intent: RouteIntent {
+                workload,
+                writes,
+                ..Default::default()
+            },
             choice: RouteChoice::NamedRoute(RouteName::parse(pool)?),
             effort: None,
             confidential: false,

@@ -33,6 +33,12 @@ Provider-family assurance remains established by provider evidence.
 
 ### Exact selection, seeded pools
 
+A dispatch carries its requested write and effective network controls into
+selection. Each candidate must support those controls in its adapter's launch
+table, and preparation checks them again before launching. Unsupported explicit
+requests are refused; unsupported pool members are excluded. Capability facts
+never grant filesystem or network authority.
+
 A request names exactly one `--model ADAPTER/ID` or `--route NAME`. No
 adapter, upgrade, effort default or downgrade is inferred, and an unknown
 explicit ID runs only if availability, disclosure and confinement are
@@ -183,12 +189,14 @@ OpenCode Go local ledger usage is labelled `source: local-ledger` and
 `coverage: partial`; it is a lower bound because other devices are absent.
 An active per-account calibration supplies dashboard percentage floors,
 applied as the maximum of ledger and floor at each read. Expiry restores raw
-ledger usage. Missing or expired floors do not exclude pool members; route list
-and resolve identify uncalibrated windows so users can tighten pacing.
-Exhaustion, authentication and quota limits still exclude members.
+ledger usage. Missing or expired floors make the affected partial headroom
+unknown and ineligible by default. The `routing.allow_unknown_partial_headroom`
+knob opts into selection and admission with that uncertainty; an observed lower
+bound at the limit still excludes the member. Route explanation reports the
+setting and its source. Exhaustion, authentication and quota limits still exclude members.
 Configuration and the operational limits are
 in the [calibration runbook](../runbooks/configuration.md#opencode-go-quota-calibration).
-- Why: Go models remain available while partial coverage is visible.
+- Why: selection and launch admission use the same scoped quota evidence.
 - Test: `crates/quota/src/calibration.rs::tests::calibration_takes_maximum_and_expires_even_with_cached_ledger`
 - Owner: `crates/quota/src/calibration.rs`, `crates/routing/src/resolve.rs`
 

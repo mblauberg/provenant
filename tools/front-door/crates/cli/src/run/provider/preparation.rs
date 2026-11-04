@@ -807,6 +807,15 @@ pub(super) fn prepare_candidates(
     }
     for (candidate, route) in candidates(resolved).into_iter().enumerate() {
         let label = format!("{}/{}", route.adapter, route.model);
+        if let Some(spec) = AdapterSpec::get(&route.adapter)
+            && let Err(error) =
+                request
+                    .intent
+                    .check_launch(spec, &route.model, route.effort.as_deref())
+        {
+            reasons.push(skip(&label, SkipKind::Refused, &error.to_string()));
+            continue;
+        }
         let effective = config.domains.routing.model_policy.effective(
             &provenant_routing::ModelId::parse(&label).map_err(|error| error.to_string())?,
             route.account_key.as_deref(),

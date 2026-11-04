@@ -261,6 +261,7 @@ impl RouteRequest {
                     provenant_routing::Workload::General
                 },
                 writes: false,
+                ..Default::default()
             },
             choice,
             effort: self.effort.clone(),
@@ -802,6 +803,7 @@ fn override_value(row: &provenant_routing::PacingOverride) -> toml_edit::Value {
 }
 #[derive(Serialize)]
 pub struct RoutePreview {
+    pub allow_unknown_partial_headroom: provenant_config::KnobValue,
     /// Persisted exclusion rows that were repaired or ignored on reading.
     pub exclusion_notes: Vec<String>,
     pub model_policy: provenant_routing::EffectiveModelPolicy,
@@ -1003,9 +1005,21 @@ fn with_context<T>(
         &[provenant_quota::QuotaPolicy],
     ) -> Result<T, EdgeError>,
 ) -> Result<T, EdgeError> {
-    let domains = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?.domains;
+    let resolved_config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?;
+    let partial_headroom_source = resolved_config
+        .knobs
+        .get("routing.allow_unknown_partial_headroom")
+        .cloned()
+        .ok_or(RoutingError::InvalidValue)?;
+    let allow_unknown = partial_headroom_source
+        .value
+        .as_bool()
+        .ok_or(RoutingError::InvalidValue)?;
+    let domains = resolved_config.domains;
     let policies = provenant_providers::scheduling_policies(&domains.quota, REGISTRY);
     let mut config = domains.routing;
+    config.allow_unknown_partial_headroom = allow_unknown;
+    config.partial_headroom_source = Some(partial_headroom_source);
     resolve_pacing_accounts(&mut config, &domains.accounts)?;
     let catalogue = Catalogue::bundled()?;
     // A lane holds no grant on the shared quota store: route without a
@@ -1305,7 +1319,12 @@ fn resolve_dispatch_excluding(
                 .map_err(EdgeError::GoAllowance)
                 .and_then(|()| {
                     if matches!(&resolved.readiness, RouteReadiness::Ready { .. }) {
-                        admission.check(&resolved).map_err(EdgeError::from)
+                        admission
+                            .check_with_partial_headroom(
+                                &resolved,
+                                context.config.allow_unknown_partial_headroom,
+                            )
+                            .map_err(EdgeError::from)
                     } else {
                         Ok(())
                     }
@@ -1495,9 +1514,14 @@ pub(crate) fn check_dispatch_candidate(
     let catalogue = Catalogue::bundled().map_err(|e| e.to_string())?;
     let model =
         ModelId::parse(&format!("{}/{}", route.adapter, route.model)).map_err(|e| e.to_string())?;
-    let domains = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-        .map_err(|e| e.to_string())?
-        .domains;
+    let resolved_config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+        .map_err(|e| e.to_string())?;
+    let allow_unknown = resolved_config
+        .knobs
+        .get("routing.allow_unknown_partial_headroom")
+        .and_then(|v| v.value.as_bool())
+        .unwrap_or(false);
+    let domains = resolved_config.domains;
     provenant_routing::check_go_allowance(&model, &domains.routing, &catalogue)?;
     let pools = catalogue.admission_pools(&model);
     let now = SystemClock::new().unix_seconds();
@@ -1509,7 +1533,7 @@ pub(crate) fn check_dispatch_candidate(
         records: &records,
         pools: &pools,
     }
-    .check(route)
+    .check_with_partial_headroom(route, allow_unknown)
     .map_err(|e| e.to_string())
 }
 
@@ -2107,7 +2131,13 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
                     .and_then(|r| r.snapshot.clone());
                 let pacing = provenant_routing::pacing_preview(&model, context);
                 let entry = context.catalogue.model(&model);
+                let allow_unknown_partial_headroom = context
+                    .config
+                    .partial_headroom_source
+                    .clone()
+                    .ok_or(RoutingError::InvalidValue)?;
                 Ok(Data::Resolved(Box::new(RoutePreview {
+                    allow_unknown_partial_headroom,
                     exclusion_notes: context.config.model_exclusions.notes().to_vec(),
                     model_policy,
                     compaction_break_even_turns,
@@ -2322,7 +2352,10 @@ pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<S
                         availability_ref: "preview".into(),
                         expires_unix_seconds: now + 60,
                     };
-                    match admission.check(&probe) {
+                    match admission.check_with_partial_headroom(
+                        &probe,
+                        context.config.allow_unknown_partial_headroom,
+                    ) {
                         Ok(()) if !spent(record, now) => return Ok(None),
                         Ok(()) => member.push("allowance exhausted".to_owned()),
                         Err(error) => member.push(error.to_string()),
@@ -2412,6 +2445,10 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
             }
         }
     }
+    text.push_str(&format!(
+        "allow unknown partial headroom: {} (source: {:?})\n",
+        preview.allow_unknown_partial_headroom.value, preview.allow_unknown_partial_headroom.source
+    ));
     if let Some(details) = preview.quota.as_ref().and_then(|q| q.details.as_ref())
         && let (Some(source), Some(coverage)) = (&details.source, &details.coverage)
     {
@@ -2752,6 +2789,22 @@ mod route_tests {
         };
         let (data, text) = super::explain_dispatch(&request, &roots)?;
         assert_ne!(data["adapter"], "claude");
+        assert_eq!(data["allow_unknown_partial_headroom"]["value"], false);
+        assert_eq!(data["allow_unknown_partial_headroom"]["source"], "default");
+        std::fs::write(
+            roots.state.as_path().join("config.toml"),
+            "schema_version=1\n[knobs]\n'routing.allow_unknown_partial_headroom'=true\n",
+        )?;
+        let (override_data, override_text) = super::explain_dispatch(&request, &roots)?;
+        assert_eq!(
+            override_data["allow_unknown_partial_headroom"]["value"],
+            true
+        );
+        assert_eq!(
+            override_data["allow_unknown_partial_headroom"]["source"],
+            "override"
+        );
+        assert!(override_text.contains("allow unknown partial headroom: true (source: Override)"));
         assert!(
             text.contains("claude/claude-haiku-5-5: excluded by flag: provider claude"),
             "{text}"

@@ -179,6 +179,12 @@
         "status": "wired",
         "effect": "Host-owned exact executable path and signing team_id (or platform) exceptions for actual cwd EPERM. All real/effective/saved uids must be system accounts foreign to every root owner; platform entries also require a root-owned chain with no group/other write permission. Listed executables may occupy a worktree. Invalid/unreadable signing state never qualifies. Not accepted through dispatch --knob or Fabric overrides."
     },
+    "routing.allow_unknown_partial_headroom": {
+      "type": "bool", "default": false, "strict": true, "host_only": true, "status": "wired",
+      "reader": "tools/front-door/crates/cli/src/route.rs",
+      "effect": "Allow uncalibrated partial quota headroom below the limit.",
+      "trade_off": "Partial coverage cannot prove remaining allowance; exhausted lower bounds still block selection."
+    },
     "routing.workload": {
       "type": "enum", "values": ["general", "read_heavy", "edit_heavy", "review"], "default": "general", "status": "wired",
       "reader": "tools/front-door/crates/cli/src/run.rs",
