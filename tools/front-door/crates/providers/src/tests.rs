@@ -2841,7 +2841,11 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                 .iter()
                 .all(|grant| grant.path == package
                     || homebrew_node(&grant.path)
-                    || !grant.path.starts_with("/opt"))
+                    || (grant.scope == provenant_confinement::permissions::PathScope::Exact
+                        && grant.path.starts_with("/opt/homebrew"))
+                    || !grant.path.starts_with("/opt")),
+            "{id}: {:?}",
+            spec.profile.spec.tool_exec_roots
         );
         // A read-only launch may only start inside a declared read root.
         assert!(matches!(
@@ -7111,9 +7115,13 @@ fn assert_lane_user_skills(adapter: &str) -> Result<(), Box<dyn std::error::Erro
                         .all(|write| !write.path.starts_with(&grant.path)
                             && !grant.path.starts_with(&write.path))
                 );
-                assert!(spec.profile.spec.runtime_reads.iter().all(|read| read.scope
-                    != provenant_confinement::permissions::PathScope::Subtree
-                    || !grant.path.starts_with(&read.path)));
+                assert!(
+                    spec.profile.spec.runtime_reads.iter().all(|read| read.scope
+                        != provenant_confinement::permissions::PathScope::Subtree
+                        || !grant.path.starts_with(&read.path)),
+                    "library {grant:?}, reads {:?}",
+                    spec.profile.spec.runtime_reads
+                );
             }
             let exposed = state == "discover";
             assert_eq!(

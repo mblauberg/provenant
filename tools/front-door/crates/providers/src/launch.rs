@@ -656,7 +656,11 @@ impl LaunchSpec {
                     })
                 {
                     LibraryAccess::OmitProtected
-                } else if excluded.iter().any(|root| path.starts_with(root)) {
+                } else if excluded.iter().any(|root| path.starts_with(root))
+                    || spec.profile.spec.runtime_reads.iter().any(|grant| {
+                        grant.scope == PathScope::Subtree && path.starts_with(&grant.path)
+                    })
+                {
                     LibraryAccess::AlreadyCovered
                 } else {
                     LibraryAccess::Grant
