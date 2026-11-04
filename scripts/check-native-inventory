@@ -17,8 +17,10 @@ def inventory(path):
             continue
         if not in_table:
             continue
+        if not line.strip():
+            break  # A blank line ends the table.
         if not line.startswith('|'):
-            break
+            raise ValueError(f'malformed native inventory row: {line}')
         if line.startswith('|---'):
             continue
         fields = [field.strip() for field in line.strip('|').split('|')]
