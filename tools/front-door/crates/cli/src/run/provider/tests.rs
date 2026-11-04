@@ -1316,6 +1316,137 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         },
         &call,
     )?;
+    // Exercise the actual adapter, sandbox compiler and fixture executable in both lane modes.
+    #[cfg(target_os = "macos")]
+    {
+        use provenant_confinement::permissions::{
+            AccessMode, AnchoredDirectory, Anchors, BackendContext, prepare_writer_directories,
+            required_anchors, system_backend,
+        };
+        let skill_root = home.join(".gemini/skills");
+        std::fs::create_dir_all(&skill_root)?;
+        // Skill discovery and Rust discovery omit the same canonical root.
+        // Repeated read/exec grants for that root collapse within Toolchain.
+        std::os::unix::fs::symlink(&skill_root, skill_root.join("bin"))?;
+        std::os::unix::fs::symlink(&skill_root, home.join(".cargo"))?;
+        std::fs::create_dir_all(home.join(".rustup/toolchains"))?;
+        let login = home.join("Library/Keychains/login.keychain-db");
+        std::fs::create_dir_all(login.parent().unwrap())?;
+        std::fs::write(&login, b"fixture")?;
+        let fake_agy = assets.join("agy");
+        std::fs::write(&fake_agy, b"#!/bin/sh\nprintf 'agy 1.0.0\\n'\n")?;
+        std::fs::set_permissions(&fake_agy, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::write(state.join("config.toml"), "schema_version = 1\n")?;
+        let backend = system_backend(&BackendContext {
+            executor: &executor,
+            cancel: &cancel,
+            env: &[],
+        });
+        if let Err(error) = &backend {
+            provenant_test_support::skip_sandbox_dependent_test(format!(
+                "agy fixture execution requires native sandbox: {error}"
+            ))?;
+        }
+        for (n, write) in [(7u8, true), (8u8, false)] {
+            let mut request = task.clone();
+            request.route = run::RequestedRoute::Model {
+                extra: Default::default(),
+                provider: "agy".into(),
+                model: "agy/gemini-3.8-flash".into(),
+                effort: None,
+            };
+            request.fallback.clear();
+            if !write {
+                request.writer = None;
+            }
+            let attempt_id = AttemptId::from_bytes([n; 16]);
+            let attempt = state.join(format!("runs/{run_id}/attempts/{attempt_id}"));
+            let paths = run::LaunchPaths {
+                attempt_id,
+                operation_id: OperationId::parse(&format!("agy-fixture-{n}"))?,
+                task_index: 0,
+                lane_depth: 1,
+                run_id,
+                deadline_unix_ms: u64::MAX,
+                scratch: attempt.join("scratch"),
+                provider_state: attempt.join("provider-state"),
+                temporary: attempt.join("tmp"),
+                temporary_alias: None,
+            };
+            for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
+                std::fs::create_dir_all(path)?;
+            }
+            let prepared = prepare_with(
+                &registry,
+                &request,
+                "fixture",
+                &paths,
+                None,
+                |_| Ok(fake_agy.clone()),
+                None,
+            )?;
+            let warning = prepared.route.extra["user_skills"]["warnings"][0]
+                .as_str()
+                .ok_or("missing agy warning")?;
+            assert!(warning.contains("~/.gemini/skills"), "{warning}");
+            assert_eq!(
+                prepared.route.extra["user_skills"]["warnings"],
+                serde_json::json!([warning]),
+            );
+            assert_eq!(
+                prepared.route.extra["discovery_warnings"],
+                if write {
+                    serde_json::json!([warning])
+                } else {
+                    serde_json::json!([])
+                },
+                "writers discover the same path as both a skill and a toolchain"
+            );
+            let confinement = prepared.confinement.as_ref().ok_or("missing confinement")?;
+            assert!(
+                !confinement
+                    .profile
+                    .spec
+                    .runtime_reads
+                    .iter()
+                    .any(|grant| grant.path == skill_root)
+            );
+            let writer = confinement
+                .writer
+                .as_ref()
+                .map(|writer| (&writer.worktree, &writer.branch));
+            if let (Some((worktree, branch)), AccessMode::WorktreeWrite(authority)) =
+                (writer, &confinement.plan.permissions().mode)
+            {
+                prepare_writer_directories(worktree, branch, authority, &home)?;
+            }
+            let directories =
+                required_anchors(confinement.plan.permissions(), &confinement.profile, writer)
+                    .into_iter()
+                    .map(AnchoredDirectory::open_canonical)
+                    .collect::<Result<Vec<_>, _>>()?;
+            let anchors = Anchors {
+                home: &home,
+                directories: &directories,
+                worktree: writer,
+            };
+            let compiled = provenant_confinement::permissions::snapshot::compile(
+                confinement.plan.permissions(),
+                &confinement.profile,
+                &anchors,
+            )?;
+            if backend.is_err() {
+                continue;
+            }
+            let argv = compiled.command(&prepared.argv, &attempt_id)?;
+            let mut options = ExecOptions::new(&argv, &prepared.cwd, Duration::from_secs(10));
+            options.env = Some(&prepared.environment);
+            let result = executor.execute(options)?;
+            assert_eq!(result.termination, Termination::Exit(0), "{result:?}");
+            assert!(String::from_utf8_lossy(&result.stdout.bytes).contains("agy 1.0.0"));
+        }
+        std::fs::remove_file(home.join(".cargo"))?;
+    }
     std::fs::write(
         state.join("config.toml"),
         format!(
@@ -1409,9 +1540,8 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
             &confinement.profile,
         );
         for path in [&skills, &skill_target] {
-            assert_eq!(
-                reads.iter().any(|grant| grant.path == *path),
-                expected,
+            assert!(
+                !reads.iter().any(|grant| grant.path == *path),
                 "{settings}: {path:?}"
             );
             assert!(
@@ -1422,7 +1552,19 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
             );
         }
         let receipt = &prepared.route.extra["user_skills"];
-        assert_eq!(receipt["exposed"], expected, "{settings}");
+        assert_eq!(receipt["exposed"], false, "{settings}");
+        assert_eq!(
+            receipt["warnings"].as_array().unwrap().len(),
+            usize::from(expected)
+        );
+        if expected {
+            assert!(
+                receipt["warnings"][0]
+                    .as_str()
+                    .unwrap()
+                    .contains("~/.cursor/skills")
+            );
+        }
         if source == "route" {
             assert!(receipt["source"]["route_policy"].is_array());
         } else {

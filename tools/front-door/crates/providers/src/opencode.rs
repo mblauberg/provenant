@@ -146,10 +146,11 @@ fn prepare(
     );
     let user_skills = crate::user_skills_directory("opencode", input.home, input.host_var)
         .filter(|_| input.user_skills());
-    let skill_reads = user_skills
+    let (skill_reads, skill_omitted) = user_skills
         .as_ref()
-        .map(|path| crate::user_skills_grants(path))
+        .map(|path| crate::user_skills_grants_with_omissions(path, Some(input.home)))
         .unwrap_or_default();
+    let mut omitted_discovery = crate::launch::OmittedGrant::skills(skill_omitted);
     let mut permission = serde_json::json!({
         "edit": edit,
         "bash": edit,
@@ -232,12 +233,22 @@ fn prepare(
             .map(exact),
     );
     if access == Access::WorktreeWrite {
+        let start = runtime_reads.len();
         runtime_reads.extend(crate::launch::git_global_files(&config_home));
+        crate::launch::filter_optional_grants(
+            &mut runtime_reads,
+            start,
+            input.home,
+            crate::launch::OmissionSource::Toolchain,
+            &mut omitted_discovery,
+        );
     }
     // Preserve the existing provider configuration without making skills
     // readable when discovery is off. Do not follow unrelated config links.
     let config_dir = config_home.join("opencode");
+    let optional_start = runtime_reads.len();
     if let Ok(config_dir) = std::fs::canonicalize(&config_dir)
+        && !provenant_confinement::refuses_lane_root(&config_dir, true, Some(input.home))
         && let Ok(entries) = std::fs::read_dir(&config_dir)
     {
         runtime_reads.push(exact(&config_dir));
@@ -254,6 +265,25 @@ fn prepare(
             }
         }
     }
+    if let Ok(config_dir) = std::fs::canonicalize(&config_dir)
+        && provenant_confinement::refuses_lane_root(&config_dir, true, Some(input.home))
+        && !omitted_discovery.iter().any(|entry| {
+            entry.path == config_dir
+                && entry.source == crate::launch::OmissionSource::ProviderConfig
+        })
+    {
+        omitted_discovery.push(crate::launch::OmittedGrant {
+            path: config_dir,
+            source: crate::launch::OmissionSource::ProviderConfig,
+        });
+    }
+    crate::launch::filter_optional_grants(
+        &mut runtime_reads,
+        optional_start,
+        input.home,
+        crate::launch::OmissionSource::ProviderConfig,
+        &mut omitted_discovery,
+    );
     runtime_reads.extend(skill_reads);
     // Keep the account store readable but outside all writable state grants.
     let mut state_writes = ["opencode.db", "opencode.db-shm", "opencode.db-wal"]
@@ -332,6 +362,7 @@ fn prepare(
             &mut tool_exec_roots,
             &mut env,
             &mut setup,
+            &mut omitted_discovery,
         );
         crate::launch::node_tools(
             input.home,
@@ -340,6 +371,7 @@ fn prepare(
             &mut runtime_reads,
             &mut tool_exec_roots,
             &mut env,
+            &mut omitted_discovery,
         );
     }
     env.push(("OPENCODE_CONFIG_CONTENT".into(), config.into()));
@@ -359,6 +391,7 @@ fn prepare(
         secret_input: None,
         cwd: input.cwd.to_owned(),
         setup,
+        omitted_discovery,
         git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {

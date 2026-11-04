@@ -4970,6 +4970,7 @@ fn lanes_read_the_host_pnpm_store_but_cannot_write_it() -> Result<(), Box<dyn st
         &mut reads,
         &mut exec,
         &mut env,
+        &mut Vec::new(),
     );
     for store in ["Library/pnpm", ".local/share/pnpm"] {
         assert!(
@@ -6827,6 +6828,95 @@ fn user_skills_grants_resolve_linked_roots_resources_and_cycles()
     Ok(())
 }
 
+#[test]
+fn optional_discovered_grants_are_filtered_without_touching_required_grants()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().canonicalize()?;
+    let secret = home.join(".gemini/private");
+    let optional = home.join("optional");
+    std::fs::create_dir_all(&secret)?;
+    std::os::unix::fs::symlink(&secret, &optional)?;
+    let required = crate::launch::subtree(&secret);
+    let mut grants = vec![
+        required.clone(),
+        crate::launch::subtree(&optional),
+        crate::launch::subtree(&secret),
+    ];
+    let mut omitted = crate::launch::OmittedGrant::skills(vec![secret.clone()]);
+    crate::launch::filter_optional_grants(
+        &mut grants,
+        1,
+        &home,
+        crate::launch::OmissionSource::Toolchain,
+        &mut omitted,
+    );
+    assert_eq!(grants, vec![required]);
+    assert_eq!(
+        omitted,
+        vec![
+            crate::launch::OmittedGrant {
+                path: secret.clone(),
+                source: crate::launch::OmissionSource::UserSkill,
+            },
+            crate::launch::OmittedGrant {
+                path: secret,
+                source: crate::launch::OmissionSource::Toolchain,
+            },
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn opencode_skill_and_provider_config_omissions_keep_both_sources()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().canonicalize()?;
+    let secret = home.join(".gemini/skills");
+    std::fs::create_dir_all(&secret)?;
+    std::fs::create_dir_all(home.join(".config"))?;
+    std::os::unix::fs::symlink(&secret, home.join(".config/opencode"))?;
+    std::os::unix::fs::symlink(&secret, secret.join("skills"))?;
+    let mut route = route("opencode", "fixture-model");
+    route.account_key = None;
+    let plan = fixture_access_plan(Access::ReadOnly, None, false);
+    let prompt = Prompt::new("fixture".into());
+    let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
+    input.home = &home;
+    let spec = opencode::OpenCode.prepare(input)?;
+    assert_eq!(
+        spec.omitted_discovery,
+        vec![
+            crate::launch::OmittedGrant {
+                path: secret.clone(),
+                source: crate::launch::OmissionSource::UserSkill,
+            },
+            crate::launch::OmittedGrant {
+                path: secret,
+                source: crate::launch::OmissionSource::ProviderConfig,
+            },
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn discovered_skill_links_into_credential_roots_are_omitted()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().canonicalize()?;
+    let skills = home.join("skills");
+    let secret = home.join(".gemini/private");
+    std::fs::create_dir_all(&skills)?;
+    std::fs::create_dir_all(&secret)?;
+    std::os::unix::fs::symlink(&secret, skills.join("linked"))?;
+    let (grants, omitted) = crate::user_skills_grants_with_omissions(&skills, Some(&home));
+    assert_eq!(grants, vec![crate::launch::subtree(&skills)]);
+    assert_eq!(omitted, vec![secret]);
+    Ok(())
+}
+
 fn assert_lane_user_skills(adapter: &str) -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let home = temp.path().canonicalize()?;
@@ -6886,7 +6976,19 @@ fn assert_lane_user_skills(adapter: &str) -> Result<(), Box<dyn std::error::Erro
             input.home = &home;
             input.host_var = &host_var;
             let spec = provider.prepare(input)?;
-            let exposed = state == "discover";
+            let exposed = state == "discover" && !matches!(adapter, "agy" | "claude" | "cursor");
+            if matches!(adapter, "agy" | "claude" | "cursor") {
+                assert_eq!(
+                    spec.omitted_discovery,
+                    if state == "discover" {
+                        crate::launch::OmittedGrant::skills(vec![skills.clone()])
+                    } else {
+                        Vec::new()
+                    },
+                    "{adapter} {access:?} {state}"
+                );
+            }
+
             if adapter == "opencode" {
                 assert!(
                     spec.profile
@@ -7059,14 +7161,13 @@ fn claude_user_skills_use_private_placement_for_registered_readers()
     assert!(
         spec.env
             .iter()
-            .any(|(key, value)| key == "CLAUDE_CONFIG_DIR"
-                && value == "/fixture/state/claude-config")
+            .any(|(key, value)| key == "CLAUDE_CONFIG_DIR" && value == account_dir.as_os_str())
     );
     assert!(
-        spec.setup
+        !spec
+            .setup
             .iter()
-            .any(|step| matches!(step, SetupStep::Symlink { link, target }
-        if link == Path::new("/fixture/state/claude-config/skills") && target == &skills))
+            .any(|step| matches!(step, SetupStep::Symlink { target, .. } if target == &skills))
     );
     assert!(
         spec.profile

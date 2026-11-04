@@ -68,11 +68,26 @@ fn prepare(
         authentication.push(subtree(config));
     }
     let mut skill_reads = Vec::new();
+    let mut omitted_discovery = Vec::new();
     if input.user_skills()
         && let Some(skills) = crate::user_skills_directory("cursor", input.home, input.host_var)
     {
-        skill_reads = crate::user_skills_grants(&skills);
+        let (reads, omitted) = crate::user_skills_grants_with_omissions(&skills, Some(input.home));
+        skill_reads = reads;
+        omitted_discovery = crate::launch::OmittedGrant::skills(omitted);
     }
+    let mut optional_reads = if access == Access::WorktreeWrite {
+        crate::launch::git_global_files(&input.home.join(".config"))
+    } else {
+        Vec::new()
+    };
+    crate::launch::filter_optional_grants(
+        &mut optional_reads,
+        0,
+        input.home,
+        crate::launch::OmissionSource::Toolchain,
+        &mut omitted_discovery,
+    );
     let chats = input.home.join(".cursor/chats");
     let mut env = base_env(input, &plan.scratch.path, "/usr/bin:/bin");
     env.extend([
@@ -86,6 +101,7 @@ fn prepare(
         secret_input: None,
         cwd: input.cwd.to_owned(),
         setup: vec![SetupStep::CreateDir(chats.clone())],
+        omitted_discovery,
         git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
@@ -94,11 +110,7 @@ fn prepare(
                 runtime_reads: [subtree(package)]
                     .into_iter()
                     .chain(skill_reads)
-                    .chain(if access == Access::WorktreeWrite {
-                        crate::launch::git_global_files(&input.home.join(".config"))
-                    } else {
-                        Vec::new()
-                    })
+                    .chain(optional_reads)
                     .collect(),
                 authentication: vec![AuthenticationProfile {
                     mechanism: "login".into(),

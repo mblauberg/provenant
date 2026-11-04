@@ -101,6 +101,7 @@ fn prepare(
         .tool_exec_roots
         .extend(command.runtimes.iter().map(exact));
     let mut setup = Vec::new();
+    let mut omitted_discovery = Vec::new();
     if [".cargo/bin", ".rustup/toolchains"]
         .iter()
         .all(|path| input.home.join(path).is_dir())
@@ -112,6 +113,7 @@ fn prepare(
             &mut profile.tool_exec_roots,
             &mut env,
             &mut setup,
+            &mut omitted_discovery,
         );
     } else {
         crate::launch::system_tools(
@@ -129,6 +131,7 @@ fn prepare(
         &mut profile.runtime_reads,
         &mut profile.tool_exec_roots,
         &mut env,
+        &mut omitted_discovery,
     );
     Ok(LaunchSpec {
         argv,
@@ -137,6 +140,7 @@ fn prepare(
         secret_input: None,
         cwd: input.cwd.to_owned(),
         setup,
+        omitted_discovery,
         git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: profile,
