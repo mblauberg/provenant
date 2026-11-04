@@ -27,7 +27,8 @@ Four boundaries are strict and fail closed:
 
 Everything else is flexible. User configuration warns and keeps valid settings;
 other edge cases get a note, or a typed refusal of that one operation
-([ADR 0034](0034-refusals-carry-stable-typed-codes.md)). Persisted formats are versioned and tolerate extra fields.
+([ADR 0034](0034-refusals-carry-stable-typed-codes.md)). Persisted formats are
+versioned and tolerate extra fields.
 
 Interfaces change without compatibility shims, before and after 1.0: no legacy
 readers, aliases, fallback paths or dual formats. A breaking change ships with
@@ -43,6 +44,7 @@ over refusing the launch.
 ## Consequences
 
 New guards need an observed failure in one of the four classes. Reviews treat
-a refusal outside them as a defect to loosen, not a safety gain. See
+a lane or launch refusal outside them, or any guard that blocks ordinary work,
+as a defect to loosen, not a safety gain. See
 [Simple first](../specs/rust-workspace.md#simple-first) and the
 [supervisor spec](../specs/supervisor.md).
