@@ -1237,10 +1237,12 @@ check; synthesis uses its declared dispositions. New findings still belong in
 the structured block.
 When directly selected sources share an id, their ids are qualified with the
 source node id in the synthesis input.
-When a downstream node propagates a finding with the same id, it declares
+When a downstream node propagates a finding, it declares
 `"propagates": "<input-node-id>:<finding-id>"` on that entry. If synthesis
 selects both the original and the downstream finding, this marker identifies
-the enriched copy as the same finding. A matching id and dependency alone do
+the enriched copy as the same finding, even if its displayed id differs. Copies
+propagated from the same origin remain visible with a shared identity, so one
+disposition settles them all. A matching id and dependency alone do
 not establish propagation; independent findings need separate dispositions.
 Use the exported qualified id. A bare id is also accepted when it matches exactly
 one selected upstream identity; ambiguous or unknown identity-only references fail

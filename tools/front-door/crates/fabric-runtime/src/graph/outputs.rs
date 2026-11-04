@@ -259,7 +259,7 @@ fn parse_findings(
                     .is_some_and(|prefix| prefix.ends_with(':'))
             });
             let source = matches.next();
-            if matches.next().is_some() {
+            if matches.any(|finding| Some(&finding.id) != source.map(|item| &item.id)) {
                 return Err(fail(
                     "id",
                     "ambiguous upstream identity; use the qualified id",
@@ -371,39 +371,56 @@ pub(super) fn selected_findings(
             );
         }
     }
-    // A downstream input may carry a finding already selected from its own
-    // input. Keep its enriched copy, while preserving collisions between
-    // independent sources.
+    // A marker names the stored identity at an actual input of the propagator.
+    // Keep that origin even when the original is not itself selected.
+    let origin = |source: &str, finding: &Finding| {
+        let marker = finding.extra.get("propagates").and_then(|v| v.as_str());
+        positions
+            .get(source)
+            .and_then(|index| {
+                plan.nodes[*index].inputs.iter().find_map(|input| {
+                    if !input
+                        .outputs
+                        .iter()
+                        .any(|kind| matches!(kind, OutputKind::Result | OutputKind::Findings))
+                    {
+                        return None;
+                    }
+                    let id = marker?.strip_prefix(&format!("{}:", input.node))?;
+                    (!id.is_empty()).then(|| (input.node.clone(), id.to_owned()))
+                })
+            })
+            .unwrap_or_else(|| (source.to_owned(), finding.id.clone()))
+    };
     let snapshot = selected.clone();
     selected.retain(|(source, finding)| {
         !snapshot.iter().any(|(other, candidate)| {
             other != source
-                && candidate.id == finding.id
-                && candidate.extra.get("propagates").and_then(|v| v.as_str())
-                    == Some(format!("{source}:{}", finding.id).as_str())
-                && positions.get(other).is_some_and(|index| {
-                    plan.nodes[*index].inputs.iter().any(|input| {
-                        input.node == *source
-                            && input.outputs.iter().any(|kind| {
-                                matches!(kind, OutputKind::Result | OutputKind::Findings)
-                            })
-                    })
-                })
+                && origin(other, candidate) == (source.clone(), finding.id.clone())
+                && origin(other, candidate) != (other.clone(), candidate.id.clone())
         })
     });
-    let collisions: std::collections::BTreeSet<String> = selected
-        .iter()
-        .filter(|(node, finding)| {
-            selected
-                .iter()
-                .any(|(other, f)| other != node && f.id == finding.id)
-        })
-        .map(|(_, finding)| finding.id.clone())
+    // All copies of an origin retain their evidence but share one identity.
+    // Qualify only when different origins have the same displayed identity.
+    let mut identities = std::collections::BTreeMap::new();
+    for (source, finding) in &selected {
+        identities
+            .entry(origin(source, finding))
+            .or_insert_with(|| finding.id.clone());
+    }
+    let collisions: std::collections::BTreeSet<_> = identities
+        .values()
+        .filter(|id| identities.values().filter(|other| *other == *id).count() > 1)
+        .cloned()
         .collect();
-    for (node, finding) in &mut selected {
-        if collisions.contains(&finding.id) {
-            finding.id = format!("{node}:{}", finding.id);
-        }
+    for (source, finding) in &mut selected {
+        let key = origin(source, finding);
+        let id = &identities[&key];
+        finding.id = if collisions.contains(id) {
+            format!("{}:{id}", key.0)
+        } else {
+            id.clone()
+        };
     }
     selected
 }
