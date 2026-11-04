@@ -224,9 +224,9 @@ Alternatively create and extend stacks through the API. REST PRs carry a
 create, extend and dissolve endpoints. GraphQL stack fields are read-only;
 webhooks carry `stack`.
 
-The chair normally merges `main` into branches instead of rebasing. For a
-stack, a writer may rebase and force-push with lease only the unmerged branches
-of its own stack, never `main` or another writer's branch. `gh stack rebase`
+The chair normally merges `main` into branches instead of rebasing. A writer
+may rebase and force-push with lease its own unmerged branches, including a
+whole stack, never `main` or another writer's branch. `gh stack rebase`
 cascades and supports `--upstack` and `--downstack`; `gh stack push` uses an
 atomic per-branch force-with-lease, and `gh stack sync` fetches, rebases, pushes
 and syncs PR state. Recheck the changed heads and their review evidence.
@@ -377,7 +377,7 @@ reported cause and rerun: an already-merged PR skips CI and merge and retries
 only safe cleanup. CI failures use `CI_PENDING`, `CI_FAILED`,
 `CI_UNAVAILABLE`, `CI_POLICY_UNAVAILABLE`, `CI_TIMEOUT`, `CI_CONFLICT`,
 `CI_NOT_SCHEDULED` or `HEAD_MOVED`. `CI_CONFLICT` means the PR conflicts with its
-base, so CI never starts: update the branch and push (see [stacked pull requests](#stacked-pull-requests) for the rebase exception). `CI_NOT_SCHEDULED` means the wait
+base, so CI never starts: merge `main` or rebase, then push. `CI_NOT_SCHEDULED` means the wait
 ended with no check registered for the head. Required checks on the exact head
 stay mandatory.
 
@@ -431,9 +431,9 @@ For status-check rollup handling and false-green traps, follow the
 The user review/merge gate applies only when the agent is stuck: split review
 verdicts it cannot settle with primary-source evidence, an exhausted repair
 budget, or a decision outside its granted authority. Standing user gates are:
-forced branch deletion, deletion of a branch that is not merged, history
-rewrites outside the [stack exception](#stacked-pull-requests), credential or connector setup, pushes to shared branches outside
-authorised merges, and risk-tier downgrades. Deleting a *merged* branch's own
+forced branch deletion, deletion of a branch that is not merged, credential
+or connector setup, pushes to shared branches (including any rewrite of
+`main`) outside authorised merges, and risk-tier downgrades. Deleting a *merged* branch's own
 local ref and worktree is carried by the merge itself, under
 [post-merge pruning](../worktrees.md#ownership-and-cleanup).
 
