@@ -383,6 +383,7 @@ jobs:
         run: ../../scripts/run-native-test-group tls cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E 'package(=provenant-providers) & test(claude_network_on)'
 
       - name: Verify required native test inventory
+        if: always()
         run: scripts/check-native-inventory "$RUNNER_TEMP/native-test-list.json" "$RUNNER_TEMP/native-test-results"
       - name: Preserve native test evidence
         if: always()
