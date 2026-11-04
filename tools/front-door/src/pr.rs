@@ -13,6 +13,7 @@ use std::{ffi::OsString, path::Path, time::Duration};
 pub(super) mod contributions;
 mod git;
 pub(crate) mod land;
+pub(crate) mod landing;
 mod open;
 pub(crate) mod status;
 mod wait;

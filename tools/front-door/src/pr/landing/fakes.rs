@@ -1,0 +1,239 @@
+//! Scriptable in-memory boundaries for driver and lane tests.
+use super::{LandingError, model::*, ports::*};
+use provenant_cli::domains::MergeMethod;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+#[derive(Default)]
+pub struct FakeForge {
+    pub target_branch: String,
+    pub pull_requests: BTreeMap<u64, PullRequestInfo>,
+    pub heads: BTreeMap<u64, String>,
+    pub approvals_at_head: BTreeMap<(u64, String), Vec<Approval>>,
+    pub check_runs: BTreeMap<String, Vec<GateEvidence>>,
+    pub labels: BTreeMap<u64, Vec<String>>,
+    pub direct_push: bool,
+    pub lose_merge_response: bool,
+    pub merges: Vec<(u64, String, MergeMethod)>,
+}
+impl Forge for FakeForge {
+    fn pull_request(&mut self, number: u64) -> Result<PullRequestInfo, LandingError> {
+        self.pull_requests
+            .get(&number)
+            .cloned()
+            .ok_or_else(|| LandingError::Failed("missing pull request".into()))
+    }
+    fn target_branch(&mut self) -> Result<String, LandingError> {
+        Ok(self.target_branch.clone())
+    }
+    fn head(&mut self, number: u64) -> Result<String, LandingError> {
+        self.heads
+            .get(&number)
+            .cloned()
+            .ok_or_else(|| LandingError::Failed("missing head".into()))
+    }
+    fn approvals(&mut self, number: u64, head: &str) -> Result<Vec<Approval>, LandingError> {
+        Ok(self
+            .approvals_at_head
+            .get(&(number, head.into()))
+            .cloned()
+            .unwrap_or_default())
+    }
+    fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError> {
+        Ok(self.check_runs.get(commit).cloned().unwrap_or_default())
+    }
+    fn merge(
+        &mut self,
+        number: u64,
+        head: &str,
+        method: MergeMethod,
+    ) -> Result<String, LandingError> {
+        if self.head(number)? != head {
+            return Err(LandingError::Failed("head moved".into()));
+        }
+        self.merges.push((number, head.into(), method));
+        let landed = format!("landed-{number}");
+        if let Some(pr) = self.pull_requests.get_mut(&number) {
+            pr.state = PullRequestState::Merged;
+            pr.merged_commit = Some(landed.clone());
+        }
+        if self.lose_merge_response {
+            return Err(LandingError::Failed("lost response".into()));
+        }
+        Ok(landed)
+    }
+    fn may_push_directly(&mut self, _branch: &str) -> Result<bool, LandingError> {
+        Ok(self.direct_push)
+    }
+    fn labels(&mut self, number: u64) -> Result<Vec<String>, LandingError> {
+        Ok(self.labels.get(&number).cloned().unwrap_or_default())
+    }
+}
+#[derive(Default)]
+pub struct FakeRepo {
+    pub target: String,
+    pub target_ref: String,
+    pub fetches: VecDeque<String>,
+    pub conflicts: BTreeSet<(String, String)>,
+    pub refs: BTreeMap<String, String>,
+    pub trees: BTreeMap<String, String>,
+    pub parents: BTreeMap<String, Vec<String>>,
+    pub pushes: Vec<(String, String, Option<String>)>,
+    pub refuse_push: bool,
+    pub refuse_target_push: bool,
+    pub lose_push_response: bool,
+}
+impl Repo for FakeRepo {
+    fn fetch_target(&mut self, branch: &str) -> Result<String, LandingError> {
+        if let Some(next) = self.fetches.pop_front() {
+            self.target = next;
+        }
+        self.target_ref = branch.into();
+        self.refs.insert(branch.into(), self.target.clone());
+        Ok(self.target.clone())
+    }
+    fn merge_tree(&mut self, base: &str, head: &str) -> Result<MergeTree, LandingError> {
+        if self.conflicts.contains(&(base.into(), head.into())) {
+            Ok(MergeTree::Conflict)
+        } else {
+            Ok(MergeTree::Tree(format!("tree-{base}-{head}")))
+        }
+    }
+    fn commit_tree(
+        &mut self,
+        tree: &str,
+        parents: &[String],
+        _message: &str,
+    ) -> Result<String, LandingError> {
+        let commit = format!("commit-{}", self.parents.len());
+        self.parents.insert(commit.clone(), parents.into());
+        self.trees.insert(commit.clone(), tree.into());
+        Ok(commit)
+    }
+    fn push_ref(
+        &mut self,
+        name: &str,
+        commit: &str,
+        expected_old: Option<&str>,
+    ) -> Result<(), LandingError> {
+        if self.refuse_push || (self.refuse_target_push && name == self.target_ref) {
+            return Err(LandingError::Failed("push refused".into()));
+        }
+        if self.refs.get(name).map(String::as_str) != expected_old {
+            return Err(LandingError::Failed("ref moved".into()));
+        }
+        self.refs.insert(name.into(), commit.into());
+        if name == self.target_ref {
+            self.target = commit.into();
+        }
+        self.pushes
+            .push((name.into(), commit.into(), expected_old.map(str::to_owned)));
+        if self.lose_push_response {
+            return Err(LandingError::Failed("lost response".into()));
+        }
+        Ok(())
+    }
+    fn delete_ref(&mut self, name: &str, expected_old: &str) -> Result<(), LandingError> {
+        if self.refs.get(name).map(String::as_str) != Some(expected_old) {
+            return Err(LandingError::Failed("ref moved".into()));
+        }
+        self.refs.remove(name);
+        Ok(())
+    }
+    fn is_ancestor(&mut self, ancestor: &str, descendant: &str) -> Result<bool, LandingError> {
+        let mut pending = vec![descendant.to_owned()];
+        let mut seen = BTreeSet::new();
+        while let Some(commit) = pending.pop() {
+            if commit == ancestor {
+                return Ok(true);
+            }
+            if seen.insert(commit.clone()) {
+                pending.extend(self.parents.get(&commit).cloned().unwrap_or_default());
+            }
+        }
+        Ok(false)
+    }
+    fn tree_of(&mut self, commit: &str) -> Result<String, LandingError> {
+        self.trees
+            .get(commit)
+            .cloned()
+            .ok_or_else(|| LandingError::Failed("missing tree".into()))
+    }
+}
+#[derive(Default)]
+pub struct FakeGate {
+    pub results: VecDeque<GateEvidence>,
+    pub observed: Vec<String>,
+}
+impl GateRunner for FakeGate {
+    fn gate(
+        &mut self,
+        candidate: &Candidate,
+        _definition: &GateDefinition,
+        _poll_seconds: u64,
+    ) -> Result<GateEvidence, LandingError> {
+        self.observed.push(candidate.commit.clone());
+        self.results
+            .pop_front()
+            .ok_or_else(|| LandingError::Failed("missing gate result".into()))
+    }
+}
+#[derive(Default)]
+pub struct FakeAlarms(pub Vec<Alarm>);
+impl AlarmSink for FakeAlarms {
+    fn post(&mut self, alarm: &Alarm) -> Result<(), LandingError> {
+        self.0.push(alarm.clone());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    unused_imports,
+    reason = "custom worktree harness includes tests without the test runner"
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lost_merge_response_leaves_observable_forge_state() -> Result<(), LandingError> {
+        let mut forge = FakeForge {
+            lose_merge_response: true,
+            ..FakeForge::default()
+        };
+        forge.heads.insert(7, "head".into());
+        forge.pull_requests.insert(
+            7,
+            PullRequestInfo {
+                number: 7,
+                head: "head".into(),
+                base_branch: "main".into(),
+                author: "author".into(),
+                state: PullRequestState::Open,
+                merged_commit: None,
+            },
+        );
+        assert!(forge.merge(7, "head", MergeMethod::Merge).is_err());
+        let observed = forge.pull_request(7)?;
+        assert_eq!(observed.state, PullRequestState::Merged);
+        assert_eq!(observed.merged_commit.as_deref(), Some("landed-7"));
+        Ok(())
+    }
+
+    #[test]
+    fn lost_push_response_keeps_the_advanced_target_for_reconciliation() -> Result<(), LandingError>
+    {
+        let mut repo = FakeRepo {
+            target: "base".into(),
+            ..FakeRepo::default()
+        };
+        let base = repo.fetch_target("main")?;
+        let commit = repo.commit_tree("tree", std::slice::from_ref(&base), "merge")?;
+        repo.lose_push_response = true;
+        assert!(repo.push_ref("main", &commit, Some(&base)).is_err());
+        let observed = repo.fetch_target("main")?;
+        assert_eq!(observed, commit);
+        assert!(repo.is_ancestor(&base, &observed)?);
+        assert_eq!(repo.tree_of(&observed)?, "tree");
+        Ok(())
+    }
+}

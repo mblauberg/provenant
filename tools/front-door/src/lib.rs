@@ -1015,17 +1015,25 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             provenant_cli::run::status(cmd, globals.json, edge)
         }),
         Command::Land {
-            number,
+            numbers,
             head,
             wait,
             poll,
             explain,
-        } => pr::land::run(
-            number,
-            head,
-            wait,
-            poll,
-            explain,
+            batch,
+            shadow,
+            tier,
+        } => pr::landing::run(
+            pr::landing::Options {
+                numbers,
+                head,
+                wait,
+                poll,
+                explain,
+                batch,
+                shadow,
+                tier,
+            },
             globals,
             process.workers(),
         ),

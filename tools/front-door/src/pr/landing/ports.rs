@@ -1,0 +1,75 @@
+//! Narrow side-effect boundaries for landing orchestration.
+use super::{LandingError, model::*};
+use provenant_cli::domains::MergeMethod;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullRequestInfo {
+    pub number: u64,
+    pub head: String,
+    pub base_branch: String,
+    pub author: String,
+    pub state: PullRequestState,
+    pub merged_commit: Option<String>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PullRequestState {
+    Open,
+    Closed,
+    Merged,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Approval {
+    pub reference: String,
+    pub reviewer: String,
+}
+pub trait Forge {
+    fn pull_request(&mut self, number: u64) -> Result<PullRequestInfo, LandingError>;
+    fn target_branch(&mut self) -> Result<String, LandingError>;
+    fn head(&mut self, number: u64) -> Result<String, LandingError>;
+    fn approvals(&mut self, number: u64, head: &str) -> Result<Vec<Approval>, LandingError>;
+    fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError>;
+    fn merge(
+        &mut self,
+        number: u64,
+        head: &str,
+        method: MergeMethod,
+    ) -> Result<String, LandingError>;
+    fn may_push_directly(&mut self, branch: &str) -> Result<bool, LandingError>;
+    fn labels(&mut self, number: u64) -> Result<Vec<String>, LandingError>;
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MergeTree {
+    Tree(String),
+    Conflict,
+}
+pub trait Repo {
+    fn fetch_target(&mut self, branch: &str) -> Result<String, LandingError>;
+    fn merge_tree(&mut self, base: &str, head: &str) -> Result<MergeTree, LandingError>;
+    fn commit_tree(
+        &mut self,
+        tree: &str,
+        parents: &[String],
+        message: &str,
+    ) -> Result<String, LandingError>;
+    /// Push without force, conditional on the expected previous value.
+    fn push_ref(
+        &mut self,
+        name: &str,
+        commit: &str,
+        expected_old: Option<&str>,
+    ) -> Result<(), LandingError>;
+    fn delete_ref(&mut self, name: &str, expected_old: &str) -> Result<(), LandingError>;
+    fn is_ancestor(&mut self, ancestor: &str, descendant: &str) -> Result<bool, LandingError>;
+    fn tree_of(&mut self, commit: &str) -> Result<String, LandingError>;
+}
+pub trait GateRunner {
+    fn gate(
+        &mut self,
+        candidate: &Candidate,
+        definition: &GateDefinition,
+        poll_seconds: u64,
+    ) -> Result<GateEvidence, LandingError>;
+}
+pub trait AlarmSink {
+    fn post(&mut self, alarm: &Alarm) -> Result<(), LandingError>;
+}
