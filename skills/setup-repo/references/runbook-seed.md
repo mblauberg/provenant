@@ -26,8 +26,9 @@ worktree, named by replacing `/` with `-`.
 
 One `Closes #n` per issue in the PR body only when merge leaves no user or external
 gate; otherwise `References #n` and leave the issue open. Never use a closing keyword
-in a commit message. A new commit invalidates exact-head evidence: rerun checks and
-review before merge.
+in a commit message. A new commit needs green checks on the new head. Review covers
+only its delta (a repair or a conflict resolution); a clean merge of the base needs
+none.
 
 ## Merge authority
 
