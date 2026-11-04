@@ -174,8 +174,13 @@ pub fn clear_pending(
     candidate: &Candidate,
 ) -> Result<(), LandingError> {
     let path = pending_path(state, repository, candidate)?;
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
+    match std::fs::remove_file(&path) {
+        Ok(()) => {
+            let dir = std::fs::File::open(pending_dir(state))
+                .map_err(|e| failed("open pending directory", e))?;
+            dir.sync_all()
+                .map_err(|e| failed("sync pending directory", e))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(failed("clear pending record", error)),
     }

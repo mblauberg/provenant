@@ -171,6 +171,11 @@ fn run_inner(
                 .into(),
         );
     }
+    if request.settings.publish_settle_seconds == 0 {
+        report.warnings.push(
+            "publish_settle_seconds = 0 disables the in-flight publication settle window".into(),
+        );
+    }
     let repository = forge.repository_identity()?;
     recover(forge, repo, runner, alarms, &request, &repository, report)?;
     let limit = usize::try_from(request.settings.batch_size)
@@ -423,6 +428,9 @@ fn run_inner(
                             }
                             return Err(error);
                         }
+                        // A definite result must not leave a retryable intent, even if
+                        // receipting, follow-up or cleanup subsequently fails.
+                        receipt::clear_pending(request.state, &repository, &candidate)?;
                         // These successes are known in this run; the remaining operations
                         // were either refused or never attempted.
                         if !progress.is_empty() {
@@ -456,7 +464,6 @@ fn run_inner(
                             followed?;
                         }
                         repo.delete_ref(&candidate.ref_name, &candidate.commit)?;
-                        receipt::clear_pending(request.state, &repository, &candidate)?;
                         prs.drain(..progress.len());
                         if let LandingError::PullRequestChanged(number) = error {
                             prs.retain(|pr| {
@@ -779,17 +786,10 @@ mod tests {
         let second = format!("{:040x}", 2002);
         repo.parents.insert(moved.clone(), vec![first.clone()]);
         repo.trees.insert(second.clone(), "final".into());
-        repo.fetches = [
-            base.clone(),
-            base.clone(),
-            base,
-            moved.clone(),
-            moved.clone(),
-            moved.clone(),
-            moved,
-            second,
-        ]
-        .into();
+        let target = std::rc::Rc::new(std::cell::RefCell::new(base));
+        forge.shared_target = Some(target.clone());
+        forge.move_after_merge = Some((1, moved));
+        repo.shared_target = Some(target);
         let state = tempfile::tempdir()?;
         let result = exercise(
             &mut forge,
@@ -1259,8 +1259,100 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn refused_recovery_push_settles_but_open_rest_remains_pending()
+    fn refused_merge_and_failed_cleanup_cannot_be_retried() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
+        forge.direct_push = false;
+        forge.refuse_merge = Some(1);
+        repo.refuse_delete = true;
+        let state = tempfile::tempdir()?;
+        assert!(matches!(
+            exercise(
+                &mut forge,
+                &mut repo,
+                &mut gate,
+                &settings,
+                &definition,
+                &[1],
+                false,
+                state.path()
+            ),
+            Err(LandingError::Failed(_))
+        ));
+        assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
+        let pushes = repo.push_attempts.len();
+        reconcile::recover_pending(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &mut FakeAlarms::default(),
+            state.path(),
+            "fake-repository",
+            "main",
+            false,
+            &mut Vec::new(),
+        )?;
+        assert_eq!(repo.push_attempts.len(), pushes);
+        assert_eq!(forge.merge_attempts, vec![1]);
+        Ok(())
+    }
+
+    #[test]
+    fn published_tree_read_failure_remains_pending_until_mismatch_checked()
     -> Result<(), Box<dyn std::error::Error>> {
+        let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
+        forge.direct_push = false;
+        forge.valid_merge_ids = true;
+        let target = std::rc::Rc::new(std::cell::RefCell::new(repo.target.clone()));
+        forge.shared_target = Some(target.clone());
+        repo.shared_target = Some(target);
+        let state = tempfile::tempdir()?;
+        assert!(matches!(
+            exercise(
+                &mut forge,
+                &mut repo,
+                &mut gate,
+                &settings,
+                &definition,
+                &[1],
+                false,
+                state.path()
+            ),
+            Err(LandingError::PublicationUnknownAt { .. })
+        ));
+        assert_eq!(
+            receipt::pending(state.path(), "fake-repository", "main")?.len(),
+            1
+        );
+        let landed = format!("{:040x}", 2001);
+        repo.trees.insert(landed, "unexpected-tree".into());
+        let mut alarms = FakeAlarms::default();
+        let mut recovered = Vec::new();
+        reconcile::recover_pending(
+            &mut forge,
+            &mut repo,
+            &mut gate,
+            &mut alarms,
+            state.path(),
+            "fake-repository",
+            "main",
+            false,
+            &mut recovered,
+        )?;
+        assert!(
+            alarms
+                .0
+                .iter()
+                .any(|alarm| alarm.code == "LAND_TREE_MISMATCH")
+        );
+        assert_eq!(recovered[0].outcomes[&1], Outcome::Landed);
+        assert_eq!(forge.merges.len(), 1);
+        assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn refused_recovery_push_and_merge_settle() -> Result<(), Box<dyn std::error::Error>> {
         for mode in [PublishMode::FastForward, PublishMode::RestOrdered] {
             let (mut forge, mut repo, mut gate, settings, definition) = fixture(1);
             let policy = LandPolicy::resolve(
@@ -1294,6 +1386,11 @@ mod tests {
             repo.refuse_target_push = true;
             repo.target_ref = "main".into();
             forge.refuse_merge = Some(1);
+            if mode == PublishMode::RestOrdered {
+                let fail = std::rc::Rc::new(std::cell::Cell::new(false));
+                forge.fail_fetch_on_refusal = Some(fail.clone());
+                repo.fail_fetch = Some(fail);
+            }
             receipt::record_pending(
                 state.path(),
                 &PendingAttempt {
@@ -1323,19 +1420,9 @@ mod tests {
                 false,
                 &mut Vec::new(),
             );
-            if mode == PublishMode::FastForward {
-                result?;
-                assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
-            } else {
-                assert!(matches!(
-                    result,
-                    Err(LandingError::PublicationUnknownAt { .. })
-                ));
-                assert_eq!(
-                    receipt::pending(state.path(), "fake-repository", "main")?.len(),
-                    1
-                );
-            }
+            result?;
+            assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
+            assert!(forge.merges.is_empty());
         }
         Ok(())
     }
@@ -1419,19 +1506,8 @@ mod tests {
         );
         assert!(forge.merges.is_empty());
         assert!(repo.pushes.is_empty());
-        if mode == PublishMode::FastForward || change == "head" || change == "closed" {
-            result?;
-            assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
-        } else {
-            assert!(matches!(
-                result,
-                Err(LandingError::PublicationUnknownAt { .. })
-            ));
-            assert_eq!(
-                receipt::pending(state.path(), "fake-repository", "main")?.len(),
-                1
-            );
-        }
+        result?;
+        assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
         Ok(())
     }
     #[test]
@@ -1460,6 +1536,85 @@ mod tests {
     fn recovery_does_not_retry_closed_pr() -> Result<(), Box<dyn std::error::Error>> {
         for mode in [PublishMode::FastForward, PublishMode::RestOrdered] {
             recovery_does_not_retry_changed_pr(mode, "closed")?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_settles_open_prs_after_target_or_sibling_moves()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for changed_sibling in [false, true] {
+            let (mut forge, mut repo, mut gate, settings, definition) = fixture(2);
+            let policy = LandPolicy::resolve(
+                &settings,
+                &BTreeMap::new(),
+                None,
+                None,
+                &LandOverride::default(),
+            )?;
+            let state = tempfile::tempdir()?;
+            let base = repo.target.clone();
+            let steps = (1..=2)
+                .map(|number| CandidateStep {
+                    pr: EligiblePr {
+                        number,
+                        head: forge.pull_requests[&number].head.clone(),
+                        approval: format!("approval-{number}"),
+                        base_branch: "main".into(),
+                    },
+                    commit: format!("step-{number}"),
+                    tree: format!("tree-{number}"),
+                })
+                .collect();
+            let candidate = Candidate {
+                base,
+                commit: "step-2".into(),
+                tree: "tree-2".into(),
+                ref_name: "land/test".into(),
+                steps,
+            };
+            repo.refs
+                .insert(candidate.ref_name.clone(), candidate.commit.clone());
+            if changed_sibling {
+                forge.heads.insert(2, "changed".into());
+                forge.pull_requests.get_mut(&2).unwrap().head = "changed".into();
+            } else {
+                repo.target = "moved".into();
+            }
+            receipt::record_pending(
+                state.path(),
+                &PendingAttempt {
+                    repository: "fake-repository".into(),
+                    target: "main".into(),
+                    candidate,
+                    policy,
+                    gate_definition: definition,
+                    gate_evidence: super::super::receipt::tests::evidence("step-2"),
+                    publish: PublishDecision {
+                        mode: PublishMode::RestOrdered,
+                        reason: "fixture".into(),
+                    },
+                    cost: CostEstimate::Unknown {
+                        reason: "fixture".into(),
+                    },
+                },
+            )?;
+            let mut recovered = Vec::new();
+            reconcile::recover_pending(
+                &mut forge,
+                &mut repo,
+                &mut gate,
+                &mut FakeAlarms::default(),
+                state.path(),
+                "fake-repository",
+                "main",
+                false,
+                &mut recovered,
+            )?;
+            assert_eq!(recovered[0].outcomes[&1], Outcome::Excluded);
+            assert_eq!(recovered[0].outcomes[&2], Outcome::Excluded);
+            assert!(forge.merge_attempts.is_empty());
+            assert!(receipt::pending(state.path(), "fake-repository", "main")?.is_empty());
         }
         Ok(())
     }
@@ -1495,6 +1650,9 @@ mod tests {
         };
         repo.refs
             .insert(candidate.ref_name.clone(), candidate.commit.clone());
+        let target = std::rc::Rc::new(std::cell::RefCell::new(repo.target.clone()));
+        forge.shared_target = Some(target.clone());
+        repo.shared_target = Some(target);
         repo.trees.insert("landed-1".into(), "tree".into());
         receipt::record_pending(
             state.path(),
@@ -1566,7 +1724,9 @@ mod tests {
         };
         repo.refs
             .insert(candidate.ref_name.clone(), candidate.commit.clone());
-        repo.fetches = [base.clone(), base, "landed-1".into()].into();
+        let target = std::rc::Rc::new(std::cell::RefCell::new(base));
+        forge.shared_target = Some(target.clone());
+        repo.shared_target = Some(target);
         repo.trees.insert("landed-2".into(), "tree-2".into());
         receipt::record_pending(
             state.path(),
@@ -1622,7 +1782,7 @@ mod tests {
         let state = tempfile::tempdir()?;
         repo.target = "tip".into();
         repo.parents.insert("tip".into(), vec!["a".into()]);
-        repo.trees.insert("a".into(), "tree".into());
+        repo.trees.insert("tip".into(), "tree".into());
         forge.pull_requests.get_mut(&2).unwrap().state = PullRequestState::Merged;
         forge.pull_requests.get_mut(&2).unwrap().merged_commit = Some("unproven".into());
         for (number, commit) in [(1, "a"), (2, "b")] {
@@ -1802,7 +1962,7 @@ mod tests {
         );
         repo.parents.insert("a".repeat(40), vec!["landed-1".into()]);
         repo.trees
-            .insert("landed-1".into(), attempts[0].candidate.tree.clone());
+            .insert("a".repeat(40), attempts[0].candidate.tree.clone());
         exercise(
             &mut forge,
             &mut repo,
