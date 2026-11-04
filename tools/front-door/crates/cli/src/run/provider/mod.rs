@@ -20,6 +20,7 @@ mod continuation;
 mod fixtures;
 mod observation;
 mod preparation;
+mod project_paths;
 
 use command::*;
 use confinement::*;

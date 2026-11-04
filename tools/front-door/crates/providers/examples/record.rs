@@ -1143,6 +1143,7 @@ fn main() -> Result<()> {
             home: &home,
             user: &user,
             host_var: &|key| std::env::var_os(key),
+            skill_stage_max_bytes: 16 * 1024 * 1024,
             account: account.as_ref(),
             token: token.as_ref(),
             cwd,

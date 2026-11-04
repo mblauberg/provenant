@@ -54,7 +54,86 @@ pub struct OmittedGrant {
     pub source: OmissionSource,
 }
 
+/// Resolved facts for one executable requirement in the compiled lane.
+/// Receipts consume this value; they never repeat dependency discovery.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedToolRequirement {
+    pub executable: PathBuf,
+    pub dependency_closure: crate::dylib::DependencyClosure,
+}
+
+/// Discoveries from the toolchain producers. Optional roots are filtered and
+/// applied once, after the adapter has assembled its required profile.
+#[derive(Debug, Default)]
+pub(crate) struct ToolRequirements {
+    pub(crate) reads: Vec<PathGrant>,
+    pub(crate) exec: Vec<PathGrant>,
+    pub(crate) writes: Vec<PathGrant>,
+    pub(crate) required_exec: Vec<PathGrant>,
+    project_reads: Vec<PathGrant>,
+    project_exec: Vec<PathGrant>,
+    project_writes: Vec<PathGrant>,
+    project_receipt: Option<serde_json::Value>,
+    project_applied: bool,
+    selected: Vec<PreparedToolRequirement>,
+    omitted: Vec<OmittedGrant>,
+    applied: bool,
+}
+
+impl PreparedToolRequirement {
+    /// Public receipt data is bounded to file names; dependency paths stay in
+    /// the prepared grant plan and never leak through route explanations.
+    pub fn receipt(&self) -> serde_json::Value {
+        use crate::{ClosureOutcome, IncompleteReason};
+        let name = |path: &Path| {
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        };
+        let outcome = match self.dependency_closure.outcome {
+            ClosureOutcome::Complete => "complete",
+            ClosureOutcome::Incomplete => "incomplete",
+            ClosureOutcome::UnsupportedFormat => "unsupported_format",
+        };
+        let mut unresolved = Vec::new();
+        let mut reasons = Vec::new();
+        for reason in &self.dependency_closure.reasons {
+            let (kind, path) = match reason {
+                IncompleteReason::LoaderRelative(path) => {
+                    ("loader_relative", Some(Path::new(path)))
+                }
+                IncompleteReason::Missing(path) => ("missing", Some(Path::new(path))),
+                IncompleteReason::Malformed(path) => ("malformed", Some(path.as_path())),
+                IncompleteReason::Limit { .. } => ("limit", None),
+                IncompleteReason::OmittedCredential(path) => {
+                    ("credential_root", Some(path.as_path()))
+                }
+                IncompleteReason::OmittedProtected(path) => {
+                    ("protected_root", Some(path.as_path()))
+                }
+            };
+            if !reasons.contains(&kind) {
+                reasons.push(kind);
+            }
+            if let Some(path) = path {
+                let filename = name(path);
+                if !unresolved.contains(&filename) {
+                    unresolved.push(filename);
+                }
+            }
+        }
+        serde_json::json!({
+            "tool": name(&self.executable), "outcome": outcome,
+            "reason": reasons.first(), "reasons": reasons, "unresolved": unresolved,
+            "libraries": self.dependency_closure.libraries.iter().map(|path| name(path)).collect::<Vec<_>>(),
+            "already_covered": self.dependency_closure.already_covered.iter().map(|path| name(path)).collect::<Vec<_>>(),
+        })
+    }
+}
+
 impl OmittedGrant {
+    #[cfg(test)]
     pub(crate) fn skills(paths: Vec<PathBuf>) -> Vec<Self> {
         paths
             .into_iter()
@@ -111,10 +190,123 @@ pub struct LaunchSpec {
     pub setup: Vec<SetupStep>,
     /// Discovered optional grants omitted by the credential guard.
     pub omitted_discovery: Vec<OmittedGrant>,
+    /// Exact staged skill content and warnings used by this launch.
+    pub user_skills: crate::StagedUserSkills,
+    pub(crate) tool_requirements: ToolRequirements,
     pub(crate) git_wrapper: crate::lane::GitWrapper,
     pub profile: ProviderProfile,
     /// Decoder state bound to any continuation identity.
     pub stream: StreamState,
+}
+
+/// The prepared facts which the profile and receipt use for launch access.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AppliedAccess {
+    pub libraries: Vec<PathGrant>,
+    pub staged_content: Option<PathGrant>,
+    pub toolchain_roots: Vec<PathGrant>,
+    pub omitted_grants: Vec<OmittedGrant>,
+}
+
+impl AppliedAccess {
+    /// Portable receipt projection; host paths outside HOME have no portable
+    /// anchor, so only their final component is retained.
+    pub fn receipt(&self, home: &Path) -> serde_json::Value {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::ffi::OsStrExt;
+        let display = |path: &Path| {
+            path.strip_prefix(home)
+                .map(|path| format!("~/{}", path.display()))
+                .unwrap_or_else(|_| {
+                    format!(
+                        "<external>/{}",
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    )
+                })
+        };
+        let path_id = |path: &Path| {
+            let mut digest = Sha256::new();
+            digest.update(b"provenant.applied-path.v1\0");
+            digest.update(path.as_os_str().as_bytes());
+            format!("sha256:{}", provenant_core::hex(&digest.finalize()))
+        };
+        let grant = |grant: &PathGrant| {
+            serde_json::json!({
+                "path": display(&grant.path), "scope": grant.scope,
+                "path_id": path_id(&grant.path),
+            })
+        };
+        serde_json::json!({
+            "libraries": self.libraries.iter().map(grant).collect::<Vec<_>>(),
+            "staged_content": self.staged_content.as_ref().map(|_| "<attempt>/skills"),
+            "toolchain_roots": self.toolchain_roots.iter().map(grant).collect::<Vec<_>>(),
+            "omitted_grants": self.omitted_grants.iter().map(|entry| serde_json::json!({
+                "code": "discovered_grant_omitted",
+                "reason": if provenant_confinement::refuses_lane_root(&entry.path, true, Some(home)) { "credential_root" } else { "protected_root" },
+                "path": display(&entry.path),
+                "path_id": path_id(&entry.path),
+                "source": match entry.source { OmissionSource::UserSkill => "user_skill", OmissionSource::Toolchain => "toolchain", OmissionSource::ProviderConfig => "provider_config" },
+            })).collect::<Vec<_>>(),
+        })
+    }
+}
+
+impl LaunchSpec {
+    /// Record already-validated project access without rediscovering paths.
+    /// The confinement compiler still validates the resulting profile.
+    pub fn set_project_requirements(
+        &mut self,
+        reads: Vec<PathGrant>,
+        exec: Vec<PathGrant>,
+        writes: Vec<PathGrant>,
+        receipt: serde_json::Value,
+    ) {
+        self.tool_requirements.project_reads = reads;
+        self.tool_requirements.project_exec = exec;
+        self.tool_requirements.project_writes = writes;
+        self.tool_requirements.project_receipt = Some(receipt);
+        self.tool_requirements.project_applied = false;
+    }
+
+    pub fn project_requirements_receipt(&self) -> Option<&serde_json::Value> {
+        self.tool_requirements.project_receipt.as_ref()
+    }
+
+    /// Selected executable facts, after the requirements resolver ran.
+    pub fn prepared_tools(&self) -> &[PreparedToolRequirement] {
+        &self.tool_requirements.selected
+    }
+
+    pub fn applied_access(&self) -> AppliedAccess {
+        debug_assert!(
+            self.tool_requirements
+                .omitted
+                .iter()
+                .all(|entry| self.omitted_discovery.contains(entry))
+        );
+        let reads = &self.profile.spec.runtime_reads;
+        let mut libraries = Vec::new();
+        for tool in self.prepared_tools() {
+            for path in &tool.dependency_closure.libraries {
+                let grant = exact(path);
+                if reads.contains(&grant) && !libraries.contains(&grant) {
+                    libraries.push(grant);
+                }
+            }
+        }
+        let staged_content = self
+            .user_skills
+            .root
+            .as_ref()
+            .map(subtree)
+            .filter(|grant| reads.contains(grant));
+        AppliedAccess {
+            libraries,
+            staged_content,
+            toolchain_roots: self.profile.spec.tool_exec_roots.clone(),
+            omitted_grants: self.omitted_discovery.clone(),
+        }
+    }
 }
 
 /// Frozen confinement policy and launch facts, compiled before launch by the
@@ -137,6 +329,7 @@ pub struct PrepareInput<'a> {
     /// `std::env::var_os`; tests pass a fixed lookup so the profiles do not
     /// depend on the runner.
     pub host_var: &'a dyn Fn(&str) -> Option<OsString>,
+    pub skill_stage_max_bytes: u64,
     /// Claude's login token, read by the host outside the sandbox.
     /// Selected registered identity. Absent preserves the default login source.
     pub account: Option<&'a crate::identity::RegisteredAccount>,
@@ -153,6 +346,24 @@ pub struct PrepareInput<'a> {
 impl PrepareInput<'_> {
     pub fn user_skills(&self) -> bool {
         self.route.user_skills()
+    }
+
+    pub(crate) fn stage_user_skills(&self) -> crate::StagedUserSkills {
+        let Some(source) = self
+            .user_skills()
+            .then(|| locate_user_skills(&self.route.adapter, self.home, self.host_var))
+            .flatten()
+        else {
+            return crate::StagedUserSkills::default();
+        };
+        let scratch = &self.confined.permissions().scratch.path;
+        let Some(name) = scratch.file_name() else {
+            return crate::StagedUserSkills::default();
+        };
+        let mut name = name.to_os_string();
+        name.push(format!("-skills-{}", provenant_core::hex(&self.nonce)));
+        let destination = scratch.with_file_name(name);
+        crate::skill_stage::capture(&source, &destination, self.home, self.skill_stage_max_bytes)
     }
 }
 
@@ -278,10 +489,6 @@ pub(crate) fn private_git_objects(
             *path = value;
         }
         spec.profile.spec.process_executables.push(exact(git));
-        spec.profile
-            .spec
-            .runtime_reads
-            .extend(crate::dylib::linked_libraries(git).into_iter().map(exact));
         return Ok(());
     }
     let scratch = &input.confined.permissions().scratch.path;
@@ -328,18 +535,215 @@ pub(crate) fn private_git_objects(
         .spec
         .process_executables
         .extend([exact("/bin/sh"), exact(input.provenant.git)]);
-    spec.profile.spec.runtime_reads.extend(
-        crate::dylib::linked_libraries(input.provenant.git)
-            .into_iter()
-            .map(exact),
-    );
     Ok(())
+}
+
+/// Resolve all exact executable requirements in the profile once, then use
+/// those same facts both to add exact read grants and to report preparation.
+pub(crate) fn prepare_tool_requirements(input: &PrepareInput<'_>, spec: &mut LaunchSpec) {
+    spec.complete_tool_requirements(input.confined, input.home, input.cwd);
+}
+
+impl LaunchSpec {
+    /// Resolve any additional exact executables added by launch configuration.
+    pub fn complete_tool_requirements(&mut self, plan: &ConfinedPlan, home: &Path, cwd: &Path) {
+        let spec = self;
+        use provenant_confinement::permissions::PathScope;
+
+        if !spec.tool_requirements.applied {
+            let omitted_before = spec.omitted_discovery.len();
+            let mut reads = spec.tool_requirements.reads.clone();
+            let mut exec = Vec::new();
+            let mut writes = Vec::new();
+            filter_optional_grants(
+                &mut reads,
+                0,
+                home,
+                OmissionSource::Toolchain,
+                &mut spec.omitted_discovery,
+            );
+            let required = &spec.tool_requirements.required_exec;
+            for candidate in &spec.tool_requirements.exec {
+                let mut one = vec![candidate.clone()];
+                if !required.contains(candidate) {
+                    filter_optional_grants(
+                        &mut one,
+                        0,
+                        home,
+                        OmissionSource::Toolchain,
+                        &mut spec.omitted_discovery,
+                    );
+                }
+                exec.extend(one);
+            }
+            for candidate in &spec.tool_requirements.writes {
+                match std::fs::canonicalize(&candidate.path) {
+                    Ok(path)
+                        if provenant_confinement::refuses_lane_root(&path, false, Some(home)) =>
+                    {
+                        if !spec.omitted_discovery.iter().any(|entry| {
+                            entry.path == path && entry.source == OmissionSource::Toolchain
+                        }) {
+                            spec.omitted_discovery.push(OmittedGrant {
+                                path,
+                                source: OmissionSource::Toolchain,
+                            });
+                        }
+                    }
+                    _ => writes.push(candidate.clone()),
+                }
+            }
+            spec.profile.spec.runtime_reads.extend(reads);
+            spec.profile.spec.tool_exec_roots.extend(exec);
+            spec.profile.spec.tool_writes.extend(writes);
+            spec.tool_requirements.omitted = spec.omitted_discovery[omitted_before..].to_vec();
+            spec.tool_requirements.applied = true;
+        }
+        if !spec.tool_requirements.project_applied {
+            spec.profile
+                .spec
+                .runtime_reads
+                .extend(spec.tool_requirements.project_reads.clone());
+            spec.profile
+                .spec
+                .tool_exec_roots
+                .extend(spec.tool_requirements.project_exec.clone());
+            spec.profile
+                .spec
+                .tool_writes
+                .extend(spec.tool_requirements.project_writes.clone());
+            spec.tool_requirements.project_applied = true;
+        }
+
+        let mut executables = Vec::new();
+        for grant in spec
+            .profile
+            .spec
+            .process_executables
+            .iter()
+            .chain(&spec.profile.spec.tool_exec_roots)
+        {
+            if grant.scope == PathScope::Exact && !executables.contains(&grant.path) {
+                executables.push(grant.path.clone());
+            }
+        }
+        let already_prepared: std::collections::HashSet<_> = spec
+            .tool_requirements
+            .selected
+            .iter()
+            .map(|tool| tool.executable.clone())
+            .collect();
+        for executable in executables {
+            if already_prepared.contains(&executable) {
+                continue;
+            }
+            let mut excluded = vec![cwd, &plan.permissions().scratch.path];
+            if let Some(private_state) = &plan.permissions().private_state {
+                excluded.push(&private_state.path);
+            }
+            let closure = crate::dylib::dependency_closure(&executable, |path| {
+                use crate::dylib::LibraryAccess;
+                if provenant_confinement::refuses_lane_root(path, true, Some(home)) {
+                    LibraryAccess::OmitCredential
+                } else if plan
+                    .permissions()
+                    .protected_roots
+                    .iter()
+                    .chain(&plan.permissions().secret_roots)
+                    .any(|root| {
+                        path == root.path
+                            || (root.scope == PathScope::Subtree && path.starts_with(&root.path))
+                    })
+                {
+                    LibraryAccess::OmitProtected
+                } else if excluded.iter().any(|root| path.starts_with(root)) {
+                    LibraryAccess::AlreadyCovered
+                } else {
+                    LibraryAccess::Grant
+                }
+            });
+            for path in &closure.omitted {
+                if !spec.omitted_discovery.iter().any(|omitted| {
+                    omitted.path == *path && omitted.source == OmissionSource::Toolchain
+                }) {
+                    let omitted = OmittedGrant {
+                        path: path.clone(),
+                        source: OmissionSource::Toolchain,
+                    };
+                    spec.tool_requirements.omitted.push(omitted.clone());
+                    spec.omitted_discovery.push(omitted);
+                }
+            }
+            for library in &closure.libraries {
+                let grant = exact(library);
+                if !spec.profile.spec.runtime_reads.contains(&grant) {
+                    spec.profile.spec.runtime_reads.push(grant);
+                }
+            }
+            spec.tool_requirements
+                .selected
+                .push(PreparedToolRequirement {
+                    executable,
+                    dependency_closure: closure,
+                });
+        }
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod git_tests {
     use super::*;
+
+    #[test]
+    fn incomplete_closure_receipt_keeps_only_file_names() {
+        let tool = PreparedToolRequirement {
+            executable: "/private/fixture/bin/rg".into(),
+            dependency_closure: crate::DependencyClosure {
+                outcome: crate::ClosureOutcome::Incomplete,
+                libraries: vec!["/private/fixture/lib/libok.dylib".into()],
+                reasons: vec![
+                    crate::IncompleteReason::Missing("/secret/path/libmissing.dylib".into()),
+                    crate::IncompleteReason::LoaderRelative("@rpath/librelative.dylib".into()),
+                ],
+                omitted: Vec::new(),
+                already_covered: Vec::new(),
+            },
+        };
+        let receipt = tool.receipt();
+        assert_eq!(receipt["tool"], "rg");
+        assert_eq!(receipt["outcome"], "incomplete");
+        assert_eq!(receipt["reason"], "missing");
+        assert_eq!(
+            receipt["unresolved"],
+            serde_json::json!(["libmissing.dylib", "librelative.dylib"])
+        );
+        assert!(!receipt.to_string().contains("/secret/"));
+        assert!(!receipt.to_string().contains("/private/"));
+    }
+
+    #[test]
+    fn applied_receipt_distinguishes_external_paths_without_exposing_them() {
+        let applied = AppliedAccess {
+            libraries: vec![
+                exact("/external/first/libsame.dylib"),
+                exact("/external/second/libsame.dylib"),
+            ],
+            staged_content: None,
+            toolchain_roots: Vec::new(),
+            omitted_grants: Vec::new(),
+        };
+        let receipt = applied.receipt(Path::new("/home/fixture"));
+        assert_eq!(
+            receipt["libraries"][0]["path"],
+            receipt["libraries"][1]["path"]
+        );
+        assert_ne!(
+            receipt["libraries"][0]["path_id"],
+            receipt["libraries"][1]["path_id"]
+        );
+        assert!(!receipt.to_string().contains("/external/first"));
+    }
 
     #[test]
     fn reads_effective_identity_and_omits_missing_values() {
@@ -395,6 +799,17 @@ pub(crate) fn lane_cache<'a>(input: &'a PrepareInput<'_>) -> &'a Path {
     }
 }
 
+/// Keep the selected files visible to the single closure resolver even when
+/// their broader toolchain root is also granted.
+pub(crate) fn add_existing_tool(executable: &Path, tool_exec_roots: &mut Vec<PathGrant>) {
+    if let Ok(executable) = std::fs::canonicalize(executable)
+        && executable.is_file()
+        && !tool_exec_roots.iter().any(|grant| grant.path == executable)
+    {
+        tool_exec_roots.push(exact(executable));
+    }
+}
+
 /// Rust tools for every shell-capable lane. The user's `~/.cargo` is read-only
 /// (its `bin` proxies and the rustup toolchains stay executable); the host
 /// later builds from its registry and Git checkouts unconfined, so no lane
@@ -405,22 +820,27 @@ pub(crate) fn lane_cache<'a>(input: &'a PrepareInput<'_>) -> &'a Path {
 pub(crate) fn rust_tools(
     input: &PrepareInput<'_>,
     access: Access,
-    runtime_reads: &mut Vec<PathGrant>,
-    tool_exec_roots: &mut Vec<PathGrant>,
+    requirements: &mut ToolRequirements,
     env: &mut Vec<(OsString, OsString)>,
     setup: &mut Vec<SetupStep>,
-    omitted: &mut Vec<OmittedGrant>,
 ) {
-    let reads_start = runtime_reads.len();
-    let exec_start = tool_exec_roots.len();
     // Subtree grants must anchor to existing directories. Keep this decision
     // here so every adapter gets the same system-tool fallback on non-Rust
     // hosts; the grants below it hold either way.
     if rust_tools_available(input.home) {
-        rust_toolchain(input, access, runtime_reads, tool_exec_roots, env, setup);
+        rust_toolchain(
+            input,
+            access,
+            &mut requirements.reads,
+            &mut requirements.exec,
+            env,
+            setup,
+        );
     }
-    system_tools(access, runtime_reads, tool_exec_roots, env);
-    crate::swift::swift_tools(input, access, runtime_reads, tool_exec_roots, env, setup);
+    system_tools(access, &mut requirements.reads, &mut requirements.exec, env);
+    crate::swift::swift_tools(input, access, requirements, env, setup);
+    let runtime_reads = &mut requirements.reads;
+    let tool_exec_roots = &mut requirements.exec;
     runtime_reads.extend(git_global_files(&input.home.join(".config")));
     // Homebrew resolves bin/git into its versioned keg. Its remote helpers
     // live beside bin/, independently of whether Node enables Homebrew tools.
@@ -434,25 +854,13 @@ pub(crate) fn rust_tools(
             tool_exec_roots.push(subtree(core));
         }
     }
-    filter_optional_grants(
-        runtime_reads,
-        reads_start,
-        input.home,
-        OmissionSource::Toolchain,
-        omitted,
-    );
-    filter_optional_grants(
-        tool_exec_roots,
-        exec_start,
-        input.home,
-        OmissionSource::Toolchain,
-        omitted,
-    );
     // Repository scripts (a Cargo rustc wrapper, test runners, `./scripts/*`)
     // run directly, whether or not Rust is installed. Children inherit this
     // profile, so exec stays confined; read and write grants and the protected
     // and credential denials are unchanged.
-    tool_exec_roots.push(subtree(input.cwd));
+    let cwd = subtree(input.cwd);
+    tool_exec_roots.push(cwd.clone());
+    requirements.required_exec.push(cwd);
 }
 
 /// The Rust toolchain grants and Cargo environment of an installed Rust home.
@@ -479,6 +887,9 @@ fn rust_toolchain(
         subtree(cargo.join("bin")),
         subtree(rustup.join("toolchains")),
     ]);
+    for name in ["cargo", "rustc", "rustfmt", "clippy-driver"] {
+        add_existing_tool(&cargo.join("bin").join(name), tool_exec_roots);
+    }
     let cargo_home = cache.join("cargo-home");
     if access == Access::ReadOnly {
         // Offline builds from the already-extracted shared sources. The
@@ -613,16 +1024,14 @@ pub(crate) fn node_tools(
     home: &Path,
     access: Access,
     cache: &Path,
-    runtime_reads: &mut Vec<PathGrant>,
-    tool_exec_roots: &mut Vec<PathGrant>,
+    requirements: &mut ToolRequirements,
     env: &mut Vec<(OsString, OsString)>,
-    omitted: &mut Vec<OmittedGrant>,
 ) {
-    let reads_start = runtime_reads.len();
-    let exec_start = tool_exec_roots.len();
     for prefix in ["/opt/homebrew", "/usr/local"].map(Path::new) {
         if prefix.join("bin/node").exists() {
-            homebrew_tools(prefix, runtime_reads, tool_exec_roots, env);
+            homebrew_tools(prefix, requirements, env);
+            let runtime_reads = &mut requirements.reads;
+            let tool_exec_roots = &mut requirements.exec;
             let host_corepack = home.join(".cache/node/corepack");
             let corepack = if access == Access::ReadOnly && host_corepack.is_dir() {
                 runtime_reads.push(subtree(&host_corepack));
@@ -667,20 +1076,6 @@ pub(crate) fn node_tools(
                 ("COREPACK_ENABLE_PROJECT_SPEC".into(), "0".into()),
                 ("COREPACK_ENABLE_DOWNLOAD".into(), "0".into()),
             ]);
-            filter_optional_grants(
-                runtime_reads,
-                reads_start,
-                home,
-                OmissionSource::Toolchain,
-                omitted,
-            );
-            filter_optional_grants(
-                tool_exec_roots,
-                exec_start,
-                home,
-                OmissionSource::Toolchain,
-                omitted,
-            );
             return;
         }
     }
@@ -691,10 +1086,11 @@ pub(crate) fn node_tools(
 /// holds service data such as Postgres clusters. Nothing in it is writable.
 pub(crate) fn homebrew_tools(
     prefix: &Path,
-    runtime_reads: &mut Vec<PathGrant>,
-    tool_exec_roots: &mut Vec<PathGrant>,
+    requirements: &mut ToolRequirements,
     env: &mut [(OsString, OsString)],
 ) {
+    let runtime_reads = &mut requirements.reads;
+    let tool_exec_roots = &mut requirements.exec;
     let present = |names: &[&str]| -> Vec<PathBuf> {
         names
             .iter()
@@ -723,6 +1119,9 @@ pub(crate) fn homebrew_tools(
             .into_iter()
             .map(subtree),
     );
+    for name in ["node", "npm", "pnpm", "corepack"] {
+        add_existing_tool(&prefix.join("bin").join(name), tool_exec_roots);
+    }
     if let Some((_, path)) = env.iter_mut().find(|(key, _)| key == "PATH") {
         path.push(":");
         path.push(prefix.join("bin"));
@@ -776,87 +1175,20 @@ pub(crate) fn subtree(path: impl Into<PathBuf>) -> PathGrant {
 }
 
 /// The native user skills location, without exposing the rest of host config.
-pub fn user_skills_directory(
+fn locate_user_skills(
     adapter: &str,
     home: &Path,
     host_var: &dyn Fn(&str) -> Option<OsString>,
 ) -> Option<PathBuf> {
-    let path = match adapter {
-        "claude" => home.join(".claude/skills"),
-        "codex" => home.join(".agents/skills"),
-        "agy" => home.join(".gemini/skills"),
-        "cursor" => home.join(".cursor/skills"),
-        "opencode" => host_var("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .unwrap_or_else(|| home.join(".config"))
-            .join("opencode/skills"),
-        _ => return None,
-    };
+    let location = provenant_records::AdapterSpec::get(adapter)?.skills?;
+    let path = location
+        .environment
+        .and_then(host_var)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(location.fallback))
+        .join(location.suffix);
     path.is_dir().then_some(path)
-}
-
-/// Canonical read-only grants, including linked skill resources. Directory
-/// identities bound traversal even when links form cycles; files need exact
-/// grants because a subtree grant requires a directory anchor.
-pub fn user_skills_grants(skills_dir: &Path) -> Vec<PathGrant> {
-    user_skills_grants_with_omissions(skills_dir, None).0
-}
-
-/// Return safe discovered grants and credential-root paths omitted from them.
-pub fn user_skills_grants_with_omissions(
-    skills_dir: &Path,
-    home: Option<&Path>,
-) -> (Vec<PathGrant>, Vec<PathBuf>) {
-    let Ok(root) = std::fs::canonicalize(skills_dir) else {
-        return (Vec::new(), Vec::new());
-    };
-    if provenant_confinement::refuses_lane_root(&root, true, home) {
-        return (Vec::new(), vec![root]);
-    }
-    if !root.is_dir() {
-        return (Vec::new(), Vec::new());
-    }
-    let mut omitted = Vec::new();
-    let mut grants = vec![subtree(&root)];
-    let mut pending = vec![root.clone()];
-    let mut visited = std::collections::BTreeSet::new();
-    let mut targets = std::collections::BTreeSet::new();
-    while let Some(directory) = pending.pop() {
-        if !visited.insert(directory.clone()) {
-            continue;
-        }
-        let Ok(entries) = std::fs::read_dir(directory) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Ok(target) = std::fs::canonicalize(&path) else {
-                continue;
-            };
-            if provenant_confinement::refuses_lane_root(&target, true, home) {
-                if !omitted.contains(&target) {
-                    omitted.push(target);
-                }
-                continue;
-            }
-            let is_dir = target.is_dir();
-            if entry.file_type().is_ok_and(|ft| ft.is_symlink())
-                && !target.starts_with(&root)
-                && targets.insert(target.clone())
-            {
-                grants.push(if is_dir {
-                    subtree(&target)
-                } else {
-                    exact(&target)
-                });
-            }
-            if is_dir {
-                pending.push(target);
-            }
-        }
-    }
-    (grants, omitted)
 }
 
 /// Lowercase RFC 4122 version 4 spelling of caller randomness.

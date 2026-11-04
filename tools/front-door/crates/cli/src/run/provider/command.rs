@@ -83,7 +83,8 @@ pub(super) fn prepare_command(
         provider,
         false,
     )?;
-    let (plan, observed_head, repository) = read_only_plan(roots, project, &cwd, &git, request)?;
+    let (plan, observed_head, repository, worktree_gitdir) =
+        read_only_plan(roots, project, &cwd, &git, request)?;
     let user = provenant_os::sys::account(provenant_os::sys::Account::Current)
         .map_err(|error| error.to_string())?
         .ok_or("current user identity is unavailable")?
@@ -135,6 +136,7 @@ pub(super) fn prepare_command(
             home: &home,
             user: &user,
             host_var: &|key| std::env::var_os(key),
+            skill_stage_max_bytes: config.domains.lanes.skill_stage_max_bytes,
             account: None,
             token: None,
             cwd: &cwd,
@@ -156,6 +158,26 @@ pub(super) fn prepare_command(
         alias_temporary_env(&mut spec.env, &scratch, &alias.join("command"));
     }
     spec.profile.spec.allow_database_ipc = task.access.database_ipc;
+    let common_git_path = repository
+        .as_ref()
+        .map(|path| path.to_path_buf())
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    let project_key = project.to_string();
+    let project_paths = super::project_paths::apply(
+        &mut spec,
+        &plan,
+        super::project_paths::Context {
+            cwd: &cwd,
+            home: &home,
+            common_git: common_git_path.as_deref(),
+            state_root: roots.state.as_path(),
+            worktree_gitdir: worktree_gitdir.as_deref(),
+            writer: false,
+            settings: config.domains.lanes.projects.get(&project_key),
+            project: &project_key,
+        },
+    );
     configure_process_tree(&mut spec, paths)?;
     let settings = config.domains.fabric.lanes.build_settings();
     configure_build_slots(
@@ -174,12 +196,20 @@ pub(super) fn prepare_command(
             .and_then(|host| host.cargo_build_jobs.as_deref()),
         settings.jobs(),
     );
+    spec.complete_tool_requirements(&plan, &home, &cwd);
     apply_setup(&spec.setup, &[&scratch, &paths.provider_state], None)?;
     let warnings: Vec<String> = spec
         .omitted_discovery
         .iter()
         .map(|entry| super::preparation::omission_warning(entry, &home))
         .collect();
+    let applied_access = spec.applied_access().receipt(&home);
+    let tool_closure = serde_json::Value::Array(
+        spec.prepared_tools()
+            .iter()
+            .map(|tool| tool.receipt())
+            .collect(),
+    );
     Ok(run::PreparedLaunch {
         skipped_routes: Vec::new(),
         argv: spec.argv,
@@ -192,7 +222,10 @@ pub(super) fn prepare_command(
             source: Some(format!("domains.fabric.commands.{name}")),
             extra: [
                 ("name".into(), serde_json::Value::String(name.into())),
+                ("applied_access".into(), applied_access),
+                ("tool_closure".into(), tool_closure),
                 ("discovery_warnings".into(), serde_json::json!(warnings)),
+                ("project_paths".into(), project_paths),
             ]
             .into_iter()
             .collect(),

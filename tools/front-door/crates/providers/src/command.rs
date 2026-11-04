@@ -89,11 +89,7 @@ fn prepare(
         deny_credential_access: true,
         deny_network: input.confined.permissions().network
             == provenant_records::run::NetworkAccess::Provider,
-        runtime_reads: std::iter::once(input.executable)
-            .chain(command.runtimes.iter().map(std::path::PathBuf::as_path))
-            .flat_map(crate::dylib::linked_libraries)
-            .map(exact)
-            .collect(),
+        runtime_reads: Vec::new(),
         tool_exec_roots: vec![subtree("/bin"), subtree("/usr/bin")],
         ..Default::default()
     };
@@ -101,37 +97,30 @@ fn prepare(
         .tool_exec_roots
         .extend(command.runtimes.iter().map(exact));
     let mut setup = Vec::new();
-    let mut omitted_discovery = Vec::new();
+    let omitted_discovery = Vec::new();
+    let mut tool_requirements = crate::launch::ToolRequirements::default();
     if [".cargo/bin", ".rustup/toolchains"]
         .iter()
         .all(|path| input.home.join(path).is_dir())
     {
-        rust_tools(
-            input,
-            access,
-            &mut profile.runtime_reads,
-            &mut profile.tool_exec_roots,
-            &mut env,
-            &mut setup,
-            &mut omitted_discovery,
-        );
+        rust_tools(input, access, &mut tool_requirements, &mut env, &mut setup);
     } else {
         crate::launch::system_tools(
             access,
-            &mut profile.runtime_reads,
-            &mut profile.tool_exec_roots,
+            &mut tool_requirements.reads,
+            &mut tool_requirements.exec,
             &mut env,
         );
-        profile.tool_exec_roots.push(subtree(input.cwd));
+        let cwd = subtree(input.cwd);
+        tool_requirements.exec.push(cwd.clone());
+        tool_requirements.required_exec.push(cwd);
     }
     node_tools(
         input.home,
         access,
         scratch,
-        &mut profile.runtime_reads,
-        &mut profile.tool_exec_roots,
+        &mut tool_requirements,
         &mut env,
-        &mut omitted_discovery,
     );
     Ok(LaunchSpec {
         argv,
@@ -141,6 +130,8 @@ fn prepare(
         cwd: input.cwd.to_owned(),
         setup,
         omitted_discovery,
+        user_skills: Default::default(),
+        tool_requirements,
         git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: profile,

@@ -180,6 +180,15 @@ applies to both classes. `lanes` shows a queued or starting lane's
 class and what it is waiting for, such as `read-only startup spacing: 1.2 s
 left of 2.0 s`.
 
+Project-scoped `domains.lanes.projects.<project>.shared_paths` can share an
+existing host test-lock directory with writers when the resource is broader
+than Cargo. Relative paths resolve against the primary checkout; `~/` and
+absolute paths are also accepted. Unsafe or missing entries warn and are
+ignored. `exec_roots` in the same table grants read and execution access to
+checkout-relative toolchain directories without write access. Both default to
+empty arrays; `config show` reports their effective value and origin. See
+[project paths](providers.md#project-paths-and-host-checkout-identity).
+
 Build slots gate builds, not lanes. A writer is admitted on the writer caps
 and the memory and disk floors alone, however many writers are live, so one
 project's idle writers never block another's. The slots are a build throttle,

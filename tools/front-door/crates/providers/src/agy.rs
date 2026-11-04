@@ -322,6 +322,7 @@ fn prepare(
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
     let plan = input.confined.permissions();
+    let mut tool_requirements = crate::launch::ToolRequirements::default();
     if plan.selected_authentication.as_deref() != Some("keychain") {
         return Err(ProviderError::UnsupportedPolicy);
     }
@@ -336,14 +337,10 @@ fn prepare(
         None => None,
     }
     .unwrap_or_else(|| input.home.join(KEYCHAIN));
-    let user_skills = input.home.join(".gemini/skills");
-    let (skill_reads, skill_omitted) = if input.user_skills() && user_skills.is_dir() {
-        crate::user_skills_grants_with_omissions(&user_skills, Some(input.home))
-    } else {
-        (Vec::new(), Vec::new())
-    };
-    let mut omitted_discovery = crate::launch::OmittedGrant::skills(skill_omitted);
-    let discover_skills = !skill_reads.is_empty();
+    let staged_skills = input.stage_user_skills();
+    let user_skills = staged_skills.root.clone();
+    let skill_reads = user_skills.iter().map(subtree).collect::<Vec<_>>();
+    let omitted_discovery = Vec::new();
     let mut argv: Vec<OsString> = [
         input.executable.as_os_str(),
         "--output-format".as_ref(),
@@ -360,7 +357,7 @@ fn prepare(
     }
     argv.push("--dangerously-skip-permissions".into());
     if access == Access::ReadOnly {
-        if discover_skills {
+        if let Some(user_skills) = &user_skills {
             // The skill loader reports paths through the private home link.
             argv.extend([
                 "--add-dir".into(),
@@ -419,7 +416,7 @@ fn prepare(
             target: keychain.clone(),
         },
     ];
-    if discover_skills {
+    if let Some(user_skills) = &user_skills {
         setup.push(SetupStep::CreateDir(home.join(".gemini")));
         setup.push(SetupStep::Symlink {
             link: home.join(".gemini/skills"),
@@ -427,8 +424,8 @@ fn prepare(
         });
     }
     // Both lanes run system commands; only writers get the additional tools.
-    let mut runtime_reads = skill_reads;
-    let mut tool_exec_roots = vec![
+    let runtime_reads = skill_reads;
+    let tool_exec_roots = vec![
         subtree("/bin"),
         subtree("/usr/bin"),
         subtree("/usr/libexec"),
@@ -438,23 +435,13 @@ fn prepare(
         ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
     ]);
     if shell {
-        crate::launch::rust_tools(
-            input,
-            access,
-            &mut runtime_reads,
-            &mut tool_exec_roots,
-            &mut env,
-            &mut setup,
-            &mut omitted_discovery,
-        );
+        crate::launch::rust_tools(input, access, &mut tool_requirements, &mut env, &mut setup);
         crate::launch::node_tools(
             input.home,
             access,
             crate::launch::lane_cache(input),
-            &mut runtime_reads,
-            &mut tool_exec_roots,
+            &mut tool_requirements,
             &mut env,
-            &mut omitted_discovery,
         );
     }
     Ok(LaunchSpec {
@@ -465,6 +452,8 @@ fn prepare(
         cwd: input.cwd.to_owned(),
         setup,
         omitted_discovery,
+        user_skills: staged_skills,
+        tool_requirements,
         git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {

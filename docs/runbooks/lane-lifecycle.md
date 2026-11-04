@@ -3,6 +3,13 @@
 Owner: run and Fabric maintainers
 Anchor: docs/specs/run.md, docs/specs/fabric.md
 
+For host-owned project paths, use `PROVENANT_PRIMARY_CHECKOUT`. A linked
+worktree's read-only admin directory is `PROVENANT_WORKTREE_GITDIR`; the writer's
+Git commands continue to use its private view. Project `shared_paths` can expose
+an existing host lock directory read-write to writers, and `exec_roots` can
+expose a repo-managed toolchain read-only. Both are empty by default. See
+[project paths](providers.md#project-paths-and-host-checkout-identity).
+
 Create a writer checkout, submit and wait with one command:
 
 ```sh
