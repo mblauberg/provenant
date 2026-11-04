@@ -1,5 +1,6 @@
 //! Pure argument parsing, help and bounded result rendering. No owner execution.
 #![forbid(unsafe_code)]
+use provenant_core::edit_distance;
 pub mod accounts;
 pub mod bench;
 pub mod check;
@@ -361,22 +362,6 @@ fn walk_subcommands<'a>(
         }
     }
     Some((selected, path))
-}
-fn edit_distance(left: &str, right: &str) -> usize {
-    let right: Vec<char> = right.chars().collect();
-    let mut row: Vec<_> = (0..=right.len()).collect();
-    for (i, a) in left.chars().enumerate() {
-        let mut diagonal = row[0];
-        row[0] = i + 1;
-        for (j, b) in right.iter().enumerate() {
-            let above = row[j + 1];
-            row[j + 1] = (row[j] + 1)
-                .min(above + 1)
-                .min(diagonal + usize::from(a != *b));
-            diagonal = above;
-        }
-    }
-    row[right.len()]
 }
 /// An example for the command the caller was invoking, chosen by the parsed
 /// subcommand path rather than by words anywhere in argv.
