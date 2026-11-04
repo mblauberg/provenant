@@ -295,6 +295,7 @@ pub(super) enum PrepareError {
         message: String,
         plans: Vec<provenant_confinement::PlanError>,
         skipped_routes: Vec<SkippedRoute>,
+        fallback_outcome: Option<provenant_records::run::PreparationFailure>,
     },
     #[error("{0}")]
     Other(String),
@@ -305,10 +306,12 @@ impl PrepareError {
             Self::Candidates {
                 message,
                 skipped_routes,
+                fallback_outcome,
                 ..
             } => run::PrepareRefusal {
                 message,
                 skipped_routes,
+                fallback_outcome,
             },
             other => other.to_string().into(),
         }
@@ -382,7 +385,16 @@ pub(super) fn prepare_with_wait(
         let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
             .map_err(|error| error.to_string())?;
         let native = config.domains.fabric.host_native.get(name).ok_or_else(|| {
-            format!("host-native {name} is not configured in domains.fabric.host_native")
+            PrepareError::Candidates {
+                message: format!(
+                    "host-native {name} is not configured in domains.fabric.host_native"
+                ),
+                plans: Vec::new(),
+                skipped_routes: Vec::new(),
+                fallback_outcome: Some(
+                    provenant_records::run::PreparationFailure::AdapterUnavailable,
+                ),
+            }
         })?;
         let provenant_fabric_runtime::config::HostNativeConfig::ClaudeAgent {
             model,
@@ -451,8 +463,7 @@ pub(super) fn prepare_candidates(
     wait: Option<u64>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route {
-        return prepare_command(registry, task, paths, resume, locate, provider, name)
-            .map_err(PrepareError::from);
+        return prepare_command(registry, task, paths, resume, locate, provider, name);
     }
     check_launch_prompt(prompt_text, paths, None)?;
     if task.fallback.is_empty()
@@ -754,13 +765,18 @@ pub(super) fn prepare_candidates(
                 (e.label == label || e.key == label)
                     && requested_adapter.is_none_or(|adapter| e.adapter == adapter)
             });
-            let entry = matching.next().ok_or_else(|| {
-                format!("account {label} is not registered for the requested route")
+            let entry = matching.next().ok_or_else(|| PrepareError::Candidates {
+                message: format!("account {label} is not registered for the requested route"),
+                plans: Vec::new(),
+                skipped_routes: Vec::new(),
+                fallback_outcome: Some(
+                    provenant_records::run::PreparationFailure::AdapterUnavailable,
+                ),
             })?;
             if matching.any(|other| other.key != entry.key) {
-                return Err(format!(
+                return Err(PrepareError::Other(format!(
                     "account alias {label} is ambiguous; use its exact registered key"
-                ));
+                )));
             }
             Ok(entry.key.as_str())
         })
@@ -771,6 +787,34 @@ pub(super) fn prepare_candidates(
         .to_string();
     let rules = crate::route::task_exclusion_rules(&task.profile, roots)
         .map_err(|error| error.to_string())?;
+    let family_constraints = match &task.route {
+        run::RequestedRoute::Review {
+            excluded_families,
+            distinct_families: true,
+            require_distinct,
+            preferred_families,
+            ..
+        } => Some((
+            excluded_families.as_slice(),
+            *require_distinct,
+            preferred_families.as_slice(),
+        )),
+        _ => None,
+    };
+    let resolve = |rejected: &[provenant_routing::ModelId]| {
+        crate::route::resolve_dispatch_rejecting(
+            &request,
+            roots,
+            selected,
+            (paths.operation_id.as_str(), paths.task_index),
+            &availability,
+            &access,
+            &host,
+            family_constraints,
+            &rules,
+            rejected,
+        )
+    };
     let resolved = crate::route::resolve_dispatch(
         &request,
         roots,
@@ -779,23 +823,11 @@ pub(super) fn prepare_candidates(
         &availability,
         &access,
         &host,
-        match &task.route {
-            run::RequestedRoute::Review {
-                excluded_families,
-                distinct_families: true,
-                require_distinct,
-                preferred_families,
-                ..
-            } => Some((
-                excluded_families.as_slice(),
-                *require_distinct,
-                preferred_families.as_slice(),
-            )),
-            _ => None,
-        },
+        family_constraints,
         &rules,
     )
     .map_err(|error| error.to_string())?;
+    let named_pool = resolved.pool_selection.is_some() && resume.is_none();
     if let Some(selection) = &resolved.pool_selection {
         for redraw in &selection.redraws {
             reasons.push(skip(
@@ -805,8 +837,77 @@ pub(super) fn prepare_candidates(
             ));
         }
     }
-    for (candidate, route) in candidates(resolved).into_iter().enumerate() {
+    // Candidate preparation happens before writer custody or guardian handoff.
+    // Advance only for a typed provider outcome, within the sealed alternatives,
+    // and never substitute a differently pinned account.
+    let mut previous_outcome = provenant_routing::FallbackOutcome::Other;
+    let mut queue: std::collections::VecDeque<_> = candidates(resolved).into();
+    let mut rejected = Vec::new();
+    let mut candidate = 0usize;
+    let mut redraws = 0u8;
+    loop {
+        if queue.is_empty() {
+            let allowed = provenant_routing::FallbackPolicy {
+                outcome: previous_outcome,
+                handoff: provenant_routing::FallbackHandoff::Local,
+                custody_released: true,
+                budget_remaining: named_pool && redraws < config.domains.routing.settlement_retries,
+                pinned: false,
+            }
+            .allows_switch();
+            if !allowed {
+                break;
+            }
+            let Ok(next) = resolve(&rejected) else {
+                break;
+            };
+            redraws += 1;
+            queue.extend(candidates(next));
+        }
+        let Some(route) = queue.pop_front() else {
+            break;
+        };
+        let model =
+            provenant_routing::ModelId::parse(&format!("{}/{}", route.adapter, route.model))
+                .map_err(|error| error.to_string())?;
+        if rejected.contains(&model) {
+            continue;
+        }
+        if candidate > 0
+            && !(provenant_routing::FallbackPolicy {
+                outcome: previous_outcome,
+                handoff: provenant_routing::FallbackHandoff::Local,
+                custody_released: true,
+                budget_remaining: true,
+                pinned: selected.is_some_and(|key| route.account_key.as_deref() != Some(key)),
+            })
+            .allows_switch()
+        {
+            break;
+        }
+        rejected.push(model);
+        let current_candidate = candidate;
+        candidate += 1;
+        previous_outcome = provenant_routing::FallbackOutcome::Other;
         let label = format!("{}/{}", route.adapter, route.model);
+        if !eligible(&route.adapter) {
+            previous_outcome = provenant_routing::FallbackOutcome::AdapterUnavailable;
+            reasons.push(skip(
+                &label,
+                SkipKind::Unavailable,
+                "provider lease unavailable",
+            ));
+            continue;
+        }
+        if let Some(spec) = AdapterSpec::get(&route.adapter)
+            && let Err(error) =
+                request
+                    .intent
+                    .check_launch(spec, &route.model, route.effort.as_deref())
+        {
+            reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
+            continue;
+        }
         let effective = config.domains.routing.model_policy.effective(
             &provenant_routing::ModelId::parse(&label).map_err(|error| error.to_string())?,
             route.account_key.as_deref(),
@@ -859,6 +960,7 @@ pub(super) fn prepare_candidates(
             .iter()
             .find(|registration| registration.adapter.id() == route.adapter)
         else {
+            previous_outcome = provenant_routing::FallbackOutcome::AdapterUnavailable;
             reasons.push(skip(&label, SkipKind::Unavailable, "unknown adapter"));
             continue;
         };
@@ -869,6 +971,9 @@ pub(super) fn prepare_candidates(
                 provenant_records::RouteExclusionReason::UnknownAvailability
             ) {
                 if let Some((kind, detail)) = default_failures.get(&route.adapter) {
+                    if *kind == SkipKind::AuthRequired {
+                        previous_outcome = provenant_routing::FallbackOutcome::AuthRequired;
+                    }
                     reasons.push(skip(&label, *kind, detail));
                     continue;
                 }
@@ -899,6 +1004,7 @@ pub(super) fn prepare_candidates(
                 reason,
                 provenant_records::RouteExclusionReason::AuthRequired
             ) {
+                previous_outcome = provenant_routing::FallbackOutcome::AuthRequired;
                 reasons.push(skip(
                     &label,
                     SkipKind::AuthRequired,
@@ -912,9 +1018,21 @@ pub(super) fn prepare_candidates(
             ) && let Some(detail) =
                 unavailable_auth_detail(&route, selected, &entries, &auth_failures)
             {
+                previous_outcome = provenant_routing::FallbackOutcome::AuthRequired;
                 reasons.push(skip(&label, SkipKind::AuthRequired, detail));
                 continue;
             }
+            previous_outcome = match reason {
+                provenant_records::RouteExclusionReason::Exhausted
+                | provenant_records::RouteExclusionReason::FreeTierRefused
+                | provenant_records::RouteExclusionReason::ProviderRefused => {
+                    provenant_routing::FallbackOutcome::UsageLimited
+                }
+                provenant_records::RouteExclusionReason::MissingExecutable => {
+                    provenant_routing::FallbackOutcome::AdapterUnavailable
+                }
+                _ => provenant_routing::FallbackOutcome::Other,
+            };
             // An adapter left out of `access` names its confinement error, not the router's denial.
             let detail = plan_errors
                 .get(route.adapter.as_str())
@@ -975,6 +1093,7 @@ pub(super) fn prepare_candidates(
         let executable = match locate(adapter.id()) {
             Ok(path) => path,
             Err(error) => {
+                previous_outcome = provenant_routing::FallbackOutcome::AdapterUnavailable;
                 reasons.push(skip(&label, SkipKind::Unavailable, error));
                 continue;
             }
@@ -982,8 +1101,10 @@ pub(super) fn prepare_candidates(
         // Every lane stages temporary files under tmp for terminal cleanup.
         // A failed setup never poisons the next explicit fallback candidate.
         let staging = &paths.temporary;
-        let scratch = staging.join(format!("candidate-{candidate}"));
-        let private_state = paths.provider_state.join(format!("candidate-{candidate}"));
+        let scratch = staging.join(format!("candidate-{current_candidate}"));
+        let private_state = paths
+            .provider_state
+            .join(format!("candidate-{current_candidate}"));
         // Retain the handle opened while creating scratch: a parent lane can
         // rename tmp and redirect its pathname before context is published.
         let scratch_directory =
@@ -1055,7 +1176,7 @@ pub(super) fn prepare_candidates(
         let child_state = state_root
             .join("children")
             .join(paths.attempt_id.to_string());
-        let (plan, observed_head, repository) = match confinement_request(
+        let (plan, observed_head, repository, worktree_gitdir) = match confinement_request(
             project_id,
             ConfinementRoots {
                 cwd: &cwd,
@@ -1081,6 +1202,7 @@ pub(super) fn prepare_candidates(
                             writer.worktree.repo().common_git_dir(),
                         )
                         .ok(),
+                        Some(writer.worktree.repo().private_git_dir().to_owned()),
                     )
                 })
                 .map_err(|error| error.to_string()),
@@ -1105,6 +1227,7 @@ pub(super) fn prepare_candidates(
             let authority = match credential_authority(roots.state.as_path(), paths, &login) {
                 Ok(authority) => authority,
                 Err(error) => {
+                    previous_outcome = provenant_routing::FallbackOutcome::AuthRequired;
                     reasons.push(skip(&label, SkipKind::AuthRequired, error));
                     continue;
                 }
@@ -1126,6 +1249,7 @@ pub(super) fn prepare_candidates(
             ) {
                 Ok(token) => Some(token),
                 Err(error) => {
+                    previous_outcome = provenant_routing::FallbackOutcome::AuthRequired;
                     reasons.push(skip(
                         &label,
                         SkipKind::AuthRequired,
@@ -1172,47 +1296,86 @@ pub(super) fn prepare_candidates(
         provider_route.set_user_skills(user_skills_mode.is_discover());
         let nonce = entropy_128().map_err(|error| error.to_string())?;
         let grant_digest = task.authority_digest.to_string();
-        let mut spec = match adapter.prepare(PrepareInput {
-            command: None,
-            route: &provider_route,
-            confined: &plan,
-            prompt: &prompt,
-            continuation: continuation.as_ref(),
-            grant_digest: &grant_digest,
-            executable: &executable,
-            home: &home,
-            user: &user,
-            host_var: &|key| std::env::var_os(key),
-            account: account.as_ref(),
-            token,
-            cwd: &cwd,
-            git_context: git_context.is_some(),
-            nonce,
-            provenant: LaneRuntime {
-                executable: &provenant_executable,
-                git: &git,
-                state: roots.state.as_path(),
-                child_state: &child_state,
+        let prepare = |provider_route: &provenant_records::ResolvedRoute| {
+            adapter.prepare(PrepareInput {
+                command: None,
+                route: provider_route,
+                confined: &plan,
+                prompt: &prompt,
+                continuation: continuation.as_ref(),
+                grant_digest: &grant_digest,
+                executable: &executable,
                 home: &home,
-                depth: paths.lane_depth,
-                attempt: paths.attempt_id,
-                assets,
-            },
-        }) {
+                user: &user,
+                host_var: &|key| std::env::var_os(key),
+                skill_stage_max_bytes: config.domains.lanes.skill_stage_max_bytes,
+                account: account.as_ref(),
+                token,
+                cwd: &cwd,
+                git_context: git_context.is_some(),
+                nonce,
+                provenant: LaneRuntime {
+                    executable: &provenant_executable,
+                    git: &git,
+                    state: roots.state.as_path(),
+                    child_state: &child_state,
+                    home: &home,
+                    depth: paths.lane_depth,
+                    attempt: paths.attempt_id,
+                    assets,
+                },
+            })
+        };
+        let mut spec = match prepare(&provider_route) {
             Ok(spec) => spec,
             Err(error) => {
                 reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
                 continue;
             }
         };
+        if !materialise_user_skills(&mut spec.user_skills, |stage, setup| {
+            apply_setup_directory(&[staging], stage)
+                .and_then(|_| apply_setup(setup, &[stage], None))
+        }) {
+            let skills = std::mem::take(&mut spec.user_skills);
+            let mut without_skills = provider_route.clone();
+            without_skills.set_user_skills(false);
+            spec = match prepare(&without_skills) {
+                Ok(spec) => spec,
+                Err(error) => {
+                    reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
+                    continue;
+                }
+            };
+            spec.user_skills = skills;
+        }
         if let Some(alias) = &paths.temporary_alias {
             alias_temporary_env(
                 &mut spec.env,
                 scratch,
-                &alias.join(format!("candidate-{candidate}")),
+                &alias.join(format!("candidate-{current_candidate}")),
             );
         }
         spec.profile.spec.allow_database_ipc = task.access.database_ipc;
+        let common_git_path = repository
+            .as_ref()
+            .map(|path| path.to_path_buf())
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        let project_paths = super::project_paths::apply(
+            &mut spec,
+            &plan,
+            super::project_paths::Context {
+                cwd: &cwd,
+                home: &home,
+                common_git: common_git_path.as_deref(),
+                state_root: roots.state.as_path(),
+                worktree_gitdir: worktree_gitdir.as_deref(),
+                writer: writer.is_some(),
+                settings: config.domains.lanes.projects.get(&project_id_str),
+                project: &project_id_str,
+            },
+        );
         configure_process_tree(&mut spec, paths)?;
         let build_settings = config.domains.fabric.lanes.build_settings();
         configure_build_slots(
@@ -1277,6 +1440,7 @@ pub(super) fn prepare_candidates(
             spec.argv
                 .splice(1..1, [argument.into(), scratch.as_os_str().to_owned()]);
         }
+        spec.complete_tool_requirements(&plan, &home, &cwd);
         let transcript_account = account
             .as_ref()
             .filter(|_| adapter.id() == provenant_records::Harness::Claude.spec().name)
@@ -1352,27 +1516,38 @@ pub(super) fn prepare_candidates(
             entry.map(|e| e.label.as_str()),
             &task.route,
             resume.is_some(),
-            redirected || candidate > 0,
+            redirected || current_candidate > 0,
         );
         provider.extra.insert(
             "account_source".into(),
             account_source(resume.is_some(), task.account.is_some()).into(),
         );
+        provider.extra.insert("project_paths".into(), project_paths);
         if let Some(event) = &dependency_event {
             provider
                 .extra
                 .insert("dependency_preparation".into(), event.clone());
         }
+        let mut skills =
+            user_skills_exposure(user_skills_mode, user_skills_origin, &spec.user_skills);
+        skills["stage_max_bytes"] = serde_json::json!({
+            "value": config.domains.lanes.skill_stage_max_bytes,
+            "origin": config.origins.get("domains.lanes.skill_stage_max_bytes"),
+            "key": "domains.lanes.skill_stage_max_bytes",
+        });
+        provider.extra.insert("user_skills".into(), skills);
         provider.extra.insert(
-            "user_skills".into(),
-            user_skills_exposure(
-                adapter.id(),
-                user_skills_mode,
-                &home,
-                &|key| std::env::var_os(key),
-                user_skills_origin,
-                &spec.omitted_discovery,
+            "tool_closure".into(),
+            serde_json::Value::Array(
+                spec.prepared_tools()
+                    .iter()
+                    .map(|tool| tool.receipt())
+                    .collect(),
             ),
+        );
+        provider.extra.insert(
+            "applied_access".into(),
+            spec.applied_access().receipt(&home),
         );
         provider.extra.insert(
             "discovery_warnings".into(),
@@ -1403,6 +1578,18 @@ pub(super) fn prepare_candidates(
         });
     }
     Err(PrepareError::Candidates {
+        fallback_outcome: match previous_outcome {
+            provenant_routing::FallbackOutcome::AuthRequired => {
+                Some(provenant_records::run::PreparationFailure::AuthRequired)
+            }
+            provenant_routing::FallbackOutcome::UsageLimited => {
+                Some(provenant_records::run::PreparationFailure::UsageLimited)
+            }
+            provenant_routing::FallbackOutcome::AdapterUnavailable => {
+                Some(provenant_records::run::PreparationFailure::AdapterUnavailable)
+            }
+            provenant_routing::FallbackOutcome::Other => None,
+        },
         message: reasons
             .iter()
             .map(|skipped| format!("{}: {}", skipped.route, skipped.detail))
@@ -1569,8 +1756,13 @@ pub(super) fn omission_warning(entry: &provenant_providers::OmittedGrant, home: 
         .path
         .strip_prefix(home)
         .map(|relative| format!("~/{}", relative.display()))
-        .unwrap_or_else(|_| entry.path.display().to_string());
-    format!("omitted discovered grant {display}: credential root guard")
+        .unwrap_or_else(|_| "<external path; inspect on host>".into());
+    let guard = if provenant_confinement::refuses_lane_root(&entry.path, true, Some(home)) {
+        "credential root guard"
+    } else {
+        "protected root guard"
+    };
+    format!("omitted discovered grant {display}: {guard}")
 }
 
 /// Warnings for omitted grants of one kind. Skill omissions belong under
@@ -1589,28 +1781,44 @@ pub(super) fn discovery_warnings(
 }
 
 /// Report the same provider-owned locations and grants used during prepare.
+/// Materialise the captured tree; an I/O failure drops only optional skills.
+fn materialise_user_skills(
+    staged: &mut provenant_providers::StagedUserSkills,
+    setup: impl FnOnce(&Path, &[SetupStep]) -> Result<(), String>,
+) -> bool {
+    let Some(root) = &staged.root else {
+        return true;
+    };
+    if setup(root, staged.setup()).is_ok() {
+        return true;
+    }
+    staged.discard();
+    staged.warnings.push(provenant_providers::SkillWarning {
+        path: PathBuf::new(),
+        reason: "staging_failed",
+    });
+    false
+}
+
 fn user_skills_exposure(
-    adapter: &str,
     mode: provenant_records::UserSkillsMode,
-    home: &Path,
-    host_var: &dyn Fn(&str) -> Option<std::ffi::OsString>,
     origin: serde_json::Value,
-    omitted: &[provenant_providers::OmittedGrant],
+    staged: &provenant_providers::StagedUserSkills,
 ) -> serde_json::Value {
-    let directory = mode
-        .is_discover()
-        .then(|| provenant_providers::user_skills_directory(adapter, home, host_var))
-        .flatten();
-    let reads = directory
-        .as_ref()
-        .map(|path| provenant_providers::user_skills_grants_with_omissions(path, Some(home)).0)
-        .unwrap_or_default();
-    let warnings = discovery_warnings(omitted, home, true);
+    let warnings: Vec<_> = staged
+        .warnings
+        .iter()
+        .map(|warning| {
+            serde_json::json!({
+                "code": "user_skill_skipped", "reason": warning.reason, "path": warning.path.to_string_lossy(),
+            })
+        })
+        .collect();
     serde_json::json!({
         "mode": mode,
-        "exposed": !reads.is_empty(),
-        "directory": directory,
-        "read_grants": reads,
+        "exposed": staged.root.is_some(),
+        "directory": staged.source,
+        "staged_file_count": staged.file_count,
         "warnings": warnings,
         "source": origin,
     })
@@ -1620,100 +1828,43 @@ fn user_skills_exposure(
 mod user_skills_tests {
     use super::*;
     #[test]
-    fn agy_credential_skills_are_omitted_with_warning() -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let home = temp.path().canonicalize()?;
-        std::fs::create_dir_all(home.join(".gemini/skills"))?;
+    fn staging_setup_failure_continues_without_skills() {
+        let mut staged = provenant_providers::StagedUserSkills::default();
+        staged.root = Some(PathBuf::from("/attempt/skills"));
+        staged.source = Some("~/.agents/skills".into());
+        staged.file_count = 3;
+        assert!(!materialise_user_skills(&mut staged, |_, _| Err(
+            "injected I/O failure".into()
+        )));
+        assert!(staged.root.is_none());
+        assert_eq!(staged.file_count, 0);
+        assert_eq!(staged.source.as_deref(), Some("~/.agents/skills"));
+        assert!(
+            staged
+                .warnings
+                .iter()
+                .any(|warning| warning.reason == "staging_failed")
+        );
         let record = user_skills_exposure(
-            "agy",
             provenant_records::UserSkillsMode::Discover,
-            &home,
-            &|_| None,
             serde_json::Value::Null,
-            &[provenant_providers::OmittedGrant {
-                path: home.join(".gemini/skills"),
-                source: provenant_providers::OmissionSource::UserSkill,
-            }],
+            &staged,
         );
         assert_eq!(record["exposed"], false);
-        assert_eq!(record["read_grants"], serde_json::json!([]));
-        let warning = record["warnings"][0].as_str().ok_or("missing warning")?;
-        assert!(warning.contains("~/.gemini/skills"));
-        assert!(warning.contains("credential root"));
-        Ok(())
+        assert_eq!(record["warnings"][0]["reason"], "staging_failed");
     }
 
     #[test]
-    fn user_skills_record_reports_mode_origin_and_canonical_grants()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let home = temp.path().canonicalize()?;
-        let skills = home.join(".agents/skills");
-        let target = home.join("release/skill");
-        std::fs::create_dir_all(&skills)?;
-        std::fs::create_dir_all(&target)?;
-        std::os::unix::fs::symlink(&target, skills.join("skill"))?;
+    fn receipt_uses_prepared_skill_facts() {
+        let staged = provenant_providers::StagedUserSkills::default();
         let origin = serde_json::json!({"key": "domains.lanes.user_skills", "origin": "compiled"});
         let record = user_skills_exposure(
-            "codex",
             provenant_records::UserSkillsMode::Discover,
-            &home,
-            &|_| None,
             origin.clone(),
-            &[],
+            &staged,
         );
-        assert_eq!(record["exposed"], true);
-        assert_eq!(record["directory"], serde_json::json!(skills));
-        assert_eq!(
-            record["read_grants"]
-                .as_array()
-                .ok_or("missing grants")?
-                .len(),
-            2
-        );
+        assert_eq!(record["exposed"], false);
+        assert_eq!(record["staged_file_count"], 0);
         assert_eq!(record["source"], origin);
-        let off = user_skills_exposure(
-            "codex",
-            provenant_records::UserSkillsMode::Off,
-            &home,
-            &|_| None,
-            serde_json::json!({"route_policy": ["rules[0]"]}),
-            &[],
-        );
-        assert_eq!(off["mode"], "off");
-        assert_eq!(off["exposed"], false);
-        assert_eq!(off["directory"], serde_json::Value::Null);
-        assert_eq!(off["read_grants"], serde_json::json!([]));
-        Ok(())
-    }
-
-    #[test]
-    fn omissions_land_under_their_own_source() {
-        let home = Path::new("/home/fixture");
-        let omitted = [
-            provenant_providers::OmittedGrant {
-                path: home.join("skills/linked"),
-                source: provenant_providers::OmissionSource::UserSkill,
-            },
-            provenant_providers::OmittedGrant {
-                path: home.join(".cargo/registry"),
-                source: provenant_providers::OmissionSource::Toolchain,
-            },
-        ];
-        let record = user_skills_exposure(
-            "codex",
-            provenant_records::UserSkillsMode::Off,
-            home,
-            &|_| None,
-            serde_json::Value::Null,
-            &omitted,
-        );
-        let skill = record["warnings"].as_array().expect("skill warnings");
-        assert_eq!(skill.len(), 1);
-        assert!(skill[0].as_str().unwrap().contains("~/skills/linked"));
-        let other = discovery_warnings(&omitted, home, false);
-        assert_eq!(other.len(), 1);
-        assert!(other[0].contains("~/.cargo/registry"));
-        assert!(!other[0].contains("skills"));
     }
 }

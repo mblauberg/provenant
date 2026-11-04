@@ -19,6 +19,9 @@ pub struct AccessContext<'a> {
     pub disclosure_ref: &'a str,
     pub confinement_ref: &'a str,
 }
+#[cfg(test)]
+type LaunchSpecLookup<'a> = &'a dyn Fn(&str) -> Option<provenant_records::AdapterSpec>;
+
 pub struct RoutingContext<'a> {
     /// Preview-only account policy selection. It never supplies availability.
     pub policy_account_hint: Option<&'a str>,
@@ -36,6 +39,9 @@ pub struct RoutingContext<'a> {
     /// scope and `now` in unix seconds. Routing performs no I/O; `None` reads
     /// every route as unknown. Only an `unavailable` verdict excludes a route.
     pub readiness: Option<ReadinessLookup<'a>>,
+    /// Fixture-only capability facts; production always uses the adapter table.
+    #[cfg(test)]
+    pub launch_specs: Option<LaunchSpecLookup<'a>>,
     pub access: &'a [AccessContext<'a>],
     pub now: provenant_core::WallTime,
     pub host: &'a str,
@@ -1041,8 +1047,21 @@ fn account_reason<'q>(
     if reason.is_none()
         && let Some(q) = quota
     {
-        reason = if reading_exhausted(&q.snapshot, model, context) {
+        let partial = provenant_quota::partial_headroom(
+            &q.snapshot,
+            model.adapter(),
+            model.model(),
+            &context.catalogue.admission_pools(model),
+            context.now_seconds(),
+        );
+        reason = if partial == provenant_quota::PartialHeadroom::Exhausted
+            || reading_exhausted(&q.snapshot, model, context)
+        {
             Some(RouteExclusionReason::Exhausted)
+        } else if partial == provenant_quota::PartialHeadroom::Unknown
+            && !context.config.allow_unknown_partial_headroom
+        {
+            Some(RouteExclusionReason::UnknownPartialHeadroom)
         } else if q.snapshot.status == QuotaStatus::AuthRequired {
             Some(RouteExclusionReason::AuthRequired)
         } else {
@@ -1342,6 +1361,18 @@ fn candidate(
     intent: RouteIntent,
 ) -> Result<RouteAlternative, RoutingError> {
     let entry = admissible(model, effort, context)?;
+    #[cfg(test)]
+    let spec = context
+        .launch_specs
+        .and_then(|lookup| lookup(model.adapter()))
+        .or_else(|| provenant_records::AdapterSpec::get(model.adapter()).copied());
+    #[cfg(not(test))]
+    let spec = provenant_records::AdapterSpec::get(model.adapter()).copied();
+    if let Some(spec) = spec {
+        intent
+            .check_launch(&spec, model.model(), effort)
+            .map_err(|error| RoutingError::UnsupportedLaunch(error.to_string()))?;
+    }
     let access = context.access.iter().find(|a| a.adapter == model.adapter());
     // Several registered accounts may serve one adapter: take a ready one with
     // the most pacing headroom, so exhausted accounts are skipped rather than
@@ -1753,7 +1784,7 @@ fn resolve_inner(
             )
         })
         .filter_map(|candidate| match candidate {
-            Err(RoutingError::ReadOnlyPolicy) => None,
+            Err(RoutingError::ReadOnlyPolicy | RoutingError::UnsupportedLaunch(_)) => None,
             candidate => Some(candidate),
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -2006,6 +2037,12 @@ fn classify_pool(
                         .exclusions
                         .push(format!("{}: read-only model policy", member.model.as_str()));
                     Some("read-only model policy".into())
+                }
+                Err(RoutingError::UnsupportedLaunch(detail)) => {
+                    classified
+                        .exclusions
+                        .push(format!("{}: {detail}", member.model.as_str()));
+                    Some(detail)
                 }
                 Err(RoutingError::UnsupportedEffort { .. }) => {
                     classified.exclusions.push("unsupported effort".into());

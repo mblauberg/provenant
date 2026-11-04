@@ -263,6 +263,7 @@ fn account_placement() -> Result {
             home: &rig.home,
             user: OsStr::new("fixture"),
             host_var: &|_| None,
+            skill_stage_max_bytes: 16 * 1024 * 1024,
             account: Some(account),
             token: None,
             cwd: &rig.project,

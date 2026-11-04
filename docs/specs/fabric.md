@@ -314,6 +314,10 @@ The CLI and MCP render one typed category per run error, and peer replies
 keep their error code over the wire. MCP errors include a message and recovery
 hint, and validation identifies the expected value. Uncertain mutations carry
 their `operation_id`.
+Graph launch diagnostics and MCP projections select safe details and actions
+from the typed refusal before persisting or transporting them. An unanchored
+host path or an arbitrary source error is omitted; uncertain handoffs name the
+operation to inspect instead of directing a new launch.
 - Why: people and agents act on the code.
 - Test: `crates/cli/src/fabric.rs::upgrade_and_peer_version_refusals_match_on_both_edges`;
   `src/fabric.rs::peer_run_errors_stay_typed_through_cli_rendering`
@@ -321,7 +325,17 @@ their `operation_id`.
 
 ## Bounded graphs and route fallback
 
-Graph documents accept schema versions 1 and 2. Version 2 carries deferred
+The graph runtime owns static admission for presets, raw documents and planner
+fragments. It validates schema capability, the configured structural limits,
+the expanded plan, the worst-case checkpoint envelope and selected output
+kinds before submission. Recovery uses the same schema-capability predicate.
+For composites, the declared exports are the static public capability; admission
+checks consumers against that contract and validates export references and
+selector shapes. Whether a selected member actually made an output available is
+runtime evidence and remains visible in the composite settlement.
+Schema 2 is the minimum version when the complete typed document carries a
+deferred-review field; presets choose that version after building the document,
+while raw documents retain their authored version. Version 2 carries deferred
 review configuration (`review` and `family_group` on nodes, and `review_base`
 on the document); a version 1 document must not carry these fields. The host
 pins `review_base` in the execution and can record review resolution in an
@@ -346,9 +360,13 @@ ordinary graph and submits it through the graph owner; run flags are in
 do not provision branches or checkouts. The [preset runbook](../runbooks/presets.md)
 contains starting points and batch preparation guidance.
 
-`--explain` prints a compact tree of roles, tiers, scopes, worktrees, inputs,
-concurrency, attempt bounds, acceptance and effective limits without writing a
-graph or opening graph state. JSON output includes the exact submitted graph
+`--explain` prints the admission result, inspection metrics and live checks
+still pending, followed by a compact tree of roles, tiers, scopes, worktrees,
+inputs, concurrency, attempt bounds, acceptance and effective limits. It does
+not write a graph or open graph state. Pending ids are `source` (an unresolved
+source binding), `worktree` (a writer), `delivery_target` (push or integrate),
+`planner_authority` (a plan node) and `route_readiness` (an agent node).
+JSON output includes the exact submitted graph
 and effective value origins, bounded by the 8 MiB graph document limit rather
 than the ordinary 1 MiB result limit. Identical expanded graphs use the same
 graph ID and a private, content-addressed document in project scratch, so

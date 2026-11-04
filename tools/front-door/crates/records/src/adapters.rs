@@ -34,11 +34,24 @@ pub enum QuotaProbeKind {
     LocalLedger,
 }
 
-#[derive(Debug)]
+/// Location of a provider's user skill tree relative to the host home or an
+/// absolute environment override. The fallback is relative to the home.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkillLocation {
+    pub environment: Option<&'static str>,
+    pub fallback: &'static str,
+    pub suffix: &'static str,
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct AdapterSpec {
     pub id: Harness,
     pub name: &'static str,
     pub binary: &'static str,
+    pub skills: Option<SkillLocation>,
+    /// Home-relative installation roots that can supply linked skills.
+    /// They describe discovery provenance, not an eligibility allowlist.
+    pub skill_install_roots: &'static [&'static str],
     pub registered_account: bool,
     /// A registered account's directory is the client's configuration
     /// directory, which account settings sync keeps in step. False where it is
@@ -64,6 +77,8 @@ pub struct AdapterSpec {
     pub context_directory_arg: Option<&'static str>,
     pub compaction_env: Option<&'static str>,
     pub allowance_prefix: Option<&'static str>,
+    /// Local allowance windows governing models under allowance_prefix.
+    pub allowance_windows: &'static [&'static str],
     pub namespaced_models: bool,
     pub catalogue_models_only: bool,
     pub chair_switch: bool,
@@ -218,12 +233,22 @@ impl AdapterSpec {
     }
 }
 
+// The installed Provenant release carries the common portfolio used by each
+// provider. Linked skill targets outside these roots remain eligible too.
+const SKILL_INSTALL_ROOTS: &[&str] = &[".local/share/provenant/v1/releases"];
+
 // Keep the rows in Harness order. CLI installation also uses this order.
 pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
     AdapterSpec {
         id: Harness::Claude,
         name: "claude",
         binary: "claude",
+        skills: Some(SkillLocation {
+            environment: None,
+            fallback: ".claude",
+            suffix: "skills",
+        }),
+        skill_install_roots: SKILL_INSTALL_ROOTS,
         registered_account: true,
         account_config_dir: true,
         local_login: false,
@@ -239,6 +264,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         context_directory_arg: Some("--add-dir"),
         compaction_env: Some("CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
         allowance_prefix: None,
+        allowance_windows: &[],
         namespaced_models: false,
         catalogue_models_only: false,
         chair_switch: true,
@@ -271,6 +297,12 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         id: Harness::Codex,
         name: "codex",
         binary: "codex",
+        skills: Some(SkillLocation {
+            environment: None,
+            fallback: ".agents",
+            suffix: "skills",
+        }),
+        skill_install_roots: SKILL_INSTALL_ROOTS,
         registered_account: true,
         account_config_dir: true,
         local_login: false,
@@ -290,6 +322,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         context_directory_arg: None,
         compaction_env: None,
         allowance_prefix: None,
+        allowance_windows: &[],
         namespaced_models: false,
         catalogue_models_only: false,
         chair_switch: false,
@@ -322,6 +355,12 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         id: Harness::Cursor,
         name: "cursor",
         binary: "cursor-agent",
+        skills: Some(SkillLocation {
+            environment: None,
+            fallback: ".cursor",
+            suffix: "skills",
+        }),
+        skill_install_roots: SKILL_INSTALL_ROOTS,
         registered_account: false,
         account_config_dir: false,
         local_login: true,
@@ -340,6 +379,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         context_directory_arg: None,
         compaction_env: None,
         allowance_prefix: None,
+        allowance_windows: &[],
         namespaced_models: false,
         catalogue_models_only: false,
         chair_switch: false,
@@ -372,6 +412,12 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         id: Harness::Agy,
         name: "agy",
         binary: "agy",
+        skills: Some(SkillLocation {
+            environment: None,
+            fallback: ".gemini",
+            suffix: "skills",
+        }),
+        skill_install_roots: SKILL_INSTALL_ROOTS,
         registered_account: true,
         account_config_dir: false,
         local_login: true,
@@ -394,6 +440,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         context_directory_arg: None,
         compaction_env: None,
         allowance_prefix: None,
+        allowance_windows: &[],
         namespaced_models: false,
         catalogue_models_only: false,
         chair_switch: false,
@@ -426,6 +473,12 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         id: Harness::Opencode,
         name: "opencode",
         binary: "opencode",
+        skills: Some(SkillLocation {
+            environment: Some("XDG_CONFIG_HOME"),
+            fallback: ".config",
+            suffix: "opencode/skills",
+        }),
+        skill_install_roots: SKILL_INSTALL_ROOTS,
         registered_account: false,
         account_config_dir: false,
         local_login: true,
@@ -446,6 +499,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         context_directory_arg: None,
         compaction_env: None,
         allowance_prefix: Some("opencode-go/"),
+        allowance_windows: &["five_hour", "seven_day", "thirty_day"],
         namespaced_models: true,
         catalogue_models_only: true,
         chair_switch: false,
@@ -478,6 +532,8 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         id: Harness::Command,
         name: "command",
         binary: "",
+        skills: None,
+        skill_install_roots: &[],
         registered_account: false,
         account_config_dir: false,
         local_login: false,
@@ -493,6 +549,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         context_directory_arg: None,
         compaction_env: None,
         allowance_prefix: None,
+        allowance_windows: &[],
         namespaced_models: false,
         catalogue_models_only: false,
         chair_switch: false,
@@ -527,6 +584,8 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         id: Harness::HostNative,
         name: "host-native",
         binary: "",
+        skills: None,
+        skill_install_roots: &[],
         registered_account: false,
         account_config_dir: false,
         local_login: false,
@@ -542,6 +601,7 @@ pub static ADAPTER_SPECS: &[AdapterSpec; 7] = &[
         context_directory_arg: None,
         compaction_env: None,
         allowance_prefix: None,
+        allowance_windows: &[],
         namespaced_models: false,
         catalogue_models_only: false,
         chair_switch: false,

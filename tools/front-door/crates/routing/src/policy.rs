@@ -19,6 +19,26 @@ pub enum Workload {
 pub struct RouteIntent {
     pub workload: Workload,
     pub writes: bool,
+    /// Requested network mode, when the caller has a concrete launch request.
+    pub network: Option<provenant_records::run::NetworkAccess>,
+}
+
+impl RouteIntent {
+    /// Check the normalised launch controls against one adapter's declared capabilities.
+    pub fn check_launch(
+        self,
+        spec: &provenant_records::AdapterSpec,
+        model: &str,
+        effort: Option<&str>,
+    ) -> Result<(), provenant_records::UnsupportedLaunch> {
+        spec.check_launch(&provenant_records::LaunchRequest {
+            model: Some(model),
+            effort,
+            resume: false,
+            network: self.network,
+            write: self.writes,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -904,6 +924,52 @@ mod tests {
     }
 
     #[test]
+    fn normalised_launch_requirements_use_adapter_capabilities() {
+        use provenant_records::run::NetworkAccess;
+        use provenant_records::{ADAPTER_SPECS, AdapterSpec, LaunchCapabilities, LaunchField};
+        let narrow = AdapterSpec {
+            launch: LaunchCapabilities {
+                network: &[NetworkAccess::Provider],
+                write: false,
+                ..ADAPTER_SPECS[0].launch
+            },
+            ..ADAPTER_SPECS[0]
+        };
+        for (intent, expected) in [
+            (
+                RouteIntent {
+                    network: Some(NetworkAccess::Provider),
+                    ..Default::default()
+                },
+                None,
+            ),
+            (
+                RouteIntent {
+                    writes: true,
+                    network: Some(NetworkAccess::Provider),
+                    ..Default::default()
+                },
+                Some(LaunchField::Write),
+            ),
+            (
+                RouteIntent {
+                    network: Some(NetworkAccess::Open),
+                    ..Default::default()
+                },
+                Some(LaunchField::Network),
+            ),
+        ] {
+            assert_eq!(
+                intent
+                    .check_launch(&narrow, "model", None)
+                    .err()
+                    .map(|e| e.field),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn user_skills_route_policy_overlays_defaults() -> Result<(), Box<dyn std::error::Error>> {
         let policies: ModelPolicies = toml_edit::de::from_str(
             "[defaults.lane]\nuser_skills='off'\n[[rules]]\nadapter='claude'\n[rules.policy.lane]\nuser_skills='discover'\n",
@@ -1460,6 +1526,7 @@ mod tests {
         let intent = RouteIntent {
             workload: Workload::ReadHeavy,
             writes: false,
+            ..Default::default()
         };
         assert_eq!(deepseek.cache_factor_basis_points(intent), 30_000);
         let deepseek_model = ModelId::parse("opencode/opencode-go/deepseek-v4.1-flash")?;

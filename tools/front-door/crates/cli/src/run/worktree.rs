@@ -138,6 +138,7 @@ pub(super) fn own_worktree(
                             .workers
                             .observe_evidence(std::slice::from_ref(&info.path), false);
                         return Err(worktrees::WorktreeError::CensusUnknown {
+                            path: info.path.clone(),
                             detail: evidence
                                 .details
                                 .get(&info.path)
@@ -164,7 +165,9 @@ pub(super) fn own_worktree(
                                 || worktrees::cache_writer_probe(context.project_state, &info.path)
                                     .is_err()
                             {
-                                return Err(worktrees::WorktreeError::UnknownWriter);
+                                return Err(worktrees::WorktreeError::UnknownWriterAt {
+                                    path: info.path.clone(),
+                                });
                             }
                         }
                     }

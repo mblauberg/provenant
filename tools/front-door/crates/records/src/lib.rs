@@ -4,13 +4,14 @@
 mod adapters;
 pub use adapters::{
     ADAPTER_SPECS, AdapterSpec, COMMAND_OUTPUT_TAIL_BYTES, LaunchCapabilities, LaunchField,
-    LaunchRequest, QuotaProbeKind, UnsupportedLaunch,
+    LaunchRequest, QuotaProbeKind, SkillLocation, UnsupportedLaunch,
 };
 mod artifact_ref;
 mod attempt_fact;
 mod attempt_file;
 mod canonical;
 pub mod control;
+pub mod diagnostic;
 mod finding;
 pub mod handoff;
 mod input;

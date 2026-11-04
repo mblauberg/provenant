@@ -169,9 +169,12 @@ existing recovery behaviour and do not trigger result-policy retries.
 Allowances reset for each run, including a manually resumed run. The first
 sealed retry decision survives interrupted settlement even if a scheduled or
 expiring rule changes before recovery.
-Result-check fallback never carries write authority. Capacity and account
-recovery retain the task's existing worktree and write authority, and carry its
-validated handoff rather than a transcript. Nested stores are lane-writable, so
+Result-check fallback follows only a successful provider result that fails the
+configured quality check. It never carries write authority and waits for the
+original attempt's custody to be confirmed released. Task failures, uncommitted
+work and input-required outcomes do not trigger it. Capacity recovery can resume
+the same provider session; quota and sessionless capacity stops do not switch
+routes or accounts automatically. Nested stores are lane-writable, so
 restricted routes select their reliable fallback before launch there instead of
 trusting a later retry record. Nested session continuations require explicit
 caller recovery. Exact attempt inspection preserves original evidence;

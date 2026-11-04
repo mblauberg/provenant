@@ -17,6 +17,15 @@ use std::path::{Path, PathBuf};
 fn profiles_between_the_old_and_new_limits_compile_and_larger_ones_name_their_size()
 -> Result<(), Box<dyn std::error::Error>> {
     let (plan, profile) = write_grants_fixture();
+    let mut many = plan.clone();
+    many.read_roots = (0..129)
+        .map(|index| PathGrant {
+            path: PathBuf::from(format!("/fixture/root/{index}")),
+            scope: PathScope::Subtree,
+        })
+        .collect();
+    assert!(validate_plan_grant_limit(&many, 128).is_err());
+    assert!(validate_plan_grant_limit(&many, 256).is_ok());
     let mut grants = GrantSet::build(&plan, &profile, Path::new("/fixture/home"), None)?;
     let root = |index: usize, width: usize| PathGrant {
         path: PathBuf::from(format!("/fixture/reads/{index}/{}", "x".repeat(width))),
@@ -31,6 +40,8 @@ fn profiles_between_the_old_and_new_limits_compile_and_larger_ones_name_their_si
     assert!(
         matches!(error, PermissionError::ProfileTooLarge { bytes, limit: PROFILE_LIMIT } if bytes > PROFILE_LIMIT)
     );
+    let expanded = render_with_limit(&grants, 2 * 1024 * 1024)?;
+    assert!(expanded.len() > PROFILE_LIMIT);
     Ok(())
 }
 
@@ -189,8 +200,11 @@ fn read_only_profile_reads_verified_git_and_only_writes_project_exceptions()
 
         worktree: None,
     };
-    let compiled =
-        MacOsSandboxBackend { ready: true }.compile(plan.permissions(), &profile, &anchors)?;
+    let compiled = MacOsSandboxBackend {
+        ready: true,
+        limits: ProfileLimits::default(),
+    }
+    .compile(plan.permissions(), &profile, &anchors)?;
     let source = String::from_utf8(compiled.profile)?;
     let git = binding.common_dir();
     assert!(repo.0.private_git_dir().starts_with(git));
@@ -247,9 +261,12 @@ fn read_only_profile_reads_verified_git_and_only_writes_project_exceptions()
     std::fs::rename(&listed, home.join(".config/elsewhere"))?;
     std::os::unix::fs::symlink(home.join(".config/elsewhere"), &listed)?;
     assert!(
-        MacOsSandboxBackend { ready: true }
-            .compile(plan.permissions(), &profile, &anchors)
-            .is_err()
+        MacOsSandboxBackend {
+            ready: true,
+            limits: ProfileLimits::default()
+        }
+        .compile(plan.permissions(), &profile, &anchors)
+        .is_err()
     );
     std::fs::remove_file(&listed)?;
     std::fs::rename(home.join(".config/elsewhere"), &listed)?;
@@ -257,9 +274,12 @@ fn read_only_profile_reads_verified_git_and_only_writes_project_exceptions()
     std::fs::rename(root.join(".agent-run"), root.join("moved"))?;
     std::os::unix::fs::symlink(root.join("moved"), root.join(".agent-run"))?;
     assert!(
-        MacOsSandboxBackend { ready: true }
-            .compile(plan.permissions(), &profile, &anchors)
-            .is_err()
+        MacOsSandboxBackend {
+            ready: true,
+            limits: ProfileLimits::default()
+        }
+        .compile(plan.permissions(), &profile, &anchors)
+        .is_err()
     );
     Ok(())
 }

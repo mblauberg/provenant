@@ -73,9 +73,17 @@ use std::{
 
 pub(crate) fn scratch_prepare_error(error: impl std::fmt::Display) -> FacadeError {
     FacadeError::Io {
+        delivery_limit: None,
+        delivery_stage: None,
         operation: format!("prepare project scratch: {error}"),
         path: Some(".provenant/scratch".into()),
     }
+}
+
+fn lane_timeout(deadline_seconds: Option<u64>, graph_timeout_seconds: u64) -> u64 {
+    deadline_seconds
+        .unwrap_or(graph_timeout_seconds)
+        .min(graph_timeout_seconds)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -825,14 +833,24 @@ impl F3Facade for BoundFacade<'_> {
 /// Retain lower-level diagnostics while naming the request that failed.
 fn scope_io(error: FacadeError, scope: &str) -> FacadeError {
     match error {
-        FacadeError::Io { operation, path } => {
+        FacadeError::Io {
+            operation,
+            path,
+            delivery_limit,
+            delivery_stage,
+        } => {
             let prefix = format!("{scope}: ");
             let operation = if operation.starts_with(&prefix) {
                 operation
             } else {
                 format!("{scope}: {operation}")
             };
-            FacadeError::Io { operation, path }
+            FacadeError::Io {
+                operation,
+                path,
+                delivery_limit,
+                delivery_stage,
+            }
         }
         other => other,
     }
@@ -1308,6 +1326,7 @@ pub fn landing(
                 serde_json::json!({"operation_id":recovery_id,"state":"unknown"}),
             );
             result.error = Some(provenant_records::CommandError {
+                diagnostic: None,
                 code: "launch_unknown".into(),
                 message: "push outcome requires remote reconciliation".into(),
                 cause: None,
@@ -1337,6 +1356,7 @@ pub fn landing(
                 serde_json::json!({"operation_id":recovery_id}),
             );
             result.error = Some(provenant_records::CommandError {
+                diagnostic: None,
                 code: "QUEUE_FULL".into(),
                 message: message.clone(),
                 cause: None,
@@ -1497,19 +1517,109 @@ fn run_error(error: provenant_run::RunError) -> FacadeError {
     fail_error(error.into())
 }
 fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
-    fail.detail.unwrap_or_else(|| kind_error(fail.kind))
+    use provenant_records::diagnostic::DiagnosticFact;
+    let fact = fail
+        .projection
+        .as_ref()
+        .and_then(|value| value.fact.as_ref());
+    if fail.detail.is_none() {
+        match fact {
+            Some(DiagnosticFact::CredentialGrant { access }) => {
+                return FacadeError::CredentialRoot {
+                    access: (*access).into(),
+                };
+            }
+            Some(DiagnosticFact::DeliveryLimit(fact)) => {
+                return FacadeError::HostDeliveryLimit { fact: fact.clone() };
+            }
+            Some(DiagnosticFact::DeliveryStage(stage)) => {
+                return FacadeError::HostDeliveryStage { stage: *stage };
+            }
+            Some(DiagnosticFact::GenerationConflict(current_generation)) => {
+                return FacadeError::GenerationConflict {
+                    current_generation: *current_generation,
+                };
+            }
+            Some(DiagnosticFact::WorktreeUnregistered) => {
+                return FacadeError::WorktreeUnregistered {
+                    path: "inspect worktree registration".into(),
+                };
+            }
+            Some(DiagnosticFact::Filesystem { operation }) => return FacadeError::io(*operation),
+            Some(DiagnosticFact::DiskPressure {
+                available,
+                floor,
+                reclaimed,
+            }) => {
+                return FacadeError::DispatchRefused {
+                    fact: None,
+                    reason: "insufficient disk space".into(),
+                    disk: Some(
+                        provenant_fabric_runtime::coordination::facade::DiskPressure {
+                            available: *available,
+                            floor: *floor,
+                            reclaimed: *reclaimed,
+                        },
+                    ),
+                };
+            }
+            Some(DiagnosticFact::DiskUnobserved) => {
+                return FacadeError::DispatchUnobserved {
+                    reason: "disk observation failed".into(),
+                };
+            }
+            None => {}
+        }
+    }
+    match fail.detail.map(|detail| *detail) {
+        Some(FacadeError::WorktreeUnregistered { .. }) => FacadeError::WorktreeUnregistered {
+            path: "inspect worktree registration".into(),
+        },
+        Some(FacadeError::Io {
+            operation,
+            delivery_limit,
+            delivery_stage,
+            ..
+        }) => FacadeError::Io {
+            delivery_limit,
+            delivery_stage,
+            operation,
+            path: None,
+        },
+        Some(detail) => detail,
+        None => facade_error_for_kind(fail.kind),
+    }
 }
 /// Translate a submission's refusal at the facade edge. Dispatch access
 /// failures keep their own message; rendering it by kind would read as
 /// invalid input instead of a refusal.
 fn dispatch_refused(fail: provenant_cli::run::Fail) -> FacadeError {
-    FacadeError::DispatchRefused {
-        reason: fail.message,
+    if matches!(
+        fail.projection
+            .as_ref()
+            .and_then(|projection| projection.fact.as_ref()),
+        Some(provenant_records::diagnostic::DiagnosticFact::DiskPressure { .. })
+    ) {
+        return fail_error(fail);
+    }
+    match fail.detail.map(|detail| *detail) {
+        Some(
+            detail @ FacadeError::DispatchRefused {
+                fact: None,
+                disk: Some(_),
+                ..
+            },
+        ) => detail,
+        _ => FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason: "dispatch was refused; inspect the request and access policy".into(),
+        },
     }
 }
 /// Translate a typed run category at the MCP edge. `ErrorKind` is the one
 /// categorisation of run errors; this only renders it.
-fn kind_error(kind: provenant_run::ErrorKind) -> FacadeError {
+fn facade_error_for_kind(kind: provenant_run::ErrorKind) -> FacadeError {
     use provenant_run::ErrorKind as E;
     match kind {
         E::SecretInput
@@ -1522,6 +1632,11 @@ fn kind_error(kind: provenant_run::ErrorKind) -> FacadeError {
         | E::LaneCap
         | E::BuildSettings
         | E::GuardianIdentity => FacadeError::ConfinementRefused,
+        E::WriterBusy => FacadeError::WriterBusy,
+        E::WriterUnknown => FacadeError::WriterUnknown,
+        E::CredentialRoot => FacadeError::CredentialRoot {
+            access: "requested".into(),
+        },
         E::LaneDepth => FacadeError::LaneDepth,
         E::LaneContext
         | E::ParentAttempt
@@ -2822,6 +2937,8 @@ fn graph_ask_poll(
     use provenant_records::inbox::RequestState;
     let inbox_error =
         |error: provenant_fabric_runtime::inbox::InboxError| FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
             reason: format!("graph ask {}: {error}", scope.ask.ask_id),
         };
     // The immutable ask and its operation receipt commit together. A crash before
@@ -2893,6 +3010,8 @@ fn graph_ask_edge(
     // before the first ask, just as an attempt retains its launch actor.
     identity.inbox.actor = scope.actor.parse().map_err(|_| FacadeError::StateCorrupt)?;
     let refused = |error: &dyn std::fmt::Display| FacadeError::DispatchRefused {
+        fact: None,
+        disk: None,
         reason: format!("graph ask {}: {error}", scope.ask.ask_id),
     };
     // Validate the ordinary inbox edge before opening local state. Graph
@@ -2951,6 +3070,8 @@ fn graph_inbox_close(
     use provenant_fabric_runtime::inbox::{InboxFilter, InboxInput, InboxResult};
     use provenant_records::inbox::RequestState;
     let map = |e: provenant_fabric_runtime::inbox::InboxError| FacadeError::DispatchRefused {
+        fact: None,
+        disk: None,
         reason: format!("{context}: {e}"),
     };
     // Find the request through the normal bounded inbox list.
@@ -3140,6 +3261,8 @@ fn graph_journal_error(error: provenant_fabric_runtime::graph::JournalError) -> 
             version: found,
         },
         JournalError::TooLarge => FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
             reason: "graph checkpoint exceeds its byte limit".into(),
         },
         JournalError::Filesystem(_)
@@ -4272,6 +4395,44 @@ impl BoundGraphOwner<'_> {
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     type Error = FacadeError;
 
+    fn preparation_fallback_evidence(
+        &mut self,
+        key: &provenant_fabric_runtime::graph::AttemptKey,
+        reference: &str,
+    ) -> Result<Option<provenant_records::run::PreparationFailure>, Self::Error> {
+        let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+        // Only this host can verify its writer fences and custody lock.
+        if host != self.factory.context.identity.host.to_string() {
+            return Ok(None);
+        }
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: false,
+            actor: None,
+            chair: None,
+        };
+        let store = owner.store(self.cancel)?;
+        let call = owner.call(self.cancel);
+        let record = store
+            .record(
+                attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+                &call,
+            )
+            .map_err(run_error)?;
+        if record.operation_id != graph_operation("graph-attempt-operation", key)?
+            || record.context.as_ref().is_none_or(|context| {
+                context.graph_id.as_deref() != Some(key.graph_id.as_str())
+                    || context.node_id.as_deref() != Some(key.node_id.as_str())
+            })
+        {
+            return Ok(None);
+        }
+        if !store.custody_released(&record, &call).map_err(run_error)? {
+            return Ok(None);
+        }
+        Ok(record.preparation_failure)
+    }
+
     fn resolve_review(
         &mut self,
         node: &provenant_fabric_runtime::graph::GraphNode,
@@ -4409,6 +4570,8 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             self.integration_branch
                 .as_deref()
                 .ok_or_else(|| FacadeError::DispatchRefused {
+                    fact: None,
+                    disk: None,
                     reason: "an integration source requires graph.integration_branch".into(),
                 })?;
         let reference = match branch.strip_prefix("origin/") {
@@ -4815,6 +4978,8 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 .map_err(|error| match error {
                     provenant_run::RunError::Validation("writer needs a branch") => {
                         FacadeError::DispatchRefused {
+                            fact: Some(provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::DetachedWriter),
+                            disk: None,
                             reason: "writer needs a branch".into(),
                         }
                     }
@@ -4828,6 +4993,8 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     )
                 {
                     return Err(FacadeError::DispatchRefused {
+                        fact: Some(provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::DetachedWriter),
+                        disk: None,
                         reason: "writer needs a branch".into(),
                     });
                 }
@@ -4852,6 +5019,8 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     },
                 )
                 .map_err(|error| FacadeError::DispatchRefused {
+                    fact: None,
+                    disk: None,
                     reason: format!("initialise graph writer at {commit}: {error}"),
                 })?;
             }
@@ -4881,6 +5050,8 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     && bound != branch
                 {
                     return Err(FacadeError::DispatchRefused {
+                        fact: None,
+                        disk: None,
                         reason: format!(
                             "graph writer worktree is on {branch}, not the continued branch {bound}"
                         ),
@@ -5024,10 +5195,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                             effort: route.effort.clone(),
                         },
                     }),
-                    timeout_seconds: node
-                        .deadline_seconds
-                        .unwrap_or(self.factory.context.config.limits.graph_timeout_seconds)
-                        .min(self.factory.context.config.limits.graph_timeout_seconds),
+                    timeout_seconds: lane_timeout(
+                        node.deadline_seconds,
+                        self.factory.context.config.limits.graph_timeout_seconds,
+                    ),
                     delivery_id: None,
                     deliver: delivery,
                     new_worktree: None,
@@ -5169,6 +5340,18 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     attempt_ref: reference,
                     outcome: if result_warning.is_some() {
                         AttemptOutcome::OtherFailure
+                    } else if let Some(failure) = attempt.preparation_failure {
+                        match failure {
+                            provenant_records::run::PreparationFailure::AuthRequired => {
+                                AttemptOutcome::AuthRequired
+                            }
+                            provenant_records::run::PreparationFailure::UsageLimited => {
+                                AttemptOutcome::UsageLimited
+                            }
+                            provenant_records::run::PreparationFailure::AdapterUnavailable => {
+                                AttemptOutcome::AdapterUnavailable
+                            }
+                        }
                     } else {
                         match outcome {
                             Outcome::Succeeded
@@ -5323,6 +5506,8 @@ impl Factory {
     > {
         use provenant_fabric_runtime::graph::FileJournal;
         let refused = || FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
             reason: graph_selector_forms(),
         };
         // An exact graph ID wins over every other form, but a hex ID that is
@@ -5461,6 +5646,8 @@ impl Factory {
                     self.resolve_graph(&document.to_string_lossy())?
                         .1
                         .ok_or_else(|| FacadeError::DispatchRefused {
+                            fact: None,
+                            disk: None,
                             reason: graph_selector_forms(),
                         })?
                 } else {
@@ -5490,7 +5677,11 @@ impl Factory {
                 let admitted = checkpoint.is_some();
                 let expanded = document
                     .expanded(&self.context.config.graph.limits)
-                    .map_err(|reason| FacadeError::DispatchRefused { reason })?;
+                    .map_err(|reason| FacadeError::DispatchRefused {
+                        reason,
+                        disk: None,
+                        fact: None,
+                    })?;
                 for node in &expanded.nodes {
                     if let Some(provenant_records::run::DeliveryMode::Integrate(target)) =
                         &node.delivery
@@ -5548,6 +5739,8 @@ impl Factory {
                         .map_err(run_error)?;
                         if writer.branch.as_str().trim_start_matches("refs/heads/") == target {
                             return Err(FacadeError::DispatchRefused {
+                                fact: None,
+                                disk: None,
                                 reason: format!(
                                     "worktree {path} is on the integration branch {target}; create it with `git worktree add -b batch/work PATH BASE`"
                                 ),
@@ -5755,7 +5948,11 @@ impl Factory {
                 }
                 provenant_fabric_runtime::graph::GraphError::Extension(reason)
                 | provenant_fabric_runtime::graph::GraphError::Refused(reason) => {
-                    FacadeError::DispatchRefused { reason }
+                    FacadeError::DispatchRefused {
+                        reason,
+                        disk: None,
+                        fact: None,
+                    }
                 }
                 provenant_fabric_runtime::graph::GraphError::PlanChanged => FacadeError::Conflict,
                 provenant_fabric_runtime::graph::GraphError::Journal(error) => {
@@ -5903,6 +6100,8 @@ impl Factory {
                 cancel,
             )
             .map_err(|error| FacadeError::DispatchRefused {
+                fact: None,
+                disk: None,
                 reason: format!("close legacy loop asks: {error}"),
             })?;
             graph_legacy_loop_close(&service, checkpoint, identity.inbox.actor, cancel)?;

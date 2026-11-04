@@ -172,6 +172,7 @@ pub struct Decoded {
 pub struct PrepareRefusal {
     pub message: String,
     pub skipped_routes: Vec<SkippedRoute>,
+    pub fallback_outcome: Option<provenant_records::run::PreparationFailure>,
 }
 impl PrepareRefusal {
     pub fn auth_required(&self) -> bool {
@@ -187,6 +188,7 @@ impl From<String> for PrepareRefusal {
         Self {
             message,
             skipped_routes: Vec::new(),
+            fallback_outcome: None,
         }
     }
 }
@@ -570,7 +572,10 @@ fn child_access_within_impl(
             })
         {
             return Err(RunError::Confinement(if diagnostic {
-                provenant_confinement::permissions::PermissionError::credential_root_at(root, home)
+                provenant_confinement::permissions::PermissionError::CredentialGrant {
+                    path: root.clone(),
+                    access: if read { "read" } else { "write" },
+                }
             } else {
                 provenant_confinement::permissions::PermissionError::CredentialRoot
             }));
@@ -671,9 +676,15 @@ mod release_root_tests {
         let child = parent.clone();
         let error = child_access_with_diagnostic(&parent, &child, &home.join("state"), Some(&home))
             .unwrap_err();
-        let message = error.to_string();
-        assert!(message.contains("~/.gemini/skills"), "{message}");
-        assert!(message.contains("credential root"), "{message}");
+        let local = error.diagnostic(provenant_records::diagnostic::Destination::Local);
+        let remote = error.diagnostic(provenant_records::diagnostic::Destination::Remote {
+            repository: None,
+            home: Some(&home),
+        });
+        assert!(local.detail.unwrap().contains(&root.display().to_string()));
+        let detail = remote.detail.unwrap();
+        assert!(detail.contains("~/.gemini/skills"), "{detail}");
+        assert!(detail.contains("read grant"), "{detail}");
         Ok(())
     }
 
@@ -1424,6 +1435,15 @@ impl RunStore {
                     .transpose()?;
                 // Every launcher, the settling guardian or a later sweep, waits
                 // for the retry's sealed launch time.
+                if record.continuation.as_deref() == Some("policy_fallback") {
+                    let released = prior
+                        .as_ref()
+                        .is_some_and(|prior| self.custody_released(prior, call).unwrap_or(false));
+                    if !released {
+                        started.push(Started::Deferred(id));
+                        continue;
+                    }
+                }
                 let not_before = match &prior {
                     Some(prior) => self
                         .staged_policy_retry(prior)?
@@ -1569,14 +1589,17 @@ impl RunStore {
                         Outcome::Rejected
                     };
                     let reason = refusal.message;
-                    match self.withdraw(
+                    match self.withdraw_with_preparation_failure(
                         id,
-                        AttemptState::Queued {
-                            extra: Default::default(),
+                        crate::store::Withdrawal {
+                            expected: AttemptState::Queued {
+                                extra: Default::default(),
+                            },
+                            outcome,
+                            reason: &reason,
+                            finished_at: now()?,
+                            failure: refusal.fallback_outcome,
                         },
-                        outcome,
-                        &reason,
-                        now()?,
                         call,
                     ) {
                         Ok(Some(_)) => crate::writer::settle_launch_staging(&attempt)?,

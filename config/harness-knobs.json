@@ -31,6 +31,8 @@
   "host_run_settings": {
     "path": "domains.run",
     "settings": {
+      "profile_limit_bytes": {"type": "int", "allowed": "1 or more bytes", "default": "524288", "effect": "Maximum rendered macOS sandbox profile size. Increase for lanes with many grants; profiles pass through argv and may still hit OS limits."},
+      "grant_limit": {"type": "int", "allowed": "1 or more", "default": "128", "effect": "Maximum total plan roots and maximum entries in each provider grant family. Increase for lanes needing more roots."},
       "projects.{project}.writer_writes": {"type": "string_list", "allowed": "up to 16 absolute, safe directory paths outside credential roots", "default": "host writer_writes", "effect": "Replace the host writer_writes list for this project; an empty list grants no host-configured writer roots. Origin: host configuration [domains.run.projects.<project ID>]."}
     }
   },
@@ -128,6 +130,25 @@
         "allowed": "discover or off",
         "default": "discover",
         "effect": "Discover host user skills for lanes read-only. off disables host user skill discovery unless overridden by domains.lanes.projects.{project_id}.user_skills or route policy lane.user_skills. Route policy wins over project, then host. Inspect value, default and origin with config show or config schema."
+      },
+      "skill_stage_max_bytes": {
+        "type": "int",
+        "allowed": "bytes, 0 or more",
+        "min": 0,
+        "default": 16777216,
+        "effect": "Maximum bytes copied into an attempt's read-only user skill tree. Content exceeding the bound is skipped with a warning. Inspect value and origin with config show."
+      },
+      "projects.{project}.shared_paths": {
+        "type": "string_list",
+        "allowed": "existing absolute, ~/ or checkout-relative paths",
+        "default": [],
+        "effect": "Existing paths shared read-write with this project's writers. Absolute, ~/ and primary-checkout-relative paths are accepted. Git, credential, protected and executable paths are omitted with a warning. Read-only lanes receive no additional writes."
+      },
+      "projects.{project}.exec_roots": {
+        "type": "string_list",
+        "allowed": "directory paths relative to the primary checkout",
+        "default": [],
+        "effect": "Read-and-execute directory subtrees relative to the primary checkout. Entries escaping that checkout, missing, protected, credential or writable targets are ignored with a warning naming the configuration key."
       }
     }
   },
@@ -178,6 +199,12 @@
         "host_only": true,
         "status": "wired",
         "effect": "Host-owned exact executable path and signing team_id (or platform) exceptions for actual cwd EPERM. All real/effective/saved uids must be system accounts foreign to every root owner; platform entries also require a root-owned chain with no group/other write permission. Listed executables may occupy a worktree. Invalid/unreadable signing state never qualifies. Not accepted through dispatch --knob or Fabric overrides."
+    },
+    "routing.allow_unknown_partial_headroom": {
+      "type": "bool", "default": false, "strict": true, "host_only": true, "status": "wired",
+      "reader": "tools/front-door/crates/cli/src/route.rs",
+      "effect": "Allow uncalibrated partial quota headroom below the limit.",
+      "trade_off": "Partial coverage cannot prove remaining allowance; exhausted lower bounds still block selection."
     },
     "routing.workload": {
       "type": "enum", "values": ["general", "read_heavy", "edit_heavy", "review"], "default": "general", "status": "wired",

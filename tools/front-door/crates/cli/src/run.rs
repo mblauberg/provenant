@@ -92,7 +92,8 @@ pub struct Fail {
     pub kind: ErrorKind,
     pub message: String,
     /// Safe typed detail retained for the MCP edge, without raw source errors.
-    pub detail: Option<provenant_fabric_runtime::coordination::facade::FacadeError>,
+    pub detail: Option<Box<provenant_fabric_runtime::coordination::facade::FacadeError>>,
+    pub projection: Option<Box<provenant_records::diagnostic::Diagnostic>>,
 }
 impl Fail {
     fn new(status: Status, kind: ErrorKind, message: impl Into<String>) -> Self {
@@ -101,69 +102,35 @@ impl Fail {
             kind,
             message: message.into(),
             detail: None,
+            projection: None,
         }
     }
 }
 impl From<run::RunError> for Fail {
     fn from(error: run::RunError) -> Self {
-        use provenant_fabric_runtime::coordination::facade::FacadeError;
-        let detail = match &error {
-            run::RunError::Delivery(_)
-            | run::RunError::DeliveryPrepare { .. }
-            | run::RunError::DeliveryLimit { .. } => Some(FacadeError::HostDeliveryIo {
-                reason: error.to_string(),
-            }),
-            run::RunError::GenerationConflict { current_generation } => {
-                Some(FacadeError::GenerationConflict {
-                    current_generation: *current_generation,
-                })
-            }
-            run::RunError::WorktreeUnregistered(path) => Some(FacadeError::WorktreeUnregistered {
-                path: path.to_string_lossy().into_owned(),
-            }),
-            run::RunError::Filesystem(error) | run::RunError::Publication(error) => {
-                Some(FacadeError::filesystem(error))
-            }
-            run::RunError::OperationIo {
-                operation, path, ..
-            } => Some(FacadeError::Io {
-                operation: (*operation).into(),
-                path: path
-                    .as_ref()
-                    .filter(|path| path.is_absolute())
-                    .map(|path| path.to_string_lossy().into_owned()),
-            }),
-            _ => None,
-        };
         let kind = ErrorKind::from(&error);
-        let status = match kind {
-            ErrorKind::Invalid
-            | ErrorKind::OperationConflict
-            | ErrorKind::NotFound
-            | ErrorKind::WorktreeMissing => Status::Invalid,
-            ErrorKind::WorktreeUnregistered
-            | ErrorKind::Refused
-            | ErrorKind::WriterScope
-            | ErrorKind::WriterProjectMismatch
-            | ErrorKind::Confinement
-            | ErrorKind::DiskFloor
-            | ErrorKind::MemoryPressure
-            | ErrorKind::LaneCap
-            | ErrorKind::BuildSettings
-            | ErrorKind::GuardianIdentity
-            | ErrorKind::Nonterminal
-            | ErrorKind::ProviderStateExpired
-            | ErrorKind::Conflict
-            | ErrorKind::LaneDepth
-            | ErrorKind::QueueFull
-            | ErrorKind::SecretInput
-            | ErrorKind::Unsupported
-            | ErrorKind::ContinuationUnsupported => Status::Refused,
+        let projection = error.diagnostic(provenant_records::diagnostic::Destination::Local);
+        let message = projection.detail.as_ref().map_or_else(
+            || kind.summary().to_owned(),
+            |detail| {
+                if matches!(
+                    error,
+                    run::RunError::Delivery(_) | run::RunError::DeliveryLimit { .. }
+                ) {
+                    detail.clone()
+                } else {
+                    format!("{} {detail}", kind.summary())
+                }
+            },
+        );
+        let status = match kind.category() {
+            "invalid" => Status::Invalid,
+            "refused" => Status::Refused,
             _ => Status::Error,
         };
         Self {
-            detail,
-            ..Self::new(status, kind, error.to_string())
+            projection: Some(Box::new(projection)),
+            ..Self::new(status, kind, message)
         }
     }
 }
@@ -197,10 +164,14 @@ fn reply(command: &str, outcome: Result<(Value, String), Fail>) -> Reply {
         Err(fail) => {
             let mut result = CommandResult::new(command, fail.status, Value::Null);
             result.error = Some(CommandError {
+                diagnostic: fail.projection.as_deref().map(Into::into),
                 code: fail.kind.code().into(),
                 message: fail.message,
-                cause: None,
-                repair: None,
+                cause: fail
+                    .projection
+                    .as_ref()
+                    .and_then(|projection| projection.detail.clone()),
+                repair: fail.projection.and_then(|projection| projection.next),
             });
             Reply {
                 result,
@@ -335,18 +306,12 @@ impl run::Providers for Registry<'_> {
                     .map_err(|error| error.to_string())
             })
             .transpose()?;
-        let (routing, accounts, quota, quota_settings) = match context_roots.as_ref().or(self.roots)
-        {
+        let routing = match context_roots.as_ref().or(self.roots) {
             Some(roots) => {
-                let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-                    .map_err(|error| error.to_string())?;
-                (
-                    config.domains.routing,
-                    config.domains.accounts.with_derived_accounts(),
-                    // Unreadable quota is unknown, and unknown is not spent.
-                    crate::quota::read_cache_at(roots.state.as_path()).unwrap_or_default(),
-                    config.domains.quota,
-                )
+                provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+                    .map_err(|error| error.to_string())?
+                    .domains
+                    .routing
             }
             None => Default::default(),
         };
@@ -368,35 +333,54 @@ impl run::Providers for Registry<'_> {
         if assessment.refusal.is_some() || assessment.retry.is_some() {
             return Ok(assessment);
         }
-        let catalogue =
-            provenant_routing::Catalogue::bundled().map_err(|error| error.to_string())?;
-        // The same calibrated records and configured polling intervals that
-        // resolution and the admission recheck read.
-        let (quota, policies) =
-            crate::route::account_evidence(&quota_settings, quota, now.unix_seconds());
-        let other_account = |adapter: &str, key: &str| {
-            unspent_alternative(
-                accounts
-                    .entries
-                    .values()
-                    .filter(|entry| entry.adapter == adapter)
-                    .map(|entry| entry.key.as_str()),
-                &quota,
-                &policies,
-                key,
-                &model,
-                &catalogue,
-                now.unix_seconds(),
-            )
-        };
+        // A quota-stopped writer with a recorded unfinished handoff may
+        // continue its retained worktree on another eligible account.
+        let quota_handoff_recovery =
+            if quota_handoff_recovery_eligible(decoded.outcome, task, handoff) {
+                if let (Some(roots), Some(adapter), Some(key)) = (
+                    context_roots.as_ref().or(self.roots),
+                    route.provider.as_deref(),
+                    route.account_key.as_deref(),
+                ) {
+                    let config =
+                        provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+                            .map_err(|error| error.to_string())?;
+                    let accounts = config.domains.accounts.with_derived_accounts();
+                    let quota =
+                        crate::quota::read_cache_at(roots.state.as_path()).unwrap_or_default();
+                    let (quota, policies) = crate::route::account_evidence(
+                        &config.domains.quota,
+                        quota,
+                        now.unix_seconds(),
+                    );
+                    let catalogue = provenant_routing::Catalogue::bundled()
+                        .map_err(|error| error.to_string())?;
+                    unspent_alternative(
+                        accounts
+                            .entries
+                            .values()
+                            .filter(|entry| entry.adapter == adapter)
+                            .map(|entry| entry.key.as_str()),
+                        &quota,
+                        &policies,
+                        key,
+                        &model,
+                        &catalogue,
+                        now.unix_seconds(),
+                    )
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
         Ok(assess_settlement_retry(
             &routing,
-            other_account,
-            task,
             record,
             decoded,
             policy_attempt,
             now.unix_seconds(),
+            quota_handoff_recovery,
         ))
     }
     fn priority(&self, task: &run::TaskRequest) -> Result<u8, String> {
@@ -961,6 +945,7 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
     Ok(provenant_routing::RouteRequest {
         intent: provenant_routing::RouteIntent {
             writes: run::Service::has_writes(task.writer.is_some(), &task.access.write_roots),
+            network: Some(task.access.network(task.writer.is_some())),
             workload: if matches!(task.route, run::RequestedRoute::Review { .. }) {
                 provenant_routing::Workload::Review
             } else {

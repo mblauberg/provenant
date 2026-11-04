@@ -435,6 +435,12 @@ with its meaning, in `ErrorKind`; `help --all --json` lists them under
 renders that list. Tests assert the code and stable identifiers such as a
 configuration key or repair command, never message prose. Other owners and
 per-attempt launch refusals still use coarser codes.
+
+Run refusals may include `category`, `detail` and `next` alongside the
+established error envelope. These are bounded, terminal-safe facts selected by
+the owner. The local CLI can name an absolute worktree or refused grant;
+remote diagnostics need a repository or home anchor or use an inspection
+action. A writer with unknown custody remains refused until custody is checked.
 - Why: agents and tests act on the code, and a reworded message must break
   neither.
 - Test: `crates/run/src/service_tests.rs::each_refusal_has_its_own_stable_code`;

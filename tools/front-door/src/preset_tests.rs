@@ -489,6 +489,159 @@ fn bundled_role_presets_have_bounded_nested_graphs() {
 }
 
 #[test]
+fn require_findings_nodes_instruct_a_findings_block() {
+    fn walk(nodes: &[Value], preset: &str) {
+        for node in nodes {
+            if node["require_findings"] == true {
+                let typed: provenant_fabric_runtime::graph::GraphNode =
+                    serde_json::from_value(node.clone()).unwrap();
+                let rendered = provenant_fabric_runtime::graph::rendered_prompt(&typed);
+                let prompt = rendered.as_str();
+                assert!(
+                    prompt.contains("```findings"),
+                    "{preset}: {} lacks findings fence",
+                    node["id"]
+                );
+                assert!(
+                    prompt.contains("{\"schema_version\":1,\"findings\":[]}"),
+                    "{preset}: {} lacks empty findings form",
+                    node["id"]
+                );
+            }
+            for key in ["composite", "loop"] {
+                for child_key in ["nodes", "body"] {
+                    if let Some(children) = node
+                        .pointer(&format!("/{key}/{child_key}"))
+                        .and_then(Value::as_array)
+                    {
+                        walk(children, preset);
+                    }
+                }
+            }
+            if let Some(nodes) = node
+                .pointer("/plan/fallback/nodes")
+                .and_then(Value::as_array)
+            {
+                walk(nodes, preset);
+            }
+            for pattern in node
+                .pointer("/plan/patterns")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(nodes) = pattern.get("nodes").and_then(Value::as_array) {
+                    walk(nodes, preset);
+                }
+            }
+        }
+    }
+    for name in [
+        "scout-swarm",
+        "generator-evaluator",
+        "review-council",
+        "big-batch",
+        "scope-then-run",
+        "deliver",
+    ] {
+        let expanded = expand(&Layers::empty(), name, "approved brief", &[]).unwrap();
+        walk(expanded.document["nodes"].as_array().unwrap(), name);
+    }
+}
+
+#[test]
+fn explain_pending_checks_follow_the_document() {
+    let cases = [
+        (
+            json!({"nodes":[{"id":"read","access":"read_only","prompt":"x"}]}),
+            vec!["route_readiness"],
+        ),
+        (
+            json!({"delivery":"integrate:main","nodes":[{"id":"write","access":"worktree_write","worktree":"/repo/w","prompt":"x"}]}),
+            vec!["delivery_target", "route_readiness", "worktree"],
+        ),
+        (
+            json!({"nodes":[{"id":"upstream","access":"read_only","prompt":"x"},{"id":"downstream","access":"read_only","prompt":"y","source":{"type":"node","node":"upstream"},"inputs":[{"node":"upstream","outputs":["result"]}]}]}),
+            vec!["route_readiness", "source"],
+        ),
+        (
+            json!({"nodes":[{"id":"plan","kind":"plan","access":"read_only","prompt":"x"}]}),
+            vec!["planner_authority", "route_readiness"],
+        ),
+    ];
+    for (document, expected) in cases {
+        let checks = super::preset::pending_checks(&document);
+        let ids: Vec<_> = checks
+            .iter()
+            .filter_map(|check| check["id"].as_str())
+            .collect();
+        assert_eq!(ids, expected);
+        assert!(checks.iter().all(|check| {
+            check["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.lines().count() == 1)
+        }));
+    }
+}
+
+#[test]
+fn admission_preset_version_follows_document() {
+    for name in [
+        "scout-swarm",
+        "generator-evaluator",
+        "review-council",
+        "big-batch",
+        "scope-then-run",
+        "deliver",
+    ] {
+        let document = bundled_fixture(name);
+        let raw: Value = serde_json::to_value(&document).unwrap();
+        document
+            .admit(&provenant_fabric_runtime::config::GraphConfig::default().limits)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let raw_document: provenant_fabric_runtime::graph::GraphDocument =
+            serde_json::from_value(raw).unwrap();
+        assert_eq!(
+            document.admit(&Default::default()),
+            raw_document.admit(&Default::default()),
+            "{name}"
+        );
+        assert_eq!(document.schema_version, 1, "{name}");
+    }
+    let mut review = expand(
+        &real_selector("/nonexistent"),
+        "deliver",
+        "approved brief",
+        &[
+            "parameters.worktree='/repo/w'".into(),
+            "parameters.base='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'".into(),
+        ],
+    )
+    .unwrap();
+    pin_fixture_sources(&mut review.document);
+    let review_doc: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(review.document.clone()).unwrap();
+    assert_eq!(review_doc.schema_version, 2);
+    review_doc
+        .admit(&provenant_fabric_runtime::config::GraphConfig::default().limits)
+        .unwrap();
+    let raw: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(review.document).unwrap();
+    assert_eq!(
+        review_doc.admit(&Default::default()),
+        raw.admit(&Default::default())
+    );
+    let raw_v2: provenant_fabric_runtime::graph::GraphDocument = serde_json::from_value(json!({
+        "schema_version":2,"graph_id":"raw-v2","nodes":[{"id":"task","access":"read_only","prompt":"x"}]
+    })).unwrap();
+    assert_eq!(raw_v2.schema_version, 2);
+    assert_eq!(
+        provenant_fabric_runtime::graph::minimum_schema_version(&raw_v2),
+        1
+    );
+}
+
+#[test]
 fn implementer_and_scope_briefs_carry_the_authority_envelope() {
     let mut expanded = expand(
         &Layers::empty(),
@@ -2745,8 +2898,10 @@ fn generator_evaluator_ends_with_an_evaluator_over_the_lens_list() {
     assert_eq!(route(evaluate)["alias"], "principal");
     assert_eq!(evaluate["source"]["node"], "implement");
     assert_eq!(evaluate["review_base"], "main");
+    let mut fixture = expanded.document.clone();
+    pin_fixture_sources(&mut fixture);
     let document: provenant_fabric_runtime::graph::GraphDocument =
-        serde_json::from_value(expanded.document.clone()).unwrap();
+        serde_json::from_value(fixture).unwrap();
     let graph = document
         .expanded(&provenant_fabric_runtime::config::GraphLimits::default())
         .unwrap();
@@ -3374,9 +3529,12 @@ prompt = "Look at ${prompt}"
             "stages = [{ id = \"inner\", preset = \"typed\" }]",
         )
         .unwrap();
-    let error = expand(&layers, "outer", "brief", &[]).err().unwrap();
+    let expansion = expand(&layers, "outer", "brief", &[]).unwrap();
+    let document: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(expansion.document).unwrap();
+    let error = document.admit(&Default::default()).unwrap_err();
     assert!(error.contains("look"), "{error}");
-    assert!(error.contains("composite"), "{error}");
+    assert!(error.contains("inner"), "{error}");
     assert!(error.contains("commit"), "{error}");
 }
 
@@ -3389,19 +3547,26 @@ fn selection(stages: &str) -> Result<Expansion, String> {
             &format!("stages = {stages}\n[roles.scout]\nprompt = \"Look at ${{prompt}}\""),
         )
         .unwrap();
-    expand(&layers, "sel", "brief", &[])
+    let expansion = expand(&layers, "sel", "brief", &[])?;
+    let document: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(expansion.document.clone()).map_err(|error| error.to_string())?;
+    document.admit(&Default::default())?;
+    Ok(expansion)
 }
 
 #[test]
 fn composite_children_inherit_the_pinned_source_for_commit() {
-    let pinned = r#"[{ id = "grp", source = { type = "commit", commit = "abc" },
+    let pinned = r#"[{ id = "grp", source = { type = "commit", commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
         stages = [{ id = "look", role = "scout" }],
         exports = [{ node = "look", outputs = ["commit"] }] }]"#;
     selection(pinned).unwrap();
-    let error = selection(&pinned.replace("source = { type = \"commit\", commit = \"abc\" },", ""))
-        .err()
-        .unwrap();
-    assert!(error.contains("commit from look"), "{error}");
+    let error = selection(&pinned.replace(
+        "source = { type = \"commit\", commit = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" },",
+        "",
+    ))
+    .err()
+    .unwrap();
+    assert!(error.contains("commit from grp--look"), "{error}");
 }
 
 #[test]
@@ -3413,23 +3578,23 @@ fn selections_resolve_against_enclosing_scopes_and_branch_needs_a_writer() {
     .err()
     .unwrap();
     assert!(
-        error.contains("node x selects commit from scope"),
+        error.contains("node run--x selects commit from scope"),
         "{error}"
     );
     let error = selection(
-        r#"[{ id = "grp", source = { type = "commit", commit = "abc" },
+        r#"[{ id = "grp", source = { type = "commit", commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
         stages = [{ id = "look", role = "scout" }],
         exports = [{ node = "look", outputs = ["branch"] }] }]"#,
     )
     .err()
     .unwrap();
-    assert!(error.contains("branch from look"), "{error}");
+    assert!(error.contains("branch from grp--look"), "{error}");
 }
 
 #[test]
 fn loops_supply_no_commit_or_branch() {
     let error = selection(
-        r#"[{ id = "again", loop = { stages = [{ id = "look", role = "scout" }], until = "look", max_rounds = 2 } },
+        r#"[{ id = "again", loop = { stages = [{ id = "look", role = "scout" }, { id = "accept", kind = "gate", condition = { type = "budget" } }], until = "accept", max_rounds = 2 } },
         { id = "after", role = "scout", inputs = [{ node = "again", outputs = ["commit"] }] }]"#,
     )
     .err()
@@ -3441,11 +3606,12 @@ fn loops_supply_no_commit_or_branch() {
 fn previous_round_selections_resolve_against_the_loop_body() {
     let error = selection(
         r#"[{ id = "again", loop = { stages = [{ id = "look", role = "scout" },
-        { id = "fix", role = "scout", inputs = [{ node = "previous.look", outputs = ["commit"] }] }], until = "look", max_rounds = 2 } }]"#,
+        { id = "fix", role = "scout", inputs = [{ node = "previous.look", outputs = ["commit"] }] }, { id = "accept", kind = "gate", condition = { type = "budget" } }], until = "accept", max_rounds = 2 } }]"#,
     )
     .err()
     .unwrap();
-    assert!(error.contains("commit from look"), "{error}");
+    assert!(error.contains("commit from again--r1--look"), "{error}");
+    assert!(error.contains("again--r2--fix"), "{error}");
 }
 
 mod planner_front_end {

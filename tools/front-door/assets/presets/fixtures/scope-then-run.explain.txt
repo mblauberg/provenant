@@ -1,7 +1,13 @@
 Graph <id>
+Admission: {"status":"admitted"}
+Inspection: {"dependency_depth":9,"edges":19,"limit_reason":null,"max_attempts":15,"nodes":13,"prompt_bytes":8970}
 Preset selection: scope-then-run (override)
 Review shape: standard (default; size=pending (measured at review launch); kind=unknown; risk=unknown)
 plan: off -> off (planning turned off)
+Pending "planner_authority": "Planner authority is checked when the plan runs."
+Pending "route_readiness": "Route readiness and quota are checked before launch."
+Pending "source": "Source binding must be resolved and verified at execution."
+Pending "worktree": "Writer worktree ownership is checked at execution."
 scout  role=- tier=- family=any kind=composite access=read_only worktree=-
   scouts  role=- tier=- family=any kind=composite access=read_only worktree=-
     scout-1  role=scout.codebase tier=junior family=any kind=- access=read_only worktree=-

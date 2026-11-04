@@ -596,6 +596,9 @@ error_kinds! {
     Timeout => "TIMEOUT", "The wait budget expired.";
     Peer => "PEER", "The peer host returned an error.";
     WriterScope => "WRITER_SCOPE", "The writer worktree scope was refused.";
+    WriterBusy => "WRITER_BUSY", "The writer or its lock is held by another operation.";
+    WriterUnknown => "WRITER_UNKNOWN", "Writer custody could not be determined.";
+    CredentialRoot => "CREDENTIAL_ROOT", "A requested grant overlaps a credential root.";
     WriterProjectMismatch => "WRITER_PROJECT_MISMATCH", "The writer worktree belongs to a different project than the selected one.";
     Confinement => "CONFINEMENT", "Confinement refused the requested access.";
     DiskFloor => "DISK_FLOOR", "Free disk space is below gc.free_floor; run `provenant gc --apply`.";
@@ -608,6 +611,54 @@ error_kinds! {
     WriterRefLocked => "WRITER_REF_LOCKED", "A writer Git ref lock already exists.";
     ObjectImportLimit => "OBJECT_IMPORT_LIMIT", "A lane's Git object import exceeded its limits.";
 }
+impl ErrorKind {
+    /// Stable category shared by the output adapters.
+    pub const fn category(self) -> &'static str {
+        match self {
+            Self::Invalid | Self::OperationConflict | Self::NotFound | Self::WorktreeMissing => {
+                "invalid"
+            }
+            Self::WorktreeUnregistered
+            | Self::Refused
+            | Self::WriterScope
+            | Self::WriterBusy
+            | Self::WriterUnknown
+            | Self::CredentialRoot
+            | Self::WriterProjectMismatch
+            | Self::Confinement
+            | Self::DiskFloor
+            | Self::MemoryPressure
+            | Self::LaneCap
+            | Self::BuildSettings
+            | Self::GuardianIdentity
+            | Self::Nonterminal
+            | Self::ProviderStateExpired
+            | Self::Conflict
+            | Self::LaneDepth
+            | Self::QueueFull
+            | Self::SecretInput
+            | Self::Unsupported
+            | Self::ContinuationUnsupported => "refused",
+            _ => "error",
+        }
+    }
+
+    /// The hard boundary this code protects; non-boundary failures remain typed.
+    pub const fn boundary_class(self) -> provenant_records::diagnostic::BoundaryClass {
+        use provenant_records::diagnostic::BoundaryClass as B;
+        match self {
+            Self::CredentialRoot => B::Credentials,
+            Self::ObjectImportLimit | Self::StateCorrupt => B::Integrity,
+            Self::WriterRefLocked => B::LaneGit,
+            Self::WriterScope
+            | Self::WriterBusy
+            | Self::WriterUnknown
+            | Self::WriterProjectMismatch
+            | Self::LaneCoordinationRefused => B::Authority,
+            _ => B::None,
+        }
+    }
+}
 impl From<&RunError> for ErrorKind {
     fn from(error: &RunError) -> Self {
         match error {
@@ -616,7 +667,23 @@ impl From<&RunError> for ErrorKind {
             RunError::WorktreeMissing(_) => Self::WorktreeMissing,
             RunError::WorktreeUnregistered(_) => Self::WorktreeUnregistered,
             RunError::WriterProjectMismatch { .. } => Self::WriterProjectMismatch,
+            RunError::Writer(
+                provenant_confinement::worktrees::WorktreeError::LockBusy
+                | provenant_confinement::worktrees::WorktreeError::LiveWriter
+                | provenant_confinement::worktrees::WorktreeError::WriterBusy { .. },
+            ) => Self::WriterBusy,
+            RunError::Writer(
+                provenant_confinement::worktrees::WorktreeError::UnknownWriter
+                | provenant_confinement::worktrees::WorktreeError::UnknownWriterAt { .. }
+                | provenant_confinement::worktrees::WorktreeError::CensusUnknown { .. }
+                | provenant_confinement::worktrees::WorktreeError::IncompleteCensus { .. },
+            ) => Self::WriterUnknown,
             RunError::Writer(_) => Self::WriterScope,
+            RunError::Confinement(
+                provenant_confinement::permissions::PermissionError::CredentialRoot
+                | provenant_confinement::permissions::PermissionError::CredentialRootAt { .. }
+                | provenant_confinement::permissions::PermissionError::CredentialGrant { .. },
+            ) => Self::CredentialRoot,
             RunError::Confinement(_) => Self::Confinement,
             RunError::Refused => Self::Refused,
             RunError::Admission(AdmissionError::Disk { .. }) => Self::DiskFloor,

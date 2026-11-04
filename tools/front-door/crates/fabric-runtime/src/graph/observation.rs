@@ -23,14 +23,56 @@ pub enum AttemptOutcome {
     DeadlineExceeded,
 }
 
-impl AttemptOutcome {
-    /// Only these three typed terminal results advance to the next route.
-    pub(super) fn allows_route_fallback(self, access: AccessMode, launched: bool) -> bool {
-        matches!(
-            self,
-            Self::AuthRequired | Self::UsageLimited | Self::AdapterUnavailable
-        ) && (!launched || access == AccessMode::ReadOnly)
+fn routing_outcome(outcome: AttemptOutcome) -> provenant_routing::FallbackOutcome {
+    match outcome {
+        AttemptOutcome::AuthRequired => provenant_routing::FallbackOutcome::AuthRequired,
+        AttemptOutcome::UsageLimited => provenant_routing::FallbackOutcome::UsageLimited,
+        AttemptOutcome::AdapterUnavailable => {
+            provenant_routing::FallbackOutcome::AdapterUnavailable
+        }
+        _ => provenant_routing::FallbackOutcome::Other,
     }
+}
+
+/// Legacy checkpoint validation accepts the historical rule, never as launch authority.
+pub(super) fn historical_fallback_admissible(
+    outcome: AttemptOutcome,
+    access: AccessMode,
+    launched: bool,
+) -> bool {
+    provenant_routing::historical_fallback_admissible(
+        routing_outcome(outcome),
+        access == AccessMode::WorktreeWrite,
+        launched,
+    )
+}
+
+pub(super) fn live_fallback_allowed(
+    outcome: AttemptOutcome,
+    launched: bool,
+    evidence: Option<provenant_records::run::PreparationFailure>,
+) -> bool {
+    use provenant_records::run::PreparationFailure;
+    if launched {
+        return false;
+    }
+    let expected = match evidence {
+        Some(PreparationFailure::AuthRequired) => provenant_routing::FallbackOutcome::AuthRequired,
+        Some(PreparationFailure::UsageLimited) => provenant_routing::FallbackOutcome::UsageLimited,
+        Some(PreparationFailure::AdapterUnavailable) => {
+            provenant_routing::FallbackOutcome::AdapterUnavailable
+        }
+        None => return false,
+    };
+    expected == routing_outcome(outcome)
+        && provenant_routing::FallbackPolicy {
+            outcome: expected,
+            handoff: provenant_routing::FallbackHandoff::Local,
+            custody_released: true,
+            budget_remaining: true,
+            pinned: false,
+        }
+        .allows_switch()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,4 +92,39 @@ pub enum AttemptObservation {
         branch: Option<String>,
         commit: Option<String>,
     },
+}
+
+#[cfg(test)]
+mod fallback_evidence_tests {
+    use super::*;
+    use provenant_records::run::PreparationFailure;
+
+    #[test]
+    fn contradictory_or_wrong_scope_evidence_cannot_switch() {
+        assert!(live_fallback_allowed(
+            AttemptOutcome::AuthRequired,
+            false,
+            Some(PreparationFailure::AuthRequired)
+        ));
+        assert!(!live_fallback_allowed(
+            AttemptOutcome::AuthRequired,
+            true,
+            Some(PreparationFailure::AuthRequired)
+        ));
+        assert!(!live_fallback_allowed(
+            AttemptOutcome::UsageLimited,
+            false,
+            Some(PreparationFailure::AuthRequired)
+        ));
+        assert!(!live_fallback_allowed(
+            AttemptOutcome::TaskFailed,
+            false,
+            Some(PreparationFailure::AuthRequired)
+        ));
+        assert!(!live_fallback_allowed(
+            AttemptOutcome::AuthRequired,
+            false,
+            None
+        ));
+    }
 }

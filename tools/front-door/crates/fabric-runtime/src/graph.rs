@@ -38,6 +38,11 @@ mod outputs;
 mod pattern_plan;
 mod plans;
 mod validation;
+#[doc(hidden)]
+pub use plans::prompt as rendered_prompt;
+pub use validation::minimum_schema_version;
+#[cfg(test)]
+mod admission_tests;
 use budget::*;
 pub use journal::*;
 pub use model::*;
@@ -148,6 +153,16 @@ pub enum ReviewResolveError {
 
 pub trait AttemptOwner {
     type Error: Error + 'static;
+
+    /// Re-read host-owned proof of a pre-custody preparation refusal and
+    /// released custody. Missing or unverifiable proof never authorizes a route.
+    fn preparation_fallback_evidence(
+        &mut self,
+        _key: &AttemptKey,
+        _reference: &str,
+    ) -> Result<Option<provenant_records::run::PreparationFailure>, Self::Error> {
+        Ok(None)
+    }
 
     /// Resolve a deferred review; hosts without support fail closed.
     fn resolve_review(
@@ -571,30 +586,17 @@ fn launch_retry_kind(error: &(dyn Error + 'static)) -> bool {
             | FacadeError::HomeUnavailable
             | FacadeError::Io { .. }
             | FacadeError::DispatchUnobserved { .. }
-            | FacadeError::HostDeliveryIo { .. }
+            | FacadeError::HostDeliveryStage { .. }
+            | FacadeError::HostDeliveryLimit { .. }
             | FacadeError::LaunchUnknown { .. }
     )
 }
 
-/// A permanent refusal's remedy, as recorded for status beside the reason.
-fn launch_remedy(error: &(dyn Error + 'static), graph_id: &str) -> String {
-    use crate::coordination::facade::FacadeError;
-    if error.downcast_ref::<FacadeError>().is_some_and(|error| {
-        matches!(
-            error,
-            FacadeError::ConfinementRefused
-                | FacadeError::LaneDepth
-                | FacadeError::LaneCoordinationRefused
-        )
-    }) {
-        format!(
-            "check the host's capacity and the access the node declares; fix the cause, cancel this graph with `provenant fabric graph cancel {graph_id}`, then rerun the document under a new graph_id"
-        )
-    } else {
-        format!(
-            "fix the node's route, worktree or inputs in the graph document, cancel this graph with `provenant fabric graph cancel {graph_id}`, then rerun the document under a new graph_id"
-        )
-    }
+fn launch_diagnostic(error: &(dyn Error + 'static)) -> provenant_records::diagnostic::Diagnostic {
+    error
+        .downcast_ref::<crate::coordination::facade::FacadeError>()
+        .map(crate::coordination::facade::FacadeError::diagnostic)
+        .unwrap_or_else(|| provenant_records::diagnostic::Diagnostic::new("launch_failed"))
 }
 
 /// Apply a persisted disposition to a node whose launch errored while its
@@ -637,13 +639,18 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
             retry.wake_at = DurationMicros::from_seconds(delay.as_secs())
                 .ok()
                 .and_then(|duration| now.checked_add(duration).ok());
-            retry.reason = Some(bounded(&error.to_string(), MAX_ADVANCE_ERROR_BYTES));
+            let projected = launch_diagnostic(error);
+            retry.reason = Some(bounded(
+                projected.detail.as_deref().unwrap_or(&projected.code),
+                MAX_ADVANCE_ERROR_BYTES,
+            ));
             asks::refresh_wake(checkpoint);
             return journal.save(checkpoint).map_err(GraphError::Journal);
         }
     }
     // A permanent refusal, or a retry budget spent: block the node with the
     // reason and a remedy, and keep the refusal visible in graph status.
+    let graph_id = checkpoint.graph_id.clone();
     let progress = &mut checkpoint.nodes[index];
     let id = &progress.id;
     let code = if retrying {
@@ -652,10 +659,39 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
         "launch_refused"
     };
     progress.advance_error_code = Some(code.into());
-    progress.advance_error = Some(format!(
-        "node {id}: the launch failed: {}; {}",
-        bounded(&error.to_string(), MAX_ADVANCE_ERROR_BYTES),
-        launch_remedy(error, &checkpoint.graph_id)
+    let projected = launch_diagnostic(error);
+    let detail = projected.detail.as_deref().unwrap_or(&projected.code);
+    let action = projected
+        .next
+        .as_deref()
+        .unwrap_or("inspect the node's inputs and state before retrying");
+    let error: &(dyn Error + 'static) = error;
+    let recovery = if error
+        .downcast_ref::<crate::coordination::facade::FacadeError>()
+        .is_some_and(|e| {
+            matches!(
+                e,
+                crate::coordination::facade::FacadeError::LaunchUnknown { .. }
+            )
+        }) {
+        String::new()
+    } else if graph_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    {
+        format!(
+            "; after correcting the cause, cancel with `provenant fabric graph cancel {graph_id}` and rerun with a new graph_id"
+        )
+    } else {
+        "; inspect and cancel the graph before rerunning with a new graph_id".into()
+    };
+    progress.advance_error = Some(bounded(
+        &format!(
+            "node {}: the launch failed [{}]: {detail}; {action}{recovery}",
+            provenant_records::diagnostic::safe_text(id),
+            projected.code
+        ),
+        MAX_ADVANCE_ERROR_BYTES,
     ));
     progress.state = NodeState::Blocked;
     // Keep the attempt row even when launch handoff is uncertain. A guardian
@@ -797,6 +833,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         routes_per_node: u16::MAX as usize,
         node_prompt_bytes: usize::MAX,
         graph_prompt_bytes: usize::MAX,
+        fan_out_width: usize::MAX,
+        expansion_depth: usize::MAX,
         ..limits.clone()
     };
     let mut stored = journal
@@ -812,8 +850,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
     }
     let stored_extensions = stored.as_ref().map_or(&[][..], |c| c.extensions.as_slice());
-    let (base, _) = validate_plan_with_limits(document, &unbounded)
-        .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
+    let (base, _) = if stored.is_some() {
+        validate_replay_plan(document, &unbounded)
+    } else {
+        validate_plan_with_limits(document, &unbounded)
+    }
+    .map_err(GraphError::Invalid)?;
     let mut expanded = plans::expand(
         document,
         stored_extensions,
@@ -1529,9 +1571,25 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     }
                     Some(last)
                         if last.outcome.is_some_and(|outcome| {
-                            outcome.allows_route_fallback(node.access, last.launched)
+                            historical_fallback_admissible(outcome, node.access, last.launched)
                         }) =>
                     {
+                        let Some(outcome) = last.outcome else { break };
+                        let evidence = last.attempt_ref.as_deref().and_then(|reference| {
+                            owner
+                                .preparation_fallback_evidence(&last.key, reference)
+                                .ok()
+                                .flatten()
+                        });
+                        if !live_fallback_allowed(outcome, last.launched, evidence) {
+                            let progress = &mut checkpoint.nodes[node_index];
+                            progress.state = NodeState::Failed;
+                            progress.advance_error_code =
+                                Some("fallback_evidence_unavailable".into());
+                            progress.advance_error = Some("Cannot verify local preparation and released custody for route fallback.".into());
+                            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                            break;
+                        }
                         progress.attempts.len()
                     }
                     Some(_) => break,
@@ -2011,6 +2069,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     }
                     Err(error) => return Err(GraphError::Run(error)),
                 };
+                let fallback_evidence = match &observation {
+                    AttemptObservation::Terminal {
+                        attempt_ref: Some(reference),
+                        ..
+                    } => owner
+                        .preparation_fallback_evidence(&key, reference)
+                        .ok()
+                        .flatten(),
+                    _ => None,
+                };
                 let mut usage_error = None;
                 let mut cost_error = None;
                 let usage = if let AttemptObservation::Terminal {
@@ -2276,7 +2344,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 AttemptOutcome::AuthRequired
                                 | AttemptOutcome::UsageLimited
                                 | AttemptOutcome::AdapterUnavailable => {
-                                    if !outcome.allows_route_fallback(node.access, launched)
+                                    if !live_fallback_allowed(outcome, launched, fallback_evidence)
                                         || route_index + 1 == node.routes.len()
                                     {
                                         if outcome == AttemptOutcome::UsageLimited {
@@ -2295,6 +2363,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                                 ),
                                                 MAX_ADVANCE_ERROR_BYTES,
                                             ));
+                                        }
+                                        if !live_fallback_allowed(
+                                            outcome,
+                                            launched,
+                                            fallback_evidence,
+                                        ) && route_index + 1 < node.routes.len()
+                                        {
+                                            progress.advance_error_code =
+                                                Some("fallback_evidence_unavailable".into());
+                                            progress.advance_error = Some("Cannot verify local preparation and released custody for route fallback.".into());
                                         }
                                         progress.state = NodeState::Failed;
                                         false

@@ -2956,6 +2956,7 @@ pub(super) struct Fake {
     partial: Vec<PartialSignal>,
     /// Report `QuotaLimited` only when this exact sealed stderr arrives.
     quota_stderr: Option<&'static [u8]>,
+    assess_empty: bool,
 }
 
 #[test]
@@ -2987,6 +2988,35 @@ fn policy_refusal_skips_provider_preparation_and_preserves_sibling_progress() ->
 }
 
 impl Providers for Fake {
+    fn assess_result(
+        &self,
+        _: &TaskRequest,
+        record: &AttemptRecord,
+        decoded: &Decoded,
+        _: Option<&provenant_records::handoff::Handoff>,
+        _: Option<&crate::HolderContext>,
+        _: u64,
+    ) -> std::result::Result<crate::ResultAssessment, String> {
+        if self.assess_empty
+            && decoded.outcome == Outcome::Succeeded
+            && decoded.complete
+            && decoded.result.is_empty()
+        {
+            return Ok(crate::ResultAssessment {
+                refusal: Some("empty result rejected by policy".into()),
+                retry: Some(crate::PolicyRetry {
+                    schema_version: 1,
+                    route: record.requested_route.clone(),
+                    resume: false,
+                    max_attempts: 2,
+                    instruction: "Try again".into(),
+                    not_before_unix_seconds: None,
+                }),
+                note: None,
+            });
+        }
+        Ok(Default::default())
+    }
     fn check_policy(&self, task: &TaskRequest) -> std::result::Result<(), String> {
         if self.policy_task == Some(task.task_id) {
             return Err("insufficient disk space; run `provenant gc`".into());
@@ -3275,6 +3305,47 @@ fn settlement_scrubs_provider_session_history() -> TestResult {
         );
         assert!(text.contains("[REDACTED]"));
     }
+    Ok(())
+}
+
+#[test]
+fn empty_success_is_assessed_before_settlement_rejects_it() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(&dir, "stdout.log", b"", CAPTURE_LIMIT)?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        observed: Some(route()),
+        answer: Some(String::new()),
+        assess_empty: true,
+        ..Fake::default()
+    };
+    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    assert!(matches!(
+        record.state,
+        AttemptState::Terminal {
+            outcome: Outcome::Failed,
+            ..
+        }
+    ));
+    assert!(store.staged_policy_retry(&record)?.is_some());
     Ok(())
 }
 
@@ -7926,7 +7997,7 @@ fn read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt
 }
 
 #[test]
-fn write_grants_are_bounded_at_admission_and_read_and_preserve_git_digest() -> TestResult {
+fn write_grants_wire_bound_and_git_digest_are_preserved() -> TestResult {
     use std::os::unix::ffi::OsStringExt;
 
     let temp = tempfile::tempdir()?;
@@ -7945,24 +8016,16 @@ fn write_grants_are_bounded_at_admission_and_read_and_preserve_git_digest() -> T
         scope: PathScope::Subtree,
     };
     let mut applied = admission::AppliedWriteGrants {
-        grants: vec![grant.clone(); provenant_confinement::MAX_WRITE_GRANTS + 1],
+        grants: vec![grant.clone(); 1025],
         git_grants_digest: Some(provenant_core::Digest::from_bytes([7; 32])),
     };
     let mut record = store.record(id, &call)?;
-    assert!(matches!(
-        store.mark_starting(&record, &route(), &[], &applied, None, &call),
-        Err(RunError::Validation("invalid write grants"))
-    ));
     record.write_grants = applied.grants.clone();
-    assert!(matches!(
-        reader::validate_attempt(&record),
-        Err(RunError::Validation("invalid write grants"))
-    ));
-    applied.grants.pop();
+    reader::validate_attempt(&record)?;
     assert!(reader::valid_write_grants(&applied.grants));
     assert!(reader::write_grants_fit(&applied.grants));
     // Native bytes double in the wire encoding, exceeding the cap even
-    // though the raw path is smaller. Old records still decode by count.
+    // though the raw path is smaller. Existing records remain readable.
     let mut path = b"/fixture/".to_vec();
     path.extend(vec![b'x'; 128 * 1024]);
     path.push(0xff);
@@ -8710,6 +8773,17 @@ fn a_policy_retry_launches_for_no_launcher_before_its_sealed_time() -> TestResul
         clock: &clock,
         cancel: &cancel,
     };
+    // Even after the delay, a result-quality successor cannot start while
+    // the prior attempt's custody remains held or unverifiable.
+    let directory = store.attempt_dir(run.run_id, id, false)?;
+    let custody = directory.try_lock(
+        std::ffi::OsStr::new("custody.lock"),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
+    let started = store.start(run.run_id, &fake, &|_, _| unreachable!(), &later)?;
+    assert!(matches!(started.as_slice(), [Started::Deferred(attempt)] if *attempt == next));
+    assert_eq!(fake.prepared.get(), 0);
+    drop(custody);
     let started = store.start(run.run_id, &fake, &|_, _| unreachable!(), &later)?;
     assert!(matches!(started.as_slice(), [Started::Refused { attempt, .. }] if *attempt == next));
     assert_eq!(fake.prepared.get(), 1);
@@ -8827,6 +8901,8 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
         ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
             Err(crate::PrepareRefusal {
                 message: "all candidates require sign-in; run provenant accounts".into(),
+                fallback_outcome: (!self.0)
+                    .then_some(provenant_records::run::PreparationFailure::AuthRequired),
                 skipped_routes: ["cursor/example", "codex/example"]
                     .map(|route| SkippedRoute {
                         extra: Default::default(),
@@ -8874,6 +8950,19 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
             Some(provenant_records::run::TerminalEvidence::PreLaunchRefusal)
         );
         assert_eq!(record.provider_launched, Some(false));
+        assert_eq!(
+            record.preparation_failure,
+            (!mixed).then_some(provenant_records::run::PreparationFailure::AuthRequired)
+        );
+        assert!(store.custody_released(&record, &call)?);
+        if !mixed {
+            let mut corrupt = record.clone();
+            corrupt.provider_launched = None;
+            assert!(matches!(
+                crate::reader::validate_attempt(&corrupt),
+                Err(RunError::Validation("preparation failure evidence"))
+            ));
+        }
         assert_eq!(record.skipped_routes.len(), 2);
         assert_eq!(
             record

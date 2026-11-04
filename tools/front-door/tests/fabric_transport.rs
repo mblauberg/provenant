@@ -650,7 +650,7 @@ fn rust_mcp_negotiates_lists_tools_and_persists_mail_without_interpreters() -> R
     let replies = mcp(
         &rig,
         &[
-            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}}),
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}}), // timebomb: allow MCP protocol version, not compared with the clock
             json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
             json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
             json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fabric_context","arguments":{"op":"inspect"}}}),
@@ -659,7 +659,7 @@ fn rust_mcp_negotiates_lists_tools_and_persists_mail_without_interpreters() -> R
     )?;
     assert_eq!(
         replies.iter().find(|r| r["id"] == 1).ok_or("initialise")?["result"]["protocolVersion"],
-        "2025-11-25"
+        "2025-11-25" // timebomb: allow MCP protocol version, not compared with the clock
     );
     let list = &replies.iter().find(|r| r["id"] == 2).ok_or("catalogue")?["result"]["tools"];
     let names: Vec<_> = list
@@ -981,6 +981,170 @@ fn mcp_client_default_selects_its_own_inbox_and_run_binding_is_honest() -> Resul
 }
 
 #[test]
+fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
+    for scenario in ["authority", "refresh", "quota"] {
+        let mut rig = TestRig::new()?;
+        let cleanup = rig.process_cleanup();
+        let bin = rig.root.join("bin");
+        std::fs::create_dir(&bin)?;
+        let executable = bin.join("claude");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo '2.1.0'; else echo '{\"loggedIn\":true,\"email\":\"fixture@example.test\"}'; fi\n",
+        )?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))?;
+        rig.env.retain(|(key, _)| key != "PATH");
+        rig.env.push((
+            "PATH".into(),
+            format!("{}:/usr/bin:/bin", bin.display()).into(),
+        ));
+        let directory = rig.home.join(".claude-pro");
+        std::fs::create_dir(&directory)?;
+        let credential = directory.join(".credentials.json");
+        if scenario == "authority" {
+            std::fs::create_dir(&credential)?;
+        } else {
+            std::fs::write(&credential, b"{}")?;
+        }
+        let key = provenant_providers::identity::fingerprint("fixture@example.test")
+            .ok_or("account key")?;
+        support::register_account(&rig, "claude", "pro", &key, &directory)?;
+        if scenario == "quota" {
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "the quota record must be fresh against the CLI's live clock"
+            )]
+            let now = i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_secs(),
+            )?;
+            let scope = provenant_quota::AccountScope {
+                adapter: "claude".into(),
+                account_key: key.clone(),
+                label: "pro".into(),
+            };
+            let mut record = provenant_quota::AccountRecord::empty(scope.clone());
+            record.snapshot = Some(provenant_quota::QuotaSnapshot {
+                schema_version: 1,
+                account: scope,
+                revision: 0,
+                status: provenant_quota::QuotaStatus::Exhausted,
+                observed_unix_seconds: now,
+                source_ref: "fixture".into(),
+                authority_ref: None,
+                windows: vec![provenant_quota::QuotaWindow {
+                    pool: "five_hour".into(),
+                    window_seconds: Some(18_000),
+                    used_basis_points: 10_000,
+                    resets_unix_seconds: Some(now + 9000),
+                }],
+                details: None,
+            });
+            let quota = rig.state.join("quota").join(&key);
+            std::fs::create_dir_all(&quota)?;
+            std::fs::set_permissions(
+                rig.state.join("quota"),
+                std::fs::Permissions::from_mode(0o700),
+            )?;
+            std::fs::set_permissions(&quota, std::fs::Permissions::from_mode(0o700))?;
+            let path = quota.join("claude.json");
+            std::fs::write(&path, serde_json::to_vec(&record)?)?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        std::fs::write(
+            rig.project.join("graph.json"),
+            serde_json::to_vec(&json!({
+                "schema_version":1,"graph_id":"typed-refusal","nodes":[{"id":"one","prompt":"work","access":"read_only","routes":[
+                    {"adapter":"claude","model":"claude/claude-sonnet-5-5","account":"pro"},
+                    {"adapter":"fixture","model":"two","account":"pro"}
+                ]}]
+            }))?,
+        )?;
+        let run = rig.command(&[
+            "fabric",
+            "graph",
+            "run",
+            "--document",
+            "graph.json",
+            "--json",
+        ])?;
+        assert_eq!(
+            code(&run),
+            0,
+            "{scenario}: stdout={} stderr={}",
+            String::from_utf8_lossy(&run.stdout.bytes),
+            String::from_utf8_lossy(&run.stderr.bytes)
+        );
+        let run: Value = serde_json::from_slice(&run.stdout.bytes)?;
+        let node = &run["data"]["checkpoint"]["nodes"][0];
+        let attempts = node["attempts"].as_array().ok_or("attempts")?;
+        assert_eq!(attempts.len(), 2, "{scenario}: {run}");
+        let expected = if scenario == "quota" {
+            "usage_limited"
+        } else {
+            "auth_required"
+        };
+        assert_eq!(attempts[0]["outcome"], expected, "{scenario}: {run}");
+        assert_eq!(attempts[0]["launched"], false);
+        let identity = rig.command(&["fabric", "identity", "--json"])?;
+        let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
+        let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
+        inputs.state_dir = Some(rig.state.clone());
+        let context = provenant_run::ExecutionContext {
+            state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
+            project_id: identity["data"]["project"]
+                .as_str()
+                .ok_or("project")?
+                .parse()?,
+            actor_id: identity["data"]["inbox"]["actor"]
+                .as_str()
+                .ok_or("actor")?
+                .parse()?,
+            read_prompts: false,
+        };
+        let clock = provenant_os::clock::SystemClock::new();
+        let cancel = provenant_core::CancelToken::new();
+        let call = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let store = provenant_run::RunStore::open(&context, &call)?;
+        let (_, id) = attempts[0]["attempt_ref"]
+            .as_str()
+            .ok_or("reference")?
+            .split_once('/')
+            .ok_or("reference")?;
+        let record = store.record(id.parse()?, &call)?;
+        let failure = if scenario == "quota" {
+            provenant_records::run::PreparationFailure::UsageLimited
+        } else {
+            provenant_records::run::PreparationFailure::AuthRequired
+        };
+        assert_eq!(
+            record.preparation_failure,
+            Some(failure),
+            "{scenario}: {record:?}"
+        );
+        let reason = match &record.state {
+            provenant_run::AttemptState::Terminal {
+                reason: Some(reason),
+                ..
+            } => reason,
+            _ => return Err("missing refusal reason".into()),
+        };
+        match scenario {
+            "authority" => assert!(reason.contains("single regular file"), "{reason}"),
+            "refresh" => assert!(reason.contains("stored credential JSON"), "{reason}"),
+            "quota" => assert!(reason.contains("Exhausted"), "{reason}"),
+            _ => unreachable!(),
+        }
+        cleanup.disarm();
+    }
+    Ok(())
+}
+
+#[test]
 fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
     let rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
@@ -1008,10 +1172,8 @@ fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
     assert_eq!(run["data"]["status"], "complete");
     let node = &run["data"]["checkpoint"]["nodes"][0];
     assert_eq!(node["state"], "failed");
-    // Neither fixture route is configured, so each is refused before launch and
-    // the graph moves on to the next route rather than claiming a task failure.
     let attempts = node["attempts"].as_array().ok_or("attempts")?;
-    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts.len(), 2, "{node}");
     let identity = rig.command(&["fabric", "identity", "--json"])?;
     let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
     let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
@@ -1047,6 +1209,10 @@ fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
             .split_once('/')
             .ok_or("reference")?;
         let record = store.record(id.parse()?, &call)?;
+        assert_eq!(
+            record.preparation_failure,
+            Some(provenant_records::run::PreparationFailure::AdapterUnavailable)
+        );
         assert_eq!(
             store.request(record.run_id, &call)?.tasks[0]
                 .account
@@ -1909,9 +2075,11 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     }
 
     use provenant_fabric_runtime::coordination::facade::FacadeError;
-    for (error, expected_operation) in [
+    for (error, _expected_operation) in [
         (
             FacadeError::Io {
+                delivery_limit: None,
+                delivery_stage: None,
                 operation: "submit: access database".into(),
                 path: None,
             },
@@ -1919,6 +2087,8 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         ),
         (
             FacadeError::Io {
+                delivery_limit: None,
+                delivery_stage: None,
                 operation: "spawn peer".into(),
                 path: None,
             },
@@ -1961,7 +2131,11 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
         assert_eq!(result["isError"], true, "{result}");
         let structured = &result["structuredContent"];
         assert_eq!(structured["code"], "io", "{result}");
-        assert_eq!(structured["operation"], expected_operation, "{result}");
+        assert_eq!(
+            structured["operation_id"], "verified-submit-scope",
+            "{result}"
+        );
+        assert!(structured.get("operation").is_none(), "{result}");
     }
 
     // Return valid status records after admission, so a wrong-branch receipt
@@ -3601,15 +3775,22 @@ fn writer_disk_refusal_keeps_its_reason_through_graph_mcp_and_dispatch() -> Resu
              "route":{"adapter":"codex","model":"codex/gpt-6-luna","effort":"low"}}
         ]}))?,
     )?;
-    let reason = |message: &Value| -> Result {
+    let reason = |message: &Value, local: bool| -> Result {
         let message = message.as_str().ok_or("refusal reason")?;
         assert!(message.contains("insufficient disk space on "), "{message}");
-        assert!(
-            message.contains(worktree)
-                || message.contains(rig.state.to_str().ok_or("state")?)
-                || message.contains(rig.home.to_str().ok_or("home")?),
-            "{message}"
-        );
+        if local {
+            assert!(
+                message.contains(worktree)
+                    || message.contains(rig.state.to_str().ok_or("state")?)
+                    || message.contains(rig.home.to_str().ok_or("home")?),
+                "{message}"
+            );
+        } else {
+            assert!(
+                !message.contains(rig.root.to_str().ok_or("root")?),
+                "{message}"
+            );
+        }
         let (_, available) = message.rsplit_once(": ").ok_or("available bytes")?;
         let (bytes, _) = available
             .split_once(" bytes available, floor ")
@@ -3619,7 +3800,6 @@ fn writer_disk_refusal_keeps_its_reason_through_graph_mcp_and_dispatch() -> Resu
             message.contains("floor 18446744073709551615 bytes"),
             "{message}"
         );
-        assert!(message.contains("provenant gc"), "{message}");
         Ok(())
     };
     let (status, graph) = json_command(
@@ -3636,7 +3816,13 @@ fn writer_disk_refusal_keeps_its_reason_through_graph_mcp_and_dispatch() -> Resu
     assert_eq!(status, 1, "{graph}");
     assert_eq!(graph["status"], "refused", "{graph}");
     assert_eq!(graph["error"]["code"], "dispatch_refused", "{graph}");
-    reason(&graph["error"]["message"])?;
+    reason(&graph["error"]["message"], false)?;
+    assert!(
+        graph["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("provenant gc")
+    );
 
     // Submission is exposed as fabric_run op=submit in the current MCP schema.
     let replies = mcp(
@@ -3655,7 +3841,13 @@ fn writer_disk_refusal_keeps_its_reason_through_graph_mcp_and_dispatch() -> Resu
         result["structuredContent"]["code"], "dispatch_refused",
         "{result}"
     );
-    reason(&result["structuredContent"]["message"])?;
+    reason(&result["structuredContent"]["message"], false)?;
+    assert!(
+        result["structuredContent"]["next"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("provenant gc")
+    );
 
     let prompt = rig.root.join("prompt.txt");
     std::fs::write(&prompt, "fixture")?;
@@ -3679,7 +3871,13 @@ fn writer_disk_refusal_keeps_its_reason_through_graph_mcp_and_dispatch() -> Resu
     assert_eq!(status, 1, "{dispatch}");
     assert_eq!(dispatch["status"], "refused", "{dispatch}");
     assert_eq!(dispatch["error"]["code"], "DISK_FLOOR", "{dispatch}");
-    reason(&dispatch["error"]["message"])?;
+    reason(&dispatch["error"]["message"], true)?;
+    assert!(
+        dispatch["error"]["next"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("provenant gc")
+    );
     assert!(!rig.state.join("runs").exists());
     rig.assert_legacy_unchanged()
 }
@@ -4469,7 +4667,7 @@ fn submit_writer_io_names_the_failed_operation_and_path() -> Result {
     let private = Path::new(gitfile.trim().strip_prefix("gitdir: ").ok_or("gitdir")?);
     let head = private.join("HEAD");
     let original_head = std::fs::read(&head)?;
-    for (contents, operation) in [
+    for (contents, _operation) in [
         (None, "submit: openat read"),
         (Some(vec![0xff]), "submit: decode writer HEAD"),
         (
@@ -4485,8 +4683,11 @@ fn submit_writer_io_names_the_failed_operation_and_path() -> Result {
         let result = submit()?;
         let error = &result["structuredContent"];
         assert_eq!(error["code"], "io", "{result}");
-        assert_eq!(error["operation"], operation, "{result}");
-        assert_eq!(error["path"], head.to_string_lossy().as_ref(), "{result}");
+        assert_eq!(error["operation_id"], "writer-io", "{result}");
+        assert!(
+            !error.to_string().contains(head.to_string_lossy().as_ref()),
+            "{result}"
+        );
     }
     std::fs::write(&head, original_head)?;
     let blocked = rig.state.join("worktrees");
@@ -4494,10 +4695,11 @@ fn submit_writer_io_names_the_failed_operation_and_path() -> Result {
     let result = submit()?;
     let error = &result["structuredContent"];
     assert_eq!(error["code"], "io", "{result}");
-    assert_eq!(error["operation"], "submit: openat directory", "{result}");
-    assert_eq!(
-        error["path"],
-        blocked.to_string_lossy().as_ref(),
+    assert_eq!(error["operation_id"], "writer-io", "{result}");
+    assert!(
+        !error
+            .to_string()
+            .contains(blocked.to_string_lossy().as_ref()),
         "{result}"
     );
     rig.assert_legacy_unchanged()
@@ -4526,13 +4728,11 @@ fn submit_coordination_io_names_the_failed_operation_and_path() -> Result {
         .ok_or("submit reply")?["result"];
     let error = &result["structuredContent"];
     assert_eq!(error["code"], "io", "{result}");
-    assert_eq!(
-        error["operation"], "open coordination store: openat directory",
-        "{result}"
-    );
-    assert_eq!(
-        error["path"],
-        blocked.to_string_lossy().as_ref(),
+    assert_eq!(error["operation_id"], "store-io", "{result}");
+    assert!(
+        !error
+            .to_string()
+            .contains(blocked.to_string_lossy().as_ref()),
         "{result}"
     );
     rig.assert_legacy_unchanged()

@@ -34,7 +34,7 @@ fn shared_peer_records_remain_strict_at_the_mcp_argument_boundary() {
 }
 
 #[test]
-fn io_error_payload_preserves_native_path_diagnostics_without_source_text() {
+fn io_error_payload_omits_unanchored_path_and_source_text() {
     use std::{ffi::OsString, os::unix::ffi::OsStringExt, path::PathBuf};
     let error = FacadeError::from(&provenant_fabric_store::Error::Io {
         path: PathBuf::from(OsString::from_vec(b"/state-\xff/worktrees".to_vec())),
@@ -43,20 +43,25 @@ fn io_error_payload_preserves_native_path_diagnostics_without_source_text() {
     let detail = ServiceError::Facade(error).structured_error();
     assert_eq!(detail["code"], "io");
     assert_eq!(detail["operation"], "access Fabric store");
-    assert_eq!(detail["path"], "/state-\u{fffd}/worktrees");
+    assert!(detail.get("path").is_none());
+    assert!(!detail.to_string().contains("private source text"));
     assert!(detail["message"].is_string() && detail["hint"].is_string());
 }
 
 #[test]
 fn host_delivery_io_keeps_its_reason_under_the_io_code() {
-    let reason = "host writer delivery failed at Prepare (worktree): git worktree list output exceeded the 8388608-byte host limit";
-    let detail = ServiceError::Facade(FacadeError::HostDeliveryIo {
-        reason: reason.into(),
-    })
-    .structured_error();
+    let fact = provenant_records::diagnostic::DeliveryLimit::new(
+        provenant_records::run::WriterDeliveryStage::Prepare,
+        "git",
+        "worktree list",
+        8388608,
+    )
+    .unwrap();
+    let reason = fact.detail();
+    let detail = ServiceError::Facade(FacadeError::HostDeliveryLimit { fact }).structured_error();
     assert_eq!(detail["code"], "io");
     let message = detail["message"].as_str().unwrap_or_default();
-    assert!(message.contains(reason), "{message}");
+    assert!(message.contains(&reason), "{message}");
 }
 
 #[test]
@@ -465,7 +470,7 @@ fn summary_patch_accepts_empty_text_as_the_cli_does() {
 }
 
 #[test]
-fn cli_error_detail_carries_data_once() {
+fn cli_error_detail_keeps_safe_revision_without_raw_data() {
     let error = ServiceError::Cli {
         code: "conflict".into(),
         message: "stale".into(),
@@ -474,7 +479,7 @@ fn cli_error_detail_carries_data_once() {
     let detail = error.structured_error();
     assert_eq!(detail["code"], "conflict");
     assert_eq!(detail["revision"], 4);
-    assert_eq!(detail["data"], "kept");
+    assert!(detail.get("data").is_none());
     let error = ServiceError::Cli {
         code: "cli_failed".into(),
         message: "failed".into(),
@@ -482,7 +487,7 @@ fn cli_error_detail_carries_data_once() {
     };
     let detail = error.structured_error();
     assert_eq!(detail["code"], "cli_failed");
-    assert_eq!(detail["data"], "text");
+    assert!(detail.get("data").is_none());
 }
 
 #[test]
@@ -537,7 +542,9 @@ fn coordination_store_errors_include_safe_context() {
         source: std::io::Error::other("private"),
     }));
     let detail = io.structured_error();
-    assert_eq!(detail["path"], "/state/inbox.db");
+    assert_eq!(detail["code"], "io");
+    assert!(detail.get("path").is_none_or(serde_json::Value::is_null));
+    assert!(!detail.to_string().contains("/state/inbox.db"));
     assert!(!detail.to_string().contains("private"));
 }
 
@@ -549,4 +556,25 @@ fn continuation_conflict_includes_current_generation() {
     let detail = error.structured_error();
     assert_eq!(detail["code"], "conflict");
     assert_eq!(detail["current_generation"], 1);
+}
+
+#[test]
+fn projected_mcp_failure_omits_untrusted_sources_and_bounds_safe_detail() {
+    let unsafe_error = ServiceError::Facade(FacadeError::Io {
+        delivery_limit: None,
+        delivery_stage: None,
+        operation: "TOKEN_SENTINEL\u{1b}".into(),
+        path: Some("/private/host".into()),
+    })
+    .structured_error();
+    let encoded = unsafe_error.to_string();
+    assert!(!encoded.contains("TOKEN_SENTINEL"));
+    assert!(!encoded.contains("/private/host"));
+    let error = ServiceError::Facade(FacadeError::InvalidInput {
+        detail: Some(format!("schema version\u{1b}{}", "é".repeat(2000))),
+    })
+    .structured_error();
+    let detail = error["detail"].as_str().unwrap();
+    assert!(detail.len() <= provenant_records::diagnostic::MAX_DIAGNOSTIC_BYTES);
+    assert!(!detail.chars().any(char::is_control));
 }

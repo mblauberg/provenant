@@ -658,10 +658,8 @@ fn run_base_consistency_on_existing_branch() -> Result {
         message.contains(&base_b),
         "expected requested base {base_b} in message: {message}"
     );
-    assert!(
-        message.contains("omit --base"),
-        "expected omit --base guidance in message: {message}"
-    );
+    let repair = value["error"]["repair"].as_str().unwrap_or_default();
+    assert!(repair.contains("omit --base"), "{repair}");
 
     Ok(())
 }

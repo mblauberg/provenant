@@ -698,6 +698,15 @@ pub enum AttemptState {
         reason: Option<String>,
     },
 }
+/// A typed refusal made during local provider preparation, before custody.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreparationFailure {
+    AuthRequired,
+    UsageLimited,
+    AdapterUnavailable,
+}
+
 /// Why a fallback candidate did not launch. Typed so `lanes` and `output` can
 /// show a skipped leg without reading prose.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -976,6 +985,9 @@ pub struct AttemptRecord {
     /// Custody evidence. None in older records must never authorise a writer retry.
     #[serde(default)]
     pub provider_launched: Option<bool>,
+    /// Confirmed pre-custody preparation refusal, sealed with its terminal row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation_failure: Option<PreparationFailure>,
     pub provider_ms: Option<u64>,
     pub admission_deadline: Option<WallTime>,
     pub runtime_deadline: Option<WallTime>,

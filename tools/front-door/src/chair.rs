@@ -911,6 +911,7 @@ fn summary_run(command: ChairSummary, globals: &Globals) -> u8 {
                     json!({"current_revision": current_revision}),
                 );
                 result.error = Some(provenant_records::CommandError {
+            diagnostic: None,
                     code: "SUMMARY_STALE".into(),
                     message: error.to_string(),
                     cause: None,

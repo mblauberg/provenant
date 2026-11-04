@@ -398,6 +398,8 @@ pub(crate) fn exchange_within(
                 || detail.as_object().is_some_and(|fields| {
                     fields.keys().all(|key| {
                         matches!(key.as_str(), "code" | "message" | "hint" | "retryable")
+                            || (matches!(code.as_str(), "busy" | "conflict" | "cancelled")
+                                && matches!(key.as_str(), "category" | "detail" | "next"))
                     })
                 }))
                 && let Ok(error) =

@@ -258,8 +258,13 @@ fn pattern_summary(spec: &PlanSpec) -> String {
         .join("; ")
 }
 
-pub(super) fn prompt(node: &GraphNode) -> String {
+pub fn prompt(node: &GraphNode) -> String {
     let mut prompt = node.prompt.clone();
+    if node.require_findings && !prompt.contains("```findings") {
+        prompt.push_str(
+            "\n\nInclude a fenced `findings` JSON block in your final response. If there are no findings, emit exactly:\n```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nEach finding must include its id, severity, file, summary and status.",
+        );
+    }
     if let Some(spec) = &node.plan {
         let kinds = serde_json::to_string(&spec.kinds).unwrap_or_default();
         if spec.patterns.is_empty() {
@@ -1055,7 +1060,7 @@ fn fragment(
         review_base: None,
         context: document.context.clone(),
         extra: Default::default(),
-        schema_version: 1,
+        schema_version: document.schema_version,
         graph_id: "fragment".into(),
         nodes: local_nodes,
         limits: None,
@@ -1066,6 +1071,7 @@ fn fragment(
     // Pattern wrappers are ordinary static composites. Expand them before the
     // fragment is measured or validated so the host limits see every child.
     let local = composites::expand(&local, &generous())?;
+    validate_schema(&local).map_err(str::to_owned)?;
     if local.nodes.len() > spec.max_nodes {
         return Err(format!(
             "fragment expands to {} nodes; plan allows at most {}",
@@ -1074,6 +1080,7 @@ fn fragment(
         ));
     }
     let (plan, _) = validate_flat_plan(&local, &generous()).map_err(str::to_owned)?;
+    validate_output_kinds(&local)?;
     let mut nodes: Vec<GraphNode> = plan
         .nodes
         .iter()
@@ -1549,7 +1556,9 @@ pub(super) fn settle(
                 return Err("loop writers must share one worktree".into());
             }
         }
+        validate_schema(&preview).map_err(str::to_owned)?;
         let (plan, positions) = validate_flat_plan(&preview, &generous()).map_err(str::to_owned)?;
+        validate_output_kinds(&preview)?;
         if let Some(reason) = structural_limit_reason(&preview, &plan, limits) {
             return Err(reason);
         }
@@ -1600,8 +1609,10 @@ pub(super) fn settle(
                     let addition = fallback_expansion(&node.id, spec, source)?;
                     let mut preview = document.clone();
                     append(&mut preview, &addition);
+                    validate_schema(&preview).map_err(str::to_owned)?;
                     let (plan, positions) =
                         validate_flat_plan(&preview, &generous()).map_err(str::to_owned)?;
+                    validate_output_kinds(&preview)?;
                     if let Some(reason) = structural_limit_reason(&preview, &plan, limits) {
                         return Err(reason);
                     }

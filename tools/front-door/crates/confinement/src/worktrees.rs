@@ -122,11 +122,13 @@ pub enum WorktreeError {
     IncompleteCensus { detail: String },
     #[error("worktree writer or registration is unknown")]
     UnknownWriter,
+    #[error("worktree writer or registration is unknown at {}", .path.display())]
+    UnknownWriterAt { path: PathBuf },
     /// The merged writer state is unknown specifically because native census
     /// evidence was incomplete. The public refusal text and code stay the same
     /// as `UnknownWriter`; lifecycle consumers get a typed retry cause.
     #[error("worktree writer or registration is unknown")]
-    CensusUnknown { detail: String },
+    CensusUnknown { detail: String, path: PathBuf },
     #[error("Git marks the worktree {}", if *.locked { "locked" } else { "prunable" })]
     GitEntryHeld { locked: bool },
     #[error("worktree operation was cancelled")]
@@ -192,7 +194,7 @@ impl WorktreeError {
             Self::RegistryLockTimeout => Some(AdmissionCause::RegistryLockTimeout),
             Self::IncompleteCensus { .. } => Some(AdmissionCause::CensusIncomplete),
             Self::CensusUnknown { .. } => Some(AdmissionCause::CensusIncomplete),
-            Self::UnknownWriter | Self::GitEntryHeld { .. } => {
+            Self::UnknownWriter | Self::UnknownWriterAt { .. } | Self::GitEntryHeld { .. } => {
                 Some(AdmissionCause::RegistrationOrCustodyUnknown)
             }
             Self::LockBusy | Self::LiveWriter | Self::LiveProcess(_) | Self::WriterBusy { .. } => {
@@ -208,7 +210,10 @@ impl WorktreeError {
     pub fn is_custody_unknown(&self) -> bool {
         matches!(
             self,
-            Self::UnknownWriter | Self::CensusUnknown { .. } | Self::GitEntryHeld { .. }
+            Self::UnknownWriter
+                | Self::UnknownWriterAt { .. }
+                | Self::CensusUnknown { .. }
+                | Self::GitEntryHeld { .. }
         )
     }
 
@@ -235,7 +240,7 @@ impl WorktreeError {
             Self::GitOperationInProgress => {
                 "run `git -C PATH status` and complete or abort the Git operation before retrying"
             }
-            Self::UnknownWriter | Self::CensusUnknown { .. } => {
+            Self::UnknownWriter | Self::UnknownWriterAt { .. } | Self::CensusUnknown { .. } => {
                 "run `provenant worktree list` and inspect the registration and writer state before retrying"
             }
             Self::IncompleteCensus { .. } => {
@@ -362,6 +367,16 @@ pub enum WriterState {
     Unknown,
 }
 
+/// Observed lane-ownership registration; absence does not prove custody is free.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnerStatus {
+    Registered,
+    Unowned,
+    Unknown,
+    Primary,
+}
+
 /// CLI result facts are serialize-only. Its absolute path is emitted through
 /// the explicit root-plus-PathWire envelope below, never lossy `Path::display`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -371,6 +386,7 @@ pub struct WorktreeInfo {
     pub head: GitOid,
     pub dirty: WorktreeCondition,
     pub writer: WriterState,
+    pub owner: OwnerStatus,
 }
 
 impl Serialize for WorktreeInfo {
@@ -379,12 +395,16 @@ impl Serialize for WorktreeInfo {
         S: Serializer,
     {
         let path = AbsolutePathWire::from_path(&self.path).map_err(serde::ser::Error::custom)?;
-        let mut state = serializer.serialize_struct("WorktreeInfo", 5)?;
+        let mut state = serializer.serialize_struct("WorktreeInfo", 7)?;
         state.serialize_field("path", &path)?;
         state.serialize_field("branch", &self.branch)?;
         state.serialize_field("head", &self.head)?;
         state.serialize_field("dirty", &self.dirty)?;
         state.serialize_field("writer", &self.writer)?;
+        state.serialize_field("owner", &self.owner)?;
+        if self.owner == OwnerStatus::Unowned {
+            state.serialize_field("next", "This checkout has no Provenant lane owner; it may have been created outside Provenant. Inspect its custody, then select it explicitly with --worktree <path>.")?;
+        }
         state.end()
     }
 }

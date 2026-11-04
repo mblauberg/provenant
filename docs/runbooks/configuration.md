@@ -138,6 +138,13 @@ authority. The test always audits unplaceable processes and checks a same-user
 sleep occupant; without the variable it reports that the clean-Free assertion
 was skipped.
 
+The host `[domains.run]` settings `grant_limit` (default 128) and
+`profile_limit_bytes` (default 524288) bound the total plan roots and each
+provider grant family, and the rendered macOS sandbox profile respectively.
+Raise either positive integer when a lane needs more capacity. The profile
+travels in an argument, so the operating system can still impose its own
+transport limit. These settings do not bypass path, credential, or Git checks.
+
 `confinement.census_exclude_ancestors` controls whether run admission excludes the
 invoking process's ancestor chain (such as the invoking shell) from live-writer detection.
 This strict boolean defaults to `true`. When set to `false`, only the invoking process
@@ -179,6 +186,15 @@ The 5 % memory floor applies on every platform and the disk floor
 applies to both classes. `lanes` shows a queued or starting lane's
 class and what it is waiting for, such as `read-only startup spacing: 1.2 s
 left of 2.0 s`.
+
+Project-scoped `domains.lanes.projects.<project>.shared_paths` can share an
+existing host test-lock directory with writers when the resource is broader
+than Cargo. Relative paths resolve against the primary checkout; `~/` and
+absolute paths are also accepted. Unsafe or missing entries warn and are
+ignored. `exec_roots` in the same table grants read and execution access to
+checkout-relative toolchain directories without write access. Both default to
+empty arrays; `config show` reports their effective value and origin. See
+[project paths](providers.md#project-paths-and-host-checkout-identity).
 
 Build slots gate builds, not lanes. A writer is admitted on the writer caps
 and the memory and disk floors alone, however many writers are live, so one
@@ -541,9 +557,12 @@ five-hour floor entered at 09:00 with a window ending at 13:00 should expire at
 floors are never written over the raw ledger cache. Zen does not use Go floors.
 
 DeepSeek V4.1 Flash (junior weight 2, senior 1) and GLM-5.3 Flash (junior 1,
-senior 1) are provisional Go pool members. They remain eligible without
-calibration and use the local ledger for pacing. Route diagnostics identify the
-partial coverage and any uncalibrated windows; adding floors can tighten pacing.
+senior 1) are provisional Go pool members. Uncalibrated partial windows exclude
+them by default. To accept unknown headroom, set
+`provenant config set routing.allow_unknown_partial_headroom true`. This is a
+host setting and cannot be overridden by an individual dispatch. Route
+diagnostics identify partial coverage and uncalibrated windows; adding floors
+can tighten pacing. An observed lower bound at the limit remains exhausted.
 MiMo V2.6 Flash is catalogued for exact selection only. Paid OpenCode pacing
 remains `pace`.
 

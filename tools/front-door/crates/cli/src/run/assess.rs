@@ -10,11 +10,9 @@ pub(super) fn assess_model_result(
 ) -> Result<run::ResultAssessment, String> {
     let failed_check = !policy.result_valid(&decoded.result);
     if policy.result.check == Some(true)
-        && matches!(
-            decoded.outcome,
-            run::Outcome::Succeeded | run::Outcome::Failed | run::Outcome::Uncommitted
-        )
-        && (failed_check || decoded.outcome == run::Outcome::Failed)
+        && decoded.outcome == run::Outcome::Succeeded
+        && decoded.complete
+        && failed_check
     {
         let retry = if !run::Service::has_writes(task.writer.is_some(), &task.access.write_roots)
             && record.continuation.as_deref() != Some("policy_fallback")
@@ -32,7 +30,7 @@ pub(super) fn assess_model_result(
                         ..Default::default()
                     })
             });
-            fallback.and_then(|fallback| fallback.model.map(|model| run::PolicyRetry {
+            fallback.filter(|fallback| task.account.is_none() || fallback.provider.as_deref() == record.applied_route.as_ref().and_then(|route| route.provider.as_deref())).and_then(|fallback| fallback.model.map(|model| run::PolicyRetry {
                 schema_version: 1,
                 route: run::RequestedRoute::Model { extra: Default::default(), provider: fallback.provider.unwrap_or_default(), model, effort: fallback.effort },
                 resume: false, max_attempts: 2,
@@ -91,14 +89,20 @@ pub(super) fn capacity_reason(reason: &str) -> bool {
         .is_some_and(|rest| rest.starts_with(": "))
 }
 
-/// A lane that settled for provider capacity or a spent account is typed, then
-/// retried within `domains.routing.settlement_retries`: a capacity stop resumes
-/// its session after a growing backoff, or redraws when it has none, and a
-/// quota stop redraws at once, where admission skips the spent account.
-/// Whether another registered account for `model`'s adapter, other than
-/// `spent_key`, serves the model and is not known to be spent: no persisted
-/// mismatch or live refusal, as quota's `account_block` assesses them, and no
-/// reading that routing's rule calls spent. Invalid evidence is not ready.
+/// Check that another registered account can continue on the same model.
+/// Only a quota-stopped writer on an unpinned account with a recorded,
+/// unfinished handoff may continue its retained worktree on another account.
+pub(super) fn quota_handoff_recovery_eligible(
+    outcome: run::Outcome,
+    task: &run::TaskRequest,
+    handoff: Option<&provenant_records::handoff::Handoff>,
+) -> bool {
+    outcome == run::Outcome::QuotaLimited
+        && task.writer.is_some()
+        && task.account.is_none()
+        && handoff.is_some_and(provenant_records::handoff::Handoff::unfinished)
+}
+
 pub(super) fn unspent_alternative<'k>(
     keys: impl IntoIterator<Item = &'k str>,
     quota: &[provenant_quota::AccountRecord],
@@ -139,12 +143,11 @@ pub(super) fn unspent_alternative<'k>(
 
 pub(super) fn assess_settlement_retry(
     config: &provenant_routing::RoutingConfig,
-    other_account: impl Fn(&str, &str) -> bool,
-    task: &run::TaskRequest,
     record: &run::AttemptRecord,
     decoded: &run::Decoded,
     policy_attempt: u64,
     now_unix_seconds: i64,
+    quota_handoff_recovery: bool,
 ) -> run::ResultAssessment {
     let max_attempts = u64::from(config.settlement_retries) + 1;
     let capacity = decoded.outcome == run::Outcome::ModelUnavailable
@@ -156,53 +159,33 @@ pub(super) fn assess_settlement_retry(
     if !(capacity || quota) || config.settlement_retries == 0 || policy_attempt >= max_attempts {
         return Default::default();
     }
-    let writes = run::Service::has_writes(task.writer.is_some(), &task.access.write_roots);
-    let applied = || {
-        Some(run::RequestedRoute::Model {
-            extra: Default::default(),
-            provider: route.provider.clone()?,
-            model: route.model.clone()?,
-            effort: route.effort.clone(),
-        })
-    };
-    // Resume only where the adapter's launch table says it can.
+    // A settled provider has left local preparation. Route or account
+    // switching is denied by the shared policy. Verified handoff recovery and
+    // same-session continuation use the existing model and retained work.
     let session = decoded.session.as_deref().is_some_and(|s| !s.is_empty())
         && route
             .provider
             .as_deref()
             .and_then(provenant_records::AdapterSpec::get)
             .is_some_and(|spec| spec.launch.resume);
-    let (route_choice, resume) = if capacity && session {
-        (applied(), true)
-    } else if quota {
-        // A pinned account is the caller's choice. Otherwise another unspent
-        // account must serve the applied model, and the retry keeps that model
-        // so a redraw cannot reach the spent account through another model;
-        // admission then refuses the spent account and resolution falls through.
-        let elsewhere = task.account.is_none()
-            && route
-                .provider
-                .as_deref()
-                .zip(route.account_key.as_deref())
-                .is_some_and(|(adapter, key)| other_account(adapter, key));
-        (elsewhere.then(applied).flatten(), false)
-    } else if !writes && let Some(fallback) = task.fallback.first() {
-        let fallback = fallback
-            .model
+    if !(capacity && session || quota && quota_handoff_recovery) {
+        return Default::default();
+    }
+    let Some(route_choice) =
+        route
+            .provider
             .clone()
-            .map(|model| run::RequestedRoute::Model {
+            .zip(route.model.clone())
+            .map(|(provider, model)| run::RequestedRoute::Model {
                 extra: Default::default(),
-                provider: fallback.provider.clone().unwrap_or_default(),
+                provider,
                 model,
-                effort: fallback.effort.clone(),
-            });
-        (fallback, false)
-    } else {
-        (Some(task.route.clone()), false)
-    };
-    let Some(route_choice) = route_choice else {
+                effort: route.effort.clone(),
+            })
+    else {
         return Default::default();
     };
+    let resume = capacity;
     // Linear backoff with up to a quarter more, drawn from the attempt ID so
     // lanes that hit the same capacity error do not retry in step.
     let backoff_seconds = if capacity {
@@ -218,29 +201,16 @@ pub(super) fn assess_settlement_retry(
     } else {
         0
     };
-    let cause = if capacity {
-        "the provider was at capacity"
-    } else {
-        "the account's usage limit was reached"
-    };
     let instruction = if resume {
-        format!(
-            "This session stopped because {cause}. Continue the original task from where it stopped and complete its verification."
-        )
-    } else if writes {
-        format!(
-            "A previous attempt at this task stopped because {cause}. The worktree may hold its partial work: inspect `git status` and `git log` first, and before pushing or opening a pull request check whether the branch was already pushed and a pull request already exists. Keep what is useful, then complete the original task."
-        )
+        "This session stopped because the provider was at capacity. Continue the original task from where it stopped and complete its verification."
     } else {
-        format!(
-            "A previous attempt at this task stopped because {cause}. Complete the original task."
-        )
-    };
+        "The previous attempt stopped at the account usage limit. Inspect the retained worktree and continue the unfinished task using its handoff; complete its verification."
+    }.to_owned();
     let next = policy_attempt + 1;
-    let action = match (resume, quota) {
-        (true, _) => "retrying this session",
-        (false, true) => "retrying on the next eligible account",
-        (false, false) => "redrawing the route",
+    let action = if resume {
+        "retrying this session"
+    } else {
+        "continuing from the handoff on the next eligible account"
     };
     let wait = if backoff_seconds == 0 {
         String::new()

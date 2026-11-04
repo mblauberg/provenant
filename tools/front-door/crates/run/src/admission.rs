@@ -49,7 +49,7 @@ impl Default for AdmissionPolicy {
     /// Defaults: five per cent memory, the GC disk floor, 20 s writer spacing, 2 s
     /// read-only spacing and a one-hour admission deadline.
     fn default() -> Self {
-        let mut policy = Self {
+        let policy = Self {
             memory_floor_basis_points: 500,
             startup_spacing_ms: 20_000,
             read_only_spacing_ms: 2_000,
@@ -60,12 +60,16 @@ impl Default for AdmissionPolicy {
         // full 20 s. The override only lowers a spacing, and release builds
         // ignore it.
         #[cfg(debug_assertions)]
-        if let Some(ms) = std::env::var_os(provenant_supervisor::STARTUP_SPACING_ENV)
-            .and_then(|value| value.to_str()?.parse::<u64>().ok())
-        {
-            policy.startup_spacing_ms = policy.startup_spacing_ms.min(ms);
-            policy.read_only_spacing_ms = policy.read_only_spacing_ms.min(ms);
-        }
+        let policy = {
+            let mut policy = policy;
+            if let Some(ms) = std::env::var_os(provenant_supervisor::STARTUP_SPACING_ENV)
+                .and_then(|value| value.to_str()?.parse::<u64>().ok())
+            {
+                policy.startup_spacing_ms = policy.startup_spacing_ms.min(ms);
+                policy.read_only_spacing_ms = policy.read_only_spacing_ms.min(ms);
+            }
+            policy
+        };
         policy
     }
 }

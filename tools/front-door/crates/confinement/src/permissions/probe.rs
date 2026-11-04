@@ -27,6 +27,21 @@ pub(super) const PROBE_CAPTURE_LIMIT: usize = 1024;
 #[cfg(target_os = "macos")]
 pub(super) const CLEANUP_TIMEOUT: Duration = Duration::from_millis(250);
 
+/// Host-configured resource limits for profile compilation.
+#[derive(Clone, Copy, Debug)]
+pub struct ProfileLimits {
+    pub grant_limit: usize,
+    pub profile_limit_bytes: usize,
+}
+impl Default for ProfileLimits {
+    fn default() -> Self {
+        Self {
+            grant_limit: 128,
+            profile_limit_bytes: 512 * 1024,
+        }
+    }
+}
+
 pub struct BackendContext<'a> {
     pub executor: &'a dyn Executor,
     pub cancel: &'a CancelToken,
@@ -56,12 +71,22 @@ pub trait ConfinementBackend: Send + Sync {
 pub fn system_backend(
     context: &BackendContext<'_>,
 ) -> Result<Box<dyn ConfinementBackend>, PermissionError> {
+    system_backend_with_limits(context, ProfileLimits::default())
+}
+
+pub fn system_backend_with_limits(
+    context: &BackendContext<'_>,
+    limits: ProfileLimits,
+) -> Result<Box<dyn ConfinementBackend>, PermissionError> {
     #[cfg(target_os = "macos")]
     {
         match probe_sandbox(context)? {
             Availability::Available {
                 backend: BackendKind::MacOsSbpl,
-            } => Ok(Box::new(MacOsSandboxBackend { ready: true })),
+            } => Ok(Box::new(MacOsSandboxBackend {
+                ready: true,
+                limits,
+            })),
             Availability::Unavailable { reason } => {
                 Err(PermissionError::BackendNotAvailable(reason))
             }
@@ -69,7 +94,7 @@ pub fn system_backend(
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = context;
+        let _ = (context, limits);
         Err(PermissionError::BackendNotAvailable(
             AvailabilityReason::UnsupportedPlatform,
         ))
@@ -79,6 +104,7 @@ pub fn system_backend(
 #[cfg(target_os = "macos")]
 pub(super) struct MacOsSandboxBackend {
     pub(super) ready: bool,
+    pub(super) limits: ProfileLimits,
 }
 
 #[cfg(target_os = "macos")]
@@ -99,7 +125,7 @@ impl ConfinementBackend for MacOsSandboxBackend {
         if !self.ready {
             return Err(PermissionError::BackendUnavailable);
         }
-        compile_sbpl_with_diagnostic(plan, profile, anchors)
+        compile_sbpl_with_diagnostic(plan, profile, anchors, self.limits)
     }
 }
 

@@ -11,13 +11,40 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 pub(super) const MAX_PATH_BYTES: usize = 4096;
+#[cfg(test)]
 pub(super) const MAX_PATH_GRANTS: usize = 128;
-/// Bound each of the eight recorded write sources by the profile path limit.
-pub const MAX_WRITE_GRANTS: usize = MAX_PATH_GRANTS * 8;
-#[cfg(any(target_os = "macos", test))]
-pub(super) const MAX_NETWORK_GRANTS: usize = 128;
 #[cfg(target_os = "macos")]
 pub(super) const MAX_GIT_HEAD_BYTES: u64 = 1024;
+
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn validate_plan_grant_limit(
+    plan: &PlanPermissions,
+    limit: usize,
+) -> Result<(), PermissionError> {
+    for (family, count) in [
+        (
+            "total root grant count",
+            plan.read_roots
+                .len()
+                .saturating_add(plan.protected_roots.len())
+                .saturating_add(plan.secret_roots.len())
+                .saturating_add(plan.write_roots.len()),
+        ),
+        ("read root grant count", plan.read_roots.len()),
+        ("protected root grant count", plan.protected_roots.len()),
+        ("secret root grant count", plan.secret_roots.len()),
+        ("write root grant count", plan.write_roots.len()),
+    ] {
+        if count > limit {
+            return Err(PermissionError::BoundExceeded {
+                family,
+                limit,
+                path: plan.scratch.path.clone(),
+            });
+        }
+    }
+    Ok(())
+}
 
 #[cfg(target_os = "macos")]
 pub(super) fn verify_worktree_authority(
@@ -160,31 +187,33 @@ pub(super) fn verify_selected_head(
 
 #[cfg(test)]
 pub(super) fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), PermissionError> {
-    validate_profile_spec_impl(spec, None)
+    validate_profile_spec_impl(spec, None, MAX_PATH_GRANTS)
 }
 
 #[cfg(target_os = "macos")]
 pub(super) fn validate_profile_spec_with_home(
     spec: &ProviderProfileSpec,
     home: &Path,
+    grant_limit: usize,
 ) -> Result<(), PermissionError> {
-    validate_profile_spec_impl(spec, Some(home))
+    validate_profile_spec_impl(spec, Some(home), grant_limit)
 }
 
 #[cfg(any(target_os = "macos", test))]
 fn validate_profile_spec_impl(
     spec: &ProviderProfileSpec,
     home: Option<&Path>,
+    grant_limit: usize,
 ) -> Result<(), PermissionError> {
-    if spec.process_executables.len() > MAX_PATH_GRANTS
-        || spec.runtime_reads.len() > MAX_PATH_GRANTS
-        || spec.discovery_reads.len() > MAX_PATH_GRANTS
+    if spec.process_executables.len() > grant_limit
+        || spec.runtime_reads.len() > grant_limit
+        || spec.discovery_reads.len() > grant_limit
         || spec.authentication.len() > 16
-        || spec.continuation_reads.len() > MAX_PATH_GRANTS
-        || spec.state_writes.len() > MAX_PATH_GRANTS
-        || spec.tool_exec_roots.len() > MAX_PATH_GRANTS
-        || spec.tool_writes.len() > MAX_PATH_GRANTS
-        || spec.provider_api.len() > MAX_NETWORK_GRANTS
+        || spec.continuation_reads.len() > grant_limit
+        || spec.state_writes.len() > grant_limit
+        || spec.tool_exec_roots.len() > grant_limit
+        || spec.tool_writes.len() > grant_limit
+        || spec.provider_api.len() > grant_limit
         || spec.native_controls.len() > 64
     {
         return Err(PermissionError::InvalidFixture);
@@ -253,7 +282,7 @@ fn validate_profile_spec_impl(
                 return Err(PermissionError::BroadRoot);
             }
         }
-        if auth.roots.len() > MAX_PATH_GRANTS || auth.in_place_writes.len() > MAX_PATH_GRANTS {
+        if auth.roots.len() > grant_limit || auth.in_place_writes.len() > grant_limit {
             return Err(PermissionError::InvalidFixture);
         }
         for write in &auth.in_place_writes {

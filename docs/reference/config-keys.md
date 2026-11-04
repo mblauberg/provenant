@@ -11,6 +11,9 @@ Set these in `[domains.lanes]` in the host configuration. Omit a key for its def
 | Key | Default | Effect |
 |---|---|---|
 | `user_skills` | discover | Discover host user skills for lanes read-only. off disables host user skill discovery unless overridden by domains.lanes.projects.{project_id}.user_skills or route policy lane.user_skills. Route policy wins over project, then host. Inspect value, default and origin with config show or config schema. (discover or off). |
+| `skill_stage_max_bytes` | 16777216 | Maximum bytes copied into an attempt's read-only user skill tree. Content exceeding the bound is skipped with a warning. Inspect value and origin with config show. (bytes, 0 or more). |
+| `projects.{project}.shared_paths` | [] | Existing paths shared read-write with this project's writers. Absolute, ~/ and primary-checkout-relative paths are accepted. Git, credential, protected and executable paths are omitted with a warning. Read-only lanes receive no additional writes. (existing absolute, ~/ or checkout-relative paths). |
+| `projects.{project}.exec_roots` | [] | Read-and-execute directory subtrees relative to the primary checkout. Entries escaping that checkout, missing, protected, credential or writable targets are ignored with a warning naming the configuration key. (directory paths relative to the primary checkout). |
 
 ## Host lane build settings
 
@@ -356,6 +359,19 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `trade_off` | `"Lower marks silence sooner; the process census and observation cadence stays unchanged."` |
 | `type` | `"int"` |
 
+## `routing.allow_unknown_partial_headroom`
+
+| Field | Value |
+|---|---|
+| `default` | `false` |
+| `effect` | `"Allow uncalibrated partial quota headroom below the limit."` |
+| `host_only` | `true` |
+| `reader` | `"tools/front-door/crates/cli/src/route.rs"` |
+| `status` | `"wired"` |
+| `strict` | `true` |
+| `trade_off` | `"Partial coverage cannot prove remaining allowance; exhausted lower bounds still block selection."` |
+| `type` | `"bool"` |
+
 ## `routing.exclude`
 
 | Field | Value |
@@ -464,6 +480,18 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
   "host_run_settings": {
     "path": "domains.run",
     "settings": {
+      "grant_limit": {
+        "allowed": "1 or more",
+        "default": "128",
+        "effect": "Maximum total plan roots and maximum entries in each provider grant family. Increase for lanes needing more roots.",
+        "type": "int"
+      },
+      "profile_limit_bytes": {
+        "allowed": "1 or more bytes",
+        "default": "524288",
+        "effect": "Maximum rendered macOS sandbox profile size. Increase for lanes with many grants; profiles pass through argv and may still hit OS limits.",
+        "type": "int"
+      },
       "projects.{project}.writer_writes": {
         "allowed": "up to 16 absolute, safe directory paths outside credential roots",
         "default": "host writer_writes",

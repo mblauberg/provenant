@@ -1045,6 +1045,116 @@ fn explain_does_not_create_state() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn explain_admission_matches_submission() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let state = temp.path().join("state");
+    std::fs::create_dir(&state)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let prompt = temp.path().join("prompt");
+    std::fs::write(&prompt, "brief")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    let presets = project.join(".provenant/presets");
+    std::fs::create_dir_all(&presets)?;
+    std::fs::write(
+        presets.join("limits.toml"),
+        r#"
+stages = [
+  { id = "a", tier = "senior" },
+  { id = "b", tier = "senior", depends_on = ["a"] },
+  { id = "c", tier = "senior", depends_on = ["a"] },
+  { id = "d", tier = "senior", depends_on = ["b"] },
+]
+"#,
+    )?;
+    let init = provenant_os::fixture::git_command()
+        .current_dir(&project)
+        .args(["init", "-q"])
+        .output()?;
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let run = |explain: bool| -> Result<std::process::Output, Box<dyn std::error::Error>> {
+        let mut command = fixture_cli();
+        command
+            .current_dir(&project)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["--json", "--state-dir"])
+            .arg(&state)
+            .args(["run", "--preset", "limits", "--prompt-file"])
+            .arg(&prompt);
+        if explain {
+            command.arg("--explain");
+        }
+        Ok(command.output()?)
+    };
+    for key in [
+        "nodes",
+        "edges",
+        "routes_per_node",
+        "node_prompt_bytes",
+        "graph_prompt_bytes",
+        "fan_out_width",
+        "expansion_depth",
+    ] {
+        std::fs::write(
+            state.join("config.toml"),
+            format!("schema_version = 1\n[domains.fabric.graph.limits]\n{key} = 1\n"),
+        )?;
+        let explained = run(true)?;
+        assert!(
+            explained.status.success(),
+            "{key}: {}",
+            String::from_utf8_lossy(&explained.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&explained.stdout)?;
+        assert_eq!(
+            value["data"]["admission"]["status"], "refused",
+            "{key}: {value}"
+        );
+        let reason = value["data"]["admission"]["reason"]
+            .as_str()
+            .ok_or("missing admission reason")?;
+        assert!(reason.contains(&format!("limits.{key}")), "{key}: {reason}");
+        assert!(value["data"].get("execution").is_none());
+        assert!(value["data"].get("validation_error").is_none());
+        let submitted = run(false)?;
+        assert!(!submitted.status.success(), "{key}");
+        let submitted_value: serde_json::Value = serde_json::from_slice(&submitted.stdout)?;
+        let submitted_reason = submitted_value["error"]["message"]
+            .as_str()
+            .ok_or("missing submission refusal reason")?;
+        assert_eq!(reason, submitted_reason, "{key}: {submitted_value}");
+    }
+    fn has_graph_journal(path: &std::path::Path) -> std::io::Result<bool> {
+        if !path.exists() {
+            return Ok(false);
+        }
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() && has_graph_journal(&entry.path())? {
+                return Ok(true);
+            }
+            if file_type.is_file() && entry.file_name().to_string_lossy().starts_with("graph-") {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    assert!(!has_graph_journal(&state)?);
+    Ok(())
+}
+
+#[test]
 fn explain_applies_writer_read_root_and_concurrency_bindings_without_state()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -1548,6 +1658,30 @@ fn golden(name: &str, actual: &str) -> Result<(), Box<dyn std::error::Error>> {
     golden_in("assets/presets/fixtures", name, actual)
 }
 
+// Prompt lengths include the checkout path before the displayed path is scrubbed.
+fn scrub_prompt_bytes(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            if line.starts_with("Inspection: ")
+                && let Some(start) = line.find("\"prompt_bytes\":")
+            {
+                let value_start = start + "\"prompt_bytes\":".len();
+                let value_end = value_start
+                    + line[value_start..]
+                        .bytes()
+                        .take_while(u8::is_ascii_digit)
+                        .count();
+                let mut line = line.to_owned();
+                line.replace_range(value_start..value_end, "<bytes>");
+                line
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn golden_in(dir: &str, name: &str, actual: &str) -> Result<(), Box<dyn std::error::Error>> {
     let actual = format!("{}\n", actual.trim_end());
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1559,7 +1693,8 @@ fn golden_in(dir: &str, name: &str, actual: &str) -> Result<(), Box<dyn std::err
     }
     let expected = std::fs::read_to_string(&path).unwrap_or_default();
     assert_eq!(
-        actual, expected,
+        scrub_prompt_bytes(&actual),
+        scrub_prompt_bytes(&expected),
         "{name}: rerun with UPDATE_GOLDEN=1 to refresh"
     );
     Ok(())
@@ -1660,7 +1795,16 @@ fn remaining_bundled_patterns_have_explain_goldens() -> Result<(), Box<dyn std::
         ("scope-then-run", &worktree[..]),
         ("deliver", &deliver[..]),
     ] {
-        golden(&format!("{name}.explain.txt"), &explain_text(name, extra)?)?;
+        let explained = explain_text(name, extra)?;
+        if name == "single" {
+            let inspection = explained
+                .lines()
+                .find_map(|line| line.strip_prefix("Inspection: "))
+                .ok_or("missing inspection")?;
+            let inspection: serde_json::Value = serde_json::from_str(inspection)?;
+            assert_eq!(inspection["prompt_bytes"], 10);
+        }
+        golden(&format!("{name}.explain.txt"), &explained)?;
     }
     Ok(())
 }

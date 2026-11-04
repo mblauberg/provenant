@@ -3,6 +3,13 @@
 Owner: run and Fabric maintainers
 Anchor: docs/specs/run.md, docs/specs/fabric.md
 
+For host-owned project paths, use `PROVENANT_PRIMARY_CHECKOUT`. A linked
+worktree's read-only admin directory is `PROVENANT_WORKTREE_GITDIR`; the writer's
+Git commands continue to use its private view. Project `shared_paths` can expose
+an existing host lock directory read-write to writers, and `exec_roots` can
+expose a repo-managed toolchain read-only. Both are empty by default. See
+[project paths](providers.md#project-paths-and-host-checkout-identity).
+
 Create a writer checkout, submit and wait with one command:
 
 ```sh
@@ -112,6 +119,10 @@ writer custody is free. Dirty trees, held locks and observed live writers still 
 `--base` is supplied for a branch that already exists, Provenant accepts the branch only when
 it already contains that base (reusing its existing worktree or creating one); otherwise the refusal
 names the branch head and the base, and says to omit `--base` to reuse it.
+If a linked checkout has no Provenant lane-owner record, the worktree list
+shows that fact separately from its observed writer state. It may have been
+created outside Provenant. Inspect custody and use `--worktree <path>` to select
+the checkout explicitly; an unknown writer remains unknown until checked.
 
 A refusal that says repository authority could not be revalidated includes the
 underlying repository error and its reason. Inspect that reason and the

@@ -1385,23 +1385,28 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
                 |_| Ok(fake_agy.clone()),
                 None,
             )?;
-            let warning = prepared.route.extra["user_skills"]["warnings"][0]
-                .as_str()
-                .ok_or("missing agy warning")?;
-            assert!(warning.contains("~/.gemini/skills"), "{warning}");
-            assert_eq!(
-                prepared.route.extra["user_skills"]["warnings"],
-                serde_json::json!([warning]),
+            let skills = &prepared.route.extra["user_skills"];
+            assert_eq!(skills["exposed"], true);
+            assert!(
+                skills["warnings"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|warning| warning["code"] == "user_skill_skipped"
+                        && warning["reason"] == "cycle")
             );
-            assert_eq!(
-                prepared.route.extra["discovery_warnings"],
-                if write {
-                    serde_json::json!([warning])
-                } else {
-                    serde_json::json!([])
-                },
-                "writers discover the same path as both a skill and a toolchain"
-            );
+            let warnings = prepared.route.extra["discovery_warnings"]
+                .as_array()
+                .unwrap();
+            if write {
+                assert!(warnings.iter().any(|warning| {
+                    warning
+                        .as_str()
+                        .is_some_and(|text| text.contains("~/.gemini/skills"))
+                }));
+            } else {
+                assert!(warnings.is_empty());
+            }
             let confinement = prepared.confinement.as_ref().ok_or("missing confinement")?;
             assert!(
                 !confinement
@@ -1552,19 +1557,11 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
             );
         }
         let receipt = &prepared.route.extra["user_skills"];
-        assert_eq!(receipt["exposed"], false, "{settings}");
-        assert_eq!(
-            receipt["warnings"].as_array().unwrap().len(),
-            usize::from(expected)
-        );
-        if expected {
-            assert!(
-                receipt["warnings"][0]
-                    .as_str()
-                    .unwrap()
-                    .contains("~/.cursor/skills")
-            );
-        }
+        // The linked target is an empty, safe directory: discovery stages
+        // an empty tree without granting its original location.
+        assert_eq!(receipt["exposed"], expected, "{settings}");
+        assert_eq!(receipt["staged_file_count"], 0);
+        assert!(receipt["warnings"].as_array().unwrap().is_empty());
         if source == "route" {
             assert!(receipt["source"]["route_policy"].is_array());
         } else {
@@ -1661,6 +1658,7 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
             home: &home,
             user: "fixture".as_ref(),
             host_var: &|_| None,
+            skill_stage_max_bytes: 16 * 1024 * 1024,
             account: Some(&codex_account),
             token: None,
             cwd: &project.join(".worktrees/writer"),
@@ -1937,6 +1935,124 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         fallback_launch.route.model.as_deref(),
         Some("cursor/gpt-5.3-codex-low")
     );
+    // A named pool redraws after an adapter disappears during local preparation.
+    // The first two lookups establish availability; the third refuses the first
+    // selected member, and the next lookup admits the remaining member.
+    let saved_config = std::fs::read(state.join("config.toml"))?;
+    std::fs::write(
+        state.join("config.toml"),
+        "schema_version=1\n[domains.routing]\nsettlement_retries=1\n[[domains.routing.pools.redraw-fixture]]\nmodel='cursor/gpt-5.3-codex-low'\nweight=1\nefforts=[]\n[[domains.routing.pools.redraw-fixture]]\nmodel='cursor/grok-4.7'\nweight=1\nefforts=[]\n",
+    )?;
+    let mut redraw_task = task.clone();
+    redraw_task.route = run::RequestedRoute::Named {
+        extra: Default::default(),
+        name: "redraw-fixture".into(),
+        effort: None,
+    };
+    redraw_task.fallback.clear();
+    let redraw_prompt = "pool redraw fixture";
+    redraw_task.prompt_digest =
+        provenant_records::CanonicalV1::file_digest(redraw_prompt.as_bytes());
+    let redraw_paths = run::LaunchPaths {
+        scratch: attempt.join("redraw-scratch"),
+        provider_state: attempt.join("redraw-provider-state"),
+        temporary: attempt.join("redraw-tmp"),
+        temporary_alias: None,
+        attempt_id: fallback_paths.attempt_id,
+        operation_id: fallback_paths.operation_id.clone(),
+        task_index: fallback_paths.task_index,
+        lane_depth: fallback_paths.lane_depth,
+        run_id: fallback_paths.run_id,
+        deadline_unix_ms: fallback_paths.deadline_unix_ms,
+    };
+    for path in [
+        &redraw_paths.scratch,
+        &redraw_paths.provider_state,
+        &redraw_paths.temporary,
+    ] {
+        std::fs::DirBuilder::new().mode(0o700).create(path)?;
+    }
+    let lookup_count = std::cell::Cell::new(0);
+    let redraw_launch = prepare_with(
+        &registry,
+        &redraw_task,
+        redraw_prompt,
+        &redraw_paths,
+        None,
+        |adapter| {
+            assert_eq!(adapter, "cursor");
+            let count = lookup_count.get() + 1;
+            lookup_count.set(count);
+            if count == 3 {
+                Err("fixture executable disappeared".into())
+            } else {
+                Ok(executable.clone())
+            }
+        },
+        None,
+    )?;
+    assert_eq!(redraw_launch.skipped_routes.len(), 1);
+    assert!(
+        redraw_launch.skipped_routes[0]
+            .detail
+            .contains("fixture executable disappeared")
+    );
+    assert_ne!(
+        redraw_launch.route.model.as_deref(),
+        Some(redraw_launch.skipped_routes[0].route.as_str())
+    );
+    let config = std::fs::read_to_string(state.join("config.toml"))?;
+    std::fs::write(
+        state.join("config.toml"),
+        config.replace("settlement_retries=1", "settlement_retries=0"),
+    )?;
+    let no_retry_paths = run::LaunchPaths {
+        scratch: attempt.join("no-redraw-scratch"),
+        provider_state: attempt.join("no-redraw-provider-state"),
+        temporary: attempt.join("no-redraw-tmp"),
+        temporary_alias: None,
+        attempt_id: fallback_paths.attempt_id,
+        operation_id: fallback_paths.operation_id.clone(),
+        task_index: fallback_paths.task_index,
+        lane_depth: fallback_paths.lane_depth,
+        run_id: fallback_paths.run_id,
+        deadline_unix_ms: fallback_paths.deadline_unix_ms,
+    };
+    for path in [
+        &no_retry_paths.scratch,
+        &no_retry_paths.provider_state,
+        &no_retry_paths.temporary,
+    ] {
+        std::fs::DirBuilder::new().mode(0o700).create(path)?;
+    }
+    let calls = std::cell::Cell::new(0);
+    let Err(refusal) = prepare_with(
+        &registry,
+        &redraw_task,
+        redraw_prompt,
+        &no_retry_paths,
+        None,
+        |_| {
+            let count = calls.get() + 1;
+            calls.set(count);
+            if count == 3 {
+                Err("fixture executable disappeared".into())
+            } else {
+                Ok(executable.clone())
+            }
+        },
+        None,
+    ) else {
+        panic!("zero retry budget must not redraw")
+    };
+    assert!(
+        refusal
+            .to_string()
+            .contains("fixture executable disappeared")
+    );
+    assert_eq!(calls.get(), 3);
+    std::fs::write(state.join("config.toml"), saved_config)?;
+
     let mut review_task = task.clone();
     review_task.writer = None;
     let review_paths = run::LaunchPaths {
@@ -2560,6 +2676,7 @@ fn user_sessions_and_pruned_codex_state_remain_resumable() -> Result<(), Box<dyn
                 home: &home,
                 user: "fixture".as_ref(),
                 host_var: &|_| None,
+                skill_stage_max_bytes: 16 * 1024 * 1024,
                 account: Some(&account),
                 token: None,
                 cwd: &cwd,
@@ -3516,5 +3633,32 @@ fn absent_default_login_differs_from_directory_integrity_errors()
         AccountObservationError::VersionUnavailable("codex executable missing".into()).skip_kind(),
         SkipKind::Unavailable
     );
+    Ok(())
+}
+
+#[test]
+fn staged_skill_files_are_written_outside_writable_scratch()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let temporary = temp.path().join("tmp");
+    std::fs::create_dir_all(&temporary)?;
+    let scratch = temporary.join("candidate-0");
+    let stage = temporary.join("candidate-0-skills");
+    apply_setup_directory(&[&temporary], &scratch)?;
+    apply_setup_directory(&[&temporary], &stage)?;
+    apply_setup(
+        &[
+            SetupStep::CreateDir(stage.join("example")),
+            SetupStep::WriteFile {
+                path: stage.join("example/SKILL.md"),
+                bytes: b"staged".to_vec(),
+            },
+        ],
+        &[&stage],
+        None,
+    )?;
+    assert_eq!(std::fs::read(stage.join("example/SKILL.md"))?, b"staged");
+    assert!(!stage.starts_with(&scratch));
+    assert!(!scratch.starts_with(&stage));
     Ok(())
 }

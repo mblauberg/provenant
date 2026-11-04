@@ -134,7 +134,9 @@ pub fn list_with_observation(
             .get(&path)
             .copied()
             .unwrap_or(WorkerState::Unknown);
+        let mut owner = OwnerStatus::Unknown;
         let (dirty, writer, registration_unknown) = if path == primary {
+            owner = OwnerStatus::Primary;
             (
                 worktree_dirty_at(context, context.repo, cancel)
                     .unwrap_or(WorktreeCondition::Unknown),
@@ -144,6 +146,11 @@ pub fn list_with_observation(
         } else {
             match verify_probed_worktree(context, &path, cancel) {
                 Ok(worktree) => {
+                    owner = match load_owner(&worktree) {
+                        Ok(Some(_)) => OwnerStatus::Registered,
+                        Ok(None) => OwnerStatus::Unowned,
+                        Err(_) => OwnerStatus::Unknown,
+                    };
                     let disk = if entry.locked || entry.prunable {
                         WorkerState::Unknown
                     } else {
@@ -170,6 +177,7 @@ pub fn list_with_observation(
                 head: entry.head,
                 dirty,
                 writer,
+                owner,
             },
             observed,
             registration_unknown,
@@ -377,6 +385,7 @@ pub fn create(
         branch: Some(branch.as_str().to_owned()),
         head: entry.head,
         dirty: WorktreeCondition::Clean,
+        owner: OwnerStatus::Unowned,
         writer: match writer {
             WorkerState::Free => WriterState::Free,
             WorkerState::Live => WriterState::Live,
@@ -805,6 +814,7 @@ pub(super) fn remove_tree_when(
             .map(|branch| branch.as_str().to_owned()),
         head: expected_head,
         dirty: WorktreeCondition::Clean,
+        owner: OwnerStatus::Unknown,
         writer: WriterState::Free,
     };
     let writer = locked.writer.take().ok_or(WorktreeError::UnknownWriter)?;

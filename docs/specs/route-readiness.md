@@ -17,7 +17,9 @@ unsupported peer version. Existing exclusion reason wire names stay stable.
 Missing records, future observations, scope mismatches and records at or beyond
 their expiry read as unknown. A reset does not by itself establish readiness.
 A partial, uncalibrated usage window cannot establish headroom; a lower bound at
-the limit still establishes exhaustion. Account refusals cover all routes for
+the limit still establishes exhaustion. Selection and admission exclude that
+unknown headroom by default; `routing.allow_unknown_partial_headroom` permits
+it without clearing other refusals. Account refusals cover all routes for
 that account; pool refusals cover only the verified pool. Refusals publish as
 soon as observed and retain the existing clearing and isolation rules.
 
