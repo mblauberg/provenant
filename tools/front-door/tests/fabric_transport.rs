@@ -981,6 +981,166 @@ fn mcp_client_default_selects_its_own_inbox_and_run_binding_is_honest() -> Resul
 }
 
 #[test]
+fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
+    for scenario in ["authority", "refresh", "quota"] {
+        let mut rig = TestRig::new()?;
+        let cleanup = rig.process_cleanup();
+        let bin = rig.root.join("bin");
+        std::fs::create_dir(&bin)?;
+        let executable = bin.join("claude");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo '2.1.0'; else echo '{\"loggedIn\":true,\"email\":\"fixture@example.test\"}'; fi\n",
+        )?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))?;
+        rig.env.retain(|(key, _)| key != "PATH");
+        rig.env.push((
+            "PATH".into(),
+            format!("{}:/usr/bin:/bin", bin.display()).into(),
+        ));
+        let directory = rig.home.join(".claude-pro");
+        std::fs::create_dir(&directory)?;
+        let credential = directory.join(".credentials.json");
+        if scenario == "authority" {
+            std::fs::create_dir(&credential)?;
+        } else {
+            std::fs::write(&credential, b"{}")?;
+        }
+        let key = provenant_providers::identity::fingerprint("fixture@example.test")
+            .ok_or("account key")?;
+        support::register_account(&rig, "claude", "pro", &key, &directory)?;
+        if scenario == "quota" {
+            let now = i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_secs(),
+            )?;
+            let scope = provenant_quota::AccountScope {
+                adapter: "claude".into(),
+                account_key: key.clone(),
+                label: "pro".into(),
+            };
+            let mut record = provenant_quota::AccountRecord::empty(scope.clone());
+            record.snapshot = Some(provenant_quota::QuotaSnapshot {
+                schema_version: 1,
+                account: scope,
+                revision: 0,
+                status: provenant_quota::QuotaStatus::Exhausted,
+                observed_unix_seconds: now,
+                source_ref: "fixture".into(),
+                authority_ref: None,
+                windows: vec![provenant_quota::QuotaWindow {
+                    pool: "five_hour".into(),
+                    window_seconds: Some(18_000),
+                    used_basis_points: 10_000,
+                    resets_unix_seconds: Some(now + 9000),
+                }],
+                details: None,
+            });
+            let quota = rig.state.join("quota").join(&key);
+            std::fs::create_dir_all(&quota)?;
+            std::fs::set_permissions(
+                rig.state.join("quota"),
+                std::fs::Permissions::from_mode(0o700),
+            )?;
+            std::fs::set_permissions(&quota, std::fs::Permissions::from_mode(0o700))?;
+            let path = quota.join("claude.json");
+            std::fs::write(&path, serde_json::to_vec(&record)?)?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        std::fs::write(
+            rig.project.join("graph.json"),
+            serde_json::to_vec(&json!({
+                "schema_version":1,"graph_id":"typed-refusal","nodes":[{"id":"one","prompt":"work","access":"read_only","routes":[
+                    {"adapter":"claude","model":"claude/claude-sonnet-5-5","account":"pro"},
+                    {"adapter":"fixture","model":"two","account":"pro"}
+                ]}]
+            }))?,
+        )?;
+        let run = rig.command(&[
+            "fabric",
+            "graph",
+            "run",
+            "--document",
+            "graph.json",
+            "--json",
+        ])?;
+        assert_eq!(
+            code(&run),
+            0,
+            "{scenario}: stdout={} stderr={}",
+            String::from_utf8_lossy(&run.stdout.bytes),
+            String::from_utf8_lossy(&run.stderr.bytes)
+        );
+        let run: Value = serde_json::from_slice(&run.stdout.bytes)?;
+        let node = &run["data"]["checkpoint"]["nodes"][0];
+        let attempts = node["attempts"].as_array().ok_or("attempts")?;
+        assert_eq!(attempts.len(), 2, "{scenario}: {run}");
+        let expected = if scenario == "quota" {
+            "usage_limited"
+        } else {
+            "auth_required"
+        };
+        assert_eq!(attempts[0]["outcome"], expected, "{scenario}: {run}");
+        assert_eq!(attempts[0]["launched"], false);
+        let identity = rig.command(&["fabric", "identity", "--json"])?;
+        let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
+        let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
+        inputs.state_dir = Some(rig.state.clone());
+        let context = provenant_run::ExecutionContext {
+            state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
+            project_id: identity["data"]["project"]
+                .as_str()
+                .ok_or("project")?
+                .parse()?,
+            actor_id: identity["data"]["inbox"]["actor"]
+                .as_str()
+                .ok_or("actor")?
+                .parse()?,
+            read_prompts: false,
+        };
+        let clock = provenant_os::clock::SystemClock::new();
+        let cancel = provenant_core::CancelToken::new();
+        let call = provenant_run::Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let store = provenant_run::RunStore::open(&context, &call)?;
+        let (_, id) = attempts[0]["attempt_ref"]
+            .as_str()
+            .ok_or("reference")?
+            .split_once('/')
+            .ok_or("reference")?;
+        let record = store.record(id.parse()?, &call)?;
+        let failure = if scenario == "quota" {
+            provenant_records::run::PreparationFailure::UsageLimited
+        } else {
+            provenant_records::run::PreparationFailure::AuthRequired
+        };
+        assert_eq!(
+            record.preparation_failure,
+            Some(failure),
+            "{scenario}: {record:?}"
+        );
+        let reason = match &record.state {
+            provenant_run::AttemptState::Terminal {
+                reason: Some(reason),
+                ..
+            } => reason,
+            _ => return Err("missing refusal reason".into()),
+        };
+        match scenario {
+            "authority" => assert!(reason.contains("single regular file"), "{reason}"),
+            "refresh" => assert!(reason.contains("stored credential JSON"), "{reason}"),
+            "quota" => assert!(reason.contains("Exhausted"), "{reason}"),
+            _ => unreachable!(),
+        }
+        cleanup.disarm();
+    }
+    Ok(())
+}
+
+#[test]
 fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
     let rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
