@@ -9,7 +9,7 @@ Record the cost to remove, observable invariants and the before/after ownership 
 
 Land the shared seam first when independent modules depend on it. Then make the large change under the same oracle, with disjoint write scopes and one writer per worktree. Delete the old path in the same change and rewrite tests coupled to its structure at the public boundary. For a codemod, review the transform and a sample of sites. Structural search can locate candidates, for example `sg -p '$A.unwrap()'`.
 
-Use a temporary strangler only for production traffic, persisted data, published APIs or a weak oracle; give its adapter an expiry. Do not add compatibility shims for unpublished code. Bound retries per unit and route the long tail to a senior. Stop on an unexplained oracle failure or discovered behaviour change; use diagnose or scope as appropriate. Report the ownership and dependency delta, evidence and residual uncertainty for code-review.
+Do not add compatibility shims, legacy readers or fallback paths. Use a temporary strangler only while live traffic or persisted data moves, or behind a weak oracle; give it an expiry and delete it when the move finishes. Bound retries per unit and route the long tail to a senior. Stop on an unexplained oracle failure or discovered behaviour change; use diagnose or scope as appropriate. Report the ownership and dependency delta, evidence and residual uncertainty for code-review.
 
 ## How it runs
 
