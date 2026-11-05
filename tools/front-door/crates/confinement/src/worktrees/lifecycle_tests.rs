@@ -1487,6 +1487,18 @@ fn lane_owner_reassignment_holds_custody_and_preserves_adopted_owners() -> Resul
         Err(WorktreeError::IdentityChanged)
     ));
     assert_eq!(load_owner(&tree)?, Some(owner.clone()));
+    assert!(matches!(
+        remove_created_by_operation(
+            &context,
+            "lane-owner".into(),
+            info.head,
+            &"competing-owner".parse()?,
+            &cancel()
+        ),
+        Err(WorktreeError::IdentityChanged)
+    ));
+    assert!(info.path.exists());
+    assert_eq!(load_owner(&tree)?, Some(owner.clone()));
     let state = context
         .project_state
         .open_verified_directory(&state_dir_name(&info.path))?;

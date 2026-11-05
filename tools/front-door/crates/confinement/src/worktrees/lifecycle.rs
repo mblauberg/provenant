@@ -1344,6 +1344,39 @@ pub fn remove_with_output(
     cancel: &CancelToken,
     output: &provenant_config::ProjectGcSettings,
 ) -> Result<RemoveOutcome, WorktreeError> {
+    remove_with_owner(context, request, cancel, output, None)
+}
+
+/// Remove a freshly created lane only while it is still owned by this operation.
+/// The owner is checked again under repository and writer custody.
+pub fn remove_created_by_operation(
+    context: &WorktreeContext<'_>,
+    name: String,
+    expected_head: GitOid,
+    operation: &provenant_core::OperationId,
+    cancel: &CancelToken,
+) -> Result<RemoveOutcome, WorktreeError> {
+    remove_with_owner(
+        context,
+        WorktreeRemove::Name {
+            name,
+            discard: false,
+            integration: None,
+            expected_head: Some(expected_head),
+        },
+        cancel,
+        &Default::default(),
+        Some(operation),
+    )
+}
+
+fn remove_with_owner(
+    context: &WorktreeContext<'_>,
+    request: WorktreeRemove,
+    cancel: &CancelToken,
+    output: &provenant_config::ProjectGcSettings,
+    operation: Option<&provenant_core::OperationId>,
+) -> Result<RemoveOutcome, WorktreeError> {
     validate_binding(context)?;
     let repository = repository_lock(context, LockMode::Exclusive, cancel)?;
     let mut detached = Vec::new();
@@ -1365,6 +1398,29 @@ pub fn remove_with_output(
                 let branch_tips = read_branch_tips(context, cancel)?;
                 let entry = named_worktree(&entries, &name, context.repo.root_path())?;
                 let tip = entry.head;
+                let remove_named = || {
+                    let eligible = || {
+                        if let Some(operation) = operation {
+                            let tree = verify_worktree(context.repo, &entry.path)?;
+                            let owner = load_owner(&tree)?.ok_or(WorktreeError::UnknownWriter)?;
+                            if owner.origin != WorktreeOrigin::Lane
+                                || owner.operation_id.as_ref() != Some(operation)
+                            {
+                                return Err(WorktreeError::IdentityChanged);
+                            }
+                        }
+                        Ok(())
+                    };
+                    remove_tree_when(
+                        context,
+                        entry,
+                        tip,
+                        cancel,
+                        &eligible,
+                        Some(output),
+                        Repository::Held,
+                    )
+                };
                 // `remove_tree` rechecks this tip under the worktree lock, so
                 // a commit made after the caller's check cannot be removed.
                 if expected_head.is_some_and(|expected| expected != tip) {
@@ -1374,7 +1430,7 @@ pub fn remove_with_output(
                     if !discard && !is_ancestor(context, tip, integration_tip, cancel)? {
                         return Err(WorktreeError::DetachedUnmerged { head: tip });
                     }
-                    let removed = remove_tree(context, entry, tip, cancel, output)?;
+                    let removed = remove_named()?;
                     outcome.removed.push(removed.info.clone());
                     detached.push(removed);
                     return Ok(outcome);
@@ -1394,7 +1450,7 @@ pub fn remove_with_output(
                     cancel,
                 );
                 // A dirty or live worktree fails here, before any branch changes.
-                let removed = remove_tree(context, entry, tip, cancel, output)?;
+                let removed = remove_named()?;
                 outcome.removed.push(removed.info.clone());
                 detached.push(removed);
                 settle_branch(context, branch, tip, disposition, cancel, &mut outcome)?;

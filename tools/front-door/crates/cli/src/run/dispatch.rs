@@ -396,14 +396,11 @@ pub(super) fn dispatch_with_workers(
                     }) {
                         return Err(worktrees::WorktreeError::UnknownWriter);
                     }
-                    worktrees::remove(
+                    worktrees::remove_created_by_operation(
                         context,
-                        worktrees::WorktreeRemove::Name {
-                            name: branch,
-                            discard: false,
-                            integration: None,
-                            expected_head: Some(info.head),
-                        },
+                        branch,
+                        info.head,
+                        &operation_id,
                         &cancel,
                     )?;
                     Ok(())
