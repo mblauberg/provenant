@@ -1,6 +1,6 @@
 Graph <id>
 Admission: {"status":"admitted"}
-Inspection: {"dependency_depth":4,"edges":22,"limit_reason":null,"max_attempts":22,"nodes":12,"prompt_bytes":37780}
+Inspection: {"dependency_depth":4,"edges":22,"limit_reason":null,"max_attempts":22,"nodes":12,"prompt_bytes":38044}
 Preset selection: review-council (override)
 Review shape: deep (by_risk; size=unknown; kind=unknown; risk=crucial)
 plan: auto -> off (review subject is not large (size=unknown))
@@ -31,6 +31,10 @@ lenses  role=- tier=- family=any kind=composite access=read_only worktree=-
     reference: skill:code-review/references/reviewer-context.md <digest>
     reference: skill:code-review/references/lenses/simplicity.md <digest>
     read_roots: ["<project>","<root>/skills"]
+  lens-reliability  role=lens.reliability tier=senior family=any kind=- access=read_only worktree=-
+    reference: skill:code-review/references/reviewer-context.md <digest>
+    reference: skill:code-review/references/lenses/reliability.md <digest>
+    read_roots: ["<project>","<root>/skills"]
   lens-conventions-readability  role=lens.conventions-readability tier=senior family=any kind=- access=read_only worktree=-
     reference: skill:code-review/references/reviewer-context.md <digest>
     reference: skill:code-review/references/lenses/conventions-readability.md <digest>
@@ -39,15 +43,11 @@ lenses  role=- tier=- family=any kind=composite access=read_only worktree=-
     reference: skill:code-review/references/reviewer-context.md <digest>
     reference: skill:code-review/references/lenses/refactor-cleanup.md <digest>
     read_roots: ["<project>","<root>/skills"]
-  lens-reliability  role=lens.reliability tier=senior family=any kind=- access=read_only worktree=-
-    reference: skill:code-review/references/reviewer-context.md <digest>
-    reference: skill:code-review/references/lenses/reliability.md <digest>
-    read_roots: ["<project>","<root>/skills"]
   lens-flexibility  role=lens.flexibility tier=senior family=any kind=- access=read_only worktree=-
     reference: skill:code-review/references/reviewer-context.md <digest>
     reference: skill:code-review/references/lenses/flexibility.md <digest>
     read_roots: ["<project>","<root>/skills"]
-  exports: [{"node":"lens-correctness-spec","outputs":["result","findings"]},{"node":"lens-tests","outputs":["result","findings"]},{"node":"lens-design-fit-reuse","outputs":["result","findings"]},{"node":"lens-simplicity","outputs":["result","findings"]},{"node":"lens-conventions-readability","outputs":["result","findings"]},{"node":"lens-refactor-cleanup","outputs":["result","findings"]},{"node":"lens-reliability","outputs":["result","findings"]},{"node":"lens-flexibility","outputs":["result","findings"]}]
+  exports: [{"node":"lens-correctness-spec","outputs":["result","findings"]},{"node":"lens-tests","outputs":["result","findings"]},{"node":"lens-design-fit-reuse","outputs":["result","findings"]},{"node":"lens-simplicity","outputs":["result","findings"]},{"node":"lens-reliability","outputs":["result","findings"]},{"node":"lens-conventions-readability","outputs":["result","findings"]},{"node":"lens-refactor-cleanup","outputs":["result","findings"]},{"node":"lens-flexibility","outputs":["result","findings"]}]
 verify  role=review.verify tier=senior family=cross_preferred kind=- access=read_only worktree=-
   read_roots: ["<project>"]
   source: {"node":"subject","type":"node"}

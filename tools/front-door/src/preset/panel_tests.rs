@@ -113,7 +113,7 @@ fn select_items_names_the_family_group_of_each_slot() {
             .collect()
     };
     let standard = in_group(json!({"review_shape": "standard"}));
-    assert_eq!(standard, vec![Some("group-0".to_owned()); 3]);
+    assert_eq!(standard, vec![Some("group-0".to_owned()); 5]);
 
     // quick prefers no spread, so its lens carries no group.
     assert_eq!(in_group(json!({"review_shape": "quick"})), [None]);
