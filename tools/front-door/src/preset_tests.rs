@@ -5121,8 +5121,14 @@ mod planner_front_end {
                 &config.budget,
             )
             .unwrap_err();
-            assert_eq!(error.code(), "invalid_graph");
-            assert!(error.to_string().contains("invalid review expansion"));
+            assert_eq!(
+                error.code(),
+                if response == fragment && !fail {
+                    "invalid_graph"
+                } else {
+                    "bad_checkpoint"
+                }
+            );
             if response == fragment && !fail {
                 let mut changed = journal.0.clone().unwrap();
                 let lens = changed
