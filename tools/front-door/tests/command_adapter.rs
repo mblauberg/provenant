@@ -170,6 +170,14 @@ fn review_preset_launches_read_only_from_detached_head() -> Result {
         "{}",
         String::from_utf8_lossy(&explain.stdout.bytes)
     );
+    let plan: Value = serde_json::from_slice(&explain.stdout.bytes)?;
+    let nodes = plan["data"]["graph"]["nodes"]
+        .as_array()
+        .ok_or("plan nodes")?;
+    for id in ["subject", "lenses", "synthesis"] {
+        let node = nodes.iter().find(|node| node["id"] == id).ok_or(id)?;
+        assert!(node.to_string().contains("review-pass"), "{node}");
+    }
     if !available()? {
         return Ok(());
     }
