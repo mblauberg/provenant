@@ -22,6 +22,7 @@ push_conflict_markers = true
 brief_read_root_warnings = true
 profile_limit_bytes = 524288
 grant_limit = 128
+writer_token_budget = 500000
 
 [projects]
 "#;
@@ -64,8 +65,17 @@ pub struct RunConfig {
     /// Maximum path grants in each profile family and in the plan.
     #[serde(default = "default_grant_limit")]
     pub grant_limit: usize,
+    /// Tokens a writer attempt may use before it is ended with its work
+    /// committed and pushed. 0 turns the budget off.
+    #[serde(default = "default_writer_token_budget")]
+    pub writer_token_budget: u64,
     #[serde(default)]
     pub projects: BTreeMap<String, ProjectRunConfig>,
+}
+/// Default writer token budget.
+pub const DEFAULT_WRITER_TOKEN_BUDGET: u64 = 500_000;
+fn default_writer_token_budget() -> u64 {
+    DEFAULT_WRITER_TOKEN_BUDGET
 }
 fn default_profile_limit_bytes() -> usize {
     512 * 1024
@@ -94,6 +104,9 @@ pub struct ProjectRunConfig {
     /// Default admission deadline in seconds before launch for this project.
     #[serde(default)]
     pub admission_seconds: Option<u64>,
+    /// Replaces the host writer token budget for this project.
+    #[serde(default)]
+    pub writer_token_budget: Option<u64>,
 }
 fn default_review_exempt() -> Vec<String> {
     DEFAULT_REVIEW_EXEMPT
@@ -111,6 +124,7 @@ impl Default for RunConfig {
             admission_seconds: None,
             profile_limit_bytes: default_profile_limit_bytes(),
             grant_limit: default_grant_limit(),
+            writer_token_budget: default_writer_token_budget(),
             projects: BTreeMap::new(),
         }
     }
@@ -144,6 +158,26 @@ impl RunConfig {
             .or(self.admission_seconds)
     }
 
+    /// The writer token budget for `project`, with where it came from. A
+    /// per-run override wins over the project, then the host setting, then
+    /// the default.
+    pub fn writer_token_budget_for(&self, project: &str, per_run: Option<u64>) -> TokenBudget {
+        let (tokens, source) = if let Some(tokens) = per_run {
+            (tokens, TokenBudgetSource::Run)
+        } else if let Some(tokens) = self
+            .projects
+            .get(project)
+            .and_then(|settings| settings.writer_token_budget)
+        {
+            (tokens, TokenBudgetSource::Project)
+        } else if self.writer_token_budget != DEFAULT_WRITER_TOKEN_BUDGET {
+            (self.writer_token_budget, TokenBudgetSource::Host)
+        } else {
+            (DEFAULT_WRITER_TOKEN_BUDGET, TokenBudgetSource::Default)
+        };
+        TokenBudget { tokens, source }
+    }
+
     /// The review-exempt paths that apply to `project`: its own list when it
     /// has one, otherwise the host-wide list.
     pub fn review_exempt_for(&self, project: &str) -> Vec<String> {
@@ -174,6 +208,21 @@ impl RunConfig {
             .and_then(|settings| settings.brief_read_root_warnings)
             .unwrap_or(self.brief_read_root_warnings)
     }
+}
+/// A resolved writer token budget. `tokens` of 0 means no budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct TokenBudget {
+    pub tokens: u64,
+    pub source: TokenBudgetSource,
+}
+/// Where a writer token budget was set, for `--explain` and receipts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenBudgetSource {
+    Run,
+    Project,
+    Host,
+    Default,
 }
 fn valid_writer_write(path: &Path) -> bool {
     path.is_absolute()
@@ -290,6 +339,7 @@ fn project_key(key: &str) -> bool {
 pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::new("profile_limit_bytes", "int"),
     FieldMetadata::new("grant_limit", "int"),
+    FieldMetadata::new("writer_token_budget", "int"),
     FieldMetadata::new("push_conflict_markers", "bool"),
     FieldMetadata::new("brief_read_root_warnings", "bool"),
     FieldMetadata::new("warn_brief_read_roots", "bool"),
