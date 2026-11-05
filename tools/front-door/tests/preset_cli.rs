@@ -4,6 +4,101 @@
 )]
 use std::{path::PathBuf, process::Command};
 
+fn graph_journal_files(path: &std::path::Path) -> std::io::Result<Vec<(PathBuf, Vec<u8>)>> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            files.extend(graph_journal_files(&entry.path())?);
+        } else if entry.file_name().to_string_lossy().starts_with("graph-") {
+            files.push((entry.path(), std::fs::read(entry.path())?));
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+#[test]
+fn preset_secret_inputs_are_refused_before_publication() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let project = temp.path().join("project");
+    let graphs = project.join(".provenant/scratch/graphs");
+    let state = temp.path().join("state");
+    std::fs::create_dir_all(&graphs)?;
+    std::fs::create_dir_all(&state)?;
+    std::fs::write(graphs.join("existing"), "graph sentinel")?;
+    std::fs::write(state.join("graph-existing.json"), "journal sentinel")?;
+    let prompt = temp.path().join("prompt");
+    let params = temp.path().join("params.toml");
+    let secret = format!("ghp_{}", "a1".repeat(18));
+    // TOML escapes ensure scanning operates on decoded values.
+    let encoded = secret.replacen('g', "\\u0067", 1);
+    for (source, explain) in [
+        ("prompt", false),
+        ("set", false),
+        ("file", false),
+        ("prompt", true),
+        ("set", true),
+        ("file", true),
+    ] {
+        std::fs::write(
+            &prompt,
+            if source == "prompt" {
+                &secret
+            } else {
+                "ordinary brief"
+            },
+        )?;
+        std::fs::write(
+            &params,
+            format!("branches = [{{ brief = \"{encoded}\" }}]\n"),
+        )?;
+        let mut command = fixture_cli();
+        command
+            .current_dir(&project)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["--json", "--state-dir"])
+            .arg(&state)
+            .args(["run", "--preset", "fan-out-synthesise", "--prompt-file"])
+            .arg(&prompt);
+        if source == "set" {
+            command.args([
+                "--set",
+                &format!("parameters.branches=[{{brief=\"{encoded}\"}}]"),
+            ]);
+        }
+        if source == "file" {
+            command.arg("--params-file").arg(&params);
+        }
+        if explain {
+            command.arg("--explain");
+        }
+        let output = command.output()?;
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        assert!(
+            !output.status.success(),
+            "{source}, explain={explain}: {result}"
+        );
+        assert_eq!(
+            result["error"]["code"], "SECRET_INPUT",
+            "{source}, explain={explain}: {result}"
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(&secret));
+        assert_eq!(std::fs::read_dir(&graphs)?.count(), 1);
+        assert_eq!(std::fs::read(graphs.join("existing"))?, b"graph sentinel");
+        assert_eq!(
+            graph_journal_files(&state)?,
+            vec![(
+                state.join("graph-existing.json"),
+                b"journal sentinel".to_vec()
+            )]
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn fan_out_branch_parameters_validate_and_route_synthesis() -> Result<(), Box<dyn std::error::Error>>
 {

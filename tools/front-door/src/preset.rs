@@ -930,11 +930,7 @@ pub fn expand_with(
         .map_err(|error| format!("{error}; valid parameter and slot paths: {valid}"))?;
     }
     for item in overrides {
-        let (path, raw) = item
-            .split_once('=')
-            .ok_or_else(|| format!("expected path=value: {item}"))?;
-        let parsed: Value = toml_edit::de::from_str(&format!("value = {raw}"))
-            .map_err(|e| format!("{path}: {e}; string values need quotes, for example --set 'parameters.route=\"utility\"'"))?;
+        let (path, parsed) = parse_preset_override(item)?;
         if parsed["value"].is_object() {
             return Err(format!(
                 "{path}: --set requires a scalar or array value; set table fields with dotted paths, for example --set 'parameters.subject.commit=\"<sha>\"'"
@@ -3921,6 +3917,81 @@ fn params_file(path: &Path) -> Result<Vec<(String, Value)>, String> {
         .collect())
 }
 
+fn parse_preset_override(item: &str) -> Result<(&str, Value), String> {
+    let (path, raw) = item
+        .split_once('=')
+        .ok_or_else(|| format!("expected path=value: {item}"))?;
+    let parsed = toml_edit::de::from_str(&format!("value = {raw}"))
+        .map_err(|e| format!("{path}: {e}; string values need quotes, for example --set 'parameters.route=\"utility\"'"))?;
+    Ok((path, parsed))
+}
+
+enum PresetInputError {
+    Invalid(String),
+    Secret,
+}
+impl From<String> for PresetInputError {
+    fn from(message: String) -> Self {
+        Self::Invalid(message)
+    }
+}
+fn scan_preset_value(value: &Value) -> Result<(), PresetInputError> {
+    match value {
+        Value::String(text) => {
+            provenant_run::Service::scan(text).map_err(|_| PresetInputError::Secret)
+        }
+        Value::Array(values) => values.iter().try_for_each(scan_preset_value),
+        Value::Object(values) => values.values().try_for_each(scan_preset_value),
+        _ => Ok(()),
+    }
+}
+struct PresetInputs {
+    bytes: Vec<u8>,
+    params: Vec<(String, Value)>,
+}
+
+fn preset_inputs(request: &provenant_cli::Dispatch) -> Result<PresetInputs, PresetInputError> {
+    let bytes = if let Some(path) = &request.input.prompt_file {
+        let mut file = provenant_os::fs::FileHandle::open_source(path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        file.read_bounded(1_048_576)
+            .map_err(|e| format!("{}: {e}", path.display()))?
+    } else if request.input.prompt_stdin {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::io::stdin()
+            .lock()
+            .take(1_048_577)
+            .read_to_end(&mut bytes)
+            .map_err(|error| error.to_string())?;
+        if bytes.len() > 1_048_576 {
+            return Err(PresetInputError::Invalid(
+                "prompt exceeds 1048576 bytes".into(),
+            ));
+        }
+        bytes
+    } else {
+        return Err(PresetInputError::Invalid(
+            "preset selection requires a prompt input".into(),
+        ));
+    };
+
+    let prompt = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
+    provenant_run::Service::scan(prompt).map_err(|_| PresetInputError::Secret)?;
+    let params = match &request.preset_params_file {
+        Some(path) => params_file(path)?,
+        None => Vec::new(),
+    };
+    for (_, value) in &params {
+        scan_preset_value(value)?;
+    }
+    for item in &request.preset_set {
+        let (_, parsed) = parse_preset_override(item)?;
+        scan_preset_value(&parsed["value"])?;
+    }
+    Ok(PresetInputs { bytes, params })
+}
+
 fn prompt_ready(prompt: &str) -> bool {
     let lower = prompt.to_ascii_lowercase();
     let named_surface = [
@@ -3956,27 +4027,31 @@ pub fn run(
     globals: &provenant_cli::Globals,
     workers: &'static dyn provenant_confinement::worktrees::WorkerObserver,
 ) -> u8 {
+    let PresetInputs {
+        bytes,
+        params: file_params,
+    } = match preset_inputs(&request) {
+        Ok(inputs) => inputs,
+        Err(PresetInputError::Secret) => {
+            return crate::fail(
+                "run",
+                provenant_records::Outcome::Refused,
+                "SECRET_INPUT",
+                "input matches a secret pattern; remove the secret and retry",
+                globals,
+            );
+        }
+        Err(PresetInputError::Invalid(error)) => {
+            return crate::fail(
+                "run",
+                provenant_records::Outcome::Invalid,
+                "preset",
+                &error,
+                globals,
+            );
+        }
+    };
     let result = (|| -> Result<(Expansion, Vec<String>), String> {
-        let bytes = if let Some(path) = &request.input.prompt_file {
-            let mut file = provenant_os::fs::FileHandle::open_source(path)
-                .map_err(|e| format!("{}: {e}", path.display()))?;
-            file.read_bounded(1_048_576)
-                .map_err(|e| format!("{}: {e}", path.display()))?
-        } else if request.input.prompt_stdin {
-            use std::io::Read;
-            let mut bytes = Vec::new();
-            std::io::stdin()
-                .lock()
-                .take(1_048_577)
-                .read_to_end(&mut bytes)
-                .map_err(|error| error.to_string())?;
-            if bytes.len() > 1_048_576 {
-                return Err("prompt exceeds 1048576 bytes".into());
-            }
-            bytes
-        } else {
-            return Err("preset selection requires a prompt input".into());
-        };
         let prompt = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
         let directory = crate::roots::selected_project(globals.project.as_deref(), false)
             .map_err(|e| e.to_string())?;
@@ -4005,10 +4080,6 @@ pub fn run(
         let config =
             provenant_config::read_with_domains(&roots.roots, &provenant_cli::domains::SECTIONS)
                 .map_err(|e| e.to_string())?;
-        let file_params = match &request.preset_params_file {
-            Some(path) => params_file(path)?,
-            None => Vec::new(),
-        };
         let mut layers = configured(globals)?;
         layers.launch_dir = Some(directory.clone());
         // Default project selection may be a subdirectory of a checkout.
