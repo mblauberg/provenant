@@ -3,6 +3,15 @@ use super::*;
 #[cfg(test)]
 thread_local! { pub(super) static CHECKPOINT_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
+#[cfg(feature = "fixture")]
+thread_local! { static READ_GRAPH_IDS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) }; }
+
+/// Take the graph IDs read by this thread since the last call.
+#[cfg(feature = "fixture")]
+pub fn take_checkpoint_read_ids() -> Vec<String> {
+    READ_GRAPH_IDS.with(|ids| std::mem::take(&mut *ids.borrow_mut()))
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum CrashPoint {
@@ -831,6 +840,8 @@ pub(super) fn read_checkpoint_bytes(
 ) -> Result<Option<Vec<u8>>, JournalError> {
     #[cfg(test)]
     CHECKPOINT_READS.with(|reads| reads.set(reads.get() + 1));
+    #[cfg(feature = "fixture")]
+    READ_GRAPH_IDS.with(|ids| ids.borrow_mut().push(graph_id.to_owned()));
     let file = match directory.open_read(OsStr::new(&format!("graph-{graph_id}.json"))) {
         Ok(file) => file,
         Err(error) if error.is_not_found() => return Ok(None),

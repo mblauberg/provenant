@@ -104,6 +104,7 @@ provenant-records = { workspace = true }
 toml_edit = { workspace = true }
 
 [dev-dependencies]
+provenant-fabric-runtime = { workspace = true, features = ["fixture"] }
 provenant-test-support = { path = "crates/test-support" }
 provenant-os = { workspace = true, features = ["fixture"] }
 regex = { workspace = true }
