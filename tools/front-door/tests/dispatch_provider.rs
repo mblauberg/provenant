@@ -1259,7 +1259,7 @@ fn review_resolves_identity_only_dispositions() -> Result {
             "--prompt-file",
             brief.to_str().ok_or("brief")?,
             "--set",
-            "parameters.review_shape=\"quick\"",
+            "parameters.review_shape=\"standard\"",
             "--set",
             &format!("parameters.subject.commit=\"{head}\""),
             "--set",
@@ -1343,7 +1343,7 @@ fn review_resolves_identity_only_dispositions() -> Result {
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "council did not complete: {status}"
+            "review did not complete: {status}"
         );
         std::thread::park_timeout(std::time::Duration::from_millis(50));
     }
