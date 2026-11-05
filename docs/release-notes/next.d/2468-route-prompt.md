@@ -5,3 +5,4 @@
 - Route previews describe readiness and distinguish missing or expired observations from provider refusals (#2468).
 - Quota and hosts doctor show the same account-scoped readiness evidence and observation time (#2468).
 - Route lists and resolution show recorded model-scoped readiness for matching accounts (#2468).
+- Hosts doctor identifies installed adapters without account observations as unknown (#2468).

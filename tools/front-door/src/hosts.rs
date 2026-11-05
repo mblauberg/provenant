@@ -71,6 +71,9 @@ fn login_account(row: provenant_quota::AccountRow) -> LoginAccount {
 pub(crate) struct Report {
     claude: Vec<Identity>,
     login_accounts: Vec<LoginAccount>,
+    /// Installed adapters with no account observation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    unobserved_adapters: Vec<String>,
     /// The executable lanes can resolve through their read-only Rust toolchain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     nextest: Option<String>,
@@ -94,6 +97,17 @@ fn executable(name: &str) -> Option<PathBuf> {
         .filter(|p| p.is_absolute())
         .map(|p| p.join(name))
         .find(|p| provenant_os::sys::is_executable(p))
+}
+fn unobserved_adapters(accounts: &[LoginAccount], installed: impl Fn(&str) -> bool) -> Vec<String> {
+    provenant_records::ADAPTER_SPECS
+        .iter()
+        .filter(|spec| {
+            !spec.binary.is_empty()
+                && installed(spec.binary)
+                && !accounts.iter().any(|row| row.adapter == spec.name)
+        })
+        .map(|spec| spec.name.to_owned())
+        .collect()
 }
 fn lane_nextest(home: &Path) -> Option<String> {
     let path = home.join(".cargo/bin/cargo-nextest");
@@ -297,9 +311,12 @@ pub(crate) fn local(
             Vec::new()
         }
     };
+    let unobserved_adapters =
+        unobserved_adapters(&login_accounts, |binary| executable(binary).is_some());
     Ok(Report {
         claude,
         login_accounts,
+        unobserved_adapters,
         nextest: lane_nextest(home),
         peer_agent: provenant_fabric_runtime::peer_agent::status(state, home),
         tick_agent: crate::tick_agent::diagnosis(state, home),
@@ -367,6 +384,10 @@ fn valid_remote(report: &Report) -> bool {
                 && row.label.len() <= 128
                 && !row.label.chars().any(char::is_control)
                 && row.signin.token_validity == "unverified"
+        })
+        && report.unobserved_adapters.len() <= 128
+        && report.unobserved_adapters.iter().all(|name| {
+            !name.is_empty() && name.len() <= 128 && !name.chars().any(char::is_control)
         })
         && report.login_accounts.len() <= 128
         && report.login_accounts.iter().all(|row| {
@@ -503,6 +524,9 @@ pub fn run(command: Hosts, globals: &Globals) -> u8 {
                     text.push_str(" (status probe could not confirm sign-in)");
                 }
                 text.push_str("; token validity unverified\n");
+            }
+            for adapter in &report.unobserved_adapters {
+                text.push_str(&format!("recorded account readiness {}: unknown (no account observation; configure an account if needed, then run `provenant quota tick` to probe)\n", adapter.escape_debug()));
             }
             for row in &report.login_accounts {
                 let reason = row
@@ -645,6 +669,20 @@ mod tests {
     }
 
     #[test]
+    fn doctor_identifies_installed_adapters_without_account_observations() {
+        let row: super::LoginAccount = serde_json::from_value(serde_json::json!({
+            "adapter": "agy", "label": "work", "account_key": "key",
+            "reason": null, "last_success_unix_seconds": null,
+            "login_expiry": null, "repair": null
+        }))
+        .unwrap();
+        let names =
+            super::unobserved_adapters(&[row], |binary| binary == "agy" || binary == "opencode");
+        assert_eq!(names, ["opencode"]);
+        assert!(super::unobserved_adapters(&[], |_| false).is_empty());
+    }
+
+    #[test]
     fn doctor_login_projection_keeps_account_reason_and_recovery() {
         let row = provenant_quota::AccountRow {
             account: provenant_quota::AccountScope {
@@ -755,6 +793,12 @@ mod tests {
         )
         .unwrap();
         assert!(super::valid_remote(&report));
+        let mut installed: super::Report = serde_json::from_str(
+            r#"{"claude":[],"peer_agent":"stopped","login_accounts":[],"unobserved_adapters":["fixture"]}"#,
+        ).unwrap();
+        assert!(super::valid_remote(&installed));
+        installed.unobserved_adapters[0] = "bad\nname".into();
+        assert!(!super::valid_remote(&installed));
 
         let mut scoped: super::Report = serde_json::from_str(
             r#"{"claude":[],"peer_agent":"stopped","login_accounts":[{"adapter":"fixture","label":"work","account_key":"key","reason":null,"last_success_unix_seconds":null,"login_expiry":null,"repair":null,"readiness":{"state":"unavailable","reason":"signed_out","observed_unix_seconds":1,"expires_unix_seconds":2,"reset_unix_seconds":null,"evidence_ref":"fixture","observed_scope":{"host":"local","adapter":"fixture","account_key":"key","route":"*"}}}]}"#,

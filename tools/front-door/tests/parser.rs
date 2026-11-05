@@ -1464,6 +1464,40 @@ fn config_check_and_doctor_report_pool_effort_warnings_as_advice() -> Result {
 }
 
 #[test]
+fn hosts_doctor_reports_unobserved_installed_adapters_without_running_them() -> Result {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let mut rig = TestRig::new()?;
+    let bin = rig.root.join("status-bin");
+    fs::create_dir(&bin)?;
+    for name in ["agy", "opencode"] {
+        let executable = bin.join(name);
+        fs::write(
+            &executable,
+            b"#!/bin/sh\n: > \"$HOME/provider-ran\"\nexit 1\n",
+        )?;
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o700))?;
+    }
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push(("PATH".into(), bin.into_os_string()));
+    let out = rig.command(&["hosts", "doctor", "--json"])?;
+    assert_eq!(
+        code(&out),
+        0,
+        "{}",
+        String::from_utf8_lossy(&out.stdout.bytes)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+    let rows = value["data"]["unobserved_adapters"]
+        .as_array()
+        .ok_or("missing adapters")?;
+    for name in ["agy", "opencode"] {
+        assert!(rows.iter().any(|row| row == name), "{value}");
+    }
+    assert!(!rig.home.join("provider-ran").exists());
+    Ok(())
+}
+
+#[test]
 fn hosts_doctor_uses_non_billing_status_and_preserves_identity_selection() -> Result {
     use std::{fs, os::unix::fs::PermissionsExt};
     let mut rig = TestRig::new()?.without_state()?;
