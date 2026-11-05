@@ -77,8 +77,8 @@ fn validate(owner: &WorktreeOwner) -> Result<(), WorktreeError> {
 /// Publish lane ownership only while both repository and writer custody are
 /// excluded. Reassignment requires the caller's owner snapshot to remain
 /// current and the worktree HEAD must still be the one the caller observed
-/// (and validated, for example for base ancestry); only a verified terminal
-/// prior may permit a live or unknown census observation.
+/// (and validated, for example for base ancestry). An unowned tree or a
+/// verified terminal prior may permit a live or unknown census observation.
 #[allow(clippy::too_many_arguments)]
 pub fn save_lane_owner_when_free(
     context: &WorktreeContext<'_>,
@@ -122,13 +122,24 @@ pub fn save_lane_owner_when_free(
         .copied()
         .unwrap_or(WorkerState::Unknown);
     if observed == WorkerState::Busy
-        || matches!(observed, WorkerState::Live | WorkerState::Unknown) && !terminal_prior
+        || matches!(observed, WorkerState::Live | WorkerState::Unknown)
+            && !terminal_prior
+            && expected_prior.is_some()
     {
         return Err(live_refusal(context.workers, tree.path()));
     }
     let current_prior = load_owner(&tree)?;
     if current_prior.as_ref() != expected_prior {
         return Err(WorktreeError::IdentityChanged);
+    }
+    if let Some(prior) = current_prior.as_ref()
+        && prior.origin == WorktreeOrigin::Lane
+        && prior.operation_id != owner.operation_id
+        && !terminal_prior
+    {
+        return Err(WorktreeError::WriterBusy {
+            holder: prior.attempt_id,
+        });
     }
     if current_prior
         .as_ref()

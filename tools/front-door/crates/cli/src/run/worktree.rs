@@ -48,13 +48,16 @@ impl From<OwnWorktreeError> for Fail {
 }
 
 fn warn_worktree_census(path: &Path, detail: &str) {
-    use std::io::Write;
+    let _ = write_worktree_census_warning(&mut std::io::stderr().lock(), path, detail);
+}
+
+pub(super) fn write_worktree_census_warning(
+    output: &mut impl std::io::Write,
+    path: &Path,
+    detail: &str,
+) -> std::io::Result<()> {
     let warning = format!("{}: {detail}", path.display());
-    let _ = writeln!(
-        std::io::stderr().lock(),
-        "warning: {}",
-        plain_text(&warning, 4096)
-    );
+    writeln!(output, "warning: {}", plain_text(&warning, 4096))
 }
 
 /// Create or claim the owned tree and publish its lane ownership. A new
@@ -158,10 +161,11 @@ pub(super) fn own_worktree(
                             });
                         }
                         WriterState::Live => {
-                            let settled = owner
-                                .as_ref()
-                                .and_then(|owner| owner.attempt_id)
-                                .is_some_and(&terminal_attempt);
+                            let settled = owner.is_none()
+                                || owner
+                                    .as_ref()
+                                    .and_then(|owner| owner.attempt_id)
+                                    .is_some_and(&terminal_attempt);
                             if !settled
                                 || observation.registration_unknown
                                 || worktrees::cache_writer_probe(context.project_state, &info.path)
@@ -169,19 +173,18 @@ pub(super) fn own_worktree(
                             {
                                 return Err(worktrees::live_refusal(context.workers, &info.path));
                             }
-                            warn_worktree_census(
-                                &info.path,
-                                &format!(
-                                    "{}; the previous lane attempt has finished",
-                                    worktrees::live_refusal(context.workers, &info.path)
-                                ),
+                            let detail = context.workers.live_process(&info.path).map_or_else(
+                                || "a process was observed".to_owned(),
+                                |process| format!("process {process} ({})", process.kind),
                             );
+                            warn_worktree_census(&info.path, &detail);
                         }
                         WriterState::Unknown => {
-                            let settled = owner
-                                .as_ref()
-                                .and_then(|owner| owner.attempt_id)
-                                .is_some_and(&terminal_attempt);
+                            let settled = owner.is_none()
+                                || owner
+                                    .as_ref()
+                                    .and_then(|owner| owner.attempt_id)
+                                    .is_some_and(&terminal_attempt);
                             if !settled
                                 || worktrees::cache_writer_probe(context.project_state, &info.path)
                                     .is_err()

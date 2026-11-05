@@ -2973,7 +2973,7 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
     })?;
     let counted = CountedUnknown(std::sync::atomic::AtomicUsize::new(0));
     let session = worktrees::CensusSession::new(&counted, &clock);
-    let census_error = super::own_worktree(
+    let (census_admitted, _) = super::own_worktree(
         &super::OwnedWorktree {
             branch: census_branch.into(),
             host,
@@ -2988,13 +2988,11 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
         &clock,
         &cancel,
         None,
+    )?;
+    assert_eq!(
+        census_admitted.branch.as_deref(),
+        Some("refs/heads/census-refusal-branch")
     );
-    match census_error {
-        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
-            provenant_confinement::worktrees::WorktreeError::CensusUnknown { detail, .. },
-        ))) => assert_eq!(detail, "injected census incomplete"),
-        other => panic!("expected typed census refusal, got {other:?}"),
-    }
     assert_eq!(counted.0.load(std::sync::atomic::Ordering::SeqCst), 1);
     let census_unknown = worktrees::WorktreeError::CensusUnknown {
         path: path.clone(),
@@ -3083,6 +3081,20 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
         None,
     )?;
     assert_eq!(admitted.path, path);
+    Ok(())
+}
+
+#[test]
+fn worktree_census_warning_includes_scope_and_evidence() -> Result<(), Box<dyn std::error::Error>> {
+    let mut output = Vec::new();
+    super::worktree::write_worktree_census_warning(
+        &mut output,
+        Path::new("/repo/worktree"),
+        "census incomplete for pid 42",
+    )?;
+    let warning = String::from_utf8(output)?;
+    assert!(warning.contains("/repo/worktree"));
+    assert!(warning.contains("census incomplete for pid 42"));
     Ok(())
 }
 
@@ -3202,17 +3214,55 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
         target: path.clone(),
     };
 
-    // Ordinary policy without run ancestor exclusion refuses admission because
-    // the inside process is observed live:
+    // A bystander in an unowned worktree is advisory when custody is free.
     let ordinary = CensusPolicyWorkers::from_roots(&observer, &roots)?;
-    let refused = super::own_worktree(
+    let held = worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+        worktrees::cache_writer_guard(context.project_state, &path)
+            .map_err(|_| worktrees::WorktreeError::UnknownWriter)
+    })?;
+    let claim_time = WallTime::from_micros(2)?;
+    let claim_operation = OperationId::parse("inside-op")?;
+    let attempt_claim = || {
+        super::own_worktree(
+            &super::OwnedWorktree {
+                branch: branch.into(),
+                host,
+                created_at: claim_time,
+            },
+            None,
+            &claim_operation,
+            &edge_inside,
+            &ordinary,
+            |_| false,
+            &mut None,
+            &clock,
+            &cancel,
+            None,
+        )
+    };
+    assert!(matches!(
+        attempt_claim(),
+        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
+            worktrees::WorktreeError::WriterBusy { .. }
+        )))
+    ));
+    drop(held);
+    std::fs::write(path.join("uncommitted"), "keep")?;
+    assert!(matches!(
+        attempt_claim(),
+        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
+            worktrees::WorktreeError::Dirty(_)
+        )))
+    ));
+    std::fs::remove_file(path.join("uncommitted"))?;
+    let admitted = super::own_worktree(
         &super::OwnedWorktree {
             branch: branch.into(),
             host,
             created_at: WallTime::from_micros(2)?,
         },
         None,
-        &OperationId::parse("inside-op-refused")?,
+        &OperationId::parse("inside-op")?,
         &edge_inside,
         &ordinary,
         |_| false,
@@ -3220,21 +3270,11 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
         &clock,
         &cancel,
         None,
-    );
-    match refused {
-        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
-            provenant_confinement::worktrees::WorktreeError::LiveProcess(proc),
-        ))) => {
-            assert_eq!(proc.pid, 24680);
-            assert_eq!(proc.command.as_deref(), Some("ancestor-shell"));
-            assert_eq!(proc.cwd.as_ref(), Some(&path));
-        }
-        other => panic!("expected LiveProcess refusal without ancestor exclusion, got {other:?}"),
-    }
-
-    // Real run policy applies ancestor exclusion, so admission succeeds:
+    )?;
+    assert_eq!(admitted.0.path, path);
+    assert_eq!(admitted.0.head, head);
     let run_policy = CensusPolicyWorkers::for_run(&observer, &roots)?;
-    let admitted = super::own_worktree(
+    let replay = super::own_worktree(
         &super::OwnedWorktree {
             branch: branch.into(),
             host,
@@ -3250,8 +3290,7 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
         &cancel,
         None,
     )?;
-    assert_eq!(admitted.0.path, path);
-    assert_eq!(admitted.0.head, head);
+    assert_eq!(replay.0.path, path);
 
     let attempt = provenant_core::AttemptId::from_bytes([42; 16]);
     worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {

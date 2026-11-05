@@ -635,6 +635,32 @@ fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>>
         .find(|lane| lane.path == path)
         .ok_or("lane")?;
     assert_eq!(lane.writer, WriterState::Busy);
+    let tree = verify_worktree(&fixture.repo, &path)?;
+    let new_owner = WorktreeOwner {
+        attempt_id: None,
+        operation_id: Some("retained-import-claim".parse()?),
+        branch: "native".into(),
+        base: lane.head.to_string(),
+        host: provenant_core::HostId::from_bytes([3; 16]),
+        created_at: context.clock.wall_now()?,
+        origin: WorktreeOrigin::Lane,
+        label: None,
+    };
+    assert!(matches!(
+        save_lane_owner_when_free(
+            &context,
+            &tree,
+            &new_owner,
+            lane.head,
+            None,
+            false,
+            &cancel()
+        ),
+        Err(WorktreeError::LockBusy)
+    ));
+    assert!(load_owner(&tree)?.is_none());
+    assert_eq!(fs::read(attempt.join("reservation.json"))?, b"reservation");
+    assert_eq!(fs::read(attempt.join("import-retained.json"))?, b"retained");
     let entries = read_worktrees(&context, &cancel())?;
     let entry = entries
         .iter()
@@ -1272,6 +1298,38 @@ fn lane_owner_reassignment_holds_custody_and_preserves_adopted_owners() -> Resul
     ));
     assert_eq!(load_owner(&tree)?, Some(owner.clone()));
     drop(held);
+    assert!(matches!(
+        save_lane_owner_when_free(
+            &context,
+            &tree,
+            &next,
+            info.head,
+            Some(&owner),
+            false,
+            &cancel()
+        ),
+        Err(WorktreeError::WriterBusy { holder }) if holder == owner.attempt_id
+    ));
+    assert_eq!(load_owner(&tree)?, Some(owner.clone()));
+    let pending = WorktreeOwner {
+        attempt_id: None,
+        ..owner.clone()
+    };
+    save_owner(&tree, &pending)?;
+    assert!(matches!(
+        save_lane_owner_when_free(
+            &context,
+            &tree,
+            &next,
+            info.head,
+            Some(&pending),
+            false,
+            &cancel()
+        ),
+        Err(WorktreeError::WriterBusy { holder: None })
+    ));
+    assert_eq!(load_owner(&tree)?, Some(pending));
+    save_owner(&tree, &owner)?;
     fs::write(info.path.join("dirty"), "keep")?;
     let error = save_lane_owner_when_free(
         &context,

@@ -44,6 +44,13 @@ process that does not take the advisory writer lock may start after the
 observation; the census is not atomic exclusion and never grants signalling
 authority.
 
+An unowned worktree may be claimed when writer custody is available even if
+the census observes a bystander or cannot complete. Admission warns with the
+observation, and the claim checks the Git registration, HEAD, cleanliness and
+in-progress Git operations under repository and writer custody. A different
+operation cannot replace a nonterminal lane owner, including a reservation that
+has not yet acquired an attempt ID.
+
 A lane owner whose recorded attempt is confirmed terminal may be reassigned
 when the writer lock is free even if the census sees a process in the tree.
 Admission warns about that observation, or the scoped census evidence when
