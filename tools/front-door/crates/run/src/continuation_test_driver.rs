@@ -364,7 +364,8 @@ fn launches() -> TestResult {
         input.request.tasks[0].writer.as_ref().ok_or("writer")?,
         &store.writer_registry,
         context.project_id,
-    )?;
+    )
+    .map_err(|e| format!("prepare fixture writer: {e}"))?;
     provenant_confinement::worktrees::save_owner(
         &writer.worktree,
         &provenant_confinement::worktrees::WorktreeOwner {
@@ -377,12 +378,15 @@ fn launches() -> TestResult {
             origin: provenant_confinement::worktrees::WorktreeOrigin::Lane,
             label: None,
         },
-    )?;
-    writer.snapshot(
-        context.state_root.as_path(),
-        &attempt,
-        RunStore::scope(&old),
-    )?;
+    )
+    .map_err(|e| format!("save fixture owner: {e}"))?;
+    writer
+        .snapshot(
+            context.state_root.as_path(),
+            &attempt,
+            RunStore::scope(&old),
+        )
+        .map_err(|e| format!("snapshot fixture writer: {e}"))?;
     // A launched predecessor's guardian leaves a custody lock after release.
     let custody = attempt.try_lock(
         std::ffi::OsStr::new("custody.lock"),
