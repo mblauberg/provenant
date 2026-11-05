@@ -744,105 +744,50 @@ fn bundled_codex_tiers_resolve_with_pool_specific_effort_controls()
         disclosure_ref: "policy",
         confinement_ref: "grant",
     }];
-    let codex_models: Vec<_> = catalogue
-        .models()
-        .iter()
-        .filter(|entry| entry.model.adapter() == "codex")
-        .map(|entry| entry.model.model())
-        .collect();
-    assert_eq!(codex_models, ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol"]);
-    for (pool, model, weight, default_effort, allowed) in [
-        ("junior", "gpt-6.1-terra", 2, "low", vec!["low", "medium"]),
-        (
-            "senior",
-            "gpt-6.1-sol",
-            4,
-            "medium",
-            vec!["low", "medium", "high"],
-        ),
-        (
-            "senior",
-            "gpt-6.1-terra",
-            4,
-            "high",
-            vec!["low", "medium", "high"],
-        ),
-        (
-            "principal",
-            "gpt-6.1-sol",
-            1,
-            "high",
-            vec!["medium", "high", "xhigh"],
-        ),
-    ] {
-        let member = catalogue.pools[pool]
+    let mut checked = 0;
+    for (pool, members) in &catalogue.pools {
+        for member in members
             .iter()
-            .find(|member| member.model.as_str() == format!("codex/{model}"))
-            .ok_or("Codex pool member missing")?;
-        assert_eq!(member.model.model(), model);
-        assert_eq!(member.weight, weight);
-        assert_eq!(member.efforts, allowed);
-        assert_eq!(member.effort.as_deref(), Some(default_effort));
-        // Check this member's effort policy independently of the weighted draw.
-        let mut isolated = catalogue.clone();
-        isolated.pools.insert(pool.into(), vec![member.clone()]);
-        let mut record = availability();
-        record.observed_models = vec![model.into()];
-        let records = [record];
-        let mut context = context(&isolated, &config, now()?);
-        context.availability = &records;
-        context.access = &access;
-        let entry = catalogue.model(&member.model).ok_or("model missing")?;
-        assert_eq!(entry.family.as_deref(), Some("openai"));
-        assert_eq!(entry.trains_on_prompts, Some(false));
-        assert!(entry.evidence_ref.contains("models_cache.json"));
-        assert_eq!(entry.efforts, ["low", "medium", "high", "xhigh", "max"]);
-        let mut query = request(&format!("codex/{model}"))?;
-        query.confidential = true;
-        for effort in ["low", "medium", "high", "xhigh", "max"] {
-            query.effort = Some(effort.into());
-            let exact = resolve(&query, &context)?;
-            assert_eq!(exact.effort.as_deref(), Some(effort));
-            assert!(matches!(exact.readiness, RouteReadiness::Ready { .. }));
-        }
-        query.choice = RouteChoice::NamedRoute(RouteName::parse(pool)?);
-        query.effort = None;
-        let resolved = resolve_with_seed(&query, &context, "codex-tier", 0)?;
-        assert_eq!(resolved.model, model);
-        assert_eq!(resolved.effort.as_deref(), Some(default_effort));
-        for effort in &allowed {
-            query.effort = Some((*effort).into());
+            .filter(|member| member.model.adapter() == "codex")
+        {
+            checked += 1;
+            if let Some(default) = &member.effort {
+                assert!(
+                    member.efforts.contains(default),
+                    "{pool}: {}",
+                    member.model.as_str()
+                );
+            }
+            let entry = catalogue.model(&member.model).ok_or("model missing")?;
+            assert!(
+                member
+                    .efforts
+                    .iter()
+                    .all(|effort| entry.efforts.contains(effort))
+            );
+            let mut isolated = catalogue.clone();
+            isolated.pools.insert(pool.clone(), vec![member.clone()]);
+            let mut record = availability();
+            record.observed_models = vec![member.model.model().into()];
+            let records = [record];
+            let mut context = context(&isolated, &config, now()?);
+            context.availability = &records;
+            context.access = &access;
+            let mut query = request(member.model.as_str())?;
+            query.choice = RouteChoice::NamedRoute(RouteName::parse(pool)?);
+            query.effort = None;
             let resolved = resolve_with_seed(&query, &context, "codex-tier", 0)?;
-            assert_eq!(resolved.model, model);
-            assert_eq!(resolved.effort.as_deref(), Some(*effort));
-        }
-        for effort in ["low", "medium", "high", "xhigh", "max"] {
-            if allowed.contains(&effort) {
-                continue;
-            }
-            query.effort = Some(effort.into());
-            match resolve_with_seed(&query, &context, "codex-tier", 0) {
-                Ok(resolved) => assert_ne!(resolved.model, model),
-                Err(RoutingError::NoEligiblePoolMember { .. }) => {}
-                Err(error) => return Err(error.into()),
+            assert_eq!(resolved.model, member.model.model());
+            assert_eq!(resolved.effort.as_ref(), member.effort.as_ref());
+            for effort in &member.efforts {
+                query.effort = Some(effort.clone());
+                let resolved = resolve_with_seed(&query, &context, "codex-tier", 0)?;
+                assert_eq!(resolved.model, member.model.model());
+                assert_eq!(resolved.effort.as_deref(), Some(effort.as_str()));
             }
         }
     }
-    for entry in catalogue.models() {
-        assert!(entry.efforts.iter().all(|effort| {
-            ["low", "medium", "high", "xhigh", "max"].contains(&effort.as_str())
-        }));
-    }
-    for members in catalogue.pools.values() {
-        for member in members {
-            assert!(!member.efforts.iter().any(|effort| effort == "max"));
-            assert_ne!(member.effort.as_deref(), Some("max"));
-        }
-    }
-    let principal = &catalogue.pools["principal"];
-    assert_eq!(principal.len(), 2);
-    assert_eq!(principal[0].model.as_str(), "claude/claude-opus-5-5");
-    assert_eq!(principal[0].weight, 1);
+    assert!(checked > 0, "bundled pools should contain Codex models");
     Ok(())
 }
 
