@@ -286,7 +286,9 @@ pub fn spawn_detached(argv: &[OsString], cwd: &Path) -> Result<(), ExecError> {
 
 /// Start a worker in its own process group and read one bounded receipt. When
 /// the reader's deadline expires, the reaper retains the child without
-/// signalling it: its work and any custody it holds must continue.
+/// signalling it: its work and any custody it holds must continue. `None` means
+/// only that the deadline expired. A worker that ends or breaks its stream
+/// early gives whatever it wrote, which the caller must validate.
 #[allow(clippy::disallowed_methods)] // This is a real process deadline.
 pub fn detached_receipt(
     argv: &[OsString],
@@ -331,18 +333,18 @@ pub fn detached_receipt(
         match child.ready(Some(&output), None, None) {
             Ok(true) => {}
             Ok(false) => continue,
-            Err(_) => return Ok(None),
+            Err(_) => return Ok(Some(receipt)),
         }
         if Instant::now() >= deadline {
             return Ok(None);
         }
         let mut buf = [0_u8; 4096];
         match output.read(&mut buf) {
-            Ok(0) => return Ok(None),
+            Ok(0) => return Ok(Some(receipt)),
             Ok(n) => {
                 receipt.extend_from_slice(&buf[..n]);
                 if receipt.len() > 1024 * 1024 {
-                    return Ok(None);
+                    return Ok(Some(receipt));
                 }
                 if receipt.last() == Some(&b'\n') {
                     return Ok(Some(receipt));
@@ -353,7 +355,7 @@ pub fn detached_receipt(
                     error.kind(),
                     io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
                 ) => {}
-            Err(_) => return Ok(None),
+            Err(_) => return Ok(Some(receipt)),
         }
     }
 }

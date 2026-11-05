@@ -224,11 +224,23 @@ impl RunStore {
             // repository lock during that work, then revalidate Git under a
             // fresh lock before constructing the confined command and launch.
             let seed_attempt = local_or_withdraw!(directory());
+            // A lock, not an assertion: observers stop reporting this phase if
+            // the launcher dies. Failing to take it only loses the report.
+            let seeding = seed_attempt
+                .lock(
+                    std::ffi::OsStr::new(crate::writer::SEED_WAIT_LOCK),
+                    provenant_os::fs::LockMode::Exclusive,
+                    call.lock_budget(),
+                    call.cancel,
+                    call.clock,
+                )
+                .ok();
             seed_without_setup_lock(&mut _git_setup_lock, || {
                 #[cfg(feature = "fixture")]
                 hold_seed_for_fixture();
                 confinement.seed_cargo(&plan.environment, &seed_attempt);
             });
+            drop(seeding);
             _git_setup_lock = match retry_setup_lock(
                 record.retry_of.is_some(),
                 |budget| {

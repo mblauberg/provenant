@@ -43,6 +43,20 @@ fn detached_receipt_timeout_leaves_worker_running() -> Result<(), Box<dyn std::e
 }
 
 #[test]
+fn detached_receipt_tells_an_ended_worker_from_an_expired_wait()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let argv = [
+        OsString::from("/bin/sh"),
+        OsString::from("-c"),
+        OsString::from("exit 0"),
+    ];
+    let receipt = detached_receipt(&argv, temp.path(), Duration::from_secs(60))?;
+    assert_eq!(receipt, Some(Vec::new()));
+    Ok(())
+}
+
+#[test]
 fn detached_worker_refuses_to_relaunch_a_test_harness() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let argv = [

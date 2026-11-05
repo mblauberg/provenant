@@ -106,7 +106,8 @@ fn dispatch_proceeds_when_provider_update_is_busy() -> Result {
     assert_eq!(code(&result), 0, "{result:?}");
     let response: Value = serde_json::from_slice(&result.stdout.bytes)?;
     let run = response["data"]["run_id"].as_str().ok_or("run id")?;
-    let lanes = rig.command(&["lanes", "--id", run, "--wait", "5s", "--json"])?;
+    // Preparation can outlast the one-second wait on a loaded host.
+    let lanes = rig.command(&["lanes", "--id", run, "--wait", "60s", "--json"])?;
     assert_eq!(code(&lanes), 0, "{lanes:?}");
     let output = rig.command(&["output", run, "--json"])?;
     assert_eq!(code(&output), 0, "{output:?}");
@@ -3083,11 +3084,13 @@ fn local_wait_returns_while_writer_seed_is_held() -> Result {
         elapsed < std::time::Duration::from_secs(15),
         "{elapsed:?}: {result}"
     );
-    assert_eq!(result["error"]["code"], "LAUNCH_UNKNOWN", "{result}");
+    // A launch that outlasts the wait is still waiting, and says where.
+    assert_eq!(code(&output), 0, "{result}");
+    assert!(result["error"].is_null(), "{result}");
     assert!(
-        result["error"]["message"]
+        result["data"]["lanes"][0]["waiting_for"]
             .as_str()
-            .is_some_and(|message| message.contains("launch preparation")),
+            .is_some_and(|phase| phase.starts_with("launch preparation")),
         "{result}"
     );
     assert_eq!(

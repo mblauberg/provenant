@@ -2364,7 +2364,12 @@ pub(super) fn launch_with_deadline(
             ),
         )
     };
-    let receipt = receipt.ok_or_else(unknown)?;
+    // The worker holds custody and keeps preparing after this wait ends, so a
+    // launch that outlasts the wait is a lane still waiting, not a failure. The
+    // caller reports the lane's current phase from the store.
+    let Some(receipt) = receipt else {
+        return Ok(Vec::new());
+    };
     let value: Value = serde_json::from_slice(&receipt).map_err(|_| unknown())?;
     if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
         let kind = error["code"]

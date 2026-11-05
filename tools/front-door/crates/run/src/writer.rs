@@ -34,6 +34,8 @@ pub(crate) enum WriterCustodyError {
 }
 
 pub(crate) const SETUP_WAIT_LOCK: &str = "setup-wait.lock";
+/// Held while the writer's Cargo cache is seeded, so observers can name the phase.
+pub(crate) const SEED_WAIT_LOCK: &str = "seed-wait.lock";
 
 // Serialise queue changes separately from the long-lived setup lock. Each
 // ticket is itself locked, so a killed waiter can be discarded by its peers.

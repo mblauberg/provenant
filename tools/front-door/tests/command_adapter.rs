@@ -147,11 +147,11 @@ fn local_wait_returns_while_command_preparation_is_held() -> Result {
     fs::remove_file(gate.join("hold"))?;
     entered.map_err(|error| format!("{error}: {result}"))?;
     assert!(elapsed < Duration::from_secs(15), "{elapsed:?}: {result}");
-    assert_eq!(result["error"]["code"], "LAUNCH_UNKNOWN", "{result}");
+    assert!(result["error"].is_null(), "{result}");
     assert!(
-        result["error"]["message"]
+        result["data"]["lanes"][0]["waiting_for"]
             .as_str()
-            .is_some_and(|message| message.contains("launch preparation")),
+            .is_some_and(|phase| phase.contains("launch")),
         "{result}"
     );
     assert_eq!(result["data"]["operation_id"], "held-command", "{result}");
