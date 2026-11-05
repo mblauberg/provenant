@@ -357,4 +357,174 @@ mod tests {
         }
         Ok(())
     }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn configured_shared_path_allows_lane_lock_contended_by_host()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_confinement::permissions::{
+            BackendContext, WorktreeWriteAuthority, system_backend,
+        };
+        use provenant_os::exec::{
+            ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
+        };
+        use std::ffi::OsString;
+        use std::time::Duration;
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let primary = root.join("repo");
+        let home = root.join("home");
+        let common = primary.join(".git");
+        let admin = common.join("worktrees/writer");
+        let cwd = root.join("writer");
+        let shared = primary.join(".agent-run/locks");
+        let scratch = root.join("scratch");
+        let state = root.join("state");
+        for path in [&home, &admin, &cwd, &shared, &scratch, &state] {
+            std::fs::create_dir_all(path)?;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+        let executor = SystemExecutor::new(2)?;
+        let cancel = provenant_core::CancelToken::new();
+        let env: Vec<(OsString, OsString)> = Vec::new();
+        if let Err(error) = system_backend(&BackendContext {
+            executor: &executor,
+            cancel: &cancel,
+            env: &env,
+        }) {
+            provenant_test_support::skip_sandbox_dependent_test(format!(
+                "native sandbox unavailable: {error}"
+            ))?;
+            return Ok(());
+        }
+        let mut roots = provenant_core::RootInputs::new(home.clone(), primary.clone());
+        roots.state_dir = Some(state.clone());
+        let roots = roots.resolve(&provenant_os::fs::SystemPathResolver)?;
+        std::fs::write(
+            state.join("config.toml"),
+            "schema_version = 1\n[domains.lanes.projects.example]\nshared_paths = ['.agent-run/locks']\n",
+        )?;
+        let config = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?;
+        let settings = config
+            .domains
+            .lanes
+            .projects
+            .get("example")
+            .ok_or("project settings")?;
+        let grant = |path: PathBuf| PathGrant {
+            path,
+            scope: PathScope::Subtree,
+        };
+        let plan = ConfinedPlan::new(PlanRequest {
+            scope: WorkScope::Project(ProjectId::from_bytes([1; 16])),
+            codex: CodexPolicy::Clean,
+            extensions: ExtensionPolicy::Deny,
+            agy_state: None,
+            permissions: PlanPermissions {
+                mode: AccessMode::WorktreeWrite(Box::new(serde_json::from_value::<
+                    WorktreeWriteAuthority,
+                >(json!({
+                    "git_grants_digest": vec![7_u8; 32], "publishing": false,
+                    "common_git_dir": common, "cargo_cache": {"path": scratch.join("cache"), "scope": "subtree"}
+                }))?)),
+                read_only: None,
+                scratch: grant(scratch.clone()),
+                private_state: None,
+                read_roots: vec![grant(cwd.clone())],
+                protected_roots: vec![],
+                secret_roots: vec![],
+                selected_authentication: None,
+                include_continuation: false,
+                write_roots: vec![],
+                network: NetworkAccess::Provider,
+                nested_confinement: false,
+            },
+        })?;
+        let mut profile = ProviderProfile {
+            spec: ProviderProfileSpec {
+                allow_process_fork: true,
+                tool_exec_roots: vec![grant("/usr/bin".into()), grant("/bin".into())],
+                ..Default::default()
+            },
+            observations: Default::default(),
+        };
+        let record = apply_to(
+            &mut Vec::new(),
+            &mut profile,
+            &plan,
+            Context {
+                cwd: &cwd,
+                home: &home,
+                state_root: &state,
+                common_git: Some(&common),
+                worktree_gitdir: Some(&admin),
+                writer: true,
+                settings: Some(settings),
+                project: "example",
+            },
+        );
+        assert_eq!(record["shared_paths"][0]["path"], "./.agent-run/locks");
+        let sbpl = provenant_confinement::permissions::snapshot::render(
+            plan.permissions(),
+            &profile,
+            &home,
+        )?;
+        let lock_dir = provenant_os::fs::Directory::open_anchor(&shared)?;
+        let release = lock_dir.try_lock(
+            std::ffi::OsStr::new("release.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
+        let lock = shared.join("lane.lock");
+        let ready = shared.join("ready");
+        let started = shared.join("host-started");
+        let acquired = shared.join("host-acquired");
+        let release_path = shared.join("release.lock");
+        std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+            let lane = scope.spawn(|| {
+                let argv = [OsString::from("/usr/bin/sandbox-exec"), "-p".into(), sbpl.into(), "/usr/bin/perl".into(), "-e".into(),
+                    "open(my $f, '>>', $ARGV[0]) or die $!; flock($f, 2) or die $!; open(my $r, '>', $ARGV[1]) or die $!; close($r); open(my $g, '>>', $ARGV[2]) or die $!; flock($g, 2) or die $!;".into(),
+                    lock.as_os_str().to_owned(), ready.as_os_str().to_owned(), release_path.as_os_str().to_owned()];
+                let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(20));
+                options.stderr = StreamPolicy::Capture { limit: 1024 };
+                executor.execute(options)
+            });
+            provenant_test_support::wait_for(
+                "lane lock",
+                Duration::from_secs(10),
+                || ready.exists(),
+                |ready| *ready,
+            )?;
+            assert!(
+                lock_dir
+                    .try_lock(
+                        std::ffi::OsStr::new("lane.lock"),
+                        provenant_os::fs::LockMode::Exclusive
+                    )
+                    .is_err()
+            );
+            let host = scope.spawn(|| {
+                let argv = [OsString::from("/usr/bin/perl"), "-e".into(),
+                    "open(my $f, '>>', $ARGV[0]) or die $!; open(my $s, '>', $ARGV[1]) or die $!; close($s); flock($f, 2) or die $!; open(my $a, '>', $ARGV[2]) or die $!;".into(),
+                    lock.as_os_str().to_owned(), started.as_os_str().to_owned(), acquired.as_os_str().to_owned()];
+                let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(20));
+                options.stderr = StreamPolicy::Capture { limit: 1024 };
+                executor.execute(options)
+            });
+            provenant_test_support::wait_for(
+                "host contender",
+                Duration::from_secs(10),
+                || started.exists(),
+                |started| *started,
+            )?;
+            assert!(!acquired.exists());
+            drop(release);
+            let lane = lane.join().map_err(|_| "lane thread")??;
+            let host = host.join().map_err(|_| "host thread")??;
+            assert_eq!(lane.termination, Termination::Exit(0), "{lane:?}");
+            assert_eq!(host.termination, Termination::Exit(0), "{host:?}");
+            assert!(acquired.exists());
+            Ok(())
+        })?;
+        Ok(())
+    }
 }
