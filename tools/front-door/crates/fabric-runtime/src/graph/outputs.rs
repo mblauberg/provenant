@@ -6,6 +6,9 @@ pub(super) const SEPARATION_FAMILIES: usize = 8;
 pub(super) const FAMILY_BYTES: usize = 64;
 pub(super) const MAX_FINDINGS: usize = 32;
 
+/// Soft per-node budget for inherited disposition descriptions.
+const DISPOSITION_TEXT_TARGET: usize = 64 * 1024;
+
 /// Canonical JSON bytes of one character inside a string.
 pub(super) fn encoded_char(character: char) -> usize {
     match character {
@@ -104,7 +107,13 @@ pub(super) fn make_outputs_with_upstream(
             parse_findings(block, upstream)
         });
     let findings = parsed
-        .map(|(findings, skipped)| {
+        .map(|(findings, skipped, trimmed)| {
+            if trimmed > 0 {
+                warnings.push(bounded(
+                    &format!("findings metadata trimmed for {trimmed} entries in checkpoint"),
+                    WARNING_BYTES,
+                ));
+            }
             if let Some(first) = skipped.first() {
                 let warning = if skipped.len() > 1 {
                     format!(
@@ -192,7 +201,7 @@ pub(super) fn make_outputs_with_upstream(
 fn parse_findings(
     block: &str,
     upstream: &[Finding],
-) -> Result<(Vec<Finding>, Vec<String>), String> {
+) -> Result<(Vec<Finding>, Vec<String>, usize), String> {
     let block: serde_json::Value = serde_json::from_str(block).map_err(|error| {
         format!(
             "field findings: invalid JSON at line {} column {}",
@@ -402,13 +411,34 @@ fn parse_findings(
     } else {
         DISPOSITION_FINDINGS_BYTES
     };
-    if canonical_len(&findings) > cap {
+    let mut size = canonical_len(&findings);
+    let mut trimmed = 0;
+    if !upstream.is_empty() && size > DISPOSITION_TEXT_TARGET {
+        // Retain identities, locations, dispositions and the marker used to
+        // follow provenance. The full result remains in the attempt artifact.
+        for finding in &mut findings {
+            if size <= DISPOSITION_TEXT_TARGET {
+                break;
+            }
+            let before = canonical_len(finding);
+            finding
+                .extra
+                .retain(|key, _| key == "propagates" || key == "verification");
+            finding.summary.clear();
+            let after = canonical_len(finding);
+            if after < before {
+                size -= before - after;
+                trimmed += 1;
+            }
+        }
+    }
+    if size > cap {
         return Err("field findings: exceeds canonical byte cap".into());
     }
     if findings.is_empty() && !skipped.is_empty() {
         return Err(skipped.remove(0));
     }
-    Ok((findings, skipped))
+    Ok((findings, skipped, trimmed))
 }
 
 type FindingOrigin = (String, String);
@@ -1157,6 +1187,45 @@ mod alias_tests {
         assert_eq!(outputs.findings[0].id, "F1");
         assert_eq!(outputs.verdict.as_deref(), Some("VERDICT: PASS"));
         assert!(outputs.warnings[0].contains("(F9) field id: unknown upstream identity"));
+    }
+
+    #[test]
+    fn large_inherited_dispositions_trim_optional_metadata() {
+        let mut upstream: Finding = serde_json::from_value(serde_json::json!({
+            "id":"F1", "severity":"high", "file":"src/lib.rs", "line":17,
+            "summary":"description", "status":"open", "detail":"x".repeat(8000),
+            "propagates":"review:F1"
+        }))
+        .unwrap();
+        upstream.summary = "s".repeat(1000);
+        let upstream = vec![upstream; 240];
+        let mut capture = crate::result_capture::ResultCapture::new(Some("VERDICT: PASS"));
+        capture.push(b"```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"disposition\":\"accepted\",\"reason\":\"yes\"}]}\n```\nVERDICT: PASS\n");
+        let outputs =
+            make_outputs_with_upstream(Some(&capture.finish()), None, None, None, None, &upstream);
+        assert_eq!(outputs.findings.len(), upstream.len());
+        assert!(canonical_len(&outputs.findings) <= DISPOSITION_TEXT_TARGET);
+        assert!(
+            outputs
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("findings metadata trimmed"))
+        );
+        for finding in outputs.findings {
+            assert_eq!(finding.id, "F1");
+            assert_eq!(finding.severity, "high");
+            assert_eq!(finding.file, "src/lib.rs");
+            assert_eq!(finding.line, Some(17));
+            assert_eq!(finding.disposition.as_deref(), Some("accepted"));
+            assert_eq!(finding.reason.as_deref(), Some("yes"));
+            assert_eq!(
+                finding
+                    .extra
+                    .get("propagates")
+                    .and_then(|value| value.as_str()),
+                Some("review:F1")
+            );
+        }
     }
 
     #[test]

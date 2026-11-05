@@ -1673,6 +1673,92 @@ fn synthesis_disposes_once_of_findings_propagated_through_verifier() {
 }
 
 #[test]
+fn large_synthesis_trims_metadata_and_replays_with_finding_identities() {
+    let input = |id: &str| GraphInput {
+        extra: Default::default(),
+        node: id.into(),
+        outputs: vec![OutputKind::Findings],
+    };
+    let mut nodes = vec![node("seed", route("first"))];
+    let mut observations = VecDeque::from([terminal_with_result(
+        AttemptOutcome::Succeeded,
+        &findings_text(&entry("")),
+    )]);
+    let entries = vec![entry(",\"propagates\":\"seed:F1\""); MAX_FINDINGS].join(",");
+    let verifier_text = findings_text(&entries);
+    for i in 0..8 {
+        let mut verifier = node(&format!("verifier{i}"), route("first"));
+        verifier.depends_on = vec!["seed".into()];
+        verifier.inputs = vec![input("seed")];
+        nodes.push(verifier);
+        observations.push_back(terminal_with_result(
+            AttemptOutcome::Succeeded,
+            &verifier_text,
+        ));
+    }
+    let mut synthesis = node("synthesis", route("first"));
+    synthesis.depends_on = (0..8).map(|i| format!("verifier{i}")).collect();
+    synthesis.inputs = synthesis.depends_on.iter().map(|id| input(id)).collect();
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    nodes.push(synthesis);
+    let mut next = node("next", route("first"));
+    next.depends_on = vec!["synthesis".into()];
+    next.inputs = vec![input("synthesis")];
+    nodes.push(next);
+    let decisions = serde_json::json!({"id":"F1", "disposition":"accepted", "reason":"yes", "detail":"x".repeat(8000)});
+    observations.push_back(terminal_with_result(
+        AttemptOutcome::Succeeded,
+        &findings_text(&decisions.to_string()),
+    ));
+    observations.push_back(terminal_with_result(
+        AttemptOutcome::Succeeded,
+        &findings_text(""),
+    ));
+    let document = graph(nodes);
+    let mut journal = MemoryJournal::default();
+    let mut owner = FakeOwner {
+        observations,
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let synthesis = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "synthesis")
+        .unwrap();
+    assert_eq!(
+        synthesis.state,
+        NodeState::Succeeded,
+        "{:?}",
+        synthesis.advance_error
+    );
+    let outputs = synthesis.outputs.as_ref().unwrap();
+    assert!(
+        outputs
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("findings metadata trimmed"))
+    );
+    assert_eq!(outputs.findings.len(), 8 * MAX_FINDINGS);
+    assert!(
+        outputs.findings.iter().all(|finding| finding.id == "F1"
+            && finding.severity == "high"
+            && finding.file == "a.rs")
+    );
+    assert_eq!(
+        run.checkpoint.nodes.last().unwrap().state,
+        NodeState::Succeeded
+    );
+    let prompt = owner.prompts.last().unwrap();
+    assert!(prompt.contains("F1") && prompt.contains("high") && prompt.contains("a.rs"));
+    let stored = serde_json::to_vec(journal.0.as_ref().unwrap()).unwrap();
+    journal.0 = Some(serde_json::from_slice(&stored).unwrap());
+    let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
+    assert_eq!(run.checkpoint, replay.checkpoint);
+}
+
+#[test]
 fn settled_copies_keep_origin_and_evidence_for_downstream_disposition() {
     let input = |id: &str| GraphInput {
         extra: Default::default(),

@@ -2279,6 +2279,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     .warnings
                                     .push("equal_base_and_head: review range is empty".into());
                             }
+                            outputs.warnings.truncate(MAX_WARNINGS);
                             if outcome == AttemptOutcome::UsageLimited {
                                 outputs
                                     .warnings

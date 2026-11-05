@@ -616,9 +616,14 @@ Choose review depth from the risk and author tier.
 
 The checkpoint estimate reserves space for each node’s bounded outputs and,
 for disposition nodes, copies of upstream findings. Those reservations can be
-much larger than the text actually stored. Review panels with an unpinned size
-expand after their subjects are committed. The current admission estimate does
-not include all of that expansion, so a graph that explains successfully can
+much larger than the text actually stored. When inherited disposition metadata
+is large, settlement trims summaries and optional fields toward a shared
+per-node target and warns; identities, severity, location, dispositions,
+reasons and propagation markers remain. That target is not yet a hard bound:
+large required fields can still exceed the existing reservation. Review panels
+with an unpinned size expand after their subjects are committed. The current
+admission estimate does not include all of that expansion, so a graph that
+explains successfully can
 still exceed the checkpoint limit. Setting the top-level `size` or `review_shape`
 fixes the council and repair panels,
 but does not fix the lane panels. Split a large batch into smaller graphs to
