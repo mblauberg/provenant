@@ -833,7 +833,9 @@ pub(super) fn render_lanes_with_lineage(
                     provenant_records::wire::LaneTranscript {
                         adapter: adapter.to_owned(),
                         session: session.to_owned(),
-                        path: path.map(|path| path.display().to_string()),
+                        path: path.and_then(|path| {
+                            provenant_records::AbsolutePathWire::from_path(&path).ok()
+                        }),
                     }
                 });
             // The settled record's own reason, without a waiting lane's note.
@@ -888,7 +890,9 @@ pub(super) fn render_lanes_with_lineage(
                     lane.usage.cache_read,
                     lane.usage.cache_write,
                 ),
-                result_path: json!(result),
+                result_path: json!(result.as_deref().and_then(|path| {
+                    provenant_records::AbsolutePathWire::from_path(path).ok()
+                })),
                 transcript,
                 title: lane.title.clone(),
                 requested_priority: lane

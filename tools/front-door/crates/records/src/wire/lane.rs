@@ -115,7 +115,7 @@ pub struct LaneSettlement {
 pub struct LaneTranscript {
     pub adapter: String,
     pub session: String,
-    pub path: Option<String>,
+    pub path: Option<crate::AbsolutePathWire>,
 }
 
 /// Planned `data` of `lanes` and `status`. Current status emits raw attempt
@@ -203,16 +203,16 @@ pub fn lane_row_schema() -> Value {
             ("head", nullable(string())),
             ("protected_paths", a.clone()),
             ("delivery", a.clone()),
-            ("continuation", a.clone()),
+            ("continuation", a),
             ("cache_read_share", nullable(number())),
-            ("result_path", a),
+            ("result_path", nullable(super::schema::worktree_path())),
             (
                 "transcript",
                 nullable(object(
                     &[
                         ("adapter", string()),
                         ("session", string()),
-                        ("path", nullable(string())),
+                        ("path", nullable(super::schema::worktree_path())),
                     ],
                     &[],
                 )),

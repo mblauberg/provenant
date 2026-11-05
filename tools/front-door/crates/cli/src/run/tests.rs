@@ -4152,10 +4152,9 @@ fn render_lanes_points_at_the_provider_transcript() -> Result<(), Box<dyn std::e
     assert_eq!(found["session"], "sess-1848");
     assert_eq!(
         found["path"],
-        transcript
-            .join("sess-1848.jsonl")
-            .to_string_lossy()
-            .as_ref()
+        json!(provenant_records::AbsolutePathWire::from_path(
+            &transcript.join("sess-1848.jsonl")
+        )?)
     );
     // Read-only Claude records its selected account's exact state-write path.
     // The lookup never follows links, so build the grant from the resolved temp root.
@@ -4177,7 +4176,7 @@ fn render_lanes_points_at_the_provider_transcript() -> Result<(), Box<dyn std::e
     let (data, _) = render_lanes_without_cooldowns(&[lane], &[], None, other.path());
     assert_eq!(
         data["lanes"][0]["transcript"]["path"],
-        path.to_string_lossy().as_ref()
+        json!({"kind":"path", "root":"/", "relative":{"encoding":"utf8", "path":path.strip_prefix("/")?.to_str().unwrap()}})
     );
     Ok(())
 }

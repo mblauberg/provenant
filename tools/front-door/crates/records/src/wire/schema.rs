@@ -98,6 +98,20 @@ pub fn absolute_path() -> Value {
         &[],
     )
 }
+/// The tagged absolute path form used by worktree listings.
+pub fn worktree_path() -> Value {
+    one_of(vec![
+        object(&[("kind", constant("root"))], &[]),
+        object(
+            &[
+                ("kind", constant("path")),
+                ("root", constant("/")),
+                ("relative", path_wire()),
+            ],
+            &[],
+        ),
+    ])
+}
 /// Add the dialect, identifier and title to a root schema.
 pub fn root(id: &str, title: &str, mut schema: Value) -> Value {
     if let Some(map) = schema.as_object_mut() {
