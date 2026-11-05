@@ -40,11 +40,24 @@ Keep the graph kernel, its checkpoint-before-launch discipline and the compiled
   `count`, `for_each` and `parallel`, so a swarm is one node over named areas.
 - **Graph:** a revisioned collection of nodes, changed only by patches.
 
+```toml
+# .provenant/templates/map-and-plan.toml
+nodes = [
+  { id = "map", use = "explore", over = ["crates/run", "crates/fabric-runtime"] },
+  { id = "slices", use = "plan", after = ["map"] },
+]
+```
+
+A dynamic list comes from a patch or from a resolver named `@name` at launch:
+`over = "@review-panel"` replaces `ReviewSpec`, with the host choosing lenses from
+risk tier and tags.
+
 **One mutation path.** `admit_patch(graph, parent, patch)` is called by submission,
 an agent's final `patch` block and a live call from a lane. A patch holds nodes,
 inline templates and optional `skip` or `replace` of unstarted nodes. It commits
 atomically against an expected revision and an idempotency key, and rejects cycles
-and conflicting edits. Started attempts are immutable. Limits are overridable.
+and conflicting edits, scans for secrets and journals the change. Started attempts
+are immutable. Limits are overridable, including child depth (default 8).
 "Planner" is only `use = "plan"`: any agent may emit any template, loop, worktree
 or further planner, so replanning after a wave is ordinary.
 
@@ -54,12 +67,14 @@ join the same graph, sharing budget, cancellation and trace, and may be writers
 integrating into the parent's branch. Spawning is recorded separately from
 completion dependencies, so a parent can yield its slot while it waits. A composite
 completes when its dynamic producers have closed and its join condition holds.
+Cancellation follows the subtree unless a child was explicitly detached.
 
 **A plain lane** is a one-node patch using `task`, with `AttemptSpec` (#2869)
 carrying placement, account and write roots.
 
-**Prompts are content-addressed.** A checkpoint stores digests, so graph size does
-not grow with brief size times node count.
+**Prompts are content-addressed.** A checkpoint stores digests into a store beside
+the journal, collected with its graph, so graph size does not grow with brief size
+times node count. Prompts are scanned for secrets before they persist.
 
 ## Node library
 
@@ -96,8 +111,8 @@ digests and codes only, so secrets stay out.
 
 The checkpoint stays the authority for recovery, and operation replay prevents
 duplicate launches. Recovery reconciles uncertain launches, reuses finished outputs
-and resumes only unfinished work. `AttemptFact` gains `tier`, `template` and
-`parent_node` and keeps its token, cache and timing fields, and reports group by
+and resumes only unfinished work. `AttemptFact` gains `tier`, `template`,
+`parent_node` and slot wait, and keeps its token, cache and timing fields, and reports group by
 tier and template without counting composite descendants twice.
 
 ## Interface
@@ -105,7 +120,11 @@ tier and template without counting composite descendants twice.
 `run`, `status`, `output`, `steer`, `stop`, `retry`, `edit`, `templates`, `land`,
 `quota`. Everything else sits behind `--all`. `output --trace` shows the timeline;
 `edit` applies a patch. `status` has one row schema for graph, node and attempt.
-MCP calls the same service with the same JSON and takes documents, not file paths.
+`run [BRIEF] [--use T] [--tier] [--over] [--set] [--file] [--explain] [--wait]` starts
+work, and inside a lane adds a child. `retry` resumes, continues or redoes a target,
+optionally with a new brief or a raised budget. `status --stats --by tier|template`
+reports efficiency. MCP calls the same service with the same JSON and takes
+documents, not file paths.
 
 Deleted: `dispatch`, `review`, `lanes`, `resume`, `cancel`, `preset`, `fabric graph`,
 `fabric_graph`, `PRESET_INCOMPATIBLE`, the policy successors and tail chase (#2869),
@@ -117,7 +136,8 @@ child stores, `pattern_plan.rs`, per-preset `[plan]`, `shape_stages`,
 Delivery is one integration branch and one release, after a drain. Pending graphs
 finish or are cancelled first and live lanes drain. Terminal checkpoints stay
 decodable or take the existing `retire_unreadable` path, and the release note reports
-any that do. User presets are ported by hand. Old child stores stop being written and
+any that do. Records that cannot be read are preserved and reported, never dropped.
+User presets are ported by hand. Old child stores stop being written and
 are ingested into telemetry before `gc` decides. All hosts upgrade together, then real
 launches run on each.
 
