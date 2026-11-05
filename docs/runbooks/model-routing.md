@@ -12,6 +12,11 @@ model when the task needs one. Resolve a pool with
 `provenant route resolve NAME` also accepts a route name or an unambiguous
 model name. Unknown or ambiguous names report suggestions and examples.
 
+Writer graph previews report an advisory tier mix and warn when it is inverted;
+they do not change or refuse a route. Set the `generator-evaluator` writer
+parameter or a planned `big-batch` lane route to suit the work. See
+[writer tiers](presets.md#writer-tiers) for the defaults and counting rules.
+
 An observed expired login projects as `login_expired` for routing; it does
 not create a quota refusal. Existing scoped quota refusals retain their own
 clearing rules. `provenant quota` shows the last reading and, when the account

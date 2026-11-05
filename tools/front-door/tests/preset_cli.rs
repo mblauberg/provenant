@@ -345,6 +345,7 @@ fn bound_worktree_default_head_subject_resolves_in_that_worktree()
     let graph = &result["data"]["graph"];
     assert_eq!(result["data"]["tier_mix"]["junior"], 1);
     assert_eq!(result["data"]["tier_mix"]["inverted"], false);
+    assert!(result["data"]["tier_mix"]["warning"].is_null());
     assert_eq!(
         result["data"]["tier_mix"]["line"],
         "tier mix: junior 1 / senior 0 / principal 0"
@@ -394,6 +395,12 @@ fn bound_worktree_default_head_subject_resolves_in_that_worktree()
         "stderr: {stderr}"
     );
     let explicit: serde_json::Value = serde_json::from_slice(&explicit.stdout)?;
+    assert_eq!(explicit["data"]["tier_mix"]["inverted"], true);
+    assert!(
+        explicit["data"]["tier_mix"]["warning"]
+            .as_str()
+            .is_some_and(|warning| warning.contains("inverted"))
+    );
     assert_eq!(
         explicit["data"]["graph"]["nodes"][0]["source"]["commit"],
         invoking_head
