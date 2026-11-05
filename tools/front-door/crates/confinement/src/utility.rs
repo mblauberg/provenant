@@ -264,6 +264,8 @@ pub enum GitRead {
     WorktreeListBare,
     /// Read repository config, excluding the utility's core.bare override.
     LocalBare,
+    /// Read local bare settings with their include origins.
+    LocalBareOrigins,
     BranchTips,
     /// Read remote-tracking refs for branch-name collision checks.
     RemoteBranchTips,
@@ -1388,6 +1390,19 @@ fn git_args(
         .into_iter()
         .map(OsString::from)
         .collect(),
+        GitRead::LocalBareOrigins => [
+            "config",
+            "--local",
+            "--includes",
+            "--show-origin",
+            "-z",
+            "--bool",
+            "--get-all",
+            "core.bare",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect(),
         GitRead::BranchTips => vec![
             "for-each-ref".into(),
             "--format=%(refname)%00%(objectname)%00".into(),
@@ -1696,6 +1711,7 @@ struct ConfigScan {
     overrides: Vec<(String, String)>,
     files: Vec<PathBuf>,
     head_sensitive: bool,
+    lane_files: BTreeSet<PathBuf>,
 }
 
 /// Keys that cannot affect a utility command. Its argv is fixed, with
@@ -1919,7 +1935,74 @@ fn scan_configuration(
         overrides: overrides.into_iter().collect(),
         files: files.into_iter().collect(),
         head_sensitive,
+        lane_files,
     })
+}
+
+pub(crate) fn lane_configuration_files(
+    executor: &dyn Executor,
+    repo: &ReadOnlyRepo,
+    runtime: &UtilityRuntime,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+) -> Result<BTreeSet<PathBuf>, UtilityError> {
+    let scan = scan_configuration(executor, &repo.0, runtime, budget, cancel)?;
+    let mut files = scan.lane_files;
+    let roots = runtime.lane_roots(&repo.0);
+    // An include may be named inside a lane even when Git reports the
+    // resolved target as its origin. Seed the graph with the declared path.
+    for entry in &scan.entries {
+        if let (Some(file), Some(value)) = (entry.file(repo.root_path()), &entry.value)
+            && transport::is_include_directive(&entry.key)
+        {
+            let target = transport::include_target(&file, value, runtime.home.path.as_path());
+            if roots.contains(&target) {
+                files.insert(target);
+            }
+        }
+    }
+    // A worktree's private configuration can be changed independently of the
+    // common configuration, including when the common file includes it.
+    files.insert(crate::transport::normalise(
+        &repo.private_git_dir().join("config.worktree"),
+    ));
+    let mut resolved: BTreeSet<PathBuf> = files
+        .iter()
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .collect();
+    loop {
+        let before = (files.len(), resolved.len());
+        for entry in &scan.entries {
+            if let (Some(file), Some(value)) = (entry.file(repo.root_path()), &entry.value)
+                && transport::is_include_directive(&entry.key)
+                && (files.contains(&file)
+                    || std::fs::canonicalize(&file)
+                        .ok()
+                        .is_some_and(|path| resolved.contains(&path)))
+            {
+                let target = transport::include_target(&file, value, runtime.home.path.as_path());
+                if let Ok(path) = std::fs::canonicalize(&target) {
+                    resolved.insert(path);
+                }
+                files.insert(target);
+            }
+        }
+        if (files.len(), resolved.len()) == before {
+            break;
+        }
+    }
+    // Git can print the same included file through a different path than its
+    // include directive, including a symlinked temporary or worktree root.
+    for entry in &scan.entries {
+        if let Some(file) = entry.file(repo.root_path())
+            && std::fs::canonicalize(&file)
+                .ok()
+                .is_some_and(|path| resolved.contains(&path))
+        {
+            files.insert(file);
+        }
+    }
+    Ok(files)
 }
 
 /// Read one config file directly, without following its includes. `None` when

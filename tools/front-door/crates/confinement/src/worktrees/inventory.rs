@@ -252,18 +252,62 @@ impl RepoFacts {
         let scalar = budget.with_stdout_cap(self.scalar_limit)?;
         let bare = crate::utility::run_read_utility(
             executor,
-            GitRead::LocalBare,
+            GitRead::LocalBareOrigins,
             repo,
             utility,
             scalar,
             cancel,
         )?;
         let bare = match exit_code(&bare)? {
-            0 => match trim_ascii(&bare.stdout.bytes) {
-                b"true" => true,
-                b"false" => false,
-                _ => return Err(WorktreeError::InvalidOutput),
-            },
+            0 => {
+                let roots = utility.lane_roots(&repo.0);
+                let lane_files = crate::utility::lane_configuration_files(
+                    executor, repo, utility, budget, cancel,
+                )?;
+                if !bare.stdout.bytes.ends_with(&[0]) {
+                    return Err(WorktreeError::InvalidOutput);
+                }
+                let mut fields = bare.stdout.bytes.split(|byte| *byte == 0);
+                let mut selected = false;
+                let mut untrusted_bare = false;
+                while let Some(origin) = fields.next() {
+                    if origin.is_empty() && fields.clone().next().is_none() {
+                        break;
+                    }
+                    let path = origin
+                        .strip_prefix(b"file:")
+                        .ok_or(WorktreeError::InvalidOutput)?;
+                    if path.is_empty() {
+                        return Err(WorktreeError::InvalidOutput);
+                    }
+                    let path = PathBuf::from(OsString::from_vec(path.to_vec()));
+                    let path = if path.is_absolute() {
+                        path
+                    } else {
+                        repo.root_path().join(path)
+                    };
+                    let in_lane = roots.contains(&path);
+                    let path = crate::transport::normalise(&path);
+                    let value = fields.next().ok_or(WorktreeError::InvalidOutput)?;
+                    let value = match value {
+                        b"true" => true,
+                        b"false" => false,
+                        _ => return Err(WorktreeError::InvalidOutput),
+                    };
+                    if !in_lane && !lane_files.contains(&path) {
+                        selected = value;
+                    } else {
+                        untrusted_bare |= value;
+                    }
+                }
+                // If a bare setting appears only through lane-controlled
+                // provenance, the primary worktree cannot be classified
+                // safely: an alias may hide a trusted occurrence of that file.
+                if !selected && untrusted_bare {
+                    return Err(WorktreeError::InvalidOutput);
+                }
+                selected
+            }
             1 => false,
             _ => return Err(WorktreeError::InvalidOutput),
         };

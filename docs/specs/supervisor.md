@@ -38,8 +38,9 @@ Fetch, resolution and advertisement share the peer deadline. Pull-request base
 resolution and landing branch and commit tree reads each use a command-scoped facts session
 and read-only verified checkouts, including when Git uses a separate directory
 or native object alternates. Landing inventory reads the common repository's
-local bare setting before listing worktrees, so Git's primary bare registration
-is preserved without accepting worktree-level configuration overrides. Batch
+trusted local and included bare settings before listing worktrees, so Git's
+primary bare registration is preserved without accepting lane-writable or
+worktree-level configuration overrides. Batch
 landing passes its facts session into local follow-up and discards verified
 checkout handles around command-controlled mutations. Landing revalidates those
 handles before reading their common or private Git paths instead of rediscovering

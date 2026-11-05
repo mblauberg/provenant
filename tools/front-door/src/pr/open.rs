@@ -448,6 +448,106 @@ mod tests {
                 .windows(b"bare\0".len())
                 .any(|field| field == b"bare\0")
         );
+        // The common config may get its bare setting through a trusted include.
+        // A later include in the checkout cannot override that setting, even
+        // through a further include outside the checkout.
+        let trusted = temp.path().join("trusted-bare.conf");
+        let outside = temp.path().join("outside-bare.conf");
+        let lane = linked.join("lane-bare.conf");
+        std::fs::write(&trusted, "[core]\n bare = true\n")?;
+        std::fs::write(&outside, "[core]\n bare = false\n")?;
+        std::fs::write(&lane, format!("[include]\n path = {}\n", outside.display()))?;
+        provenant_os::fixture::run_git(&bare, &["config", "--local", "--unset", "core.bare"])?;
+        provenant_os::fixture::run_git(
+            &bare,
+            &[
+                "config",
+                "--local",
+                "--add",
+                "include.path",
+                trusted.to_str().ok_or("trusted path")?,
+            ],
+        )?;
+        provenant_os::fixture::run_git(
+            &bare,
+            &[
+                "config",
+                "--local",
+                "--add",
+                "include.path",
+                lane.to_str().ok_or("lane path")?,
+            ],
+        )?;
+        let private_config = String::from_utf8(provenant_os::fixture::run_git(
+            &linked,
+            &["rev-parse", "--git-path", "config.worktree"],
+        )?)?;
+        provenant_os::fixture::run_git(
+            &bare,
+            &[
+                "config",
+                "--local",
+                "--add",
+                "include.path",
+                private_config.trim(),
+            ],
+        )?;
+        #[cfg(unix)]
+        {
+            // A lane path can itself be a symlink to an outside file.
+            let lane_alias = linked.join("lane-config-alias");
+            let outside_alias = temp.path().join("outside-alias.conf");
+            std::fs::write(&outside_alias, "[core]\n bare = false\n")?;
+            std::os::unix::fs::symlink(&outside_alias, &lane_alias)?;
+            provenant_os::fixture::run_git(
+                &bare,
+                &[
+                    "config",
+                    "--local",
+                    "--add",
+                    "include.path",
+                    lane_alias.to_str().ok_or("lane alias")?,
+                ],
+            )?;
+            let alias = temp.path().join("private-config-alias");
+            std::os::unix::fs::symlink(private_config.trim(), &alias)?;
+            provenant_os::fixture::run_git(
+                &bare,
+                &[
+                    "config",
+                    "--local",
+                    "--add",
+                    "include.path",
+                    alias.to_str().ok_or("alias")?,
+                ],
+            )?;
+        }
+        git.invalidate_repositories();
+        let listing = git.worktrees(&linked)?;
+        assert!(
+            listing
+                .windows(b"bare\0".len())
+                .any(|field| field == b"bare\0")
+        );
+        #[cfg(unix)]
+        {
+            // If a lane alias names the trusted bare file, the origins may be
+            // indistinguishable. Do not report a non-bare primary checkout.
+            let ambiguous = linked.join("trusted-config-alias");
+            std::os::unix::fs::symlink(&trusted, &ambiguous)?;
+            provenant_os::fixture::run_git(
+                &bare,
+                &[
+                    "config",
+                    "--local",
+                    "--add",
+                    "include.path",
+                    ambiguous.to_str().ok_or("ambiguous alias")?,
+                ],
+            )?;
+            git.invalidate_repositories();
+            assert!(git.worktrees(&linked).is_err());
+        }
         assert_eq!(
             base_commit(&git, &project, "origin", "main")?,
             Some(expected.trim().to_owned())

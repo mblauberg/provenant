@@ -142,12 +142,18 @@ impl LaneRoots {
         let resolved = resolve(&lexical);
         let raw = resolve(path);
         self.0.iter().any(|root| {
-            lexical.starts_with(root) || resolved.starts_with(root) || raw.starts_with(root)
+            lexical.starts_with(root)
+                || resolved.starts_with(root)
+                || raw.starts_with(root)
+                // A lane can retarget a symlink that it owns, even if the
+                // resolved target lies outside. Resolve each parent separately
+                // so aliases of the lane root do not hide that ownership.
+                || path.ancestors().skip(1).any(|parent| resolve(parent).starts_with(root))
         })
     }
 }
 
-fn normalise(path: &Path) -> PathBuf {
+pub(crate) fn normalise(path: &Path) -> PathBuf {
     let mut normal = PathBuf::new();
     for component in path.components() {
         match component {
@@ -475,6 +481,20 @@ mod tests {
         assert!(roots.contains(&root.join("other/../lane/x")));
         assert!(!roots.contains(&root.join("laneish")));
         assert!(!roots.contains(Path::new("relative/lane")));
+        Ok(())
+    }
+
+    #[test]
+    fn lane_roots_include_symlinks_under_an_aliased_root() -> TestResult {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        std::fs::create_dir(root.join("lane"))?;
+        std::fs::write(root.join("outside"), "config")?;
+        std::os::unix::fs::symlink(root.join("lane"), root.join("alias"))?;
+        std::os::unix::fs::symlink(root.join("outside"), root.join("lane/config"))?;
+        let roots = LaneRoots::new([root.join("lane")]);
+        assert!(roots.contains(&root.join("alias/config")));
+        assert!(!roots.contains(&root.join("outside")));
         Ok(())
     }
 
