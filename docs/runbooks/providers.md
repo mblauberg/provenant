@@ -545,3 +545,16 @@ Errors kept only in an unreported provider transcript are not visible there.
 
 Use the Rust provider source for launch behaviour. Dispatch still requires an
 installed executable, local login and the applicable routing and confinement grants.
+
+## Cloud environment preparation
+
+`scripts/cloud-environment [REPOSITORY]` prints a starting checklist for a
+provider environment, including detected tracked Cargo manifests. Run it from
+any repository or pass its path; adapt the toolchain, native dependencies,
+nextest installation and optional build warm-up to the selected tests. Provider
+setup time limits may make a warm build impractical. Create and select the
+environment in the provider's interface. Do not put credentials in setup
+scripts, prompts or result artifacts.
+
+This checklist does not dispatch or monitor cloud jobs. Cloud execution remains
+advisory and does not replace exact-head required CI.
