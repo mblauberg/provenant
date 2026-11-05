@@ -151,7 +151,18 @@ impl RunStore {
         // Keep the shared config lock until custody confirms the child launch.
         let mut _git_setup_lock = None;
         if let Some(confinement) = &mut plan.confinement {
-            _git_setup_lock = match confinement.prepare_git(&directory()?) {
+            let writer_attempt = directory()?;
+            _git_setup_lock = match retry_setup_lock(
+                record.retry_of.is_some(),
+                |budget| {
+                    confinement.prepare_git(
+                        &writer_attempt,
+                        call.cancel,
+                        record.retry_of.map(|_| budget),
+                    )
+                },
+                || call.check(),
+            ) {
                 Ok(lock) => lock,
                 Err(error) => {
                     lease
@@ -267,5 +278,66 @@ impl RunStore {
         )
         .map_err(|failure| HandOff::Uncertain(failure.error.to_string()))?;
         Ok(())
+    }
+}
+
+// A setup lock timeout occurs before Git preparation and before any guardian
+// launch. Keep the same attempt and custody while waiting for another turn.
+const SETUP_RETRY_SECONDS: u64 = 240;
+fn retry_setup_lock<T>(
+    continuation: bool,
+    mut prepare: impl FnMut(provenant_core::WaitBudget) -> Result<T>,
+    mut check: impl FnMut() -> Result<()>,
+) -> Result<T> {
+    use provenant_core::Clock;
+    let clock = provenant_os::clock::SystemClock::new();
+    let budget = provenant_core::WaitBudget::cli(clock.mono_now(), SETUP_RETRY_SECONDS)
+        .map_err(|_| RunError::Validation("setup retry deadline"))?;
+    loop {
+        match prepare(budget) {
+            Err(RunError::LaneSetupLockTimeout)
+                if continuation && budget.remaining(clock.mono_now()).as_micros() > 0 =>
+            {
+                check()?
+            }
+            result => return result,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn continuation_retries_only_setup_lock_timeouts() {
+        let mut calls = 0;
+        let result = retry_setup_lock(
+            true,
+            |_| {
+                calls += 1;
+                if calls == 1 {
+                    Err(RunError::LaneSetupLockTimeout)
+                } else {
+                    Ok(42)
+                }
+            },
+            || Ok(()),
+        );
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(calls, 2);
+        let mut calls = 0;
+        let result: Result<()> = retry_setup_lock(
+            false,
+            |_| {
+                calls += 1;
+                Err(RunError::LaneSetupLockTimeout)
+            },
+            || Ok(()),
+        );
+        assert!(matches!(result, Err(RunError::LaneSetupLockTimeout)));
+        assert_eq!(calls, 1);
+        let result: Result<()> = retry_setup_lock(true, |_| Err(RunError::Conflict), || Ok(()));
+        assert!(matches!(result, Err(RunError::Conflict)));
     }
 }
