@@ -622,7 +622,7 @@ pub struct Access {
     /// Access mode: read-only or worktree-write [default: read-only]
     #[arg(long, value_enum)]
     pub mode: Option<Mode>,
-    /// Writer worktree; local run creates an owned worktree for a missing branch name
+    /// Checkout to read or write; a writer can create an owned worktree for a missing branch name
     #[arg(long)]
     pub worktree: Option<PathBuf>,
     /// Extra directory the lane may read (repeatable)

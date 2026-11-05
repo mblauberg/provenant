@@ -283,6 +283,9 @@ pub struct LaneAccess {
     /// Host-verified graph source checkout for a read-only launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_root: Option<std::path::PathBuf>,
+    /// Use the verified source checkout directly, without a writer lease.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_live: bool,
     /// Filesystem identity of the bound source directory at admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_identity: Option<SourceIdentity>,

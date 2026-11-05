@@ -648,8 +648,17 @@ impl ReviewConfig {
         paths: &[String],
         size: Option<&str>,
     ) -> Selection<String> {
+        if override_value.is_none()
+            && let Some(value) = self.select.by_readiness.get("ready")
+        {
+            return Selection {
+                value: value.clone(),
+                source: "readiness",
+                matched: Some("readiness:ready".into()),
+            };
+        }
         self.select
-            .select(override_value, risk, kind, paths, size, Some(true))
+            .select(override_value, risk, kind, paths, size, None)
     }
 
     pub fn select_shape<'a>(

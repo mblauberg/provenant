@@ -274,12 +274,12 @@ pub(super) fn source_cwd(
 ) -> Result<PathBuf, String> {
     let cwd = registry.cwd.ok_or("working directory is unavailable")?;
     let Some(source) = &task.access.source_root else {
-        if task.access.source_identity.is_some() {
+        if task.access.source_identity.is_some() || task.access.source_live {
             return Err("graph source identity has no checkout".into());
         }
         return canonical(cwd);
     };
-    if task.writer.is_some() || task.head.is_none() {
+    if task.writer.is_some() || (!task.access.source_live && task.head.is_none()) {
         return Err("read-only source needs a pinned head and no writer".into());
     }
     let state = registry.state_root.ok_or("state root is unavailable")?;
@@ -304,7 +304,7 @@ pub(super) fn require_source_head(
     task: &run::TaskRequest,
     observed: Option<provenant_core::GitOid>,
 ) -> Result<(), String> {
-    if task.access.source_root.is_some() {
+    if task.access.source_root.is_some() && !task.access.source_live {
         let expected = task
             .head
             .as_deref()
@@ -336,6 +336,7 @@ pub(super) fn read_only_plan(
     git: &Path,
     request: PlanRequest,
     isolated: bool,
+    live: bool,
 ) -> Result<PreparedReadPlan, String> {
     use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility};
     use provenant_os::exec::SystemExecutor;
@@ -394,7 +395,9 @@ pub(super) fn read_only_plan(
             .ok()
             .and_then(|out| String::from_utf8(out.stdout.bytes).ok())
             .and_then(|text| provenant_core::GitOid::parse(text.trim()).ok());
-            let plan = if isolated {
+            let plan = if live {
+                run::live_read_only_plan(&repo, &binding, request)
+            } else if isolated {
                 run::isolated_read_only_plan(&roots.state, &repo, &binding, request)
             } else {
                 run::read_only_plan(&roots.state, &repo, &binding, request)

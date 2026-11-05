@@ -63,9 +63,7 @@ pub use asks::{
 };
 pub use composites::CompositeSpec;
 pub use land::{LandAuthority, LandObservation, LandRecord, LandRequest, LandSpec};
-pub use loops::{
-    InvalidLoopDecision, LegacyLoopAsk, LoopDecision, LoopRound, LoopSpec, legacy_loop_asks,
-};
+pub use loops::{InvalidLoopDecision, LoopDecision, LoopRound, LoopSpec};
 pub use plans::{
     Expansion, PatternInstantiation, PatternParameter, PatternParameterKind, PatternSpec, PlanSpec,
     RemainingBudgets,

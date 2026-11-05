@@ -143,7 +143,11 @@ impl<'a> Service<'a> {
                     None => crate::pr_contribution::read_only_branch(
                         self.store.writer_registry(),
                         self.store.context.project_id,
-                        cwd,
+                        task.access
+                            .source_root
+                            .as_deref()
+                            .filter(|_| task.access.source_live)
+                            .unwrap_or(cwd),
                     )?,
                 };
                 if let Some(branch) = branch {
@@ -168,7 +172,16 @@ impl<'a> Service<'a> {
                         && prior.head == task.head
                 })
             });
-            let git_cwd = writer.as_ref().map_or(cwd, |writer| &writer.worktree);
+            let git_cwd = writer.as_ref().map_or_else(
+                || {
+                    task.access
+                        .source_root
+                        .as_deref()
+                        .filter(|_| task.access.source_live)
+                        .unwrap_or(cwd)
+                },
+                |writer| &writer.worktree,
+            );
             if prior.is_none()
                 && let Some(head) = &task.head
             {
