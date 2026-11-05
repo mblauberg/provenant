@@ -128,6 +128,15 @@ fn provider_update_settings_defaults_opt_out_commands_and_validation() {
         Some(7200)
     );
     assert_eq!(config.providers["opencode"], ProviderSettings::default());
+    let registered = load(&roots(), Some(b"schema_version=1\n[providers.fixture-provider]\nupdate=false\nruntime_deadline_seconds=120".as_slice())).unwrap();
+    assert_eq!(
+        registered.providers["fixture-provider"].update,
+        ProviderUpdate::Enabled(false)
+    );
+    assert_eq!(
+        registered.providers["fixture-provider"].runtime_deadline_seconds,
+        Some(120)
+    );
     test_support::assert_leaf_origins(&config);
     for (section, setting, rule) in [
         ("codex", "update=42", "type"),
@@ -159,7 +168,6 @@ fn provider_update_settings_defaults_opt_out_commands_and_validation() {
         ),
         ("codex", "runtime_deadline_seconds=-1", "type"),
         ("codex", "typo=false", "unknown_key"),
-        ("unknown", "update=false", "provider_id"),
     ] {
         let text = format!("schema_version=1\n[providers.{section}]\n{setting}");
         let config = load(&roots(), Some(text.as_bytes())).unwrap();
