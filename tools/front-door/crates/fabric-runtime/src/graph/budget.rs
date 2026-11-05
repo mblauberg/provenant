@@ -13,14 +13,21 @@ pub(super) fn structural_limit_reason(
     plan: &PlannedGraph,
     limits: &crate::config::GraphLimits,
 ) -> Option<String> {
-    let check = |key: &str, actual: usize, max: usize| {
-        let source = "domains.fabric.graph.limits";
-        (actual > max).then(|| format!("limits.{key}={max} reached ({actual}); set by {source}"))
+    structural_limit(document, plan, limits).map(|limit| limit.to_string())
+}
+
+pub(super) fn structural_limit(
+    document: &GraphDocument,
+    plan: &PlannedGraph,
+    limits: &crate::config::GraphLimits,
+) -> Option<GraphStructuralLimit> {
+    let check = |key: GraphLimitKey, actual: usize, max: usize| {
+        (actual > max).then_some(GraphStructuralLimit { key, actual, max })
     };
-    check("nodes", document.nodes.len(), limits.nodes)
+    check(GraphLimitKey::Nodes, document.nodes.len(), limits.nodes)
         .or_else(|| {
             check(
-                "edges",
+                GraphLimitKey::Edges,
                 document
                     .nodes
                     .iter()
@@ -32,7 +39,7 @@ pub(super) fn structural_limit_reason(
         .or_else(|| {
             document.nodes.iter().find_map(|node| {
                 check(
-                    "routes_per_node",
+                    GraphLimitKey::RoutesPerNode,
                     node.routes
                         .as_ref()
                         .map_or(usize::from(node.route.is_some()), Vec::len),
@@ -43,7 +50,7 @@ pub(super) fn structural_limit_reason(
         .or_else(|| {
             document.nodes.iter().find_map(|node| {
                 check(
-                    "node_prompt_bytes",
+                    GraphLimitKey::NodePromptBytes,
                     node.content_bytes(),
                     limits.node_prompt_bytes,
                 )
@@ -51,7 +58,7 @@ pub(super) fn structural_limit_reason(
         })
         .or_else(|| {
             check(
-                "graph_prompt_bytes",
+                GraphLimitKey::GraphPromptBytes,
                 document.nodes.iter().map(GraphNode::content_bytes).sum(),
                 limits.graph_prompt_bytes,
             )
@@ -65,7 +72,7 @@ pub(super) fn structural_limit_reason(
             }
             children
                 .values()
-                .find_map(|width| check("fan_out_width", *width, limits.fan_out_width))
+                .find_map(|width| check(GraphLimitKey::FanOutWidth, *width, limits.fan_out_width))
         })
         .or_else(|| {
             let mut depths = std::collections::BTreeMap::<&str, usize>::new();
@@ -75,7 +82,9 @@ pub(super) fn structural_limit_reason(
                     .map(|parent| depths[parent.as_str()] + 1)
                     .max()
                     .unwrap_or(0);
-                if let Some(reason) = check("expansion_depth", depth, limits.expansion_depth) {
+                if let Some(reason) =
+                    check(GraphLimitKey::ExpansionDepth, depth, limits.expansion_depth)
+                {
                     return Some(reason);
                 }
                 depths.insert(&node.id, depth);

@@ -92,12 +92,18 @@ pub(super) fn validate_output_kinds(document: &GraphDocument) -> Result<(), Admi
         // A composite's export declaration is its public output contract. Its
         // members are validated in their own scopes; consumers are checked
         // against the declared composite outputs through `supplied_kinds`.
-        for input in consumer.inputs.iter().chain(
-            consumer
-                .composite
-                .iter()
-                .flat_map(|composite| &composite.exports),
-        ) {
+        for (input, field) in consumer
+            .inputs
+            .iter()
+            .map(|input| (input, GraphOutputField::Input))
+            .chain(
+                consumer
+                    .composite
+                    .iter()
+                    .flat_map(|composite| &composite.exports)
+                    .map(|input| (input, GraphOutputField::CompositeExport)),
+            )
+        {
             let source_id = input.node.strip_prefix("previous.").unwrap_or(&input.node);
             let Some(source) = by_id.get(source_id) else {
                 continue;
@@ -110,13 +116,16 @@ pub(super) fn validate_output_kinds(document: &GraphDocument) -> Result<(), Admi
                         .map(|v| format!("{v:?}").to_lowercase())
                         .collect::<Vec<_>>()
                         .join(", ");
-                    return Err(AdmissionError::OutputKind(format!(
-                        "node {} selects {} from {}, which supplies only {}",
-                        consumer.id,
-                        format!("{kind:?}").to_lowercase(),
-                        source_id,
-                        labels
-                    )));
+                    return Err(AdmissionError::OutputKind {
+                        field,
+                        reason: format!(
+                            "node {} selects {} from {}, which supplies only {}",
+                            consumer.id,
+                            format!("{kind:?}").to_lowercase(),
+                            source_id,
+                            labels
+                        ),
+                    });
                 }
             }
         }

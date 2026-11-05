@@ -311,8 +311,59 @@ impl GraphNode {
     }
 }
 
+/// A host graph limit whose value can be safely reported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphLimitKey {
+    Nodes,
+    Edges,
+    RoutesPerNode,
+    NodePromptBytes,
+    GraphPromptBytes,
+    FanOutWidth,
+    ExpansionDepth,
+}
+impl GraphLimitKey {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Nodes => "nodes",
+            Self::Edges => "edges",
+            Self::RoutesPerNode => "routes_per_node",
+            Self::NodePromptBytes => "node_prompt_bytes",
+            Self::GraphPromptBytes => "graph_prompt_bytes",
+            Self::FanOutWidth => "fan_out_width",
+            Self::ExpansionDepth => "expansion_depth",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphStructuralLimit {
+    pub key: GraphLimitKey,
+    pub actual: usize,
+    pub max: usize,
+}
+impl std::fmt::Display for GraphStructuralLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "limits.{}={} reached ({}); set by domains.fabric.graph.limits",
+            self.key.name(),
+            self.max,
+            self.actual
+        )
+    }
+}
+
 /// The static admission check that refused a graph. The contained text is the
 /// existing operator-facing reason; callers branch on the variant, not text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphOutputField {
+    Input,
+    CompositeExport,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum AdmissionError {
     #[error("{0}")]
@@ -322,11 +373,14 @@ pub enum AdmissionError {
     #[error("{0}")]
     Plan(String),
     #[error("{0}")]
-    StructuralLimit(String),
+    StructuralLimit(GraphStructuralLimit),
     #[error("{0}")]
     Envelope(String),
-    #[error("{0}")]
-    OutputKind(String),
+    #[error("{reason}")]
+    OutputKind {
+        field: GraphOutputField,
+        reason: String,
+    },
 }
 
 impl GraphDocument {
@@ -364,7 +418,7 @@ impl GraphDocument {
             loops::expand(self, &[], &expansion_limits).map_err(AdmissionError::Composite)?;
         let (plan, _) = validate_flat_plan(&expanded, &expansion_limits)
             .map_err(|reason| AdmissionError::Plan(reason.into()))?;
-        if let Some(reason) = structural_limit_reason(&expanded, &plan, limits) {
+        if let Some(reason) = structural_limit(&expanded, &plan, limits) {
             return Err(AdmissionError::StructuralLimit(reason));
         }
         if let Some(reason) = graph_envelope_reason(self, &[], &[], &plan) {

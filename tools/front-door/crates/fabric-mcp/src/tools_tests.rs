@@ -1,4 +1,48 @@
 #[test]
+fn graph_admission_error_has_safe_field_and_action() {
+    let error = FacadeError::graph_admission(
+        provenant_fabric_runtime::graph::AdmissionError::Schema("TOKEN_SENTINEL\u{1b}".into()),
+    );
+    let value = ServiceError::Facade(error).structured_error();
+    assert_eq!(value["code"], "dispatch_refused");
+    assert!(value["detail"].as_str().unwrap().contains("schema_version"));
+    assert!(value["hint"].is_string());
+    assert!(!value.to_string().contains("TOKEN_SENTINEL"));
+    let error = FacadeError::graph_admission(
+        provenant_fabric_runtime::graph::AdmissionError::OutputKind {
+            field: provenant_fabric_runtime::graph::GraphOutputField::Input,
+            reason: "TOKEN_SENTINEL".into(),
+        },
+    );
+    let value = ServiceError::Facade(error).structured_error();
+    assert!(
+        value["detail"]
+            .as_str()
+            .unwrap()
+            .contains("inputs[].outputs")
+    );
+    assert!(value["next"].is_string());
+    assert!(!value.to_string().contains("TOKEN_SENTINEL"));
+}
+
+#[test]
+fn graph_limit_refusal_keeps_typed_field_and_values() {
+    use provenant_fabric_runtime::graph::{AdmissionError, GraphLimitKey, GraphStructuralLimit};
+    let error =
+        FacadeError::graph_admission(AdmissionError::StructuralLimit(GraphStructuralLimit {
+            key: GraphLimitKey::Nodes,
+            actual: 4,
+            max: 1,
+        }));
+    let value = ServiceError::Facade(error).structured_error();
+    assert_eq!(value["code"], "dispatch_refused");
+    let detail = value["detail"].as_str().unwrap();
+    assert!(detail.contains("limits.nodes=1"));
+    assert!(detail.contains("(4)"));
+    assert!(value["next"].as_str().unwrap().contains("limit"));
+}
+
+#[test]
 fn invalid_input_paths_omit_untrusted_data() {
     use provenant_fabric_runtime::coordination::{CoordinationError, InputError};
     for path in [

@@ -132,7 +132,7 @@ fn admission_output_kind_matrix() {
         ]),
     );
     let error = validate_output_kinds(&selected_commit).unwrap_err();
-    assert!(matches!(error, AdmissionError::OutputKind(_)));
+    assert!(matches!(error, AdmissionError::OutputKind { .. }));
     let error = error.to_string();
     for part in ["consumer", "source", "commit", "result", "findings"] {
         assert!(error.contains(part), "{error}");

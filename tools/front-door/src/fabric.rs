@@ -6048,6 +6048,9 @@ impl Factory {
                 )
                 .map_err(graph_journal_error)?;
                 let admitted = checkpoint.is_some();
+                document
+                    .admit(&self.context.config.graph.limits)
+                    .map_err(FacadeError::graph_admission)?;
                 let expanded = document
                     .expanded(&self.context.config.graph.limits)
                     .map_err(|reason| FacadeError::DispatchRefused {

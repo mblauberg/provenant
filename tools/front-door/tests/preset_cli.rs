@@ -461,6 +461,63 @@ fn review_council_with_a_base_is_admitted_on_submit() -> Result<(), Box<dyn std:
     Ok(())
 }
 
+#[test]
+fn malformed_preset_reports_safe_output_field_and_action() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    let presets = project.join(".provenant/presets");
+    std::fs::create_dir_all(&presets)?;
+    let init = provenant_os::fixture::git_command()
+        .current_dir(&project)
+        .args(["init", "-q"])
+        .output()?;
+    assert!(init.status.success());
+    std::fs::write(
+        presets.join("typed.toml"),
+        r#"
+stages = [{ id = "look", role = "scout" }]
+exports = [{ node = "look", outputs = ["result", "commit"] }]
+[roles.scout]
+prompt = "Look at ${prompt}"
+"#,
+    )?;
+    std::fs::write(
+        presets.join("outer.toml"),
+        "stages = [{ id = \"inner\", preset = \"typed\" }]\n",
+    )?;
+    let prompt = project.join("brief");
+    std::fs::write(&prompt, "PROMPT_SENTINEL")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = fixture_cli()
+        .current_dir(&project)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .args(["--json", "--state-dir"])
+        .arg(temp.path().join("state"))
+        .args(["run", "--preset", "outer", "--prompt-file"])
+        .arg(&prompt)
+        .args(["--plan", "off"])
+        .output()?;
+    assert!(!output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(value["error"]["code"], "preset_graph");
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("composite.exports[].outputs")
+    );
+    assert!(
+        value["error"]["repair"]
+            .as_str()
+            .unwrap()
+            .contains("output")
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("PROMPT_SENTINEL"));
+    Ok(())
+}
+
 fn fixture_cli() -> Command {
     scrubbed(env!("CARGO_BIN_EXE_provenant"))
 }
