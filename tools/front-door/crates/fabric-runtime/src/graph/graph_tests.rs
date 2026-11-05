@@ -59,6 +59,7 @@ struct FakeOwner {
     source_commits: Vec<Option<String>>,
     equal_range: bool,
     read_roots: Vec<Vec<String>>,
+    capabilities: Vec<Option<Vec<String>>>,
     distinct_from: Vec<Vec<String>>,
     family_peers: Vec<Vec<String>>,
     family_pool: Vec<String>,
@@ -230,6 +231,8 @@ impl AttemptOwner for FakeOwner {
         self.source_commits
             .push(node.source_commit.map(str::to_owned));
         self.read_roots.push(node.read_roots.to_vec());
+        self.capabilities
+            .push(node.capabilities.map(<[String]>::to_vec));
         self.distinct_from
             .push(node.distinct_from_attempts.to_vec());
         self.family_peers.push(node.family_peers.to_vec());
@@ -308,6 +311,7 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
         composite: None,
         role: None,
         read_roots: Vec::new(),
+        capabilities: None,
         source: None,
         after_expansion: Vec::new(),
         plan: None,
@@ -352,6 +356,28 @@ fn graph(nodes: Vec<GraphNode>) -> GraphDocument {
         schema_version: 1,
         graph_id: "g-test".to_owned(),
         nodes,
+    }
+}
+
+#[test]
+fn node_capabilities_preserve_inheritance_and_explicit_empty() {
+    for capabilities in [None, Some(Vec::new()), Some(vec!["postgres".into()])] {
+        let mut lane = node("lane", route("first"));
+        lane.capabilities = capabilities.clone();
+        let roundtrip: GraphNode =
+            serde_json::from_value(serde_json::to_value(&lane).unwrap()).unwrap();
+        assert_eq!(roundtrip.capabilities, capabilities);
+        let mut owner = FakeOwner {
+            observations: [terminal(AttemptOutcome::Succeeded)].into(),
+            ..Default::default()
+        };
+        advance(
+            &graph(vec![roundtrip]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
+        assert_eq!(owner.capabilities, vec![capabilities]);
     }
 }
 
@@ -5645,6 +5671,7 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
         composite: None,
         role: None,
         read_roots: Vec::new(),
+        capabilities: None,
         source: None,
         after_expansion: Vec::new(),
         plan: None,
@@ -5920,6 +5947,7 @@ fn pending_and_unknown_keep_observing_the_same_route_without_fallback() {
             composite: None,
             role: None,
             read_roots: Vec::new(),
+            capabilities: None,
             source: None,
             after_expansion: Vec::new(),
             plan: None,
@@ -6544,6 +6572,7 @@ fn terminal_task_failure_does_not_try_a_fallback_route() {
         composite: None,
         role: None,
         read_roots: Vec::new(),
+        capabilities: None,
         source: None,
         after_expansion: Vec::new(),
         plan: None,

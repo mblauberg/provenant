@@ -860,7 +860,7 @@ fn tool_schema_size_is_bounded() {
     for tool in catalogue() {
         let name = &tool["name"];
         let size = serde_json::to_vec(tool).unwrap().len();
-        assert!(size <= 5_000, "{name}: {size} bytes exceeds hard cap");
+        assert!(size <= 5_500, "{name}: {size} bytes exceeds hard cap");
     }
 }
 

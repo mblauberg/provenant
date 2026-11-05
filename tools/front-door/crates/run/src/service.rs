@@ -96,13 +96,19 @@ impl<'a> Service<'a> {
                 provenant_core::validate_task_title(title)
                     .map_err(|message| RunError::InvalidTaskTitle(message.into()))?;
             }
-            // A lane's child launches outside the lane's sandbox, so it may not
-            // name access its parent never had.
-            if input.parent_attempt.is_some() && !task.access.is_default() {
-                return Err(input_error(
-                    ErrorKind::Unsupported,
-                    "a nested dispatch cannot set network, capability, read-root or write-root access",
-                ));
+            // The host validates a requested database capability against the
+            // sealed parent. Other nested access additions keep their existing
+            // preflight restriction.
+            if input.parent_attempt.is_some() {
+                let mut other_access = task.access.clone();
+                other_access.database_ipc = false;
+                other_access.extra.remove("capability_sources");
+                if !other_access.is_default() {
+                    return Err(input_error(
+                        ErrorKind::Unsupported,
+                        "a nested dispatch cannot set network, read-root or write-root access",
+                    ));
+                }
             }
             if task.deliver.is_some() && task.worktree.is_none() {
                 return Err(input_error(
@@ -237,6 +243,7 @@ impl<'a> Service<'a> {
             .map_err(|error| input_error(ErrorKind::Io, error.to_string()))?;
 
             requests.push(TaskRequest {
+                cloud: task.cloud,
                 context: task.context,
                 extra: Default::default(),
                 build_heavy: task.build_heavy,
@@ -770,6 +777,7 @@ impl From<&RunError> for ErrorKind {
 
 /// Prepared transport-independent dispatch input.
 pub struct DispatchTask {
+    pub cloud: Option<provenant_records::run::CloudPlacement>,
     pub context: Option<provenant_records::run::WorkContext>,
     pub build_heavy: bool,
     pub title: Option<String>,
@@ -813,6 +821,9 @@ fn fresh<T>(make: impl FnOnce([u8; 16]) -> T) -> Result<T> {
 /// before any writer is prepared or any run, reservation or receipt exists.
 /// Named routes resolve their adapter later, where routing checks effort.
 fn check_launch_capabilities(task: &DispatchTask, route: &RequestedRoute) -> Result<()> {
+    if task.cloud.is_some() {
+        return Ok(());
+    }
     let write = Service::has_writes(task.worktree.is_some(), &task.access.write_roots);
     let check = |provider: &str, model: Option<&str>, effort: Option<&str>| {
         let Some(spec) = provenant_records::AdapterSpec::get(provider) else {

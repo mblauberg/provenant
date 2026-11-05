@@ -74,6 +74,7 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
             lane_depth: 1,
             parent_attempt: None,
             tasks: vec![provenant_run::DispatchTask {
+                cloud: None,
                 context: Some(provenant_records::run::WorkContext {
                     graph_id: Some("loop-settlement".into()),
                     ..Default::default()
@@ -130,7 +131,7 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
         integration_branch: None,
         factory: &factory,
         integration_base: None,
-        network: None,
+        network: None, capability_overrides: Default::default(),
         exclude: Vec::new(),
         budget,
         cancel: &cancel,
@@ -265,7 +266,7 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
         integration_branch: None,
         factory: &factory,
         integration_base: None,
-        network: None,
+        network: None, capability_overrides: Default::default(),
         exclude: Vec::new(),
         budget,
         cancel: &cancel,

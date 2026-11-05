@@ -2391,6 +2391,14 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
+| `--placement` | `{"conflicts": ["preset"], "description": "Placement: local or named cloud target in cloud:NAME form", "name": "placement"}` |
+| `--cloud-provider` | `{"description": "Override the cloud provider", "name": "cloud_provider"}` |
+| `--cloud-environment` | `{"description": "Override the provider environment ID", "name": "cloud_environment"}` |
+| `--cloud-model` | `{"description": "Override the requested cloud model", "name": "cloud_model"}` |
+| `--cloud-effort` | `{"description": "Override the requested cloud effort", "name": "cloud_effort"}` |
+| `--cloud-repository` | `{"description": "Override the cloud repository source", "name": "cloud_repository"}` |
+| `--cloud-branch` | `{"description": "Override the repository branch made available to the cloud job", "name": "cloud_branch"}` |
+| `--cloud-deadline` | `{"description": "Override the cloud job deadline in seconds", "name": "cloud_deadline"}` |
 | `--set` | `{"description": "Override a preset value (PATH=TOML_VALUE); quote TOML strings; repeatable", "name": "preset_set", "repeatable": true, "requires": ["preset"]}` |
 | `--params-file` | `{"description": "Read preset parameters from a TOML table file; --set overrides it", "name": "preset_params_file", "requires": ["preset"]}` |
 | `--plan` | `{"description": "Planner front-end: auto, on or off; the default is [domains.fabric.plan] mode", "name": "preset_plan", "requires": ["preset"], "values": ["auto", "on", "off"]}` |
@@ -2420,6 +2428,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--write-root` | `{"bounds": [0, 32], "description": "Extra directory the lane may write, outside Git metadata (repeatable)", "name": "write_root", "repeatable": true}` |
 | `--network` | `{"description": "Network access [default: on]", "name": "network", "values": ["on", "off"]}` |
 | `--capability` | `{"bounds": [0, 16], "description": "Grant a named capability: postgres (repeatable)", "name": "capability", "repeatable": true}` |
+| `--no-capability` | `{"bounds": [0, 16], "description": "Remove a project-default capability (repeatable)", "name": "no_capability", "repeatable": true}` |
 | `--provider-timeout` | `{"bounds": [1, 14400], "conditional_defaults": [["read-only", "3600"], ["worktree-write", "10800"]], "defaults": ["3600"], "description": "Provider timeout in seconds", "name": "provider_timeout"}` |
 | `--concurrency` | `{"bounds": [1, 16], "description": "Manifest lanes or preset graph attempts to run at once (1 to 16)", "name": "concurrency"}` |
 | `--knob` | `{"description": "Override an effective harness knob for this dispatch (NAME=VALUE)", "name": "knobs", "repeatable": true}` |
@@ -2428,9 +2437,9 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--head` | `{"description": "Chair-verified full commit SHA to review (must exist on the executing host)", "name": "head"}` |
 | `--base` | `{"description": "Git base for attempt history and a new writer branch", "name": "base"}` |
 | `--admission-timeout` | `{"description": "Admission timeout before launch (seconds, or a duration such as 10m)", "name": "admission_timeout"}` |
-| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "write_root", "capability", "knobs", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "provider_timeout", "operation_id"], "description": "Expand and run a named pipeline preset", "name": "preset", "requires": ["prompt_file"]}` |
+| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "write_root", "knobs", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "provider_timeout", "operation_id"], "description": "Expand and run a named pipeline preset", "name": "preset", "requires": ["prompt_file"]}` |
 | `--model` | `{"conflicts": ["route"], "description": "Exact model in ADAPTER/ID form", "name": "model"}` |
-| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "capability"], "description": "Dispatch the tasks in this manifest file", "name": "manifest"}` |
+| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root"], "description": "Dispatch the tasks in this manifest file", "name": "manifest"}` |
 | `--worktree` | `{"description": "Bind an existing preset writer worktree; single tasks can create an owned worktree for a missing branch name", "name": "worktree"}` |
 | `--wait` | `{"bounds": [1, 14400], "defaults": ["240"], "description": "Wait for task or preset graph settlement (seconds, or a duration such as 30m)", "name": "wait"}` |
 | `--branch` | `{"description": "Create or reuse an owned writer worktree for this branch, locally or on --host", "name": "branch"}` |
@@ -2488,7 +2497,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
         "read_root",
         "write_root",
         "network",
-        "capability"
+        "capability",
+        "no_capability"
       ],
       "multiple": true,
       "name": "Access",
@@ -2640,6 +2650,14 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
+| `--placement` | `{"conflicts": ["preset"], "description": "Placement: local or named cloud target in cloud:NAME form", "name": "placement"}` |
+| `--cloud-provider` | `{"description": "Override the cloud provider", "name": "cloud_provider"}` |
+| `--cloud-environment` | `{"description": "Override the provider environment ID", "name": "cloud_environment"}` |
+| `--cloud-model` | `{"description": "Override the requested cloud model", "name": "cloud_model"}` |
+| `--cloud-effort` | `{"description": "Override the requested cloud effort", "name": "cloud_effort"}` |
+| `--cloud-repository` | `{"description": "Override the cloud repository source", "name": "cloud_repository"}` |
+| `--cloud-branch` | `{"description": "Override the repository branch made available to the cloud job", "name": "cloud_branch"}` |
+| `--cloud-deadline` | `{"description": "Override the cloud job deadline in seconds", "name": "cloud_deadline"}` |
 | `--set` | `{"description": "Override a preset value (PATH=TOML_VALUE); quote TOML strings; repeatable", "name": "preset_set", "repeatable": true, "requires": ["preset"]}` |
 | `--params-file` | `{"description": "Read preset parameters from a TOML table file; --set overrides it", "name": "preset_params_file", "requires": ["preset"]}` |
 | `--plan` | `{"description": "Planner front-end: auto, on or off; the default is [domains.fabric.plan] mode", "name": "preset_plan", "requires": ["preset"], "values": ["auto", "on", "off"]}` |
@@ -2670,6 +2688,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--write-root` | `{"bounds": [0, 32], "description": "Extra directory the lane may write, outside Git metadata (repeatable)", "name": "write_root", "repeatable": true}` |
 | `--network` | `{"description": "Network access [default: on]", "name": "network", "values": ["on", "off"]}` |
 | `--capability` | `{"bounds": [0, 16], "description": "Grant a named capability: postgres (repeatable)", "name": "capability", "repeatable": true}` |
+| `--no-capability` | `{"bounds": [0, 16], "description": "Remove a project-default capability (repeatable)", "name": "no_capability", "repeatable": true}` |
 | `--provider-timeout` | `{"bounds": [1, 14400], "conditional_defaults": [["read-only", "3600"], ["worktree-write", "10800"]], "defaults": ["3600"], "description": "Provider timeout in seconds", "name": "provider_timeout"}` |
 | `--knob` | `{"description": "Override an effective harness knob for this dispatch (NAME=VALUE)", "name": "knobs", "repeatable": true}` |
 | `--host` | `{"description": "Configured peer (label or host ID) to run the dispatch on", "name": "host"}` |
@@ -2679,9 +2698,9 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--base` | `{"description": "Git base for attempt history and a new writer branch", "name": "base"}` |
 | `--wait` | `{"bounds": [1, 14400], "description": "Wait for task or preset graph settlement (seconds, or a duration such as 30m)", "name": "wait"}` |
 | `--admission-timeout` | `{"description": "Admission timeout before launch (seconds, or a duration such as 10m)", "name": "admission_timeout"}` |
-| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "write_root", "capability", "knobs", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "provider_timeout", "operation_id"], "description": "Expand and run a named pipeline preset", "name": "preset", "requires": ["prompt_file"]}` |
+| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "write_root", "knobs", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "provider_timeout", "operation_id"], "description": "Expand and run a named pipeline preset", "name": "preset", "requires": ["prompt_file"]}` |
 | `--model` | `{"conflicts": ["route"], "description": "Exact model in ADAPTER/ID form", "name": "model"}` |
-| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root", "capability"], "description": "Dispatch the tasks in this manifest file", "name": "manifest"}` |
+| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root"], "description": "Dispatch the tasks in this manifest file", "name": "manifest"}` |
 | `--concurrency` | `{"bounds": [1, 16], "description": "Manifest lanes or preset graph attempts to run at once (1 to 16)", "name": "concurrency", "requires": ["manifest"]}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
@@ -2736,7 +2755,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
         "read_root",
         "write_root",
         "network",
-        "capability"
+        "capability",
+        "no_capability"
       ],
       "multiple": true,
       "name": "Access",
@@ -2770,7 +2790,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--wait` | `{"bounds": [1, 14400], "conflicts": ["watch"], "description": "Wait for settlement (seconds, or a duration such as 30m). An oversized unseen default backlog is summarised with its count and newest 100 lanes", "name": "wait"}` |
 | `--condition` | `{"conflicts": ["watch"], "defaults": ["any"], "description": "Wait for any or all lanes to settle", "name": "condition", "requires": ["wait"], "values": ["any", "all"]}` |
 | `--watch` | `{"bounds": [1, 14400], "conflicts": ["all", "states", "cursor"], "description": "Print one line per lane state change until every selected lane has settled or this many seconds pass (default 14400)", "name": "watch"}` |
-| `--state` | `{"conflicts": ["wait", "watch"], "description": "Keep lanes in any of these states", "name": "states", "repeatable": true, "values": ["queued", "starting", "running", "settling", "succeeded", "review_required", "failed", "rejected", "timed_out", "rate_limited", "quota_limited", "auth_required", "model_unavailable", "permission_denied", "quarantined", "lost", "uncommitted", "cancelled", "input_required"]}` |
+| `--state` | `{"conflicts": ["wait", "watch"], "description": "Keep lanes in any of these states", "name": "states", "repeatable": true, "values": ["cloud_submitting", "cloud_running", "cloud_passed", "cloud_failed", "cloud_setup_failed", "cloud_cancelled", "cloud_cancellation_unconfirmed", "cloud_unknown", "queued", "starting", "running", "settling", "succeeded", "review_required", "failed", "rejected", "timed_out", "rate_limited", "quota_limited", "auth_required", "model_unavailable", "permission_denied", "quarantined", "lost", "uncommitted", "cancelled", "input_required"]}` |
 | `--since` | `{"description": "Keep lanes queued within this many seconds, or since an RFC3339 time. With --wait or --watch, count lanes that settled since then", "name": "since"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |

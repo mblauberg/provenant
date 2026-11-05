@@ -62,7 +62,11 @@ pub fn run(mut command: Dispatch, edge: &Edge<'_>) -> Reply {
 // dispatch so it cannot silently become a read-only lane. An explicit mode
 // (including `--mode read-only`) or a target is an intent and passes.
 pub(super) fn require_explicit_target(command: &Dispatch, cwd: &Path) -> Result<(), Fail> {
-    if command.access.mode.is_some()
+    if command
+        .placement
+        .as_deref()
+        .is_some_and(|placement| placement.starts_with("cloud:"))
+        || command.access.mode.is_some()
         || command.access.worktree.is_some()
         || command.branch.is_some()
         || command.worktree_branch.is_some()
@@ -146,6 +150,55 @@ fn local_session(edge: &Edge<'_>) -> Option<Session> {
 pub(super) fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
     result.result.command = "run".into();
     if result.result.error.is_some() {
+        return result;
+    }
+    if let Some(jobs) = result.result.data["cloud_jobs"].as_array() {
+        let mut human = format!(
+            "operation {}\n",
+            result.result.data["operation_id"]
+                .as_str()
+                .unwrap_or("unknown")
+        );
+        for job in jobs {
+            let id = job["attempt_id"].as_str().unwrap_or("unknown");
+            let state = job["state"]["state"].as_str().unwrap_or("unknown");
+            human.push_str(&format!(
+                "{} cloud {} {}",
+                &id[..id.len().min(8)],
+                plain_text(job["target"].as_str().unwrap_or("unknown"), usize::MAX),
+                state
+            ));
+            if let Some(passed) = job["passed"].as_bool() {
+                human.push_str(if passed {
+                    " (advisory pass)"
+                } else {
+                    " (advisory failure)"
+                });
+                if !passed {
+                    result.result.status = Status::Failed;
+                }
+            }
+            if let Some(model) = job["observed_model_status"].as_str() {
+                human.push_str(&format!(", observed model {model}"));
+            }
+            if let Some(detail) = job["state"]["detail"].as_str() {
+                human.push_str(&format!(": {}", plain_text(detail, usize::MAX)));
+            }
+            if let Some(remedy) = job["remedy"].as_str() {
+                human.push_str(&format!("; {}", plain_text(remedy, usize::MAX)));
+            }
+            if state == "setup_failed" {
+                result.result.status = Status::Failed;
+            }
+            human.push('\n');
+        }
+        if result.result.status == Status::Timeout {
+            result.result.status = Status::Waiting;
+        }
+        human.push_str(&warnings_text(&result.result.data));
+        result.summary = Some(crate::Summary::verbatim(&human, None));
+        result.human = human;
+        result.read_only = false;
         return result;
     }
     let rows = result.result.data["lanes"]
@@ -629,6 +682,55 @@ pub(super) fn dispatch_inner(
     created: &mut Option<(PathBuf, String)>,
     workers: &dyn provenant_confinement::worktrees::WorkerObserver,
 ) -> Result<(Value, String, bool), Fail> {
+    // Resolve the project default before admission, so child authority checks
+    // see the same effective capabilities as the provider.
+    let explicit = command.access.capability.clone();
+    let settings = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
+    let project = if settings.domains.lanes.projects.is_empty() {
+        None
+    } else {
+        preview_project_id(edge.roots, edge.cwd)
+    };
+    let defaults = project
+        .as_ref()
+        .and_then(|id| settings.domains.lanes.projects.get(&id.to_string()))
+        .map(|settings| settings.capabilities.as_slice())
+        .unwrap_or_default();
+    let mut capability_warnings = Vec::new();
+    command.access.capability.retain(|name| {
+        if name == "postgres" {
+            true
+        } else {
+            capability_warnings.push(format!("--capability: ignored unknown capability {name}"));
+            false
+        }
+    });
+    for name in &command.access.no_capability {
+        if name != "postgres" {
+            capability_warnings.push(format!(
+                "--no-capability: ignored unknown capability {name}"
+            ));
+        }
+    }
+    if command.access.mode() == Mode::WorktreeWrite {
+        for capability in defaults {
+            if capability != "postgres" {
+                capability_warnings.push(format!("domains.lanes.projects.{}.capabilities: ignored unknown capability {capability}", project.as_ref().map(ToString::to_string).unwrap_or_default()));
+                continue;
+            }
+            if !command.access.capability.contains(capability) {
+                command.access.capability.push(capability.clone());
+            }
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    command.access.capability.retain(|capability| {
+        !command.access.no_capability.contains(capability) && seen.insert(capability.clone())
+    });
+    let capability_sources: Vec<_> = command.access.capability.iter().map(|name| json!({
+        "name": name, "source": if explicit.contains(name) { "flag" } else { "project default" },
+    })).collect();
     // Explain is a preview-only operation. Return before worktree preflight,
     // operation replay, or any preparation that could lead to submission.
     if command.explain {
@@ -651,7 +753,7 @@ pub(super) fn dispatch_inner(
             run::AdmissionPolicy::resolve_timeout(command.admission_timeout, configured_admission);
         // The brief scan only reads the prompt file and resolves the roots; it
         // never prepares anything that could lead to a submission.
-        let warnings = match command.input.prompt_file.as_deref() {
+        let mut warnings = match command.input.prompt_file.as_deref() {
             Some(path) => {
                 let prompt = read_bounded(path)?;
                 let access = lane_access(&command.access, edge.roots.state.as_path(), edge.home)?;
@@ -669,8 +771,17 @@ pub(super) fn dispatch_inner(
             }
             None => Vec::new(),
         };
+        warnings.extend(capability_warnings.clone());
         return crate::route::explain_dispatch(&command.route, edge.roots)
             .map(|(mut data, mut text)| {
+                data["capabilities"] = json!(capability_sources);
+                for capability in &capability_sources {
+                    text.push_str(&format!(
+                        "capability: {} ({})\n",
+                        capability["name"].as_str().unwrap_or_default(),
+                        capability["source"].as_str().unwrap_or_default()
+                    ));
+                }
                 data["admission_timeout"] = json!({
                     "seconds": effective_admission.seconds,
                     "origin": effective_admission.origin.as_str(),
@@ -704,6 +815,129 @@ pub(super) fn dispatch_inner(
                 )
             });
     }
+    let cloud = if let Some(placement) = command
+        .placement
+        .as_deref()
+        .filter(|placement| *placement != "local")
+    {
+        let name = placement
+            .strip_prefix("cloud:")
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| {
+                Fail::new(
+                    Status::Invalid,
+                    ErrorKind::Invalid,
+                    "placement must be cloud:NAME",
+                )
+            })?;
+        if command.host.is_some() {
+            return Err(Fail::new(
+                Status::Invalid,
+                ErrorKind::Invalid,
+                "cloud placement cannot be combined with --host",
+            ));
+        }
+        if crate::fabric::in_lane() {
+            return Err(Fail::new(
+                Status::Refused,
+                ErrorKind::LaneCoordinationRefused,
+                "cloud submission requires the host run owner",
+            ));
+        }
+        if matches!(command.access.mode(), Mode::WorktreeWrite)
+            || command.deliver.is_some()
+            || command.access.worktree.is_some()
+            || command.branch.is_some()
+            || command.worktree_branch.is_some()
+        {
+            return Err(Fail::new(
+                Status::Refused,
+                ErrorKind::Refused,
+                "cloud verification is advisory and cannot hold writer or delivery authority",
+            ));
+        }
+        let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
+            .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
+        let target = config
+            .domains
+            .lanes
+            .cloud_targets
+            .get(name)
+            .ok_or_else(|| {
+                Fail::new(
+                    Status::Invalid,
+                    ErrorKind::Config,
+                    format!("cloud target {name} is not configured"),
+                )
+            })?;
+        let cloud = provenant_records::run::CloudPlacement {
+            target: name.into(),
+            provider: command
+                .cloud_provider
+                .clone()
+                .unwrap_or_else(|| target.provider.clone()),
+            environment: command
+                .cloud_environment
+                .clone()
+                .unwrap_or_else(|| target.environment.clone()),
+            repository: command
+                .cloud_repository
+                .clone()
+                .unwrap_or_else(|| target.repository.clone()),
+            branch: command
+                .cloud_branch
+                .clone()
+                .unwrap_or_else(|| target.branch.clone()),
+            model: command
+                .cloud_model
+                .clone()
+                .or_else(|| {
+                    command.route.model.as_ref().map(|model| {
+                        model
+                            .0
+                            .split_once('/')
+                            .map_or(model.0.as_str(), |(_, name)| name)
+                            .to_owned()
+                    })
+                })
+                .unwrap_or_else(|| target.model.clone()),
+            effort: command
+                .cloud_effort
+                .clone()
+                .or_else(|| command.route.effort.clone())
+                .or_else(|| target.effort.clone()),
+            deadline_seconds: command.cloud_deadline.unwrap_or(target.deadline_seconds),
+        };
+        if cloud.environment.trim().is_empty()
+            || cloud.repository.trim().is_empty()
+            || cloud.branch.trim().is_empty()
+            || cloud.model.trim().is_empty()
+            || cloud.deadline_seconds == 0
+        {
+            return Err(Fail::new(
+                Status::Invalid,
+                ErrorKind::Config,
+                format!(
+                    "cloud target {name} environment {} needs valid repository, branch, model and deadline; create or repair the provider environment and retry",
+                    if cloud.environment.trim().is_empty() {
+                        "<missing>"
+                    } else {
+                        cloud.environment.as_str()
+                    }
+                ),
+            ));
+        }
+        if command.head.is_none() {
+            let git = provenant_os::git::git_executable().ok_or(run::RunError::GitUnavailable)?;
+            command.head = Some(run::resolve_git_base(&git, edge.cwd, "HEAD")?);
+        }
+        if command.base.is_none() {
+            command.base = command.head.clone();
+        }
+        Some(cloud)
+    } else {
+        None
+    };
     // Check explicit placement before local aliases are normalised away and
     // before writer validation or peer discovery can act on the request.
     if command.host.is_some() && crate::fabric::in_lane() {
@@ -715,6 +949,11 @@ pub(super) fn dispatch_inner(
     }
     // Validate roots before checking the capabilities they request.
     let mut lane_access = lane_access(&command.access, edge.roots.state.as_path(), edge.home)?;
+    if !capability_sources.is_empty() {
+        lane_access
+            .extra
+            .insert("capability_sources".into(), json!(capability_sources));
+    }
     let has_writes = run::Service::has_writes(
         matches!(command.access.mode(), Mode::WorktreeWrite),
         &lane_access.write_roots,
@@ -743,7 +982,14 @@ pub(super) fn dispatch_inner(
         // Initialise the state before entering the shared confinement context.
         let call = request(&clock, &cancel)?;
         let session = open(edge, &call)?;
-        if let Some(replayed) = replay_owned_dispatch(&command, edge, &session, &call, workers)? {
+        if let Some(replayed) = replay_owned_dispatch(
+            &command,
+            edge,
+            &session,
+            &call,
+            workers,
+            &capability_sources,
+        )? {
             return Ok(replayed);
         }
         if let Some(mode) = &command.deliver
@@ -937,11 +1183,23 @@ pub(super) fn dispatch_inner(
             task_id,
             command.title.clone(),
             prompt,
-            requested(
-                flag_route.0.as_deref(),
-                flag_route.1.as_deref(),
-                flag_route.2.clone(),
-            )?,
+            if let Some(cloud) = cloud
+                .as_ref()
+                .filter(|_| flag_route.0.is_none() && flag_route.1.is_none())
+            {
+                run::RequestedRoute::Model {
+                    extra: Default::default(),
+                    provider: cloud.provider.clone(),
+                    model: cloud.model.clone(),
+                    effort: cloud.effort.clone(),
+                }
+            } else {
+                requested(
+                    flag_route.0.as_deref(),
+                    flag_route.1.as_deref(),
+                    flag_route.2.clone(),
+                )?
+            },
             flag_route.3.clone(),
             command.delivery_id,
             command.account.clone(),
@@ -986,7 +1244,11 @@ pub(super) fn dispatch_inner(
             if !fallback.is_empty() {
                 return unsupported("route fallback with --host");
             }
-            if !lane_access.is_default() || network.is_some() {
+            if lane_access.network.is_some()
+                || !lane_access.read_roots.is_empty()
+                || !lane_access.write_roots.is_empty()
+                || network.is_some()
+            {
                 return unsupported(
                     "network, capability, read-root or write-root access with --host",
                 );
@@ -1005,7 +1267,7 @@ pub(super) fn dispatch_inner(
                 deliver,
             });
         }
-        return remote::dispatch(
+        let (mut data, mut human, timed_out) = remote::dispatch(
             edge,
             host,
             remote::Batch {
@@ -1015,9 +1277,28 @@ pub(super) fn dispatch_inner(
                 knobs: command.knobs,
                 provider_timeout: command.provider_timeout,
                 new_worktree,
+                capabilities: if !command.access.capability.is_empty()
+                    || !command.access.no_capability.is_empty()
+                {
+                    Some(command.access.capability.clone())
+                } else {
+                    None
+                },
+                capability_sources: capability_sources
+                    .iter()
+                    .filter_map(|value| {
+                        Some((
+                            value["name"].as_str()?.to_owned(),
+                            value["source"].as_str()?.to_owned(),
+                        ))
+                    })
+                    .collect(),
             },
             command.wait,
-        );
+        )?;
+        record_warnings(&mut data, capability_warnings);
+        human.push_str(&warnings_text(&data));
+        return Ok((data, human, timed_out));
     }
     let mut session = open(edge, &call)?;
     // Protection governs new admission. Service::dispatch still compares the
@@ -1336,6 +1617,7 @@ pub(super) fn dispatch_inner(
                     access.network = network;
                 }
                 Submitted {
+                    cloud: cloud.clone(),
                     require_skill_location,
                     settlement_retry_limit: None,
                     context,
@@ -1358,7 +1640,7 @@ pub(super) fn dispatch_inner(
             },
         )
         .collect();
-    let brief_warnings = if command.input.manifest.is_none()
+    let mut brief_warnings = if command.input.manifest.is_none()
         && config
             .domains
             .run
@@ -1379,6 +1661,15 @@ pub(super) fn dispatch_inner(
     } else {
         Vec::new()
     };
+    let cloud_prompts: Vec<_> = tasks
+        .iter()
+        .filter_map(|task| {
+            task.cloud
+                .as_ref()
+                .map(|_| (task.task_id, task.prompt.clone()))
+        })
+        .collect();
+    brief_warnings.extend(capability_warnings);
     let (record, started) = submit_with_host_and_wait(
         &session,
         edge,
@@ -1393,14 +1684,130 @@ pub(super) fn dispatch_inner(
         None,
         command.wait,
     )?;
-    let (mut data, mut human, timed_out) =
-        report(&session, &record, &started, command.wait, edge, &call)?;
+    let mut cloud_jobs = Vec::new();
+    if let Some(placement) = cloud.as_ref() {
+        let attempts = session.store.pending_attempts(record.run_id, &call)?;
+        let target = crate::domains::CloudTarget {
+            provider: placement.provider.clone(),
+            environment: placement.environment.clone(),
+            model: placement.model.clone(),
+            effort: placement.effort.clone(),
+            repository: placement.repository.clone(),
+            branch: placement.branch.clone(),
+            deadline_seconds: placement.deadline_seconds,
+        };
+        for (task_id, prompt) in &cloud_prompts {
+            let attempt = attempts
+                .iter()
+                .find(|attempt| attempt.task_id == *task_id)
+                .ok_or_else(|| {
+                    Fail::new(Status::Error, ErrorKind::Invalid, "cloud attempt not found")
+                })?;
+            let commit = command.head.as_deref().ok_or_else(|| {
+                Fail::new(Status::Error, ErrorKind::Invalid, "cloud commit missing")
+            })?;
+            let job = cloud_owner::prepare_job(
+                attempt.attempt_id,
+                &placement.target,
+                &target,
+                commit,
+                &clock,
+            )
+            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
+            let job = cloud_owner::submit_installed(&session.store, attempt.attempt_id, job, prompt, &call, edge.cwd).map_err(|error| Fail::new(Status::Error, ErrorKind::Io, format!("cloud target {} environment {}: {error}; create or repair the provider environment and retry", placement.target, placement.environment)))?;
+            cloud_jobs.push(job);
+        }
+    }
+    let mut cloud_wait_timed_out = false;
+    if let Some(seconds) = command.wait.filter(|_| !cloud_jobs.is_empty()) {
+        let duration = DurationMicros::from_seconds(seconds)
+            .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid cloud wait"))?;
+        let deadline = clock
+            .mono_now()
+            .checked_add(duration)
+            .map_err(|_| Fail::new(Status::Error, ErrorKind::Time, "cloud wait deadline"))?;
+        loop {
+            for job in &mut cloud_jobs {
+                if job.state.is_terminal()
+                    || matches!(
+                        job.state,
+                        provenant_providers::cloud::RemoteState::Unknown { .. }
+                    )
+                {
+                    continue;
+                }
+                let id = AttemptId::parse(&job.job_id).map_err(|_| {
+                    Fail::new(
+                        Status::Error,
+                        ErrorKind::Invalid,
+                        "invalid cloud job identity",
+                    )
+                })?;
+                *job =
+                    cloud_owner::observe_installed(&session.store, id, job, &call, edge.cwd, false)
+                        .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
+            }
+            if cloud_jobs.iter().all(|job| {
+                job.state.is_terminal()
+                    || matches!(
+                        job.state,
+                        provenant_providers::cloud::RemoteState::Unknown { .. }
+                    )
+            }) {
+                break;
+            }
+            let now = clock.mono_now();
+            if now >= deadline {
+                cloud_wait_timed_out = true;
+                break;
+            }
+            let pause = now
+                .checked_add(DurationMicros::from_micros(2_000_000))
+                .map_err(|_| Fail::new(Status::Error, ErrorKind::Time, "cloud wait"))?
+                .min(deadline);
+            clock
+                .wait_until(pause)
+                .map_err(|_| Fail::new(Status::Error, ErrorKind::Time, "cloud wait"))?;
+        }
+    }
+    let (mut data, mut human, timed_out) = report(
+        &session,
+        &record,
+        &started,
+        if cloud.is_some() { None } else { command.wait },
+        edge,
+        &call,
+    )?;
+    if !cloud_jobs.is_empty() {
+        brief_warnings.push("cloud usage costs are unknown; results are advisory".into());
+        data["cloud_jobs"] = json!(
+            cloud_jobs
+                .iter()
+                .map(|job| {
+                    let mut view = cloud_owner::view(job);
+                    view["attempt_id"] = json!(job.job_id);
+                    view
+                })
+                .collect::<Vec<_>>()
+        );
+        if command.wait.is_some() {
+            data["timed_out"] = json!(cloud_wait_timed_out);
+        }
+        for job in &cloud_jobs {
+            human.push_str(&format!(
+                "cloud {}: {} ({:?})\n",
+                plain_text(&job.target, usize::MAX),
+                plain_text(&job.remote_id, usize::MAX),
+                state_tag(&job.state)
+            ));
+        }
+    }
     record_warnings(&mut data, brief_warnings);
     human.push_str(&warnings_text(&data));
     if let Some(worktree) = worktree {
         data["worktree"] = worktree;
     }
-    Ok((data, human, timed_out))
+    Ok((data, human, timed_out || cloud_wait_timed_out))
 }
 
 /// Carry submit-time warnings as `data["warnings"]`, so JSON consumers see them.
@@ -1425,6 +1832,10 @@ pub fn warnings_text(data: &Value) -> String {
 
 /// Resolve an existing project binding without creating state during previews.
 pub fn preview_project_id(roots: &Roots, cwd: &Path) -> Option<provenant_core::ProjectId> {
+    if crate::fabric::in_lane() {
+        let gitdir = std::env::var_os("PROVENANT_WORKTREE_GITDIR").map(PathBuf::from)?;
+        return project_id_for_lane_gitdir(roots, &gitdir);
+    }
     let git = provenant_os::git::git_executable()?;
     let runtime = provenant_confinement::UtilityRuntime::read_only(git).ok()?;
     let executor = provenant_os::exec::SystemExecutor::new(1).ok()?;
@@ -1436,6 +1847,28 @@ pub fn preview_project_id(roots: &Roots, cwd: &Path) -> Option<provenant_core::P
     provenant_config::lookup_project(roots, &location)
         .ok()?
         .map(|binding| binding.project_id())
+}
+
+pub(super) fn project_id_for_lane_gitdir(
+    roots: &Roots,
+    gitdir: &Path,
+) -> Option<provenant_core::ProjectId> {
+    let mut matches = provenant_config::registered_projects(roots)
+        .ok()?
+        .into_iter()
+        .filter(|binding| {
+            let common = binding.common_dir();
+            gitdir == common
+                || gitdir
+                    .strip_prefix(common.join("worktrees"))
+                    .is_ok_and(|rest| {
+                        let mut components = rest.components();
+                        matches!(components.next(), Some(std::path::Component::Normal(_)))
+                            && components.next().is_none()
+                    })
+        });
+    let project = matches.next()?.project_id();
+    matches.next().is_none().then_some(project)
 }
 
 /// Resolve an existing project binding without creating state during previews.
@@ -1573,6 +2006,7 @@ pub(super) fn replay_owned_dispatch(
     session: &Session,
     call: &run::Request<'_>,
     workers: &dyn provenant_confinement::worktrees::WorkerObserver,
+    capability_sources: &[Value],
 ) -> Result<Option<(Value, String, bool)>, Fail> {
     let Some(operation) = session.store.operation(&command.operation_id, call)? else {
         return Ok(None);
@@ -1610,6 +2044,12 @@ pub(super) fn replay_owned_dispatch(
         .dispatch_profile(&command.knobs)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
     profile.require_skill_location = command.require_skill_location;
+    let mut expected_access = lane_access(&command.access, edge.roots.state.as_path(), edge.home)?;
+    if !capability_sources.is_empty() {
+        expected_access
+            .extra
+            .insert("capability_sources".into(), json!(capability_sources));
+    }
     if task.title != command.title
         || task.build_heavy != command.build_heavy
         || task.prompt_digest != CanonicalV1::file_digest(prompt.as_bytes())
@@ -1618,7 +2058,7 @@ pub(super) fn replay_owned_dispatch(
         || task.head != command.head
         || task.base_ref != command.base
         || task.deliver != delivery
-        || task.access != lane_access(&command.access, edge.roots.state.as_path(), edge.home)?
+        || task.access != expected_access
         || task.profile != profile
         || task.provider_timeout_seconds != command.provider_timeout
         || task.delivery_id != command.delivery_id

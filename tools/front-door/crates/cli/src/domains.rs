@@ -585,6 +585,35 @@ pub struct LanesSettings {
     pub skill_stage_max_bytes: u64,
     #[serde(default)]
     pub projects: std::collections::BTreeMap<String, ProjectLanesConfig>,
+    /// Named provider environments available to projects.
+    #[serde(default)]
+    pub cloud_targets: std::collections::BTreeMap<String, CloudTarget>,
+}
+
+/// Configuration only; credentials belong to the provider's authentication mechanism.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CloudTarget {
+    pub provider: String,
+    pub environment: String,
+    pub model: String,
+    pub effort: Option<String>,
+    pub repository: String,
+    pub branch: String,
+    pub deadline_seconds: u64,
+}
+impl Default for CloudTarget {
+    fn default() -> Self {
+        Self {
+            provider: String::new(),
+            environment: String::new(),
+            model: String::new(),
+            effort: None,
+            repository: String::new(),
+            branch: "main".into(),
+            deadline_seconds: 3600,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -594,8 +623,13 @@ pub struct ProjectLanesConfig {
     pub user_skills: Option<UserSkillsMode>,
     #[serde(default)]
     pub shared_paths: Vec<PathBuf>,
+    /// Capabilities granted by default to this project's writer lanes.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
     #[serde(default)]
     pub exec_roots: Vec<PathBuf>,
+    #[serde(default)]
+    pub cloud_target: Option<String>,
 }
 
 impl Default for LanesSettings {
@@ -604,6 +638,7 @@ impl Default for LanesSettings {
             user_skills: UserSkillsMode::default(),
             skill_stage_max_bytes: 16 * 1024 * 1024,
             projects: Default::default(),
+            cloud_targets: Default::default(),
         }
     }
 }
@@ -632,7 +667,16 @@ const LANES_SECTION: DomainSection = DomainSection::new::<LanesSettings>(
     FieldMetadata::new("skill_stage_max_bytes", "int"),
     FieldMetadata::enumeration("projects.{project}.user_skills", &["discover", "off"]),
     FieldMetadata::new("projects.{project}.shared_paths", "array"),
+    FieldMetadata::new("projects.{project}.capabilities", "array"),
     FieldMetadata::new("projects.{project}.exec_roots", "array"),
+    FieldMetadata::new("projects.{project}.cloud_target", "string"),
+    FieldMetadata::new("cloud_targets.{target}.provider", "string"),
+    FieldMetadata::new("cloud_targets.{target}.environment", "string"),
+    FieldMetadata::new("cloud_targets.{target}.model", "string"),
+    FieldMetadata::new("cloud_targets.{target}.effort", "string"),
+    FieldMetadata::new("cloud_targets.{target}.repository", "string"),
+    FieldMetadata::new("cloud_targets.{target}.branch", "string"),
+    FieldMetadata::new("cloud_targets.{target}.deadline_seconds", "integer"),
 ]);
 
 static ENTRIES: [DomainSection; 9] = [
@@ -655,6 +699,48 @@ mod tests {
     use provenant_core::{PathResolver, Roots};
     use serde_json::json;
     use std::path::Path;
+
+    #[test]
+    fn cloud_targets_round_trip_with_project_selection() {
+        let settings: LanesSettings = toml_edit::de::from_str(
+            r#"
+            [cloud_targets.build]
+            provider = "example"
+            environment = "env-1"
+            model = "small"
+            effort = "low"
+            repository = "owner/repo"
+            [projects.sample]
+            cloud_target = "build"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(
+            settings.projects["sample"].cloud_target.as_deref(),
+            Some("build")
+        );
+        assert_eq!(settings.cloud_targets["build"].environment, "env-1");
+        let encoded = serde_json::to_string(&settings).unwrap();
+        assert_eq!(
+            serde_json::from_str::<LanesSettings>(&encoded).unwrap(),
+            settings
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp);
+        let edited = edit(
+            &roots,
+            json!({
+                "domains.lanes.cloud_targets.build.provider": "example",
+                "domains.lanes.cloud_targets.build.environment": "env-1",
+                "domains.lanes.cloud_targets.build.model": "small",
+                "domains.lanes.cloud_targets.build.effort": "low",
+                "domains.lanes.cloud_targets.build.repository": "owner/repo",
+                "domains.lanes.projects.sample.cloud_target": "build"
+            }),
+        )
+        .unwrap();
+        assert_eq!(edited.config.domains.lanes, settings);
+    }
 
     struct Resolver;
     impl PathResolver for Resolver {
@@ -961,11 +1047,13 @@ mod tests {
         let (config, _) = provenant_config::show(&roots, &SECTIONS).unwrap();
         assert_eq!(config.domains.lanes.skill_stage_max_bytes, 16 * 1024 * 1024);
         assert!(ProjectLanesConfig::default().shared_paths.is_empty());
+        assert!(ProjectLanesConfig::default().capabilities.is_empty());
         assert!(ProjectLanesConfig::default().exec_roots.is_empty());
         let edited = edit(
             &roots,
             json!({
                 "domains.lanes.projects.example.shared_paths": [".agent-run/locks", "~/locks"],
+                "domains.lanes.projects.example.capabilities": ["postgres"],
                 "domains.lanes.projects.example.exec_roots": [".local-tools"],
                 "domains.lanes.skill_stage_max_bytes": 1024,
             }),
@@ -977,9 +1065,11 @@ mod tests {
             [PathBuf::from(".agent-run/locks"), PathBuf::from("~/locks")]
         );
         assert_eq!(project.exec_roots, [PathBuf::from(".local-tools")]);
+        assert_eq!(project.capabilities, ["postgres"]);
         assert_eq!(edited.config.domains.lanes.skill_stage_max_bytes, 1024);
         for key in [
             "domains.lanes.projects.example.shared_paths",
+            "domains.lanes.projects.example.capabilities",
             "domains.lanes.projects.example.exec_roots",
             "domains.lanes.skill_stage_max_bytes",
         ] {

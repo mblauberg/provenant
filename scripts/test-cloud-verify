@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""Exercise the cloud verification receipt against a real Git checkout."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+
+import test_git_env
+test_git_env.isolate()
+
+
+HELPER = Path(__file__).resolve().with_name("cloud-verify")
+
+
+class CloudVerify(unittest.TestCase):
+    def setUp(self):
+        self.scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(self.scratch.cleanup)
+        self.root = Path(self.scratch.name)
+        self.repo = self.root / "repo"
+        self.repo.mkdir()
+        self.git("init", "-q")
+        self.git("config", "user.name", "Test")
+        self.git("config", "user.email", "test@example.invalid")
+        (self.repo / "tracked").write_text("before\n")
+        self.git("add", "tracked")
+        self.git("commit", "-qm", "fixture")
+        self.commit = self.git("rev-parse", "HEAD").strip()
+
+    def git(self, *args):
+        return subprocess.check_output(["git", *args], cwd=self.repo, text=True)
+
+    def run_helper(self, command, commit=None):
+        return subprocess.run(
+            [sys.executable, str(HELPER), "--job-id", "test-job", "--nonce", "test-nonce", "--commit", commit or self.commit,
+             "--test", "tier 1", "--log", str(self.root / "log"),
+             "--log-location", "https://example.invalid/log", "--", *command],
+            cwd=self.repo, capture_output=True, text=True, env=os.environ.copy(),
+        )
+
+    def test_clean_success_and_failure(self):
+        ok = self.run_helper([sys.executable, "-c", "print('hello')"])
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        result = json.loads(ok.stdout)
+        self.assertEqual(result["job_id"], "test-job")
+        self.assertEqual(result["nonce"], "test-nonce")
+        self.assertEqual(json.loads((self.repo / ".provenant-cloud-result.json").read_text()), result)
+        self.assertEqual(result["commit"], self.commit)
+        self.assertEqual(result["tests_run"], ["tier 1"])
+        self.assertEqual(result["tests_failed"], [])
+        self.assertFalse(result["tracked_files_changed"])
+        self.assertIsNone(result["observed_model"])
+        self.assertEqual((self.root / "log").read_text(), "hello\n")
+        failed = self.run_helper([sys.executable, "-c", "raise SystemExit(3)"])
+        self.assertEqual(failed.returncode, 0, failed.stderr)
+        result = json.loads(failed.stdout)
+        self.assertEqual(result["exit_status"], 3)
+        self.assertEqual(result["tests_failed"], ["tier 1"])
+
+    def test_missing_command_produces_failed_result_and_log(self):
+        completed = self.run_helper([str(self.root / "missing-command")])
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["exit_status"], 127)
+        self.assertEqual(result["tests_failed"], ["tier 1"])
+        self.assertIn("Unable to start verification command", (self.root / "log").read_text())
+
+    def test_changed_checkout_and_wrong_head(self):
+        changed = self.run_helper([sys.executable, "-c", "open('tracked','w').write('changed')"])
+        self.assertEqual(changed.returncode, 0, changed.stderr)
+        self.assertTrue(json.loads(changed.stdout)["tracked_files_changed"])
+        marker = self.root / "ran"
+        wrong = self.run_helper([sys.executable, "-c", f"open({str(marker)!r},'w').close()"], "a" * 40)
+        self.assertNotEqual(wrong.returncode, 0)
+        self.assertFalse(marker.exists())
+
+    def test_log_location_with_credentials_is_refused_before_command(self):
+        marker = self.root / "ran"
+        for location in ("https://example.invalid/log?token=secret", "https://example.invalid/log?key=secret"):
+            result = subprocess.run(
+                [sys.executable, str(HELPER), "--job-id", "test-job", "--nonce", "test-nonce",
+                 "--commit", self.commit, "--test", "tier 1", "--log", str(self.root / "log"),
+                 "--log-location", location, "--",
+                 sys.executable, "-c", f"open({str(marker)!r},'w').close()"],
+                cwd=self.repo, capture_output=True, text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(marker.exists())
+
+    def test_tracked_result_path_is_not_overwritten(self):
+        result_path = self.repo / ".provenant-cloud-result.json"
+        result_path.write_text("retain\n")
+        self.git("add", result_path.name)
+        completed = self.run_helper([sys.executable, "-c", "pass"])
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(result_path.read_text(), "retain\n")
+
+    def test_dirty_start_and_changed_commit_are_reported(self):
+        (self.repo / "tracked").write_text("dirty\n")
+        result = self.run_helper([sys.executable, "-c", "pass"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads(result.stdout)["tracked_files_changed"])
+        self.git("add", "tracked")
+        commit = self.run_helper(["git", "commit", "-qm", "changed"])
+        self.assertEqual(commit.returncode, 0, commit.stderr)
+        result = json.loads(commit.stdout)
+        self.assertNotEqual(result["commit"], self.commit)
+        self.assertTrue(result["tracked_files_changed"])
+
+
+if __name__ == "__main__":
+    unittest.main()

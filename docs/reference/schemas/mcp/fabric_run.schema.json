@@ -183,6 +183,25 @@
                 }
               ]
             },
+            "capabilities": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "source"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
             "cause": {
               "anyOf": [
                 {
@@ -204,6 +223,12 @@
                   "type": "null"
                 }
               ]
+            },
+            "cloud": {
+              "type": "object"
+            },
+            "cloud_state": {
+              "type": "string"
             },
             "continuation": {},
             "delivery": {},
@@ -990,6 +1015,25 @@
                   }
                 ]
               },
+              "capabilities": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "source": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "source"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
               "cause": {
                 "anyOf": [
                   {
@@ -1011,6 +1055,12 @@
                     "type": "null"
                   }
                 ]
+              },
+              "cloud": {
+                "type": "object"
+              },
+              "cloud_state": {
+                "type": "string"
               },
               "continuation": {},
               "delivery": {},
@@ -1808,6 +1858,25 @@
                 }
               ]
             },
+            "capabilities": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "source"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
             "cause": {
               "anyOf": [
                 {
@@ -1829,6 +1898,12 @@
                   "type": "null"
                 }
               ]
+            },
+            "cloud": {
+              "type": "object"
+            },
+            "cloud_state": {
+              "type": "string"
             },
             "continuation": {},
             "delivery": {},
@@ -2614,6 +2689,25 @@
                 }
               ]
             },
+            "capabilities": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "source"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
             "cause": {
               "anyOf": [
                 {
@@ -2635,6 +2729,12 @@
                   "type": "null"
                 }
               ]
+            },
+            "cloud": {
+              "type": "object"
+            },
+            "cloud_state": {
+              "type": "string"
             },
             "continuation": {},
             "delivery": {},

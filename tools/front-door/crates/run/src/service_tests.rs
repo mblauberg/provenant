@@ -5,6 +5,32 @@ use provenant_core::{CancelToken, OperationId, TaskId};
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
 #[test]
+fn cloud_placement_survives_request_reopen() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut request = submission("run a test");
+    let placement = provenant_records::run::CloudPlacement {
+        target: "verify".into(),
+        provider: "fake".into(),
+        environment: "env".into(),
+        repository: "owner/repo".into(),
+        branch: "main".into(),
+        model: "model".into(),
+        effort: None,
+        deadline_seconds: 3600,
+    };
+    request.tasks[0].cloud = Some(placement.clone());
+    let run = Service::new(&store).dispatch(request, temp.path(), &call)?;
+    assert_eq!(
+        store.request(run.run_id, &call)?.tasks[0].cloud,
+        Some(placement)
+    );
+    Ok(())
+}
+
+#[test]
 fn peer_wait_views_keep_terminal_and_show_custody_until_released() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
@@ -149,6 +175,7 @@ pub(super) fn submission(prompt: &str) -> DispatchRequest {
         chair: None,
         operation_id: OperationId::parse("service-dispatch").unwrap(),
         tasks: vec![DispatchTask {
+            cloud: None,
             context: None,
             build_heavy: false,
             title: None,
@@ -194,6 +221,36 @@ fn adapter_child_leaves_network_unset_so_the_parent_bound_applies() -> TestResul
     let record = Service::new(&store).dispatch(input, temp.path(), &call)?;
     let request = store.request(record.run_id, &call)?;
     assert_eq!(request.tasks[0].access.network, None);
+    Ok(())
+}
+
+#[test]
+fn child_dispatch_accepts_database_proposal_but_keeps_other_access_restricted() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    for case in ["database", "network", "read", "write"] {
+        let mut input = submission(case);
+        input.operation_id = OperationId::parse(&format!("child-{case}"))?;
+        input.parent_attempt = Some(provenant_core::AttemptId::from_bytes([9; 16]));
+        input.lane_depth = 2;
+        match case {
+            "database" => input.tasks[0].access.database_ipc = true,
+            "network" => input.tasks[0].access.network = Some(NetworkAccess::Provider),
+            "read" => input.tasks[0]
+                .access
+                .read_roots
+                .push(temp.path().join("read")),
+            "write" => input.tasks[0]
+                .access
+                .write_roots
+                .push(temp.path().join("write")),
+            _ => unreachable!(),
+        }
+        let result = Service::new(&store).dispatch(input, temp.path(), &call);
+        assert_eq!(result.is_ok(), case == "database", "{case}: {result:?}");
+    }
     Ok(())
 }
 
