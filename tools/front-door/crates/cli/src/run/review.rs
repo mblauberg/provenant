@@ -559,7 +559,7 @@ fn review_identity(
 
 fn review_task(slot: &ReviewSlot, head: &str, brief: &str, families: Vec<String>) -> Submitted {
     let prompt = format!(
-        "Review commit {head}. Work read-only.\nLens: {}\nGive findings, then end with exactly one final non-empty line: VERDICT: APPROVE, VERDICT: REQUEST_CHANGES, or VERDICT: INCONCLUSIVE. A closed trailing handoff fence may follow.\n\n{brief}",
+        "Review commit {head}. Work read-only.\nLens: {}\nGive findings, then end with exactly one final non-empty line: VERDICT: PASS, VERDICT: FAIL, or VERDICT: INCONCLUSIVE. A closed trailing handoff fence may follow.\n\n{brief}",
         slot.lens.as_deref().unwrap_or("general")
     );
     Submitted {
