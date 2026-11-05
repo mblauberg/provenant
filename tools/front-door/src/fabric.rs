@@ -4806,6 +4806,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             self.factory.context.roots.state.as_path(),
             request.branch,
             request.head,
+            request.pull_request,
             request.authority.is_some(),
             self.factory.workers,
         ))

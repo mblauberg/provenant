@@ -152,6 +152,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for Host {
         Ok(None)
     }
     fn land(&mut self, request: LandRequest<'_>) -> Result<LandObservation, Self::Error> {
+        if request.pull_request.is_none() {
+            return Ok(LandObservation::Identified { pull_request: 7 });
+        }
         // A tier that asks only observes; the chair has not merged by hand.
         if request.authority.is_none() {
             return Ok(LandObservation::Pending {

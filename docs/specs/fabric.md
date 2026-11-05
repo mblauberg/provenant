@@ -1076,7 +1076,10 @@ fails the node. A tier that asks with no session fails the node and names
 `provenant land` for a manual land. The host finds the PR by head branch,
 never by `gh pr view BRANCH`, which reads a numeric branch as a PR number: it
 needs exactly one same-repository PR that is open or already at the pinned
-head. A merged PR succeeds the node with verdict `LANDED`, the branch and head
+head. The node saves that PR number before the host can request a merge; replay
+observes the saved number even if the branch name is reused. A failed save
+prevents the merge, and an observation for another PR cannot settle the node.
+A merged PR succeeds the node with verdict `LANDED`, the branch and head
 as outputs and an excerpt that names who or what authorised it. Pending checks, an unknown merge
 state or an unavailable PR keep the node running and save a retry deadline,
 spaced by the node's CI poll backoff, that host tick wake discovery includes; a

@@ -108,6 +108,10 @@ impl AttemptOwner for Owner {
             .unwrap_or_else(|| crate::config::GraphLand::default().choose(None, tier))
     }
     fn land(&mut self, request: LandRequest<'_>) -> Result<LandObservation, Self::Error> {
+        if request.pull_request.is_none() {
+            return Ok(LandObservation::Identified { pull_request: 7 });
+        }
+        assert_eq!(request.pull_request, Some(7));
         let Some(authority) = request.authority else {
             self.observed
                 .push((request.branch.into(), request.head.into()));
@@ -322,6 +326,60 @@ fn an_auto_tier_lands_the_newest_delivered_head_through_the_host() {
     let excerpt = &outputs.result.as_ref().unwrap().excerpt;
     assert!(excerpt.contains("#7") && excerpt.contains("policy is auto (default)"));
     assert!(checkpoint.asks.is_empty());
+}
+
+#[test]
+fn land_identity_save_failure_prevents_merge() {
+    #[derive(Default)]
+    struct FailingJournal(Option<GraphCheckpoint>);
+    impl GraphJournal for FailingJournal {
+        type Error = std::io::Error;
+        fn load(&mut self, _: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+            Ok(self.0.clone())
+        }
+        fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+            if node(checkpoint, "land")
+                .land
+                .as_ref()
+                .and_then(|land| land.pull_request)
+                .is_some()
+            {
+                return Err(std::io::Error::other("injected identity save failure"));
+            }
+            self.0 = Some(checkpoint.clone());
+            Ok(())
+        }
+    }
+    let mut owner = owner();
+    let mut journal = FailingJournal::default();
+    let error = advance(&document("routine", None), &mut owner, &mut journal).unwrap_err();
+    assert!(matches!(error, GraphError::Journal(ref e) if e.to_string().contains("injected")));
+    assert_eq!(owner.merge_requests, 0);
+    let land = node(journal.0.as_ref().unwrap(), "land")
+        .land
+        .as_ref()
+        .unwrap();
+    assert_eq!(land.pull_request, None);
+}
+
+#[test]
+fn land_rejects_a_merge_observation_for_another_pr() {
+    let mut owner = owner();
+    owner.outcomes.push_back(LandObservation::Merged {
+        pull_request: Some(8),
+        note: None,
+    });
+    let mut journal = Journal::default();
+    let error = advance(&document("routine", None), &mut owner, &mut journal).unwrap_err();
+    assert!(
+        matches!(error, GraphError::Refused(ref reason) if reason.contains("saved PR identity"))
+    );
+    let saved = journal.0.as_ref().unwrap();
+    assert_eq!(node(saved, "land").state, NodeState::Running);
+    assert_eq!(
+        node(saved, "land").land.as_ref().unwrap().pull_request,
+        Some(7)
+    );
 }
 
 #[test]

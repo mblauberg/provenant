@@ -69,6 +69,8 @@ pub struct LandRequest<'a> {
     pub node_id: &'a str,
     pub branch: &'a str,
     pub head: &'a str,
+    /// The PR identity saved before an authorised merge is attempted.
+    pub pull_request: Option<u64>,
     pub tier: RiskTier,
     /// `None` while the tier asks: the host only observes whether the chair
     /// merged the pull request at `head`, and never merges.
@@ -77,6 +79,8 @@ pub struct LandRequest<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LandObservation {
+    /// A uniquely identified PR; save this identity before any merge effect.
+    Identified { pull_request: u64 },
     Merged {
         pull_request: Option<u64>,
         note: Option<String>,
@@ -593,19 +597,45 @@ pub(super) fn advance<R: AttemptOwner, J: GraphJournal>(
             None => return Ok(()),
         },
     };
-    let observation = owner
-        .land(LandRequest {
-            graph_id: &plan.graph_id,
-            node_id: &node.id,
-            branch: &record.branch,
-            head: &record.head,
-            tier: record.tier,
-            authority: record.authorised_by.as_ref(),
-        })
-        .map_err(GraphError::Run)?;
+    let observation = loop {
+        let observation = owner
+            .land(LandRequest {
+                graph_id: &plan.graph_id,
+                node_id: &node.id,
+                branch: &record.branch,
+                head: &record.head,
+                pull_request: record.pull_request,
+                tier: record.tier,
+                authority: record.authorised_by.as_ref(),
+            })
+            .map_err(GraphError::Run)?;
+        match observation {
+            LandObservation::Identified { pull_request } => {
+                if pull_request == 0 || record.pull_request.is_some() {
+                    return Err(GraphError::Refused(format!(
+                        "node {}: land owner returned an invalid or repeated PR identity",
+                        node.id
+                    )));
+                }
+                record.pull_request = Some(pull_request);
+                checkpoint.nodes[index].land = Some(record.clone());
+                journal.save(checkpoint).map_err(GraphError::Journal)?;
+            }
+            other => break other,
+        }
+    };
     record.wake_at = None;
     match observation {
+        LandObservation::Identified { .. } => {
+            unreachable!("identity is saved in the observation loop")
+        }
         LandObservation::Merged { pull_request, note } => {
+            if record.pull_request.is_none() || record.pull_request != pull_request {
+                return Err(GraphError::Refused(format!(
+                    "node {}: land observation did not match the saved PR identity",
+                    node.id
+                )));
+            }
             if let Some(ask_id) = asked {
                 record.authorised_by = Some(LandAuthority::Chair { ask_id });
             }
