@@ -100,6 +100,87 @@ fn preset_secret_inputs_are_refused_before_publication() -> Result<(), Box<dyn s
 }
 
 #[test]
+fn expanded_role_and_rule_secrets_are_refused() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    let presets = project.join(".provenant/presets");
+    let graphs = project.join(".provenant/scratch/graphs");
+    let state = temp.path().join("state");
+    std::fs::create_dir_all(&presets)?;
+    std::fs::create_dir_all(&graphs)?;
+    std::fs::create_dir_all(&state)?;
+    std::fs::write(graphs.join("existing"), "sentinel")?;
+    std::fs::write(state.join("graph-existing.json"), "sentinel")?;
+    let prompt = temp.path().join("prompt");
+    std::fs::write(
+        &prompt,
+        "Acceptance criteria are explicit. Surface: the run command. Risk tier: low. Verification uses cargo test. Design decision is settled.",
+    )?;
+    let secret = format!("ghp_{}", "a1".repeat(18));
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for source in ["role", "rule"] {
+        std::fs::write(
+            presets.join("probe.toml"),
+            "stages = [{ id = 'task', role = 'lens.house' }]\n",
+        )?;
+        std::fs::write(
+            project.join(".provenant/roles.toml"),
+            format!(
+                "[roles.\"lens.house\"]\ntier = 'senior'\ncard = '{}'\n",
+                if source == "role" {
+                    &secret
+                } else {
+                    "ordinary card"
+                }
+            ),
+        )?;
+        std::fs::write(
+            project.join(".provenant/preset-rules.toml"),
+            if source == "rule" {
+                format!(
+                    "[select]\ndefault = {{ preset = 'fan-out-synthesise', parameters = {{ branches = [{{ id = 'branch', brief = '{secret}', tier = 'senior' }}] }} }}\n"
+                )
+            } else {
+                "[select]\ndefault = { preset = 'probe' }\n".to_owned()
+            },
+        )?;
+        for explain in [false, true] {
+            let mut command = fixture_cli();
+            command
+                .current_dir(&project)
+                .env("PROVENANT_ROOT", &root)
+                .env("XDG_CONFIG_HOME", temp.path().join("config"))
+                .args(["--json", "--state-dir"])
+                .arg(&state)
+                .args(["run", "--prompt-file"])
+                .arg(&prompt);
+            if explain {
+                command.arg("--explain");
+            }
+            let output = command.output()?;
+            let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+            assert!(
+                !output.status.success(),
+                "{source}, explain={explain}: {result}"
+            );
+            assert_eq!(
+                result["error"]["code"], "SECRET_INPUT",
+                "{source}, explain={explain}: {result}"
+            );
+            assert!(!String::from_utf8_lossy(&output.stdout).contains(&secret));
+            assert!(!String::from_utf8_lossy(&output.stderr).contains(&secret));
+            assert_eq!(std::fs::read_dir(&graphs)?.count(), 1);
+            assert_eq!(std::fs::read(graphs.join("existing"))?, b"sentinel");
+            assert_eq!(
+                graph_journal_files(&state)?,
+                vec![(state.join("graph-existing.json"), b"sentinel".to_vec())]
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn fan_out_branch_parameters_validate_and_route_synthesis() -> Result<(), Box<dyn std::error::Error>>
 {
     let temp = tempfile::tempdir()?;

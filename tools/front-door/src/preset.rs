@@ -3941,7 +3941,10 @@ fn scan_preset_value(value: &Value) -> Result<(), PresetInputError> {
             provenant_run::Service::scan(text).map_err(|_| PresetInputError::Secret)
         }
         Value::Array(values) => values.iter().try_for_each(scan_preset_value),
-        Value::Object(values) => values.values().try_for_each(scan_preset_value),
+        Value::Object(values) => values.iter().try_for_each(|(key, value)| {
+            provenant_run::Service::scan(key).map_err(|_| PresetInputError::Secret)?;
+            scan_preset_value(value)
+        }),
         _ => Ok(()),
     }
 }
@@ -4051,6 +4054,7 @@ pub fn run(
             );
         }
     };
+    let mut deferred_stderr = Vec::new();
     let result = (|| -> Result<(Expansion, Vec<String>), String> {
         let prompt = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
         let directory = crate::roots::selected_project(globals.project.as_deref(), false)
@@ -4203,7 +4207,7 @@ pub fn run(
         {
             use std::io::Write;
             for warning in &placement.warnings {
-                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                let _ = writeln!(deferred_stderr, "warning: {warning}");
             }
         }
         if let Some(assignment) = &placement.assignment {
@@ -4273,7 +4277,7 @@ pub fn run(
                 &directory,
                 &spec,
                 advice_path.as_deref(),
-                &mut std::io::stderr().lock(),
+                &mut deferred_stderr,
                 bind,
             )?;
         } else {
@@ -4331,12 +4335,6 @@ pub fn run(
             &directory,
             request.access.worktree.as_deref(),
         )?;
-        {
-            use std::io::Write;
-            for warning in &expansion.warnings {
-                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
-            }
-        }
         // Every bound worktree and read root counts as readable; the brief's
         // own paths are warned about, never refused.
         let mut effective = Vec::new();
@@ -4380,34 +4378,52 @@ pub fn run(
         };
         Ok((expansion, brief_warnings))
     })();
-    match result {
-        Err(error) => crate::fail(
-            "run",
-            provenant_records::Outcome::Invalid,
-            "preset",
-            &error,
-            globals,
-        ),
-        Ok((expansion, brief_warnings)) if request.explain => {
-            explain(expansion, brief_warnings, globals)
-        }
-        Ok((expansion, brief_warnings)) => {
-            if !expansion.repo_files.is_empty() {
-                use std::io::Write;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "Repository preset: {}",
-                    expansion.repo_files.join(", ")
-                );
-            }
-            crate::fabric::run_preset_graph(
-                expansion.document,
-                request.wait.unwrap_or(240),
-                &brief_warnings,
+    let (expansion, brief_warnings) = match result {
+        Ok(result) => result,
+        Err(error) => {
+            return crate::fail(
+                "run",
+                provenant_records::Outcome::Invalid,
+                "preset",
+                &error,
                 globals,
-                workers,
-            )
+            );
         }
+    };
+    if scan_preset_value(&expansion.document).is_err() {
+        return crate::fail(
+            "run",
+            provenant_records::Outcome::Refused,
+            "SECRET_INPUT",
+            "input matches a secret pattern; remove the secret and retry",
+            globals,
+        );
+    }
+    {
+        use std::io::Write;
+        let _ = std::io::stderr().lock().write_all(&deferred_stderr);
+        for warning in &expansion.warnings {
+            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+        }
+    }
+    if request.explain {
+        explain(expansion, brief_warnings, globals)
+    } else {
+        if !expansion.repo_files.is_empty() {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "Repository preset: {}",
+                expansion.repo_files.join(", ")
+            );
+        }
+        crate::fabric::run_preset_graph(
+            expansion.document,
+            request.wait.unwrap_or(240),
+            &brief_warnings,
+            globals,
+            workers,
+        )
     }
 }
 
