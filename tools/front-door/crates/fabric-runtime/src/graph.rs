@@ -668,10 +668,17 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
         let deadline = match retry.deadline {
             Some(deadline) => deadline,
             None => {
-                let deadline = DurationMicros::from_seconds(admission_seconds)
+                let Some(deadline) = DurationMicros::from_seconds(admission_seconds)
                     .ok()
                     .and_then(|duration| now.checked_add(duration).ok())
-                    .ok_or_else(|| GraphError::Refused("invalid admission deadline".into()))?;
+                else {
+                    retry.wake_at = None;
+                    retry.reason = Some(
+                        "launch retry deadline unavailable; retry timing is unavailable".into(),
+                    );
+                    asks::refresh_wake(checkpoint);
+                    return journal.save(checkpoint).map_err(GraphError::Journal);
+                };
                 retry.deadline = Some(deadline);
                 deadline
             }
