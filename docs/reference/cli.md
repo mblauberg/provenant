@@ -2425,6 +2425,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--account` | `{"description": "Pin a registered account (key or label) instead of resolving one", "name": "account"}` |
 | `--mode` | `{"description": "Access mode: read-only or worktree-write [default: read-only]", "name": "mode", "values": ["read-only", "worktree-write"]}` |
 | `--read-root` | `{"bounds": [0, 32], "description": "Extra directory the lane may read (repeatable)", "name": "read_root", "repeatable": true}` |
+| `--attach` | `{"bounds": [0, 32], "description": "Image file to attach to the lane (repeatable)", "name": "attach", "repeatable": true}` |
 | `--write-root` | `{"bounds": [0, 32], "description": "Extra directory the lane may write, outside Git metadata (repeatable)", "name": "write_root", "repeatable": true}` |
 | `--network` | `{"description": "Network access [default: on]", "name": "network", "values": ["on", "off"]}` |
 | `--capability` | `{"bounds": [0, 16], "description": "Grant a named capability: postgres (repeatable)", "name": "capability", "repeatable": true}` |
@@ -2439,7 +2440,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--admission-timeout` | `{"description": "Admission timeout before launch (seconds, or a duration such as 10m)", "name": "admission_timeout"}` |
 | `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "write_root", "knobs", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "provider_timeout", "operation_id"], "description": "Expand and run a named pipeline preset", "name": "preset", "requires": ["prompt_file"]}` |
 | `--model` | `{"conflicts": ["route"], "description": "Exact model in ADAPTER/ID form", "name": "model"}` |
-| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root"], "description": "Dispatch the tasks in this manifest file", "name": "manifest"}` |
+| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "attach", "write_root"], "description": "Dispatch the tasks in this manifest file", "name": "manifest"}` |
 | `--worktree` | `{"description": "Bind an existing preset writer worktree; single tasks can create an owned worktree for a missing branch name", "name": "worktree"}` |
 | `--wait` | `{"bounds": [1, 14400], "defaults": ["240"], "description": "Wait for task or preset graph settlement (seconds, or a duration such as 30m)", "name": "wait"}` |
 | `--branch` | `{"description": "Create or reuse an owned writer worktree for this branch, locally or on --host", "name": "branch"}` |
@@ -2495,6 +2496,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
         "mode",
         "worktree",
         "read_root",
+        "attach",
         "write_root",
         "network",
         "capability",
@@ -2689,6 +2691,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--mode` | `{"description": "Access mode: read-only or worktree-write [default: read-only]", "name": "mode", "values": ["read-only", "worktree-write"]}` |
 | `--worktree` | `{"description": "Checkout to read or write; a writer can create an owned worktree for a missing branch name", "name": "worktree"}` |
 | `--read-root` | `{"bounds": [0, 32], "description": "Extra directory the lane may read (repeatable)", "name": "read_root", "repeatable": true}` |
+| `--attach` | `{"bounds": [0, 32], "description": "Image file to attach to the lane (repeatable)", "name": "attach", "repeatable": true}` |
 | `--write-root` | `{"bounds": [0, 32], "description": "Extra directory the lane may write, outside Git metadata (repeatable)", "name": "write_root", "repeatable": true}` |
 | `--network` | `{"description": "Network access [default: on]", "name": "network", "values": ["on", "off"]}` |
 | `--capability` | `{"bounds": [0, 16], "description": "Grant a named capability: postgres (repeatable)", "name": "capability", "repeatable": true}` |
@@ -2704,7 +2707,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--admission-timeout` | `{"description": "Admission timeout before launch (seconds, or a duration such as 10m)", "name": "admission_timeout"}` |
 | `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "write_root", "knobs", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "provider_timeout", "operation_id"], "description": "Expand and run a named pipeline preset", "name": "preset", "requires": ["prompt_file"]}` |
 | `--model` | `{"conflicts": ["route"], "description": "Exact model in ADAPTER/ID form", "name": "model"}` |
-| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "write_root"], "description": "Dispatch the tasks in this manifest file", "name": "manifest"}` |
+| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "attach", "write_root"], "description": "Dispatch the tasks in this manifest file", "name": "manifest"}` |
 | `--concurrency` | `{"bounds": [1, 16], "description": "Manifest lanes or preset graph attempts to run at once (1 to 16)", "name": "concurrency", "requires": ["manifest"]}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
@@ -2757,6 +2760,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
         "mode",
         "worktree",
         "read_root",
+        "attach",
         "write_root",
         "network",
         "capability",
