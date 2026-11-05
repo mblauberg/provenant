@@ -554,6 +554,7 @@ esac
             cwd: temp.path(),
             executor: &executor,
         };
+        let host_deadline = Instant::now() + Duration::from_secs(2);
         let state = collect_with_cli(
             SessionState::default(),
             &cli,
@@ -562,7 +563,7 @@ esac
                 settled_after_unix: 0,
                 pr_refs: vec![],
             },
-            Instant::now() + Duration::from_secs(1),
+            crate::hooks::session_collection_deadline(host_deadline),
         );
         let digest = state.digest(provenant_workflow::session::DIGEST_LIMIT);
         assert!(digest.contains("r/t/a"), "{digest}");
@@ -575,6 +576,41 @@ esac
             digest.contains("1 worktree skipped during inventory"),
             "{digest}"
         );
+        // The child budget has expired, but the hook still has time to render
+        // the partial digest into its native SessionStart response.
+        assert!(Instant::now() < host_deadline);
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        for name in ["home", "checkout", "state"] {
+            std::fs::create_dir(root.join(name)).unwrap();
+        }
+        let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
+        inputs.state_dir = Some(root.join("state"));
+        let roots = inputs
+            .resolve(&provenant_os::fs::SystemPathResolver)
+            .unwrap();
+        let commands = CommandPrefix::default();
+        let context = provenant_workflow::session::hook_context_with(
+            &roots.state,
+            provenant_core::ProjectId::from_bytes([7; 16]),
+            provenant_workflow::session::HookEvent::SessionStart,
+            &br#"{"hook_event_name":"SessionStart","session_id":"test-session"}"#[..],
+            &provenant_os::clock::SystemClock::new(),
+            provenant_core::DurationMicros::from_micros(1_000_000),
+            provenant_workflow::session::Advice {
+                digest: &digest,
+                commands: &commands,
+                client: None,
+            },
+        );
+        let output = String::from_utf8(context.stdout).unwrap();
+        for text in [
+            "r/t/a",
+            "/lane",
+            "1 lane record was not inspected",
+            "1 worktree skipped during inventory",
+        ] {
+            assert!(output.contains(text), "{output}");
+        }
     }
 
     #[test]
