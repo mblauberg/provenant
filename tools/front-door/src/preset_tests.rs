@@ -2067,6 +2067,22 @@ fn preset_node_limit_uses_the_host_admission_bound() {
 }
 
 #[test]
+fn configured_node_limit_also_applies_to_flat_presets() {
+    let stages = (0..513)
+        .map(|index| format!("{{id='node-{index}',prompt='work'}}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut layers = Layers::empty();
+    layers
+        .insert("test", "flat-large", &format!("stages=[{stages}]\n"))
+        .unwrap();
+    let error = expand(&layers, "flat-large", "brief", &[]).unwrap_err();
+    assert!(error.contains("limits.nodes=512"), "{error}");
+    layers.graph_limits.nodes = 1024;
+    assert!(expand(&layers, "flat-large", "brief", &[]).is_ok());
+}
+
+#[test]
 fn expanded_composite_id_refusal_matches_admission() {
     let outer = "a".repeat(32);
     let inner = "b".repeat(32);

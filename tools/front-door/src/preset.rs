@@ -2737,9 +2737,6 @@ impl StageBuilder<'_> {
             }
             self.layers.built_nodes.set(count);
             nodes.push(node);
-            if nodes.len() > 512 {
-                return Err("preset expands to more than 512 nodes".into());
-            }
             ends.push(id);
         }
         Ok(ends)
