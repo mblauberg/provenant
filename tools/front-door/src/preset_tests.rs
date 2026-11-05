@@ -2051,6 +2051,25 @@ fn preset_node_limit_uses_the_host_admission_bound() {
 }
 
 #[test]
+fn expanded_composite_id_refusal_matches_admission() {
+    let outer = "a".repeat(32);
+    let inner = "b".repeat(32);
+    let mut layers = Layers::empty();
+    let preset = format!(
+        "stages=[{{ id='{outer}', stages=[{{ id='{inner}', prompt='work' }}], exports=[{{ node='{inner}', outputs=['result'] }}] }}]\n"
+    );
+    layers.insert("test", "long-id", &preset).unwrap();
+    let error = expand(&layers, "long-id", "brief", &[]).unwrap_err();
+    let valid = preset.replace(&outer, "group");
+    layers.insert("test", "short-id", &valid).unwrap();
+    let mut document = expand(&layers, "short-id", "brief", &[]).unwrap().document;
+    document["nodes"][0]["id"] = json!(outer);
+    let document: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(document).unwrap();
+    assert_eq!(error, document.admit(&Default::default()).unwrap_err());
+}
+
+#[test]
 fn preset_explain_big_batch_shows_targeted_checks_policy_and_origin() {
     let layers = Layers::empty();
     let explained = layers.explain("big-batch").unwrap();

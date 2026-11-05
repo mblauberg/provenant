@@ -1093,10 +1093,6 @@ pub fn expand_with(
     )
     .to_string();
     let id = format!("preset-{}", &digest[7..39]);
-    let count = check_expansion(&nodes, "", 0)?;
-    if let Some(reason) = layers.graph_limits.nodes_bound().refusal(count) {
-        return Err(reason);
-    }
     let bases = layers.review_bases.take();
     if bases.len() > 1 {
         return Err(format!(
@@ -1168,6 +1164,16 @@ pub fn expand_with(
     let typed: provenant_fabric_runtime::graph::GraphDocument =
         serde_json::from_value(document.clone()).map_err(|error| error.to_string())?;
     typed.check_composites(&layers.graph_limits)?;
+    let count = check_expansion(
+        document["nodes"]
+            .as_array()
+            .ok_or("nodes must be an array")?,
+        "",
+        0,
+    )?;
+    if let Some(reason) = layers.graph_limits.nodes_bound().refusal(count) {
+        return Err(reason);
+    }
     document["schema_version"] = json!(provenant_fabric_runtime::graph::minimum_schema_version(
         &typed
     ));
