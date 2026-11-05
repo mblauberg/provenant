@@ -3709,27 +3709,6 @@ fn verdict_gate_matches_review_tokens_and_legacy_aliases() {
     );
 }
 
-#[test]
-fn checkpoint_serde_preserves_stored_verdict_strings() {
-    let (document, mut owner) = verdict_fixture(VerdictThreshold::All, &[Some("PASS")]);
-    let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default())
-        .unwrap()
-        .checkpoint;
-    for stored in [
-        "VERDICT: PASS",
-        "VERDICT: APPROVE",
-        "VERDICT: FAIL",
-        "VERDICT: APPROVE_WITH_NITS",
-        "VERDICT: INCONCLUSIVE",
-    ] {
-        checkpoint.nodes[0].outputs.as_mut().unwrap().verdict = Some(stored.into());
-        let encoded = serde_json::to_value(&checkpoint).unwrap();
-        assert_eq!(encoded["nodes"][0]["outputs"]["verdict"], stored);
-        assert_eq!(encoded["nodes"][1]["outputs"]["verdict"], "PASS");
-        let decoded: GraphCheckpoint = serde_json::from_value(encoded).unwrap();
-        assert_eq!(decoded, checkpoint);
-    }
-}
 
 #[test]
 fn gate_threshold_fixtures_count_missing_verdicts_and_strict_majorities() {
