@@ -41,19 +41,18 @@ pub fn collect(
     policy: &WorktreeGcPolicy<'_>,
     cancel: &CancelToken,
 ) -> Result<WorktreeGcReport, WorktreeError> {
-    collect_impl(context, lanes, policy, cancel, false, None)
+    collect_impl(context, lanes, policy, cancel, false)
 }
 
 /// Collect against [`list_for_gc`], checking candidate cleanliness under
 /// writer exclusion before using it to authorise cleanup.
 pub fn collect_lazy(
     context: &WorktreeContext<'_>,
-    facts: &RepoFacts,
     lanes: &[WorktreeInfo],
     policy: &WorktreeGcPolicy<'_>,
     cancel: &CancelToken,
 ) -> Result<WorktreeGcReport, WorktreeError> {
-    collect_impl(context, lanes, policy, cancel, true, Some(facts))
+    collect_impl(context, lanes, policy, cancel, true)
 }
 
 fn collect_impl(
@@ -62,7 +61,6 @@ fn collect_impl(
     policy: &WorktreeGcPolicy<'_>,
     cancel: &CancelToken,
     lazy_cleanliness: bool,
-    facts: Option<&RepoFacts>,
 ) -> Result<WorktreeGcReport, WorktreeError> {
     validate_binding(context)?;
     // A preview describes one inventory snapshot. Applied cleanup refreshes
@@ -70,7 +68,9 @@ fn collect_impl(
     let entries = {
         let _repository = repository_lock(context, LockMode::Shared, cancel)?;
         context.repo.revalidate()?;
-        let snapshot = facts.and_then(|facts| facts.take_inventory(context));
+        let snapshot = lazy_cleanliness
+            .then(|| context.facts.take_inventory(context))
+            .flatten();
         if policy.dry_run {
             match snapshot {
                 Some(entries) => entries,

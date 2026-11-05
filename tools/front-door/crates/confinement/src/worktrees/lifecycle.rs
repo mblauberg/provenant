@@ -130,10 +130,9 @@ pub fn list_streaming(
 /// policy and custody checks, rather than running Git in every checkout.
 pub fn list_for_gc(
     context: &WorktreeContext<'_>,
-    facts: &RepoFacts,
     cancel: &CancelToken,
 ) -> Result<Vec<WorktreeInfo>, WorktreeError> {
-    Ok(list_impl(context, cancel, |_, _| {}, false, facts)?
+    Ok(list_impl(context, cancel, |_, _| {}, false, context.facts)?
         .into_iter()
         .map(|observation| observation.info)
         .collect())

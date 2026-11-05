@@ -294,11 +294,9 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
         calls: AtomicUsize::new(0),
     };
     context.executor = &git;
-    let facts = RepoFacts::default();
-    let lanes = list_for_gc(&context, &facts, &cancel())?;
+    let lanes = list_for_gc(&context, &cancel())?;
     let report = collect_lazy(
         &context,
-        &facts,
         &lanes,
         &WorktreeGcPolicy {
             upstream: None,
@@ -315,10 +313,9 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
     assert!(report.worktrees.removed.is_empty());
     // A single command-scoped inventory serves both phases of a preview.
     assert_eq!(git.calls.load(Ordering::SeqCst), 1);
-    let lanes = list_for_gc(&context, &facts, &cancel())?;
+    let lanes = list_for_gc(&context, &cancel())?;
     collect_lazy(
         &context,
-        &facts,
         &lanes,
         &WorktreeGcPolicy {
             upstream: None,
@@ -351,11 +348,9 @@ fn gc_lazy_inventory_still_refuses_a_dirty_candidate() -> Result<(), Box<dyn Err
         &cancel(),
     )?;
     fs::write(lane.path.join("untracked"), "keep")?;
-    let facts = RepoFacts::default();
-    let lanes = list_for_gc(&context, &facts, &cancel())?;
+    let lanes = list_for_gc(&context, &cancel())?;
     let report = collect_lazy(
         &context,
-        &facts,
         &lanes,
         &WorktreeGcPolicy {
             upstream: None,
@@ -424,11 +419,9 @@ fn gc_lazy_candidate_is_retained_when_its_git_probe_fails() -> Result<(), Box<dy
         Occupancy::Unknown { scope, evidence, source: OccupancyUnknownSource::Custody }
             if scope == lane.path && evidence.contains("worktree verification failed:")
     ));
-    let facts = RepoFacts::default();
-    let lanes = list_for_gc(&context, &facts, &cancel())?;
+    let lanes = list_for_gc(&context, &cancel())?;
     let report = collect_lazy(
         &context,
-        &facts,
         &lanes,
         &WorktreeGcPolicy {
             upstream: None,
@@ -472,11 +465,9 @@ fn gc_lazy_candidate_never_runs_nested_git_filters() -> Result<(), Box<dyn Error
     let poison = add_poisoned_gitlink(&fixture, &lane.path, "sub", &marker)?;
     assert_raw_git_runs_poison_filter(&fixture, &poison)?;
     poison.arm()?;
-    let facts = RepoFacts::default();
-    let lanes = list_for_gc(&context, &facts, &cancel())?;
+    let lanes = list_for_gc(&context, &cancel())?;
     let report = collect_lazy(
         &context,
-        &facts,
         &lanes,
         &WorktreeGcPolicy {
             upstream: None,
