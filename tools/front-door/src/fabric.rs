@@ -6361,12 +6361,65 @@ fn graph_display(
     }
 }
 
+fn graph_waiting_human(
+    run: &provenant_fabric_runtime::graph::GraphRun,
+    globals: &provenant_cli::Globals,
+) -> String {
+    use provenant_fabric_runtime::graph::NodeState;
+    let in_flight = run
+        .checkpoint
+        .nodes
+        .iter()
+        .filter(|node| matches!(node.state, NodeState::Running | NodeState::Pending))
+        .count();
+    let mut status = String::from("provenant");
+    if let Some(state_dir) = &globals.state_dir {
+        status.push_str(&format!(
+            " --state-dir {}",
+            preset_graph::shell_path(state_dir)
+        ));
+    }
+    if let Some(project) = &globals.project {
+        status.push_str(&format!(" --project {}", preset_graph::shell_path(project)));
+    }
+    status.push_str(&format!(" fabric graph status {}", run.checkpoint.graph_id));
+    format!(
+        "Graph {}: waiting ({in_flight} nodes in flight); status: {status}\n{}",
+        run.checkpoint.graph_id,
+        graph_human(run)
+    )
+}
+
+fn wait_graph(
+    clock: &dyn Clock,
+    pause: &dyn provenant_core::Pause,
+    seconds: u64,
+    cancel: &CancelToken,
+    mut observe: impl FnMut() -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
+) -> Result<provenant_fabric_runtime::graph::GraphRun, Box<dyn std::error::Error>> {
+    let budget = WaitBudget::cli(clock.mono_now(), seconds)?;
+    loop {
+        let run = observe()?;
+        let remaining = budget.remaining(clock.mono_now());
+        if run.status != provenant_fabric_runtime::graph::GraphStatus::Pending
+            || remaining.as_micros() == 0
+        {
+            return Ok(run);
+        }
+        pause.wait(
+            provenant_core::DurationMicros::from_micros(250_000.min(remaining.as_micros())),
+            cancel,
+        );
+    }
+}
+
 pub fn graph(
     input: provenant_cli::fabric::Graph,
     globals: &provenant_cli::Globals,
     workers: &'static dyn WorkerObserver,
 ) -> u8 {
     use provenant_cli::fabric::Graph;
+    let mut wait_seconds = None;
     let (command, input) = match input {
         Graph::Run { document } => (
             "fabric graph run",
@@ -6382,6 +6435,16 @@ pub fn graph(
                 id,
             },
         ),
+        Graph::Wait { id, wait } => {
+            wait_seconds = Some(wait);
+            (
+                "fabric graph wait",
+                GraphInput::Status {
+                    extra: Default::default(),
+                    id,
+                },
+            )
+        }
         Graph::Cancel { id, reason } => (
             "fabric graph cancel",
             GraphInput::Cancel {
@@ -6406,7 +6469,13 @@ pub fn graph(
         }
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
-        Ok(factory.graph(input, budget, &cancel)?)
+        if let Some(seconds) = wait_seconds {
+            wait_graph(&factory.clock, &factory.backoff, seconds, &cancel, || {
+                factory.graph(input.clone(), budget, &cancel)
+            })
+        } else {
+            Ok(factory.graph(input, budget, &cancel)?)
+        }
     })();
     match result {
         Ok(data) => {
@@ -6427,11 +6496,20 @@ pub fn graph(
                     globals,
                 );
             }
-            let human = graph_display(&data, command, globals);
+            let mut human = graph_display(&data, command, globals);
+            let waiting = command == "fabric graph wait"
+                && data.status == provenant_fabric_runtime::graph::GraphStatus::Pending;
+            if waiting {
+                human = graph_waiting_human(&data, globals);
+            }
             crate::emit(
                 &provenant_records::CommandResult::new(
                     command,
-                    provenant_records::Outcome::Ok,
+                    if waiting {
+                        provenant_records::Outcome::Waiting
+                    } else {
+                        provenant_records::Outcome::Ok
+                    },
                     data,
                 ),
                 globals,
