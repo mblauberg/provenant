@@ -1539,7 +1539,7 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
         provenant_config::ProjectLocation::new(repo.common_git_dir())?,
     )?;
     let executable = assets.join("fixture-provider");
-    std::fs::write(&executable, b"#!/bin/sh\nprintf 'fixture 1.0\\n'\n")?;
+    std::fs::write(&executable, b"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf x >> \"$HOME/probe-count\"; fi\nprintf 'fixture 1.0\\n'\n")?;
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
     let run_id = RunId::from_bytes([2; 16]);
     let attempt_id = AttemptId::from_bytes([1; 16]);
@@ -1601,27 +1601,30 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
         host: None,
         cancel: Some(&cancel),
     };
-    let prepared = super::preparation::prepare_candidates(
-        &registry,
-        &providers,
-        &task,
-        prompt,
-        &paths,
-        None,
-        &|name| {
-            if name == "fixture-provider" {
-                Ok(executable.clone())
-            } else {
-                Err("unavailable".into())
-            }
-        },
-        None,
-        false,
-        None,
-    )?;
+    let prepared = super::preparation::with_stale_observations(|| {
+        super::preparation::prepare_candidates(
+            &registry,
+            &providers,
+            &task,
+            prompt,
+            &paths,
+            None,
+            &|name| {
+                if name == "fixture-provider" {
+                    Ok(executable.clone())
+                } else {
+                    Err("unavailable".into())
+                }
+            },
+            None,
+            false,
+            None,
+        )
+    })?;
     assert_eq!(prepared.route.provider.as_deref(), Some("fixture-provider"));
     assert_eq!(prepared.route.account_key.as_deref(), Some("work"));
     assert!(!prepared.argv.is_empty());
+    assert_eq!(std::fs::read(home.join("probe-count"))?, b"xx");
     Ok(())
 }
 

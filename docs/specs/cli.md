@@ -461,6 +461,9 @@ lane ceilings are identified separately from configurable writer limits. A
 process-limit projection names the operating-system soft limit and shipped
 reserved headroom. Actions name the condition to correct. A writer
 with unknown custody remains refused until custody is checked.
+A stale selected-account availability observation emits `STALE_READINESS` as
+a warning and is re-probed once. A healthy recheck keeps the selected route
+and its fallback receipt; account and quota guards still apply.
 - Why: agents and tests act on the code, and a reworded message must break
   neither.
 - Test: `crates/run/src/service_tests.rs::each_refusal_has_its_own_stable_code`;

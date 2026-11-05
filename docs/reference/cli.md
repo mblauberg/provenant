@@ -5147,6 +5147,7 @@ which may be reworded.
 | `HOST_PROCESSES` | The user process limit has insufficient headroom. |
 | `MEMORY_PRESSURE` | Host memory pressure is too high to admit a lane. |
 | `MEMORY_FLOOR` | Available host memory is below the advisory admission floor. |
+| `STALE_READINESS` | The selected account's readiness observation is stale. |
 | `LANE_CAP` | The host or project writer lane cap is reached. |
 | `BUILD_SETTINGS` | The host lane build settings are invalid. |
 | `GUARDIAN_IDENTITY` | The guardian process identity could not be observed. |

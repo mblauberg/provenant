@@ -654,6 +654,7 @@ error_kinds! {
     Processes => "HOST_PROCESSES", "The user process limit has insufficient headroom.";
     MemoryPressure => "MEMORY_PRESSURE", "Host memory pressure is too high to admit a lane.";
     MemoryFloor => "MEMORY_FLOOR", "Available host memory is below the advisory admission floor.";
+    StaleReadiness => "STALE_READINESS", "The selected account's readiness observation is stale.";
     LaneCap => "LANE_CAP", "The host or project writer lane cap is reached.";
     BuildSettings => "BUILD_SETTINGS", "The host lane build settings are invalid.";
     GuardianIdentity => "GUARDIAN_IDENTITY", "The guardian process identity could not be observed.";
@@ -678,6 +679,9 @@ impl ErrorKind {
             Self::DuplicatePacingProfile => {
                 diagnostic.next("remove duplicate pacing profiles for the same account")
             }
+            Self::StaleReadiness => diagnostic
+                .detail("the selected account's provider availability observation is stale")
+                .next("re-probe the selected account; if it remains unavailable, run `provenant quota tick` or check its login"),
             _ => diagnostic,
         }
     }
@@ -685,7 +689,7 @@ impl ErrorKind {
     /// Stable category shared by the output adapters.
     pub const fn category(self) -> &'static str {
         match self {
-            Self::MemoryFloor => "warning",
+            Self::MemoryFloor | Self::StaleReadiness => "warning",
             Self::Invalid
             | Self::OperationConflict
             | Self::NotFound
