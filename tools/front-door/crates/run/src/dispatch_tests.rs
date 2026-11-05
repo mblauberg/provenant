@@ -3420,6 +3420,7 @@ fn successful_lane_result_preserves_stdout_path_denial_evidence() -> TestResult 
     observed.scope = RunStore::scope(&store.record(id, &call)?);
     seal_exit(&store, &observed)?;
     let fake = Fake {
+        observed: Some(route()),
         answer: Some("The tool failed".into()),
         ..Fake::default()
     };
@@ -3428,6 +3429,52 @@ fn successful_lane_result_preserves_stdout_path_denial_evidence() -> TestResult 
     let result = String::from_utf8(result)?;
     assert!(result.contains("/fixture/missing-grant"), "{result}");
     assert!(result.contains("access grant"), "{result}");
+    assert_eq!(terminal(&store, id, &call)?, Outcome::ReviewRequired);
+    Ok(())
+}
+
+#[test]
+fn denial_evidence_does_not_turn_an_empty_answer_into_success() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(
+        &dir,
+        "stdout.log",
+        b"tool: /fixture/missing-grant: Permission denied\n",
+        CAPTURE_LIMIT,
+    )?;
+    artifacts::seal(&dir, "stderr.log", b"", CAPTURE_LIMIT)?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        observed: Some(route()),
+        answer: Some(String::new()),
+        assess_empty: true,
+        ..Fake::default()
+    };
+    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    let result = artifacts::read_sealed(&dir, "result.md", RESULT_LIMIT)?.ok_or("result")?;
+    let result = String::from_utf8(result)?;
+    assert!(result.contains("/fixture/missing-grant"), "{result}");
+    assert!(result.contains("access grant"), "{result}");
+    assert_eq!(terminal(&store, id, &call)?, Outcome::Failed);
+    assert!(store.staged_policy_retry(&record)?.is_some());
     Ok(())
 }
 

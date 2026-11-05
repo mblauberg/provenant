@@ -1141,13 +1141,6 @@ impl RunStore {
                     .and_then(|capture| path_denial_hint(&capture))
             })
         });
-        if let Some(note) = denial {
-            if !decoded.result.is_empty() {
-                decoded.result.push_str("\n\n");
-            }
-            decoded.result.push_str(&note);
-            decoded.result.push('\n');
-        }
         // Valid natural completion wins over a late stop request.
         if decoded.outcome != Outcome::Succeeded {
             match exit.stop_reason {
@@ -1540,8 +1533,11 @@ impl RunStore {
                 decoded.reason = Some(format!("cancelled: {reason}"));
             }
         }
-        if decoded.result.len() as u64 > RESULT_LIMIT {
-            let mut end = RESULT_LIMIT as usize;
+        let diagnostic = denial.map(|note| format!("\n\n{note}\n"));
+        let answer_limit =
+            (RESULT_LIMIT as usize).saturating_sub(diagnostic.as_ref().map_or(0, String::len));
+        if decoded.result.len() > answer_limit {
+            let mut end = answer_limit;
             while !decoded.result.is_char_boundary(end) {
                 end -= 1;
             }
@@ -1639,6 +1635,11 @@ impl RunStore {
         {
             decoded.outcome = Outcome::Failed;
             decoded.reason = Some("provider result is empty or incomplete".into());
+        }
+        // Diagnostics are not provider answers. Add them only after answer
+        // validation, and reserve room so a full capture cannot hide the path.
+        if let Some(note) = diagnostic {
+            decoded.result.push_str(&note);
         }
         // Decoding can reveal credential markers hidden by JSON escapes in
         // the already-filtered capture. Seal only a filtered rendering.
