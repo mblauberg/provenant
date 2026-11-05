@@ -210,7 +210,7 @@ flowchart LR
    tokens and cost go into the run record.
 3. **Deliver.** For a writer, the host fetches before launch and, afterwards,
    verifies the final commit and pushes it with its own Git authority.
-   `--open-pr` opens a pull request. `provenant pr status` watches CI, and
+   `--deliver pr` opens a pull request. `provenant pr status` watches CI, and
    `provenant land` checks CI and merges the verified head. How much review a
    change gets is set by the [review ladder](HARNESS.md) and the `review.*`
    knobs.

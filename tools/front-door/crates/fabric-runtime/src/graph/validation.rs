@@ -1075,11 +1075,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                     && (attempt.state != AttemptState::Terminal
                         || !(review_substitution(node, attempt)
                             || attempt.outcome.is_some_and(|outcome| {
-                                historical_fallback_admissible(
-                                    outcome,
-                                    node.access,
-                                    attempt.launched,
-                                )
+                                fallback_candidate(outcome, attempt.launched)
                             }))))
             {
                 return Err(bad(
@@ -1103,9 +1099,9 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 Some(attempt) if attempt.state != AttemptState::Terminal => true,
                 Some(attempt) => {
                     (review_substitution(node, attempt)
-                        || attempt.outcome.is_some_and(|outcome| {
-                            historical_fallback_admissible(outcome, node.access, attempt.launched)
-                        }))
+                        || attempt
+                            .outcome
+                            .is_some_and(|outcome| fallback_candidate(outcome, attempt.launched)))
                         && progress.attempts.len() < node.routes.len()
                 }
                 None => false,
@@ -1142,7 +1138,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                             | AttemptOutcome::ReviewRequired,
                         ) => true,
                         Some(outcome) if outcome != AttemptOutcome::Succeeded => {
-                            !historical_fallback_admissible(outcome, node.access, attempt.launched)
+                            !fallback_candidate(outcome, attempt.launched)
                                 || progress.attempts.len() == node.routes.len()
                         }
                         _ => false,

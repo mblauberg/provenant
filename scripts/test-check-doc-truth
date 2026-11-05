@@ -114,13 +114,22 @@ class DocTruthTests(unittest.TestCase):
         self.assertIn("example.md:4: warning: unresolved command", result.stdout)
         self.assertIn("example.md:5: warning: unresolved ADR", result.stdout)
 
-    def test_missing_help_is_a_warning_and_paths_are_still_checked(self):
+    def test_invalid_help_sources_warn_once_and_paths_are_still_checked(self):
         self.document("# Sources\nOwner: maintainers\nAnchor: tools/front-door\n"
                       "Read `docs/vanished.md`.\n")
-        result = self.check("--help-json", str(self.root / "missing.json"), source=False)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("unresolved CLI help source", result.stdout)
-        self.assertIn("unresolved path `docs/vanished.md`", result.stdout)
+        for name, contents in (
+            ("missing.json", None),
+            ("non-object.json", "[]"),
+            ("bad-argument.json", '{"commands": [{"command": "provenant", "arguments": [{"long": 17}]}]}'),
+        ):
+            with self.subTest(name=name):
+                path = self.root / name
+                if contents is not None:
+                    path.write_text(contents)
+                result = self.check("--help-json", str(path), source=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.count("unresolved CLI help source"), 1)
+                self.assertIn("unresolved path `docs/vanished.md`", result.stdout)
 
     def test_workspace_relative_paths_resolve(self):
         code = self.root / "tools/front-door/crates/example/src/lib.rs"
@@ -131,23 +140,6 @@ class DocTruthTests(unittest.TestCase):
         result = self.check()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "")
-
-    def test_malformed_catalogue_warns_once(self):
-        invalid = self.root / "invalid.json"
-        invalid.write_text("[]")
-        result = self.check("--help-json", str(invalid), source=False)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.count("warning:"), 1)
-        self.assertIn("unresolved CLI help source", result.stdout)
-
-    def test_malformed_argument_warns_as_source_gap(self):
-        invalid = self.root / "invalid.json"
-        invalid.write_text('{"commands": [{"command": "provenant", '
-                           '"arguments": [{"long": 17}]}]}')
-        result = self.check("--help-json", str(invalid), source=False)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.count("warning:"), 1)
-        self.assertIn("unresolved CLI help source", result.stdout)
 
     def test_deleted_tracked_basename_warns(self):
         code = self.root / "tools/front-door/crates/example/src/gone.rs"

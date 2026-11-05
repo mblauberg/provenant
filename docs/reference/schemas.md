@@ -31,9 +31,8 @@ with no `receipts`. Validate failures that carry an `error` object against
 ## Edge error codes
 
 Stable `error.code` values emitted outside the run owner (those are listed in the
-[CLI reference](cli.md#error-codes)). `legacy_spelling` codes keep the spelling
-consumers already match on; `umbrella` codes cover a command family until an
-owner splits them.
+[CLI reference](cli.md#error-codes)). `umbrella` codes cover a command family
+until an owner splits them.
 
 | Code | Kind | Meaning |
 |---|---|---|

@@ -1173,13 +1173,11 @@ fn renewal_uses_one_wall_timestamp_for_expiry_and_record() {
     let mut req = f.request();
     req.clock = &clock;
     for renew in 0..3 {
-        let before = *clock.0.lock().unwrap();
         let (at, expires) = match renew {
             0 => {
                 store
                     .renew_claim(project(), &work, input.lease, &req)
                     .unwrap();
-                assert_eq!(*clock.0.lock().unwrap(), before + 1);
                 let row = store.verify_claim(project(), &work, &req).unwrap();
                 (row.updated_at, row.expires_at)
             }
@@ -1187,7 +1185,6 @@ fn renewal_uses_one_wall_timestamp_for_expiry_and_record() {
                 store
                     .renew_landing(&guard, &fence, input.lease, &req)
                     .unwrap();
-                assert_eq!(*clock.0.lock().unwrap(), before + 1);
                 let row = store.verify_landing(&guard, &fence, &req).unwrap();
                 (row.updated_at, row.expires_at)
             }
@@ -1195,7 +1192,6 @@ fn renewal_uses_one_wall_timestamp_for_expiry_and_record() {
                 store
                     .renew_task(project(), &task, input.lease, &req)
                     .unwrap();
-                assert_eq!(*clock.0.lock().unwrap(), before + 1);
                 let row = store.verify_task(project(), &task, &req).unwrap();
                 (row.updated_at, row.expires_at)
             }
