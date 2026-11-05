@@ -33,6 +33,8 @@ pub use panel::{ShapeSelector, review_selector};
 
 #[derive(Default)]
 pub struct Layers {
+    /// Host limits used by the runtime's composite structural check.
+    pub graph_limits: provenant_fabric_runtime::config::GraphLimits,
     /// Routing review shapes. Each review stage selects its own shape from its
     /// final `review_shape` and `risk_tier` parameters.
     pub review: Option<ShapeSelector>,
@@ -1162,6 +1164,7 @@ pub fn expand_with(
     }
     let typed: provenant_fabric_runtime::graph::GraphDocument =
         serde_json::from_value(document.clone()).map_err(|error| error.to_string())?;
+    typed.check_composites(&layers.graph_limits)?;
     document["schema_version"] = json!(provenant_fabric_runtime::graph::minimum_schema_version(
         &typed
     ));
@@ -3866,6 +3869,7 @@ pub fn run(
             None => Vec::new(),
         };
         let mut layers = configured(globals)?;
+        layers.graph_limits = config.domains.fabric.graph.limits.clone();
         layers.launch_dir = Some(directory.clone());
         // Default project selection may be a subdirectory of a checkout.
         layers.project_dir = Some(

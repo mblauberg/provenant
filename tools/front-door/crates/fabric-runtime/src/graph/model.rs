@@ -297,7 +297,28 @@ impl GraphNode {
     }
 }
 
+pub(super) fn expansion_safety_limits(
+    limits: &crate::config::GraphLimits,
+) -> crate::config::GraphLimits {
+    crate::config::GraphLimits {
+        nodes: limits.nodes.max(16_384),
+        expansion_depth: limits.expansion_depth.max(64),
+        edges: usize::MAX,
+        routes_per_node: u16::MAX as usize,
+        node_prompt_bytes: usize::MAX,
+        graph_prompt_bytes: usize::MAX,
+        ..limits.clone()
+    }
+}
+
 impl GraphDocument {
+    /// Check nested composite structure with the same expansion safety bounds
+    /// used by graph admission, without starting a graph.
+    pub fn check_composites(&self, limits: &crate::config::GraphLimits) -> Result<(), String> {
+        let expansion_limits = expansion_safety_limits(limits);
+        composites::expand(self, &expansion_limits).map(|_| ())
+    }
+
     /// Host preflight sees the same bounded static composite/loop expansion as
     /// the scheduler. Planner additions are checked separately before admission.
     /// A plan whose worst-case checkpoint would not fit is refused here, naming
@@ -319,15 +340,7 @@ impl GraphDocument {
     /// is suitable for bounded display and typed projection by the front door.
     pub fn admit(&self, limits: &crate::config::GraphLimits) -> Result<(), String> {
         validate_schema(self).map_err(String::from)?;
-        let expansion_limits = crate::config::GraphLimits {
-            nodes: limits.nodes.max(16_384),
-            expansion_depth: limits.expansion_depth.max(64),
-            edges: usize::MAX,
-            routes_per_node: u16::MAX as usize,
-            node_prompt_bytes: usize::MAX,
-            graph_prompt_bytes: usize::MAX,
-            ..limits.clone()
-        };
+        let expansion_limits = expansion_safety_limits(limits);
         let expanded = loops::expand(self, &[], &expansion_limits)?;
         let (plan, _) = validate_flat_plan(&expanded, &expansion_limits).map_err(String::from)?;
         if let Some(reason) = structural_limit_reason(&expanded, &plan, limits) {
@@ -341,15 +354,7 @@ impl GraphDocument {
 
     pub fn inspect(&self, limits: &crate::config::GraphLimits) -> Result<GraphInspection, String> {
         validate_schema(self).map_err(String::from)?;
-        let inspect_limits = crate::config::GraphLimits {
-            nodes: limits.nodes.max(16_384),
-            expansion_depth: limits.expansion_depth.max(64),
-            edges: usize::MAX,
-            routes_per_node: u16::MAX as usize,
-            node_prompt_bytes: usize::MAX,
-            graph_prompt_bytes: usize::MAX,
-            ..limits.clone()
-        };
+        let inspect_limits = expansion_safety_limits(limits);
         let expanded = loops::expand(self, &[], &inspect_limits)?;
         let generous = crate::config::GraphLimits {
             nodes: usize::MAX,

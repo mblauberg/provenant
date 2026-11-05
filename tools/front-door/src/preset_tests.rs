@@ -2018,6 +2018,22 @@ message = 'explicit'
 }
 
 #[test]
+fn composite_exports_are_checked_when_a_preset_is_compiled() {
+    let mut layers = Layers::empty();
+    layers.insert("test", "invalid-export", "stages = [{ id = 'group', stages = [{ id = 'member', prompt = 'work' }], exports = [{ node = 'missing', outputs = ['result'] }] }]\n").unwrap();
+    let error = expand(&layers, "invalid-export", "brief", &[]).unwrap_err();
+    assert!(error.contains("export"), "{error}");
+    layers.insert("test", "valid-export", "stages = [{ id = 'group', stages = [{ id = 'member', prompt = 'work' }], exports = [{ node = 'member', outputs = ['result'] }] }]\n").unwrap();
+    let mut document = expand(&layers, "valid-export", "brief", &[])
+        .unwrap()
+        .document;
+    document["nodes"][0]["composite"]["exports"][0]["node"] = json!("missing");
+    let document: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(document).unwrap();
+    assert_eq!(error, document.admit(&Default::default()).unwrap_err());
+}
+
+#[test]
 fn preset_explain_big_batch_shows_targeted_checks_policy_and_origin() {
     let layers = Layers::empty();
     let explained = layers.explain("big-batch").unwrap();
@@ -4147,6 +4163,16 @@ mod planner_front_end {
 
     #[test]
     fn review_council_with_a_non_commit_subject_keeps_its_static_lenses() {
+        let mut configured = layers(PlanMode::On, None);
+        let original = include_str!("../assets/presets/review-council.toml");
+        let with_subject = original.replacen(
+            "stages = [",
+            "stages = [{ id = 'write', access = 'worktree_write', worktree = '/repo/lane', prompt = 'produce the subject' },",
+            1,
+        );
+        configured
+            .insert("test", "review-council", &with_subject)
+            .unwrap();
         let params = vec![
             ("worktree".to_owned(), json!("/repo/lane")),
             (
@@ -4154,12 +4180,7 @@ mod planner_front_end {
                 json!({"type": "node", "node": "write"}),
             ),
         ];
-        let expansion = run(
-            &layers(PlanMode::On, None),
-            "review-council",
-            "brief",
-            params,
-        );
+        let expansion = run(&configured, "review-council", "brief", params);
         let decision = expansion.plan.as_ref().unwrap();
         assert!(!decision.applied);
         assert!(
