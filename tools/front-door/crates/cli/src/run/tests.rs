@@ -685,7 +685,7 @@ fn worktree_access_readers_leave_existing_writer_lease_untouched()
         &fixture.root,
         &fixture.project,
         |edge| -> Result<(), Box<dyn std::error::Error>> {
-            std::fs::create_dir_all(edge.roots.state.as_path())?;
+            crate::fabric::private_dir(edge.roots.state.as_path(), edge.roots.state.as_path())?;
             provenant_config::bind_project(
                 edge.roots,
                 provenant_config::ProjectLocation::new(fixture.project.join(".git"))?,
