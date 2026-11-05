@@ -861,7 +861,9 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             .open("gh-calls")?,
         "{call}"
     )?;
-    let normalised = call.replace("api --include ", "api ");
+    let normalised = call
+        .replace("api --include ", "api ")
+        .replace(" -H X-GitHub-Api-Version:2026-03-10", "");
     match normalised.as_str() {
         "api repos/{owner}/{repo}" => {
             io::stdout().write_all(br#"{"default_branch":"main","html_url":"https://github.com/owner/repo","full_name":"owner/repo","owner":{"login":"owner"}}"#)?;
