@@ -332,6 +332,12 @@ fn parse_findings(
         for source in copies {
             let mut entry = entry.clone();
             if let Some(source) = source {
+                if entry.contains_key("disposition")
+                    && !entry.contains_key("propagates")
+                    && let Some(marker) = source.extra.get("propagates")
+                {
+                    entry.insert("propagates".into(), marker.clone());
+                }
                 let inherited = serde_json::to_value(source)
                     .map_err(|_| fail("id", "cannot encode upstream finding"))?;
                 for (field, value) in inherited
