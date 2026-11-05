@@ -1,4 +1,4 @@
 ## Fixes
 ### Git and safety
 
-- Session handoff uses bounded repository facts when checking worktrees and upstream commits (#2877).
+- Peer worktrees and session handoff use bounded repository facts and check the pinned base commit against remote-tracking refs (#2877).
