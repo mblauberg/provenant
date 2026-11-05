@@ -2917,12 +2917,9 @@ fn graph_without_deadline_launches_on_tick() -> Result {
     }
     let rig = claude_fixture()?;
     let cleanup = rig.process_cleanup();
-    writeln!(
-        OpenOptions::new()
-            .append(true)
-            .open(rig.state.join("config.toml"))?,
-        "\n[gc]\nschedule=false"
-    )?;
+    let config_path = rig.state.join("config.toml");
+    let config = fs::read_to_string(&config_path)?;
+    fs::write(&config_path, config.replace("[gc]\n", "[gc]\nschedule=false\n"))?;
     let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
     inputs.state_dir = Some(rig.state.clone());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
