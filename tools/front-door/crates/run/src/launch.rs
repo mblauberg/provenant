@@ -116,8 +116,8 @@ pub struct PreparedLaunch {
 enum WriteGrantError {
     #[error("invalid write grant path")]
     InvalidPath,
-    #[error("write grants exceed 1,024 entries or 256 KiB")]
-    Limit,
+    #[error("encoded write grants exceed the {limit}-byte launch record bound")]
+    Limit { limit: u64 },
 }
 
 fn applied_write_grants(
@@ -140,7 +140,9 @@ fn applied_write_grants(
         })
         .collect::<std::result::Result<Vec<_>, WriteGrantError>>()?;
     if !crate::reader::write_grants_fit(&grants) {
-        return Err(WriteGrantError::Limit);
+        return Err(WriteGrantError::Limit {
+            limit: provenant_records::run::MAX_WRITE_GRANT_BYTES,
+        });
     }
     let git_grants_digest = match &permissions.mode {
         provenant_confinement::permissions::AccessMode::ReadOnly => None,
@@ -1682,7 +1684,7 @@ impl RunStore {
                 Err(error) => {
                     let kind = match error {
                         WriteGrantError::InvalidPath => RefusalKind::InvalidWriteGrantPath,
-                        WriteGrantError::Limit => RefusalKind::WriteGrantsLimit,
+                        WriteGrantError::Limit { .. } => RefusalKind::WriteGrantsLimit,
                     };
                     let reason = error.to_string();
                     match self.withdraw(
