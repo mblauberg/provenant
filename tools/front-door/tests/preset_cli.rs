@@ -1540,17 +1540,7 @@ fn explain_text(preset: &str, extra: &[&str]) -> Result<String, Box<dyn std::err
     std::fs::create_dir(&project)?;
     for args in [
         &["init", "-q"][..],
-        &[
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@example.com",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "base",
-        ],
+        &["commit", "-q", "--allow-empty", "-m", "base"],
     ] {
         assert!(
             provenant_os::fixture::git_command()
@@ -1564,16 +1554,7 @@ fn explain_text(preset: &str, extra: &[&str]) -> Result<String, Box<dyn std::err
     std::fs::write(project.join("change.txt"), "one line\n")?;
     for args in [
         &["add", "change.txt"][..],
-        &[
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@example.com",
-            "commit",
-            "-q",
-            "-m",
-            "change",
-        ],
+        &["commit", "-q", "-m", "change"],
     ] {
         assert!(
             provenant_os::fixture::git_command()
