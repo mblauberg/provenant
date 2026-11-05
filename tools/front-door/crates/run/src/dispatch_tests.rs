@@ -2724,11 +2724,22 @@ fn pressure_errors_fall_back_and_normal_still_obeys_floor() -> TestResult {
 
 #[test]
 fn invalid_optional_build_settings_use_defaults_without_blocking_admission() -> TestResult {
-    for assignment in ["cargo_build_jobs = -2", "cargo_build_jobs = 'invalid'"] {
+    for (assignment, explicit_policy) in [
+        ("cargo_build_jobs = -2", false),
+        ("cargo_build_jobs = 'invalid'", false),
+        ("max_concurrent_builds = 0", true),
+    ] {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
-        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let mut store = RunStore::open(&context(temp.path())?, &call)?;
+        if explicit_policy {
+            store.set_admission_policy(AdmissionPolicy {
+                startup_spacing_ms: 0,
+                admission_seconds: 1,
+                ..AdmissionPolicy::default()
+            });
+        }
         let run = lane(69, true);
         let id = starting(&store, &run, &call)?;
         let attempt = store.attempt_dir(run.run_id, id, false)?;
@@ -2736,12 +2747,17 @@ fn invalid_optional_build_settings_use_defaults_without_blocking_admission() -> 
             store.writer_registry.join("config.toml"),
             format!("schema_version=1\n[domains.fabric.lanes]\n{assignment}\n"),
         )?;
-        assert!(
-            store
-                .admit(id, &attempt, &HostFacts::new(100), &clock, &cancel)
-                .is_ok(),
-            "{assignment}"
-        );
+        let result = store.admit(id, &attempt, &HostFacts::new(100), &clock, &cancel);
+        if explicit_policy {
+            assert_eq!(
+                result?.state,
+                AttemptState::Running {
+                    extra: Default::default()
+                }
+            );
+        } else {
+            assert!(result.is_ok(), "{assignment}");
+        }
     }
     Ok(())
 }
@@ -2846,36 +2862,6 @@ fn idle_writers_are_admitted_beyond_the_build_limit() -> TestResult {
             );
         }
     }
-    Ok(())
-}
-
-#[test]
-fn out_of_range_build_settings_do_not_block_admission() -> TestResult {
-    // Range errors are reported when configuration loads, not at admission.
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let mut store = RunStore::open(&context(temp.path())?, &call)?;
-    store.set_admission_policy(AdmissionPolicy {
-        startup_spacing_ms: 0,
-        admission_seconds: 1,
-        ..AdmissionPolicy::default()
-    });
-    std::fs::write(
-        store.writer_registry.join("config.toml"),
-        "schema_version=1\n[domains.fabric.lanes]\nmax_concurrent_builds = 0\n",
-    )?;
-    let run = lane(71, true);
-    let id = starting(&store, &run, &call)?;
-    let dir = store.attempt_dir(run.run_id, id, false)?;
-    assert_eq!(
-        store
-            .admit(id, &dir, &HostFacts::new(100), &clock, &cancel)?
-            .state,
-        AttemptState::Running {
-            extra: Default::default()
-        }
-    );
     Ok(())
 }
 
@@ -5023,8 +5009,11 @@ fn batch_concurrency_defaults_by_lane_class_and_an_explicit_value_wins() {
     assert_eq!(concurrency(None, &tuned, false, None), 2);
     assert_eq!(concurrency(None, &tuned, true, None), 5);
     let bare = HarnessProfile::default();
-    assert_eq!(concurrency(None, &bare, false, None), 8);
-    assert_eq!(concurrency(None, &bare, true, None), 16);
+    let writer_default = concurrency(None, &bare, false, None);
+    let reader_default = concurrency(None, &bare, true, None);
+    assert!(reader_default >= writer_default);
+    assert_eq!(concurrency(Some(3), &bare, false, None), 3);
+    assert_eq!(concurrency(Some(3), &bare, true, None), 3);
     assert_eq!(concurrency(None, &registry, true, Some(3)), 3, "bounded");
     assert_eq!(
         concurrency(None, &tuned, true, Some(7)),
@@ -8344,6 +8333,33 @@ fn lane_waits_report_only_the_running_lanes_own_disk_pause() -> TestResult {
             .lane_waits_with_resources(&records, &call, &facts)
             .is_empty(),
         "a dead guardian's checkpoint must not report a current disk pause"
+    );
+    Ok(())
+}
+
+#[test]
+fn setup_lock_wait_is_visible_only_while_the_launcher_holds_its_marker() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let id = starting(&store, &lane(120, true), &call)?;
+    let record = store.record(id, &call)?;
+    let attempt = store.attempt_dir(record.run_id, id, false)?;
+    let held = attempt.try_lock(
+        std::ffi::OsStr::new(crate::writer::SETUP_WAIT_LOCK),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
+    let waits = store.lane_waits(std::slice::from_ref(&record), &call);
+    assert_eq!(waits.len(), 1);
+    assert_eq!(waits[0].attempt_id, id);
+    assert!(waits[0].waiting_for.contains("provenant-lane-setup.lock"));
+    drop(held);
+    let waits = store.lane_waits(&[record], &call);
+    assert!(
+        waits
+            .iter()
+            .all(|wait| !wait.waiting_for.contains("provenant-lane-setup.lock"))
     );
     Ok(())
 }

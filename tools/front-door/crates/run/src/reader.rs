@@ -840,6 +840,17 @@ impl RunStore {
         u64::try_from(sequence).map_err(|_| RunError::Validation("attempt sequence"))
     }
     pub fn lanes(&self, query: &LaneQuery, call: &Request<'_>) -> Result<LanePage> {
+        self.lanes_streaming(query, call, |_, _, _| {})
+    }
+
+    /// Report the selected page before loading its records and then report
+    /// each completed record. The cursor identifies the last inspected row.
+    pub fn lanes_streaming(
+        &self,
+        query: &LaneQuery,
+        call: &Request<'_>,
+        mut report: impl FnMut(usize, Option<(u64, &AttemptRecord)>, Option<u64>),
+    ) -> Result<LanePage> {
         if !(1..=100).contains(&query.limit) || query.targets.len() > 100 {
             return Err(RunError::Validation("lane page bounds"));
         }
@@ -901,14 +912,17 @@ impl RunStore {
         let next = more
             .then(|| rows.last().map(|(sequence, _)| *sequence as u64))
             .flatten();
-        let lanes = rows
-            .into_iter()
-            .map(|(_, id)| {
-                AttemptId::parse(&id)
-                    .map_err(|_| RunError::Validation("attempt index ID"))
-                    .and_then(|id| self.record_observed(id, call))
-            })
-            .collect::<Result<_>>()?;
+        let total = rows.len();
+        report(total, None, next);
+        let mut lanes = Vec::with_capacity(total);
+        for (sequence, id) in rows {
+            let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
+            let lane = self.record_observed(id, call)?;
+            let cursor =
+                u64::try_from(sequence).map_err(|_| RunError::Validation("attempt sequence"))?;
+            report(total, Some((cursor, &lane)), next);
+            lanes.push(lane);
+        }
         Ok(LanePage { lanes, next })
     }
     /// The seen cursor (an event sequence) for one actor's wait selection. A

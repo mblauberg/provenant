@@ -437,25 +437,6 @@ fn autosave_never_writes_the_chair_file_and_output_shows_both_parts() -> Result 
 }
 
 #[test]
-fn a_legacy_block_in_the_checkpoint_stays_chair_text() -> Result {
-    let rig = TestRig::new()?;
-    binding(&rig)?;
-    let checkpoint = store(&rig, "legacy-session")?;
-    let legacy = "notes\n\n<!-- provenant:session-state:begin -->\nBlock-digest: abc\n## Provenant session state\nAuto-saved: old\n<!-- provenant:session-state:end -->\n";
-    save(&checkpoint, legacy)?;
-    let input =
-        json!({"hook_event_name":"PreCompact","session_id":"legacy-session","cwd":rig.project});
-    assert_eq!(code(&run_hook(&rig, "pre-compact", &input)?), 0);
-    assert_eq!(checkpoint_text(&checkpoint)?, legacy);
-    assert!(autosave_text(&checkpoint)?.contains("Auto-saved: "));
-    assert!(!autosave_text(&checkpoint)?.contains("Auto-saved: old"));
-    let output = run_hook(&rig, "compact", &start(&rig, "legacy-session", "compact"))?;
-    let text = context(&output)?;
-    assert!(text.contains("Auto-saved: old"), "{text}");
-    Ok(())
-}
-
-#[test]
 fn pre_compact_without_a_checkpoint_saves_state_and_says_notes_are_missing() -> Result {
     let rig = TestRig::new()?;
     binding(&rig)?;
@@ -547,6 +528,79 @@ fn commit_file(rig: &TestRig) -> Result {
     )?;
     Ok(())
 }
+
+#[test]
+fn session_worktree_stream_reports_inventory_rows() -> Result {
+    let rig = TestRig::new()?;
+    commit_file(&rig)?;
+    let linked = rig.root.join("streamed-worktree");
+    git(
+        &rig,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "streamed",
+            linked.to_str().ok_or("path")?,
+        ],
+    )?;
+    let output = rig.command(&["worktree", "session-list", "--json"])?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    let events: Vec<Value> = output
+        .stdout
+        .bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(serde_json::from_slice)
+        .collect::<std::result::Result<_, _>>()?;
+    assert_eq!(events[0]["total"], 2);
+    assert_eq!(events.len(), 3);
+    assert!(
+        events
+            .iter()
+            .any(|event| event["worktree"]["branch"] == "refs/heads/streamed")
+    );
+    Ok(())
+}
+
+#[test]
+fn session_lane_stream_reports_inventory_rows() -> Result {
+    let rig = TestRig::new()?;
+    let lane = create_lane(&rig)?;
+    let output = rig.command(&["lanes", "--session-stream", "--json"])?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    let events: Vec<Value> = output
+        .stdout
+        .bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(serde_json::from_slice)
+        .collect::<std::result::Result<_, _>>()?;
+    assert_eq!(events[0]["total"], 1);
+    let row = &events[1]["lane"];
+    assert!(row["reason"].is_string(), "{row}");
+    assert_eq!(
+        format!(
+            "{}/{}/{}",
+            row["run_id"].as_str().ok_or("run")?,
+            row["task_id"].as_str().ok_or("task")?,
+            row["attempt_id"].as_str().ok_or("attempt")?
+        ),
+        lane
+    );
+    Ok(())
+}
+
 fn worktree_input(rig: &TestRig, name: &str) -> Value {
     json!({"hook_event_name":"WorktreeCreate","session_id":"wt-session","cwd":rig.project,"name":name})
 }

@@ -174,6 +174,22 @@ pub(super) fn make_outputs_with_upstream(
     }
 }
 
+/// Whether `id` names `finding` in another form: a suffix of its qualified
+/// id, the qualified form of its short id, or the finding it carries forward.
+fn names_finding(finding: &Finding, id: &str) -> bool {
+    let qualifies = |long: &str, short: &str| {
+        long.strip_suffix(short)
+            .is_some_and(|prefix| prefix.ends_with(':'))
+    };
+    qualifies(&finding.id, id)
+        || qualifies(id, &finding.id)
+        || finding
+            .extra
+            .get("propagates")
+            .and_then(serde_json::Value::as_str)
+            == Some(id)
+}
+
 /// Parse entries individually, preserving usable evidence when a field is malformed.
 fn parse_findings(
     block: &str,
@@ -252,12 +268,9 @@ fn parse_findings(
         let source = if let Some(exact) = upstream.iter().find(|finding| finding.id == id) {
             Some(exact)
         } else {
-            let mut matches = upstream.iter().filter(|finding| {
-                finding
-                    .id
-                    .strip_suffix(&id)
-                    .is_some_and(|prefix| prefix.ends_with(':'))
-            });
+            let mut matches = upstream
+                .iter()
+                .filter(|finding| names_finding(finding, &id));
             let source = matches.next();
             if matches.any(|finding| Some(&finding.id) != source.map(|item| &item.id)) {
                 return Err(fail(
@@ -470,16 +483,19 @@ fn parse_findings(
     let mut size = canonical_len(&findings);
     let mut trimmed = 0;
     if !upstream.is_empty() && size > DISPOSITION_TEXT_TARGET {
-        // Retain identities, locations, dispositions and the marker used to
-        // follow provenance. The full result remains in the attempt artifact.
+        // Retain the qualified finding and the marker used to follow it.
+        // The full result remains in the attempt artifact.
         for finding in &mut findings {
             if size <= DISPOSITION_TEXT_TARGET {
                 break;
             }
             let before = canonical_len(finding);
-            finding
-                .extra
-                .retain(|key, _| key == "propagates" || key == "verification");
+            finding.extra.retain(|key, _| {
+                matches!(
+                    key.as_str(),
+                    "propagates" | "verification" | "lens" | "evidence" | "proposed_fix"
+                )
+            });
             finding.summary.clear();
             let after = canonical_len(finding);
             if after < before {
@@ -647,10 +663,10 @@ pub(super) fn materialise_checkpoint_findings(
         expansion_depth: usize::MAX,
         ..crate::config::GraphLimits::default()
     };
-    let mut expansions = checkpoint.expansions.clone();
-    plans::restore_legacy_topology(document, &checkpoint.extensions, &mut expansions, &limits)
+    let expansions = &checkpoint.expansions;
+    plans::validate_persisted_topology(document, &checkpoint.extensions, expansions, &limits)
         .map_err(|(_, reason)| reason.to_owned())?;
-    let expanded = plans::expand(document, &checkpoint.extensions, &expansions, &limits)?;
+    let expanded = plans::expand(document, &checkpoint.extensions, expansions, &limits)?;
     let (plan, positions) = validate_flat_plan(&expanded, &limits).map_err(|e| e.to_string())?;
     if plan.nodes.len() != checkpoint.nodes.len()
         || plan
@@ -800,17 +816,30 @@ fn resolved_inputs_inner(
     selected
 }
 
+/// The declared marker form is `<input>:<id>`. A propagator that drops the input
+/// prefix still names one finding when that shorter form leads to a single root.
 fn marker_root(marker: &str, upstream: &[ResolvedFinding]) -> Option<FindingOrigin> {
-    let roots: std::collections::BTreeSet<_> = upstream
-        .iter()
-        .filter(|item| {
-            marker == format!("{}:{}", item.source, item.stored_id)
-                || marker == format!("{}:{}", item.source, item.finding.id)
+    let roots = |named: &dyn Fn(&str) -> bool| -> std::collections::BTreeSet<FindingOrigin> {
+        upstream
+            .iter()
+            .filter(|item| {
+                named(&format!("{}:{}", item.source, item.stored_id))
+                    || named(&format!("{}:{}", item.source, item.finding.id))
+            })
+            .map(|item| item.root.clone())
+            .collect()
+    };
+    let exact = roots(&|full| full == marker);
+    let matched = if exact.is_empty() {
+        roots(&|full| {
+            full.strip_suffix(marker)
+                .is_some_and(|prefix| prefix.ends_with(':'))
         })
-        .map(|item| item.root.clone())
-        .collect();
-    (roots.len() == 1)
-        .then(|| roots.into_iter().next())
+    } else {
+        exact
+    };
+    (matched.len() == 1)
+        .then(|| matched.into_iter().next())
         .flatten()
 }
 
@@ -1438,7 +1467,8 @@ mod alias_tests {
         let mut upstream: Finding = serde_json::from_value(serde_json::json!({
             "id":"F1", "severity":"high", "file":"src/lib.rs", "line":17,
             "summary":"description", "status":"open", "detail":"x".repeat(8000),
-            "propagates":"review:F1"
+            "propagates":"review:F1", "lens":"tests", "evidence":"observed",
+            "proposed_fix":"repair"
         }))
         .unwrap();
         upstream.summary = "s".repeat(1000);
@@ -1462,6 +1492,9 @@ mod alias_tests {
             assert_eq!(finding.line, Some(17));
             assert_eq!(finding.disposition.as_deref(), Some("accepted"));
             assert_eq!(finding.reason.as_deref(), Some("yes"));
+            assert_eq!(finding.extra["lens"], "tests");
+            assert_eq!(finding.extra["evidence"], "observed");
+            assert_eq!(finding.extra["proposed_fix"], "repair");
             assert_eq!(
                 finding
                     .extra
@@ -1469,6 +1502,22 @@ mod alias_tests {
                     .and_then(|value| value.as_str()),
                 Some("review:F1")
             );
+        }
+    }
+
+    #[test]
+    fn a_disposition_may_name_a_verified_finding_by_the_lens_finding_it_carries() {
+        let verified = serde_json::from_value::<Finding>(serde_json::json!({
+            "id": "F1", "severity": "high", "file": "a.rs", "summary": "s", "status": "open",
+            "propagates": "lenses--spec:F7"
+        }))
+        .unwrap();
+        for named in ["lenses--spec:F1", "lenses--spec:F7"] {
+            let block = format!(
+                r#"{{"schema_version":1,"findings":[{{"id":"{named}","disposition":"rejected","reason":"no"}}]}}"#
+            );
+            let (findings, _, _) = parse_findings(&block, std::slice::from_ref(&verified)).unwrap();
+            assert_eq!(findings[0].id, "F1", "{named}");
         }
     }
 

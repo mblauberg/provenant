@@ -13,20 +13,20 @@ pub fn run(mut command: Dispatch, edge: &Edge<'_>) -> Reply {
         } else {
             edge.cwd.join(path)
         };
+        if !absolute.exists() && (path.is_absolute() || path.starts_with(".worktrees")) {
+            return reply(
+                "run",
+                Err(Fail::new(
+                    Status::Invalid,
+                    ErrorKind::Invalid,
+                    format!(
+                        "worktree {} does not exist; use --branch BRANCH to create an owned worktree",
+                        path.display()
+                    ),
+                )),
+            );
+        }
         if !absolute.exists() {
-            if path.is_absolute() || path.starts_with(".worktrees") {
-                return reply(
-                    "run",
-                    Err(Fail::new(
-                        Status::Invalid,
-                        ErrorKind::Invalid,
-                        format!(
-                            "worktree {} does not exist; use --branch BRANCH to create an owned worktree",
-                            path.display()
-                        ),
-                    )),
-                );
-            }
             command.worktree_branch = Some(path.to_string_lossy().into_owned());
             command.access.worktree = None;
         }
@@ -202,12 +202,12 @@ pub(super) fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
         if let Some(reason) = row["reason"].as_str() {
             human.push_str(&format!("{}\n", plain_text(reason, usize::MAX)));
         }
-        if (row["result_path"].is_string()
+        if (!row["result_path"].is_null()
             || (row["host"].is_string()
                 && !matches!(state, "queued" | "starting" | "running" | "settling")))
             && let Ok(attempt) = id.parse()
         {
-            let target = if row["result_path"].is_string() {
+            let target = if !row["result_path"].is_null() {
                 lane_target(&row)
             } else {
                 None
@@ -744,12 +744,10 @@ pub(super) fn dispatch_inner(
         if let Some(replayed) = replay_owned_dispatch(&command, edge, &session, &call, workers)? {
             return Ok(replayed);
         }
-        if let Some(mode) = &command.deliver {
-            if let Some(delivery) = run::HostDeliveryContext::destination(mode.clone(), &branch)? {
-                check_delivery_branch(edge.cwd, &delivery.branch)?;
-            }
-        } else if let Some(target) = &command.deliver_branch {
-            check_delivery_branch(edge.cwd, target)?;
+        if let Some(mode) = &command.deliver
+            && let Some(delivery) = run::HostDeliveryContext::destination(mode.clone(), &branch)?
+        {
+            check_delivery_branch(edge.cwd, &delivery.branch)?;
         }
         let host = provenant_config::bind_host(edge.roots)
             .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
@@ -829,18 +827,7 @@ pub(super) fn dispatch_inner(
             .collect::<Vec<_>>(),
     );
     let mut tasks = Vec::new();
-    let mut flag_delivery =
-        command
-            .deliver_remote
-            .zip(command.deliver_branch)
-            .map(|(remote, branch)| run::WriterDeliveryRequest {
-                extra: Default::default(),
-                mode: Default::default(),
-                remote,
-                branch,
-                open_pr: command.open_pr,
-                fast_forward_only: false,
-            });
+    let mut flag_delivery = None;
     if let Some(mode) = &command.deliver {
         let branch = if let Some(path) = &command.access.worktree {
             let writer = run::resolve_writer(edge.roots.state.as_path(), edge.cwd, path)?;
@@ -1607,18 +1594,7 @@ pub(super) fn replay_owned_dispatch(
     )?;
     let delivery = match &command.deliver {
         Some(mode) => run::HostDeliveryContext::destination(mode.clone(), branch)?,
-        None => command
-            .deliver_remote
-            .clone()
-            .zip(command.deliver_branch.clone())
-            .map(|(remote, branch)| run::WriterDeliveryRequest {
-                extra: Default::default(),
-                mode: Default::default(),
-                remote,
-                branch,
-                open_pr: command.open_pr,
-                fast_forward_only: false,
-            }),
+        None => None,
     };
     let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
@@ -2417,6 +2393,34 @@ pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> 
         .any(|started| !matches!(started, run::Started::Refused { .. }))
     {
         return Ok(());
+    }
+    if let Some(seconds) = started.iter().find_map(|started| match started {
+        run::Started::Refused {
+            kind: run::RefusalKind::SetupLockTimeout { seconds },
+            ..
+        } => Some(*seconds),
+        _ => None,
+    }) {
+        return Err(run::RunError::SetupLockTimeout { seconds }.into());
+    }
+    if let Some((run, attempt, worktree)) = started.iter().find_map(|started| match started {
+        run::Started::Refused {
+            kind:
+                run::RefusalKind::RetainedImport {
+                    run,
+                    attempt,
+                    worktree,
+                },
+            ..
+        } => Some((*run, *attempt, worktree.clone())),
+        _ => None,
+    }) {
+        return Err(run::RunError::RetainedWriterImport {
+            run,
+            attempt,
+            worktree,
+        }
+        .into());
     }
     // Candidate preparation reports route exclusions as `route: detail` entries.
     // Promote pacing specifically; other preparation refusals remain in the receipt.

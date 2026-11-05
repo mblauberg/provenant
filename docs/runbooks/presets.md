@@ -222,7 +222,7 @@ all role briefs and defaults.
 | Preset | Main parameters | Default work |
 | --- | --- | --- |
 | `scout-swarm` | `width = 4`, `external = 1`, `read_roots = []` | Junior codebase scouts and external scouts that research outward, then senior synthesis |
-| `generator-evaluator` | `worktree`, `scope = ["."]`, `subject.commit = "HEAD"`, `base`, `spec`, `lenses`, `evaluator = "senior"`, `delivery = "none"` | Senior writer, the lens list over the commit it wrote, then an evaluator that gives each finding a disposition |
+| `generator-evaluator` | `worktree`, `scope = ["."]`, `subject.commit = "HEAD"`, `base`, `spec`, `lenses`, `writer = ""` (role tier), `evaluator = "senior"`, `delivery = "none"` | Senior writer, the lens list over the commit it wrote, then an evaluator that gives each finding a disposition |
 | `review` | `subject.commit = "HEAD"`, `worktree`, `base`, `spec`, `lenses`, `verifiers = 1`, `verifier_tier = "verifier"`, `risk_tier`, `review_shape`, `risk_tags` | One `lens.NAME` role per lens, a verifier, preferably from another model family, that tries to falsify the findings, then senior synthesis with a disposition per finding |
 | `scope-then-run` | `width = 3`, `worktree`, `write_scope = ["."]`, `base`, `spec`, `delivery = "none"` | Scouts, a senior scoping stage, a verdict gate (a blocked scope launches no writer), then `generator-evaluator` |
 | `big-batch` | `lanes`, `batch_worktree`, `base`, `spec`, `integration_branch = "batch/graph"`, `scout = 1`, `width = 4`, `read_roots = []` | Scout, one writer lane per `lanes` entry, council, principal refactor, two-round repair and review |
@@ -491,13 +491,21 @@ most 32 entries and one-line summaries; a lens with no
 findings emits an empty array. A required
 findings block missing from a lens result makes that lens unavailable.
 
-The `review` lens group accepts partial success. A lens that fails or
+The `review` lens group accepts partial success. A settled task failure
+in a lens or verifier, or a verified local preparation refusal, may be retried
+on its next route as a fresh attempt on the same node.
+`domains.fabric.graph.limits.review_substitutions` bounds these
+retries per member (default 1; 0 disables them). Graph status and a deferred
+review's resolved panel record the substitute. An unresolved launch stays on
+its original attempt. A replacement prefers a different family, while a fresh
+attempt in the same family remains available when no other family is ready.
+
+A lens that fails or
 returns no valid findings block is recorded as unavailable with its cause, and
 only successful lenses flow to verification and synthesis, after an
 "Unavailable lenses" list that is never truncated. The group still fails with
 `coverage_below_minimum: N of M lenses succeeded, minimum K; unavailable: ...`
-when fewer than `min_reviews` lenses succeed, which stops the council for the
-chair to substitute a lens through a different lens or decide. `min_reviews`
+when fewer than `min_reviews` lenses succeed. `min_reviews`
 currently defaults by `risk_tier` (`substantial` 1,
 `crucial` and `terminal` 2) and is at least 1. Model panels cap it at the
 lens count; reduced panels retain the declared minimum, so a coverage shortfall
@@ -928,3 +936,5 @@ names both commits when that comparison has no commit range to review. The host
 sets the review verdict to inconclusive, even if the agent reported a pass. When
 no base was resolved, the host reports that separately; the source fallback does
 not identify an empty review range.
+
+Writer tiers are advisory. Set `parameters.writer` for `generator-evaluator` to choose a writer alias. Planned `big-batch` lanes default to `junior`; use `senior` for contained design and reserve `principal` for at most one lane per wave when appropriate. `run --explain` reports the concrete writer tier mix and warns if higher tiers outnumber lower tiers. Exact model and route choices remain available; the mix never refuses a graph.

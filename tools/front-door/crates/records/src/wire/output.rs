@@ -21,16 +21,15 @@ pub const ARTIFACT_PARTS: &[&str] = &["result", "prompt", "stderr", "transcript"
 /// A byte range of an attempt artifact.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct OutputChunk {
-    pub attempt_id: String,
-    pub state: String,
-    pub reason: Option<String>,
+    #[serde(flatten)]
+    pub lane: super::LaneRow,
     pub part: String,
     pub offset: u64,
     pub next_offset: u64,
-    pub length: u64,
+    pub length: Option<u64>,
     pub eof: bool,
-    pub clipped: bool,
-    pub complete: bool,
+    pub clipped: Option<bool>,
+    pub complete: Option<bool>,
     pub digest: Option<String>,
     pub bytes: ChunkBytes,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -42,10 +41,6 @@ pub struct OutputChunk {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changed_files_total: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider_error: Option<Option<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result_path: Option<Option<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub selected: Option<Value>,
 }
 
@@ -55,19 +50,22 @@ pub struct OutputChunk {
 pub enum OutputData {
     /// `--trace`: the launch trace and grants.
     Trace {
-        attempt_id: String,
+        #[serde(flatten)]
+        lane: super::LaneRow,
         trace: Value,
         grants: Value,
     },
     /// `--path`: where the artifact lives, not its bytes.
     Path {
-        attempt_id: String,
+        #[serde(flatten)]
+        lane: super::LaneRow,
         part: String,
-        path: String,
+        path: crate::StructuredPathWire,
     },
     /// `--part events`: state-change events from a cursor.
     Events {
-        attempt_id: String,
+        #[serde(flatten)]
+        lane: super::LaneRow,
         events: Vec<Value>,
     },
     /// `--part receipt`: the reviewer receipt.
@@ -78,9 +76,8 @@ pub enum OutputData {
 /// The reviewer receipt of a settled review attempt.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ReviewerReceipt {
-    pub run_id: String,
-    pub task_id: String,
-    pub attempt_id: String,
+    #[serde(flatten)]
+    pub lane: super::LaneRow,
     pub adapter: Value,
     pub model: Value,
     pub effort: Value,
@@ -106,40 +103,35 @@ pub fn chunk_bytes_schema() -> Value {
 }
 
 pub fn output_chunk_schema() -> Value {
-    object(
+    with_lane(object(
         &[
-            ("attempt_id", string()),
-            ("state", string()),
-            ("reason", nullable(string())),
             ("part", choices(ARTIFACT_PARTS)),
             ("offset", unsigned()),
             ("next_offset", unsigned()),
-            ("length", unsigned()),
+            ("length", nullable(unsigned())),
             ("eof", boolean()),
-            ("clipped", boolean()),
-            ("complete", boolean()),
+            ("clipped", nullable(boolean())),
+            ("complete", nullable(boolean())),
             ("digest", nullable(string())),
             ("bytes", chunk_bytes_schema()),
         ],
         &[
             ("tail", unsigned()),
             ("tail_clamped", boolean()),
-            ("changed_files", any()),
+            (
+                "changed_files",
+                nullable(array(nullable(super::schema::worktree_path()))),
+            ),
             ("changed_files_total", any()),
-            ("provider_error", nullable(string())),
-            ("result_path", nullable(string())),
             ("selected", any()),
         ],
-    )
+    ))
 }
 
 pub fn reviewer_receipt_schema() -> Value {
     let a = any();
-    object(
+    with_lane(object(
         &[
-            ("run_id", string()),
-            ("task_id", string()),
-            ("attempt_id", string()),
             ("adapter", a.clone()),
             ("model", a.clone()),
             ("effort", a.clone()),
@@ -151,28 +143,49 @@ pub fn reviewer_receipt_schema() -> Value {
             ("reviewer_provenance", a),
         ],
         &[],
-    )
+    ))
+}
+
+fn with_lane(mut schema: Value) -> Value {
+    let lane = super::lane::lane_row_schema();
+    if let (Some(properties), Some(lane_properties)) = (
+        schema["properties"].as_object_mut(),
+        lane["properties"].as_object(),
+    ) {
+        properties.extend(lane_properties.clone());
+        properties.insert("to".into(), super::schema::worktree_path());
+        properties.insert("written".into(), unsigned());
+        properties.insert("tail_text".into(), string());
+        properties.insert("tail".into(), unsigned());
+        properties.insert("tail_clamped".into(), boolean());
+        properties.insert("selected".into(), any());
+        properties.insert("planner_fallback".into(), any());
+        properties.insert("host".into(), string());
+    }
+    if let (Some(required), Some(lane_required)) = (
+        schema["required"].as_array_mut(),
+        lane["required"].as_array(),
+    ) {
+        for field in lane_required {
+            if !required.contains(field) {
+                required.push(field.clone());
+            }
+        }
+    }
+    schema
 }
 
 pub fn output_data_schema() -> Value {
     one_of(vec![
-        object(
+        with_lane(object(&[("trace", any()), ("grants", any())], &[])),
+        with_lane(object(
             &[
-                ("attempt_id", string()),
-                ("trace", any()),
-                ("grants", any()),
-            ],
-            &[],
-        ),
-        object(
-            &[
-                ("attempt_id", string()),
                 ("part", choices(ARTIFACT_PARTS)),
-                ("path", string()),
+                ("path", super::schema::worktree_path()),
             ],
             &[],
-        ),
-        object(&[("attempt_id", string()), ("events", array(any()))], &[]),
+        )),
+        with_lane(object(&[("events", array(any()))], &[])),
         reviewer_receipt_schema(),
         output_chunk_schema(),
     ])

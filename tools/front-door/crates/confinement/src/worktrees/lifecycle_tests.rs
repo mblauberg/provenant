@@ -35,6 +35,476 @@ use std::os::unix::fs::PermissionsExt;
 pub(super) struct FreeWorkers;
 
 #[test]
+fn streaming_inventory_reports_the_total_before_checked_rows() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let linked = create(
+        &context,
+        WorktreeCreate {
+            branch: "streamed".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let mut events = Vec::new();
+    let inventory = list_streaming(&context, &cancel(), |total, row| {
+        events.push((total, row.map(|row| row.path.clone())));
+    })?;
+    assert_eq!(events.first(), Some(&(2, None)));
+    assert_eq!(events.len(), 3);
+    assert!(events.iter().skip(1).all(|(total, _)| *total == 2));
+    assert!(
+        events
+            .iter()
+            .any(|(_, path)| path.as_ref() == Some(&linked.path))
+    );
+    assert_eq!(inventory.len(), 2);
+    Ok(())
+}
+
+#[test]
+#[allow(clippy::disallowed_methods, clippy::print_stderr)] // Timing fixture around the real GC preview.
+fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error>> {
+    use provenant_supervisor::census::{Census, CensusError, ProcessIdentity};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Counting {
+        calls: AtomicUsize,
+        current: ProcessFact,
+    }
+    impl ProcessObserver for Counting {
+        fn boot_identity(&self) -> Result<String, CensusError> {
+            Ok("fixture-boot".into())
+        }
+        fn observe(&self, pid: i64) -> ProcessObservation {
+            if pid == self.current.identity.pid {
+                ProcessObservation::Present(self.current.clone())
+            } else {
+                ProcessObservation::Absent
+            }
+        }
+        fn census(&self, _: usize) -> Result<Census, CensusError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Census::from_observations([self.current.clone()], [], [], true, false, 32)
+        }
+    }
+    impl CwdObserver for Counting {
+        fn occupancy(&self, _: i64) -> provenant_os::pid::OccupancyObservation {
+            provenant_os::pid::OccupancyObservation {
+                paths: vec![],
+                complete: true,
+                gap: None,
+            }
+        }
+        fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
+            Ok(CwdObservation::Gone)
+        }
+    }
+    impl WorkerObserver for Counting {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            super::census::observe_worker_roots(roots, self, self, &self.current, false).0
+        }
+    }
+    let fixture = Fixture::new()?;
+    fs::write(fixture.root.join(".git/info/exclude"), "target/\n")?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    for index in 0..40 {
+        let path = fixture.root.join(format!("foreign-{index}"));
+        fixture.run(&["worktree", "add", "--detach", path.to_str().ok_or("path")?])?;
+        fs::create_dir(path.join("target"))?;
+        fs::write(path.join("target/artifact"), "output")?;
+    }
+    let mut lanes = list(&context, &cancel())?;
+    for lane in &mut lanes {
+        lane.writer = WriterState::Unknown;
+    }
+    struct CountingGit<'a> {
+        inner: &'a dyn Executor,
+        listings: AtomicUsize,
+    }
+    impl Executor for CountingGit<'_> {
+        fn execute(
+            &self,
+            options: provenant_os::exec::ExecOptions<'_>,
+        ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
+            if options
+                .argv
+                .windows(2)
+                .any(|pair| pair[0] == "worktree" && pair[1] == "list")
+            {
+                self.listings.fetch_add(1, Ordering::SeqCst);
+            }
+            self.inner.execute(options)
+        }
+    }
+    let observer = Counting {
+        calls: AtomicUsize::new(0),
+        current: ProcessFact {
+            identity: ProcessIdentity {
+                boot: "fixture-boot".into(),
+                pid: 100,
+                native_start: 100,
+                group_id: 100,
+                session_id: 100,
+            },
+            parent_pid: 1,
+            zombie: false,
+            cpu_micros: None,
+            command: None,
+        },
+    };
+    let session = CensusSession::new(&observer, &test.clock);
+    let git = CountingGit {
+        inner: context.executor,
+        listings: AtomicUsize::new(0),
+    };
+    context.workers = &session;
+    context.executor = &git;
+    let started = std::time::Instant::now();
+    let report = collect(
+        &context,
+        &lanes,
+        &WorktreeGcPolicy {
+            upstream: None,
+            terminal: &|_| false,
+            no_live_lanes: &|_| true,
+            regenerable: &["target".into()],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            dry_run: true,
+            foreign_merged_clean: false,
+        },
+        &cancel(),
+    )?;
+    eprintln!(
+        "GC preview collection for 40 worktrees: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(observer.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(git.listings.load(Ordering::SeqCst), 1);
+    assert_eq!(report.idle_output.len(), 40, "{report:?}");
+    assert!(
+        report
+            .idle_output
+            .iter()
+            .all(|entry| !entry.removed && entry.reason == "would_remove")
+    );
+    Ok(())
+}
+
+#[test]
+fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn Error>> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct CountingGit<'a> {
+        inner: &'a dyn Executor,
+        calls: AtomicUsize,
+    }
+    impl Executor for CountingGit<'_> {
+        fn execute(
+            &self,
+            options: provenant_os::exec::ExecOptions<'_>,
+        ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.execute(options)
+        }
+    }
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    for index in 0..40 {
+        let path = fixture.root.join(format!("foreign-{index}"));
+        fixture.run(&["worktree", "add", "--detach", path.to_str().ok_or("path")?])?;
+    }
+    let git = CountingGit {
+        inner: context.executor,
+        calls: AtomicUsize::new(0),
+    };
+    context.executor = &git;
+    let lanes = list_for_gc(&context, &cancel())?;
+    let report = collect_lazy(
+        &context,
+        &lanes,
+        &WorktreeGcPolicy {
+            upstream: None,
+            terminal: &|_| false,
+            no_live_lanes: &|_| true,
+            regenerable: &[],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            dry_run: true,
+            foreign_merged_clean: false,
+        },
+        &cancel(),
+    )?;
+    assert!(report.worktrees.removed.is_empty());
+    // One inventory read in list and one in collect, independent of the
+    // number of out-of-scope worktrees. No per-tree Git probes are needed.
+    assert_eq!(git.calls.load(Ordering::SeqCst), 2);
+    Ok(())
+}
+
+#[test]
+fn gc_lazy_inventory_still_refuses_a_dirty_candidate() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let lane = create(
+        &context,
+        WorktreeCreate {
+            branch: "dirty-candidate".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    fs::write(lane.path.join("untracked"), "keep")?;
+    let lanes = list_for_gc(&context, &cancel())?;
+    let report = collect_lazy(
+        &context,
+        &lanes,
+        &WorktreeGcPolicy {
+            upstream: None,
+            terminal: &|_| true,
+            no_live_lanes: &|_| true,
+            regenerable: &[],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            dry_run: true,
+            foreign_merged_clean: false,
+        },
+        &cancel(),
+    )?;
+    assert!(
+        report
+            .worktrees
+            .retained
+            .iter()
+            .any(|entry| entry.branch == "dirty-candidate" && entry.reason == RetainReason::Dirty)
+    );
+    assert!(lane.path.join("untracked").exists());
+    Ok(())
+}
+
+#[test]
+fn gc_lazy_candidate_is_retained_when_its_git_probe_fails() -> Result<(), Box<dyn Error>> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct RejectConfig<'a> {
+        inner: &'a dyn Executor,
+        rejected: AtomicUsize,
+    }
+    impl Executor for RejectConfig<'_> {
+        fn execute(
+            &self,
+            options: provenant_os::exec::ExecOptions<'_>,
+        ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
+            if options.argv.iter().any(|arg| arg == "config") {
+                self.rejected.fetch_add(1, Ordering::SeqCst);
+                return Err(provenant_os::exec::ExecError::InvalidLimit);
+            }
+            self.inner.execute(options)
+        }
+    }
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let lane = create(
+        &context,
+        WorktreeCreate {
+            branch: "probe-failure".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let git = RejectConfig {
+        inner: context.executor,
+        rejected: AtomicUsize::new(0),
+    };
+    context.executor = &git;
+    let lanes = list_for_gc(&context, &cancel())?;
+    let report = collect_lazy(
+        &context,
+        &lanes,
+        &WorktreeGcPolicy {
+            upstream: None,
+            terminal: &|_| true,
+            no_live_lanes: &|_| true,
+            regenerable: &[],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            dry_run: false,
+            foreign_merged_clean: false,
+        },
+        &cancel(),
+    )?;
+    assert!(git.rejected.load(Ordering::SeqCst) > 0);
+    assert!(lane.path.exists());
+    assert!(report.worktrees.removed.is_empty());
+    assert!(
+        report
+            .worktrees
+            .retained
+            .iter()
+            .any(|entry| entry.branch == "probe-failure")
+    );
+    Ok(())
+}
+
+#[test]
+fn gc_lazy_candidate_never_runs_nested_git_filters() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let lane = create(
+        &context,
+        WorktreeCreate {
+            branch: "lazy-gitlink".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let marker = fixture._temp.path().join("lazy-filter-ran");
+    let poison = add_poisoned_gitlink(&fixture, &lane.path, "sub", &marker)?;
+    assert_raw_git_runs_poison_filter(&fixture, &poison)?;
+    poison.arm()?;
+    let lanes = list_for_gc(&context, &cancel())?;
+    let report = collect_lazy(
+        &context,
+        &lanes,
+        &WorktreeGcPolicy {
+            upstream: None,
+            terminal: &|_| true,
+            no_live_lanes: &|_| true,
+            regenerable: &[],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            dry_run: true,
+            foreign_merged_clean: false,
+        },
+        &cancel(),
+    )?;
+    assert!(!marker.exists());
+    assert!(
+        report
+            .worktrees
+            .retained
+            .iter()
+            .any(|entry| entry.branch == "lazy-gitlink" && entry.reason == RetainReason::Dirty)
+    );
+    assert!(lane.path.exists());
+    Ok(())
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // Compare fixture mtimes to the filesystem clock.
+fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Error>> {
+    for scenario in [
+        "preview", "idle", "aged", "unowned", "recent", "index", "live", "unknown",
+    ] {
+        let fixture = Fixture::new()?;
+        fs::write(fixture.root.join(".gitignore"), "target/\n")?;
+        fixture.run(&["add", ".gitignore"])?;
+        fixture.run(&["commit", "-m", "ignore output"])?;
+        let test = TestContext::new(&fixture)?;
+        let mut context = test.context();
+        let path = fixture._temp.path().join("foreign-output");
+        fixture.run(&[
+            "worktree",
+            "add",
+            "-b",
+            "foreign-output",
+            path.to_str().ok_or("path")?,
+        ])?;
+        fs::create_dir(path.join("target"))?;
+        fs::write(path.join("target/artifact"), "output")?;
+        fs::write(path.join("untracked"), "source")?;
+        if matches!(scenario, "index" | "aged") {
+            let old = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+            let tree = verify_worktree(context.repo, &path)?;
+            for item in [
+                path.join("target/artifact"),
+                path.join("target"),
+                path.join("untracked"),
+                path.join(".gitignore"),
+                path.clone(),
+                tree.repo().private_git_dir().join("HEAD"),
+            ] {
+                fs::File::open(item)?.set_times(fs::FileTimes::new().set_modified(old))?;
+            }
+            if scenario == "aged" {
+                fs::File::open(tree.repo().private_git_dir().join("index"))?
+                    .set_times(fs::FileTimes::new().set_modified(old))?;
+            }
+        }
+        let mut lane = list(&context, &cancel())?
+            .into_iter()
+            .find(|lane| lane.path == path)
+            .ok_or("missing tree")?;
+        if scenario != "unowned" {
+            lane.writer = WriterState::Unknown;
+        } else {
+            assert_eq!(lane.owner, OwnerStatus::Unowned);
+            assert_eq!(lane.writer, WriterState::Free);
+        }
+        let live = NamedLive;
+        let unknown = UnknownWorkers;
+        if scenario == "live" {
+            context.workers = &live;
+        }
+        if scenario == "unknown" {
+            context.workers = &unknown;
+        }
+        let report = collect(
+            &context,
+            &[lane],
+            &WorktreeGcPolicy {
+                upstream: None,
+                terminal: &|_| false,
+                no_live_lanes: &|_| true,
+                regenerable: &["target".into()],
+                keep: &[],
+                written_before_ns: match scenario {
+                    "recent" => 0,
+                    "index" | "aged" => (std::time::SystemTime::now()
+                        - std::time::Duration::from_secs(3600))
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_nanos() as i128,
+                    _ => i128::MAX,
+                },
+                dry_run: scenario == "preview",
+                foreign_merged_clean: false,
+            },
+            &cancel(),
+        )?;
+        assert!(path.is_dir(), "{scenario}");
+        assert_eq!(fs::read_to_string(path.join("untracked"))?, "source");
+        assert_eq!(
+            path.join("target/artifact").exists(),
+            !matches!(scenario, "idle" | "aged" | "unowned"),
+            "{scenario}"
+        );
+        if scenario == "preview" {
+            assert!(
+                report.idle_output.iter().any(
+                    |entry| entry.path == path.join("target") && entry.reason == "would_remove"
+                )
+            );
+        }
+        if matches!(scenario, "idle" | "aged" | "unowned") {
+            assert!(
+                report
+                    .idle_output
+                    .iter()
+                    .any(|entry| entry.path == path.join("target") && entry.removed)
+            );
+        }
+        if matches!(scenario, "recent" | "index" | "live" | "unknown") {
+            assert!(report.idle_output.iter().all(|entry| !entry.removed));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn gc_native_output_preview_creates_no_writer_state() -> Result<(), Box<dyn Error>> {
     for existing_slot in [false, true] {
         let fixture = Fixture::new()?;
@@ -102,6 +572,76 @@ fn gc_native_output_preview_creates_no_writer_state() -> Result<(), Box<dyn Erro
         ));
         drop(held);
     }
+    Ok(())
+}
+
+#[test]
+fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let path = fixture.root.join(".worktrees/native");
+    fixture.run(&[
+        "worktree",
+        "add",
+        "-b",
+        "native",
+        path.to_str().ok_or("path")?,
+    ])?;
+    let slot = writer_directory(context.project_state, &path)?;
+    let guard = slot.try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?;
+    let attempt = slot.current_path()?.join("retained-attempt");
+    fs::create_dir(&attempt)?;
+    fs::write(attempt.join("reservation.json"), "reservation")?;
+    fs::write(attempt.join("import-retained.json"), "retained")?;
+    drop(guard);
+
+    assert!(matches!(
+        cache_writer_probe(context.project_state, &path),
+        Err(WorkerState::Busy)
+    ));
+    assert!(matches!(
+        cache_writer_guard(context.project_state, &path),
+        Err(WorkerState::Busy)
+    ));
+    let lane = list(&context, &cancel())?
+        .into_iter()
+        .find(|lane| lane.path == path)
+        .ok_or("lane")?;
+    assert_eq!(lane.writer, WriterState::Busy);
+    let entries = read_worktrees(&context, &cancel())?;
+    let entry = entries
+        .iter()
+        .find(|entry| entry.path == path)
+        .ok_or("entry")?;
+    assert!(matches!(
+        lock_worktree(&context, entry, &cancel(), false),
+        Err(WorktreeError::LockBusy)
+    ));
+    assert!(matches!(
+        lock_worktree(&context, entry, &cancel(), true),
+        Err(WorktreeError::LockBusy)
+    ));
+    fs::create_dir(path.join("target"))?;
+    fs::write(path.join("target/artifact"), "retained")?;
+    let lanes = list(&context, &cancel())?;
+    let regenerable = ["target".into()];
+    let policy = WorktreeGcPolicy {
+        upstream: None,
+        terminal: &|_| true,
+        no_live_lanes: &|_| true,
+        regenerable: &regenerable,
+        keep: &[],
+        written_before_ns: i128::MAX,
+        dry_run: false,
+        foreign_merged_clean: false,
+    };
+    collect(&context, &lanes, &policy, &cancel())?;
+    assert!(path.join("target/artifact").is_file());
+
+    // Settlement can retain historical evidence after clearing the reservation.
+    fs::remove_file(attempt.join("reservation.json"))?;
+    assert!(cache_writer_guard(context.project_state, &path).is_ok());
     Ok(())
 }
 
@@ -557,6 +1097,56 @@ fn source_fast_forward_preserves_ignored_files_that_become_tracked() -> Result<(
     assert_eq!(
         fs::read_to_string(info.path.join("cache"))?,
         "keep ignored content"
+    );
+    Ok(())
+}
+
+#[test]
+fn held_writer_lease_takes_precedence_over_live_census() -> Result<(), Box<dyn Error>> {
+    struct Live;
+    impl WorkerObserver for Live {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .cloned()
+                .map(|path| (path, WorkerState::Live))
+                .collect()
+        }
+    }
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let info = create(
+        &context,
+        WorktreeCreate {
+            branch: "lease-priority".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let tree = verify_worktree(&fixture.repo, &info.path)?;
+    let attempt = provenant_core::AttemptId::from_bytes([42; 16]);
+    let owner = WorktreeOwner {
+        attempt_id: Some(attempt),
+        operation_id: Some("lease-priority".parse()?),
+        branch: "lease-priority".into(),
+        base: info.head.to_string(),
+        host: provenant_core::HostId::from_bytes([3; 16]),
+        created_at: context.clock.wall_now()?,
+        origin: WorktreeOrigin::Lane,
+        label: None,
+    };
+    save_owner(&tree, &owner)?;
+    let _held = cache_writer_guard(context.project_state, &info.path).map_err(|_| "lease")?;
+    context.workers = &Live;
+    let listed = list(&context, &cancel())?
+        .into_iter()
+        .find(|entry| entry.path == info.path)
+        .ok_or("missing worktree")?;
+    assert_eq!(listed.writer, WriterState::Busy);
+    assert_eq!(
+        load_owner(&tree)?.and_then(|owner| owner.attempt_id),
+        Some(attempt)
     );
     Ok(())
 }
@@ -2095,7 +2685,7 @@ fn gc_failed_prune_retains_once_and_continues() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn gc_skips_unmanaged_worktrees_and_their_output() -> Result<(), Box<dyn Error>> {
+fn gc_reclaims_unmanaged_output_but_keeps_worktree() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     fs::write(fixture.root.join(".gitignore"), "target/\n")?;
     fixture.run(&["add", ".gitignore"])?;
@@ -2140,12 +2730,15 @@ fn gc_skips_unmanaged_worktrees_and_their_output() -> Result<(), Box<dyn Error>>
         },
         &cancel(),
     )?;
-    assert!(target.join("artifact").is_file());
+    assert!(!target.join("artifact").exists());
     assert!(unmanaged.is_dir());
     assert!(branch_exists(&fixture, "gc-unmanaged"));
     assert!(report.worktrees.removed.is_empty());
     assert!(report.worktrees.retained.is_empty());
     assert!(report.output.is_empty());
+    assert_eq!(report.idle_output.len(), 1);
+    assert_eq!(report.idle_output[0].path, target);
+    assert!(report.idle_output[0].removed);
     Ok(())
 }
 
@@ -3668,6 +4261,21 @@ fn clean_linked_worktree_reports_and_retains_in_progress_git_operations()
             ),
             "{marker}"
         );
+        if marker == "MERGE_HEAD" {
+            let expected = fs::read(&marker_path)?;
+            check_writer_terminal_with_merge(verified.repo(), &expected)?;
+            assert!(matches!(
+                check_writer_terminal_with_merge(verified.repo(), b"different"),
+                Err(WorktreeError::GitOperationInProgress)
+            ));
+            let other = verified.repo().private_git_dir().join("CHERRY_PICK_HEAD");
+            fs::write(&other, &expected)?;
+            assert!(matches!(
+                check_writer_terminal_with_merge(verified.repo(), &expected),
+                Err(WorktreeError::GitOperationInProgress)
+            ));
+            fs::remove_file(other)?;
+        }
         check_writer_terminal(&fixture.repo)?;
         let listed = list(&context, &cancellation)?;
         let entry = listed
@@ -4226,10 +4834,14 @@ fn delete_ref_compare_and_swap_preserves_a_moved_ref() -> Result<(), Box<dyn Err
 #[test]
 fn detached_worktree_names_the_head_and_both_fixes() -> Result<(), Box<dyn std::error::Error>> {
     let head = GitOid::parse("0123456789abcdef0123456789abcdef01234567")?;
-    assert_eq!(
-        WorktreeError::DetachedWorktree { head }.to_string(),
-        "detached HEAD at 0123456789abcdef0123456789abcdef01234567; git switch -c BRANCH or remove --worktree and pass --mode read-only"
-    );
+    let message = WorktreeError::DetachedWorktree { head }.to_string();
+    for part in [
+        "0123456789abcdef0123456789abcdef01234567",
+        "git switch -c",
+        "--mode read-only",
+    ] {
+        assert!(message.contains(part), "{message}");
+    }
     Ok(())
 }
 

@@ -207,7 +207,7 @@ host and peer actor with the answer; the answering host keeps no authoritative
 copy. MCP `fabric_inbox` accepts a host selector for the same owner routing.
 Close and acknowledgement are owner-local chair operations, retaining
 exact chair and delivery target checks. Remote attempts return
-`owner_local_only` before a write and direct the caller to the owner. An
+`OWNER_LOCAL_ONLY` before a write and direct the caller to the owner. An
 unavailable owner is reported rather than replaced with a local mirror.
 Paging binds project, host, session, state, page size and request snapshot;
 changed filters or snapshots require an explicit restart. New observations
@@ -751,10 +751,11 @@ waiting without querying the host; explicit graph advance, resume and attempt
 settlement re-evaluate the gate. Graph status reads the saved snapshot.
 Pending CI gates persist their next `wake_at` and observation count in the
 checkpoint. The graph's `wake_at` is the earliest running CI deadline or open
-node ask deadline. The host's `provenant tick` advances only due graphs, checks
-the deadline again under the graph journal lock, and honours each gate's own
-deadline when several gates share a graph. Terminal and cancelled graphs do
-not wake. Restart resumes from the stored deadlines without an in-process timer.
+node ask deadline. The host's `provenant tick` advances pending graphs whose
+deadline is due or absent, checks the deadline again under the graph journal
+lock, and honours each gate's own deadline when several gates share a graph.
+Cancelled graphs with pending or running nodes are also advanced. Restart
+resumes from the stored deadlines without an in-process timer.
 
 `domains.fabric.graph.ci_poll_backoff` controls `initial_seconds` and
 `max_seconds`, both zero by default, making pending gates eligible on every tick. A positive
@@ -1267,9 +1268,11 @@ When a downstream node propagates a finding, it declares
 `"propagates": "<input-node-id>:<finding-id>"` on that entry. The named node
 must be an input selecting findings or a result; the finding id may be its stored
 id or the id rendered to the propagator. Resolution follows propagation chains
-to the first root. An unresolved or ambiguous marker leaves the finding
-independent and records a warning in the producing node's outputs. A matching id
-and dependency alone do not establish propagation.
+to the first root. A marker that drops the input prefix or part of the qualified
+id still resolves when it is a colon-delimited suffix of exactly one root's
+marker. An unresolved or ambiguous marker leaves the finding independent and
+records a warning in the producing node's outputs. A matching id and dependency
+alone do not establish propagation.
 
 All selected copies of one root, including originals and intermediate copies,
 remain visible with their own evidence and share one display identity. The root's
@@ -1427,14 +1430,20 @@ retries.
 ### Settlement advances graphs
 
 After a run settles and its supervisor releases custody and writer locks,
-the supervisor advances pending graphs from the journal's retained document. A
-failed advance is recorded as `advance_error` until the next success;
-`resume` is the manual path. A lane settlement error is recorded only on graphs
-containing that attempt and does not stop other graphs from advancing.
-- Why: dependants progress without a daemon.
+the supervisor verifies the attempt's graph hint against that checkpoint and
+advances the matching graph from its retained document. If the hint is absent
+or does not match, the next tick can advance the graph. Pending markers make
+tick discovery independent of the number of terminal checkpoints; a missing
+sentinel or daily collection rebuilds them. A failed advance is recorded as
+`advance_error` until the next success; `resume` is the manual path. A lane
+settlement error is recorded on its matching graph. When a pending graph's
+worktree is missing, tick reports the graph once and continues with other
+work; restoring the worktree or cancelling the graph resolves the condition.
+Pending graphs remain protected from checkpoint retention.
+- Why: dependants progress without scanning unrelated terminal graphs.
 - Test: `crates/fabric-runtime/src/graph.rs::advance_error_is_recorded_replaced_and_cleared_and_rebind_moves_directory`;
   `tests/dispatch_provider.rs::graph_settlement_advances_writer_and_account_routed_review`;
-  `src/fabric.rs::settlement_failure_in_one_graph_does_not_stop_another_graph`
+  `src/fabric/facade_tests.rs::settlement_without_hint_does_not_advance_unrelated_graphs`
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
 ## Landing
@@ -1502,7 +1511,7 @@ SSH session; this is the existing configured-peer trust model.
 A remote mutation is prepared durably, marked sent and recorded committed or
 unknown. If its outcome is uncertain, Fabric asks only for the home host's receipt and
 never repeats it or falls back locally, and a sent but unanswered launch is
-`launch_unknown`. A peer error naming another operation, or a reply naming
+`LAUNCH_UNKNOWN`. A peer error naming another operation, or a reply naming
 the wrong attempt, is `state_corrupt`. Absolute paths under the user's home directory travel relative to it; others
 are refused. Cancelling a peer call stops the SSH
 child, never the remote run.
@@ -1578,6 +1587,9 @@ checkout's scratch root (never a symlink), so briefs there stay readable from a
 linked worktree. The graph path error and CLI help name
 `.provenant/scratch/graphs`. Scratch is disposable operator data, separate from
 authoritative run state; expiry is owned by GC rather than graph execution.
+When terminal checkpoint retention expires, GC also removes matching scratch
+graph documents. Changed and unrelated documents are retained. A preset
+republishes its document if collection races with admission.
 
 Foreground preset waits prepare scratch and retain the graph document once
 before the first poll. A setup failure before graph admission fails the command
@@ -1639,3 +1651,5 @@ launches are auto-resolved.
   `crates/run/src/delivery_tests.rs::graph_pr_body_uses_its_recorded_base_despite_primary_checkout_changes`;
   `crates/run/src/delivery_tests.rs::local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state`.
 - Owner: `crates/fabric-runtime/src/graph.rs`, `src/fabric.rs`
+
+`fabric graph wait GRAPH --wait DURATION` observes the retained status until it settles or the budget expires. It does not advance the graph. A pending graph at the deadline returns `waiting`; a paused graph returns immediately.

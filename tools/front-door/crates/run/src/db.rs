@@ -282,50 +282,35 @@ impl RunStore {
             };
             store.write(request, |tx| {
                 let current = version(tx)?;
-                if current > 0 && current < SCHEMA_VERSION {
-                    // The write reservation excludes other commits until both the
-                    // WAL-aware snapshot and the migration are complete.
-                    let stamp = request
-                        .clock
-                        .wall_now()
-                        .map_err(|_| RunError::Validation("wall clock"))?
-                        .as_micros();
-                    let source = provenant_sqlite::open_connection(
-                        &context.state_root.as_path().join("run.sqlite3"),
-                        true,
-                    )?;
-                    let mut suffix = 0_u32;
-                    let name = loop {
-                        let candidate = if suffix == 0 {
-                            format!("run.sqlite3.bak-{stamp}")
-                        } else {
-                            format!("run.sqlite3.bak-{stamp}-{suffix}")
-                        };
-                        match store.root.metadata_at(OsStr::new(&candidate), false) {
-                            Err(error) if error.is_not_found() => break candidate,
-                            Ok(_) => suffix = suffix.checked_add(1).ok_or(RunError::Conflict)?,
-                            Err(error) => return Err(error.into()),
-                        }
-                    };
-                    let path = context.state_root.as_path().join(&name);
-                    source.execute(
-                        "VACUUM INTO ?1",
-                        [path
-                            .to_str()
-                            .ok_or(RunError::Validation("backup path is not UTF-8"))?],
-                    )?;
-                    store.root.open_read(OsStr::new(&name))?.sync()?;
-                    store.root.sync()?;
-                }
                 let start = usize::try_from(current).map_err(|_| RunError::Version(current))?;
-                provenant_sqlite::apply_migrations(tx, &SCHEMA_STEPS, start, |index, db| {
-                    if index == 3 {
-                        for id in &absent_temporary {
-                            db.execute("UPDATE attempts SET tmp_retained=0 WHERE id=?1", [id])?;
+                provenant_sqlite::migrate(
+                    tx,
+                    &SCHEMA_STEPS,
+                    start,
+                    || {
+                        // The write reservation excludes commits through the snapshot and upgrade.
+                        let stamp = request
+                            .clock
+                            .wall_now()
+                            .map_err(|_| RunError::Validation("wall clock"))?
+                            .as_micros();
+                        provenant_sqlite::snapshot_database(
+                            &store.root,
+                            context.state_root.as_path(),
+                            "run.sqlite3",
+                            stamp,
+                        )?;
+                        Ok::<(), RunError>(())
+                    },
+                    |index, db| {
+                        if index == 3 {
+                            for id in &absent_temporary {
+                                db.execute("UPDATE attempts SET tmp_retained=0 WHERE id=?1", [id])?;
+                            }
                         }
-                    }
-                    Ok(())
-                })?;
+                        Ok(())
+                    },
+                )?;
                 Ok(())
             })?;
         }
@@ -457,14 +442,7 @@ const SCHEMA_STEPS: [&str; 8] = [
 const SCHEMA_VERSION: i64 = SCHEMA_STEPS.len() as i64;
 
 fn version(db: &Connection) -> Result<i64> {
-    match provenant_sqlite::read_version(db, SCHEMA_STEPS.len()) {
-        Ok(version) => Ok(version as i64),
-        Err(provenant_sqlite::VersionError::Unsupported(version)) => {
-            Err(RunError::Version(version))
-        }
-        Err(provenant_sqlite::VersionError::Unversioned) => Err(RunError::Version(0)),
-        Err(provenant_sqlite::VersionError::Sqlite(error)) => Err(error.into()),
-    }
+    Ok(provenant_sqlite::read_version(db, SCHEMA_STEPS.len())? as i64)
 }
 pub(crate) fn private(directory: &Directory) -> Result<()> {
     let m = directory.metadata()?;

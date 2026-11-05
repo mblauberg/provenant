@@ -1,6 +1,8 @@
 Graph <id>
 Admission: {"status":"admitted"}
-Inspection: {"dependency_depth":20,"edges":51,"limit_reason":null,"max_attempts":39,"nodes":32,"prompt_bytes":51448}
+Inspection: {"dependency_depth":20,"edges":51,"limit_reason":null,"max_attempts":39,"nodes":32,"prompt_bytes":52709}
+tier mix: junior 0 / senior 1 / principal 1
+Warning: writer tier mix is inverted; consider whether lower tiers fit the work.
 Preset selection: big-batch (override)
 Review shape: deep (by_kind; floors=none; size=unknown; kind=integration; risk=unknown), standard (default; floors=pending; size=pending (measured at review launch); kind=unknown; risk=unknown)
 plan: on -> on (planning requested)

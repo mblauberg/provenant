@@ -24,6 +24,7 @@ Set these in `[domains.fabric.lanes]` in the host configuration. Omit a key for 
 | `memory_pressure_threshold` | critical | Kernel memory pressure level at which new lanes wait on macOS. warning also defers at critical; never disables the pressure gate. The memory and disk floors still apply. (critical, warning or never). |
 | `max_concurrent_builds` | max(1, min(cores / cargo_build_jobs, GiB of RAM / 6)) | A build throttle, not a hard cap: cargo builds, tests, checks and lints that a lane's cargo shim runs at once across the host and every project that shares the state directory. Lanes are not capped by it; a command that compiles waits for a free slot. Direct ~/.cargo/bin/cargo, rustc and non-cargo builds are not gated. (1 to 64 or -1 for auto). |
 | `build_wait_minutes` | 30 | Minutes a build waits for a build slot or another build's Cargo lock before it gives up with an error. (1 to 1440 or -1 for auto). |
+| `setup_lock_wait_seconds` | 14400 | Seconds a writer waits for its repository's Git setup lock before launch is refused. (1 to 14400 or -1 for auto). |
 | `lane_port_base` | 30000 | First port of the range split into per-writer-lane blocks. Each writer lane holds one block for its lifetime and sees it as PROVENANT_LANE_PORT_BASE and PROVENANT_LANE_PORT_COUNT. (1024 to 65535 or -1 for auto). |
 | `lane_port_block` | 16 | Ports in each writer lane's block (PROVENANT_LANE_PORT_COUNT). (1 to 1024 or -1 for auto). |
 | `lane_port_blocks` | 64 | Blocks in the range, so the most writer lanes that hold a block at once; the base plus blocks times block size must be at most 65536. 0 turns allocation off. A writer launched while every block is held is not started and reports no free port block. (0 to 1024 or -1 for auto). |
@@ -48,6 +49,7 @@ Set these in `[domains.pr.land]` in the host configuration. Omit a key for its d
 | `batch_wait_seconds` | 30 | Maximum batch collection time. (0 or more seconds). |
 | `candidate_ref_prefix` | land/ | Prefix for temporary candidate refs. (valid Git ref prefix). |
 | `publish_settle_seconds` | 30 | Time to wait before observing an unresolved publication again. (0 or more seconds). |
+| `publish_unknown_warn_seconds` | 3600 | Warn when a publication remains unknown for this long. (0 or more seconds). |
 | `max_rebuilds` | 3 | Maximum rebuilds after target movement. (0 or more). |
 | `gate.kind` | checks | Candidate gate type. (checks or commands). |
 | `gate.checks` | ci-status | Required candidate checks. (check names). |
@@ -79,6 +81,7 @@ Set these in `[domains.pr.land]` in the host configuration. Omit a key for its d
 | `projects.{project}.batch_wait_seconds` | inherited | Override batch_wait_seconds for this project; omitted fields inherit lower layers. (0 or more seconds). |
 | `projects.{project}.candidate_ref_prefix` | inherited | Override candidate_ref_prefix for this project; omitted fields inherit lower layers. (valid Git ref prefix). |
 | `projects.{project}.publish_settle_seconds` | inherited | Override publish_settle_seconds for this project; omitted fields inherit lower layers. (0 or more seconds). |
+| `projects.{project}.publish_unknown_warn_seconds` | inherited | Override publish_unknown_warn_seconds for this project; omitted fields inherit lower layers. (0 or more seconds). |
 | `projects.{project}.max_rebuilds` | inherited | Override max_rebuilds for this project; omitted fields inherit lower layers. (0 or more). |
 | `projects.{project}.gate.kind` | inherited | Override gate.kind for this project; omitted fields inherit lower layers. (checks or commands). |
 | `projects.{project}.gate.checks` | inherited | Override gate.checks for this project; omitted fields inherit lower layers. (check names). |
@@ -110,6 +113,7 @@ Set these in `[domains.pr.land]` in the host configuration. Omit a key for its d
 | `tiers.{tier}.batch_wait_seconds` | inherited | Override batch_wait_seconds for this risk tier; omitted fields inherit lower layers. (0 or more seconds). |
 | `tiers.{tier}.candidate_ref_prefix` | inherited | Override candidate_ref_prefix for this risk tier; omitted fields inherit lower layers. (valid Git ref prefix). |
 | `tiers.{tier}.publish_settle_seconds` | inherited | Override publish_settle_seconds for this risk tier; omitted fields inherit lower layers. (0 or more seconds). |
+| `tiers.{tier}.publish_unknown_warn_seconds` | inherited | Override publish_unknown_warn_seconds for this risk tier; omitted fields inherit lower layers. (0 or more seconds). |
 | `tiers.{tier}.max_rebuilds` | inherited | Override max_rebuilds for this risk tier; omitted fields inherit lower layers. (0 or more). |
 | `tiers.{tier}.gate.kind` | inherited | Override gate.kind for this risk tier; omitted fields inherit lower layers. (checks or commands). |
 | `tiers.{tier}.gate.checks` | inherited | Override gate.checks for this risk tier; omitted fields inherit lower layers. (check names). |
@@ -153,10 +157,19 @@ Set these in `[domains.fabric.graph]` in the host configuration. Omit a key for 
 | `limits.nodes` | 512 | Graph nodes limit. (1 or more). |
 | `limits.edges` | 4096 | Graph edges limit. (1 or more). |
 | `limits.routes_per_node` | 16 | Graph routes per node limit. (1 or more). |
+| `limits.review_substitutions` | 1 | Maximum substitutions per review member. (0 or more). |
 | `limits.node_prompt_bytes` | 262144 | Graph node prompt bytes limit. (1 or more). |
 | `limits.graph_prompt_bytes` | 4194304 | Graph graph prompt bytes limit. (1 or more). |
 | `limits.fan_out_width` | 32 | Graph fan out width limit. (1 or more). |
 | `limits.concurrency` | 0 | Graph concurrency limit. Zero uses host lane caps. (0 or more). |
+
+## Host GC settings
+
+Set these in `[gc]` in the host configuration. Omit a key for its default.
+
+| Key | Default | Effect |
+|---|---|---|
+| `graph_checkpoint_days` | 90 | Retain terminal graph checkpoints for at least this many days after their last save (1 to 3650 days). |
 
 ## Host store settings
 

@@ -3,6 +3,11 @@ use serde::Serialize;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum ProviderEvent {
     Text(String),
+    /// The next text is a new whole message, so it must start on its own line.
+    /// Line-based captures (handoff, verdict) would otherwise miss a message
+    /// that follows prose with no line ending. Adapters that stream deltas
+    /// never emit this.
+    MessageStart,
     Session(String),
     Model(String),
     /// Digest of Claude's assistant text and its model, pending the final result.

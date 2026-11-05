@@ -26,7 +26,7 @@ tags = ["write", "review", "batch"]
 # instantiates only these patterns; the council and repair stages still run.
 replaces = "lanes"
 explicit = ["lanes"]
-guidance = """Split the work into waves of writer lanes. Give each lane its own worktree, a literal write scope disjoint from the other lanes in its wave, the subset of acceptance items it owns, a route and a budget. End every wave with a wave-barrier whose depends_on and inputs name that wave's lanes, and make the next wave's lanes depend on the barrier."""
+guidance = """Split the work into waves of writer lanes. Give each lane its own worktree, a literal write scope disjoint from the other lanes in its wave, the subset of acceptance items it owns, a route and a budget. Prefer junior for mechanical, well-specified lanes, senior for contained design, and at most one principal lane per wave; override these suggestions as needed. End every wave with a wave-barrier whose depends_on and inputs name that wave's lanes, and make the next wave's lanes depend on the barrier."""
 
 [[plan.patterns]]
 name = "writer-lane"
@@ -46,7 +46,7 @@ lane = { type = "string", doc = "Short lane name." }
 worktree = { type = "string", enum = "${worktrees}", doc = "Registered writer worktree for the lane." }
 scope = { type = "list", min = 1, doc = "Literal relative paths the lane may change; disjoint within a wave." }
 acceptance = { type = "list", min = 1, doc = "The acceptance items this lane owns." }
-route = { type = "string", default = "senior", enum = ["junior", "senior", "principal"], doc = "Route alias for the lane." }
+route = { type = "string", default = "junior", enum = ["junior", "senior", "principal"], doc = "Route alias for the lane; override for its scope." }
 budget_seconds = { type = "integer", default = "${plan_lane_deadline_seconds}", min = 60, max = "${plan_lane_deadline_seconds}", doc = "Wall-clock deadline for the lane, at most the graph timeout." }
 
 [[plan.patterns]]

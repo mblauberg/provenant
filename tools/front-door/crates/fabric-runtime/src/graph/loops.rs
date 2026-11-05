@@ -604,67 +604,6 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
         .collect();
 }
 
-/// Node fields that held loop decisions before node asks. A checkpoint that
-/// still carries them is not migrated: it can be cancelled, then rerun.
-const LEGACY_LOOP_FIELDS: [&str; 3] = ["loop_asks", "loop_inbox_error", "loop_decision_actor"];
-
-/// An inbox request a loop raised before node asks, not yet closed. Cancel
-/// closes it under its original operation identity; it is never migrated.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LegacyLoopAsk {
-    pub node_id: String,
-    pub rounds: u64,
-    pub session: String,
-    /// The actor the request was raised under.
-    pub actor: String,
-}
-
-/// Unclosed loop requests recorded in pre-ask node fields.
-pub fn legacy_loop_asks(checkpoint: &GraphCheckpoint) -> Vec<LegacyLoopAsk> {
-    let mut asks = Vec::new();
-    for node in &checkpoint.nodes {
-        let Some(actor) = node
-            .extra
-            .get("loop_decision_actor")
-            .and_then(|v| v.as_str())
-        else {
-            continue;
-        };
-        let stored = node.extra.get("loop_asks").and_then(|v| v.as_array());
-        for ask in stored.into_iter().flatten() {
-            if ask.get("closed").and_then(|v| v.as_bool()) == Some(true) {
-                continue;
-            }
-            if let (Some(rounds), Some(session)) = (
-                ask.get("rounds").and_then(|v| v.as_u64()),
-                ask.get("session").and_then(|v| v.as_str()),
-            ) {
-                asks.push(LegacyLoopAsk {
-                    node_id: node.id.clone(),
-                    rounds,
-                    session: session.to_owned(),
-                    actor: actor.to_owned(),
-                });
-            }
-        }
-    }
-    asks
-}
-
-/// Why a checkpoint written before node asks cannot advance, if it was.
-pub(super) fn legacy(checkpoint: &GraphCheckpoint) -> Option<String> {
-    checkpoint
-        .nodes
-        .iter()
-        .any(|node| LEGACY_LOOP_FIELDS.iter().any(|key| node.extra.contains_key(*key)))
-        .then(|| {
-            let id = &checkpoint.graph_id;
-            format!(
-                "graph {id} checkpoint predates node asks and cannot advance; cancel it with `provenant fabric graph cancel {id}`, then rerun the document under a new graph_id"
-            )
-        })
-}
-
 pub(super) fn validate_progress(
     progress: &NodeProgress,
     node: &PlannedNode,
@@ -1007,4 +946,47 @@ pub(super) fn refresh_pause(checkpoint: &mut GraphCheckpoint) {
             )
         });
     }
+}
+
+/// An inbox request a loop raised before node asks, not yet closed. Cancel
+/// closes it under its original operation identity; it is never migrated.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LegacyLoopAsk {
+    pub node_id: String,
+    pub rounds: u64,
+    pub session: String,
+    /// The actor the request was raised under.
+    pub actor: String,
+}
+
+/// Unclosed loop requests recorded in pre-ask node fields.
+pub fn legacy_loop_asks(checkpoint: &GraphCheckpoint) -> Vec<LegacyLoopAsk> {
+    let mut asks = Vec::new();
+    for node in &checkpoint.nodes {
+        let Some(actor) = node
+            .extra
+            .get("loop_decision_actor")
+            .and_then(|v| v.as_str())
+        else {
+            continue;
+        };
+        let stored = node.extra.get("loop_asks").and_then(|v| v.as_array());
+        for ask in stored.into_iter().flatten() {
+            if ask.get("closed").and_then(|v| v.as_bool()) == Some(true) {
+                continue;
+            }
+            if let (Some(rounds), Some(session)) = (
+                ask.get("rounds").and_then(|v| v.as_u64()),
+                ask.get("session").and_then(|v| v.as_str()),
+            ) {
+                asks.push(LegacyLoopAsk {
+                    node_id: node.id.clone(),
+                    rounds,
+                    session: session.to_owned(),
+                    actor: actor.to_owned(),
+                });
+            }
+        }
+    }
+    asks
 }

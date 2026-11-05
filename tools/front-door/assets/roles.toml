@@ -185,9 +185,10 @@ Check correctness against the spec as well as this lens.
 ${local_check_policy}
 End with a findings block (schema_version 1) whose findings are a JSON array,
 with at most 32 entries and an empty array when there are no findings. Keep each
-summary to one line. Use this canonical array form:
+summary to one line and include the evidence and proposed fix as structured
+fields. Use this canonical array form:
 ```findings
-{"schema_version":1,"findings":[{"id":"F1","severity":"high","file":"src/lib.rs","line":12,"summary":"Describe the finding","status":"open"}]}
+{"schema_version":1,"findings":[{"id":"F1","severity":"high","file":"src/lib.rs","line":12,"summary":"Describe the finding","status":"open","evidence":"Observed behaviour","proposed_fix":"Suggested repair"}]}
 ```
 For no findings, use `{"schema_version":1,"findings":[]}`.
 Put the findings block before the verdict line.
@@ -266,9 +267,10 @@ ${local_check_policy}
 ${mutation_testing}
 End with a findings block (schema_version 1) whose findings are a JSON array,
 with at most 32 entries and an empty array when there are no findings. Keep each
-summary to one line. Use this canonical array form:
+summary to one line and include the evidence and proposed fix as structured
+fields. Use this canonical array form:
 ```findings
-{"schema_version":1,"findings":[{"id":"F1","severity":"high","file":"src/lib.rs","line":12,"summary":"Describe the finding","status":"open"}]}
+{"schema_version":1,"findings":[{"id":"F1","severity":"high","file":"src/lib.rs","line":12,"summary":"Describe the finding","status":"open","evidence":"Observed behaviour","proposed_fix":"Suggested repair"}]}
 ```
 For no findings, use `{"schema_version":1,"findings":[]}`.
 Put the findings block before the verdict line.
@@ -385,7 +387,8 @@ fenced findings block (schema_version 1) with up to 32 finding ids; each
 entry carries "id", "disposition" (accepted, rejected or deferred) and "reason".
 Copy the upstream qualified id exactly; a bare id works only when unambiguous.
 These three fields suffice for upstream findings; descriptive fields are inherited.
-New findings require severity, file, summary and status as well.
+New findings require severity, file, summary, status, evidence and proposed_fix
+as structured fields as well.
 If the verifier's findings block is missing, empty or truncated, use its prose
 UPHELD/FALSIFIED marks together with the original lens findings. Record each
 upheld finding as accepted, with a reason citing the verifier's evidence.
@@ -424,7 +427,7 @@ fenced findings block (schema_version 1) with one entry per finding id; each
 entry carries "id", "disposition" and "reason". Copy the upstream qualified id
 exactly; a bare id works only when unambiguous. These three fields suffice for
 upstream findings; descriptive fields are inherited. New findings require
-severity, file, summary and status as well. After all findings and prose, end
+severity, file, summary, status, evidence and proposed_fix as structured fields as well. After all findings and prose, end
 with exactly one final non-empty verdict line: VERDICT: PASS only when no
 accepted finding remains, otherwise VERDICT: FAIL. Use VERDICT: INCONCLUSIVE
 when the evidence cannot support a decision. A closed handoff fence may follow.

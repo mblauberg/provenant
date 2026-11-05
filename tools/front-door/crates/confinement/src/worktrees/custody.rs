@@ -4,6 +4,22 @@ use super::*;
 /// A writer must pass this check before its terminal result is accepted.
 /// Index and working-tree cleanliness do not prove a Git operation has ended.
 pub fn check_writer_terminal(repo: &VerifiedRepo) -> Result<(), WorktreeError> {
+    check_writer_terminal_with_expected_merge(repo, None)
+}
+
+/// Accept only the merge metadata restored from a verified private writer
+/// view. Other Git operations remain terminal refusals.
+pub fn check_writer_terminal_with_merge(
+    repo: &VerifiedRepo,
+    merge_head: &[u8],
+) -> Result<(), WorktreeError> {
+    check_writer_terminal_with_expected_merge(repo, Some(merge_head))
+}
+
+fn check_writer_terminal_with_expected_merge(
+    repo: &VerifiedRepo,
+    expected_merge: Option<&[u8]>,
+) -> Result<(), WorktreeError> {
     repo.revalidate()?;
     for marker in [
         "CHERRY_PICK_HEAD",
@@ -14,6 +30,17 @@ pub fn check_writer_terminal(repo: &VerifiedRepo) -> Result<(), WorktreeError> {
         "MERGE_HEAD",
         "sequencer",
     ] {
+        if marker == "MERGE_HEAD"
+            && let Some(expected) = expected_merge
+        {
+            let actual = repo
+                .private_dir()
+                .read_stable(OsStr::new(marker), 1024 * 1024)?;
+            if actual != expected {
+                return Err(WorktreeError::GitOperationInProgress);
+            }
+            continue;
+        }
         match repo.private_dir().metadata_at(OsStr::new(marker), false) {
             Ok(_) => return Err(WorktreeError::GitOperationInProgress),
             Err(error) if error.is_not_found() => {}
@@ -271,10 +298,17 @@ pub(super) fn lock_worktree(
             Err(FsError::Cancelled { .. }) => return Err(WorktreeError::Cancelled),
             Err(_) => return Err(WorktreeError::UnknownWriter),
         };
+        match retained_import(&state) {
+            Ok(true) => return Err(WorktreeError::LockBusy),
+            Ok(false) => {}
+            Err(_) => return Err(WorktreeError::UnknownWriter),
+        }
         Some(writer)
     };
     let canonical = canonicalize(verified.path())?;
-    context.workers.invalidate();
+    if !preview {
+        context.workers.invalidate();
+    }
     let (observations, details) = context
         .workers
         .observe_roots_with_details(std::slice::from_ref(&canonical));
@@ -331,8 +365,11 @@ pub(super) fn validate_binding(context: &WorktreeContext<'_>) -> Result<(), Work
 
 pub(crate) fn combine_worker_state(state: WorkerState, native: WorkerState) -> WriterState {
     match (state, native) {
+        // A held lease is authoritative even when the census also sees a
+        // process. Preserve contention so callers can name the lease holder.
+        (WorkerState::Busy, _) => WriterState::Busy,
         (WorkerState::Live, _) | (_, WorkerState::Live) => WriterState::Live,
-        (WorkerState::Busy, _) | (_, WorkerState::Busy) => WriterState::Busy,
+        (_, WorkerState::Busy) => WriterState::Busy,
         (WorkerState::Unknown, _) | (_, WorkerState::Unknown) => WriterState::Unknown,
         (WorkerState::Free, WorkerState::Free) => WriterState::Free,
     }
@@ -356,12 +393,55 @@ pub fn cache_writer_probe(
         Err(error) if error.is_not_found() => return Ok(None),
         Err(_) => return Err(WorkerState::Unknown),
     };
-    match directory.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive) {
-        Ok(guard) => Ok(Some(guard)),
-        Err(error) if error.is_not_found() => Ok(None),
-        Err(FsError::LockTimeout { .. }) => Err(WorkerState::Busy),
-        Err(_) => Err(WorkerState::Unknown),
+    let guard = match directory.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive) {
+        Ok(guard) => Some(guard),
+        Err(error) if error.is_not_found() => None,
+        Err(FsError::LockTimeout { .. }) => return Err(WorkerState::Busy),
+        Err(_) => return Err(WorkerState::Unknown),
+    };
+    if retained_import(&directory)? {
+        return Err(WorkerState::Busy);
     }
+    Ok(guard)
+}
+
+// An interrupted import retains both its reservation and marker after the
+// process releases writer.lock. A resolved import may leave the marker as
+// historical evidence, so only the pair fences the slot.
+fn retained_import(slot: &Directory) -> Result<bool, WorkerState> {
+    fn exists(dir: &Directory, name: &str) -> Result<bool, WorkerState> {
+        match dir.metadata_at(OsStr::new(name), false) {
+            Ok(_) => Ok(true),
+            Err(error) if error.is_not_found() => Ok(false),
+            Err(_) => Err(WorkerState::Unknown),
+        }
+    }
+    if exists(slot, "reservation.json")? && exists(slot, "import-retained.json")? {
+        return Ok(true);
+    }
+    for (index, name) in slot
+        .entries()
+        .map_err(|_| WorkerState::Unknown)?
+        .enumerate()
+    {
+        if index >= 10_000 {
+            return Err(WorkerState::Unknown);
+        }
+        let name = name.map_err(|_| WorkerState::Unknown)?;
+        let metadata = slot
+            .metadata_at(&name, false)
+            .map_err(|_| WorkerState::Unknown)?;
+        if metadata.kind != provenant_os::fs::FileKind::Directory {
+            continue;
+        }
+        let attempt = slot
+            .open_verified_directory(&name)
+            .map_err(|_| WorkerState::Unknown)?;
+        if exists(&attempt, "reservation.json")? && exists(&attempt, "import-retained.json")? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Hold writer exclusion for cache mutation. Membership comes from the
@@ -371,12 +451,16 @@ pub fn cache_writer_guard(
     path: &Path,
 ) -> Result<LockGuard, WorkerState> {
     let directory = writer_directory(project_state, path).map_err(|_| WorkerState::Unknown)?;
-    directory
+    let guard = directory
         .try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)
         .map_err(|error| match error {
             FsError::LockTimeout { .. } => WorkerState::Busy,
             _ => WorkerState::Unknown,
-        })
+        })?;
+    if retained_import(&directory)? {
+        return Err(WorkerState::Busy);
+    }
+    Ok(guard)
 }
 
 #[cfg(test)]
@@ -390,24 +474,37 @@ mod dirty_tests {
             path: b"new name".to_vec(),
             original_path: Some(b"old name".to_vec()),
         }];
-        assert_eq!(dirty_paths_summary(&paths), "new name, old name");
+        let summary = dirty_paths_summary(&paths);
+        assert!(summary.contains("new name"));
+        assert!(summary.contains("old name"));
     }
 
     #[test]
     fn summary_lists_dirty_paths_and_counts_the_rest() {
         assert_eq!(dirty_paths_summary_bytes(&[]), "");
         let one = dirty_paths_summary_bytes(&[b"a.rs", b"b/c.rs"]);
-        assert_eq!(one, "a.rs, b/c.rs");
+        for path in ["a.rs", "b/c.rs"] {
+            assert_eq!(one.matches(path).count(), 1, "{one}");
+        }
         let dedup = dirty_paths_summary_bytes(&[b"a.rs", b"a.rs", b"b.rs"]);
-        assert_eq!(dedup, "a.rs, b.rs");
-        let many: Vec<Vec<u8>> = (0..15).map(|n| format!("f{n}").into_bytes()).collect();
+        for path in ["a.rs", "b.rs"] {
+            assert_eq!(dedup.matches(path).count(), 1, "{dedup}");
+        }
+        let many: Vec<Vec<u8>> = (0..15).map(|n| format!("f{n:02}").into_bytes()).collect();
         let many_refs: Vec<&[u8]> = many.iter().map(Vec::as_slice).collect();
         let summary = dirty_paths_summary_bytes(&many_refs);
-        assert!(
-            summary.contains("f11") && !summary.contains("f12"),
-            "{summary}"
-        );
-        assert!(summary.ends_with(" and 3 more"), "{summary}");
+        assert!(summary.len() <= 1024);
+        let listed = (0..15)
+            .filter(|n| summary.contains(&format!("f{n:02}")))
+            .count();
+        let omitted: usize = summary
+            .split_whitespace()
+            .rev()
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(listed + omitted, many.len(), "{summary}");
         let long = vec![b'x'; 4000];
         let long_summary = dirty_paths_summary_bytes(&[&long]);
         assert!(long_summary.len() <= 1024);

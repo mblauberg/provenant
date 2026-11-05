@@ -846,19 +846,12 @@ mod tests {
     }
 
     #[test]
-    fn submission_rejects_old_duration_and_route_shapes() {
+    fn submission_rejects_invalid_route_shapes() {
         let valid = json!({
             "op":"submit","operation_id":"submit",
             "tasks":[{"prompt":"work","route":{"kind":"named","name":"utility"},"timeout_seconds":1}]
         });
         assert!(serde_json::from_value::<SubmitInput>(valid.clone()).is_ok());
-        let mut old_duration = valid.clone();
-        old_duration["tasks"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("timeout_seconds");
-        old_duration["tasks"][0]["timeout_ms"] = json!(1000);
-        assert!(serde_json::from_value::<SubmitInput>(old_duration).is_err());
         for route in [
             json!({}),
             json!({"adapter":"codex","model":"model"}),

@@ -187,7 +187,7 @@
         },
         "min_reviews": {
           "default": 0,
-          "doc": "Lenses that must succeed. Fewer fails the lens group, which stops the council for the chair to substitute a lens or decide. 0 takes the review ladder minimum for risk_tier, at least 1.",
+          "doc": "Lenses that must succeed. Failed lenses can be retried within the substitution limit; a short panel stops with the missing lenses. 0 takes the review ladder minimum for risk_tier, at least 1.",
           "max": 32,
           "min": 0,
           "type": "integer"

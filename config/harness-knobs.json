@@ -1,5 +1,11 @@
 {
   "schema_version": 1,
+  "host_gc_settings": {
+    "path": "gc",
+    "settings": {
+      "graph_checkpoint_days": {"type": "int", "allowed": "1 to 3650 days", "default": "90", "effect": "Retain terminal graph checkpoints for at least this many days after their last save"}
+    }
+  },
   "provider_updates": {
     "path": "providers.<id>",
     "provider_ids": ["claude", "codex", "cursor", "agy", "opencode"],
@@ -45,6 +51,7 @@
       "batch_wait_seconds": {"type": "int", "allowed": "0 or more seconds", "default": "30", "effect": "Maximum batch collection time."},
       "candidate_ref_prefix": {"type": "string", "allowed": "valid Git ref prefix", "default": "land/", "effect": "Prefix for temporary candidate refs."},
       "publish_settle_seconds": {"type": "int", "allowed": "0 or more seconds", "default": "30", "effect": "Time to wait before observing an unresolved publication again."},
+      "publish_unknown_warn_seconds": {"type": "int", "allowed": "0 or more seconds", "default": "3600", "effect": "Warn when a publication remains unknown for this long."},
       "max_rebuilds": {"type": "int", "allowed": "0 or more", "default": "3", "effect": "Maximum rebuilds after target movement."},
       "gate.kind": {"type": "enum", "allowed": "checks or commands", "default": "checks", "effect": "Candidate gate type."},
       "gate.checks": {"type": "string_list", "allowed": "check names", "default": "ci-status", "effect": "Required candidate checks."},
@@ -76,6 +83,7 @@
       "projects.{project}.batch_wait_seconds": {"type": "int", "allowed": "0 or more seconds", "default": "inherited", "effect": "Override batch_wait_seconds for this project; omitted fields inherit lower layers."},
       "projects.{project}.candidate_ref_prefix": {"type": "string", "allowed": "valid Git ref prefix", "default": "inherited", "effect": "Override candidate_ref_prefix for this project; omitted fields inherit lower layers."},
       "projects.{project}.publish_settle_seconds": {"type": "int", "allowed": "0 or more seconds", "default": "inherited", "effect": "Override publish_settle_seconds for this project; omitted fields inherit lower layers."},
+      "projects.{project}.publish_unknown_warn_seconds": {"type": "int", "allowed": "0 or more seconds", "default": "inherited", "effect": "Override publish_unknown_warn_seconds for this project; omitted fields inherit lower layers."},
       "projects.{project}.max_rebuilds": {"type": "int", "allowed": "0 or more", "default": "inherited", "effect": "Override max_rebuilds for this project; omitted fields inherit lower layers."},
       "projects.{project}.gate.kind": {"type": "enum", "allowed": "checks or commands", "default": "inherited", "effect": "Override gate.kind for this project; omitted fields inherit lower layers."},
       "projects.{project}.gate.checks": {"type": "string_list", "allowed": "check names", "default": "inherited", "effect": "Override gate.checks for this project; omitted fields inherit lower layers."},
@@ -107,6 +115,7 @@
       "tiers.{tier}.batch_wait_seconds": {"type": "int", "allowed": "0 or more seconds", "default": "inherited", "effect": "Override batch_wait_seconds for this risk tier; omitted fields inherit lower layers."},
       "tiers.{tier}.candidate_ref_prefix": {"type": "string", "allowed": "valid Git ref prefix", "default": "inherited", "effect": "Override candidate_ref_prefix for this risk tier; omitted fields inherit lower layers."},
       "tiers.{tier}.publish_settle_seconds": {"type": "int", "allowed": "0 or more seconds", "default": "inherited", "effect": "Override publish_settle_seconds for this risk tier; omitted fields inherit lower layers."},
+      "tiers.{tier}.publish_unknown_warn_seconds": {"type": "int", "allowed": "0 or more seconds", "default": "inherited", "effect": "Override publish_unknown_warn_seconds for this risk tier; omitted fields inherit lower layers."},
       "tiers.{tier}.max_rebuilds": {"type": "int", "allowed": "0 or more", "default": "inherited", "effect": "Override max_rebuilds for this risk tier; omitted fields inherit lower layers."},
       "tiers.{tier}.gate.kind": {"type": "enum", "allowed": "checks or commands", "default": "inherited", "effect": "Override gate.kind for this risk tier; omitted fields inherit lower layers."},
       "tiers.{tier}.gate.checks": {"type": "string_list", "allowed": "check names", "default": "inherited", "effect": "Override gate.checks for this risk tier; omitted fields inherit lower layers."},
@@ -148,6 +157,7 @@
       "limits.nodes": {"type": "int", "allowed": "1 or more", "default": "512", "effect": "Graph nodes limit."},
       "limits.edges": {"type": "int", "allowed": "1 or more", "default": "4096", "effect": "Graph edges limit."},
       "limits.routes_per_node": {"type": "int", "allowed": "1 or more", "default": "16", "effect": "Graph routes per node limit."},
+      "limits.review_substitutions": {"type": "int", "allowed": "0 or more", "default": "1", "effect": "Maximum substitutions per review member."},
       "limits.node_prompt_bytes": {"type": "int", "allowed": "1 or more", "default": "262144", "effect": "Graph node prompt bytes limit."},
       "limits.graph_prompt_bytes": {"type": "int", "allowed": "1 or more", "default": "4194304", "effect": "Graph graph prompt bytes limit."},
       "limits.fan_out_width": {"type": "int", "allowed": "1 or more", "default": "32", "effect": "Graph fan out width limit."},
@@ -252,6 +262,7 @@
       "memory_pressure_threshold": {"type": "enum", "allowed": "critical, warning or never", "default": "critical", "effect": "Kernel memory pressure level at which new lanes wait on macOS. warning also defers at critical; never disables the pressure gate. The memory and disk floors still apply."},
       "max_concurrent_builds": {"type": "int", "min": 1, "max": 64, "auto_value": -1, "default": "max(1, min(cores / cargo_build_jobs, GiB of RAM / 6))", "effect": "A build throttle, not a hard cap: cargo builds, tests, checks and lints that a lane's cargo shim runs at once across the host and every project that shares the state directory. Lanes are not capped by it; a command that compiles waits for a free slot. Direct ~/.cargo/bin/cargo, rustc and non-cargo builds are not gated."},
       "build_wait_minutes": {"type": "int", "min": 1, "max": 1440, "auto_value": -1, "default": 30, "effect": "Minutes a build waits for a build slot or another build's Cargo lock before it gives up with an error."},
+      "setup_lock_wait_seconds": {"type": "int", "min": 1, "max": 14400, "auto_value": -1, "default": 14400, "effect": "Seconds a writer waits for its repository's Git setup lock before launch is refused."},
       "lane_port_base": {"type": "int", "min": 1024, "max": 65535, "auto_value": -1, "default": 30000, "effect": "First port of the range split into per-writer-lane blocks. Each writer lane holds one block for its lifetime and sees it as PROVENANT_LANE_PORT_BASE and PROVENANT_LANE_PORT_COUNT."},
       "lane_port_block": {"type": "int", "min": 1, "max": 1024, "auto_value": -1, "default": 16, "effect": "Ports in each writer lane's block (PROVENANT_LANE_PORT_COUNT)."},
       "lane_port_blocks": {"type": "int", "min": 0, "max": 1024, "auto_value": -1, "default": 64, "effect": "Blocks in the range, so the most writer lanes that hold a block at once; the base plus blocks times block size must be at most 65536. 0 turns allocation off. A writer launched while every block is held is not started and reports no free port block."},

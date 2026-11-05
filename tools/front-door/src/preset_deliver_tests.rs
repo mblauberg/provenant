@@ -68,6 +68,8 @@ struct Host {
     distinct: Vec<(String, Vec<String>)>,
     routes: Vec<(String, GraphRoute)>,
     host_native_unavailable: bool,
+    /// Give the fake routes distinct attempt identities in one model family.
+    one_family: bool,
     /// Head of the integration branch; a writer that integrates moves it.
     integration: Option<String>,
     /// Read-only nodes whose id contains one of these fail their verdict.
@@ -143,12 +145,24 @@ impl provenant_fabric_runtime::graph::AttemptOwner for Host {
     ) -> Result<Option<provenant_records::run::PreparationFailure>, Self::Error> {
         let refused_locally = self.host_native_unavailable
             && key.route_index == 0
-            && reference == format!("fixture/{}", key.node_id)
+            && reference
+                == if self.one_family {
+                    format!("fixture/{}/{}", key.node_id, key.route_index)
+                } else {
+                    format!("fixture/{}", key.node_id)
+                }
             && self.routes.iter().any(|(id, route)| {
                 id == &key.node_id && route.adapter.as_deref() == Some("host-native")
             });
         Ok(refused_locally
             .then_some(provenant_records::run::PreparationFailure::AdapterUnavailable))
+    }
+    fn attempt_families(&mut self, attempts: &[String]) -> Result<Vec<String>, Self::Error> {
+        Ok(if self.one_family && !attempts.is_empty() {
+            vec!["one-family".into()]
+        } else {
+            Vec::new()
+        })
     }
     fn integration_head(&mut self) -> Result<Option<String>, Self::Error> {
         Ok(self.integration.clone())
@@ -187,6 +201,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for Host {
         _: Option<&str>,
         replay: Replay<'_>,
     ) -> Result<AttemptObservation, Self::Error> {
+        let reference = if self.one_family {
+            format!("fixture/{}/{}", key.node_id, key.route_index)
+        } else {
+            format!("fixture/{}", key.node_id)
+        };
         self.launched.push(key.node_id.clone());
         self.deliveries.push((
             key.node_id.clone(),
@@ -196,7 +215,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for Host {
         self.routes.push((key.node_id.clone(), route.clone()));
         if self.host_native_unavailable && route.adapter.as_deref() == Some("host-native") {
             return Ok(AttemptObservation::Terminal {
-                attempt_ref: Some(format!("fixture/{}", key.node_id)),
+                attempt_ref: Some(reference),
                 outcome: AttemptOutcome::AdapterUnavailable,
                 launched: false,
                 result: None,
@@ -251,7 +270,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for Host {
             node.source_commit.map(str::to_owned)
         };
         Ok(AttemptObservation::Terminal {
-            attempt_ref: Some(format!("fixture/{}", key.node_id)),
+            attempt_ref: Some(reference),
             outcome: AttemptOutcome::Succeeded,
             launched: true,
             result: Some(Box::new(result.finish())),
@@ -350,6 +369,61 @@ fn deliver_falls_back_when_the_host_repairer_is_absent() {
     assert_eq!(fixes[0].adapter.as_deref(), Some("host-native"));
     assert_eq!(fixes[1].alias.as_deref(), Some("senior"));
     assert_eq!(host.lands, [("lane/write".into(), commit(2))]);
+}
+
+#[test]
+fn deliver_substitutes_a_verifier_after_a_verified_preparation_failure() {
+    fn set_verifier(nodes: &mut [provenant_fabric_runtime::graph::GraphNode]) -> usize {
+        let mut found = 0;
+        for node in nodes {
+            if node.role.as_deref() == Some("review.verify") {
+                node.route = None;
+                node.routes = Some(vec![
+                    serde_json::from_value(json!({"adapter":"host-native","name":"verify"}))
+                        .unwrap(),
+                    serde_json::from_value(json!({"alias":"senior"})).unwrap(),
+                ]);
+                found += 1;
+            }
+            if let Some(composite) = &mut node.composite {
+                found += set_verifier(&mut composite.nodes);
+            }
+        }
+        found
+    }
+    let mut document = deliver(&[]);
+    assert_eq!(set_verifier(&mut document.nodes), 1);
+    let mut host = Host {
+        host_native_unavailable: true,
+        one_family: true,
+        ..Default::default()
+    };
+    let run = drive(&document, &mut host, &mut Journal::default());
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint);
+    let verifier = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id.ends_with("--verify"))
+        .unwrap();
+    assert_eq!(verifier.state, NodeState::Succeeded);
+    assert_eq!(verifier.attempts.len(), 2);
+    assert!(verifier.attempts[1].review_substitution);
+    assert_ne!(
+        verifier.attempts[0].attempt_ref,
+        verifier.attempts[1].attempt_ref
+    );
+    assert_eq!(
+        verifier.separation.as_ref().unwrap().outcome,
+        provenant_fabric_runtime::graph::SeparationOutcome::Unavailable
+    );
+    assert!(
+        run.checkpoint
+            .nodes
+            .iter()
+            .any(|node| node.id.ends_with("--synthesis") && node.state == NodeState::Succeeded)
+    );
+    assert_eq!(host.lands, [("lane/write".into(), commit(1))]);
 }
 
 #[test]

@@ -49,6 +49,10 @@ pub struct Layers {
     /// Launch directory, used to resolve relative worktree bindings.
     pub launch_dir: Option<PathBuf>,
     pub default_worktree: Option<PathBuf>,
+    /// One inventory captured for this preset command, shared by its planner,
+    /// spec lookup and read-root selection. Library callers without a command
+    /// snapshot retain the ordinary fresh lookup.
+    command_worktrees: Option<Vec<PathBuf>>,
     used_shapes: std::cell::RefCell<BTreeSet<String>>,
     /// Bases of the deferred reviews this expansion emitted; a graph has one.
     review_bases: std::cell::RefCell<BTreeSet<String>>,
@@ -1487,7 +1491,15 @@ fn spec_candidates(layers: &Layers, parameters: &Value, spec: &str) -> Option<Ve
         .map(|w| launch.join(w).join(path))
         .chain(std::iter::once(project.join(path)))
         .collect();
-    if let Some(main) = project_worktrees(&project).first() {
+    let discovered;
+    let worktrees = match layers.command_worktrees.as_deref() {
+        Some(worktrees) => worktrees,
+        None => {
+            discovered = project_worktrees(&project);
+            &discovered
+        }
+    };
+    if let Some(main) = worktrees.first() {
         let candidate = main.join(path);
         if !candidates.contains(&candidate) {
             candidates.push(candidate);
@@ -1618,9 +1630,16 @@ fn lower_leaf(
     {
         map.remove("source");
     }
+    let mut entry = entry.clone();
+    // An unset writer parameter inherits the role, including project overrides.
+    if entry.get("tier").and_then(Value::as_str) == Some("${writer}")
+        && parameters.get("writer").and_then(Value::as_str) == Some("")
+    {
+        entry.remove("tier");
+    }
     merge(
         &mut profile,
-        &Value::Object(entry.clone()),
+        &Value::Object(entry),
         "",
         "entry",
         &mut BTreeMap::new(),
@@ -3229,15 +3248,15 @@ pub(crate) fn project_worktrees(directory: &Path) -> Vec<PathBuf> {
         .unwrap_or_else(|_| vec![directory.to_path_buf()])
 }
 
-fn discover_read_roots(directory: &Path, allowed: &[String], extra: &[PathBuf]) -> ReadRoots {
-    let mut project = project_worktrees(directory);
+fn discover_read_roots(worktrees: &[PathBuf], allowed: &[String], extra: &[PathBuf]) -> ReadRoots {
+    let mut project = worktrees.to_vec();
     project.extend(extra.iter().cloned());
     ReadRoots::new(project, allowed)
 }
 
 /// The linked worktrees, not the main checkout, which can host a writer lane.
-pub(crate) fn linked_worktrees(directory: &Path) -> Vec<String> {
-    project_worktrees(directory)
+pub(crate) fn linked_worktrees_from(worktrees: &[PathBuf]) -> Vec<String> {
+    worktrees
         .iter()
         .skip(1)
         .map(|path| path.display().to_string())
@@ -3882,6 +3901,35 @@ fn explain_tree(nodes: &[Value], indent: usize, text: &mut String) {
     }
 }
 
+/// Count concrete writer nodes by their requested alias, retaining unknown and
+/// exact-model routes outside the advisory mix.
+pub(super) fn writer_tier_mix(nodes: &[Value]) -> [usize; 3] {
+    let mut counts = [0; 3];
+    for node in nodes {
+        if node["access"] == "worktree_write" {
+            let tier = node
+                .pointer("/route/alias")
+                .or_else(|| node.pointer("/routes/0/alias"))
+                .and_then(Value::as_str);
+            if let Some(index) = ["junior", "senior", "principal"]
+                .iter()
+                .position(|name| Some(*name) == tier)
+            {
+                counts[index] += 1;
+            }
+        }
+        for pointer in ["/composite/nodes", "/loop/body"] {
+            if let Some(children) = node.pointer(pointer).and_then(Value::as_array) {
+                let nested = writer_tier_mix(children);
+                for (count, increment) in counts.iter_mut().zip(nested) {
+                    *count += increment;
+                }
+            }
+        }
+    }
+    counts
+}
+
 // Explain is read-only and must not publish an overflow artifact. The graph
 // was already bounded by the owner's 8 MiB document limit in expand().
 fn explain(
@@ -3932,6 +3980,23 @@ fn explain(
         "Graph {}\nLimits: {}\nAdmission: {}\nInspection: {}\n",
         expansion.document["graph_id"], limits, admission, metrics
     );
+    let tier_mix = writer_tier_mix(
+        expansion.document["nodes"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default(),
+    );
+    let inverted = tier_mix[2] > tier_mix[1] || tier_mix[1] > tier_mix[0];
+    let tier_mix_line = format!(
+        "tier mix: junior {} / senior {} / principal {}",
+        tier_mix[0], tier_mix[1], tier_mix[2]
+    );
+    human.push_str(&format!("{tier_mix_line}\n"));
+    if inverted {
+        human.push_str(
+            "Warning: writer tier mix is inverted; consider whether lower tiers fit the work.\n",
+        );
+    }
     if let Some(context) = expansion.document.get("context") {
         human.push_str(&format!(
             "Preset selection: {} ({})\n",
@@ -3977,6 +4042,7 @@ fn explain(
         human.push_str(&format!("Warning: {warning}\n"));
     }
     let mut data = json!({"roles": expansion.roles, "substitutions": expansion.substitutions, "graph": expansion.document, "origins": expansion.origins, "limits":limits,"admission":admission,"inspection":metrics,"pending":pending,"review_shape":expansion.review_shape,"plan":expansion.plan.as_ref().map(planner::Decision::to_json)});
+    data["tier_mix"] = json!({"junior":tier_mix[0], "senior":tier_mix[1], "principal":tier_mix[2], "inverted":inverted, "line":tier_mix_line});
     if !brief_warnings.is_empty() {
         data["warnings"] = json!(brief_warnings);
     }
@@ -4208,6 +4274,8 @@ pub(crate) fn run_with_review(
             .unwrap_or_else(|_| directory.clone()),
         );
         layers.default_worktree = request.access.worktree.clone();
+        let worktrees = project_worktrees(&directory);
+        layers.command_worktrees = Some(worktrees.clone());
         let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
         layers.known_routes = Some(config.domains.routing.route_names(&catalogue));
         {
@@ -4231,7 +4299,7 @@ pub(crate) fn run_with_review(
             layers.plan = Some(planner::PlanContext {
                 mode,
                 from_cli: request.preset_plan.is_some(),
-                worktrees: linked_worktrees(&directory),
+                worktrees: linked_worktrees_from(&worktrees),
                 route: settings.route.clone(),
                 lane_deadline_seconds: config.domains.fabric.limits.graph_timeout_seconds,
                 max_nodes: settings.max_nodes,
@@ -4425,7 +4493,7 @@ pub(crate) fn run_with_review(
             )?;
         }
         let policy = discover_read_roots(
-            &directory,
+            &worktrees,
             &config.domains.fabric.graph.allowed_read_roots,
             &policy_roots,
         );

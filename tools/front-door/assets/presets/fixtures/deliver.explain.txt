@@ -1,6 +1,8 @@
 Graph <id>
 Admission: {"status":"admitted"}
 Inspection: {"dependency_depth":13,"edges":25,"limit_reason":null,"max_attempts":4,"nodes":14,"prompt_bytes":5650}
+tier mix: junior 0 / senior 2 / principal 0
+Warning: writer tier mix is inverted; consider whether lower tiers fit the work.
 Preset selection: deliver (override)
 Review shape: standard (default; floors=pending; size=pending (measured at review launch); kind=unknown; risk=unknown)
 Pending "delivery_target": "Delivery target is checked before delivery."

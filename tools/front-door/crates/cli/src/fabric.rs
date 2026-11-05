@@ -82,6 +82,14 @@ pub enum Graph {
         /// Graph ID, project-local document path or document SHA-256 hash
         id: String,
     },
+    /// Wait for a task graph to settle without advancing it
+    Wait {
+        /// Graph ID, project-local document path or document SHA-256 hash
+        id: String,
+        /// Wait limit (seconds or a duration such as 30m)
+        #[arg(long, catalog_duration())]
+        wait: u64,
+    },
     /// Cancel a task graph
     Cancel {
         /// Graph ID, project-local document path or document SHA-256 hash
@@ -586,6 +594,7 @@ impl Fabric {
             Self::Graph(Graph::Cancel { .. }) => return "fabric graph cancel".into(),
             Self::Graph(Graph::Resume { .. }) => return "fabric graph resume".into(),
             Self::Graph(Graph::Status { .. }) => return "fabric graph status".into(),
+            Self::Graph(Graph::Wait { .. }) => return "fabric graph wait".into(),
             Self::Mail(v) => (
                 "mail",
                 match v {

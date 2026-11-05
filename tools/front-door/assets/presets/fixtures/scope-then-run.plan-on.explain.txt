@@ -1,6 +1,8 @@
 Graph <id>
 Admission: {"status":"admitted"}
-Inspection: {"dependency_depth":8,"edges":15,"limit_reason":null,"max_attempts":9,"nodes":9,"prompt_bytes":7407}
+Inspection: {"dependency_depth":8,"edges":15,"limit_reason":null,"max_attempts":9,"nodes":9,"prompt_bytes":7452}
+tier mix: junior 0 / senior 1 / principal 0
+Warning: writer tier mix is inverted; consider whether lower tiers fit the work.
 Preset selection: scope-then-run (override)
 Review shape: standard (default; floors=pending; size=pending (measured at review launch); kind=unknown; risk=unknown)
 plan: on -> on (planning requested)

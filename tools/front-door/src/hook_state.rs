@@ -116,6 +116,61 @@ impl<'a> Cli<'a> {
         let message = envelope["error"]["message"].as_str().unwrap_or("refused");
         Err(provenant_workflow::session::clean(message, 120))
     }
+
+    /// Preserve complete inventory records even when the child hits its budget.
+    #[allow(clippy::disallowed_methods)]
+    fn worktree_listing(&self, deadline: Instant) -> Result<(Vec<WorktreeLine>, usize), String> {
+        let time = LISTING_TIME.min(deadline.saturating_duration_since(Instant::now()));
+        if time < Duration::from_millis(50) {
+            return Err("hook deadline reached".into());
+        }
+        let argv = self.argv(&["worktree", "session-list"]);
+        let mut options = ExecOptions::new(&argv, self.cwd, time);
+        options.stdout = StreamPolicy::Capture { limit: OUTPUT_CAP };
+        options.stderr = StreamPolicy::Capture { limit: 2048 };
+        let out = self
+            .executor
+            .execute(options)
+            .map_err(|_| "could not start".to_owned())?;
+        parse_worktree_stream(&out.stdout.bytes).ok_or_else(|| {
+            if out.timed_out {
+                "timed out".into()
+            } else {
+                "inventory unavailable".into()
+            }
+        })
+    }
+
+    #[allow(clippy::disallowed_methods)]
+    fn lane_listing(
+        &self,
+        deadline: Instant,
+        settled_after: Option<i64>,
+    ) -> Result<(Vec<LaneLine>, Option<String>, usize), String> {
+        let time = LISTING_TIME.min(deadline.saturating_duration_since(Instant::now()));
+        if time < Duration::from_millis(50) {
+            return Err("hook deadline reached".into());
+        }
+        let mut args = vec!["lanes", "--session-stream", "--limit", LANE_PAGE];
+        if settled_after.is_some() {
+            args.push("--all");
+        }
+        let argv = self.argv(&args);
+        let mut options = ExecOptions::new(&argv, self.cwd, time);
+        options.stdout = StreamPolicy::Capture { limit: OUTPUT_CAP };
+        options.stderr = StreamPolicy::Capture { limit: 2048 };
+        let out = self
+            .executor
+            .execute(options)
+            .map_err(|_| "could not start".to_owned())?;
+        parse_lane_stream(&out.stdout.bytes, settled_after).ok_or_else(|| {
+            if out.timed_out {
+                "timed out".into()
+            } else {
+                "inventory unavailable".into()
+            }
+        })
+    }
 }
 
 fn unavailable_sources(state: &mut SessionState, want: &Want, reason: String) {
@@ -158,18 +213,22 @@ pub fn collect(globals: &Globals, cwd: &Path, want: &Want, deadline: Instant) ->
             return state;
         }
     };
-    let mut terminal_args = vec!["lanes", "--all", "--limit", LANE_PAGE];
-    for outcome in TERMINAL {
-        terminal_args.extend(["--state", outcome]);
-    }
-    let (cli, terminal_args) = (&cli, &terminal_args);
+    collect_with_cli(state, &cli, want, deadline)
+}
+
+fn collect_with_cli(
+    mut state: SessionState,
+    cli: &Cli<'_>,
+    want: &Want,
+    deadline: Instant,
+) -> SessionState {
     std::thread::scope(|scope| {
-        let active =
-            scope.spawn(move || cli.data(&["lanes", "--limit", LANE_PAGE], LISTING_TIME, deadline));
-        let settled = scope.spawn(move || cli.data(terminal_args, LISTING_TIME, deadline));
+        let active = scope.spawn(move || cli.lane_listing(deadline, None));
+        let settled =
+            scope.spawn(move || cli.lane_listing(deadline, Some(want.settled_after_unix)));
         let worktrees = want
             .worktrees
-            .then(|| scope.spawn(move || cli.data(&["worktree", "list"], LISTING_TIME, deadline)));
+            .then(|| scope.spawn(move || cli.worktree_listing(deadline)));
         let prs: Vec<_> = want
             .pr_refs
             .iter()
@@ -185,10 +244,10 @@ pub fn collect(globals: &Globals, cwd: &Path, want: &Want, deadline: Instant) ->
             })
             .collect();
         match active.join() {
-            Ok(Ok(active)) => {
-                let (lanes, next) = parse_lanes(&active, None);
+            Ok(Ok((lanes, next, skipped))) => {
                 state.active = lanes;
                 state.active_more = next.map(|cursor| next_page(&cursor, false, &state.commands));
+                state.active_skipped = skipped;
             }
             Ok(Err(reason)) => state.unavailable.push(Unavailable {
                 source: "active lanes".into(),
@@ -200,10 +259,10 @@ pub fn collect(globals: &Globals, cwd: &Path, want: &Want, deadline: Instant) ->
             }),
         }
         match settled.join() {
-            Ok(Ok(settled)) => {
-                let (lanes, next) = parse_lanes(&settled, Some(want.settled_after_unix));
+            Ok(Ok((lanes, next, skipped))) => {
                 state.settled = lanes;
                 state.settled_more = next.map(|cursor| next_page(&cursor, true, &state.commands));
+                state.settled_skipped = skipped;
             }
             Ok(Err(reason)) => state.unavailable.push(Unavailable {
                 source: "settled lanes".into(),
@@ -216,7 +275,10 @@ pub fn collect(globals: &Globals, cwd: &Path, want: &Want, deadline: Instant) ->
         }
         if let Some(handle) = worktrees {
             match handle.join() {
-                Ok(Ok(list)) => state.worktrees = parse_worktrees(&list),
+                Ok(Ok((list, skipped))) => {
+                    state.worktrees = list;
+                    state.worktrees_skipped = skipped;
+                }
                 Ok(Err(reason)) => state.unavailable.push(Unavailable {
                     source: "worktrees".into(),
                     reason,
@@ -309,6 +371,12 @@ fn parse_lanes(data: &Value, settled_after_unix: Option<i64>) -> (Vec<LaneLine>,
     let rows = data["lanes"].as_array().map_or(&[][..], Vec::as_slice);
     for lane in rows {
         if let Some(after) = settled_after_unix {
+            if !lane["state"]
+                .as_str()
+                .is_some_and(|state| TERMINAL.contains(&state))
+            {
+                continue;
+            }
             let finished = lane["finished_at"]
                 .as_str()
                 .and_then(|at| at.parse::<jiff::Timestamp>().ok())
@@ -334,6 +402,51 @@ fn parse_lanes(data: &Value, settled_after_unix: Option<i64>) -> (Vec<LaneLine>,
     }
     (lanes, data["next_cursor"].as_str().map(str::to_owned))
 }
+
+/// The header describes one page; a timed-out partial page resumes after its
+/// last complete record rather than skipping the unread tail of that page.
+fn parse_lane_stream(
+    bytes: &[u8],
+    settled_after: Option<i64>,
+) -> Option<(Vec<LaneLine>, Option<String>, usize)> {
+    let mut lines = bytes.split_inclusive(|byte| *byte == b'\n');
+    let header = lines.next()?;
+    if !header.ends_with(b"\n") {
+        return None;
+    }
+    let header: Value = serde_json::from_slice(header).ok()?;
+    let total = usize::try_from(header.get("total")?.as_u64()?).ok()?;
+    if total > 100 {
+        return None;
+    }
+    let next = header.get("next").and_then(Value::as_u64);
+    let mut rows = Vec::new();
+    let mut last = None;
+    for line in lines {
+        if !line.ends_with(b"\n") || rows.len() >= total {
+            break;
+        }
+        let Ok(event) = serde_json::from_slice::<Value>(line) else {
+            break;
+        };
+        let Some(cursor) = event.get("cursor").and_then(Value::as_u64) else {
+            break;
+        };
+        let Some(lane) = event.get("lane") else {
+            break;
+        };
+        rows.push(lane.clone());
+        last = Some(cursor);
+    }
+    let skipped = total.saturating_sub(rows.len());
+    let continuation = if skipped > 0 {
+        Some(last.map_or_else(String::new, |n| n.to_string()))
+    } else {
+        next.map(|n| n.to_string())
+    };
+    let (lanes, _) = parse_lanes(&serde_json::json!({"lanes": rows}), settled_after);
+    Some((lanes, continuation, skipped))
+}
 /// Registered worktrees other than the primary checkout, which `git` lists first.
 fn parse_worktrees(data: &Value) -> Vec<WorktreeLine> {
     data.as_array()
@@ -351,6 +464,38 @@ fn parse_worktrees(data: &Value) -> Vec<WorktreeLine> {
             writer: entry["writer"].as_str().unwrap_or("unknown").to_owned(),
         })
         .collect()
+}
+
+/// Ignore a trailing partial record, but never treat it as a completed row.
+fn parse_worktree_stream(bytes: &[u8]) -> Option<(Vec<WorktreeLine>, usize)> {
+    let mut lines = bytes.split_inclusive(|byte| *byte == b'\n');
+    let header = lines.next()?;
+    if !header.ends_with(b"\n") {
+        return None;
+    }
+    let total = serde_json::from_slice::<Value>(header)
+        .ok()?
+        .get("total")?
+        .as_u64()?;
+    let total = usize::try_from(total).ok()?;
+    let mut entries = Vec::new();
+    for line in lines {
+        if !line.ends_with(b"\n") {
+            break;
+        }
+        let Ok(event) = serde_json::from_slice::<Value>(line) else {
+            break;
+        };
+        let Some(entry) = event.get("worktree") else {
+            break;
+        };
+        if entries.len() >= total {
+            break;
+        }
+        entries.push(entry.clone());
+    }
+    let skipped = total.saturating_sub(entries.len().max(1));
+    Some((parse_worktrees(&Value::Array(entries)), skipped))
 }
 /// Read the first line of the CLI's status array; unknown fields stay unknown.
 fn pr_status(data: &Value) -> (String, String) {
@@ -381,6 +526,220 @@ fn pr_status(data: &Value) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn session_collection_keeps_lane_and_worktree_rows_after_deadline() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("inventory");
+        std::fs::write(
+            &script,
+            r##"#!/bin/sh
+case "$*" in
+  *worktree*) printf '%s\n' '{"total":3}' '{"worktree":{"path":"/primary"}}' '{"worktree":{"path":"/lane","branch":"refs/heads/lane"}}' ;;
+  *--all*) printf '%s\n' '{"total":0,"next":null}' ;;
+  *) printf '%s\n' '{"total":2,"next":null}' '{"cursor":2,"lane":{"run_id":"r","task_id":"t","attempt_id":"a","state":"running"}}' ;;
+esac
+/bin/sleep 5
+"##,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let executor = SystemExecutor::new(3).unwrap();
+        let cli = Cli {
+            exe: script,
+            state_dir: None,
+            cwd: temp.path(),
+            executor: &executor,
+        };
+        let host_deadline = Instant::now() + Duration::from_secs(2);
+        let state = collect_with_cli(
+            SessionState::default(),
+            &cli,
+            &Want {
+                worktrees: true,
+                settled_after_unix: 0,
+                pr_refs: vec![],
+            },
+            crate::hooks::session_collection_deadline(host_deadline),
+        );
+        let digest = state.digest(provenant_workflow::session::DIGEST_LIMIT);
+        assert!(digest.contains("r/t/a"), "{digest}");
+        assert!(digest.contains("/lane"), "{digest}");
+        assert!(
+            digest.contains("1 lane record was not inspected"),
+            "{digest}"
+        );
+        assert!(
+            digest.contains("1 worktree skipped during inventory"),
+            "{digest}"
+        );
+        // The child budget has expired, but the hook still has time to render
+        // the partial digest into its native SessionStart response.
+        assert!(Instant::now() < host_deadline);
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        for name in ["home", "checkout", "state"] {
+            std::fs::create_dir(root.join(name)).unwrap();
+        }
+        let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
+        inputs.state_dir = Some(root.join("state"));
+        let roots = inputs
+            .resolve(&provenant_os::fs::SystemPathResolver)
+            .unwrap();
+        let commands = CommandPrefix::default();
+        let context = provenant_workflow::session::hook_context_with(
+            &roots.state,
+            provenant_core::ProjectId::from_bytes([7; 16]),
+            provenant_workflow::session::HookEvent::SessionStart,
+            &br#"{"hook_event_name":"SessionStart","session_id":"test-session"}"#[..],
+            &provenant_os::clock::SystemClock::new(),
+            provenant_core::DurationMicros::from_micros(1_000_000),
+            provenant_workflow::session::Advice {
+                digest: &digest,
+                commands: &commands,
+                client: None,
+            },
+        );
+        let output = String::from_utf8(context.stdout).unwrap();
+        assert!(
+            Instant::now() < host_deadline,
+            "hook response missed its deadline"
+        );
+        for text in [
+            "r/t/a",
+            "/lane",
+            "1 lane record was not inspected",
+            "1 worktree skipped during inventory",
+        ] {
+            assert!(output.contains(text), "{output}");
+        }
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn lane_collector_keeps_rows_when_child_times_out() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("lanes");
+        std::fs::write(&script, "#!/bin/sh\nprintf '%s\\n' '{\"total\":3,\"next\":7}' '{\"cursor\":20,\"lane\":{\"run_id\":\"r\",\"task_id\":\"t\",\"attempt_id\":\"a\",\"state\":\"running\"}}'\n/bin/sleep 5\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let executor = SystemExecutor::new(1).unwrap();
+        let cli = Cli {
+            exe: script,
+            state_dir: None,
+            cwd: temp.path(),
+            executor: &executor,
+        };
+        let (lanes, next, skipped) = cli
+            .lane_listing(Instant::now() + Duration::from_secs(1), None)
+            .unwrap();
+        assert_eq!(lanes[0].id, "r/t/a");
+        assert_eq!(next.as_deref(), Some("20"));
+        assert_eq!(skipped, 2);
+    }
+
+    #[test]
+    fn lane_stream_preserves_partial_page_and_resumes_after_last_record() {
+        use super::*;
+        let bytes = b"{\"total\":3,\"next\":7}\n{\"cursor\":20,\"lane\":{\"run_id\":\"r\",\"task_id\":\"t\",\"attempt_id\":\"a\",\"state\":\"running\"}}\n{\"cursor\":19";
+        let (lanes, next, skipped) = parse_lane_stream(bytes, None).unwrap();
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].id, "r/t/a");
+        assert_eq!(next.as_deref(), Some("20"));
+        assert_eq!(skipped, 2);
+        let state = SessionState {
+            active: lanes,
+            active_more: next.map(|cursor| next_page(&cursor, false, &CommandPrefix::default())),
+            active_skipped: skipped,
+            ..Default::default()
+        };
+        let digest = state.digest(provenant_workflow::session::DIGEST_LIMIT);
+        assert!(digest.contains("r/t/a"), "{digest}");
+        assert!(
+            digest.contains("2 lane records were not inspected"),
+            "{digest}"
+        );
+        assert!(digest.contains("--cursor 20"), "{digest}");
+        let (_, next, skipped) = parse_lane_stream(b"{\"total\":1,\"next\":null}\n", None).unwrap();
+        assert_eq!(next.as_deref(), Some(""));
+        assert_eq!(skipped, 1);
+        let settled = b"{\"total\":2,\"next\":null}\n{\"cursor\":2,\"lane\":{\"state\":\"running\"}}\n{\"cursor\":1,\"lane\":{\"run_id\":\"r\",\"task_id\":\"t\",\"attempt_id\":\"done\",\"state\":\"failed\",\"finished_at\":\"2026-10-27T01:00:00Z\"}}\n";
+        let (lanes, next, skipped) = parse_lane_stream(settled, Some(0)).unwrap();
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].id, "r/t/done");
+        assert_eq!(next, None);
+        assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn worktree_collector_keeps_rows_when_child_times_out() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("inventory");
+        std::fs::write(&script, "#!/bin/sh\nprintf '%s\\n' '{\"total\":4}' '{\"worktree\":{\"path\":\"/primary\"}}' '{\"worktree\":{\"path\":\"/one\",\"branch\":\"refs/heads/one\"}}'\n/bin/sleep 5\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let executor = SystemExecutor::new(1).unwrap();
+        let cli = Cli {
+            exe: script,
+            state_dir: None,
+            cwd: temp.path(),
+            executor: &executor,
+        };
+        let (trees, skipped) = cli
+            .worktree_listing(Instant::now() + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(trees.len(), 1);
+        assert_eq!(trees[0].path, "/one");
+        assert_eq!(skipped, 2);
+    }
+
+    #[test]
+    fn worktree_stream_keeps_completed_rows_and_counts_skipped() {
+        use super::*;
+        let stream = b"{\"total\":4}\n{\"worktree\":{\"path\":\"/primary\"}}\n{\"worktree\":{\"path\":\"/one\",\"branch\":\"refs/heads/one\",\"dirty\":\"clean\",\"writer\":\"free\"}}\n{\"worktree\":{\"path\":\"/incomplete\"";
+        let (trees, skipped) = parse_worktree_stream(stream).unwrap();
+        assert_eq!(skipped, 2);
+        assert_eq!(trees.len(), 1);
+        assert_eq!(trees[0].path, "/one");
+        let state = SessionState {
+            worktrees: trees,
+            worktrees_skipped: skipped,
+            active: vec![LaneLine {
+                id: "run/task/attempt".into(),
+                state: "running".into(),
+                route: "fixture".into(),
+                worktree: None,
+                branch: None,
+                reason: None,
+            }],
+            ..Default::default()
+        };
+        let digest = state.digest(provenant_workflow::session::DIGEST_LIMIT);
+        assert!(digest.contains("/one"), "{digest}");
+        assert!(digest.contains("run/task/attempt"), "{digest}");
+        assert!(
+            digest.contains("2 worktrees skipped during inventory"),
+            "{digest}"
+        );
+        let single = SessionState {
+            worktrees_skipped: 1,
+            ..Default::default()
+        };
+        assert!(
+            single
+                .digest(provenant_workflow::session::DIGEST_LIMIT)
+                .contains("1 worktree skipped during inventory")
+        );
+        assert!(parse_worktree_stream(b"{\"total\":4}").is_none());
+        let (empty, skipped) = parse_worktree_stream(b"{\"total\":4}\n").unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(skipped, 3);
+    }
 
     #[test]
     fn shared_cli_setup_failure_marks_each_requested_source() {

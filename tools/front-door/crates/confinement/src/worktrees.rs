@@ -10,7 +10,7 @@ mod owner;
 pub use census::*;
 pub use context::{with_context, with_context_using_workers};
 pub use custody::*;
-pub use gc::{WorktreeGcPolicy, WorktreeGcReport, collect};
+pub use gc::{OutputEntry, WorktreeGcPolicy, WorktreeGcReport, collect, collect_lazy};
 pub use inventory::*;
 pub use lifecycle::*;
 pub use owner::{
@@ -27,13 +27,13 @@ use crate::utility::{
 };
 use provenant_config::ProjectBinding;
 use provenant_core::Clock;
-use provenant_core::{AttemptId, CancelToken, GitOid, RelativePath, WaitBudget, hex};
+use provenant_core::{AttemptId, CancelToken, GitOid, WaitBudget, hex};
 use provenant_os::exec::{ExecOutcome, Executor, Termination};
 use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, PublishMode, canonicalize};
-use provenant_os::pid::{
-    CensusIgnoreEntry, CwdObservation, CwdObserver, ProcessUids, SystemCwdObserver,
-};
-use provenant_records::{PathWire, PathWireError};
+#[cfg(test)]
+use provenant_os::pid::ProcessUids;
+use provenant_os::pid::{CensusIgnoreEntry, CwdObservation, CwdObserver, SystemCwdObserver};
+use provenant_records::{PathWireError, StructuredPathWire};
 use provenant_supervisor::census::{
     Ancestry, ProcessFact, ProcessLookup, ProcessObservation, ProcessObserver,
     SystemProcessObserver, current_process,
@@ -453,7 +453,7 @@ impl Serialize for WorktreeInfo {
     where
         S: Serializer,
     {
-        let path = AbsolutePathWire::from_path(&self.path).map_err(serde::ser::Error::custom)?;
+        let path = StructuredPathWire::from_path(&self.path).map_err(serde::ser::Error::custom)?;
         let mut state = serializer.serialize_struct("WorktreeInfo", 7)?;
         state.serialize_field("path", &path)?;
         state.serialize_field("branch", &self.branch)?;
@@ -465,36 +465,6 @@ impl Serialize for WorktreeInfo {
             state.serialize_field("next", "This checkout has no Provenant lane owner; it may have been created outside Provenant. Inspect its custody, then select it explicitly with --worktree <path>.")?;
         }
         state.end()
-    }
-}
-
-#[derive(Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum AbsolutePathWire {
-    Root,
-    Path {
-        root: &'static str,
-        relative: PathWire,
-    },
-}
-
-impl AbsolutePathWire {
-    fn from_path(path: &Path) -> Result<Self, PathWireError> {
-        if !path.is_absolute() {
-            return Err(PathWireError::InvalidNativePath);
-        }
-        let relative = path
-            .strip_prefix(Path::new("/"))
-            .map_err(|_| PathWireError::InvalidNativePath)?;
-        if relative.as_os_str().is_empty() {
-            return Ok(Self::Root);
-        }
-        let relative =
-            RelativePath::parse(relative).map_err(|_| PathWireError::InvalidNativePath)?;
-        Ok(Self::Path {
-            root: "/",
-            relative: PathWire::from_relative(&relative)?,
-        })
     }
 }
 

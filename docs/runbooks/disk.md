@@ -35,9 +35,7 @@ and GC preview below to investigate it.
 
 3. Interpret classifications using the [disk specification](../specs/disk.md).
    A lane entry with `reclaim: "gc"` names the existing GC owner; the report
-   does not run it. V1 markers with missing owners are orphaned and eligible for
-   GC; existing project owners stay legacy and never become idle. Foreign,
-   legacy, refused and unmarked caches require owner investigation.
+   does not run it. Foreign, refused and unmarked caches require owner investigation.
    An `attempt_tmp` entry with `leak: true` belongs to an indexed
    terminal attempt. `provider_state` measures resumable provider state
    separately; [GC](gc.md) applies its terminal retention policy. The `attempt_logs` class measures
@@ -52,9 +50,12 @@ and GC preview below to investigate it.
    `provenant gc --apply --json`. In addition to lane caches, GC removes clean
    merged worktrees using fetched upstream ancestry. Projects can declare
    regenerable directory names and keep paths in `[gc.projects.PROJECT_ID]`.
+   A Cargo project without an entry defaults to `target`; an explicit entry
+   overrides that default.
    Idle ignored declared output can qualify without a terminal lane when
    writer custody is free and no lane is live. Nested repositories protect
-   their containing output directory. Unknown writers remain protected
+   their containing output directory. Unknown-writer worktrees can have idle
+   ignored output reclaimed after a complete free census; the worktrees remain
    unless the project opts into `foreign_worktrees = "merged-clean"`. See the [configuration runbook](configuration.md#lane-cache-collection).
    Set `gc.alert_below` for a Fabric event and gc log message once per low-space
    dip. GC does not sweep arbitrary `/private/tmp/provenant-*` paths.

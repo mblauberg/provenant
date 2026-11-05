@@ -5,7 +5,8 @@ Anchor: tools/front-door/crates/routing/src
 Run `provenant route list` to inspect the catalogue, configured pool weights
 and pacing policy; pacing and readiness apply at dispatch. Use
 `provenant --json route list` for records, `--adapter NAME` to narrow it, or
-`--pool NAME` for one pool. Resolve a pool with
+`--pool NAME` for one pool. Prefer `--route NAME` for a pool alias when dispatching work; use an exact
+model when the task needs one. Resolve a pool with
 `provenant route resolve --route NAME`, or select an exact model with
 `--model ADAPTER/ID` and optional `--effort LEVEL`.
 `provenant route resolve NAME` also accepts a route name or an unambiguous
@@ -80,8 +81,9 @@ the refusal expiry.
 A graph node can move to its next configured route after the host verifies a
 local preparation refusal and released custody. The earlier attempt remains in
 the receipt history. Once a provider has launched, the graph does not switch
-routes automatically; a quota-stopped writer with an unfinished handoff may
-continue on another eligible account.
+routes automatically for a writer; a confirmed read-only attempt may switch on
+an authentication or usage-limit outcome within its retry budget. A quota-stopped
+writer with an unfinished handoff may continue on another eligible account.
 
 The settlement retry allowance is `domains.routing.settlement_retries`
 (shipped default **2**). Set `retry.retries` on a preset or graph document for

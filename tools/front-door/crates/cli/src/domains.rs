@@ -38,6 +38,7 @@ pub struct LandSettings {
     pub candidate_ref_prefix: String,
     pub max_rebuilds: u64,
     pub publish_settle_seconds: u64,
+    pub publish_unknown_warn_seconds: u64,
     pub gate: GateSettings,
     pub pr_ci: PrCiSettings,
     pub publish: Publication,
@@ -66,6 +67,8 @@ pub struct LandOverride {
     pub max_rebuilds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub publish_settle_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publish_unknown_warn_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gate: Option<GateOverride>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -263,6 +266,7 @@ impl Default for LandSettings {
             candidate_ref_prefix: "land/".into(),
             max_rebuilds: 3,
             publish_settle_seconds: 30,
+            publish_unknown_warn_seconds: 3600,
             gate: GateSettings::default(),
             pr_ci: PrCiSettings::default(),
             publish: Publication::Auto,
@@ -405,6 +409,7 @@ batch_wait_seconds = 30
 candidate_ref_prefix = "land/"
 max_rebuilds = 3
 publish_settle_seconds = 30
+publish_unknown_warn_seconds = 3600
 publish = "auto"
 method = "merge"
 [land.gate]
@@ -436,6 +441,7 @@ timeout_seconds = 60
     FieldMetadata::new("land.candidate_ref_prefix", "string"),
     FieldMetadata::new("land.max_rebuilds", "int"),
     FieldMetadata::new("land.publish_settle_seconds", "int"),
+    FieldMetadata::new("land.publish_unknown_warn_seconds", "int"),
     FieldMetadata::enumeration("land.gate.kind", &["checks", "commands"]),
     FieldMetadata::new("land.gate.checks", "array"),
     FieldMetadata::new("land.gate.issuer", "string"),
@@ -479,7 +485,12 @@ timeout_seconds = 60
     FieldMetadata::new("land.projects.{project}.max_rebuilds", "int"),
     FieldMetadata::new("land.tiers.{tier}.max_rebuilds", "int"),
     FieldMetadata::new("land.projects.{project}.publish_settle_seconds", "int"),
+    FieldMetadata::new(
+        "land.projects.{project}.publish_unknown_warn_seconds",
+        "int",
+    ),
     FieldMetadata::new("land.tiers.{tier}.publish_settle_seconds", "int"),
+    FieldMetadata::new("land.tiers.{tier}.publish_unknown_warn_seconds", "int"),
     FieldMetadata::enumeration("land.projects.{project}.gate.kind", &["checks", "commands"]),
     FieldMetadata::enumeration("land.tiers.{tier}.gate.kind", &["checks", "commands"]),
     FieldMetadata::new("land.projects.{project}.gate.checks", "array"),
@@ -761,6 +772,17 @@ mod tests {
         assert_eq!(
             (idle.kind, idle.min, idle.max, &idle.default),
             ("int", Some(1), Some(3650), &json!(7))
+        );
+        let graph_retention = field("gc.graph_checkpoint_days");
+        assert_eq!(graph_retention.source, provenant_config::Layer::Default);
+        assert_eq!(
+            (
+                graph_retention.kind,
+                graph_retention.min,
+                graph_retention.max,
+                &graph_retention.default
+            ),
+            ("int", Some(1), Some(3650), &json!(90))
         );
         assert!(
             schema.fields.iter().any(

@@ -10,6 +10,7 @@ memory_pressure_threshold = "critical"
 # lanes' `cargo` commands that compile wait for a slot; direct `~/.cargo/bin/cargo`, rustc and non-cargo builds are not gated.
 max_concurrent_builds = -1 # host-wide builds at once, 1-64; automatic: max(1, min(cores / cargo_build_jobs, GiB of RAM / 6))
 build_wait_minutes = -1 # minutes a build waits for a slot or Cargo lock before giving up, 1-1440; automatic: 30
+setup_lock_wait_seconds = -1 # seconds a writer waits for the repository Git setup lock, 1-14400; automatic: 14400
 max_writer_lanes = -1 # writer lanes live at once across the host, 1-64; automatic: 40
 lane_port_base = -1 # first port of the range split into per-writer-lane blocks, 1024-65535; automatic: 30000
 lane_port_block = -1 # ports in each writer lane's block, 1-1024; automatic: 16
@@ -66,6 +67,7 @@ continuations = 2
 nodes = 512
 edges = 4096
 routes_per_node = 16
+review_substitutions = 1 # 0 disables review member substitutions
 node_prompt_bytes = 262144
 graph_prompt_bytes = 4194304
 expansion_depth = 64

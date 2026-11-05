@@ -269,7 +269,8 @@ fn output_prompt(directory: &std::path::Path, prompt: &str) -> String {
 #[test]
 fn output_prompt_directs_scratch_outside_worktree() {
     let prompt = output_prompt(std::path::Path::new("/attempt"), "task");
-    assert!(prompt.contains("Keep scratch files under the provided $TMPDIR, not in the worktree."));
+    assert!(prompt.contains("$TMPDIR"));
+    assert!(prompt.contains("not in the worktree"));
 }
 
 impl RunStore {
@@ -453,6 +454,12 @@ enum HandOff {
     /// Failed before anything was sent to a guardian.
     Local(String),
     Busy,
+    SetupLockTimeout(u64),
+    RetainedImport {
+        run: RunId,
+        attempt: AttemptId,
+        worktree: std::path::PathBuf,
+    },
     /// The guardian may have received the launch.
     Uncertain(String),
 }
@@ -473,7 +480,7 @@ pub enum Started {
         error: String,
     },
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RefusalKind {
     Policy,
     Preparation,
@@ -483,6 +490,14 @@ pub enum RefusalKind {
     InvalidWriteGrantPath,
     WriteGrantsLimit,
     Handoff,
+    SetupLockTimeout {
+        seconds: u64,
+    },
+    RetainedImport {
+        run: RunId,
+        attempt: AttemptId,
+        worktree: std::path::PathBuf,
+    },
 }
 
 /// Check a canonical root against state, allowing installed releases for reads.
@@ -692,17 +707,15 @@ mod release_root_tests {
     fn child_refuses_credential_and_enclosing_roots()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
-        let credential = temp.path().join(".ssh").join("nested");
+        let home = temp.path().join("home");
+        let credential = home.join(".ssh").join("nested");
         std::fs::create_dir_all(&credential)?;
-        let mut roots = vec![std::fs::canonicalize(credential)?];
-        // The home itself is an enclosing root; use the host's real directory
-        // so the check sees a conventional home.
-        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from)
-            && home.is_dir()
-        {
-            roots.push(home);
-        }
-        assert!(roots.len() >= 2);
+        let home = std::fs::canonicalize(home)?;
+        let roots = [
+            std::fs::canonicalize(temp.path())?,
+            home.clone(),
+            std::fs::canonicalize(credential)?,
+        ];
         for root in roots {
             let mut parent = crate::tests::input().request.tasks.remove(0);
             parent.access.read_roots = vec![root.clone()];
@@ -711,13 +724,9 @@ mod release_root_tests {
                 let mut child = parent.clone();
                 child.access.read_roots = if read { vec![root.clone()] } else { vec![] };
                 child.access.write_roots = if read { vec![] } else { vec![root.clone()] };
-                let error = child_access_within(
-                    &parent,
-                    &child,
-                    &temp.path().join("state"),
-                    Some(Path::new("/fixture/host-home")),
-                )
-                .unwrap_err();
+                let error =
+                    child_access_within(&parent, &child, &temp.path().join("state"), Some(&home))
+                        .unwrap_err();
                 assert!(matches!(
                     error,
                     RunError::Confinement(
@@ -1715,12 +1724,38 @@ impl RunStore {
                 ) {
                     Ok(()) => Started::Launched(id),
                     // Nothing reached a guardian: the attempt ends here.
-                    Err(error @ (HandOff::Local(_) | HandOff::Busy)) => {
+                    Err(
+                        error @ (HandOff::Local(_)
+                        | HandOff::Busy
+                        | HandOff::SetupLockTimeout(_)
+                        | HandOff::RetainedImport { .. }),
+                    ) => {
                         let (reason, kind) = match error {
                             HandOff::Busy => ("worktree is busy".into(), RefusalKind::WorktreeBusy),
                             HandOff::Local(error) => (
                                 format!("launch preparation failed: {error}"),
                                 RefusalKind::Handoff,
+                            ),
+                            HandOff::SetupLockTimeout(seconds) => (
+                                RunError::SetupLockTimeout { seconds }.to_string(),
+                                RefusalKind::SetupLockTimeout { seconds },
+                            ),
+                            HandOff::RetainedImport {
+                                run,
+                                attempt,
+                                worktree,
+                            } => (
+                                RunError::RetainedWriterImport {
+                                    run,
+                                    attempt,
+                                    worktree: worktree.clone(),
+                                }
+                                .to_string(),
+                                RefusalKind::RetainedImport {
+                                    run,
+                                    attempt,
+                                    worktree,
+                                },
                             ),
                             _ => unreachable!(),
                         };

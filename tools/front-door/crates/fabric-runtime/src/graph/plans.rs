@@ -411,13 +411,12 @@ pub(super) fn expand(
     Ok(expanded)
 }
 
-/// Older journals omitted computed topology from flattened expansion nodes.
-/// Derive it from the submitted catalogue or deterministic fallback, restoring
-/// absent fields and checking persisted fields independently of progress rows.
-pub(super) fn restore_legacy_topology(
+/// Check persisted topology against the approved catalogue or fallback,
+/// independently of progress rows.
+pub(super) fn validate_persisted_topology(
     document: &GraphDocument,
     extensions: &[String],
-    expansions: &mut [Expansion],
+    expansions: &[Expansion],
     limits: &crate::config::GraphLimits,
 ) -> Result<(), (String, &'static str)> {
     let mut expanded = loops::expand(document, extensions, limits).map_err(|_| {
@@ -434,34 +433,27 @@ pub(super) fn restore_legacy_topology(
             .iter()
             .any(|node| node.id == addition.source && node.review.is_some())
         {
-            for node in &mut addition.nodes {
-                node.topology_present.0 = [true; 2];
-            }
             append(&mut expanded, addition);
             continue;
         }
         let expected = derive_topology(document, &expanded, addition)?;
-        for (node, (members, edges)) in addition.nodes.iter_mut().zip(expected) {
-            for (present, stored, expected, invariant) in [
+        for (node, (members, edges)) in addition.nodes.iter().zip(expected) {
+            for (stored, expected, invariant) in [
                 (
-                    node.topology_present.0[0],
-                    &mut node.composite_members,
+                    &node.composite_members,
                     members,
                     "persisted composite_members must match the approved topology",
                 ),
                 (
-                    node.topology_present.0[1],
-                    &mut node.after_expansion,
+                    &node.after_expansion,
                     edges,
                     "persisted after_expansion must match the approved topology",
                 ),
             ] {
-                if (present || !stored.is_empty()) && *stored != expected {
+                if *stored != expected {
                     return Err((node.id.clone(), invariant));
                 }
-                *stored = expected;
             }
-            node.topology_present.0 = [true; 2];
         }
         append(&mut expanded, addition);
     }

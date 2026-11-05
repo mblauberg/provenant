@@ -329,15 +329,16 @@ fn node_bound(
             reason: Some(String::new()),
             on_fail: node.on_fail.clone(),
         }),
-        separation: (node.distinct_from.is_some() || node.family_group.is_some()).then(|| {
-            FamilySeparation {
-                extra: Default::default(),
-                strength: FamilyStrength::Require,
-                excluded: Vec::new(),
-                preferred: Vec::new(),
-                applied: Some(String::new()),
-                outcome: SeparationOutcome::Unconstrained,
-            }
+        separation: (node.distinct_from.is_some()
+            || node.family_group.is_some()
+            || review_member(node))
+        .then(|| FamilySeparation {
+            extra: Default::default(),
+            strength: FamilyStrength::Require,
+            excluded: Vec::new(),
+            preferred: Vec::new(),
+            applied: Some(String::new()),
+            outcome: SeparationOutcome::Unconstrained,
         }),
         ci: ci.then(|| CiEvidence {
             wake_at: Some(latest()),
@@ -454,7 +455,7 @@ fn node_bound(
     if gate {
         bytes += OUTPUT_FIELD_BYTES; // gate reason
     }
-    if node.distinct_from.is_some() || node.family_group.is_some() {
+    if node.distinct_from.is_some() || node.family_group.is_some() || review_member(node) {
         // Excluded and preferred families and the applied family
         bytes += (2 * SEPARATION_FAMILIES + 1) * (FAMILY_BYTES + 3) + 16;
     }
@@ -500,10 +501,19 @@ fn node_bound(
             }
             + 2 * OUTPUT_FIELD_BYTES
             + MAX_WARNINGS * (WARNING_BYTES + 3);
+        // A lens attaches its validated role name to every finding after parsing.
+        if node
+            .role
+            .as_deref()
+            .is_some_and(|role| role.starts_with("lens."))
+        {
+            bytes += MAX_FINDINGS * (64 + 12);
+        }
     }
     for route in &node.routes {
         let attempt = GraphAttempt {
             extra: Default::default(),
+            review_substitution: true,
             launched: false,
             key: AttemptKey {
                 extra: Default::default(),
@@ -529,6 +539,27 @@ fn node_bound(
             }),
         };
         bytes += canonical_len(&attempt) + 2 * HOST_ID_BYTES + NOTE_BYTES + 1;
+        // A resolved panel can also record this route as a substitution.
+        if node.access == AccessMode::ReadOnly
+            && node.role.as_deref().is_some_and(|role| {
+                role == "lens" || role.starts_with("lens.") || role == "review.verify"
+            })
+        {
+            let copies = if node.role.as_deref() == Some("review.verify") {
+                plan.nodes
+                    .iter()
+                    .filter(|other| {
+                        other.review.is_some()
+                            && other.id.rsplit_once("--").map(|(scope, _)| scope)
+                                == node.id.rsplit_once("--").map(|(scope, _)| scope)
+                    })
+                    .count()
+                    .max(1)
+            } else {
+                1
+            };
+            bytes += copies.saturating_mul(node.id.len() + 64);
+        }
     }
     bytes
 }
