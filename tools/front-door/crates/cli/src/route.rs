@@ -1044,36 +1044,46 @@ fn with_context<T>(
     domains
         .quota
         .apply_calibration(&mut quota_records, timestamp.as_second());
-    // Only an account-scoped login probe supersedes older auth evidence.
-    let authenticated_at = |adapter: &str, key: &str, now: i64| {
-        if !revalidated_auth || !matches!(adapter, "claude" | "codex" | "agy" | "cursor") {
+    // A verified login can replace older auth evidence. For OpenCode, a fresh
+    // executable observation leaves login unverified; release stale sign-out
+    // or expiry for this launch, but never an identity mismatch.
+    let login_evidence = |adapter: &str, key: &str, now: i64| {
+        if !revalidated_auth {
             return None;
         }
         availability
             .iter()
             .filter(|record| {
                 record.adapter == adapter
-                    && (adapter == "claude"
-                        || record.fixture_ref == format!("installed/{adapter}/login-status"))
                     && record.account_key.as_deref() == Some(key)
                     && record.observed_unix_seconds <= now
                     && record.expires_unix_seconds > now
             })
-            .map(|record| record.observed_unix_seconds)
-            .max()
+            .filter_map(|record| {
+                let at = record.observed_unix_seconds;
+                if adapter == "claude"
+                    || (matches!(adapter, "codex" | "agy" | "cursor")
+                        && record.fixture_ref == format!("installed/{adapter}/login-status"))
+                {
+                    Some(crate::quota::LoginEvidence::Verified(at))
+                } else if adapter == "opencode"
+                    && record.fixture_ref == "installed/opencode/login-unverified"
+                {
+                    Some(crate::quota::LoginEvidence::Unverified(at))
+                } else {
+                    None
+                }
+            })
+            .max_by_key(|probe| probe.observed_at())
     };
     for record in &mut quota_records {
+        let probe = login_evidence(
+            &record.account.adapter,
+            &record.account.account_key,
+            timestamp.as_second(),
+        );
         if record.last_error == Some(provenant_quota::ProbeFailure::AccountMismatch)
-            && authenticated_at(
-                &record.account.adapter,
-                &record.account.account_key,
-                timestamp.as_second(),
-            )
-            .is_some_and(|at| {
-                record
-                    .last_attempt_unix_seconds
-                    .is_none_or(|attempt| at >= attempt)
-            })
+            && matches!(probe, Some(crate::quota::LoginEvidence::Verified(at)) if record.last_attempt_unix_seconds.is_none_or(|attempt| at >= attempt))
         {
             record.last_error = None;
         }
@@ -1091,12 +1101,12 @@ fn with_context<T>(
         .collect();
     let now = WallTime::from_micros(timestamp.as_microsecond())?;
     let state = roots.state.as_path();
-    let readiness = |scope: &provenant_quota::ReadinessScope, now: i64| match authenticated_at(
+    let readiness = |scope: &provenant_quota::ReadinessScope, now: i64| match login_evidence(
         &scope.adapter,
         &scope.account_key,
         now,
     ) {
-        Some(at) => crate::quota::read_readiness_after_probe(state, scope, now, Some(at)),
+        Some(reprobe) => crate::quota::read_readiness_after_probe(state, scope, now, Some(reprobe)),
         None => crate::quota::read_readiness(state, scope, now),
     };
     action(
@@ -2947,6 +2957,169 @@ mod route_tests {
         assert!(matches!(
             after.readiness,
             provenant_records::RouteReadiness::Ready { .. }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn opencode_unverified_login_allows_selected_account_to_try()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_quota::{
+            AccountRecord, AccountScope, LOCAL_HOST, ReadinessFile, ReadinessReason,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        let mut inputs =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let dir = roots.state.as_path().join("readiness/go");
+        std::fs::create_dir_all(&dir)?;
+        for path in [
+            roots.state.as_path(),
+            roots.state.as_path().join("readiness").as_path(),
+            dir.as_path(),
+        ] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let now = provenant_core::Clock::unix_seconds(&provenant_os::clock::SystemClock::new());
+        let account = AccountRecord::empty(AccountScope {
+            adapter: "opencode".into(),
+            account_key: "go".into(),
+            label: "go".into(),
+        });
+        let mut file = ReadinessFile::default();
+        file.sync_probe_result(
+            &account,
+            LOCAL_HOST,
+            now - 10,
+            300,
+            Some(ReadinessReason::SignedOut),
+        )?;
+        let path = dir.join("opencode.json");
+        std::fs::write(&path, serde_json::to_vec(&file)?)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let catalogue = super::Catalogue::bundled()?;
+        let mut available = provenant_providers::AvailabilityRecord {
+            schema_version: 1,
+            adapter: "opencode".into(),
+            executable: "/fixture/opencode".into(),
+            version: "fixture".into(),
+            last_update: None,
+            fixture_ref: "installed/opencode/version".into(),
+            catalogue_revision: catalogue.revision().into(),
+            account_key: Some("go".into()),
+            observed_models: Vec::new(),
+            observed_unix_seconds: now,
+            expires_unix_seconds: now + 300,
+        };
+        let request = super::RouteRequest {
+            read_heavy: false,
+            model: Some(super::Model(
+                "opencode/opencode-go/deepseek-v4.1-flash".into(),
+            )),
+            route: None,
+            effort: None,
+            confidential: false,
+            fallback: vec![],
+            exclude: vec![],
+        }
+        .to_domain()?;
+        let access = [provenant_routing::AccessContext {
+            adapter: "opencode",
+            disclosure_ref: "fixture",
+            confinement_ref: "fixture",
+        }];
+        let resolve = |record: &provenant_providers::AvailabilityRecord| {
+            super::resolve_dispatch(
+                &request,
+                &roots,
+                Some("go"),
+                ("fixture", 0),
+                std::slice::from_ref(record),
+                &access,
+                "fixture",
+                None,
+                &[],
+            )
+        };
+        assert!(matches!(
+            resolve(&available)?.readiness,
+            provenant_records::RouteReadiness::Unavailable {
+                reason: provenant_records::RouteExclusionReason::AuthRequired,
+                ..
+            }
+        ));
+        available.fixture_ref = "installed/opencode/login-unverified".into();
+        assert!(matches!(
+            resolve(&available)?.readiness,
+            provenant_records::RouteReadiness::Ready { .. }
+        ));
+        // The probe does not erase the recorded failure.
+        assert_eq!(
+            file.get(
+                &provenant_quota::ReadinessScope {
+                    host: LOCAL_HOST.into(),
+                    adapter: "opencode".into(),
+                    account_key: "go".into(),
+                    route: "opencode/opencode-go/deepseek-v4.1-flash".into()
+                },
+                now
+            )
+            .reason,
+            Some(ReadinessReason::SignedOut)
+        );
+        let zen_dir = roots.state.as_path().join("readiness/zen");
+        std::fs::create_dir_all(&zen_dir)?;
+        std::fs::set_permissions(&zen_dir, std::fs::Permissions::from_mode(0o700))?;
+        let zen = AccountRecord::empty(AccountScope {
+            adapter: "opencode".into(),
+            account_key: "zen".into(),
+            label: "zen".into(),
+        });
+        let mut zen_readiness = ReadinessFile::default();
+        zen_readiness.sync_probe_result(
+            &zen,
+            LOCAL_HOST,
+            now - 10,
+            300,
+            Some(ReadinessReason::SignedOut),
+        )?;
+        let zen_path = zen_dir.join("opencode.json");
+        std::fs::write(&zen_path, serde_json::to_vec(&zen_readiness)?)?;
+        std::fs::set_permissions(&zen_path, std::fs::Permissions::from_mode(0o600))?;
+        let mut zen_available = available.clone();
+        zen_available.account_key = Some("zen".into());
+        zen_available.fixture_ref = "installed/opencode/version".into();
+        let zen_request = super::RouteRequest {
+            read_heavy: false,
+            model: Some(super::Model(
+                "opencode/opencode/deepseek-v4.1-flash-free".into(),
+            )),
+            route: None,
+            effort: None,
+            confidential: false,
+            fallback: vec![],
+            exclude: vec![],
+        }
+        .to_domain()?;
+        let zen_result = super::resolve_dispatch(
+            &zen_request,
+            &roots,
+            Some("zen"),
+            ("fixture", 0),
+            &[available.clone(), zen_available],
+            &access,
+            "fixture",
+            None,
+            &[],
+        )?;
+        assert!(matches!(
+            zen_result.readiness,
+            provenant_records::RouteReadiness::Unavailable {
+                reason: provenant_records::RouteExclusionReason::AuthRequired,
+                ..
+            }
         ));
         Ok(())
     }

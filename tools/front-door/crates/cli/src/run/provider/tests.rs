@@ -1230,6 +1230,200 @@ fn init_fixture_repository(
 }
 
 #[test]
+fn opencode_stale_auth_prepares_with_an_unverified_warning()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{AttemptId, CancelToken, Clock, Digest, OperationId, RunId, TaskId};
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    use std::{
+        os::unix::fs::{DirBuilderExt, PermissionsExt},
+        time::Duration,
+    };
+    const CHILD: &str = "PROVENANT_TEST_OPENCODE_AUTH_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let argv = [
+            std::env::current_exe()?.into_os_string(),
+            "--exact".into(),
+            "run::provider::tests::opencode_stale_auth_prepares_with_an_unverified_warning".into(),
+            "--nocapture".into(),
+        ];
+        let mut env: Vec<_> = std::env::vars_os()
+            .filter(|(key, _)| {
+                !matches!(
+                    key.to_str(),
+                    Some(
+                        "XDG_CONFIG_HOME"
+                            | "XDG_DATA_HOME"
+                            | "XDG_CACHE_HOME"
+                            | "XDG_STATE_HOME"
+                            | "OPENCODE_DB"
+                            | "OPENCODE_CONFIG"
+                            | "OPENCODE_CONFIG_DIR"
+                            | "OPENCODE_CONFIG_CONTENT"
+                    )
+                ) && key != provenant_core::RUN_STATE_DIRECTORY_ENV
+                    && key != CHILD
+            })
+            .collect();
+        env.push((CHILD.into(), "1".into()));
+        let cwd = std::env::current_dir()?;
+        let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(60));
+        options.env = Some(&env);
+        options.stdout = StreamPolicy::Capture { limit: 65536 };
+        options.stderr = StreamPolicy::Capture { limit: 65536 };
+        let out = SystemExecutor::new(1)?.execute(options)?;
+        assert_eq!(out.termination, Termination::Exit(0), "{out:?}");
+        assert!(!out.timed_out, "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr.bytes)
+                .contains("OpenCode login status is unverified")
+        );
+        return Ok(());
+    }
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let home = base.join("home");
+    let state = base.join("state");
+    let project = base.join("repo");
+    let assets = base.join("release");
+    let git_home = base.join("git-home");
+    for path in [&home, &state, &project, &assets, &git_home] {
+        std::fs::DirBuilder::new().mode(0o700).create(path)?;
+    }
+    let executor = SystemExecutor::new(1)?;
+    let git = init_fixture_repository(&executor, &project, &git_home)?;
+    let roots = provenant_core::RootInputs {
+        state_dir: Some(state.clone()),
+        ..provenant_core::RootInputs::new(home.clone(), project.clone())
+    }
+    .resolve(&provenant_os::fs::SystemPathResolver)?;
+    let utility = provenant_confinement::UtilityRuntime::new(&git, &git_home)?;
+    let cancel = CancelToken::new();
+    let repo = utility.open_repo(
+        &executor,
+        &project,
+        provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?,
+        &cancel,
+    )?;
+    let binding = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(repo.common_git_dir())?,
+    )?;
+    let executable = assets.join("opencode/bin/opencode");
+    std::fs::create_dir_all(executable.parent().ok_or("provider bin")?)?;
+    std::fs::write(&executable, b"#!/bin/sh\nprintf 'opencode 2.2.0\\n'\n")?;
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+    let now = provenant_os::clock::SystemClock::new().unix_seconds();
+    let account = provenant_quota::AccountRecord::empty(provenant_quota::AccountScope {
+        adapter: "opencode".into(),
+        account_key: "go".into(),
+        label: "go".into(),
+    });
+    let mut readiness = provenant_quota::ReadinessFile::default();
+    readiness.sync_probe_result(
+        &account,
+        provenant_quota::LOCAL_HOST,
+        now - 1,
+        300,
+        Some(provenant_quota::ReadinessReason::SignedOut),
+    )?;
+    let readiness_dir = state.join("readiness/go");
+    std::fs::create_dir_all(&readiness_dir)?;
+    for dir in [state.join("readiness"), readiness_dir.clone()] {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let readiness_path = readiness_dir.join("opencode.json");
+    std::fs::write(&readiness_path, serde_json::to_vec(&readiness)?)?;
+    std::fs::set_permissions(&readiness_path, std::fs::Permissions::from_mode(0o600))?;
+    let run_id = RunId::from_bytes([2; 16]);
+    let attempt_id = AttemptId::from_bytes([1; 16]);
+    let attempt = state.join(format!("runs/{run_id}/attempts/{attempt_id}"));
+    let paths = run::LaunchPaths {
+        attempt_id,
+        operation_id: OperationId::parse("opencode-auth-fixture")?,
+        task_index: 0,
+        lane_depth: 1,
+        run_id,
+        deadline_unix_ms: u64::MAX,
+        scratch: attempt.join("scratch"),
+        provider_state: attempt.join("provider-state"),
+        temporary: attempt.join("tmp"),
+        temporary_alias: None,
+    };
+    for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)?;
+    }
+    let prompt = "fake OpenCode login recovery";
+    let task = run::TaskRequest {
+        context: None,
+        extra: Default::default(),
+        build_heavy: false,
+        title: None,
+        base: None,
+        head: None,
+        base_ref: None,
+        task_id: TaskId::from_bytes([3; 16]),
+        profile: Default::default(),
+        prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
+        route: run::RequestedRoute::Model {
+            extra: Default::default(),
+            provider: "opencode".into(),
+            model: "opencode/opencode-go/deepseek-v4.1-flash".into(),
+            effort: None,
+        },
+        account: Some("go".into()),
+        fallback: vec![],
+        authority_digest: Digest::from_bytes([4; 32]),
+        writer: None,
+        deliver: None,
+        provider_timeout_seconds: 20,
+        delivery_id: None,
+        access: Default::default(),
+    };
+    let registry = Registry {
+        roots: Some(&roots),
+        home: Some(&home),
+        assets: Some(&assets),
+        cwd: Some(&project),
+        state_root: Some(&state),
+        project_id: Some(binding.project_id()),
+        host: None,
+        cancel: Some(&cancel),
+    };
+    let prepared = prepare_with(
+        &registry,
+        &task,
+        prompt,
+        &paths,
+        None,
+        |name| {
+            if name == "opencode" {
+                Ok(executable.clone())
+            } else {
+                Err("fixture provider unavailable".into())
+            }
+        },
+        None,
+    )?;
+    assert_eq!(prepared.route.provider.as_deref(), Some("opencode"));
+    assert_eq!(prepared.route.account_key.as_deref(), Some("go"));
+    // Readiness remains recorded; only the current launch treats it as unknown.
+    let scope = provenant_quota::ReadinessScope {
+        host: provenant_quota::LOCAL_HOST.into(),
+        adapter: "opencode".into(),
+        account_key: "go".into(),
+        route: "opencode/opencode-go/deepseek-v4.1-flash".into(),
+    };
+    assert_eq!(
+        crate::quota::read_readiness(&state, &scope, now).reason,
+        Some(provenant_quota::ReadinessReason::SignedOut)
+    );
+    Ok(())
+}
+
+#[test]
 fn writer_plan_stages_scratch_in_private_temporary_directory()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::{UtilityBudget, UtilityRuntime, worktrees};

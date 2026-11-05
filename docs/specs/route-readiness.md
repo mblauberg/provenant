@@ -30,10 +30,10 @@ most 64, and is written under the quota lock with the same private atomic
 replacement as the account JSON. Readers take no lock. No existing reader
 rejects an unknown top-level state directory: the disk report counts it as
 other state and the other state walkers visit only the directories they name.
-An absent file reads as unknown and schedules a probe. Reuse the quota probe
-interval, keeping a login failure current until its scheduled authentication
-retry when that is later. A changed agy fingerprint makes the old account unavailable and
-registers the new identity.
+An absent file reads as unknown and schedules a probe. Login-failure readiness
+expires at the quota probe interval; authentication backoff does not extend it.
+A changed agy fingerprint makes the old account unavailable and registers the
+new identity.
 
 Each account's readiness file also holds its latest non-secret login-expiry
 observation. It is scoped to that host and account and uses the configured quota
@@ -77,6 +77,13 @@ missing executable, signed out to `auth_required`, expired login to
 `login_expired`, account mismatch,
 exhausted and provider refusal to `provider_refused`; the rest project as
 unknown.
+
+Dispatch may supersede older authentication evidence in memory after a fresh
+account-scoped login probe. OpenCode has no isolated login-status probe: after
+its executable check, dispatch warns that login is unverified and lets the
+selected launch check it. This removes only older sign-out and expiry evidence
+for that launch; it does not erase the stored observation, an account mismatch
+or a provider refusal.
 
 Routing, route commands, dispatch, host diagnostics, peer responses and quota
 displays consume this record. Route previews do not perform host I/O unless

@@ -643,11 +643,25 @@ pub(crate) fn read_readiness(state: &Path, scope: &ReadinessScope, now: i64) -> 
     read_readiness_after_probe(state, scope, now, None)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LoginEvidence {
+    Verified(i64),
+    Unverified(i64),
+}
+
+impl LoginEvidence {
+    pub(crate) fn observed_at(self) -> i64 {
+        match self {
+            Self::Verified(at) | Self::Unverified(at) => at,
+        }
+    }
+}
+
 pub(crate) fn read_readiness_after_probe(
     state: &Path,
     scope: &ReadinessScope,
     now: i64,
-    healthy_at: Option<i64>,
+    reprobe: Option<LoginEvidence>,
 ) -> ReadinessRead {
     if !component(&scope.adapter) || !component(&scope.account_key) {
         return ReadinessRead::unknown(ReadinessReason::InvalidEvidence);
@@ -659,26 +673,24 @@ pub(crate) fn read_readiness_after_probe(
     });
     match read {
         Ok(Some(mut file)) => {
-            if let Some(healthy_at) = healthy_at {
+            if let Some(reprobe) = reprobe {
+                let observed_at = reprobe.observed_at();
                 file.records.retain(|record| {
                     !(record.scope.host == scope.host
                         && record.scope.adapter == scope.adapter
                         && record.scope.account_key == scope.account_key
-                        && record.observed_unix_seconds <= healthy_at
-                        && matches!(
+                        && record.observed_unix_seconds <= observed_at
+                        && (matches!(
                             record.reason,
-                            Some(
-                                ReadinessReason::SignedOut
-                                    | ReadinessReason::LoginExpired
-                                    | ReadinessReason::AccountMismatch
-                            )
-                        ))
+                            Some(ReadinessReason::SignedOut | ReadinessReason::LoginExpired)
+                        ) || (matches!(reprobe, LoginEvidence::Verified(_))
+                            && record.reason == Some(ReadinessReason::AccountMismatch))))
                 });
                 if file.login.as_ref().is_some_and(|login| {
                     login.scope.host == scope.host
                         && login.scope.adapter == scope.adapter
                         && login.scope.account_key == scope.account_key
-                        && login.observed_unix_seconds <= healthy_at
+                        && login.observed_unix_seconds <= observed_at
                 }) {
                     file.login = None;
                 }
@@ -3375,12 +3387,116 @@ mod tests {
             Some(ReadinessReason::SignedOut)
         );
         assert_eq!(
-            read_readiness_after_probe(state, &scope, 150, Some(120)).reason,
+            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Verified(120)))
+                .reason,
             Some(ReadinessReason::NotProbed)
         );
         assert_eq!(
-            read_readiness_after_probe(state, &scope, 150, Some(90)).reason,
+            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Verified(90)))
+                .reason,
             Some(ReadinessReason::SignedOut)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unverified_login_preserves_mismatch_refusal_and_newer_auth()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        let state = temp.path();
+        let dir = state.join("readiness/go");
+        std::fs::create_dir_all(&dir)?;
+        for path in [state, state.join("readiness").as_path(), dir.as_path()] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let scope = ReadinessScope {
+            host: LOCAL_HOST.into(),
+            adapter: "opencode".into(),
+            account_key: "go".into(),
+            route: "opencode/model".into(),
+        };
+        let account = AccountRecord::empty(provenant_quota::AccountScope {
+            adapter: "opencode".into(),
+            account_key: "go".into(),
+            label: "go".into(),
+        });
+        let path = dir.join("opencode.json");
+        let write = |file: &ReadinessFile| -> Result<(), Box<dyn std::error::Error>> {
+            std::fs::write(&path, serde_json::to_vec(file)?)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            Ok(())
+        };
+        let mut file = ReadinessFile::default();
+        file.sync_probe_result(
+            &account,
+            LOCAL_HOST,
+            100,
+            300,
+            Some(ReadinessReason::SignedOut),
+        )?;
+        write(&file)?;
+        assert_eq!(
+            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Unverified(120)))
+                .reason,
+            Some(ReadinessReason::NotProbed)
+        );
+        assert_eq!(
+            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Unverified(90)))
+                .reason,
+            Some(ReadinessReason::SignedOut)
+        );
+        file = ReadinessFile::default();
+        file.login = Some(provenant_quota::LoginObservation {
+            scope: ReadinessScope {
+                route: provenant_quota::ACCOUNT_ROUTE.into(),
+                ..scope.clone()
+            },
+            observed_unix_seconds: 100,
+            valid_until_unix_seconds: 400,
+            expires_unix_seconds: Some(120),
+        });
+        write(&file)?;
+        assert_eq!(
+            read_readiness(state, &scope, 150).reason,
+            Some(ReadinessReason::LoginExpired)
+        );
+        assert_eq!(
+            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Unverified(120)))
+                .reason,
+            Some(ReadinessReason::NotProbed)
+        );
+        assert_eq!(
+            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Unverified(90)))
+                .reason,
+            Some(ReadinessReason::LoginExpired)
+        );
+        file.login = None;
+        file.sync_probe_result(
+            &account,
+            LOCAL_HOST,
+            100,
+            300,
+            Some(ReadinessReason::AccountMismatch),
+        )?;
+        write(&file)?;
+        assert_eq!(
+            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Unverified(120)))
+                .reason,
+            Some(ReadinessReason::AccountMismatch)
+        );
+        file.sync_probe_result(
+            &account,
+            LOCAL_HOST,
+            100,
+            300,
+            Some(ReadinessReason::ProviderRefusal),
+        )?;
+        write(&file)?;
+        assert_eq!(
+            read_readiness_after_probe(state, &scope, 150, Some(LoginEvidence::Unverified(120)))
+                .reason,
+            Some(ReadinessReason::ProviderRefusal)
         );
         Ok(())
     }

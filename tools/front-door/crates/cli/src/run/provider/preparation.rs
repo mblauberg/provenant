@@ -691,7 +691,10 @@ pub(super) fn prepare_candidates(
                 observe_account(entry, &executable, &probe, catalogue.revision(), timestamp)
             }) {
             Ok(mut record) => {
-                if matches!(entry.adapter.as_str(), "codex" | "agy" | "cursor") {
+                if matches!(
+                    entry.adapter.as_str(),
+                    "codex" | "agy" | "cursor" | "opencode"
+                ) {
                     let scope = provenant_quota::ReadinessScope {
                         host: provenant_quota::LOCAL_HOST.into(),
                         adapter: entry.adapter.clone(),
@@ -714,25 +717,31 @@ pub(super) fn prepare_candidates(
                     });
                     if auth_failure {
                         let executable = Path::new(&record.executable);
-                        let healthy = if entry.adapter == "codex" {
-                            codex_login_is_healthy(entry, executable, &probe)
-                        } else if entry.adapter == "cursor" {
-                            cursor_login_is_healthy(entry, executable, &probe)
+                        if entry.adapter == "opencode" {
+                            // The version probe established executable availability,
+                            // not login health. Let the selected launch check auth.
+                            record.fixture_ref = "installed/opencode/login-unverified".into();
                         } else {
-                            provenant_providers::accounts::detect_for_registration(
-                                &executor,
-                                &entry.adapter,
-                                executable,
-                                &home,
-                                &user,
-                                &entry.directory,
-                                executor.root(),
-                            )
-                            .is_ok_and(|(key, _)| key == entry.key || entry.key == "local")
-                        };
-                        if healthy {
-                            record.fixture_ref =
-                                format!("installed/{}/login-status", entry.adapter);
+                            let healthy = if entry.adapter == "codex" {
+                                codex_login_is_healthy(entry, executable, &probe)
+                            } else if entry.adapter == "cursor" {
+                                cursor_login_is_healthy(entry, executable, &probe)
+                            } else {
+                                provenant_providers::accounts::detect_for_registration(
+                                    &executor,
+                                    &entry.adapter,
+                                    executable,
+                                    &home,
+                                    &user,
+                                    &entry.directory,
+                                    executor.root(),
+                                )
+                                .is_ok_and(|(key, _)| key == entry.key || entry.key == "local")
+                            };
+                            if healthy {
+                                record.fixture_ref =
+                                    format!("installed/{}/login-status", entry.adapter);
+                            }
                         }
                     }
                 }
@@ -1569,6 +1578,18 @@ pub(super) fn prepare_candidates(
                 format!("setup failed: {error}"),
             ));
             continue;
+        }
+        if route.adapter == "opencode"
+            && availability.iter().any(|record| {
+                record.adapter == route.adapter
+                    && record.account_key == route.account_key
+                    && record.fixture_ref == "installed/opencode/login-unverified"
+            })
+        {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: OpenCode login status is unverified; the selected launch will check authentication"
+            );
         }
         for warning in config.domains.routing.pool_effort_warnings(&catalogue) {
             let _ = writeln!(std::io::stderr().lock(), "{warning}");
