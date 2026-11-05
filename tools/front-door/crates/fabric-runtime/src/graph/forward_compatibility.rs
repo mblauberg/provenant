@@ -65,6 +65,27 @@ record_cases! {
 }
 
 #[test]
+fn source_binding_and_prompt_origin_preserve_unknown_fields() {
+    let binding = json!({
+        "worktree":"/fixture/source",
+        "head":"1".repeat(40),
+        "source_directory_identity":{"device":7,"inode":9},
+        "future_binding":{"owner":"later"}
+    });
+    preserves_digest::<WriterWorktreeBinding>(binding);
+
+    let mut attempt = stored()["checkpoint"]["nodes"][0]["attempts"][0].clone();
+    attempt["input_cap"] = json!(262144);
+    attempt["input_cap_source"] = json!("configured");
+    attempt["input_manifest"] = json!({
+        "schema_version":1,"source_commit":"1".repeat(40),
+        "review_base":null,"integration_base":null,"applied_route":null,
+        "inputs":[],"omitted":0,"future_manifest":{"revision":2}
+    });
+    preserves_digest::<GraphAttempt>(attempt);
+}
+
+#[test]
 fn normalised_plan_retains_document_and_node_extras() {
     let mut value = stored()["execution"]["document"].clone();
     value["future_document"] = json!({"token":u64::MAX});
