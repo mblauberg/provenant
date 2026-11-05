@@ -29,7 +29,7 @@ pub(super) fn reason(
     let bound = checkpoint_bound(document, expansions, extensions, plan);
     (bound > MAX_CHECKPOINT_BYTES as usize).then(|| {
         format!(
-            "graph checkpoint could reach {bound} bytes, over its {MAX_CHECKPOINT_BYTES}-byte limit; use fewer nodes, routes, loop rounds or extensions, or smaller prompts"
+            "graph checkpoint could reach {bound} bytes, over its {MAX_CHECKPOINT_BYTES}-byte limit; split the graph into smaller batches, or use fewer nodes, routes, loop rounds or extensions, or smaller prompts"
         )
     })
 }

@@ -614,10 +614,13 @@ Use read-only junior swarms for scouting and research. Give implementation
 lanes to seniors, and put long-horizon principal refactoring at batch end.
 Choose review depth from the risk and author tier.
 
-Review panels with an unpinned size expand after their subjects are committed.
-The current admission estimate does not include all of that expansion, so a
-graph that explains successfully can still exceed the checkpoint limit. Setting
-the top-level `size` or `review_shape` fixes the council and repair panels,
+The checkpoint estimate reserves space for each node’s bounded outputs and,
+for disposition nodes, copies of upstream findings. Those reservations can be
+much larger than the text actually stored. Review panels with an unpinned size
+expand after their subjects are committed. The current admission estimate does
+not include all of that expansion, so a graph that explains successfully can
+still exceed the checkpoint limit. Setting the top-level `size` or `review_shape`
+fixes the council and repair panels,
 but does not fix the lane panels. Split a large batch into smaller graphs to
 reduce its checkpoint footprint.
 

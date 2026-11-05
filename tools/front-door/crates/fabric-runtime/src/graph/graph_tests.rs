@@ -724,8 +724,14 @@ fn deferred_review_journals_and_replays_without_resolving_again() {
         .and_then(|(size, _)| size.parse::<u64>().ok())
         .expect("the error names the projected checkpoint size");
     assert!(projected > MAX_CHECKPOINT_BYTES, "{error}");
-    assert!(error.contains("16777216-byte limit"), "{error}");
-    assert!(error.contains("use fewer nodes"), "{error}");
+    assert!(
+        error.contains(&format!("{MAX_CHECKPOINT_BYTES}-byte limit")),
+        "{error}"
+    );
+    assert!(
+        error.contains("split the graph into smaller batches"),
+        "{error}"
+    );
 
     let mut too_long = addition.clone();
     let long_id = format!("outer--review--review--{}", "x".repeat(64));
