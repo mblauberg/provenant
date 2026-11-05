@@ -210,11 +210,8 @@ pub enum FacadeError {
     PeerProtocolMismatch {
         peer: String,
         remote: u64,
-        /// The requested protocol level. Frames from releases before the field
-        /// existed omit it, and those releases sent feature actions at fences
-        /// 7-10, so no level can be inferred.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        expected: Option<u64>,
+        /// The requested protocol level.
+        expected: u64,
     },
     #[error("run launch outcome is unknown for operation {operation_id}")]
     LaunchUnknown { operation_id: OperationId },
@@ -668,7 +665,7 @@ impl From<&crate::hosts::PeerError> for FacadeError {
             } => Self::PeerProtocolMismatch {
                 peer: peer.clone(),
                 remote: *remote,
-                expected: Some(*expected),
+                expected: *expected,
             },
             PeerError::Project | PeerError::SourceHost | PeerError::RequestTooLarge => {
                 Self::invalid(error.to_string())
@@ -778,25 +775,6 @@ mod diagnostic_tests {
     use super::FacadeError;
 
     #[test]
-    fn legacy_mismatch_frame_omits_the_expected_level() {
-        let error: FacadeError = serde_json::from_value(serde_json::json!({
-            "code": "peer_protocol_mismatch",
-            "peer": "w",
-            "remote": 1,
-        }))
-        .unwrap();
-        assert_eq!(
-            error,
-            FacadeError::PeerProtocolMismatch {
-                peer: "w".into(),
-                remote: 1,
-                expected: None,
-            }
-        );
-        assert_eq!(error.to_string(), "peer w speaks protocol 1; upgrade both");
-    }
-
-    #[test]
     fn future_schema_requires_upgrade_with_version_diagnostics() {
         use provenant_fabric_store::Error;
         let errors = [
@@ -821,24 +799,41 @@ mod diagnostic_tests {
     }
 
     #[test]
-    fn resume_preserves_no_fallback_and_defaults_for_older_senders()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let mut input = serde_json::json!({
+    fn legacy_mismatch_frame_without_level_is_rejected() {
+        let result = serde_json::from_value::<FacadeError>(serde_json::json!({
+            "code": "peer_protocol_mismatch", "peer": "w", "remote": 1
+        }));
+        assert_eq!(
+            result.unwrap_err().classify(),
+            serde_json::error::Category::Data
+        );
+        let current = FacadeError::PeerProtocolMismatch {
+            peer: "w".into(),
+            remote: 1,
+            expected: 2,
+        };
+        assert_eq!(current.code(), "peer_version");
+    }
+
+    #[test]
+    fn resume_preserves_no_fallback_and_target() -> Result<(), Box<dyn std::error::Error>> {
+        let input = serde_json::json!({
             "op": "resume",
             "target": { "attempt": "00000000000000000000000000000001" },
             "operation_id": "resume-fixture",
             "prompt": "Continue",
-            "expected_generation": 0
+            "expected_generation": 0,
+            "no_fallback": true
         });
-        let legacy: super::RunInput = serde_json::from_value(input.clone())?;
+        let mut legacy = input.clone();
+        legacy.as_object_mut().unwrap().remove("no_fallback");
         assert!(matches!(
-            legacy,
+            serde_json::from_value::<super::RunInput>(legacy)?,
             super::RunInput::Resume {
                 no_fallback: false,
                 ..
             }
         ));
-        input["no_fallback"] = true.into();
         let explicit: super::RunInput = serde_json::from_value(input)?;
         assert!(matches!(
             explicit,
@@ -847,7 +842,12 @@ mod diagnostic_tests {
                 ..
             }
         ));
-        assert_eq!(serde_json::to_value(explicit)?["no_fallback"], true);
+        let wire = serde_json::to_value(explicit)?;
+        assert_eq!(wire["no_fallback"], true);
+        assert_eq!(
+            wire["target"]["attempt"],
+            "00000000000000000000000000000001"
+        );
         Ok(())
     }
 

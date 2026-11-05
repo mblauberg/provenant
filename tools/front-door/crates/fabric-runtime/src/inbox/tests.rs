@@ -1054,46 +1054,6 @@ fn request_correlation_lookup_never_holds_fabric_write_lock() {
 }
 
 #[test]
-fn request_correlation_legacy_records_keep_v1_wire_shape_and_answer() {
-    let f = Fixture::new();
-    let saved = receipt(f.call(ask(RequestKind::Decision, "legacy")).unwrap());
-    let InboxResult::Item { item, .. } = f.call(show(saved.request_id)).unwrap() else {
-        panic!("item")
-    };
-    let mut old = serde_json::to_value(&item.request).unwrap();
-    old.as_object_mut().unwrap().remove("work_coverage");
-    old["request"].as_object_mut().unwrap().remove("work");
-    let bytes = serde_json::to_vec(&old).unwrap();
-    let db = rusqlite::Connection::open(f.root.as_path().join("fabric/fabric.sqlite3")).unwrap();
-    for table in ["human_requests", "human_request_history"] {
-        db.execute(&format!("UPDATE {table} SET record=?1"), [&bytes])
-            .unwrap();
-    }
-    let InboxResult::Item { item, .. } = f.call(show(saved.request_id)).unwrap() else {
-        panic!("item")
-    };
-    assert_eq!(serde_json::to_value(&item.request).unwrap(), old);
-    let listed = f
-        .call(serde_json::from_value(serde_json::json!({"op":"list"})).unwrap())
-        .unwrap();
-    let InboxResult::Listed { items, .. } = listed else {
-        panic!("list")
-    };
-    assert_eq!(items, vec![item.request]);
-    f.call(answer(saved.request_id, "legacy-answer")).unwrap();
-    let InboxResult::Item { item, .. } = f.call(show(saved.request_id)).unwrap() else {
-        panic!("item")
-    };
-    assert_eq!(item.request.schema_version, 1);
-    assert!(
-        serde_json::to_value(&item.request)
-            .unwrap()
-            .get("work_coverage")
-            .is_none()
-    );
-}
-
-#[test]
 fn request_correlation_repository_bound_counts_encoded_wire_bytes() {
     use std::os::unix::ffi::OsStringExt;
     for (size, valid) in [(2048, true), (2049, false)] {
