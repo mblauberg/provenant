@@ -592,12 +592,49 @@ pub struct LaunchConfinement {
     /// Host state root containing target seed generations.
     pub state_root: PathBuf,
 }
-fn launch_resource_limits(state: &Path) -> ProfileLimits {
-    match provenant_confinement::run_config::RunConfig::read(state) {
-        Ok(config) => ProfileLimits {
-            grant_limit: config.grant_limit,
-            profile_limit_bytes: config.profile_limit_bytes,
-        },
+struct ResolvedLaunchLimits {
+    limits: ProfileLimits,
+    grant_origin: &'static str,
+    profile_origin: &'static str,
+}
+
+impl ResolvedLaunchLimits {
+    fn annotate(
+        &self,
+        error: provenant_confinement::permissions::PermissionError,
+    ) -> provenant_confinement::permissions::PermissionError {
+        use provenant_confinement::permissions::PermissionError;
+        let origin = match &error {
+            PermissionError::GrantLimitExceeded { .. } => self.grant_origin,
+            PermissionError::ProfileTooLarge { .. } => self.profile_origin,
+            _ => return error,
+        };
+        PermissionError::ConfigOrigin {
+            source: Box::new(error),
+            origin,
+        }
+    }
+}
+
+fn launch_resource_limits(state: &Path) -> ResolvedLaunchLimits {
+    match provenant_confinement::run_config::RunConfig::read_with_keys(state) {
+        Ok((config, keys)) => {
+            let origin = |key: &str| {
+                if keys.contains(key) {
+                    "host configuration"
+                } else {
+                    "compiled default"
+                }
+            };
+            ResolvedLaunchLimits {
+                limits: ProfileLimits {
+                    grant_limit: config.grant_limit,
+                    profile_limit_bytes: config.profile_limit_bytes,
+                },
+                grant_origin: origin("grant_limit"),
+                profile_origin: origin("profile_limit_bytes"),
+            }
+        }
         Err(error) => {
             let defaults = ProfileLimits::default();
             let _ = writeln!(
@@ -606,7 +643,11 @@ fn launch_resource_limits(state: &Path) -> ProfileLimits {
                 defaults.grant_limit,
                 defaults.profile_limit_bytes
             );
-            defaults
+            ResolvedLaunchLimits {
+                limits: defaults,
+                grant_origin: "compiled default",
+                profile_origin: "compiled default",
+            }
         }
     }
 }
@@ -664,7 +705,7 @@ impl LaunchConfinement {
                 #[cfg(target_os = "macos")]
                 env: &[],
             },
-            limits,
+            limits.limits,
         )
         .map_err(RunError::Confinement)?;
         let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
@@ -765,7 +806,7 @@ impl LaunchConfinement {
         };
         self.plan
             .compile(backend.as_ref(), &self.profile, &anchors)
-            .map_err(RunError::Confinement)?
+            .map_err(|error| RunError::Confinement(limits.annotate(error)))?
             .command(argv, attempt)
             .map_err(RunError::Confinement)
     }
@@ -2825,15 +2866,57 @@ mod launch_resource_limit_tests {
         )?;
         let limits = launch_resource_limits(state.path());
         let defaults = ProfileLimits::default();
-        assert_eq!(limits.grant_limit, defaults.grant_limit);
-        assert_eq!(limits.profile_limit_bytes, defaults.profile_limit_bytes);
+        assert_eq!(limits.limits.grant_limit, defaults.grant_limit);
+        assert_eq!(limits.grant_origin, "compiled default");
+        assert_eq!(
+            limits.limits.profile_limit_bytes,
+            defaults.profile_limit_bytes
+        );
+        assert_eq!(limits.profile_origin, "compiled default");
+        let default_error = limits.annotate(
+            provenant_confinement::permissions::PermissionError::GrantLimitExceeded {
+                family: "fixture",
+                limit: 1,
+            },
+        );
+        assert!(
+            default_error
+                .to_string()
+                .contains("source: compiled default")
+        );
+        std::fs::write(
+            state.path().join("config.toml"),
+            "schema_version=1\n[domains.run]\ngrant_limit=128\n",
+        )?;
+        let explicit_default = launch_resource_limits(state.path());
+        assert_eq!(explicit_default.grant_origin, "host configuration");
+        assert_eq!(explicit_default.profile_origin, "compiled default");
         std::fs::write(
             state.path().join("config.toml"),
             "schema_version=1\n[domains.run]\ngrant_limit=256\nprofile_limit_bytes=1048576\n",
         )?;
         let configured = launch_resource_limits(state.path());
-        assert_eq!(configured.grant_limit, 256);
-        assert_eq!(configured.profile_limit_bytes, 1048576);
+        assert_eq!(configured.limits.grant_limit, 256);
+        assert_eq!(configured.grant_origin, "host configuration");
+        assert_eq!(configured.limits.profile_limit_bytes, 1048576);
+        assert_eq!(configured.profile_origin, "host configuration");
+        let configured_error = configured.annotate(
+            provenant_confinement::permissions::PermissionError::ProfileTooLarge {
+                bytes: 2,
+                limit: 1,
+            },
+        );
+        assert!(
+            configured_error
+                .to_string()
+                .contains("source: host configuration")
+        );
+        let unrelated = configured
+            .annotate(provenant_confinement::permissions::PermissionError::ProtectedOverlap);
+        assert!(matches!(
+            unrelated,
+            provenant_confinement::permissions::PermissionError::ProtectedOverlap
+        ));
         Ok(())
     }
 }

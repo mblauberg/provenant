@@ -139,11 +139,18 @@ impl RunConfig {
 
     /// Read `[domains.run]` from the state root's `config.toml`.
     pub fn read(state: &Path) -> std::io::Result<Self> {
-        let config: Self = provenant_config::read_domain(state, "run")?;
+        Self::read_with_keys(state).map(|(config, _)| config)
+    }
+
+    /// Read the settings and their explicit top-level keys from one snapshot.
+    pub fn read_with_keys(
+        state: &Path,
+    ) -> std::io::Result<(Self, std::collections::BTreeSet<String>)> {
+        let (config, keys): (Self, _) = provenant_config::read_domain_with_keys(state, "run")?;
         if let Some(error) = config.validate().into_iter().next() {
             return Err(std::io::Error::other(error));
         }
-        Ok(config)
+        Ok((config, keys))
     }
 
     /// The admission seconds that apply to `project`: its own setting when it

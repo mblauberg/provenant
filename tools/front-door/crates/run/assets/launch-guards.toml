@@ -28,13 +28,13 @@ reason = "Unreadable or invalid resource settings warn and use the compiled doma
 site = "confinement/src/permissions/validation.rs#validate_plan_grant_limit"
 boundary = "configurable_default"
 setting = "domains.run.grant_limit"
-reason = "Bounds plan grant counts; the refusal names the effective setting and limit."
+reason = "Bounds plan grant counts; the refusal names the effective setting, limit and host or compiled origin."
 
 [[guard]]
 site = "confinement/src/permissions/render.rs#render_with_limit"
 boundary = "configurable_default"
 setting = "domains.run.profile_limit_bytes"
-reason = "Bounds rendered sandbox profile size."
+reason = "Bounds rendered sandbox profile size; the refusal identifies the effective setting and its host or compiled origin."
 
 [[guard]]
 site = "providers/src/contract.rs#Prompt::check_argv"
@@ -376,7 +376,7 @@ reason = "Request digest and host-owned retry checks bind launch to the validate
 site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
 boundary = "configurable_default"
 setting = "domains.run.grant_limit"
-reason = "Profile family counts use the configured grant limit and name it in a refusal; authentication and native controls preserve historical minimum caps of 16 and 64."
+reason = "Profile family counts use the configured grant limit and name its origin in a refusal; authentication and native controls preserve historical minimum caps of 16 and 64."
 
 [[guard]]
 site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
