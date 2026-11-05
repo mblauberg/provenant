@@ -175,8 +175,6 @@ pub struct Targets {
     pub tick_agent: Option<Vec<u8>>,
     /// The systemd service unit the Linux timer activates; `None` on macOS.
     pub tick_service: Option<Vec<u8>>,
-    /// Exact recognised historical rendering, for migration from pre-receipt agents.
-    pub peer_agent_previous: Option<Vec<u8>>,
     pub hook_specs: Vec<HookRegistration>,
     /// Registered account directories, which `check install` expects to be
     /// recorded targets. Supplied only by the process edge.
@@ -252,7 +250,6 @@ impl Targets {
             peer_agent: None,
             tick_agent: None,
             tick_service: None,
-            peer_agent_previous: None,
             hook_specs: Vec::new(),
             accounts: Vec::new(),
             shared_settings: None,
@@ -985,20 +982,10 @@ pub fn plan_install(
                 if immutable && complete {
                     return Err(InstallError::Tampered(path.clone()));
                 }
-                let legacy_peer = want.selector == "peer-agent"
-                    && !snapshots.receipt.as_ref().is_some_and(|receipt| {
-                        receipt
-                            .entries
-                            .iter()
-                            .any(|entry| entry.selector == "peer-agent")
-                    })
-                    && matches!(&current.value, Value::File { bytes, mode: 0o600 | 0o644 }
-                        if targets.peer_agent_previous.as_ref() == Some(bytes));
                 if !immutable
                     && !was_owned
                     && !adopt_binary
                     && !adopt_shared
-                    && !legacy_peer
                     && want.selector != "config"
                 {
                     if want.selector == "peer-agent" {
@@ -2579,37 +2566,6 @@ pub fn uninstall(
     let (selected, registered) = uninstall_selection(&receipt, targets)?;
     if selected.is_empty() {
         return not_installed(&receipt_path, findings, reporter);
-    }
-    // Older installers wrote this fixed plist without recording it. The
-    // process edge recognises its exact historical rendering, never its label
-    // alone. Unknown bytes still become a preserved-and-reported finding.
-    let recorded_peer_agent = receipt
-        .entries
-        .iter()
-        .any(|entry| entry.selector == "peer-agent");
-    if selected == registered
-        && !recorded_peer_agent
-        && let Some(desired) = &targets.peer_agent
-        && let Some(path) = peer_agent_plist(state_root)
-    {
-        let current = snapshot(&path)?;
-        let mode = match current.as_ref().map(|snapshot| &snapshot.value) {
-            Some(Value::File { mode: 0o644, .. }) => 0o644,
-            _ => 0o600,
-        };
-        receipt.entries.push(OwnedEntry {
-            extra: Default::default(),
-            path: AbsolutePath::new(&path)?,
-            harness: None,
-            selector: "peer-agent".into(),
-            expected: owned(&Value::File {
-                bytes: targets
-                    .peer_agent_previous
-                    .clone()
-                    .unwrap_or_else(|| desired.clone()),
-                mode,
-            })?,
-        });
     }
     let mut owners = Vec::with_capacity(receipt.entries.len());
     for entry in &receipt.entries {

@@ -814,46 +814,6 @@ pub fn install_plist(
     Ok(render(program, state, &sanitised_path(bin, &executables)?)?.into_bytes())
 }
 
-fn historical_plist(bytes: &[u8], program: &Path, state: &Path) -> Option<Vec<u8>> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    let (_, value) = text.split_once("<key>PATH</key>\n    <string>")?;
-    let (path, _) = value.split_once("</string>")?;
-    let path = path
-        .replace("&gt;", ">")
-        .replace("&lt;", "<")
-        .replace("&amp;", "&");
-    (render(program, state, OsStr::new(&path)).ok()?.as_bytes() == bytes).then(|| bytes.to_vec())
-}
-
-/// Recognise only the historical template for the validated installed binary
-/// and this state root. Read through held no-follow directory capabilities.
-pub fn previous_plist(
-    program: &Path,
-    state: &Path,
-    home: &Path,
-) -> Result<Option<Vec<u8>>, AgentError> {
-    let path = plist(home);
-    let parent = path
-        .parent()
-        .ok_or_else(|| AgentError::Path(path.clone()))?;
-    let dir = match provenant_config::private_directory(parent, false) {
-        Ok(dir) => dir,
-        Err(provenant_config::InstallError::Fs(error)) if error.is_not_found() => return Ok(None),
-        Err(error) => return Err(io::Error::other(error).into()),
-    };
-    let file = match dir.open_read(OsStr::new("dev.provenant.peer.plist")) {
-        Ok(file) => file,
-        Err(error) if error.is_not_found() => return Ok(None),
-        Err(error) => return Err(io::Error::other(error).into()),
-    };
-    let mut bytes = Vec::new();
-    file.take(64 * 1024 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > 64 * 1024 {
-        return Ok(None);
-    }
-    Ok(historical_plist(&bytes, program, state))
-}
-
 /// The managed-file owner calls this for an exact plist match or a missing
 /// recorded plist, under its install lock. A missing service needs no bootout;
 /// a failure keeps the receipt for retry.
@@ -1138,69 +1098,6 @@ mod tests {
             read_bounded(&mut stream, Duration::ZERO),
             Err(AgentError::Io(error)) if error.kind() == io::ErrorKind::TimedOut
         ));
-    }
-
-    #[test]
-    fn historical_plist_recognises_current_release_golden_bytes() {
-        // A plist written by the released installer, with only HOME rewritten.
-        // Keep these bytes independent of render(), including the final newline.
-        let bytes = br#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>dev.provenant.peer</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/Users/example/.local/bin/provenant</string>
-    <string>fabric</string>
-    <string>peer-agent</string>
-  </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key>
-    <string>/Users/example/.local/bin:/Users/example/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/Applications/Obsidian.app/Contents/MacOS</string>
-    <key>PROVENANT_STATE_DIR</key>
-    <string>/Users/example/.local/share/provenant/v1</string>
-  </dict>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>AbandonProcessGroup</key>
-  <true/>
-  <key>StandardErrorPath</key>
-  <string>/Users/example/.local/share/provenant/v1/peer-agent/agent.log</string>
-</dict>
-</plist>
-"#;
-        assert_eq!(
-            super::historical_plist(
-                bytes,
-                std::path::Path::new("/Users/example/.local/bin/provenant"),
-                std::path::Path::new("/Users/example/.local/share/provenant/v1"),
-            ),
-            Some(bytes.to_vec())
-        );
-    }
-
-    #[test]
-    fn historical_plist_requires_the_exact_template_and_known_binary_and_state() {
-        use super::*;
-        let program = Path::new("/home/test/.local/bin/provenant");
-        let state = Path::new("/home/test/.local/share/provenant/v1");
-        let rendered = render(program, state, OsStr::new(":relative:/a&b:/c<d:/e>f")).unwrap();
-        assert_eq!(
-            historical_plist(rendered.as_bytes(), program, state),
-            Some(rendered.as_bytes().to_vec())
-        );
-        assert!(historical_plist(format!("{rendered}\n").as_bytes(), program, state).is_none());
-        assert!(
-            historical_plist(rendered.as_bytes(), Path::new("/foreign/provenant"), state).is_none()
-        );
-        assert!(
-            historical_plist(rendered.as_bytes(), program, Path::new("/foreign/state")).is_none()
-        );
     }
 
     #[test]
