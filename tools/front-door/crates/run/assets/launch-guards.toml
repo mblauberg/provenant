@@ -269,6 +269,16 @@ boundary = "lane_git"
 reason = "A probed repository's Git structure and configuration must retain their recorded identities at use time."
 
 [[guard]]
+site = "confinement/src/repo.rs#read_bounded"
+boundary = "lane_git"
+reason = "Git markers and configuration must be read completely and consistently before the selected worktree and its Git policy can be verified."
+
+[[guard]]
+site = "confinement/src/repo.rs#reject_alternates"
+boundary = "object_integrity"
+reason = "The complete alternates declaration must be inspected before protected history can be accepted."
+
+[[guard]]
 site = "confinement/src/repo.rs#RepoError"
 boundary = "unclassified"
 reason = "Remaining repository opening, metadata bounds and filesystem failures require caller-specific classification."
