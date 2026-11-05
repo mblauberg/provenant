@@ -478,7 +478,16 @@ fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
 }
 
-const SPEC_KEYS: [&str; 7] = ["type", "default", "min", "max", "enum", "doc", "bind"];
+const SPEC_KEYS: [&str; 8] = [
+    "type",
+    "default",
+    "min",
+    "max",
+    "enum",
+    "doc",
+    "bind",
+    "tracker_advice",
+];
 const TYPE_NAMES: [&str; 6] = ["string", "integer", "number", "boolean", "list", "table"];
 /// Parameters every parent hands to a child preset that declares them.
 const AMBIENT: [&str; 3] = ["risk_tier", "subject", "local_check_policy"];
@@ -531,6 +540,17 @@ pub(super) fn request_bindings(
         }
     }
     Ok((bindings, warnings))
+}
+
+pub(super) fn tracker_advice_parameter(config: &Value) -> Option<&str> {
+    config
+        .get("parameters")?
+        .as_object()?
+        .iter()
+        .find_map(|(name, spec)| {
+            (spec.get("tracker_advice").and_then(Value::as_bool) == Some(true))
+                .then_some(name.as_str())
+        })
 }
 
 fn list_is_lenses(value: Option<&Value>) -> bool {
@@ -802,6 +822,12 @@ fn flatten_parameters(
         {
             return Err(fail("bind must be risk_tier or kind".into()));
         }
+        if value
+            .get("tracker_advice")
+            .is_some_and(|flag| !flag.is_boolean())
+        {
+            return Err(fail("tracker_advice must be a boolean".into()));
+        }
         for bound in ["min", "max"] {
             if let Some(limit) = value.get(bound)
                 && !limit.is_number()
@@ -1018,7 +1044,7 @@ pub fn expand_with(
     // Request bindings affect how inputs reach parameters, not the graph itself.
     origins.retain(|path, _| {
         !path.ends_with("$scope_read_only")
-            && !(path.ends_with(".bind")
+            && !((path.ends_with(".bind") || path.ends_with(".tracker_advice"))
                 && (path.starts_with("parameters.") || path.contains(".parameters.")))
     });
     if let Some(trusted) = trusted
@@ -3905,14 +3931,16 @@ pub fn run(
         expansion.warnings.extend(binding_warnings);
         expansion.document["provenance"]["warnings"] = json!(expansion.warnings);
         let mut spec = None;
-        if name == "deliver" && !request.explain {
+        let (preset_config, _) = layers.resolve(name)?;
+        let advice_parameter = tracker_advice_parameter(&preset_config);
+        if let Some(parameter) = advice_parameter.filter(|_| !request.explain) {
             spec = params
                 .iter()
-                .find(|(key, _)| key == "spec")
+                .find(|(key, _)| key == parameter)
                 .and_then(|(_, value)| value.as_str())
                 .map(str::to_owned);
             for item in &request.preset_set {
-                if let Some(raw) = item.strip_prefix("parameters.spec=")
+                if let Some(raw) = item.strip_prefix(&format!("parameters.{parameter}="))
                     && let Ok(value) =
                         toml_edit::de::from_str::<serde_json::Value>(&format!("value = {raw}"))
                 {

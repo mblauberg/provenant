@@ -39,7 +39,7 @@ scope = { type = "list", default = ["."], doc = "Literal relative paths the writ
 subject = { type = "table", default = { type = "commit", commit = "HEAD" }, doc = "Source the writer starts from." }
 delivery = { type = "string", default = "pr", enum = ["pr", "push"], doc = "Writer delivery. Land needs pr; push suits land = 0." }
 base = { type = "string", default = "", doc = "Diff reference the slice is measured from." }
-spec = { type = "string", default = "", doc = "Issue number or file holding the acceptance criteria." }
+spec = { type = "string", tracker_advice = true, default = "", doc = "Issue number or file holding the acceptance criteria." }
 checks = { type = "list", default = [], doc = "Check names the CI gates require; empty uses the branch's required checks." }
 ci_timeout_seconds = { type = "integer", default = 7200, min = 1, max = 604800, doc = "How long each CI gate waits for checks on one head." }
 max_iterations = { type = "integer", default = 3, min = 1, max = 32, doc = "Repair rounds before the loop pauses and asks to stop, extend or accept." }

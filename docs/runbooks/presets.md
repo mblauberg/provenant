@@ -38,6 +38,9 @@ A typed parameter can declare `bind = "risk_tier"` or `bind = "kind"` to receive
 the corresponding `--risk-tier` or `--task-kind` request. An unbound flag warns
 and is dropped. Parameter files and `--set` retain their usual precedence.
 
+A string parameter can declare `tracker_advice = true` to request tracker advice
+for its supplied spec before a run.
+
 A stage may declare `read_only_floor = true` to keep its preset read-only,
 including through inheritance.
 

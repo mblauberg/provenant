@@ -1,4 +1,6 @@
-use super::preset::{Expansion, Layers, expand, find_prompt, request_bindings};
+use super::preset::{
+    Expansion, Layers, expand, find_prompt, request_bindings, tracker_advice_parameter,
+};
 use provenant_fabric_runtime::read_roots::ReadRoots;
 use serde_json::{Value, json};
 
@@ -5812,4 +5814,20 @@ fn request_bindings_follow_declarations_and_warn_when_missing() {
     assert!(values.is_empty());
     assert!(warnings.iter().any(|w| w.contains("--risk-tier")));
     assert!(warnings.iter().any(|w| w.contains("--task-kind")));
+}
+
+#[test]
+fn tracker_advice_is_declared_by_parameter() {
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "test",
+            "custom-advice",
+            "stages=[]\n[parameters]\nticket={type='string',default='',tracker_advice=true}",
+        )
+        .unwrap();
+    let (custom, _) = layers.resolve("custom-advice").unwrap();
+    assert_eq!(tracker_advice_parameter(&custom), Some("ticket"));
+    let (single, _) = layers.resolve("single").unwrap();
+    assert_eq!(tracker_advice_parameter(&single), None);
 }
