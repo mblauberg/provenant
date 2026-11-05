@@ -3194,3 +3194,95 @@ fn historical_run_stores_upgrade_with_attempts_and_backups() -> TestResult {
     }
     Ok(())
 }
+
+fn refused_operation(context: &ExecutionContext) -> OperationRecord {
+    OperationRecord {
+        extra: Default::default(),
+        schema_version: 1,
+        project_id: context.project_id,
+        actor_id: context.actor_id,
+        operation_id: OperationId::parse("refused-operation").unwrap(),
+        kind: OperationKind::Dispatch,
+        request_digest: Digest::from_bytes([17; 32]),
+        run_id: RunId::from_bytes([18; 16]),
+        state: OperationState::Terminal,
+        refusal: Some(OperationRefusal {
+            extra: Default::default(),
+            diagnostic: provenant_records::diagnostic::Diagnostic::new("WRITER_SCOPE")
+                .category("integrity")
+                .detail("writer scope refused")
+                .next("inspect the registered worktree"),
+            worktree: Some("writer".into()),
+            refused_at: WallTime::from_micros(100).unwrap(),
+        }),
+    }
+}
+
+#[test]
+fn refused_operation_is_immutable_and_replays_once() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let refusal = refused_operation(&context);
+    assert_eq!(store.record_refusal(&refusal, &call)?, refusal);
+    let mut replay = refusal.clone();
+    replay.run_id = RunId::from_bytes([19; 16]);
+    replay.refusal.as_mut().unwrap().refused_at = WallTime::from_micros(200)?;
+    assert_eq!(store.record_refusal(&replay, &call)?, refusal);
+    replay.request_digest = Digest::from_bytes([20; 32]);
+    assert!(matches!(
+        store.record_refusal(&replay, &call),
+        Err(RunError::OperationConflict)
+    ));
+    assert_eq!(
+        store.operation(&refusal.operation_id, &call)?,
+        Some(refusal)
+    );
+    let count: i64 = store
+        .db
+        .query_row("SELECT COUNT(*) FROM operations", [], |row| row.get(0))?;
+    assert_eq!(count, 1);
+    Ok(())
+}
+
+#[test]
+fn refused_operation_write_failure_keeps_writer_reservation() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let clock = clock();
+    let cancel = CancelToken::new();
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let refusal = refused_operation(&context);
+    let slot_path = temp.path().join("writer");
+    std::fs::create_dir(&slot_path)?;
+    let slot = provenant_os::fs::Directory::open_anchor(&slot_path)?;
+    let scope = Scope {
+        run: refusal.run_id,
+        attempt: AttemptId::from_bytes([21; 16]),
+        generation: 1,
+    };
+    let lease = provenant_supervisor::fixture::acquire_writer(
+        slot,
+        scope,
+        provenant_core::WaitBudget::nonblocking(clock.mono_now()),
+        &cancel,
+        &clock,
+    )?;
+    let reservation = slot_path
+        .join(scope.attempt.to_string())
+        .join("reservation.json");
+    let before = std::fs::read(&reservation)?;
+    store.db.execute_batch("CREATE TRIGGER fail_refusal BEFORE INSERT ON operations BEGIN SELECT RAISE(ABORT, 'injected refusal write failure'); END;")?;
+    assert!(matches!(
+        store.record_refusal(&refusal, &call),
+        Err(RunError::Sqlite(_))
+    ));
+    assert_eq!(std::fs::read(reservation)?, before);
+    assert!(store.operation(&refusal.operation_id, &call)?.is_none());
+    drop(lease);
+    Ok(())
+}

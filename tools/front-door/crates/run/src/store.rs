@@ -82,6 +82,91 @@ pub(crate) struct Withdrawal<'a> {
 }
 
 impl RunStore {
+    /// Persist a pre-admission refusal under its operation identity. Replays
+    /// return the first refusal; a different request remains a conflict.
+    pub fn record_refusal(
+        &self,
+        record: &OperationRecord,
+        call: &Request<'_>,
+    ) -> Result<OperationRecord> {
+        let refusal = record
+            .refusal
+            .as_ref()
+            .ok_or(RunError::Validation("refusal missing"))?;
+        let valid_worktree = refusal.worktree.as_ref().is_none_or(|name| {
+            let mut components = std::path::Path::new(name).components();
+            matches!(components.next(), Some(std::path::Component::Normal(_)))
+                && components.next().is_none()
+                && provenant_records::diagnostic::safe_text(name) == *name
+        });
+        let diagnostic = &refusal.diagnostic;
+        let valid_diagnostic = !diagnostic.code.is_empty()
+            && provenant_records::diagnostic::safe_text(&diagnostic.code) == diagnostic.code
+            && [&diagnostic.category, &diagnostic.detail, &diagnostic.next]
+                .into_iter()
+                .all(|value| {
+                    value.as_ref().is_none_or(|value| {
+                        provenant_records::diagnostic::safe_text(value) == *value
+                    })
+                })
+            && diagnostic
+                .next
+                .as_ref()
+                .is_some_and(|next| !next.is_empty());
+        if record.schema_version != 1
+            || record.project_id != self.context.project_id
+            || record.actor_id != self.context.actor_id
+            || record.kind != OperationKind::Dispatch
+            || record.state != OperationState::Terminal
+            || !valid_worktree
+            || !valid_diagnostic
+        {
+            return Err(RunError::Validation("invalid dispatch refusal"));
+        }
+        self.write(call, |tx| {
+            let previous: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT record FROM operations WHERE project=?1 AND actor=?2 AND operation=?3",
+                    params![
+                        record.project_id.to_string(),
+                        record.actor_id.to_string(),
+                        record.operation_id.as_str()
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(previous) = previous {
+                let previous: OperationRecord = decode(&previous)?;
+                if previous.project_id != record.project_id
+                    || previous.actor_id != record.actor_id
+                    || previous.operation_id != record.operation_id
+                {
+                    return Err(RunError::Validation("operation index identity"));
+                }
+                if previous.request_digest != record.request_digest {
+                    return Err(RunError::OperationConflict);
+                }
+                return if previous.state == OperationState::Terminal && previous.refusal.is_some() {
+                    Ok(previous)
+                } else {
+                    Err(RunError::Conflict)
+                };
+            }
+            tx.execute(
+                "INSERT INTO operations VALUES (?1,?2,?3,?4,?5,?6)",
+                params![
+                    record.project_id.to_string(),
+                    record.actor_id.to_string(),
+                    record.operation_id.as_str(),
+                    record.request_digest.to_string(),
+                    record.run_id.to_string(),
+                    bytes(record)?
+                ],
+            )?;
+            Ok(record.clone())
+        })
+    }
+
     /// A sealed decision is not a certificate that an unfinished import can
     /// relinquish its reservation or private object inputs: the import must
     /// finish first, unless it was refused for good. The terminal receipts are
