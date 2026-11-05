@@ -5229,6 +5229,9 @@ fn render_lanes_says_what_an_unstarted_lane_waits_for() -> Result<(), Box<dyn st
         lane_class: run::LaneClass::ReadOnly,
         waiting_for: "read-only startup spacing: 1.2 s left of 2.0 s".into(),
     };
+    let (preparing, _) =
+        render_lanes_without_cooldowns(std::slice::from_ref(&lane), &[], None, Path::new("/state"));
+    assert_eq!(preparing["lanes"][0]["waiting_for"], "launch preparation");
     let (data, human) = render_lanes_without_cooldowns(&[lane], &[wait], None, Path::new("/state"));
     assert!(
         human.contains("starting unresolved (read-only startup spacing: 1.2 s left of 2.0 s)"),

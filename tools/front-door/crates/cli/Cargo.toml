@@ -7,9 +7,10 @@ license.workspace = true
 publish = false
 
 [features]
-fixture = ["provenant-run/fixture", "provenant-supervisor/fixture", "provenant-routing/fixture"]
+fixture = ["dep:provenant-test-support", "provenant-run/fixture", "provenant-supervisor/fixture", "provenant-routing/fixture"]
 
 [dependencies]
+provenant-test-support = { path = "../test-support", optional = true }
 provenant-os = { workspace = true }
 provenant-quota = { workspace = true }
 clap = { workspace = true, features = ["unstable-ext"] }

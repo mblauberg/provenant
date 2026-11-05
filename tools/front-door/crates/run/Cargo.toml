@@ -7,12 +7,13 @@ license.workspace = true
 publish = false
 
 [features]
-fixture = []
+fixture = ["dep:provenant-test-support"]
 
 [lints]
 workspace = true
 
 [dependencies]
+provenant-test-support = { path = "../test-support", optional = true }
 provenant-os = { workspace = true }
 provenant-confinement = { workspace = true }
 provenant-core = { workspace = true }
