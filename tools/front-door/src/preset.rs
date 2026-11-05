@@ -4071,6 +4071,15 @@ pub fn run(
     globals: &provenant_cli::Globals,
     workers: &'static dyn provenant_confinement::worktrees::WorkerObserver,
 ) -> u8 {
+    run_with_review(request, globals, workers, false)
+}
+
+pub(crate) fn run_with_review(
+    request: provenant_cli::Dispatch,
+    globals: &provenant_cli::Globals,
+    workers: &'static dyn provenant_confinement::worktrees::WorkerObserver,
+    review: bool,
+) -> u8 {
     let result = (|| -> Result<(Expansion, Vec<String>), String> {
         let bytes = if let Some(path) = &request.input.prompt_file {
             let mut file = provenant_os::fs::FileHandle::open_source(path)
@@ -4444,6 +4453,7 @@ pub fn run(
                 &brief_warnings,
                 globals,
                 workers,
+                review,
             )
         }
     }

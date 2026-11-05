@@ -127,6 +127,7 @@ pub(crate) fn run_preset_graph(
     warnings: &[String],
     globals: &provenant_cli::Globals,
     workers: &'static dyn WorkerObserver,
+    review: bool,
 ) -> u8 {
     use provenant_fabric_runtime::graph::GraphStatus;
     use provenant_records::Outcome;
@@ -242,8 +243,20 @@ pub(crate) fn run_preset_graph(
                 status_command.push_str(&format!(" --project {}", shell_path(project)));
             }
             status_command.push_str(&format!(" fabric graph status {graph_id}"));
+            let verdict = if review {
+                document_model_verdict(&document, &run.checkpoint)
+            } else {
+                None
+            };
             let outcome = match run.status {
-                GraphStatus::Complete if run.checkpoint.successful() => Outcome::Ok,
+                GraphStatus::Complete
+                    if run.checkpoint.successful()
+                        && (!review
+                            || verdict
+                                == Some(provenant_records::workflow::ReviewVerdict::Approve)) =>
+                {
+                    Outcome::Ok
+                }
                 GraphStatus::Complete => Outcome::Failed,
                 GraphStatus::Cancelled => Outcome::Cancelled,
                 GraphStatus::Paused => Outcome::Refused,
@@ -278,7 +291,11 @@ pub(crate) fn run_preset_graph(
             }
             human.push_str(&provenant_cli::run::warnings_text(&data));
             crate::emit(
-                &provenant_records::CommandResult::new("run", outcome, data),
+                &provenant_records::CommandResult::new(
+                    if review { "review" } else { "run" },
+                    outcome,
+                    data,
+                ),
                 globals,
                 &human,
                 false,
@@ -296,6 +313,29 @@ pub(crate) fn run_preset_graph(
             globals,
         ),
     }
+}
+
+fn document_model_verdict(
+    document: &std::path::Path,
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+) -> Option<provenant_records::workflow::ReviewVerdict> {
+    let bytes = std::fs::read(document).ok()?;
+    let document: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_slice(&bytes).ok()?;
+    let last = document.nodes.last()?;
+    let outputs = checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == last.id)?
+        .outputs
+        .as_ref()?;
+    if outputs.verdict_error.is_some() {
+        return None;
+    }
+    outputs
+        .verdict
+        .as_deref()
+        .and_then(provenant_records::workflow::ReviewVerdict::from_token)
 }
 
 fn graph_is_pending(factory: &Factory, graph_id: &str) -> bool {

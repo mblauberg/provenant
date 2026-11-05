@@ -277,6 +277,12 @@ pub struct Review {
     /// Show the selected panel without dispatching reviewers
     #[arg(long)]
     pub explain: bool,
+    /// Planner front-end: auto, on or off
+    #[arg(long, value_parser = ["auto", "on", "off"])]
+    pub plan: Option<String>,
+    /// Start a new graph even if this review already ran
+    #[arg(long)]
+    pub fresh: bool,
     /// Overall wait limit (seconds or a duration such as 30m)
     #[arg(long, default_value = "3600", catalog_duration())]
     pub wait: u64,
