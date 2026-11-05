@@ -2005,6 +2005,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
         &mut None,
         &clock,
         &cancel,
+        None,
     )
     .unwrap_err();
     let failure: super::Fail = refused.into();
@@ -2451,6 +2452,7 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
         &mut None,
         &clock,
         &cancel,
+        None,
     );
     match census_error {
         Err(super::OwnWorktreeError::Other(run::RunError::Writer(
@@ -2489,6 +2491,7 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
         &mut None,
         &clock,
         &cancel,
+        None,
     );
     match err {
         Err(super::OwnWorktreeError::Other(run::RunError::Writer(
@@ -2648,6 +2651,7 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
         &mut None,
         &clock,
         &cancel,
+        None,
     );
     match refused {
         Err(super::OwnWorktreeError::Other(run::RunError::Writer(
@@ -2676,6 +2680,7 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
         &mut None,
         &clock,
         &cancel,
+        None,
     )?;
     assert_eq!(admitted.0.path, path);
     assert_eq!(admitted.0.head, head);
@@ -2856,6 +2861,7 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
         &mut None,
         &clock,
         &cancel,
+        None,
     )
     .map_err(|fail| fail.to_string())?;
     assert_eq!(created_info.head, created_base);

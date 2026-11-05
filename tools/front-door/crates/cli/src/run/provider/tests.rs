@@ -2436,7 +2436,7 @@ fn prepare_policy_writer_successor(
             prompt: &str,
             paths: &run::LaunchPaths,
             _: Option<&run::AttemptRecord>,
-        ) -> Result<run::PreparedLaunch, String> {
+        ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
             let launch = prepare_with(
                 self.registry,
                 task,
