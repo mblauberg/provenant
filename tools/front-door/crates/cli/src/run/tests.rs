@@ -2560,6 +2560,69 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
     );
     let writer = run::resolve_writer(roots.state.as_path(), &project, &native_path)?;
     assert_eq!(writer.worktree, native_path);
+
+    // Exercise the actual CLI branch refusal and follow its shell-quoted
+    // remedy through the normal worktree admission and custody checks.
+    allow_any_free_disk(&edge)?;
+    let mut branch_command = parsed_run(&[
+        "--branch",
+        "native-branch",
+        "--base",
+        "HEAD",
+        "--model",
+        "codex/gpt-6-luna",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt")?,
+    ])?;
+    branch_command.wait = None;
+    let branch_reply = super::submit::with_deferred_provider_launch(|| {
+        dispatch_with_workers(branch_command, &edge, &Unknown)
+    });
+    let branch_error = branch_reply.result.error.as_ref().ok_or("branch refusal")?;
+    let remedy = branch_error.repair.as_deref().ok_or("branch remedy")?;
+    let (_, quoted) = remedy
+        .rsplit_once("--worktree ")
+        .ok_or("worktree argument")?;
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    let argv = [
+        OsString::from("/bin/sh"),
+        OsString::from("-c"),
+        format!("set -- {quoted}; printf '%s' \"$1\"").into(),
+    ];
+    let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(10));
+    options.stdout = StreamPolicy::Capture { limit: 4096 };
+    let output = SystemExecutor::new(1)?.execute(options)?;
+    assert_eq!(output.termination, Termination::Exit(0), "{remedy}");
+    let selected = String::from_utf8(output.stdout.bytes)?;
+    assert_eq!(std::path::Path::new(&selected), native_path);
+    let mut worktree_command = parsed_run(&[
+        "--worktree",
+        &selected,
+        "--model",
+        "codex/gpt-6-luna",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt")?,
+    ])?;
+    worktree_command.wait = None;
+    let accepted = super::submit::with_deferred_provider_launch(|| {
+        dispatch_with_workers(worktree_command, &edge, &Free)
+    });
+    assert_eq!(
+        accepted.result.status,
+        Status::Ok,
+        "{:?}",
+        accepted.result.error
+    );
+    let run_id = accepted.result.data["run_id"]
+        .as_str()
+        .ok_or("run id")?
+        .parse()?;
+    let request = _session.store.request(run_id, &call)?;
+    assert_eq!(
+        request.tasks[0].writer.as_ref().ok_or("writer")?.worktree,
+        native_path
+    );
+
     for origin in [
         None,
         Some(WorktreeOrigin::Lane),
