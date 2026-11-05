@@ -608,6 +608,15 @@ after the original recovery process exits. Predecessors without an import marker
 keep their existing admission semantics. Reservation release retires the marker's
 active fence; its evidence may remain beside the retired reservation.
 
+On the first locked open after the custody cutover, a retained slot-root
+reservation is published durably in the attempt directory it names before the
+slot-root file is removed. Its anchor is updated for the attempt directory and
+unknown fields are retained. A carried reservation continues to exclude all
+writers until settlement clears it; a crash between publication and removal
+replays only when both records agree. Unreadable or conflicting slot evidence
+remains fenced and appears as a reconciliation issue. Reboot recovery retains
+the original device relationship needed to verify the recorded attempt.
+
 An attempt record version 2 carries the terminal evidence and distinguishes
 `unsettled` from `lost`. Effect receipts are stored independently of the
 immutable decision. A terminal wait view includes `custody_pending`; a pending
