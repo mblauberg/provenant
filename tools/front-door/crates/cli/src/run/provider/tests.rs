@@ -4487,6 +4487,91 @@ fn explicit_write_root_keeps_read_only_git_authority() -> Result<(), Box<dyn std
 }
 
 #[test]
+fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_providers::Adapter;
+    let image = PathBuf::from("/outside/shot.png");
+    let access = run::LaneAccess {
+        attachments: vec![image.clone()],
+        ..Default::default()
+    };
+    let plan = ConfinedPlan::new(confinement_request(
+        ProjectId::parse("0123456789abcdef0123456789abcdef")?,
+        ConfinementRoots {
+            cwd: Path::new("/project"),
+            home: Path::new("/home/user"),
+            scratch: Path::new("/tmp/scratch"),
+            private_state: Path::new("/state/private"),
+            assets: Path::new("/release"),
+            prompt_file: None,
+        },
+        None,
+        &access,
+        &Default::default(),
+        "codex",
+        false,
+    )?)?;
+    let route = provenant_records::ResolvedRoute {
+        extra: Default::default(),
+        adapter: "codex".into(),
+        model: "fixture".into(),
+        effort: None,
+        catalogue_revision: "fixture".into(),
+        account_key: None,
+        host: "local".into(),
+        alternatives: Default::default(),
+        exclusions: Vec::new(),
+        eligibility: provenant_records::RouteEligibility::Eligible,
+        readiness: provenant_records::RouteReadiness::Ready {
+            extra: Default::default(),
+            availability_ref: "fixture".into(),
+            expires_unix_seconds: 100,
+        },
+        confidentiality: provenant_records::RouteConfidentiality {
+            extra: Default::default(),
+            evidence_ref: "fixture".into(),
+        },
+        pool_selection: None,
+    };
+    let prompt = Prompt::new("describe".into());
+    let launch = provenant_providers::codex::Codex.prepare(PrepareInput {
+        images: &access.attachments,
+        command: None,
+        route: &route,
+        confined: &plan,
+        prompt: &prompt,
+        continuation: None,
+        grant_digest: "fixture",
+        executable: Path::new("/opt/homebrew/Cellar/codex/fixture/bin/codex"),
+        home: Path::new("/home/user"),
+        user: "fixture".as_ref(),
+        host_var: &|_| None,
+        skill_stage_max_bytes: 0,
+        account: None,
+        token: None,
+        cwd: Path::new("/project"),
+        git_context: false,
+        nonce: [0; 16],
+        provenant: LaneRuntime {
+            executable: Path::new("/fixture/provenant/bin/provenant"),
+            git: Path::new("/usr/bin/git"),
+            state: Path::new("/state"),
+            child_state: Path::new("/state/children"),
+            home: Path::new("/home/user"),
+            depth: 1,
+            attempt: provenant_core::AttemptId::from_bytes([7; 16]),
+            assets: Path::new("/release"),
+        },
+    })?;
+    assert!(
+        launch
+            .argv
+            .windows(2)
+            .any(|pair| pair == ["--image", "/outside/shot.png"])
+    );
+    Ok(())
+}
+
+#[test]
 fn attachment_read_grant_is_exact() -> Result<(), Box<dyn std::error::Error>> {
     let image = PathBuf::from("/outside/image.png");
     let access = run::LaneAccess {
