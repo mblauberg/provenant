@@ -2131,6 +2131,7 @@ mod tests {
     fn pool_effort_is_refused_only_when_no_member_takes_it() {
         assert!(run::pool_effort_refusal(&["cursor", "codex"], "high").is_none());
         assert!(run::pool_effort_refusal(&["cursor"], "high").is_some());
+        assert!(run::pool_effort_refusal(&["cursor", "fixture-provider"], "high").is_none());
         assert!(run::pool_effort_refusal(&[], "high").is_none());
     }
     #[test]

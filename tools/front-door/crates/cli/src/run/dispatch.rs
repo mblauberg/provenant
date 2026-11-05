@@ -416,11 +416,7 @@ pub(crate) fn pool_effort_refusal(
         .map(|spec| spec.check_launch(&request))
         .collect();
     let refused: Vec<_> = refusals.into_iter().filter_map(Result::err).collect();
-    let known = adapters
-        .iter()
-        .filter(|name| provenant_records::AdapterSpec::get(name).is_some())
-        .count();
-    (known > 0 && refused.len() == known)
+    (!adapters.is_empty() && refused.len() == adapters.len())
         .then(|| refused.into_iter().next())
         .flatten()
 }
