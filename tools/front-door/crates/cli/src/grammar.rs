@@ -622,7 +622,7 @@ pub struct Access {
     /// Access mode: read-only or worktree-write [default: read-only]
     #[arg(long, value_enum)]
     pub mode: Option<Mode>,
-    /// Writer worktree; local run creates an owned worktree for a missing branch name
+    /// Checkout to read or write; a writer can create an owned worktree for a missing branch name
     #[arg(long)]
     pub worktree: Option<PathBuf>,
     /// Extra directory the lane may read (repeatable)
@@ -1419,6 +1419,13 @@ pub enum GitHook {
 }
 #[derive(Debug, Subcommand)]
 pub enum Internal {
+    /// Resume preparation of an admitted local run in a separate process.
+    Launch {
+        run: RunId,
+        /// Seconds to wait when every candidate provider is updating.
+        #[arg(long)]
+        provider_lease_wait: Option<u64>,
+    },
     Settle {
         /// Private durable-settlement resume request from the host.
         request: String,

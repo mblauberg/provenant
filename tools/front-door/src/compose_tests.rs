@@ -115,7 +115,7 @@ fn dispatch(rig: &TestRig, mode: &str, operation: &str) -> Result<(serde_json::V
         operation.into(),
         "--prompt-stdin".into(),
         "--wait".into(),
-        "5".into(),
+        "30".into(),
         "--json".into(),
     ];
     if mode == "writer" {

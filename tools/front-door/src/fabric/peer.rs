@@ -177,7 +177,7 @@ pub fn peer(
                     PeerResult::Inbox {
                         data: InboxReply::Error {
                             extra: Default::default(),
-                            code: "owner_local_only".into(),
+                            code: "OWNER_LOCAL_ONLY".into(),
                             message: format!(
                                 "inbox owner {}: run this operation on the owner host or from the owning chair session",
                                 context.identity.host

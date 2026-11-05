@@ -954,4 +954,10 @@ sets the review verdict to inconclusive, even if the agent reported a pass. When
 no base was resolved, the host reports that separately; the source fallback does
 not identify an empty review range.
 
+The `review` preset applies the same empty-range verdict to its review roles,
+including synthesis. Read-only review lanes can run from a detached worktree;
+pin `parameters.subject.commit` to select the commit. After correcting a launch
+failure, cancel the graph and use `provenant run --preset review --fresh` to
+start a new one.
+
 Writer tiers are advisory. Set `parameters.writer` for `generator-evaluator` to choose a writer alias. Planned `big-batch` lanes default to `junior`; use `senior` for contained design and reserve `principal` for at most one lane per wave when appropriate. `run --explain` reports the concrete writer tier mix and warns if higher tiers outnumber lower tiers. Exact model and route choices remain available; the mix never refuses a graph.

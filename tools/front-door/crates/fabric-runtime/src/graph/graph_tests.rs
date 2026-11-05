@@ -4408,7 +4408,7 @@ fn reduced_review_uses_worst_verdict_and_requires_coverage() {
 fn malformed_finding_fields_reach_composite_and_consumer() {
     let (document, mut owner) = partial_review(1);
     let malformed = findings_text(
-        r#"{"id":"F1","severity":42,"file":"a.rs","summary":"issue","status":1},{"id":"F2","severity":"mystery","file":"b.rs","summary":"other","status":"open"},{"severity":"high"}"#,
+        r#"{"id":"F1","severity":42,"file":"a.rs","summary":"issue","status":1},{"id":"F2","severity":"mystery","file":"b.rs","summary":"other","status":"open"},{"severity":"high"},{"id":"F3","severity":"high","file":"c.rs","summary":"valid finding","status":"open"}"#,
     );
     owner.observations = VecDeque::from([
         terminal_with_result(AttemptOutcome::Succeeded, &malformed),
@@ -4425,10 +4425,13 @@ fn malformed_finding_fields_reach_composite_and_consumer() {
         .unwrap();
     assert_eq!(lens.state, NodeState::Succeeded);
     let outputs = lens.outputs.as_ref().unwrap();
-    assert_eq!(outputs.findings.len(), 2);
+    assert_eq!(outputs.findings.len(), 3);
     assert_eq!(outputs.findings[0].severity, "blocking");
     assert_eq!(outputs.findings[1].severity, "blocking");
     assert_eq!(outputs.findings[0].status, "open");
+    assert_eq!(outputs.findings[2].id, "F3");
+    assert_eq!(outputs.findings[2].severity, "high");
+    assert_eq!(outputs.findings[2].summary, "valid finding");
     assert!(outputs.warnings.iter().any(|w| w.contains("field status")));
     assert!(
         outputs

@@ -20,6 +20,8 @@ pub(super) fn prepare_command(
     provider: &str,
     name: &str,
 ) -> Result<run::PreparedLaunch, PrepareError> {
+    #[cfg(feature = "fixture")]
+    hold_command_preparation_for_fixture();
     if !AdapterSpec::get(provider)
         .is_some_and(|spec| spec.named_entry == provenant_records::NamedEntry::Command)
     {
@@ -56,7 +58,7 @@ pub(super) fn prepare_command(
         .filter(|program| !program.is_empty())
         .ok_or("configured command has no executable")?;
     let source = source_cwd(registry, task)?;
-    let isolated = task.access.source_root.is_some();
+    let isolated = task.access.source_root.is_some() && !task.access.source_live;
     let cwd = if isolated {
         let assets = registry.assets.ok_or("product assets are unavailable")?;
         super::source_tree::ensure_source_roots(&source, &task.access, assets)?;
@@ -114,8 +116,15 @@ pub(super) fn prepare_command(
         provider,
         false,
     )?;
-    let (plan, mut observed_head, repository, mut worktree_gitdir) =
-        read_only_plan(roots, project, &source, &git, request, isolated)?;
+    let (plan, mut observed_head, repository, mut worktree_gitdir) = read_only_plan(
+        roots,
+        project,
+        &source,
+        &git,
+        request,
+        isolated,
+        task.access.source_live,
+    )?;
     if isolated {
         observed_head = Some(
             task.head
@@ -292,6 +301,25 @@ pub(super) fn prepare_command(
             state_root: roots.state.as_path().to_owned(),
         }),
     })
+}
+
+#[cfg(feature = "fixture")]
+#[allow(clippy::disallowed_methods)]
+fn hold_command_preparation_for_fixture() {
+    let Some(path) = std::env::var_os("PROVENANT_FIXTURE_HOLD_COMMAND_PREPARATION") else {
+        return;
+    };
+    let path = std::path::Path::new(&path);
+    if std::fs::write(path.join("entered"), b"entered").is_err() {
+        return;
+    }
+    let _ = provenant_test_support::wait_for(
+        "command preparation release",
+        std::time::Duration::from_secs(30),
+        || !path.join("hold").exists(),
+        |released| *released,
+    );
+    let _ = std::fs::write(path.join("released"), b"released");
 }
 
 pub(super) fn nested_policy_fallback(

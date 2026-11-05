@@ -29,6 +29,35 @@ fn retired_owner_lock_refuses_stale_and_shared_guards() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn clone_directory_is_recursive_independent_and_refuses_existing_destination() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join("source/nested")).unwrap();
+    std::fs::write(temp.path().join("source/nested/file"), b"source").unwrap();
+    std::os::unix::fs::symlink("/outside", temp.path().join("source/link")).unwrap();
+    std::fs::create_dir(temp.path().join("existing")).unwrap();
+    let dir = Directory::open_anchor(temp.path()).unwrap();
+    let source = dir.open_verified_directory(OsStr::new("source")).unwrap();
+    assert!(
+        dir.clone_directory_from(&source, OsStr::new("existing"))
+            .is_err()
+    );
+    dir.clone_directory_from(&source, OsStr::new("clone"))
+        .unwrap();
+    std::fs::write(temp.path().join("clone/nested/file"), b"clone").unwrap();
+    assert_eq!(
+        std::fs::read(temp.path().join("source/nested/file")).unwrap(),
+        b"source"
+    );
+    assert!(
+        std::fs::symlink_metadata(temp.path().join("clone/link"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn clone_file_refuses_existing_destination() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join("source"), b"source").unwrap();

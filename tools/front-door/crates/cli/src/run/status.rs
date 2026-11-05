@@ -549,7 +549,7 @@ pub(super) fn report(
     session: &Session,
     record: &run::RunRecord,
     started: &[run::Started],
-    wait: Option<u64>,
+    wait: Option<Duration>,
     edge: &Edge<'_>,
     call: &run::Request<'_>,
 ) -> Result<(Value, String, bool), Fail> {
@@ -560,13 +560,7 @@ pub(super) fn report(
         attempt: None,
     };
     let (mut data, mut human, timed_out) = match wait {
-        Some(seconds) => wait_lanes(
-            session,
-            &[target],
-            Condition::All,
-            Duration::from_secs(seconds),
-            edge,
-        )?,
+        Some(duration) => wait_lanes(session, &[target], Condition::All, duration, edge)?,
         None => {
             let page = session
                 .service()
@@ -748,6 +742,10 @@ pub fn project_lane(
         lane.provider_silent_for_ms
             .0
             .map(run::provider_silence_reason)
+            .or_else(|| {
+                (observe_host && matches!(lane.state, run::AttemptState::Starting { .. }))
+                    .then(|| "launch preparation".to_owned())
+            })
     });
     let transcript = lane
         .applied_route

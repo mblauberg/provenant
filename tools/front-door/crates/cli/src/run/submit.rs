@@ -315,6 +315,7 @@ pub(super) fn lane_access_checked(
         write_roots,
         inputs_root: None,
         source_root: None,
+        source_live: false,
         source_identity: None,
     })
 }
@@ -527,13 +528,51 @@ pub fn submit_with_host(
     submit_with_host_and_wait(session, edge, submission, call, host, None)
 }
 
+#[allow(clippy::disallowed_methods)] // The caller's wait is a real deadline.
 pub(super) fn submit_with_host_and_wait(
     session: &Session,
     edge: &Edge<'_>,
     submission: Submission,
     call: &run::Request<'_>,
     host: Option<&run::HostLaunchContext>,
-    provider_lease_wait: Option<u64>,
+    deadline: Option<Instant>,
+) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+    submit_with_launcher(session, edge, submission, call, |record, parent_attempt| {
+        if parent_attempt {
+            Ok(Vec::new())
+        } else if let Some(host) = host {
+            launch_on_host_with_wait(
+                session,
+                record.run_id,
+                edge,
+                call,
+                Some(host),
+                None,
+                None,
+                deadline.map(|end| end.saturating_duration_since(Instant::now()).as_secs()),
+            )
+        } else if let Some(deadline) = deadline {
+            launch_with_deadline(
+                session,
+                record,
+                edge,
+                call,
+                deadline.saturating_duration_since(Instant::now()),
+            )
+        } else {
+            launch_prepared_with_wait(session, record.run_id, edge, call, None, None)
+        }
+    })
+}
+
+/// Admit and seal a submission before giving the launcher its durable run ID.
+/// This boundary lets a launcher retain custody independently of the caller.
+fn submit_with_launcher(
+    session: &Session,
+    edge: &Edge<'_>,
+    submission: Submission,
+    call: &run::Request<'_>,
+    launch: impl FnOnce(&run::RunRecord, bool) -> Result<Vec<run::Started>, Fail>,
 ) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
     let (lane_depth, parent_attempt) = nested_dispatch_context(edge.roots)?;
     let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
@@ -672,28 +711,6 @@ pub(super) fn submit_with_host_and_wait(
     if TEST_DEFER_PROVIDER_LAUNCH.with(std::cell::Cell::get) {
         return Ok((record, Vec::new()));
     }
-    let started = if parent_attempt.is_some() {
-        Vec::new()
-    } else if let Some(host) = host {
-        launch_on_host_with_wait(
-            session,
-            record.run_id,
-            edge,
-            call,
-            Some(host),
-            None,
-            None,
-            provider_lease_wait,
-        )?
-    } else {
-        launch_prepared_with_wait(
-            session,
-            record.run_id,
-            edge,
-            call,
-            None,
-            provider_lease_wait,
-        )?
-    };
+    let started = launch(&record, parent_attempt.is_some())?;
     Ok((record, started))
 }
