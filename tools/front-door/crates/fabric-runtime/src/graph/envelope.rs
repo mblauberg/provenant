@@ -285,6 +285,7 @@ fn node_bound(
         .collect(),
         children: node.composite_members.clone(),
         source_commit: node.source.as_ref().map(|_| String::new()),
+        review_base: node.extra.get("review_base").map(|_| "1".repeat(64)),
         fragment: (node.plan.is_some() && !admitted).then(String::new),
         handoff: plans::writer(node).then(String::new),
         expansion_pause: expands.then(String::new),

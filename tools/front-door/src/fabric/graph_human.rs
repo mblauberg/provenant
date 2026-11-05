@@ -113,6 +113,9 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
         if let Some(head) = &node.source_commit {
             human.push_str(&format!(" source={head}"));
         }
+        if let Some(base) = &node.review_base {
+            human.push_str(&format!(" review_base={base}"));
+        }
         if let Some(wait) = waits.iter().find(|wait| wait.node == node.id) {
             human.push_str(&format!(
                 " wait={} disposition={} code={} current_attempt={} route={} failures={} limit={} limit_source={} wake_at={} next={}",

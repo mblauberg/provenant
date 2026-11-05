@@ -215,6 +215,19 @@ pub trait AttemptOwner {
         Err(ReviewResolveError::Unsupported)
     }
 
+    /// Resolve a node-specific review base in its bound execution context.
+    /// A host without Git may only accept an already pinned object ID.
+    fn resolve_review_base(
+        &mut self,
+        reference: &str,
+        _worktree: Option<&str>,
+    ) -> Result<Option<String>, Self::Error> {
+        Ok(reference
+            .parse::<provenant_core::GitOid>()
+            .ok()
+            .map(|oid| oid.to_string()))
+    }
+
     /// Pin the integration branch at the instant this node is first admitted.
     fn integration_head(&mut self) -> Result<Option<String>, Self::Error> {
         Ok(None)
@@ -1022,6 +1035,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         extra: Default::default(),
                         children: node.composite_members.clone(),
                         source_commit: None,
+                        review_base: None,
                         fragment: None,
                         handoff: None,
                         expansion_pause: None,
@@ -1793,6 +1807,45 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         .map_err(|_| GraphError::Invalid(String::from("route count")))?,
                 };
 
+                let requested_review_base = (node.access == AccessMode::ReadOnly)
+                    .then(|| {
+                        node.extra
+                            .get("review_base")
+                            .and_then(serde_json::Value::as_str)
+                    })
+                    .flatten()
+                    .filter(|base| !base.is_empty());
+                if let Some(reference) = requested_review_base {
+                    let progress = &checkpoint.nodes[node_index];
+                    if progress.review_base.is_none() && !progress.attempts.is_empty() {
+                        return Err(GraphError::BadCheckpoint {
+                            node: node.id.clone(),
+                            invariant: "node review base must be bound before its first attempt",
+                        });
+                    }
+                    if let Some(base) = &progress.review_base {
+                        if base.parse::<provenant_core::GitOid>().is_err() {
+                            return Err(GraphError::BadCheckpoint {
+                                node: node.id.clone(),
+                                invariant: "node review base must be a full object ID",
+                            });
+                        }
+                    } else {
+                        let base = owner
+                            .resolve_review_base(reference, node.worktree.as_deref())
+                            .map_err(GraphError::Run)?;
+                        let Some(base) =
+                            base.filter(|base| base.parse::<provenant_core::GitOid>().is_ok())
+                        else {
+                            return Err(GraphError::Refused(format!(
+                                "node {}: review base could not be bound; correct the reference and rerun",
+                                node.id
+                            )));
+                        };
+                        checkpoint.nodes[node_index].review_base = Some(base);
+                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                    }
+                }
                 let needs_record = checkpoint.nodes[node_index]
                     .attempts
                     .last()
@@ -2238,10 +2291,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         distinct_from_attempts: &distinct_attempts,
                         require_distinct,
                         source_commit: checkpoint.nodes[node_index].source_commit.as_deref(),
-                        review_base: node
-                            .extra
-                            .get("review_base")
-                            .and_then(serde_json::Value::as_str),
+                        review_base: checkpoint.nodes[node_index].review_base.as_deref(),
                         title: node.title.as_deref().unwrap_or(&node.id),
                         prompt: &prompt,
                         required_verdict: node.required_verdict.as_deref(),

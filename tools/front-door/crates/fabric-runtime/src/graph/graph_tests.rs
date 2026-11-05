@@ -60,6 +60,9 @@ struct FakeOwner {
     expansion_validations: usize,
     integration_heads: VecDeque<String>,
     source_commits: Vec<Option<String>>,
+    resolved_review_base: Option<String>,
+    review_base_resolutions: usize,
+    observed_review_bases: Vec<Option<String>>,
     equal_range: bool,
     read_roots: Vec<Vec<String>>,
     distinct_from: Vec<Vec<String>>,
@@ -122,6 +125,20 @@ impl AttemptOwner for FakeOwner {
                 handoff: provenant_routing::FallbackHandoff::Local,
                 custody_released: true,
             }))
+    }
+
+    fn resolve_review_base(
+        &mut self,
+        reference: &str,
+        _: Option<&str>,
+    ) -> Result<Option<String>, Self::Error> {
+        self.review_base_resolutions += 1;
+        Ok(self.resolved_review_base.clone().or_else(|| {
+            reference
+                .parse::<provenant_core::GitOid>()
+                .ok()
+                .map(|oid| oid.to_string())
+        }))
     }
 
     fn resolve_review(
@@ -242,6 +259,8 @@ impl AttemptOwner for FakeOwner {
     ) -> Result<AttemptObservation, Self::Error> {
         self.source_commits
             .push(node.source_commit.map(str::to_owned));
+        self.observed_review_bases
+            .push(node.review_base.map(str::to_owned));
         self.read_roots.push(node.read_roots.to_vec());
         self.distinct_from
             .push(node.distinct_from_attempts.to_vec());
@@ -7678,6 +7697,85 @@ fn launch_retry_backoff_starts_after_a_slow_failed_submission() {
     let mut journal = MemoryJournal::default();
     advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(retry_of(journal.0.as_ref().unwrap()).wake_at, Some(at(35)));
+}
+
+#[test]
+fn node_review_base_is_pinned_before_launch_and_reused_on_replay() {
+    let mut reviewer = node("review", route("first"));
+    reviewer
+        .extra
+        .insert("review_base".into(), serde_json::json!("moving-ref"));
+    let document = graph(vec![reviewer]);
+    let pinned = "1".repeat(40);
+    let mut owner = FakeOwner {
+        resolved_review_base: Some(pinned.clone()),
+        observations: VecDeque::from([
+            AttemptObservation::Pending {
+                attempt_ref: Some("host/review".into()),
+            },
+            terminal(AttemptOutcome::Succeeded),
+        ]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let pending = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(
+        pending.checkpoint.nodes[0].review_base.as_deref(),
+        Some(pinned.as_str())
+    );
+    owner.resolved_review_base = Some("2".repeat(40));
+    advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.review_base_resolutions, 1);
+    assert_eq!(
+        owner.observed_review_bases,
+        vec![Some(pinned.clone()), Some(pinned)]
+    );
+    let mut broken = journal.0.clone().unwrap();
+    broken.nodes[0].state = NodeState::Running;
+    broken.nodes[0].review_base = None;
+    journal.0 = Some(broken);
+    assert!(matches!(
+        advance(&document, &mut owner, &mut journal),
+        Err(GraphError::BadCheckpoint { .. })
+    ));
+    assert_eq!(owner.review_base_resolutions, 1);
+}
+
+#[test]
+fn review_base_save_failure_prevents_attempt_creation() {
+    #[derive(Default)]
+    struct FailingJournal(Option<GraphCheckpoint>);
+    impl GraphJournal for FailingJournal {
+        type Error = std::io::Error;
+        fn load(&mut self, _: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+            Ok(self.0.clone())
+        }
+        fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+            if checkpoint.nodes[0].review_base.is_some() {
+                return Err(std::io::Error::other("injected review-base save failure"));
+            }
+            self.0 = Some(checkpoint.clone());
+            Ok(())
+        }
+    }
+    let mut reviewer = node("review", route("first"));
+    reviewer
+        .extra
+        .insert("review_base".into(), serde_json::json!("moving-ref"));
+    let document = graph(vec![reviewer]);
+    let mut owner = FakeOwner {
+        resolved_review_base: Some("1".repeat(40)),
+        ..Default::default()
+    };
+    let mut journal = FailingJournal::default();
+    assert!(matches!(
+        advance(&document, &mut owner, &mut journal),
+        Err(GraphError::Journal(_))
+    ));
+    assert!(owner.calls.is_empty());
+    let prior = journal.0.as_ref().unwrap();
+    assert!(prior.nodes[0].review_base.is_none());
+    assert!(prior.nodes[0].attempts.is_empty());
 }
 
 #[test]

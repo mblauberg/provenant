@@ -4516,6 +4516,22 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         Some(effective.seconds)
     }
     type Error = FacadeError;
+    fn resolve_review_base(
+        &mut self,
+        reference: &str,
+        worktree: Option<&str>,
+    ) -> Result<Option<String>, Self::Error> {
+        let git = provenant_os::git::git_executable()
+            .ok_or(FacadeError::InvalidInput { detail: None })?;
+        let directory = worktree.map_or_else(
+            || self.factory.cwd.clone(),
+            |path| self.factory.cwd.join(path),
+        );
+        provenant_run::resolve_git_base(&git, &directory, reference)
+            .map(Some)
+            .map_err(run_error)
+    }
+
     fn retry_allowance(
         &self,
         node: &provenant_records::ExtraFields,
@@ -5316,13 +5332,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 && node.source_commit.is_some()
             {
                 node.review_base
-                    .map(|base| {
-                        let git = provenant_os::git::git_executable()
-                            .ok_or(FacadeError::InvalidInput { detail: None })?;
-                        provenant_run::resolve_git_base(&git, &self.factory.cwd, base)
-                            .map_err(run_error)
-                    })
-                    .transpose()?
+                    .map(str::to_owned)
                     // A review base recorded with the graph execution comes next,
                     // then the integration base.
                     .or_else(|| review_base.map(|base| base.to_string()))
