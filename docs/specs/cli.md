@@ -673,15 +673,15 @@ The guard is advisory: confinement and custody stay authoritative.
 
 ### Pre-push refuses data loss
 
-`hook git pre-push` refuses default-branch deletion, non-fast-forward
-updates to the default branch, pushes from linked worktrees to the default
+`hook git pre-push` resolves pushed remote branch aliases to the advertised
+default branch and refuses default-branch deletion, non-fast-forward updates to the default branch, pushes from linked worktrees to the default
 branch and, by default, literal conflict markers, each with an accepted example on stderr. The
 conflict-marker check is advisory and `[domains.run] push_conflict_markers =
 false` turns it off; the other refusals remain. It identifies the default
 branch from the remote's advertisement, refuses when any inspection fails,
 disables inherited redirects and never fetches.
 - Why: the last local guard before shared history changes.
-- Test: `tests/hooks.rs::pre_push_uses_real_git_to_refuse_data_loss_and_conflict_markers`
+- Test: `tests/hooks.rs::pre_push_refuses_non_fast_forward_to_remote_default_alias` and `tests/hooks.rs::pre_push_uses_real_git_to_refuse_data_loss_and_conflict_markers`
 - Owner: `src/hooks.rs`
 
 ### Claude worktree hooks go through the worktree owner

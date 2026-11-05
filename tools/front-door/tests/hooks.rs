@@ -244,6 +244,53 @@ fn pre_push_uses_real_git_to_refuse_data_loss_and_conflict_markers() -> Result {
     Ok(())
 }
 #[test]
+fn pre_push_refuses_non_fast_forward_to_remote_default_alias() -> Result {
+    let rig = TestRig::new()?;
+    git(&rig, &["symbolic-ref", "HEAD", "refs/heads/main"])?;
+    let first = commit(&rig, "initial", "initial\n")?;
+    let second = commit(&rig, "second", "second\n")?;
+    let remote = rig.root.join("remote.git");
+    let remote = remote.to_str().ok_or("remote path")?;
+    git(&rig, &["init", "--bare", remote])?;
+    git(&rig, &["push", remote, "main:main"])?;
+    git(
+        &rig,
+        &[
+            "--git-dir",
+            remote,
+            "symbolic-ref",
+            "HEAD",
+            "refs/heads/main",
+        ],
+    )?;
+    git(
+        &rig,
+        &[
+            "--git-dir",
+            remote,
+            "symbolic-ref",
+            "refs/heads/alias",
+            "refs/heads/main",
+        ],
+    )?;
+    git(&rig, &["remote", "add", "origin", remote])?;
+    for (destination, expected) in [("alias", 1), ("topic", 0)] {
+        let input = format!("refs/heads/main {first} refs/heads/{destination} {second}\n");
+        let output = rig.execute(
+            Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &["hook", "git", "pre-push", "origin", "fixture"],
+            Some(input.as_bytes()),
+        )?;
+        assert_eq!(
+            code(&output),
+            expected,
+            "{}",
+            String::from_utf8_lossy(&output.stderr.bytes)
+        );
+    }
+    Ok(())
+}
+#[test]
 fn pre_push_local_gate_resolves_config_and_refuses_enforce() -> Result {
     let rig = TestRig::new()?;
     prepare_gate_repo(&rig)?;

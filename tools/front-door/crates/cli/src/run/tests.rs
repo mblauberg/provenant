@@ -4328,8 +4328,12 @@ fn wait_handles_a_stale_default_cursor() -> Result<(), Box<dyn std::error::Error
     assert!(error.message.contains("narrow"));
     let context = session.context.clone();
     let worker = std::thread::spawn(move || -> Result<(), String> {
-        std::thread::sleep(Duration::from_secs(5));
         let clock = SystemClock::new();
+        let release = clock
+            .mono_now()
+            .checked_add(DurationMicros::from_micros(5_000_000))
+            .map_err(|e| e.to_string())?;
+        clock.wait_until(release).map_err(|e| e.to_string())?;
         let cancel = CancelToken::new();
         let call = run::Request {
             clock: &clock,
