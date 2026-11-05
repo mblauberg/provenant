@@ -492,14 +492,11 @@ fn parse_findings(
         return Err("field findings: exceeds canonical byte cap".into());
     }
     if findings.is_empty()
-        && skipped
+        && let Some(warning) = skipped
             .iter()
-            .any(|warning| !warning.starts_with("malformed finding:"))
-    {
-        return Err(skipped
-            .into_iter()
             .find(|warning| !warning.starts_with("malformed finding:"))
-            .unwrap());
+    {
+        return Err(warning.clone());
     }
     Ok((findings, skipped, trimmed))
 }
