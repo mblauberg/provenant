@@ -652,7 +652,12 @@ fn second_writer_is_refused_while_first_holds_the_worktree() -> Result {
         matches!(started.as_slice(), [provenant_run::Started::Launched(id)] if *id == first_attempt),
         "{started:?}"
     );
-    wait_for_path(&ready, Duration::from_secs(8), "first writer hold point")?;
+    provenant_test_support::wait_for(
+        &format!("first writer hold point: {}", ready.display()),
+        Duration::from_secs(8),
+        || ready.exists(),
+        |exists| *exists,
+    )?;
 
     let second = writer_run(relative, "writer-contender", 52, "contend for writer lease")?;
     let second_attempt = second.attempts[0].attempt_id;
@@ -780,10 +785,12 @@ fn writer_protected_changes_wait_for_review_and_ignore_upstream() -> Result {
             matches!(started.as_slice(), [provenant_run::Started::Launched(id)] if *id == attempt),
             "{started:?}"
         );
-        wait_for_path(
-            &path.join(".writer-fixture-ready"),
+        let ready = path.join(".writer-fixture-ready");
+        provenant_test_support::wait_for(
+            &format!("writer hold: {}", ready.display()),
             Duration::from_secs(8),
-            "writer hold",
+            || ready.exists(),
+            |exists| *exists,
         )?;
         // The lane commits to its private Git view. A commit made in the shared
         // repository during the attempt is a competing host update that
@@ -810,6 +817,14 @@ fn writer_protected_changes_wait_for_review_and_ignore_upstream() -> Result {
         fs::write(&release, b"release")?;
         let terminal = await_terminal(&store, attempt, &call)?;
         let value = serde_json::to_value(&terminal)?;
+        let progress = fs::read_to_string(
+            scratch
+                .parent()
+                .and_then(Path::parent)
+                .ok_or("attempt directory")?
+                .join("settlement-progress.json"),
+        )
+        .unwrap_or_else(|error| error.to_string());
         assert_eq!(
             value["state"]["outcome"],
             if own_change {
@@ -817,7 +832,7 @@ fn writer_protected_changes_wait_for_review_and_ignore_upstream() -> Result {
             } else {
                 "succeeded"
             },
-            "unexpected writer terminal record: {value:#}"
+            "unexpected writer terminal record: {value:#}; settlement progress: {progress}"
         );
         if own_change {
             assert_eq!(value["head"], head);
@@ -953,10 +968,12 @@ fn writer_terminal_refuses_sequencer_state() -> Result {
         matches!(started.as_slice(), [provenant_run::Started::Launched(id)] if *id == attempt),
         "{started:?}"
     );
-    wait_for_path(
-        &path.join(".writer-fixture-ready"),
+    let ready = path.join(".writer-fixture-ready");
+    provenant_test_support::wait_for(
+        &format!("sequencer writer hold point: {}", ready.display()),
         Duration::from_secs(8),
-        "sequencer writer hold point",
+        || ready.exists(),
+        |exists| *exists,
     )?;
     // A lane now rewinds its private ref. Rewinding the shared ref instead is
     // a competing host update, which correctly blocks CAS publication.
@@ -1128,10 +1145,12 @@ fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> Result {
         .join(record.run_id.to_string())
         .join("attempts")
         .join(attempt.to_string());
-    wait_for_path(
-        &attempt_path.join("process-exit.json"),
+    let process_exit = attempt_path.join("process-exit.json");
+    provenant_test_support::wait_for(
+        &format!("reconciled writer process exit: {}", process_exit.display()),
         Duration::from_secs(8),
-        "reconciled writer process exit",
+        || process_exit.exists(),
+        |exists| *exists,
     )?;
     assert!(!matches!(
         store.record(attempt, &call)?.state,
@@ -1540,9 +1559,15 @@ pub(super) fn await_terminal(
         let directory = temporary.parent().ok_or("attempt directory")?;
         let progress = fs::read_to_string(directory.join("settlement-progress.json"))
             .unwrap_or_else(|error| error.to_string());
+        let record = store.record(attempt, &poll)?;
+        let waits = store.lane_waits_with_resources(
+            std::slice::from_ref(&record),
+            &poll,
+            &FixtureResources,
+        );
         return Err(format!(
-            "writer attempt did not reach terminal state: {:?}; settlement: {progress}",
-            store.record(attempt, &poll)?.state
+            "writer attempt did not reach terminal state: {:?}; admission: {waits:?}; settlement: {progress}",
+            record.state
         )
         .into());
     }
@@ -1581,16 +1606,6 @@ pub(super) fn wait_for_writer_release(store: &provenant_run::RunStore) -> Result
     released
         .then_some(())
         .ok_or_else(|| "writer reservation was not released after terminal publication".into())
-}
-
-fn wait_for_path(path: &Path, timeout: Duration, label: &str) -> Result {
-    provenant_test_support::wait_for(
-        &format!("{label}: {}", path.display()),
-        timeout,
-        || path.exists(),
-        |exists| *exists,
-    )?;
-    Ok(())
 }
 
 fn pause(duration: Duration) {
@@ -4330,12 +4345,14 @@ if (process.argv[2] === 'child') {
     let forged = provenant_core::ActorId::from_bytes([66; 16]);
     if cancel_child {
         let run = store.record(attempt_id, &call)?.run_id;
-        wait_for_path(
-            &child.join(format!(
-                "runs/{run}/attempts/{attempt_id}/provider-state/candidate-0/fake-child-launched"
-            )),
+        let launched = child.join(format!(
+            "runs/{run}/attempts/{attempt_id}/provider-state/candidate-0/fake-child-launched"
+        ));
+        provenant_test_support::wait_for(
+            &format!("confined child launch: {}", launched.display()),
             Duration::from_secs(8),
-            "confined child launch",
+            || launched.exists(),
+            |exists| *exists,
         )?;
         // The lane can write its child's store and attempt directory. It
         // marks the child finished, renames the requester in its launch
@@ -4445,10 +4462,12 @@ if (process.argv[2] === 'child') {
         );
         // The forged terminal record stands, so the guardian's own exit is
         // the evidence. Unstopped, the child would run to its wall deadline.
-        wait_for_path(
-            &attempt.join("process-exit.json"),
+        let process_exit = attempt.join("process-exit.json");
+        provenant_test_support::wait_for(
+            &format!("cancelled child process exit: {}", process_exit.display()),
             Duration::from_secs(8),
-            "cancelled child process exit",
+            || process_exit.exists(),
+            |exists| *exists,
         )?;
         let exit: Value = serde_json::from_slice(&fs::read(attempt.join("process-exit.json"))?)?;
         assert_eq!(exit["stop_reason"], "explicit_cancellation", "{exit}");
