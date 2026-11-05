@@ -185,6 +185,7 @@ fn list_impl(
             .unwrap_or(WorkerState::Unknown);
         let mut owner = OwnerStatus::Unknown;
         let mut owner_evidence = None;
+        let mut registration_evidence = None;
         let (dirty, writer, disk, registration_unknown) = if path == primary {
             owner = OwnerStatus::Primary;
             (
@@ -239,12 +240,15 @@ fn list_impl(
                         entry.locked || entry.prunable || disk == WorkerState::Unknown,
                     )
                 }
-                Err(_) => (
-                    WorktreeCondition::Unknown,
-                    WriterState::Unknown,
-                    WorkerState::Unknown,
-                    true,
-                ),
+                Err(error) => {
+                    registration_evidence = Some(format!("worktree verification failed: {error}"));
+                    (
+                        WorktreeCondition::Unknown,
+                        WriterState::Unknown,
+                        WorkerState::Unknown,
+                        true,
+                    )
+                }
             }
         };
         // Until all consumers use Occupancy, legacy inventory consumers must
@@ -262,7 +266,7 @@ fn list_impl(
             } else if entry.prunable {
                 "Git marks the worktree prunable".to_owned()
             } else {
-                owner_evidence.unwrap_or_else(|| {
+                owner_evidence.or(registration_evidence).unwrap_or_else(|| {
                     "worktree registration or writer custody could not be verified".to_owned()
                 })
             };

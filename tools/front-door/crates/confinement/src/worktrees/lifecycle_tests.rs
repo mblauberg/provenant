@@ -415,6 +415,15 @@ fn gc_lazy_candidate_is_retained_when_its_git_probe_fails() -> Result<(), Box<dy
         rejected: AtomicUsize::new(0),
     };
     context.executor = &git;
+    let observation = list_with_observation(&context, &cancel())?
+        .into_iter()
+        .find(|entry| entry.info.path == lane.path)
+        .ok_or("missing worktree")?;
+    assert!(matches!(
+        observation.occupancy,
+        Occupancy::Unknown { scope, evidence, source: OccupancyUnknownSource::Custody }
+            if scope == lane.path && evidence.contains("worktree verification failed:")
+    ));
     let facts = RepoFacts::default();
     let lanes = list_for_gc(&context, &facts, &cancel())?;
     let report = collect_lazy(
