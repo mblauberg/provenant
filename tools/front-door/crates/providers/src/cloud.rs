@@ -44,6 +44,10 @@ pub enum CloudResultError {
     CommitMismatch,
 }
 
+fn full_oid(s: &str) -> bool {
+    matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 impl CloudResult {
     pub fn check(
         self,
@@ -52,8 +56,6 @@ impl CloudResult {
     ) -> Result<CheckedCloudResult, CloudResultError> {
         // Git supports SHA-1 and SHA-256 object formats. Do not accept an
         // abbreviated ID, empty value, or a ref as evidence of an exact head.
-        let full_oid =
-            |s: &str| matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit());
         if !full_oid(expected_commit)
             || !full_oid(&self.commit)
             || !self.commit.eq_ignore_ascii_case(expected_commit)
@@ -227,12 +229,18 @@ pub fn submit<P: CloudProvider, S: CloudJobStore>(
     mut job: RemoteJob,
     task: &str,
 ) -> Result<RemoteJob, CloudJobError<P::Error, S::Error>> {
+    if !full_oid(&job.commit) {
+        return Err(CloudJobError::Result(CloudResultError::CommitMismatch));
+    }
     job.remote_id.clear();
     job.state = RemoteState::Submitting;
     store.begin(&job).map_err(CloudJobError::Store)?;
     job.remote_id = provider
         .submit(CloudSubmission { job: &job, task })
         .map_err(CloudJobError::Provider)?;
+    if job.remote_id.trim().is_empty() {
+        return Err(CloudJobError::SubmissionUnknown);
+    }
     job.state = RemoteState::Running;
     store
         .save(&job)
@@ -423,6 +431,24 @@ mod lifecycle_tests {
         cancel(&mut provider, &mut store, &mut job).unwrap();
         assert_eq!(job.state, RemoteState::Cancelled);
     }
+    #[test]
+    fn cloud_submit_refuses_unpinned_commit_before_custody() {
+        let mut provider = FakeProvider {
+            observed: RemoteState::Running,
+            confirmed: false,
+            submitted: 0,
+        };
+        let mut store = FakeStore::default();
+        let mut request = job();
+        request.commit = "main".into();
+        assert!(matches!(
+            submit(&mut provider, &mut store, request, "run tests"),
+            Err(CloudJobError::Result(CloudResultError::CommitMismatch))
+        ));
+        assert!(store.saved.is_none());
+        assert_eq!(provider.submitted, 0);
+    }
+
     #[test]
     fn cloud_submit_save_failure_preserves_remote_identity() {
         let mut provider = FakeProvider {
