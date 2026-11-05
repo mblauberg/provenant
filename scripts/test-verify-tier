@@ -265,11 +265,14 @@ class Selection(unittest.TestCase):
             fake = root / "git"
             fake.write_text("#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$FAKE_LOG\"\ncase \"$1\" in clone) for last do :; done; mkdir -p \"$last\" ;; rev-parse) echo wrong ;; esac\n")
             fake.chmod(0o755)
-            result = subprocess.run(["sh", "-s", "--", "repo", "expected", "2"], input=peer.REMOTE, text=True,
+            result = subprocess.run(["sh", "-s", "--", "repo", "abc123", "2"], input=peer.REMOTE, text=True,
                                     capture_output=True, env=dict(os.environ, PATH=f"{tmp}:" + os.environ["PATH"], TMPDIR=tmp, FAKE_LOG=str(root / "git.log")))
-            self.assertEqual((root / "git.log").read_text().splitlines(), ["clone", "checkout", "rev-parse"])
+            bad_commit = subprocess.run(["sh", "-s", "--", "repo", "--upload-pack=x", "2"], input=peer.REMOTE, text=True,
+                                        capture_output=True, env=dict(os.environ, PATH=f"{tmp}:" + os.environ["PATH"], TMPDIR=tmp, FAKE_LOG=str(root / "git.log")))
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("exit_status", result.stdout)
+        self.assertNotEqual(bad_commit.returncode, 0)
+        self.assertNotIn("exit_status", bad_commit.stdout)
 
 
 if __name__ == "__main__":
