@@ -883,6 +883,9 @@ pub(crate) mod peer_tests {
         let binding = owner.bind_writer_worktree(lane.to_str().ok_or("lane path")?)?.ok_or("binding")?;
         assert_eq!(binding.worktree, std::fs::canonicalize(&lane)?.to_string_lossy());
         assert_eq!(binding.head, initial);
+        let metadata = provenant_os::fs::Directory::open_anchor(&lane)?.metadata()?;
+        assert_eq!(binding.extra["source_directory_identity"]["device"], metadata.device);
+        assert_eq!(binding.extra["source_directory_identity"]["inode"], metadata.inode);
         git(&["-C", lane.to_str().ok_or("lane path")?, "checkout", "--detach", "-q"])?;
         assert!(owner.bind_writer_worktree(lane.to_str().ok_or("lane path")?).is_err());
         Ok(())

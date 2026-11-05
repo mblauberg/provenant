@@ -261,6 +261,15 @@ pub struct LaneAccess {
     /// Host-verified graph source checkout for a read-only launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_root: Option<std::path::PathBuf>,
+    /// Filesystem identity of the bound source directory at admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_identity: Option<SourceIdentity>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceIdentity {
+    pub device: u64,
+    pub inode: u64,
 }
 impl LaneAccess {
     pub fn is_default(&self) -> bool {

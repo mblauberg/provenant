@@ -245,6 +245,15 @@ pub(super) fn host_git_home(
     provenant_providers::host::HostProbeDir::create(host_root).map_err(|error| error.to_string())
 }
 
+pub(super) fn source_identity(path: &Path) -> Result<run::SourceIdentity, String> {
+    let directory = Directory::open_anchor(path).map_err(|error| error.to_string())?;
+    let metadata = directory.metadata().map_err(|error| error.to_string())?;
+    Ok(run::SourceIdentity {
+        device: metadata.device,
+        inode: metadata.inode,
+    })
+}
+
 /// Reopen the graph-bound checkout at launch, refusing a moved or replaced
 /// worktree rather than falling back to the daemon's checkout.
 pub(super) fn source_cwd(
@@ -253,6 +262,9 @@ pub(super) fn source_cwd(
 ) -> Result<PathBuf, String> {
     let cwd = registry.cwd.ok_or("working directory is unavailable")?;
     let Some(source) = &task.access.source_root else {
+        if task.access.source_identity.is_some() {
+            return Err("graph source identity has no checkout".into());
+        }
         return canonical(cwd);
     };
     if task.writer.is_some() || task.head.is_none() {
@@ -268,6 +280,10 @@ pub(super) fn source_cwd(
         .map_err(|_| "graph source checkout is no longer registered with the project")?;
     if verified != *source {
         return Err("graph source checkout changed location".into());
+    }
+    let identity = source_identity(&verified)?;
+    if task.access.source_identity.as_ref() != Some(&identity) {
+        return Err("graph source checkout identity changed".into());
     }
     Ok(verified)
 }

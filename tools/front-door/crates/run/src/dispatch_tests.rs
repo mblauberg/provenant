@@ -420,6 +420,7 @@ fn host_refuses_child_access_beyond_its_parent_task() -> TestResult {
         write_roots: writes.iter().map(|path| base.join(path)).collect(),
         inputs_root: None,
         source_root: None,
+        source_identity: None,
     };
     let task = |writer: bool, access: LaneAccess| {
         let mut task = input().request.tasks[0].clone();

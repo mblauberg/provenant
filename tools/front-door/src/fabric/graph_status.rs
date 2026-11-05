@@ -31,6 +31,7 @@ pub(super) fn redact_checkout_paths(
     for node in &mut checkpoint.nodes {
         if let Some(binding) = &mut node.writer_binding {
             binding.worktree = "[redacted]".into();
+            binding.extra.remove("source_directory_identity");
         }
     }
 }

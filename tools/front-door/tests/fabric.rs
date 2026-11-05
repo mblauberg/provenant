@@ -696,6 +696,20 @@ fn graph_status_full_reports_recorded_attempt_inputs() -> Result {
         fn actor(&self) -> String {
             "fixture".into()
         }
+        fn bind_writer_worktree(
+            &mut self,
+            path: &str,
+        ) -> std::result::Result<Option<graph::WriterWorktreeBinding>, Infallible> {
+            Ok(Some(graph::WriterWorktreeBinding {
+                extra: [(
+                    "source_directory_identity".into(),
+                    json!({"device":7,"inode":9}),
+                )]
+                .into(),
+                worktree: path.into(),
+                head: "1".repeat(40),
+            }))
+        }
         fn applied_route(
             &mut self,
             _: &str,
@@ -741,6 +755,7 @@ fn graph_status_full_reports_recorded_attempt_inputs() -> Result {
         "schema_version":2,"graph_id":"inspection","nodes":[
             {"id":"producer","prompt":"produce","access":"read_only","source":{"type":"commit","commit":"1".repeat(40)},"route":{"adapter":"fixture","model":"fixture/model"}},
             {"id":"ordering-only","prompt":"order","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}},
+            {"id":"writer","prompt":"write","access":"worktree_write","worktree":rig.project.to_string_lossy(),"source":{"type":"commit","commit":"1".repeat(40)},"route":{"adapter":"fixture","model":"fixture/model"}},
             {"id":"consumer","prompt":"consume","access":"read_only","depends_on":["producer","ordering-only"],"source":{"type":"node","node":"producer"},
              "inputs":[{"node":"producer","outputs":["commit"],"required_outputs":["commit"]}],"route":{"adapter":"fixture","model":"fixture/model"}}
         ]
@@ -775,6 +790,17 @@ fn graph_status_full_reports_recorded_attempt_inputs() -> Result {
     let nodes = status["data"]["checkpoint"]["nodes"]
         .as_array()
         .ok_or("nodes")?;
+    let writer = nodes
+        .iter()
+        .find(|node| node["id"] == "writer")
+        .ok_or("writer")?;
+    assert_eq!(writer["writer_binding"]["worktree"], "[redacted]");
+    assert_eq!(writer["writer_binding"]["head"], "1".repeat(40));
+    assert!(
+        writer["writer_binding"]
+            .get("source_directory_identity")
+            .is_none()
+    );
     let consumer = nodes
         .iter()
         .find(|node| node["id"] == "consumer")
@@ -810,6 +836,7 @@ fn graph_status_full_reports_recorded_attempt_inputs() -> Result {
     let human = rig.command(&["fabric", "graph", "status", "inspection", "--full"])?;
     assert_eq!(code(&human), 0);
     let human = String::from_utf8(human.stdout.bytes)?;
+    assert!(!human.contains(rig.project.to_str().ok_or("project path")?));
     for fact in [
         "inspection",
         "consumer",

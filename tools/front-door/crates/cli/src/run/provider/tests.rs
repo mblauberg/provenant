@@ -4573,6 +4573,7 @@ fn graph_read_only_source_prepares_fake_provider_and_refuses_moved_head()
     task.head = Some(head.clone());
     task.base = Some(head.clone());
     task.access.source_root = Some(source.clone());
+    task.access.source_identity = Some(source_identity(&source)?);
     task.route = run::RequestedRoute::Adapter {
         extra: Default::default(),
         provider: "command".into(),
@@ -4598,7 +4599,7 @@ fn graph_read_only_source_prepares_fake_provider_and_refuses_moved_head()
     // become an implicit source grant.
     let separate = base.join("separate-checkout");
     std::fs::create_dir(&separate)?;
-    let separate_git = base.join("separate-git");
+    let separate_git = base.join(".git");
     let init_args = vec![
         git.clone().into_os_string(),
         "init".into(),
@@ -4611,10 +4612,40 @@ fn graph_read_only_source_prepares_fake_provider_and_refuses_moved_head()
     assert_eq!(init.termination, Termination::Exit(0));
     let separate_repo = utility.open_repo(&executor, &separate, budget, &cancel)?;
     assert_eq!(separate_repo.common_git_dir(), separate_git);
+    assert_eq!(
+        run::resolve_reader_source(&state, &separate, &separate)?,
+        separate
+    );
     assert!(run::resolve_reader_source(&state, &separate, &base).is_err());
+    let subdir = project.join("nested");
+    std::fs::create_dir(&subdir)?;
+    assert_eq!(
+        run::resolve_reader_source(&state, &subdir, &subdir)?,
+        project
+    );
     let mut primary = task.clone();
     primary.access.source_root = Some(project.clone());
+    primary.access.source_identity = Some(source_identity(&project)?);
     assert_eq!(source_cwd(&registry, &primary)?, project);
+    let mut missing_identity = task.clone();
+    missing_identity.access.source_identity = None;
+    assert!(
+        source_cwd(&registry, &missing_identity)
+            .unwrap_err()
+            .contains("identity changed")
+    );
+    let mut replaced = task.clone();
+    replaced
+        .access
+        .source_identity
+        .as_mut()
+        .ok_or("source identity")?
+        .inode ^= 1;
+    assert!(
+        source_cwd(&registry, &replaced)
+            .unwrap_err()
+            .contains("identity changed")
+    );
     let mut protected = task.clone();
     protected.access.source_root = Some(state.clone());
     assert!(
@@ -4698,6 +4729,33 @@ fn graph_read_only_source_prepares_fake_provider_and_refuses_moved_head()
     assert!(
         error.to_string().contains("graph source checkout moved"),
         "{error}"
+    );
+    // Replacing the path with another registered worktree at the same head
+    // must not silently replace the source selected at admission.
+    let moved_path = base.join("moved-source");
+    let move_args = vec![
+        git.clone().into_os_string(),
+        "worktree".into(),
+        "move".into(),
+        source.clone().into_os_string(),
+        moved_path.into_os_string(),
+    ];
+    let moved = executor.execute(ExecOptions::new(
+        &move_args,
+        &project,
+        Duration::from_secs(5),
+    ))?;
+    assert_eq!(moved.termination, Termination::Exit(0));
+    let added = executor.execute(ExecOptions::new(
+        &added_args,
+        &project,
+        Duration::from_secs(5),
+    ))?;
+    assert_eq!(added.termination, Termination::Exit(0));
+    assert!(
+        source_cwd(&registry, &task)
+            .unwrap_err()
+            .contains("identity changed")
     );
     Ok(())
 }

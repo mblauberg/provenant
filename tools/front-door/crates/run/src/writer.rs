@@ -123,9 +123,16 @@ pub fn resolve_reader_source(state: &Path, cwd: &Path, path: &Path) -> Result<Pa
             error.into()
         }
     })?;
-    // Only the parent of an actual `.git` directory is the primary checkout.
-    // A separate Git directory's parent can contain unrelated private files.
-    if path == project && repo.common_git_dir().file_name() == Some(OsStr::new(".git")) {
+    // A graph may have been invoked from a subdirectory. Bind its default
+    // source to the verified repository root rather than treating that
+    // subdirectory as a separate worktree.
+    if canonicalize(cwd)? == path && path.starts_with(repo.root_path()) {
+        return Ok(repo.root_path().to_path_buf());
+    }
+    // The verified invocation root can be the primary checkout, including
+    // one with a separate Git directory. A Git directory's parent is not
+    // evidence of a checkout: it may contain unrelated host files.
+    if path == repo.root_path() {
         return Ok(path);
     }
     provenant_confinement::verify_worktree(&repo, &path)

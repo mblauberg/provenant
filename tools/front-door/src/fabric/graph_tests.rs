@@ -843,6 +843,22 @@ mod result_tests {
     }
 
     #[test]
+    fn source_identity_must_match_the_bound_writer() {
+        let mut run = graph_status_fixture();
+        let identity = provenant_records::run::SourceIdentity { device: 7, inode: 9 };
+        let path = std::path::Path::new("/fixture/writer");
+        run.checkpoint.nodes[0].writer_binding = Some(provenant_fabric_runtime::graph::WriterWorktreeBinding {
+            extra: [("source_directory_identity".into(), serde_json::json!({"device":7,"inode":9}))].into(),
+            worktree: path.display().to_string(), head: "1".repeat(40),
+        });
+        assert!(super::writer_source_identity_matches(&run.checkpoint, path, &identity));
+        let other = provenant_records::run::SourceIdentity { device: 7, inode: 10 };
+        assert!(!super::writer_source_identity_matches(&run.checkpoint, path, &other));
+        run.checkpoint.nodes[0].writer_binding.as_mut().unwrap().extra.clear();
+        assert!(!super::writer_source_identity_matches(&run.checkpoint, path, &identity));
+    }
+
+    #[test]
     fn graph_status_hides_bound_host_checkout_paths() {
         let mut run = graph_status_fixture();
         run.checkpoint.nodes[0].writer_binding = Some(provenant_fabric_runtime::graph::WriterWorktreeBinding {

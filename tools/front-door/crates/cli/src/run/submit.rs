@@ -290,6 +290,7 @@ pub(super) fn lane_access_checked(
         write_roots,
         inputs_root: None,
         source_root: None,
+        source_identity: None,
     })
 }
 

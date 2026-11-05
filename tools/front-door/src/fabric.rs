@@ -4497,6 +4497,29 @@ impl BoundGraphOwner<'_> {
     }
 }
 
+fn writer_source_identity_matches(
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+    source: &Path,
+    identity: &provenant_records::run::SourceIdentity,
+) -> bool {
+    checkpoint
+        .nodes
+        .iter()
+        .filter_map(|node| node.writer_binding.as_ref())
+        .filter(|binding| Path::new(&binding.worktree) == source)
+        .all(|binding| {
+            binding
+                .extra
+                .get("source_directory_identity")
+                .and_then(|value| {
+                    serde_json::from_value::<provenant_records::run::SourceIdentity>(value.clone())
+                        .ok()
+                })
+                .as_ref()
+                == Some(identity)
+        })
+}
+
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     fn input_cap_source(&self) -> provenant_fabric_runtime::graph::InputCapSource {
         self.factory.context.graph_prompt_limit_source
@@ -4775,9 +4798,16 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .to_str()
             .ok_or(FacadeError::InvalidInput { detail: None })?
             .to_owned();
+        let identity = writer.worktree.identity();
         Ok(Some(
             provenant_fabric_runtime::graph::WriterWorktreeBinding {
-                extra: Default::default(),
+                extra: [(
+                    "source_directory_identity".into(),
+                    serde_json::json!({
+                        "device": identity.device, "inode": identity.inode,
+                    }),
+                )]
+                .into(),
                 worktree,
                 head: writer.source_commit().to_string(),
             },
@@ -5270,6 +5300,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             let mut accepted_route = None;
             let mut accepted_retry_limit = None;
             let mut accepted_source_root = None;
+            let mut accepted_source_identity = None;
             let context = match &operation {
                 Some(operation) => match store.request(operation.run_id, &call) {
                     Ok(request) => {
@@ -5279,6 +5310,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                             accepted_route = Some(task.route.clone());
                             accepted_retry_limit = Some(task.profile.settlement_retry_limit);
                             accepted_source_root = task.access.source_root.clone();
+                            accepted_source_identity = task.access.source_identity.clone();
                         }
                         task.context.clone()
                     }
@@ -5638,6 +5670,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 && node.source_commit.is_some()
             {
                 grants.source_root = if accepted {
+                    grants.source_identity = accepted_source_identity;
                     accepted_source_root
                 } else {
                     let path = worktree.map_or(self.factory.cwd.as_path(), Path::new);
@@ -5652,6 +5685,33 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         reason: "graph source checkout is no longer registered with the project"
                             .into(),
                     })?;
+                    let directory = provenant_os::fs::Directory::open_anchor(&source)
+                        .map_err(|_| FacadeError::ConfinementRefused)?;
+                    let identity = directory
+                        .metadata()
+                        .map_err(|_| FacadeError::ConfinementRefused)?;
+                    let source_identity = provenant_records::run::SourceIdentity {
+                        device: identity.device,
+                        inode: identity.inode,
+                    };
+                    if worktree.is_some()
+                        && let Some(checkpoint) =
+                            provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
+                                &self.factory.context.roots.state,
+                                self.factory.context.identity.project,
+                                &key.graph_id,
+                            )
+                            .map_err(graph_journal_error)?
+                        && !writer_source_identity_matches(&checkpoint, &source, &source_identity)
+                    {
+                        return Err(FacadeError::DispatchRefused {
+                            fact: None,
+                            disk: None,
+                            reason: "graph source checkout identity changed or is unavailable"
+                                .into(),
+                        });
+                    }
+                    grants.source_identity = Some(source_identity);
                     Some(source)
                 };
             }
