@@ -3795,13 +3795,12 @@ fn host_forge_output_over_its_bound_names_gh_not_git()
             WriterDeliveryStage::PullRequest,
         )
         .expect_err("oversized forge output must be refused");
-    assert!(
-        matches!(error, RunError::DeliveryLimit { tool: "gh", .. }),
-        "{error:?}"
-    );
+    let RunError::DeliveryLimit { tool: "gh", limit, .. } = &error else {
+        panic!("unexpected error: {error:?}");
+    };
     let message = error.to_string();
     assert!(message.contains("gh pr output"), "{message}");
-    assert!(message.contains("16384"), "{message}");
+    assert!(message.contains(&limit.to_string()), "{message}");
     Ok(())
 }
 

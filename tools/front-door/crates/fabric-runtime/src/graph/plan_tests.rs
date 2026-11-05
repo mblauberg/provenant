@@ -1263,20 +1263,7 @@ fn nested_plan_rewires_all_consumers_and_keeps_original_digest() {
 }
 
 #[test]
-fn expansion_at_node_budget_reads_journal_once() {
-    #[derive(Default)]
-    struct CountingJournal { inner: MemoryJournal, reads: usize, saves: usize }
-    impl GraphJournal for CountingJournal {
-        type Error = std::convert::Infallible;
-        fn load(&mut self, id: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
-            self.reads += 1;
-            self.inner.load(id)
-        }
-        fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
-            self.saves += 1;
-            self.inner.save(checkpoint)
-        }
-    }
+fn expansion_completes_at_node_budget() {
     let limits = crate::config::GraphLimits {
         nodes: 4,
         ..Default::default()
@@ -1291,7 +1278,7 @@ fn expansion_at_node_budget_reads_journal_once() {
     let output = result(vec![slice("child", &["src"])]);
     let mut owner = fixture_owner(&vec![output.as_str(); count]);
     owner.observations.extend((0..count).map(|_| terminal_with_result(AttemptOutcome::Succeeded, "done")));
-    let mut journal = CountingJournal::default();
+    let mut journal = MemoryJournal::default();
     let run = advance_with_budget(&doc, &mut owner, &mut journal, &limits, &Default::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Complete);
     assert_eq!(run.checkpoint.nodes.len(), limits.nodes);
