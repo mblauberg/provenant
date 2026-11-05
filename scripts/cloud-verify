@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Run a named verification command and emit a cloud result as JSON.
 
-The caller must deliver the result over a channel authorised for the job.
-The log and result location should be outside the checkout.
+The log should be outside the checkout. The result file is the adapter's
+advisory channel and must contain no credentials.
 """
 import argparse
 import errno
 import json
+import os
+import tempfile
 from pathlib import Path
 import subprocess
 import sys
@@ -22,6 +24,9 @@ def tracked_changed():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--job-id", required=True, help="durable job ID from the request")
+    parser.add_argument("--nonce", required=True, help="advisory nonce from the request")
+    parser.add_argument("--observed-model", help="model observed by the VM, if known")
     parser.add_argument("--commit", required=True, help="full expected commit object ID")
     parser.add_argument("--test", required=True, help="name of the test or tier")
     parser.add_argument("--log", required=True, type=Path, help="local log file")
@@ -29,8 +34,10 @@ def main():
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
-    if not command or not args.test.strip() or not args.log_location.strip():
-        parser.error("a command, test name and log location are required")
+    if not command or not args.test.strip() or not args.log_location.strip() or not args.job_id.strip() or not args.nonce.strip():
+        parser.error("a command, job ID, nonce, test name and log location are required")
+    if git("ls-files", "--", ".provenant-cloud-result.json"):
+        parser.error("the cloud result path must not already be tracked")
     before = git("rev-parse", "--verify", "HEAD^{commit}")
     if len(args.commit) not in (40, 64) or before.lower() != args.commit.lower():
         parser.error("checkout does not match the full requested commit")
@@ -45,15 +52,23 @@ def main():
     after = git("rev-parse", "--verify", "HEAD^{commit}")
     changed = changed_before or tracked_changed() or before != after
     result = {
+        "job_id": args.job_id,
+        "nonce": args.nonce,
         "commit": after,
         "exit_status": status,
         "tests_run": [args.test],
         "tests_failed": [args.test] if status else [],
         "log_location": args.log_location,
         "tracked_files_changed": changed,
-        "observed_model": None,
+        "observed_model": args.observed_model or None,
     }
-    print(json.dumps(result, separators=(",", ":")))
+    encoded = json.dumps(result, separators=(",", ":"))
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=".", prefix=".cloud-result-", delete=False) as temporary:
+        temporary.write(encoded + "\n")
+        temporary.flush()
+        temporary_name = temporary.name
+    os.replace(temporary_name, ".provenant-cloud-result.json")
+    print(encoded)
     return 0
 
 

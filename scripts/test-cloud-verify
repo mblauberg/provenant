@@ -32,7 +32,7 @@ class CloudVerify(unittest.TestCase):
 
     def run_helper(self, command, commit=None):
         return subprocess.run(
-            [sys.executable, str(HELPER), "--commit", commit or self.commit,
+            [sys.executable, str(HELPER), "--job-id", "test-job", "--nonce", "test-nonce", "--commit", commit or self.commit,
              "--test", "tier 1", "--log", str(self.root / "log"),
              "--log-location", "https://example.invalid/log", "--", *command],
             cwd=self.repo, capture_output=True, text=True, env=os.environ.copy(),
@@ -42,6 +42,9 @@ class CloudVerify(unittest.TestCase):
         ok = self.run_helper([sys.executable, "-c", "print('hello')"])
         self.assertEqual(ok.returncode, 0, ok.stderr)
         result = json.loads(ok.stdout)
+        self.assertEqual(result["job_id"], "test-job")
+        self.assertEqual(result["nonce"], "test-nonce")
+        self.assertEqual(json.loads((self.repo / ".provenant-cloud-result.json").read_text()), result)
         self.assertEqual(result["commit"], self.commit)
         self.assertEqual(result["tests_run"], ["tier 1"])
         self.assertEqual(result["tests_failed"], [])
@@ -70,6 +73,14 @@ class CloudVerify(unittest.TestCase):
         wrong = self.run_helper([sys.executable, "-c", f"open({str(marker)!r},'w').close()"], "a" * 40)
         self.assertNotEqual(wrong.returncode, 0)
         self.assertFalse(marker.exists())
+
+    def test_tracked_result_path_is_not_overwritten(self):
+        result_path = self.repo / ".provenant-cloud-result.json"
+        result_path.write_text("retain\n")
+        self.git("add", result_path.name)
+        completed = self.run_helper([sys.executable, "-c", "pass"])
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(result_path.read_text(), "retain\n")
 
     def test_dirty_start_and_changed_commit_are_reported(self):
         (self.repo / "tracked").write_text("dirty\n")
