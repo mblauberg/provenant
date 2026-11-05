@@ -213,7 +213,15 @@ pub fn collect(globals: &Globals, cwd: &Path, want: &Want, deadline: Instant) ->
             return state;
         }
     };
-    let cli = &cli;
+    collect_with_cli(state, &cli, want, deadline)
+}
+
+fn collect_with_cli(
+    mut state: SessionState,
+    cli: &Cli<'_>,
+    want: &Want,
+    deadline: Instant,
+) -> SessionState {
     std::thread::scope(|scope| {
         let active = scope.spawn(move || cli.lane_listing(deadline, None));
         let settled =
@@ -518,6 +526,56 @@ fn pr_status(data: &Value) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn session_collection_keeps_lane_and_worktree_rows_after_deadline() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("inventory");
+        std::fs::write(
+            &script,
+            r##"#!/bin/sh
+case "$*" in
+  *worktree*) printf '%s\n' '{"total":3}' '{"worktree":{"path":"/primary"}}' '{"worktree":{"path":"/lane","branch":"refs/heads/lane"}}' ;;
+  *--all*) printf '%s\n' '{"total":0,"next":null}' ;;
+  *) printf '%s\n' '{"total":2,"next":null}' '{"cursor":2,"lane":{"run_id":"r","task_id":"t","attempt_id":"a","state":"running"}}' ;;
+esac
+/bin/sleep 5
+"##,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let executor = SystemExecutor::new(3).unwrap();
+        let cli = Cli {
+            exe: script,
+            state_dir: None,
+            cwd: temp.path(),
+            executor: &executor,
+        };
+        let state = collect_with_cli(
+            SessionState::default(),
+            &cli,
+            &Want {
+                worktrees: true,
+                settled_after_unix: 0,
+                pr_refs: vec![],
+            },
+            Instant::now() + Duration::from_secs(1),
+        );
+        let digest = state.digest(provenant_workflow::session::DIGEST_LIMIT);
+        assert!(digest.contains("r/t/a"), "{digest}");
+        assert!(digest.contains("/lane"), "{digest}");
+        assert!(
+            digest.contains("1 lane record was not inspected"),
+            "{digest}"
+        );
+        assert!(
+            digest.contains("1 worktree skipped during inventory"),
+            "{digest}"
+        );
+    }
 
     #[test]
     #[allow(clippy::disallowed_methods)]
