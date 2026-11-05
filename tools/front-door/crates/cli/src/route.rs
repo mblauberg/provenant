@@ -3388,13 +3388,15 @@ mod route_tests {
         assert_eq!(report["cleared"].as_array().map(Vec::len), Some(2));
         assert_eq!(report["overrides"].as_array().map(Vec::len), Some(2));
         let saved = std::fs::read_to_string(path)?;
-        assert!(!saved.contains("codex/removed"), "{saved}");
-        assert!(!saved.contains("provider='codex'"), "{saved}");
-        assert!(saved.contains("provider='claude'"), "{saved}");
-        assert!(
-            saved.contains("schedule = { expires = \"1970-01-01T01:00:02.000000Z\", tz = \"Australia/Sydney\", windows = [{ weekdays = [0, 1, 2, 3, 4], start_hour = 23, end_hour = 7 }] }"), // timebomb: allow fixed epoch fixture, not the live clock
-            "{saved}"
-        );
+        let saved: serde_json::Value = toml_edit::de::from_str(&saved)?;
+        let overrides = saved["domains"]["routing"]["pacing_overrides"].as_array().ok_or("overrides")?;
+        assert!(!overrides.iter().any(|row| row["account"] == "codex/removed"));
+        assert_eq!(overrides.iter().filter(|row| row["provider"] == "codex").count(), 1);
+        assert!(overrides.iter().any(|row| row["provider"] == "claude"));
+        let codex = overrides.iter().find(|row| row["provider"] == "codex").ok_or("codex")?;
+        assert_eq!(codex["schedule"]["expires"], "1970-01-01T01:00:02.000000Z"); // timebomb: fixed fixture instant
+        assert_eq!(codex["schedule"]["tz"], "Australia/Sydney");
+        assert_eq!(codex["schedule"]["windows"], serde_json::json!([{ "weekdays": [0,1,2,3,4], "start_hour": 23, "end_hour": 7 }]));
         Ok(())
     }
 
