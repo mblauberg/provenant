@@ -6338,6 +6338,21 @@ fn codex_usage_records_cache_read_apart_from_uncached_input() {
 }
 
 #[test]
+fn command_exit_keeps_requested_route() {
+    let route = run::RouteRecord {
+        provider: Some("command".into()),
+        model: None,
+        ..Default::default()
+    };
+    let decoded = Registry::default()
+        .decode(&route, b"output", &clean_exit(), Path::new("/unused"))
+        .unwrap();
+    let observed = decoded.observed_route.expect("observed route");
+    assert_eq!(observed.provider.as_deref(), Some("command"));
+    assert_eq!(observed.source.as_deref(), Some("command_exit"));
+}
+
+#[test]
 fn claude_absent_usage_names_its_reason() {
     let route = run::RouteRecord {
         provider: Some("claude".into()),

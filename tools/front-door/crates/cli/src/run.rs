@@ -692,7 +692,7 @@ impl Registry<'_> {
                 decoded.result = first.to_owned();
             }
         }
-        if adapter.id() == "command" {
+        if provenant_records::AdapterSpec::get(adapter.id()).is_some_and(|spec| spec.exit_route) {
             decoded.observed_route = Some(run::RouteRecord {
                 source: Some("command_exit".into()),
                 ..route.clone()
