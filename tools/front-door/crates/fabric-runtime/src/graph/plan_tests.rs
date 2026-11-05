@@ -1134,7 +1134,7 @@ fn writer_graph() -> GraphDocument {
 #[test]
 fn honest_stop_continues_once_on_same_checkout_with_handoff_and_verdict_contract() {
     let mut doc = writer_graph();
-    doc.nodes[1].inputs = vec![GraphInput {extra: Default::default(),  node: "write".into(), outputs: vec![OutputKind::Result] }];
+    doc.nodes[1].inputs = vec![GraphInput { required_outputs: Vec::new(),extra: Default::default(),  node: "write".into(), outputs: vec![OutputKind::Result] }];
     let mut owner = fixture_owner(&[STOP, "VERDICT: PASS", "checked"]);
     let mut journal = MemoryJournal::default();
     let run = advance(&doc, &mut owner, &mut journal).unwrap();
@@ -1775,7 +1775,7 @@ fn planned_workers_and_the_no_scout_note_expand_and_feed_their_consumers() {
 #[test]
 fn a_hand_written_plan_keeps_its_consumers_declared_inputs() {
     let mut doc = pattern_planner(4);
-    doc.nodes[1].inputs = vec![GraphInput {
+    doc.nodes[1].inputs = vec![GraphInput { required_outputs: Vec::new(),
         extra: Default::default(),
         node: "plan".into(),
         outputs: vec![OutputKind::Result],

@@ -333,9 +333,13 @@ For composites, the declared exports are the static public capability; admission
 checks consumers against that contract and validates export references and
 selector shapes. Whether a selected member actually made an output available is
 runtime evidence and remains visible in the composite settlement.
-Selectors declaring `required` or `required_outputs` are refused until the
-runtime can enforce those semantics; they are never silently treated as
-optional selections.
+Schema 2 selectors may list selected `commit`, `verdict` and `findings` in
+`required_outputs`; the consumer fails before its next attempt if any is
+unavailable or invalid. Required findings may also come from a composite when
+all selected member evidence is complete. Required commit or verdict from a
+composite, required selections from loop and planner sources, and the
+unimplemented `required` selector field are refused at admission rather than
+silently treated as optional.
 Schema 2 is the minimum version when the complete typed document carries a
 deferred-review field; presets choose that version after building the document,
 while raw documents retain their authored version. Version 2 carries deferred

@@ -274,6 +274,11 @@ fn expand_loops(
             }
             let mut selected = std::collections::BTreeSet::new();
             for input in &child.inputs {
+                if input.node.starts_with("previous.") && !input.required_outputs.is_empty() {
+                    return Err(
+                        "required previous-round outputs cannot be enforced in the first round",
+                    );
+                }
                 let mut kinds = Vec::new();
                 if !selected.insert(&input.node) || input.outputs.is_empty() {
                     return Err("duplicate or empty loop input");
@@ -491,6 +496,11 @@ fn expand_loops(
                                     own.outputs.push(*kind);
                                 }
                             }
+                            for kind in &input.required_outputs {
+                                if !own.required_outputs.contains(kind) {
+                                    own.required_outputs.push(*kind);
+                                }
+                            }
                         } else {
                             child.inputs.push(input.clone());
                         }
@@ -689,14 +699,20 @@ pub(super) fn validate_progress(
     let stopped = checkpoint
         .extensions
         .contains(&format!("loop.{}.decision=stop", node.id));
-    let valid = match progress.state {
-        NodeState::Succeeded => {
-            !failed
-                && settled
-                && (passed || accepted)
-                && progress.outputs == Some(gate_outputs(true))
+    let matches_output = |passed| {
+        let mut expected = gate_outputs(passed);
+        if progress
+            .outputs
+            .as_ref()
+            .is_some_and(|outputs| outputs.findings_available.is_none())
+        {
+            expected.findings_available = None;
         }
-        NodeState::Failed => (failed || stopped) && progress.outputs == Some(gate_outputs(false)),
+        progress.outputs == Some(expected)
+    };
+    let valid = match progress.state {
+        NodeState::Succeeded => !failed && settled && (passed || accepted) && matches_output(true),
+        NodeState::Failed => (failed || stopped) && matches_output(false),
         NodeState::Pending => progress.outputs.is_none(),
         NodeState::Blocked | NodeState::Skipped => {
             progress.outputs.is_none()

@@ -319,7 +319,7 @@ fn loop_on_fail_and_inactive_paths_reuse_gate_routing() {
         });
         gate.id = "initial".into();
         gate.depends_on = vec!["initial-review".into()];
-        gate.inputs = vec![GraphInput {extra: Default::default(),
+        gate.inputs = vec![GraphInput { required_outputs: Vec::new(),extra: Default::default(),
             node: "initial-review".into(),
             outputs: vec![OutputKind::Verdict],
         }];

@@ -186,6 +186,11 @@ fn children(
                             own.outputs.push(*kind);
                         }
                     }
+                    for kind in &input.required_outputs {
+                        if !own.required_outputs.contains(kind) {
+                            own.required_outputs.push(*kind);
+                        }
+                    }
                 } else {
                     node.inputs.push(input.clone());
                 }
@@ -841,10 +846,19 @@ pub(super) fn validate_progress(
         && state == NodeState::Succeeded
         && progress.advance_error_code.as_deref() == Some("coverage_below_minimum")
         && progress.advance_error == shortfall;
-    let export = node
+    let mut export = node
         .composite
         .as_ref()
         .map(|spec| outputs(spec, plan, checkpoint, positions));
+    if progress
+        .outputs
+        .as_ref()
+        .is_some_and(|outputs| outputs.findings_available.is_none())
+        && let Some(Ok(expected)) = &mut export
+    {
+        // An older checkpoint retains unknown availability on replay.
+        expected.findings_available = None;
+    }
     let failed_for_export = progress.state == NodeState::Failed
         && state == NodeState::Succeeded
         && shortfall.is_none()

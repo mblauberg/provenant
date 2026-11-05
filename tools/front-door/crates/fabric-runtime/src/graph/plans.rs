@@ -764,6 +764,7 @@ fn fragment_exports(document: &GraphDocument, expansion: &Expansion) -> Vec<Grap
             }
         }
         return vec![GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: root.id.clone(),
             outputs,
@@ -795,6 +796,7 @@ fn fragment_exports(document: &GraphDocument, expansion: &Expansion) -> Vec<Grap
             }
         }
         return vec![GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: format!("{}--fallback", expansion.source),
             outputs,
@@ -806,6 +808,7 @@ fn fragment_exports(document: &GraphDocument, expansion: &Expansion) -> Vec<Grap
         .filter_map(|instance| {
             let pattern = spec.patterns.iter().find(|p| p.name == instance.name)?;
             Some(pattern.exports.iter().map(move |export| GraphInput {
+                required_outputs: Vec::new(),
                 extra: Default::default(),
                 node: format!("{}--{}", instance.id, export.node),
                 outputs: export.outputs.clone(),
@@ -835,6 +838,7 @@ fn wire_exports(node: &mut GraphNode, source: &str, exported: &[GraphInput]) {
             continue;
         }
         node.inputs.push(GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: export.node.clone(),
             outputs,

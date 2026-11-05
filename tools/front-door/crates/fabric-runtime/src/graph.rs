@@ -1472,10 +1472,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     reason: reason.map(|reason| bounded(&reason, OUTPUT_FIELD_BYTES)),
                     on_fail: node.on_fail.clone(),
                 });
-                progress.outputs = Some(ci::outputs(
-                    progress.state == NodeState::Succeeded,
-                    progress.ci.as_ref(),
-                ));
+                let passed = progress.state == NodeState::Succeeded;
+                progress.outputs = Some(if matches!(condition, GateCondition::Ci { .. }) {
+                    ci::outputs(passed, progress.ci.as_ref())
+                } else {
+                    gate_outputs(passed)
+                });
                 if let Some(ci) = progress.ci.as_mut() {
                     ci.wake_at = None;
                 }
@@ -1832,6 +1834,19 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         checkpoint
                             .pause_code
                             .get_or_insert_with(|| "budget_exceeded".into());
+                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        break;
+                    }
+                    if let Some(missing) =
+                        required_input_unavailable(node, &plan, &checkpoint, &positions)
+                    {
+                        let progress = &mut checkpoint.nodes[node_index];
+                        progress.state = NodeState::Failed;
+                        progress.advance_error_code = Some("required_input_unavailable".into());
+                        progress.advance_error = Some(format!(
+                            "node {}: required input {missing} is unavailable or invalid; repair the producer and rerun the graph",
+                            node.id
+                        ));
                         journal.save(&checkpoint).map_err(GraphError::Journal)?;
                         break;
                     }

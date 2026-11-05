@@ -592,6 +592,9 @@ pub struct GraphInput {
     pub extra: provenant_records::ExtraFields,
     pub node: String,
     pub outputs: Vec<OutputKind>,
+    /// Selected machine-readable outputs that must be available before launch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_outputs: Vec<OutputKind>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

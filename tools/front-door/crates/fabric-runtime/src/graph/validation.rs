@@ -4,10 +4,28 @@ pub(super) fn nodes_have_v2(nodes: &[GraphNode]) -> bool {
     nodes.iter().any(|node| {
         node.review.is_some()
             || node.family_group.is_some()
-            || node.plan.as_ref().is_some_and(|spec| {
-                spec.patterns
+            || node
+                .inputs
+                .iter()
+                .any(|input| !input.required_outputs.is_empty())
+            || node.composite.as_ref().is_some_and(|spec| {
+                spec.exports
                     .iter()
-                    .any(|pattern| pattern.nodes.iter().any(value_has_v2))
+                    .any(|input| !input.required_outputs.is_empty())
+            })
+            || node.plan.as_ref().is_some_and(|spec| {
+                spec.patterns.iter().any(|pattern| {
+                    pattern.nodes.iter().any(value_has_v2)
+                        || pattern
+                            .exports
+                            .iter()
+                            .any(|input| !input.required_outputs.is_empty())
+                }) || spec.fallback.as_ref().is_some_and(|fallback| {
+                    fallback
+                        .exports
+                        .iter()
+                        .any(|input| !input.required_outputs.is_empty())
+                })
             })
             || node
                 .composite
@@ -29,6 +47,9 @@ fn value_has_v2(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::Object(map) => {
             map.contains_key("family_group")
+                || map
+                    .get("required_outputs")
+                    .is_some_and(|value| value.as_array().is_none_or(|values| !values.is_empty()))
                 || map.get("review").is_some_and(serde_json::Value::is_object)
                 || map.values().any(value_has_v2)
         }
@@ -89,6 +110,33 @@ pub(super) fn validate_output_kinds(document: &GraphDocument) -> Result<(), Stri
     let by_id: std::collections::BTreeMap<_, _> =
         document.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     for consumer in &document.nodes {
+        if consumer.plan.as_ref().is_some_and(|plan| {
+            plan.patterns.iter().any(|pattern| {
+                pattern.exports.iter().any(|input| {
+                    !input.required_outputs.is_empty() || input.extra.contains_key("required")
+                })
+            }) || plan.fallback.as_ref().is_some_and(|fallback| {
+                fallback.exports.iter().any(|input| {
+                    !input.required_outputs.is_empty() || input.extra.contains_key("required")
+                })
+            })
+        }) {
+            return Err(format!(
+                "node {} declares requirements on planner exports, which are not supported",
+                consumer.id
+            ));
+        }
+        if consumer.composite.as_ref().is_some_and(|composite| {
+            composite
+                .exports
+                .iter()
+                .any(|input| !input.required_outputs.is_empty())
+        }) {
+            return Err(format!(
+                "node {} declares requirements on composite exports, which are not supported",
+                consumer.id
+            ));
+        }
         // A composite's export declaration is its public output contract. Its
         // members are validated in their own scopes; consumers are checked
         // against the declared composite outputs through `supplied_kinds`.
@@ -98,8 +146,7 @@ pub(super) fn validate_output_kinds(document: &GraphDocument) -> Result<(), Stri
                 .iter()
                 .flat_map(|composite| &composite.exports),
         ) {
-            if input.extra.contains_key("required") || input.extra.contains_key("required_outputs")
-            {
+            if input.extra.contains_key("required") {
                 return Err(format!(
                     "node {} declares required output semantics that this runtime cannot enforce",
                     consumer.id
@@ -109,6 +156,21 @@ pub(super) fn validate_output_kinds(document: &GraphDocument) -> Result<(), Stri
             let Some(source) = by_id.get(source_id) else {
                 continue;
             };
+            if !input.required_outputs.is_empty()
+                && (source.composite.is_some()
+                    && input
+                        .required_outputs
+                        .iter()
+                        .any(|kind| *kind != OutputKind::Findings)
+                    || source.loop_body.is_some()
+                    || source.plan.is_some()
+                    || input.node.starts_with("previous."))
+            {
+                return Err(format!(
+                    "node {} requires outputs from {}, whose expansion cannot yet be verified",
+                    consumer.id, input.node
+                ));
+            }
             let available = supplied_kinds(source);
             for kind in &input.outputs {
                 if !available.contains(kind) {
@@ -526,8 +588,7 @@ pub(super) fn validate_flat_plan(
         }
         let mut input_nodes = std::collections::BTreeSet::new();
         for input in &node.inputs {
-            if input.extra.contains_key("required") || input.extra.contains_key("required_outputs")
-            {
+            if input.extra.contains_key("required") {
                 return Err("required output semantics are not supported");
             }
             if !node.depends_on.contains(&input.node)
@@ -542,6 +603,21 @@ pub(super) fn validate_flat_plan(
                     return Err("duplicate input output");
                 }
                 kinds.push(*kind);
+            }
+            let mut required = Vec::new();
+            for kind in &input.required_outputs {
+                if !input.outputs.contains(kind)
+                    || required.contains(kind)
+                    || !matches!(
+                        kind,
+                        OutputKind::Commit | OutputKind::Verdict | OutputKind::Findings
+                    )
+                {
+                    return Err(
+                        "required outputs must be unique selected commit, verdict or findings values",
+                    );
+                }
+                required.push(*kind);
             }
         }
         let mut depends_on = node.depends_on.clone();
@@ -975,11 +1051,24 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                         && dependency_state(node, plan, checkpoint, &positions).is_none()
                 }
                 (Some(result), NodeState::Succeeded | NodeState::Failed) => {
+                    let mut expected = if matches!(condition, GateCondition::Ci { .. }) {
+                        ci::outputs(result.passed, progress.ci.as_ref())
+                    } else {
+                        gate_outputs(result.passed)
+                    };
+                    // Older checkpoints lack availability evidence; retain
+                    // that unknown state rather than reconstructing it.
+                    if progress
+                        .outputs
+                        .as_ref()
+                        .is_some_and(|outputs| outputs.findings_available.is_none())
+                    {
+                        expected.findings_available = None;
+                    }
                     result.passed == (progress.state == NodeState::Succeeded)
                         && result.passed == result.reason.is_none()
                         && result.on_fail == node.on_fail
-                        && progress.outputs
-                            == Some(ci::outputs(result.passed, progress.ci.as_ref()))
+                        && progress.outputs == Some(expected)
                         && dependency_state(node, plan, checkpoint, &positions).is_none()
                 }
                 _ => false,

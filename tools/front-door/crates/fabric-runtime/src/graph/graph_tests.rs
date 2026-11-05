@@ -552,6 +552,7 @@ fn admitted_deferred_review_fits_checkpoint_after_expansion() {
         min_successful: Some(1),
         nodes: vec![lens],
         exports: vec![GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: "lens".into(),
             outputs: vec![OutputKind::Result],
@@ -622,6 +623,7 @@ fn deferred_review_journals_and_replays_without_resolving_again() {
         min_successful: Some(1),
         nodes: vec![review],
         exports: vec![GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: "review".into(),
             outputs: vec![OutputKind::Result, OutputKind::Findings],
@@ -630,6 +632,7 @@ fn deferred_review_journals_and_replays_without_resolving_again() {
     let mut synthesis = node("synthesis", route("first"));
     synthesis.depends_on = vec!["outer".into()];
     synthesis.inputs = vec![GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "outer".into(),
         outputs: vec![OutputKind::Findings],
@@ -665,6 +668,7 @@ fn deferred_review_journals_and_replays_without_resolving_again() {
         min_successful: Some(1),
         nodes: vec![lens],
         exports: vec![GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: "lens".into(),
             outputs: vec![OutputKind::Result, OutputKind::Findings],
@@ -1415,6 +1419,7 @@ fn identity_only_dispositions_inherit_selected_findings() {
     synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
     synthesis.depends_on = vec!["review".into()];
     synthesis.inputs = vec![GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "review".into(),
         outputs: vec![OutputKind::Findings],
@@ -1615,6 +1620,7 @@ fn a_synthesis_must_dispose_of_every_selected_upstream_finding_exactly_once() {
         synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
         synthesis.depends_on = vec!["review".into()];
         synthesis.inputs = vec![GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: "review".into(),
             outputs: vec![OutputKind::Findings],
@@ -1661,6 +1667,7 @@ fn synthesis_disposes_once_of_findings_propagated_through_verifier() {
     let mut verify = node("verify", route("first"));
     verify.depends_on = vec!["lens".into()];
     verify.inputs = vec![GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "lens".into(),
         outputs: vec![OutputKind::Result],
@@ -1671,6 +1678,7 @@ fn synthesis_disposes_once_of_findings_propagated_through_verifier() {
     synthesis.inputs = ["verify", "lens"]
         .into_iter()
         .map(|id| GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: id.into(),
             outputs: vec![OutputKind::Findings],
@@ -1708,6 +1716,7 @@ fn synthesis_disposes_once_of_findings_propagated_through_verifier() {
 #[test]
 fn large_synthesis_trims_metadata_and_replays_with_finding_identities() {
     let input = |id: &str| GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
@@ -1794,6 +1803,7 @@ fn large_synthesis_trims_metadata_and_replays_with_finding_identities() {
 #[test]
 fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities() {
     let input = |id: &str| GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
@@ -1935,6 +1945,7 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
 #[test]
 fn compacted_synthesis_survives_composite_export_and_replay() {
     let input = |id: &str| GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
@@ -2054,6 +2065,7 @@ fn compacted_synthesis_survives_composite_export_and_replay() {
 #[test]
 fn settled_copies_keep_origin_and_evidence_for_downstream_disposition() {
     let input = |id: &str| GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
@@ -2198,6 +2210,7 @@ fn composite_qualified_propagation_resolves_identity_only_disposition() {
 #[test]
 fn qualified_propagations_group_colliding_originals() {
     let input = |id: &str| GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
@@ -2268,6 +2281,7 @@ fn qualified_propagations_group_colliding_originals() {
 #[test]
 fn multiple_verifiers_share_one_disposition_and_keep_evidence() {
     let input = |id: &str| GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
@@ -2339,6 +2353,7 @@ fn multiple_verifiers_share_one_disposition_and_keep_evidence() {
 #[test]
 fn chain_resolves_rendered_markers_and_preserves_every_copy() {
     let input = |id: &str| GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
@@ -2408,6 +2423,7 @@ fn chain_resolves_rendered_markers_and_preserves_every_copy() {
 #[test]
 fn result_only_inputs_do_not_change_rendered_finding_ids() {
     let input = |id: &str, output| GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![output],
@@ -2487,6 +2503,7 @@ fn result_only_inputs_do_not_change_rendered_finding_ids() {
 #[test]
 fn qualified_id_collision_requires_three_distinct_dispositions() {
     let input = |id: &str| GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
@@ -2540,6 +2557,7 @@ fn qualified_id_collision_requires_three_distinct_dispositions() {
 #[test]
 fn ambiguous_propagation_warns_and_remains_independent() {
     let input = |id: &str| GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
@@ -2610,6 +2628,7 @@ fn ambiguous_propagation_warns_and_remains_independent() {
 #[test]
 fn unresolved_marker_warns_and_remains_an_independent_identity() {
     let input = |id: &str| GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
@@ -2663,6 +2682,7 @@ fn dependent_reviewers_with_independent_same_ids_require_distinct_dispositions()
     let mut b = node("b", route("first"));
     b.depends_on = vec!["a".into()];
     b.inputs = vec![GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "a".into(),
         outputs: vec![OutputKind::Result],
@@ -2673,6 +2693,7 @@ fn dependent_reviewers_with_independent_same_ids_require_distinct_dispositions()
     synthesis.inputs = ["a", "b"]
         .into_iter()
         .map(|id| GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: id.into(),
             outputs: vec![OutputKind::Findings],
@@ -2719,6 +2740,7 @@ fn unknown_disposition_does_not_hide_an_undisposed_finding_on_replay() {
     synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
     synthesis.depends_on = vec!["review".into()];
     synthesis.inputs = vec![GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "review".into(),
         outputs: vec![OutputKind::Findings],
@@ -2757,6 +2779,7 @@ fn synthesis_recovers_upheld_findings_when_verifier_block_is_truncated() {
     let mut verify = node("verify", route("first"));
     verify.depends_on = vec!["lens".into()];
     verify.inputs = vec![GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "lens".into(),
         outputs: vec![OutputKind::Result, OutputKind::Findings],
@@ -2768,11 +2791,13 @@ fn synthesis_recovers_upheld_findings_when_verifier_block_is_truncated() {
     synthesis.depends_on = vec!["lens".into(), "verify".into()];
     synthesis.inputs = vec![
         GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: "lens".into(),
             outputs: vec![OutputKind::Findings],
         },
         GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: "verify".into(),
             outputs: vec![OutputKind::Result, OutputKind::Findings],
@@ -2871,6 +2896,7 @@ fn synthesis_stops_when_the_pinned_integration_head_moves() {
         synthesis.source = Some(SourceBinding::Integration);
         synthesis.depends_on = vec!["lens".into()];
         synthesis.inputs = vec![GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: "lens".into(),
             outputs: vec![OutputKind::Result],
@@ -3008,6 +3034,85 @@ fn composite_inherits_inputs_and_combines_results_from_parallel_children() {
     assert!(result.excerpt.contains("parallel--a:\nevidence A"));
     assert!(result.excerpt.contains("parallel--b:\nevidence B"));
     assert!(!result.truncated);
+}
+
+#[test]
+fn composite_merge_retains_inherited_required_outputs() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":2,"graph_id":"required-composite-input","nodes":[
+            {"id":"start","access":"read_only","prompt":"start","route":{"alias":"senior"}},
+            {"id":"parallel","kind":"composite","access":"read_only","depends_on":["start"],
+             "inputs":[{"node":"start","outputs":["findings"],"required_outputs":["findings"]}],
+             "composite":{"nodes":[
+                 {"id":"a","access":"read_only","prompt":"a","route":{"alias":"junior"},
+                  "depends_on":["start"],"inputs":[{"node":"start","outputs":["result"]}]}
+             ],"exports":[{"node":"a","outputs":["result"]}]}}
+        ]
+    }))
+    .unwrap();
+    let expanded = loops::expand(&document, &[], &crate::config::GraphLimits::default()).unwrap();
+    let child = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "parallel--a")
+        .unwrap();
+    let input = child
+        .inputs
+        .iter()
+        .find(|input| input.node == "start")
+        .unwrap();
+    assert!(input.outputs.contains(&OutputKind::Result));
+    assert!(input.outputs.contains(&OutputKind::Findings));
+    assert_eq!(input.required_outputs, vec![OutputKind::Findings]);
+}
+
+#[test]
+fn required_composite_findings_need_complete_member_evidence() {
+    let empty = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```";
+    for (second, succeeds) in [(empty, true), ("missing findings", false)] {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":2,"graph_id":"required-composite-findings","nodes":[
+                {"id":"reviews","kind":"composite","access":"read_only","composite":{
+                    "nodes":[
+                        {"id":"a","access":"read_only","prompt":"a","route":{"alias":"senior"}},
+                        {"id":"b","access":"read_only","prompt":"b","route":{"alias":"senior"}}
+                    ],"exports":[{"node":"a","outputs":["findings"]},{"node":"b","outputs":["findings"]}]
+                }},
+                {"id":"consumer","access":"read_only","prompt":"check","route":{"alias":"senior"},
+                 "depends_on":["reviews"],"inputs":[{"node":"reviews","outputs":["findings"],"required_outputs":["findings"]}]}
+            ]
+        })).unwrap();
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([
+                terminal_with_result(AttemptOutcome::Succeeded, empty),
+                terminal_with_result(AttemptOutcome::Succeeded, second),
+                terminal(AttemptOutcome::Succeeded),
+            ]),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        let consumer = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "consumer")
+            .unwrap();
+        if succeeds {
+            assert_eq!(consumer.state, NodeState::Succeeded);
+            assert_eq!(consumer.attempts.len(), 1);
+        } else {
+            assert_eq!(consumer.state, NodeState::Failed);
+            assert_eq!(
+                consumer.advance_error_code.as_deref(),
+                Some("required_input_unavailable")
+            );
+            assert!(consumer.attempts.is_empty());
+            assert_eq!(owner.calls.len(), 2);
+        }
+        let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
+        assert_eq!(replay.checkpoint, run.checkpoint);
+    }
 }
 
 #[test]
@@ -3642,6 +3747,7 @@ fn verdict_fixture(
         let review = node(&format!("review-{i}"), route("fixture"));
         gate.depends_on.push(review.id.clone());
         gate.inputs.push(GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: review.id.clone(),
             outputs: vec![OutputKind::Verdict],
@@ -3784,6 +3890,23 @@ fn gate_threshold_fixtures_count_missing_verdicts_and_strict_majorities() {
         assert_eq!(gate.outputs, Some(gate_outputs(passed)));
         assert!(gate.attempts.is_empty());
         assert_eq!(run.checkpoint.successful(), passed);
+        let mut legacy = serde_json::to_value(&run.checkpoint).unwrap();
+        for node in legacy["nodes"].as_array_mut().unwrap() {
+            if let Some(outputs) = node
+                .get_mut("outputs")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                outputs.remove("findings_available");
+            }
+        }
+        let legacy: GraphCheckpoint = serde_json::from_value(legacy).unwrap();
+        journal.0 = Some(legacy.clone());
+        assert_eq!(
+            advance(&document, &mut owner, &mut journal)
+                .unwrap()
+                .checkpoint,
+            legacy
+        );
         journal.0 =
             Some(serde_json::from_value(serde_json::to_value(&run.checkpoint).unwrap()).unwrap());
         assert_eq!(
@@ -4891,6 +5014,7 @@ fn parent_and_child(
     let mut child = node("child", route("fixture"));
     child.depends_on.push("parent".into());
     child.inputs.push(GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result],
@@ -6097,6 +6221,7 @@ fn outputs_feed_direct_dependants_and_survive_replay() {
     let mut child = node("child", route("fixture"));
     child.depends_on.push("parent".into());
     child.inputs.push(GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result, OutputKind::Findings],
@@ -6143,6 +6268,7 @@ fn output_parsing_is_lenient_and_rendering_fails_instead_of_omitting() {
     let mut child = node("child", route("fixture"));
     child.depends_on.push("parent".into());
     child.inputs.push(GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result],
@@ -6190,6 +6316,7 @@ fn optional_findings_distinguish_missing_invalid_and_valid_empty() {
         let mut child = node("child", route("fixture"));
         child.depends_on.push("parent".into());
         child.inputs.push(GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: "parent".into(),
             outputs: vec![OutputKind::Findings],
@@ -6232,6 +6359,224 @@ fn optional_findings_distinguish_missing_invalid_and_valid_empty() {
             replayed.outputs.as_ref().unwrap().findings_available,
             Some(available)
         );
+    }
+}
+
+#[test]
+fn required_inputs_stop_before_consumer_attempt_when_unavailable() {
+    let valid_oid = "a".repeat(40);
+    for (kind, text, commit, expected) in [
+        (OutputKind::Findings, "no block", None, false),
+        (
+            OutputKind::Findings,
+            "```findings\ninvalid\n```",
+            None,
+            false,
+        ),
+        (
+            OutputKind::Findings,
+            "```findings\n{\"schema_version\":1,\"findings\":[]}\n```",
+            None,
+            true,
+        ),
+        (OutputKind::Verdict, "no verdict", None, false),
+        (
+            OutputKind::Verdict,
+            "VERDICT: PASS\nVERDICT: FAIL",
+            None,
+            false,
+        ),
+        (OutputKind::Verdict, "VERDICT: PASS", None, true),
+        (OutputKind::Commit, "result", None, false),
+        (OutputKind::Commit, "result", Some("bad".to_owned()), false),
+        (OutputKind::Commit, "result", Some(valid_oid.clone()), true),
+    ] {
+        let mut parent = node("parent", route("fixture"));
+        if kind == OutputKind::Commit {
+            parent.source = Some(SourceBinding::Commit {
+                commit: valid_oid.clone(),
+            });
+        }
+        let mut child = node("child", route("fixture"));
+        child.depends_on.push("parent".into());
+        child.inputs.push(GraphInput {
+            extra: Default::default(),
+            node: "parent".into(),
+            outputs: vec![kind],
+            required_outputs: vec![kind],
+        });
+        let mut document = graph(vec![child, parent]);
+        document.schema_version = 2;
+        let mut first = terminal_with_result(AttemptOutcome::Succeeded, text);
+        if let AttemptObservation::Terminal { commit: output, .. } = &mut first {
+            *output = commit;
+        }
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([first, terminal(AttemptOutcome::Succeeded)]),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        let child = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "child")
+            .unwrap();
+        if expected {
+            assert_eq!(child.state, NodeState::Succeeded, "{kind:?} {text}");
+            assert_eq!(child.attempts.len(), 1);
+        } else {
+            assert_eq!(child.state, NodeState::Failed, "{kind:?} {text}");
+            assert_eq!(
+                child.advance_error_code.as_deref(),
+                Some("required_input_unavailable")
+            );
+            assert!(child.attempts.is_empty());
+            assert_eq!(owner.calls.len(), 1);
+        }
+        let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
+        assert_eq!(replay.checkpoint, run.checkpoint);
+    }
+}
+
+#[test]
+fn required_findings_that_do_not_fit_are_not_partially_delivered() {
+    let mut child = node("child", route("fixture"));
+    child.depends_on.push("parent".into());
+    child.inputs.push(GraphInput {
+        extra: Default::default(),
+        node: "parent".into(),
+        outputs: vec![OutputKind::Findings],
+        required_outputs: vec![OutputKind::Findings],
+    });
+    let mut document = graph(vec![child, node("parent", route("fixture"))]);
+    document.schema_version = 2;
+    let text = format!(
+        "```findings\n{}\n```",
+        serde_json::json!({
+            "schema_version":1,
+            "findings":[{"id":"F1","severity":"high","file":"a.rs","summary":"x".repeat(300),"status":"open"}]
+        })
+    );
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([terminal_with_result(AttemptOutcome::Succeeded, &text)]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let limits = crate::config::GraphLimits {
+        node_prompt_bytes: 220,
+        ..Default::default()
+    };
+    let run = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &limits,
+        &Default::default(),
+    )
+    .unwrap();
+    let child = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "child")
+        .unwrap();
+    assert_eq!(child.state, NodeState::Failed);
+    assert_eq!(
+        child.advance_error_code.as_deref(),
+        Some("upstream_outputs_too_large")
+    );
+    assert!(child.attempts.is_empty());
+    assert_eq!(owner.calls.len(), 1);
+}
+
+#[test]
+fn required_values_do_not_trust_a_truncated_source() {
+    for kind in [OutputKind::Findings, OutputKind::Verdict] {
+        let mut child = node("child", route("fixture"));
+        child.depends_on.push("parent".into());
+        child.inputs.push(GraphInput {
+            extra: Default::default(),
+            node: "parent".into(),
+            outputs: vec![kind],
+            required_outputs: vec![kind],
+        });
+        let mut document = graph(vec![child, node("parent", route("fixture"))]);
+        document.schema_version = 2;
+        let mut first = terminal_with_result(
+            AttemptOutcome::Succeeded,
+            "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS",
+        );
+        if let AttemptObservation::Terminal {
+            result: Some(result),
+            ..
+        } = &mut first
+        {
+            result.source_truncated = true;
+        }
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([first]),
+            ..Default::default()
+        };
+        let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+        let child = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "child")
+            .unwrap();
+        assert_eq!(
+            child.advance_error_code.as_deref(),
+            Some("required_input_unavailable")
+        );
+        assert!(child.attempts.is_empty());
+        assert_eq!(owner.calls.len(), 1);
+    }
+}
+
+#[test]
+fn optional_invalid_commit_and_verdict_are_visible_as_unavailable() {
+    let valid_oid = "a".repeat(40);
+    for (kind, text, commit, expected) in [
+        (
+            OutputKind::Verdict,
+            "VERDICT: PASS\nVERDICT: FAIL",
+            None,
+            "parent verdict: null",
+        ),
+        (
+            OutputKind::Commit,
+            "result",
+            Some("not-an-oid".to_owned()),
+            "parent commit: null",
+        ),
+    ] {
+        let mut parent = node("parent", route("fixture"));
+        if kind == OutputKind::Commit {
+            parent.source = Some(SourceBinding::Commit {
+                commit: valid_oid.clone(),
+            });
+        }
+        let mut child = node("child", route("fixture"));
+        child.depends_on.push("parent".into());
+        child.inputs.push(GraphInput {
+            extra: Default::default(),
+            node: "parent".into(),
+            outputs: vec![kind],
+            required_outputs: Vec::new(),
+        });
+        let document = graph(vec![child, parent]);
+        let mut first = terminal_with_result(AttemptOutcome::Succeeded, text);
+        if let AttemptObservation::Terminal { commit: output, .. } = &mut first {
+            *output = commit;
+        }
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([first, terminal(AttemptOutcome::Succeeded)]),
+            ..Default::default()
+        };
+        advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+        assert!(owner.prompts[1].contains(expected), "{}", owner.prompts[1]);
     }
 }
 
@@ -6324,6 +6669,7 @@ fn upstream_data_boundary_cannot_be_closed_by_result_content() {
     let mut child = node("child", route("fixture"));
     child.depends_on.push("parent".into());
     child.inputs.push(GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result],
@@ -6362,6 +6708,7 @@ fn synthesise_receives_selected_reviewer_findings_and_emits_typed_output() {
     synthesis.inputs = ["one", "two", "three"]
         .iter()
         .map(|id| GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: (*id).into(),
             outputs: vec![OutputKind::Findings],
@@ -6448,6 +6795,7 @@ fn result_path_is_visible_in_status_but_not_in_input() {
     let mut child = node("child", route("fixture"));
     child.depends_on.push("parent".into());
     child.inputs.push(GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result],
@@ -6483,6 +6831,7 @@ fn selected_inputs_without_room_fail_before_launch() {
     child.prompt = "x".repeat(90);
     child.depends_on.push("parent".into());
     child.inputs.push(GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result],
@@ -6528,6 +6877,7 @@ fn oversized_prompt_with_inputs_pauses_and_resumes_after_extension() {
     child.prompt = "x".repeat(300);
     child.depends_on.push("parent".into());
     child.inputs.push(GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result],
@@ -6685,6 +7035,7 @@ fn cap_failure_on_fallback_preserves_prior_attempt_outcome() {
     child.routes = Some(vec![route("first"), route("second")]);
     child.depends_on.push("parent".into());
     child.inputs.push(GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result],
@@ -6802,6 +7153,7 @@ fn replay_keeps_the_admission_input_cap() {
     let mut child = node("child", route("fixture"));
     child.depends_on.push("parent".into());
     child.inputs.push(GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result],
@@ -6849,6 +7201,7 @@ fn replay_keeps_the_admission_input_cap() {
 fn inputs_require_unique_direct_dependencies() {
     let mut child = node("child", route("fixture"));
     child.inputs.push(GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result],
@@ -7971,6 +8324,7 @@ fn identity_dispositions_preserve_large_inherited_fields() {
     synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
     synthesis.depends_on = vec!["review".into()];
     synthesis.inputs = vec![GraphInput {
+        required_outputs: Vec::new(),
         extra: Default::default(),
         node: "review".into(),
         outputs: vec![OutputKind::Findings],
@@ -8025,6 +8379,7 @@ fn direct_reviewers_with_duplicate_ids_require_distinct_dispositions() {
     synthesis.inputs = ["a", "b"]
         .into_iter()
         .map(|id| GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: id.into(),
             outputs: vec![OutputKind::Findings],
@@ -8154,6 +8509,7 @@ fn deferred_review_evaluator_uses_bounded_findings_and_tolerates_one_invalid_len
             exports: lenses
                 .iter()
                 .map(|lens| GraphInput {
+                    required_outputs: Vec::new(),
                     extra: Default::default(),
                     node: lens.id.clone(),
                     outputs: vec![OutputKind::Result, OutputKind::Findings],
@@ -8186,6 +8542,7 @@ fn deferred_review_evaluator_uses_bounded_findings_and_tolerates_one_invalid_len
         let mut evaluate = node("evaluate", route("first"));
         evaluate.depends_on = vec!["review".into()];
         evaluate.inputs = vec![GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: "review".into(),
             outputs: vec![OutputKind::Findings],
@@ -8300,6 +8657,7 @@ fn a_deferred_review_lens_keeps_the_writer_for_family_separation() {
         min_successful: Some(1),
         nodes: vec![lens],
         exports: vec![GraphInput {
+            required_outputs: Vec::new(),
             extra: Default::default(),
             node: "lens".into(),
             outputs: vec![OutputKind::Result],
