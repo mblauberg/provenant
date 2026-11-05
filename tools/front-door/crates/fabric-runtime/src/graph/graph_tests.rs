@@ -7779,6 +7779,51 @@ fn review_base_save_failure_prevents_attempt_creation() {
 }
 
 #[test]
+fn launch_disposition_transition_needs_no_owner_or_journal() {
+    let mut checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
+        "schema_version":1,"graph_id":"g-test","plan_digest":"digest",
+        "nodes":[{"id":"one","state":"running","worktree":null,"attempts":[]}]
+    }))
+    .unwrap();
+    let before = checkpoint.clone();
+    let busy = crate::coordination::facade::FacadeError::WriterLockBusy;
+    assert!(
+        apply_launch_disposition(
+            &mut checkpoint,
+            0,
+            &busy,
+            None,
+            60,
+            LaunchRetryPolicy::default()
+        )
+        .is_err()
+    );
+    assert_eq!(checkpoint, before);
+    let policy = LaunchRetryPolicy {
+        limit: 1,
+        ..Default::default()
+    };
+    apply_launch_disposition(&mut checkpoint, 0, &busy, Some(at(0)), 60, policy.clone()).unwrap();
+    assert_eq!(checkpoint.nodes[0].state, NodeState::Running);
+    assert_eq!(retry_of(&checkpoint).failures, 1);
+    assert_eq!(retry_of(&checkpoint).wake_at, Some(at(5)));
+    apply_launch_disposition(&mut checkpoint, 0, &busy, Some(at(5)), 60, policy).unwrap();
+    assert_eq!(checkpoint.nodes[0].state, NodeState::Blocked);
+    assert_eq!(
+        checkpoint.nodes[0].advance_error_code.as_deref(),
+        Some("launch_retry_exhausted")
+    );
+    assert_eq!(
+        checkpoint.nodes[0]
+            .last_launch_retry
+            .as_ref()
+            .unwrap()
+            .failures,
+        2
+    );
+}
+
+#[test]
 fn writer_lock_contention_retries_the_same_attempt_after_release() {
     let document = graph(vec![node("one", route("first"))]);
     let mut owner = ErrorLauncher {

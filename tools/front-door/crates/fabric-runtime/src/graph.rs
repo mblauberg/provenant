@@ -685,12 +685,24 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
     policy: LaunchRetryPolicy,
     journal: &mut J,
 ) -> Result<(), GraphError<R::Error, J::Error>> {
+    apply_launch_disposition(checkpoint, index, error, clock, admission_seconds, policy)
+        .map_err(GraphError::Refused)?;
+    journal.save(checkpoint).map_err(GraphError::Journal)
+}
+
+/// Pure transition: callers persist the resulting checkpoint before reporting it.
+fn apply_launch_disposition(
+    checkpoint: &mut GraphCheckpoint,
+    index: usize,
+    error: &(dyn Error + 'static),
+    clock: Option<provenant_core::WallTime>,
+    admission_seconds: u64,
+    policy: LaunchRetryPolicy,
+) -> Result<(), String> {
     let retrying = launch_retry_kind(error);
     if retrying {
         let Some(now) = clock else {
-            return Err(GraphError::Refused(
-                "wall clock unavailable; cannot record a launch retry wake".into(),
-            ));
+            return Err("wall clock unavailable; cannot record a launch retry wake".into());
         };
         let retry = checkpoint.nodes[index]
             .launch_retry
@@ -710,9 +722,9 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
                     .ok()
                     .and_then(|duration| now.checked_add(duration).ok())
                 else {
-                    return Err(GraphError::Refused(
+                    return Err(
                         "launch retry deadline unavailable; cannot record a retry wake".into(),
-                    ));
+                    );
                 };
                 retry.deadline = Some(deadline);
                 deadline
@@ -739,7 +751,7 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
                     .map_or(deadline, |wake| wake.min(deadline)),
             );
             asks::refresh_wake(checkpoint);
-            return journal.save(checkpoint).map_err(GraphError::Journal);
+            return Ok(());
         }
     }
     // A permanent refusal, or a retry budget spent: block the node with the
@@ -759,7 +771,6 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
         .next
         .as_deref()
         .unwrap_or("inspect the node's inputs and state before retrying");
-    let error: &(dyn Error + 'static) = error;
     let recovery = if error
         .downcast_ref::<crate::coordination::facade::FacadeError>()
         .is_some_and(|e| {
@@ -798,7 +809,7 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
         });
     }
     asks::refresh_wake(checkpoint);
-    journal.save(checkpoint).map_err(GraphError::Journal)
+    Ok(())
 }
 
 /// Revert cancellation-only state changes without altering attempt records.
