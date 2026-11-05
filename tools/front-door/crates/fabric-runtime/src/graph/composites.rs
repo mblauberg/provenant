@@ -352,10 +352,6 @@ fn outputs(
     let mut inherited_notices = Vec::new();
     let partial = spec.min_successful.is_some();
     let unavailable = unavailable(spec, checkpoint, positions);
-    selected.warnings = unavailable
-        .iter()
-        .map(|entry| bounded(&format!("unavailable {entry}"), WARNING_BYTES))
-        .collect();
     for export in &spec.exports {
         let member = &checkpoint.nodes[positions[&export.node]];
         // A partial composite exports only members that succeeded: a failed
@@ -366,6 +362,18 @@ fn outputs(
         let Some(source) = member.outputs.as_ref() else {
             continue;
         };
+        for warning in source
+            .warnings
+            .iter()
+            .filter(|warning| warning.contains("malformed finding:"))
+        {
+            if selected.warnings.len() < MAX_WARNINGS {
+                selected.warnings.push(bounded(
+                    &format!("{}: {warning}", export.node),
+                    WARNING_BYTES,
+                ));
+            }
+        }
         for kind in &export.outputs {
             match kind {
                 OutputKind::Result => {
@@ -414,6 +422,13 @@ fn outputs(
                 OutputKind::Commit => selected.commit = source.commit.clone(),
                 OutputKind::Remaining => selected.remaining = source.remaining.clone(),
             }
+        }
+    }
+    for entry in &unavailable {
+        if selected.warnings.len() < MAX_WARNINGS {
+            selected
+                .warnings
+                .push(bounded(&format!("unavailable {entry}"), WARNING_BYTES));
         }
     }
     if selected

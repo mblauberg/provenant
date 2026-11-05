@@ -3213,6 +3213,58 @@ fn partial_review(minimum: usize) -> (GraphDocument, FakeOwner) {
 }
 
 #[test]
+fn malformed_finding_fields_reach_composite_and_consumer() {
+    let (document, mut owner) = partial_review(1);
+    let malformed = findings_text(
+        r#"{"id":"F1","severity":42,"file":"a.rs","summary":"issue","status":1},{"id":"F2","severity":"mystery","file":"b.rs","summary":"other","status":"open"},{"severity":"high"}"#,
+    );
+    owner.observations = VecDeque::from([
+        terminal_with_result(AttemptOutcome::Succeeded, &malformed),
+        terminal_with_result(AttemptOutcome::Succeeded, &findings_text("")),
+        terminal(AttemptOutcome::AdapterUnavailable),
+        terminal_with_result(AttemptOutcome::Succeeded, "verified"),
+    ]);
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let lens = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id.ends_with("--lens-a"))
+        .unwrap();
+    assert_eq!(lens.state, NodeState::Succeeded);
+    let outputs = lens.outputs.as_ref().unwrap();
+    assert_eq!(outputs.findings.len(), 2);
+    assert_eq!(outputs.findings[0].severity, "blocking");
+    assert_eq!(outputs.findings[1].severity, "blocking");
+    assert_eq!(outputs.findings[0].status, "open");
+    assert!(outputs.warnings.iter().any(|w| w.contains("field status")));
+    assert!(outputs.result.is_some());
+    let composite = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id == "lenses")
+        .unwrap()
+        .outputs
+        .as_ref()
+        .unwrap();
+    assert!(
+        composite
+            .warnings
+            .iter()
+            .any(|w| w.contains("malformed finding:"))
+    );
+    assert!(
+        composite
+            .warnings
+            .iter()
+            .any(|w| w.contains("field status"))
+    );
+    assert!(owner.prompts[3].contains("malformed finding:"));
+    assert!(owner.prompts[3].contains("field status"));
+}
+
+#[test]
 fn review_fail_and_one_unavailable_reach_evaluator() {
     let (mut document, mut owner) = partial_review(2);
     let spec = document.nodes[0].composite.as_mut().unwrap();
@@ -8009,7 +8061,7 @@ fn deferred_review_evaluator_uses_bounded_findings_and_tolerates_one_invalid_len
         let mut document = graph(vec![review, evaluate]);
         document.schema_version = 2;
         let large = format!("{}\n{}", "x".repeat(250_000), findings_text(&entry("")));
-        let bad = "```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"low\",\"file\":\"a\",\"summary\":\"bad\",\"status\":1}]}\n```";
+        let bad = "```findings\nnot json\n```";
         let mut observations: VecDeque<_> = (0..8)
             .map(|i| {
                 terminal_with_result(

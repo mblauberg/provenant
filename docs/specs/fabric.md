@@ -1235,7 +1235,7 @@ member node id at each composite boundary. An overlong qualified id fails the
 composite. If the combined export exceeds the count or byte limit, the composite
 keeps a severity-ranked subset, reserving each member's strongest finding when
 all such reservations fit. Severity ranks critical/blocking/P0, high/P1,
-medium/P2, low/P3, then informational/P4; unrecognised labels rank last.
+medium/P2, low/P3, then informational/P4; unreadable labels are treated as blocking.
 A warning gives the dropped count, members and available attempt references; the composite result also carries the
 notice. Downstream input listings identify the staged paths for those member results. When materialisation is capped or its listing is too long, an input index
 names the graph and every source, status, path, attempt reference and finding ID prefix. A member with findings
@@ -1284,9 +1284,12 @@ limited to 1024 bytes each; a block with an overlong field is invalid. Missing
 or invalid findings produce an empty list and, when a result exists, a warning,
 not a node failure. The final findings block in the tail window takes
 precedence; if it is absent, the final block in the head window is used. An
-invalid final block yields an empty list and a bounded warning naming the first
-failing entry (index and id when available) and field. Nodes requiring findings
-or dispositions include that diagnostic in their settlement failure.
+invalid final block yields an empty list and a bounded warning. Malformed entries
+are reported with their index and field: entries without a usable identity are
+dropped, while malformed fields on identifiable entries are cleared. An unknown
+severity is treated as blocking, and an unreadable status as open. These warnings reach composite outputs and
+consumers of findings. Nodes requiring findings or dispositions include a block
+failure in their settlement diagnostic.
 The separate `required_verdict` contract checks for its exact line across the
 complete redacted stream. Writers can also provide a branch or commit.
 
