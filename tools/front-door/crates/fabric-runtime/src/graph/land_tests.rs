@@ -570,6 +570,75 @@ fn land_replay_after_journal_failure_observes_one_merge() {
 }
 
 #[test]
+fn pending_land_save_failure_keeps_prior_checkpoint() {
+    struct FailPending(GraphCheckpoint);
+    impl GraphJournal for FailPending {
+        type Error = std::io::Error;
+        fn load(&mut self, _: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+            Ok(Some(self.0.clone()))
+        }
+        fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+            if node(checkpoint, "land")
+                .land
+                .as_ref()
+                .is_some_and(|land| land.pending_observations > 1)
+            {
+                return Err(std::io::Error::other("injected land save failure"));
+            }
+            self.0 = checkpoint.clone();
+            Ok(())
+        }
+    }
+    let mut owner = owner();
+    owner.outcomes = VecDeque::from([
+        LandObservation::Pending {
+            reason: "first".into(),
+        },
+        LandObservation::Pending {
+            reason: "still pending".into(),
+        },
+    ]);
+    let document = document("routine", None);
+    let mut journal = Journal::default();
+    for _ in 0..12 {
+        let checkpoint = advance(&document, &mut owner, &mut journal)
+            .unwrap()
+            .checkpoint;
+        if node(&checkpoint, "land")
+            .land
+            .as_ref()
+            .is_some_and(|land| land.pending_observations == 1)
+        {
+            break;
+        }
+    }
+    let prior = journal.0.unwrap();
+    assert_eq!(
+        node(&prior, "land")
+            .land
+            .as_ref()
+            .unwrap()
+            .pending_observations,
+        1
+    );
+    let before = serde_json::to_vec(&prior).unwrap();
+    let mut failing = FailPending(prior);
+    assert!(matches!(
+        advance(&document, &mut owner, &mut failing),
+        Err(GraphError::Journal(_))
+    ));
+    assert_eq!(serde_json::to_vec(&failing.0).unwrap(), before);
+    assert_eq!(
+        node(&failing.0, "land")
+            .land
+            .as_ref()
+            .unwrap()
+            .pending_observations,
+        1
+    );
+}
+
+#[test]
 fn pending_land_without_wall_clock_preserves_checkpoint() {
     let mut owner = owner();
     owner.outcomes = VecDeque::from([
