@@ -457,7 +457,8 @@ dropped; parameter files and dispatch overrides retain their precedence.
 
 Composite nodes retain their children, expose declared outputs and report
 one grouped status. Their internal attempts and evidence remain available in
-the graph checkpoint. `exports` uses ordinary graph input selectors; by
+the graph checkpoint. Static group `exports` uses ordinary graph input selectors and
+interpolates parameters in the declaring preset; by
 default a preset exports result and findings from its final stage. Parallel
 groups combine labelled, bounded results and findings. Scalar outputs such as
 a commit or verdict require an unambiguous named export. Stage inputs select

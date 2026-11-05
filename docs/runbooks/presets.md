@@ -44,6 +44,8 @@ It can declare `reduce_verdict = true` to export the worst successful member
 verdict; missing or invalid verdicts count as inconclusive.
 `export_first` adds outputs from the first member only; those outputs are
 unavailable if that member fails.
+Static groups may declare `exports` to select member outputs; values interpolate the
+declaring preset's parameters, like other stage fields.
 
 `shape_stages` names the frame, parallel panel, verifier and synthesis stages
 controlled by the selected review shape. When a subject is not yet pinned, one

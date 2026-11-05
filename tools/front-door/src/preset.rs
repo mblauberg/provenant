@@ -3181,6 +3181,10 @@ impl StageBuilder<'_> {
                 let ends = built?;
                 let exports = object
                     .remove("exports")
+                    .map(|exports| {
+                        interpolate(&exports, &self.parameters, self.prompt, index as usize)
+                    })
+                    .transpose()?
                     .or_else(|| config.get("exports").cloned())
                     .unwrap_or_else(|| selected_inputs(&ends, &json!(["result", "findings"])));
                 (
@@ -3215,6 +3219,10 @@ impl StageBuilder<'_> {
                     }
                     let mut exports = object
                         .remove("exports")
+                        .map(|exports| {
+                            interpolate(&exports, &self.parameters, self.prompt, index as usize)
+                        })
+                        .transpose()?
                         .unwrap_or_else(|| selected_inputs(&ends, &json!(["result", "findings"])));
                     if let Some(requested) = object.remove("export_first") {
                         let requested =
@@ -3276,6 +3284,10 @@ impl StageBuilder<'_> {
                 let ends = self.sequence(&stages, "", &[], &mut children, depth + 1)?;
                 let exports = object
                     .remove("exports")
+                    .map(|exports| {
+                        interpolate(&exports, &self.parameters, self.prompt, index as usize)
+                    })
+                    .transpose()?
                     .unwrap_or_else(|| selected_inputs(&ends, &json!(["result", "findings"])));
                 (
                     composite(&id, children, exports, deps, &outputs, None),

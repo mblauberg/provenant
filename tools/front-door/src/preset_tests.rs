@@ -551,6 +551,39 @@ kind = "synthesise"
 }
 
 #[test]
+fn group_exports_interpolate_the_declaring_preset_parameters() {
+    let mut layers = Layers::empty();
+    for (name, group, selected) in [
+        (
+            "parallel-exports",
+            "parallel = [{ id = 'first', prompt = 'review' }, { id = 'second', prompt = 'review' }]",
+            "first",
+        ),
+        (
+            "stages-exports",
+            "stages = [{ id = 'first', prompt = 'review' }]",
+            "first",
+        ),
+        ("preset-exports", "preset = 'single'", "task"),
+    ] {
+        let source = format!(
+            r#"
+stages = [{{ id = "panel", {group}, exports = [{{ node = "${{selected}}", outputs = ["findings"] }}] }}]
+[parameters]
+selected = {{ type = "string", default = "{selected}" }}
+"#
+        );
+        layers.insert("test", name, &source).unwrap();
+        let expansion = expand(&layers, name, "brief", &[]).unwrap();
+        assert_eq!(
+            expansion.document["nodes"][0]["composite"]["exports"],
+            json!([{ "node": selected, "outputs": ["findings"] }]),
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn declared_parallel_reduction_keeps_the_worst_verdict() {
     use provenant_fabric_runtime::graph::{GraphDocument, advance_with_budget};
     let mut layers = Layers::empty();
