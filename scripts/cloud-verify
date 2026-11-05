@@ -28,7 +28,8 @@ def credential_bearing_location(location):
     if parsed.username is not None or parsed.password is not None:
         return True
     private_names = ("token", "secret", "password", "signature", "credential", "api_key")
-    return any(any(name in key.lower() for name in private_names)
+    return any(key.lower() in {"key", "auth", "sig"}
+               or any(name in key.lower() for name in private_names)
                for key, _ in parse_qsl(parsed.query, keep_blank_values=True))
 
 
