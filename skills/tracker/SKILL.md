@@ -34,12 +34,23 @@ Outcome; Evidence (required for agent-filed defects); Scope and Out of scope;
 Acceptance, each item with how it is verified; Must not change; Verify; Durable home
 (the doc that absorbs any settled rule in the same PR, or "none"). Cite
 `path#Symbol`, never line numbers or scratch paths. The spec dies with the PR.
-Implementers cannot change acceptance criteria.
+Implementers cannot change acceptance criteria. These headings are a default shape, not a form.
+
+Check each premise against the tree. For each criterion, identify how a wrong
+implementation would be caught and a feasible verification route. Give each
+deletion or move one owner. Test behaviour, not wording or line counts.
+For design-heavy issues, an optional read-only critique by one fresh implementer
+and one fresh reviewer reports only what would stop or misdirect them. A delivery
+spec gap can become a tracker regression case; retain a rule only while a case
+or critique shows that it catches something.
 
 Lifecycle is the project Status field, with the six options `setup-repo` seeds
 into the repository runbook: Backlog, Ready (readiness test passes or `plan.scope`
 returns PASS), In progress, In review, Awaiting user, Done. Do not invent other
 status names.
+
+Before filing, run `provenant tracker lint --file ISSUE.md`; use `--kind` when
+needed. Treat findings and unavailable checks as advice, never a filing gate.
 
 ## File without sprawl
 
@@ -72,7 +83,9 @@ Each stacked PR links its own issues; see the [stacked PR workflow](../../docs/r
 
 ## Steward sweep
 
-A read-only sweep clusters duplicates, thin bodies, orphans and mis-closed issues,
+Run `provenant tracker lint N...` on issues selected for the sweep; findings
+are advice, not a backfill mandate. A read-only sweep clusters duplicates, thin
+bodies, orphans and mis-closed issues,
 then the chair applies the fixes:
 
 ```sh

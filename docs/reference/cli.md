@@ -4684,6 +4684,49 @@ Response fields, nullability, coverage values and capture roles: [PR contributio
 }
 ```
 
+## `provenant tracker`
+
+| Argument | Contract |
+|---|---|
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Inspect issue specifications for stale or misleading references"
+}
+```
+
+## `provenant tracker lint`
+
+Advisory checks, local input, forge availability and repository settings: [tracker lint](../specs/tracker-lint.md).
+
+| Argument | Contract |
+|---|---|
+| `numbers` | `{"bounds": [1, 18446744073709551615], "description": "Issue numbers to inspect", "name": "numbers", "positional": true, "repeatable": true}` |
+| `--file` | `{"description": "Read an issue body from a local file", "name": "file"}` |
+| `--kind` | `{"defaults": ["task"], "description": "Kind of local issue (task, feature, bug or epic)", "name": "kind", "values": ["task", "feature", "bug", "epic"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Advise on issue specifications without blocking work",
+  "groups": [
+    {
+      "arguments": [
+        "numbers",
+        "file",
+        "kind"
+      ],
+      "multiple": true,
+      "name": "Lint",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant check`
 
 | Argument | Contract |

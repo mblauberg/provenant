@@ -135,6 +135,19 @@
         "primary_skill": "orchestrate",
         "companion_skills": []
       }
+    },
+    {
+      "id": "q2885",
+      "relation": "positive",
+      "prompt": "Review this issue spec for incorrect premises and untestable acceptance before filing it.",
+      "tags": [
+        "filing",
+        "specification"
+      ],
+      "expected": {
+        "primary_skill": "tracker",
+        "companion_skills": []
+      }
     }
   ]
 }
