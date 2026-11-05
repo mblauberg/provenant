@@ -68,8 +68,13 @@ reason = "Rejects missing anchors, protected overlaps, invalid paths and unsuppo
 
 [[guard]]
 site = "confinement/src/permissions/probe.rs#system_backend"
-boundary = "unclassified"
-reason = "Unavailable or failed sandbox backend refuses preparation."
+boundary = "credentials"
+reason = "Without an enforcing sandbox the lane could read credential stores outside its selected authentication grants."
+
+[[guard]]
+site = "confinement/src/permissions/probe.rs#system_backend"
+boundary = "lane_git"
+reason = "Without an enforcing sandbox a writer could modify the real Git administrative and common directories."
 
 [[guard]]
 site = "confinement/src/repo.rs#RepoError"
@@ -117,9 +122,9 @@ boundary = "unclassified"
 reason = "Validates route, continuation, executable and account inputs before adapter preparation."
 
 [[guard]]
-site = "providers/src/launch.rs#package_root"
-boundary = "unclassified"
-reason = "Rejects an executable whose package root cannot be represented safely."
+site = "providers/src/launch.rs#package_grant"
+boundary = "warning"
+reason = "A shared package prefix is omitted and the executable receives an exact grant; the omission is reported."
 
 [[guard]]
 site = "providers/src/lane.rs#LaneRuntime::environment"

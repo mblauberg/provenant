@@ -45,9 +45,11 @@ pub enum OmissionSource {
     Toolchain,
     /// The provider's own configuration discovery.
     ProviderConfig,
+    /// A shared package prefix was narrowed to the executable.
+    ProviderPackage,
 }
 
-/// An optional grant left out by the credential guard, with its source.
+/// An optional grant left out of the profile, with its source.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OmittedGrant {
     pub path: PathBuf,
@@ -242,10 +244,10 @@ impl AppliedAccess {
             "toolchain_roots": self.toolchain_roots.iter().map(grant).collect::<Vec<_>>(),
             "omitted_grants": self.omitted_grants.iter().map(|entry| serde_json::json!({
                 "code": "discovered_grant_omitted",
-                "reason": if provenant_confinement::refuses_lane_root(&entry.path, true, Some(home)) { "credential_root" } else { "protected_root" },
+                "reason": if entry.source == OmissionSource::ProviderPackage { "shared_package_prefix" } else if provenant_confinement::refuses_lane_root(&entry.path, true, Some(home)) { "credential_root" } else { "protected_root" },
                 "path": display(&entry.path),
                 "path_id": path_id(&entry.path),
-                "source": match entry.source { OmissionSource::UserSkill => "user_skill", OmissionSource::Toolchain => "toolchain", OmissionSource::ProviderConfig => "provider_config" },
+                "source": match entry.source { OmissionSource::UserSkill => "user_skill", OmissionSource::Toolchain => "toolchain", OmissionSource::ProviderConfig => "provider_config", OmissionSource::ProviderPackage => "provider_package" },
             })).collect::<Vec<_>>(),
         })
     }
@@ -1137,8 +1139,8 @@ pub(crate) fn homebrew_tools(
 /// (`~/.cargo/bin`, `~/.local/bin`) grants only that `bin/`, never the tree
 /// (`credentials.toml`, `share/`). A shared prefix (`/opt/homebrew`, `/usr/local`,
 /// `/usr`) is refused: its `var/` must never become readable.
-pub(crate) fn package_root(executable: &Path) -> Result<&Path, ProviderError> {
-    let package = match executable.parent() {
+fn package_candidate(executable: &Path) -> Option<&Path> {
+    match executable.parent() {
         Some(bin) if bin.file_name() == Some("bin".as_ref()) => {
             let tree = bin.parent();
             let hidden = tree
@@ -1148,7 +1150,10 @@ pub(crate) fn package_root(executable: &Path) -> Result<&Path, ProviderError> {
         }
         parent => parent,
     }
-    .ok_or(ProviderError::InvalidPath)?;
+}
+
+pub(crate) fn package_root(executable: &Path) -> Result<&Path, ProviderError> {
+    let package = package_candidate(executable).ok_or(ProviderError::InvalidPath)?;
     let shared = [
         "/",
         "/opt",
@@ -1162,6 +1167,23 @@ pub(crate) fn package_root(executable: &Path) -> Result<&Path, ProviderError> {
         return Err(ProviderError::InvalidPath);
     }
     Ok(package)
+}
+
+/// Keep shared installation prefixes out of the profile without refusing launch.
+/// The executable remains readable and executable; the omitted prefix is reported.
+pub(crate) fn package_grant(executable: &Path, omitted: &mut Vec<OmittedGrant>) -> PathGrant {
+    match package_root(executable) {
+        Ok(root) => subtree(root),
+        Err(_) => {
+            omitted.push(OmittedGrant {
+                path: package_candidate(executable)
+                    .unwrap_or(executable)
+                    .to_owned(),
+                source: OmissionSource::ProviderPackage,
+            });
+            exact(executable)
+        }
+    }
 }
 
 pub(crate) fn exact(path: impl Into<PathBuf>) -> PathGrant {

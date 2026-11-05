@@ -2004,6 +2004,11 @@ pub(super) fn omission_warning(entry: &provenant_providers::OmittedGrant, home: 
         .strip_prefix(home)
         .map(|relative| format!("~/{}", relative.display()))
         .unwrap_or_else(|_| "<external path; inspect on host>".into());
+    if entry.source == provenant_providers::OmissionSource::ProviderPackage {
+        return format!(
+            "omitted shared provider package grant {display}; using the executable only"
+        );
+    }
     let guard = if provenant_confinement::refuses_lane_root(&entry.path, true, Some(home)) {
         "credential root guard"
     } else {
@@ -2258,6 +2263,17 @@ mod user_skills_tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn shared_provider_package_omission_reports_narrow_fallback() {
+        let entry = provenant_providers::OmittedGrant {
+            path: PathBuf::from("/usr/local"),
+            source: provenant_providers::OmissionSource::ProviderPackage,
+        };
+        let warnings = discovery_warnings(&[entry], Path::new("/fixture/home"), false);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("executable only"));
     }
 
     #[test]

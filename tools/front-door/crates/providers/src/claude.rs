@@ -1,5 +1,5 @@
 use crate::launch::{
-    Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, package_root, subtree,
+    Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, package_grant, subtree,
     uuid_v4,
 };
 use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::wire};
@@ -615,7 +615,8 @@ fn prepare(
     );
     let project = config_dir.join("projects").join(project_key(input.cwd));
     let transcript_dir = project.join(&session_id);
-    let package = package_root(input.executable)?;
+    let mut package_omissions = Vec::new();
+    let package = package_grant(input.executable, &mut package_omissions);
     let scratch = &plan.scratch.path;
     // Scrub mode forces default permissions, regardless of --permission-mode.
     let allowed_tools = if shell {
@@ -654,7 +655,7 @@ fn prepare(
     let staged_skills = input.stage_user_skills();
     let user_skills = staged_skills.root.clone();
     let skill_reads = user_skills.iter().map(subtree).collect::<Vec<_>>();
-    let omitted_discovery = Vec::new();
+    let omitted_discovery = package_omissions;
     let discover_skills = user_skills.is_some();
     if shell || discover_skills {
         let config = plan
@@ -674,7 +675,7 @@ fn prepare(
     } else if input.account.is_some() {
         env.push(("CLAUDE_CONFIG_DIR".into(), config_dir.into_os_string()));
     }
-    let mut runtime_reads = vec![subtree(package)];
+    let mut runtime_reads = vec![package.clone()];
     if discover_skills {
         for grant in &skill_reads {
             // Claude's workspace arguments accept directories only. The

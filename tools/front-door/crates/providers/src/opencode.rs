@@ -1,5 +1,5 @@
 use crate::launch::{
-    Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, package_root, subtree,
+    Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, package_grant, subtree,
 };
 use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::wire};
 use provenant_confinement::permissions::{NetworkEndpoint, ProviderProfile, ProviderProfileSpec};
@@ -231,7 +231,7 @@ fn prepare(
         "permission": permission,
     })
     .to_string();
-    let package = package_root(input.executable)?;
+    let package = package_grant(input.executable, &mut omitted_discovery);
     // Bypass Apple's Git shim, including when the selected binary is Homebrew's.
     let bin = plan.scratch.path.join("bin");
     let shell = access == Access::WorktreeWrite;
@@ -259,7 +259,7 @@ fn prepare(
     let config_home = xdg("XDG_CONFIG_HOME", ".config");
     let data_home = xdg("XDG_DATA_HOME", ".local/share");
     let data = data_home.join("opencode");
-    let mut runtime_reads = vec![subtree(package), subtree(&data)];
+    let mut runtime_reads = vec![package.clone(), subtree(&data)];
     if access == Access::WorktreeWrite {
         let start = runtime_reads.len();
         runtime_reads.extend(crate::launch::git_global_files(&config_home));
@@ -363,7 +363,7 @@ fn prepare(
     // Writers' system roots do not cover a host-selected Homebrew Git.
     let process_executables = vec![exact(input.executable), exact(input.provenant.git)];
     let mut tool_exec_roots = if shell {
-        vec![subtree("/bin"), subtree("/usr/bin"), subtree(package)]
+        vec![subtree("/bin"), subtree("/usr/bin"), package.clone()]
     } else {
         Vec::new()
     };
@@ -1702,7 +1702,7 @@ mod tests {
                     [
                         subtree("/bin"),
                         subtree("/usr/bin"),
-                        subtree(package_root(input.executable).unwrap()),
+                        subtree(crate::launch::package_root(input.executable).unwrap()),
                     ]
                 );
             }
