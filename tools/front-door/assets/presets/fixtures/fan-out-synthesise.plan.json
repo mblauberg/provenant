@@ -3,7 +3,7 @@
     "pattern": "fan-out-synthesise",
     "preset": "fan-out-synthesise"
   },
-  "graph_id": "preset-d5bfcf5e4f20741961e94c3fbbc5d6c2",
+  "graph_id": "preset-6129f1dfb71fdf97a55874723c0c47a4",
   "nodes": [
     {
       "access": "read_only",
@@ -103,11 +103,7 @@
               "route": {
                 "default": "senior",
                 "doc": "Route alias for the worker.",
-                "enum": [
-                  "junior",
-                  "senior",
-                  "principal"
-                ],
+                "enum": [],
                 "type": "string"
               }
             }
@@ -158,10 +154,21 @@
   ],
   "provenance": {
     "origins": {
+      "parameters.branches.default": "bundled",
+      "parameters.branches.doc": "bundled",
+      "parameters.branches.max": "bundled",
+      "parameters.branches.type": "bundled",
       "parameters.local_check_policy": "bundled",
+      "parameters.min_branches.doc": "bundled",
+      "parameters.min_branches.min": "bundled",
+      "parameters.min_branches.optional": "bundled",
+      "parameters.min_branches.type": "bundled",
       "parameters.route.default": "bundled",
       "parameters.route.doc": "bundled",
       "parameters.route.type": "bundled",
+      "parameters.synthesis_route.doc": "bundled",
+      "parameters.synthesis_route.optional": "bundled",
+      "parameters.synthesis_route.type": "bundled",
       "parameters.width.default": "bundled",
       "parameters.width.doc": "bundled",
       "parameters.width.max": "bundled",

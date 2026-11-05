@@ -330,6 +330,20 @@ provenant run --preset fan-out --prompt-file brief.md \
   --set 'parameters.width=3' --set 'parameters.route="junior"' --explain
 ```
 
+`fan-out-synthesise` accepts `parameters.branches` as a list of entries with
+`id`, `brief` and `tier`. The list replaces `width`; each branch receives its
+own brief and configured route. Set `parameters.synthesis_route` to route the
+synthesis separately; it defaults to `route`. Without a branch list, `width`
+and `route` retain their usual meanings. The planner replaces the branch stage
+when `--plan on` is selected.
+
+For `fan-out` and `fan-out-synthesise`, set `parameters.min_branches` to a
+value from 1 through `width` to allow synthesis after some branches fail.
+Omitting it requires every branch to succeed. A graph that meets its minimum
+with failures reports `partial` and exits successfully; it does not deliver a
+pull request. When the planner replaces the branch stage, its workers require
+all-success instead.
+
 Address a stage by its id instead of a path into its internals: on a stage
 that runs a preset, `--set 'council.risk_tags=["security"]'` sets that
 preset's parameter; on a role stage, `--set 'task.tier="junior"'` sets the
@@ -338,7 +352,7 @@ entry field. A stage without an `id` is `s1`, `s2` and so on by position.
 replacing it (a single value appends one item). It is refused on a scalar
 parameter, and on a role stage field.
 Parameters can be typed tables (`type`, `default`, `min`, `max`, `enum`,
-`doc`); `preset explain` prints them. A `[pattern]` table (`level`, `summary`,
+`optional`, `doc`); `preset explain` prints them. A `[pattern]` table (`level`, `summary`,
 `citations`, `cost`, `select_when`, `tags`) says when a preset is worth using.
 
 Keep TOML string quotes inside shell quotes. Expansion refuses unknown fields,

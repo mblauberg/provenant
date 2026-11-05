@@ -577,6 +577,7 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
             prior.remove(&n.id).unwrap_or_else(|| NodeProgress {
                 extra: Default::default(),
                 children: n.composite_members.clone(),
+                min_successful: n.composite.as_ref().and_then(|spec| spec.min_successful),
                 source_commit: None,
                 fragment: None,
                 handoff: None,

@@ -501,6 +501,13 @@ pub fn apply(
         "",
         origins,
     )?;
+    plan_values["plan_route_names"] = json!(
+        layers
+            .known_routes
+            .as_ref()
+            .map(|routes| routes.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default()
+    );
     // Catalogue leaves bypass build_stages, so bind the same policy fallback
     // before lowering their role prompts.
     plan_values["local_check_policy"] = json!(layers.local_check_policy(&plan_values, origins)?.1);
@@ -549,6 +556,12 @@ pub fn apply(
         == Some(true);
     if reduced {
         fallback_stage["outputs"] = json!(["result", "findings", "verdict", "commit"]);
+    }
+    // Planned workers and their deterministic fallback require all members.
+    if (fallback_stage.get("count").is_some() || fallback_stage.get("for_each").is_some())
+        && let Some(stage) = fallback_stage.as_object_mut()
+    {
+        stage.remove("min_successful");
     }
     let mut planner = json!({
         "id": "plan",

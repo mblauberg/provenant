@@ -270,7 +270,8 @@ pub(crate) fn run_preset_graph(
             };
             let outcome = match run.status {
                 GraphStatus::Complete
-                    if run.checkpoint.successful()
+                    if run.outcome
+                        != Some(provenant_fabric_runtime::graph::GraphOutcome::Failed)
                         && (!review
                             || verdict
                                 == Some(provenant_records::workflow::ReviewVerdict::Approve)) =>

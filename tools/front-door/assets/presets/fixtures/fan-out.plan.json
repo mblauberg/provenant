@@ -3,7 +3,7 @@
     "pattern": "fan-out",
     "preset": "fan-out"
   },
-  "graph_id": "preset-18ee80a16fcaf7cd6533990c04e3caf4",
+  "graph_id": "preset-c32e1a94166d1da35846bca3637459c6",
   "nodes": [
     {
       "access": "read_only",
@@ -103,11 +103,7 @@
               "route": {
                 "default": "senior",
                 "doc": "Route alias for the worker.",
-                "enum": [
-                  "junior",
-                  "senior",
-                  "principal"
-                ],
+                "enum": [],
                 "type": "string"
               }
             }
@@ -136,6 +132,10 @@
       "parameters.distinct_families.doc": "bundled",
       "parameters.distinct_families.type": "bundled",
       "parameters.local_check_policy": "bundled",
+      "parameters.min_branches.doc": "bundled",
+      "parameters.min_branches.min": "bundled",
+      "parameters.min_branches.optional": "bundled",
+      "parameters.min_branches.type": "bundled",
       "parameters.route.default": "bundled",
       "parameters.route.doc": "bundled",
       "parameters.route.type": "bundled",
