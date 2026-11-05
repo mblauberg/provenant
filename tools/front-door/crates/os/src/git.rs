@@ -9,8 +9,11 @@ use std::{
     time::Duration,
 };
 
+/// Maximum output for a scalar repository fact such as a resolved Git path.
+pub const REPO_FACT_SCALAR_LIMIT: usize = 64 * 1024;
+
 /// Capture bound for Git repository facts. Inventory output grows with the
-/// number of worktrees; other Git output retains the caller's ordinary bound.
+/// number of worktrees; unrelated Git output retains the caller's ordinary bound.
 /// Global Git options may precede the subcommand.
 pub fn fact_capture_limit(args: &[&str], ordinary_limit: usize) -> usize {
     let mut words = args.iter().copied();
@@ -23,6 +26,7 @@ pub fn fact_capture_limit(args: &[&str], ordinary_limit: usize) -> usize {
             "worktree" if words.next() == Some("list") => {
                 return crate::exec::DEFAULT_CAPTURE_LIMIT;
             }
+            "rev-parse" => return REPO_FACT_SCALAR_LIMIT,
             _ => break,
         }
     }
@@ -166,7 +170,9 @@ pub fn repository_path_with_cancel(
     .into();
     let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(10));
     options.env = Some(&env);
-    options.stdout = StreamPolicy::Capture { limit: 64 * 1024 };
+    options.stdout = StreamPolicy::Capture {
+        limit: REPO_FACT_SCALAR_LIMIT,
+    };
     options.stderr = StreamPolicy::Capture { limit: 4096 };
     options.cancel = cancel;
     options.stop_on_output_limit = true;
@@ -269,9 +275,12 @@ mod tests {
                 crate::exec::DEFAULT_CAPTURE_LIMIT
             );
         }
+        assert_eq!(
+            fact_capture_limit(&["rev-parse", "--verify", "HEAD"], 1024),
+            REPO_FACT_SCALAR_LIMIT
+        );
         for args in [
             &["worktree", "add", "list"][..],
-            &["rev-parse", "--verify", "HEAD"][..],
             &["-c", "worktree", "list"][..],
         ] {
             assert_eq!(fact_capture_limit(args, 1024), 1024);
