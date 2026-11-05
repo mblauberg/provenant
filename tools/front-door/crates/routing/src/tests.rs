@@ -5862,3 +5862,59 @@ fn review_availability(
         satisfied,
     })
 }
+
+#[test]
+fn model_choice_preferences_expire_and_can_be_revoked() -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = RoutingConfig::default();
+    let mut query = request("codex/gpt-6-luna")?;
+    let pinned = query.clone();
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("senior")?);
+    let now = provenant_core::WallTime::from_unix_seconds(100)?;
+    let expires = provenant_core::WallTime::from_unix_seconds(200)?;
+    config.model_choices.push(ModelChoiceOverride {
+        dimension: "model".into(),
+        risk_tier: "substantial".into(),
+        task_kind: "repair".into(),
+        preferred: ModelId::parse("codex/example")?,
+        expires: Some(expires),
+    });
+    assert_eq!(
+        config
+            .preferred_model(&query, "substantial", "repair", now)
+            .map(ModelId::as_str),
+        Some("codex/example")
+    );
+    assert!(
+        config
+            .preferred_model(&query, "routine", "repair", now)
+            .is_none()
+    );
+    assert!(
+        config
+            .preferred_model(&query, "substantial", "repair", expires)
+            .is_none()
+    );
+    assert!(
+        config
+            .preferred_model(&pinned, "substantial", "repair", now)
+            .is_none()
+    );
+    config.model_choices.clear();
+    assert!(
+        config
+            .preferred_model(&query, "substantial", "repair", now)
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
+fn malformed_model_choice_does_not_survive_without_expiry() -> Result<(), Box<dyn std::error::Error>>
+{
+    let text = "schema_version=1\n[[domains.routing.model_choices]]\ndimension='model'\nrisk_tier='substantial'\ntask_kind='repair'\npreferred='codex/gpt-6-luna'\nexpires='bad'\n[[domains.routing.model_choices]]\ndimension='model'\nrisk_tier='routine'\ntask_kind='repair'\npreferred='codex/gpt-6-luna'\nexpires='2030-01-01T00:00:00Z'\n";
+    let config = load_routing(text)??;
+    assert_eq!(config.domains.routing.model_choices.len(), 1);
+    assert_eq!(config.domains.routing.model_choices[0].risk_tier, "routine");
+    assert!(!config.warnings.is_empty());
+    Ok(())
+}
