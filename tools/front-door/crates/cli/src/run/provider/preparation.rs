@@ -638,21 +638,17 @@ pub(super) fn prepare_candidates(
     };
     request.intent = route_request(task)?.intent;
     let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
-    let eligible = provenant_routing::probe_adapters(&request, &catalogue, &config.domains.routing)
-        .map_err(|e| e.to_string())?;
+    let eligible =
+        provenant_routing::probe_adapters(&request, &catalogue, &config.domains.routing, REGISTRY)
+            .map_err(|e| e.to_string())?;
     // Exclude updates during preparation when the bounded wait succeeds.
     let clock = provenant_os::clock::SystemClock::new();
     use provenant_core::Clock;
     let fallback_cancel = provenant_core::CancelToken::new();
     let cancel = registry.cancel.unwrap_or(&fallback_cancel);
-    let provider_leases = available_provider_leases(
-        roots.state.as_path(),
-        &eligible.iter().map(|spec| spec.name).collect::<Vec<_>>(),
-        wait,
-        &clock,
-        cancel,
-    )
-    .map_err(|error| error.to_string())?;
+    let provider_leases =
+        available_provider_leases(roots.state.as_path(), &eligible, wait, &clock, cancel)
+            .map_err(|error| error.to_string())?;
     let eligible = |name: &str| provider_leases.is_empty() || provider_leases.contains_key(name);
     let settings = config.domains.accounts.with_derived_accounts();
     let host_writes = config.domains.run;

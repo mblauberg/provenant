@@ -1737,6 +1737,15 @@ fn resolves_an_available_provider_supplied_only_by_the_registry()
         ..context(&catalogue, &config, now()?)
     };
     let resolved = resolve(&request("fixture-provider/test")?, &context)?;
+    assert_eq!(
+        probe_adapters(
+            &request("fixture-provider/test")?,
+            &catalogue,
+            &config,
+            &registry
+        )?,
+        ["fixture-provider"]
+    );
     assert_eq!(resolved.adapter, "fixture-provider");
     assert_eq!(resolved.account_key.as_deref(), Some("opaque-account"));
     assert!(matches!(resolved.readiness, RouteReadiness::Ready { .. }));
@@ -2848,8 +2857,7 @@ fn probe_adapters_include_only_requested_routes_pools_and_fallbacks()
     let mut config = RoutingConfig::default();
     let mut query = request("codex/fixture")?;
     let names = |query: &RouteRequest, config: &RoutingConfig| {
-        probe_adapters(query, &catalogue, config)
-            .map(|specs| specs.into_iter().map(|spec| spec.name).collect::<Vec<_>>())
+        probe_adapters(query, &catalogue, config, REGISTRY)
     };
     assert_eq!(names(&query, &config)?, ["codex"]);
     query.fallback = Fallback::Models(BoundedModels::new(vec![ModelId::parse("agy/fixture")?])?);
@@ -2901,7 +2909,7 @@ fn probe_adapters_include_only_requested_routes_pools_and_fallbacks()
     assert_eq!(names(&query, &config)?, ["opencode"]);
     query.choice = RouteChoice::NamedRoute(RouteName::parse("absent")?);
     assert!(matches!(
-        probe_adapters(&query, &catalogue, &config),
+        probe_adapters(&query, &catalogue, &config, REGISTRY),
         Err(RoutingError::UnknownRoute)
     ));
     query = request("unknown/fixture")?;

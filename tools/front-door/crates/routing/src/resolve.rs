@@ -343,7 +343,8 @@ pub fn probe_adapters(
     request: &RouteRequest,
     catalogue: &Catalogue,
     config: &RoutingConfig,
-) -> Result<Vec<&'static provenant_records::AdapterSpec>, RoutingError> {
+    registry: &[Registration],
+) -> Result<Vec<&'static str>, RoutingError> {
     let mut adapters = BTreeSet::new();
     match &request.choice {
         RouteChoice::Model(model) => {
@@ -368,9 +369,10 @@ pub fn probe_adapters(
     if let Fallback::Models(models) = &request.fallback {
         adapters.extend(models.as_slice().iter().map(ModelId::adapter));
     }
-    Ok(provenant_records::ADAPTER_SPECS
+    Ok(registry
         .iter()
-        .filter(|spec| adapters.contains(spec.name))
+        .map(|registration| registration.adapter.id())
+        .filter(|id| adapters.contains(id))
         .collect())
 }
 
