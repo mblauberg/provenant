@@ -716,6 +716,35 @@ fn settled_policy_lanes(
     }
     Err("policy successors did not settle within the fixture budget".into())
 }
+
+fn handoff_recovered(lanes: &Value) -> bool {
+    let Some(rows) = lanes["data"]["lanes"].as_array() else {
+        return false;
+    };
+    rows.iter()
+        .any(|row| row["attempt_number"] == 1 && row["state"] == "quota_limited")
+        && rows.iter().any(|row| {
+            row["attempt_number"] == 2
+                && row["continuation"] == "policy_fallback"
+                && !matches!(
+                    row["state"].as_str(),
+                    None | Some("queued" | "starting" | "running" | "settling")
+                )
+        })
+}
+
+fn handoff_recovery_requires_a_settled_successor() -> Result {
+    let mut lanes = json!({"data":{"lanes":[{"attempt_number":1,"state":"quota_limited"}]}});
+    assert!(!handoff_recovered(&lanes));
+    lanes["data"]["lanes"]
+        .as_array_mut()
+        .ok_or("fixture lanes must be an array")?
+        .push(json!({"attempt_number":2,"state":"running","continuation":"policy_fallback"}));
+    assert!(!handoff_recovered(&lanes));
+    lanes["data"]["lanes"][1]["state"] = json!("uncommitted");
+    assert!(handoff_recovered(&lanes));
+    Ok(())
+}
 /// Confined synthetic accounts exercise real launch, holder settlement and
 /// fresh retry routing without contacting a live provider service.
 fn interrupted_progress_recovers_on_another_account_in_the_same_worktree() -> Result {
@@ -754,8 +783,6 @@ fn interrupted_progress_recovers_on_another_account_in_the_same_worktree() -> Re
     }
     let git = provenant_os::git::git_executable().ok_or("git")?;
     for args in [
-        vec!["config", "user.name", "Fixture"],
-        vec!["config", "user.email", "fixture@example.invalid"],
         vec!["commit", "--allow-empty", "-qm", "base"],
         vec!["branch", "-M", "main"],
     ] {
@@ -766,6 +793,7 @@ fn interrupted_progress_recovers_on_another_account_in_the_same_worktree() -> Re
         &prompt,
         "fixture handoff recovery: finish the parser and renderer",
     )?;
+    let timeline = std::time::Instant::now();
     let output = rig.command(&[
         "run",
         "--model",
@@ -794,7 +822,41 @@ fn interrupted_progress_recovers_on_another_account_in_the_same_worktree() -> Re
             .as_str()
             .ok_or("retained worktree path")?,
     );
-    let lanes = settled_policy_lanes(&rig, output, 1)?;
+    assert!(code(&output) == 1 || code(&output) == 0, "{output:?}");
+    let run_id = launch["data"]["run_id"].as_str().ok_or("run ID")?;
+    let mut last_rows = None;
+    let mut recovery_history = Vec::new();
+    let lanes = provenant_test_support::wait_for(
+        "quota-limited attempt and settled fallback",
+        std::time::Duration::from_secs(120),
+        || -> Result<Value> {
+            let output = rig.command(&["lanes", "--id", run_id, "--all", "--json"])?;
+            if code(&output) != 0 {
+                return Err(format!("lanes command failed: {output:?}").into());
+            }
+            let lanes: Value = serde_json::from_slice(&output.stdout.bytes)?;
+            let rows = lanes["data"]["lanes"].as_array().map(|rows| {
+                rows.iter()
+                    .map(|row| {
+                        json!({
+                            "attempt_number": row["attempt_number"],
+                            "state": row["state"],
+                            "continuation": row["continuation"],
+                            "account": row["account"],
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            });
+            if last_rows.as_ref() != Some(&rows) {
+                recovery_history.push((timeline.elapsed(), rows.clone()));
+                last_rows = Some(rows);
+            }
+            Ok(lanes)
+        },
+        |observation| observation.as_ref().is_ok_and(handoff_recovered),
+    )
+    .map_err(|error| format!("{error}; recovery history: {recovery_history:?}"))??;
+    assert!(lanes["data"]["ignored_settled"].is_null(), "{lanes}");
     let rows = lanes["data"]["lanes"].as_array().ok_or("lane rows")?;
     assert_eq!(rows.len(), 2, "{lanes}");
     let first = rows
@@ -1162,20 +1224,7 @@ fn review_council_resolves_identity_only_dispositions() -> Result {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/usr/bin/git"));
     let commit = rig
-        .execute(
-            &git,
-            &[
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.test",
-                "commit",
-                "--allow-empty",
-                "-qm",
-                "Initial",
-            ],
-            None,
-        )
+        .execute(&git, &["commit", "--allow-empty", "-qm", "Initial"], None)
         .map_err(|e| format!("git: {e}"))?;
     assert_eq!(code(&commit), 0);
     let brief = rig.root.join("council-brief.txt");
@@ -1267,20 +1316,7 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
     let git = std::env::var_os("PROVENANT_GIT")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/usr/bin/git"));
-    let commit = rig.execute(
-        &git,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.test",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "Initial",
-        ],
-        None,
-    )?;
+    let commit = rig.execute(&git, &["commit", "--allow-empty", "-qm", "Initial"], None)?;
     assert_eq!(code(&commit), 0);
     // Review derives its base from origin's default branch.
     let project = rig.project.to_str().ok_or("project path")?;
@@ -1388,19 +1424,7 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
     fs::write(rig.project.join(".github/workflows/check.yml"), "fixture")?;
     let added = rig.execute(&git, &["add", ".github/workflows/check.yml"], None)?;
     assert_eq!(code(&added), 0);
-    let saved = rig.execute(
-        &git,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.test",
-            "commit",
-            "-qm",
-            "workflow",
-        ],
-        None,
-    )?;
+    let saved = rig.execute(&git, &["commit", "-qm", "workflow"], None)?;
     assert_eq!(code(&saved), 0);
     fs::create_dir_all(rig.project.join("docs"))?;
     let moved = rig.execute(
@@ -1409,19 +1433,7 @@ fn review_fans_out_and_collects_fake_provider() -> Result {
         None,
     )?;
     assert_eq!(code(&moved), 0);
-    let saved = rig.execute(
-        &git,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.test",
-            "commit",
-            "-qm",
-            "move workflow",
-        ],
-        None,
-    )?;
+    let saved = rig.execute(&git, &["commit", "-qm", "move workflow"], None)?;
     assert_eq!(code(&saved), 0);
     fs::write(&brief, "check renamed path")?;
     let renamed = rig.command(&[
@@ -1634,14 +1646,14 @@ fn opencode_stderr_live_quota() -> Result {
             "5s",
             "--json",
         ])?;
-        assert_eq!(code(&out), 0, "{out:?}");
+        assert_eq!(code(&out), 0, "{prompt_text}: {out:?}");
         let dispatched: Value = serde_json::from_slice(&out.stdout.bytes)?;
         let run = dispatched["data"]["run_id"].as_str().ok_or("run")?;
         let out = rig.command(&["lanes", "--id", run, "--json"])?;
-        assert_eq!(code(&out), 0, "{out:?}");
+        assert_eq!(code(&out), 0, "{prompt_text}: {out:?}");
         let lanes: Value = serde_json::from_slice(&out.stdout.bytes)?;
         let lane = &lanes["data"]["lanes"][0];
-        assert_eq!(lane["state"], expected, "{lane}");
+        assert_eq!(lane["state"], expected, "{prompt_text}: {lane}");
         let attempt = rig
             .state
             .join("runs")
@@ -1649,8 +1661,16 @@ fn opencode_stderr_live_quota() -> Result {
             .join("attempts")
             .join(lane["attempt_id"].as_str().ok_or("attempt")?);
         let exit: Value = serde_json::from_slice(&fs::read(attempt.join("process-exit.json"))?)?;
-        assert_eq!(exit["stop_reason"].as_str(), stop_reason, "{exit}");
-        assert_eq!(exit["terminal_observed"], stop_reason.is_some(), "{exit}");
+        assert_eq!(
+            exit["stop_reason"].as_str(),
+            stop_reason,
+            "{prompt_text}: {exit}"
+        );
+        assert_eq!(
+            exit["terminal_observed"],
+            stop_reason.is_some(),
+            "{prompt_text}: {exit}"
+        );
         cleanup.disarm();
     }
     Ok(())
@@ -2343,20 +2363,7 @@ fn unconfigured_host_native_repair_launches_alias_fallback() -> Result {
     )?;
     let git = provenant_os::git::git_executable().ok_or("git")?;
     assert_eq!(
-        code(&rig.execute(
-            &git,
-            &[
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.test",
-                "commit",
-                "--allow-empty",
-                "-qm",
-                "Initial",
-            ],
-            None,
-        )?),
+        code(&rig.execute(&git, &["commit", "--allow-empty", "-qm", "Initial",], None,)?),
         0
     );
     let created = rig.command(&[
@@ -2983,20 +2990,7 @@ fn review_council_overcap_runs_through_fake_providers() -> Result {
     )?;
     let git = provenant_os::git::git_executable().ok_or("git")?;
     assert_eq!(
-        code(&rig.execute(
-            &git,
-            &[
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.test",
-                "commit",
-                "--allow-empty",
-                "-qm",
-                "Initial"
-            ],
-            None
-        )?),
+        code(&rig.execute(&git, &["commit", "--allow-empty", "-qm", "Initial"], None)?),
         0
     );
     let prompt = rig.root.join("council-brief.txt");
@@ -3245,20 +3239,7 @@ fn graph_retries_real_registry_lock_and_runs_writer() -> Result {
     let rig = claude_fixture()?;
     let cleanup = rig.process_cleanup();
     let git = provenant_os::git::git_executable().ok_or("git")?;
-    let commit = rig.execute(
-        &git,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.test",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "base",
-        ],
-        None,
-    )?;
+    let commit = rig.execute(&git, &["commit", "--allow-empty", "-qm", "base"], None)?;
     assert_eq!(code(&commit), 0);
     let create = rig.command(&[
         "worktree",
@@ -3365,20 +3346,7 @@ fn graph_settlement_advances_writer_and_account_routed_review() -> Result {
     let git = std::env::var_os("PROVENANT_GIT")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/usr/bin/git"));
-    let commit = rig.execute(
-        &git,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.test",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "Initial",
-        ],
-        None,
-    )?;
+    let commit = rig.execute(&git, &["commit", "--allow-empty", "-qm", "Initial"], None)?;
     assert_eq!(code(&commit), 0);
     let created = rig.command(&[
         "worktree",
@@ -3678,20 +3646,7 @@ fn persisted_attempt_with(
     let rig = TestRig::new()?;
     if options.stalled_import {
         let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-        let seeded = rig.execute(
-            &git,
-            &[
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.invalid",
-                "commit",
-                "--allow-empty",
-                "-qm",
-                "seed",
-            ],
-            None,
-        )?;
+        let seeded = rig.execute(&git, &["commit", "--allow-empty", "-qm", "seed"], None)?;
         assert_eq!(code(&seeded), 0);
         let created = rig.command(&[
             "worktree",
@@ -4690,8 +4645,6 @@ fn owned_dispatch_retains_failed_attempt_and_replays() -> Result {
     let rig = TestRig::new()?;
     let git = provenant_os::git::git_executable().ok_or("git")?;
     for args in [
-        vec!["config", "user.name", "Fixture"],
-        vec!["config", "user.email", "fixture@example.invalid"],
         vec!["commit", "--allow-empty", "-qm", "base"],
         vec!["branch", "-M", "main"],
     ] {
@@ -4806,8 +4759,6 @@ fn owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation() -> Result 
     let rig = TestRig::new()?;
     let git = provenant_os::git::git_executable().ok_or("git")?;
     for args in [
-        vec!["config", "user.name", "Fixture"],
-        vec!["config", "user.email", "fixture@example.invalid"],
         vec!["commit", "--allow-empty", "-qm", "base"],
         vec!["branch", "-M", "main"],
     ] {
@@ -5106,6 +5057,7 @@ fn main() -> ExitCode {
                 "stats_reports_partial_signals_outside_graph_groups",
                 "submit_prints_each_brief_read_root_warning_once",
                 "interrupted_progress_recovers_on_another_account_in_the_same_worktree",
+                "handoff_recovery_requires_a_settled_successor",
                 "capacity_settlement_resumes_the_same_session",
                 "fixture_guardian_exits_when_sigkilled_test_owner_dies",
                 "review_council_resolves_identity_only_dispositions",
@@ -5165,6 +5117,7 @@ fn main() -> ExitCode {
                     "stats_reports_partial_signals_outside_graph_groups" => stats_reports_partial_signals_outside_graph_groups(),
                     "submit_prints_each_brief_read_root_warning_once" => submit_prints_each_brief_read_root_warning_once(),
                     "interrupted_progress_recovers_on_another_account_in_the_same_worktree" => interrupted_progress_recovers_on_another_account_in_the_same_worktree(),
+                    "handoff_recovery_requires_a_settled_successor" => handoff_recovery_requires_a_settled_successor(),
                     "capacity_settlement_resumes_the_same_session" => capacity_settlement_resumes_the_same_session(),
                     "fixture_guardian_exits_when_sigkilled_test_owner_dies" => fixture_guardian_exits_when_sigkilled_test_owner_dies(),
                     "review_council_resolves_identity_only_dispositions" => review_council_resolves_identity_only_dispositions(),

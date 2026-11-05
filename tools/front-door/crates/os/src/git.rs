@@ -427,19 +427,7 @@ mod tests {
         for (dir, args) in [
             (&main, vec!["init", "-q"]),
             (&poison, vec!["init", "-q"]),
-            (
-                &main,
-                vec![
-                    "-c",
-                    "user.name=Fixture",
-                    "-c",
-                    "user.email=fixture@example.invalid",
-                    "commit",
-                    "--allow-empty",
-                    "-qm",
-                    "fixture",
-                ],
-            ),
+            (&main, vec!["commit", "--allow-empty", "-qm", "fixture"]),
         ] {
             let output = crate::fixture::git_command()
                 .current_dir(dir)

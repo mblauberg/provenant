@@ -366,20 +366,7 @@ fn core_run_reports_generated_operation_and_status_is_newest_first() -> Result {
 fn creation_commands_refuse_colliding_branch_names() -> Result {
     let rig = TestRig::new()?;
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    let commit = rig.execute(
-        &git,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "initial",
-        ],
-        None,
-    )?;
+    let commit = rig.execute(&git, &["commit", "--allow-empty", "-qm", "initial"], None)?;
     assert_eq!(code(&commit), 0);
     let branch = rig.execute(&git, &["branch", "Existing"], None)?;
     assert_eq!(code(&branch), 0);
@@ -426,20 +413,7 @@ fn creation_commands_refuse_colliding_branch_names() -> Result {
 fn core_run_creates_a_new_managed_worktree_from_a_name_or_branch() -> Result {
     let rig = TestRig::new()?;
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    let commit = rig.execute(
-        &git,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "initial",
-        ],
-        None,
-    )?;
+    let commit = rig.execute(&git, &["commit", "--allow-empty", "-qm", "initial"], None)?;
     assert_eq!(code(&commit), 0);
     for (flag, branch, directory) in [
         ("--worktree", "new-lane", "new-lane"),
@@ -807,10 +781,6 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
         &[
             "-C",
             project,
-            "-c",
-            "user.name=fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
             "commit",
             "-q",
             "--allow-empty",

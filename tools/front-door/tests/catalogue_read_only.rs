@@ -195,20 +195,7 @@ fn catalogue_read_only() -> Result {
 
     let rig = TestRig::new()?;
     let git = provenant_os::git::git_executable().ok_or("git")?;
-    let commit = rig.execute(
-        &git,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.com",
-            "commit",
-            "--allow-empty",
-            "-m",
-            "fixture",
-        ],
-        None,
-    )?;
+    let commit = rig.execute(&git, &["commit", "--allow-empty", "-m", "fixture"], None)?;
     assert_eq!(code(&commit), 0);
     let linked = rig.root.join("linked");
     let linked_text = linked.to_str().ok_or("linked path")?;

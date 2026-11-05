@@ -3739,16 +3739,7 @@ fn writer_disk_refusal_keeps_its_reason_through_graph_mcp_and_dispatch() -> Resu
     let rig = TestRig::new()?;
     let commit = rig.execute(
         &provenant_os::git::git_executable().ok_or("Git unavailable")?,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.test",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "Initial",
-        ],
+        &["commit", "--allow-empty", "-qm", "Initial"],
         None,
     )?;
     assert_eq!(
@@ -4537,17 +4528,7 @@ fn submit_git_worktree_needs_no_provenant_registration() -> Result {
     git(
         &rig,
         &rig.project,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "base",
-        ],
+        &["commit", "-q", "--allow-empty", "-m", "base"],
     )?;
     let worktree = rig.project.join(".worktrees/git-writer");
     git(
@@ -4619,17 +4600,7 @@ fn submit_writer_io_names_the_failed_operation_and_path() -> Result {
     git(
         &rig,
         &rig.project,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "base",
-        ],
+        &["commit", "-q", "--allow-empty", "-m", "base"],
     )?;
     let worktree = rig.project.join(".worktrees/git-writer");
     git(
@@ -4764,17 +4735,7 @@ fn peer_writer_reports_delivery_prepare_failure() -> Result {
     git(
         &rig,
         &rig.project,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "base",
-        ],
+        &["commit", "-q", "--allow-empty", "-m", "base"],
     )?;
     let remote = rig.root.join("remote.git");
     git(
@@ -4861,20 +4822,10 @@ fn peer_writer_creates_its_worktree_from_a_pushed_base() -> Result {
     let cleanup = rig.process_cleanup();
     let peer = loopback_peer(&mut rig)?;
     let project = rig.project.clone();
-    let commit = [
-        "-c",
-        "user.name=Fixture",
-        "-c",
-        "user.email=fixture@example.invalid",
-    ];
     git(
         &rig,
         &project,
-        &[
-            &commit[..],
-            &["commit", "-q", "--allow-empty", "-m", "base"],
-        ]
-        .concat(),
+        &["commit", "-q", "--allow-empty", "-m", "base"],
     )?;
     let base = git(&rig, &project, &["rev-parse", "HEAD"])?;
     let remote = rig.root.join("remote.git");
@@ -4897,11 +4848,7 @@ fn peer_writer_creates_its_worktree_from_a_pushed_base() -> Result {
     git(
         &rig,
         &project,
-        &[
-            &commit[..],
-            &["commit", "-q", "--allow-empty", "-m", "local"],
-        ]
-        .concat(),
+        &["commit", "-q", "--allow-empty", "-m", "local"],
     )?;
     let unpushed = git(&rig, &project, &["rev-parse", "HEAD"])?;
     let prompt = rig.root.join("prompt.txt");
@@ -4977,15 +4924,7 @@ fn peer_writer_creates_its_worktree_from_a_pushed_base() -> Result {
     assert_eq!(status, 0, "{adopted}");
     assert_ne!(adopted["data"]["run_id"], run.as_str());
     assert_eq!(adopted["data"]["worktree"], *worktree);
-    git(
-        &rig,
-        path,
-        &[
-            &commit[..],
-            &["commit", "-q", "--allow-empty", "-m", "work"],
-        ]
-        .concat(),
-    )?;
+    git(&rig, path, &["commit", "-q", "--allow-empty", "-m", "work"])?;
     let (status, taken) = dispatch("peer-writer-again", "peer/writer", "origin/main")?;
     assert_ne!(status, 0);
     assert_eq!(taken["error"]["code"], "BRANCH_EXISTS", "{taken}");

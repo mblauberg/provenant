@@ -222,17 +222,7 @@ fn commit(rig: &TestRig, message: &str, content: &str) -> Result<String> {
     git(rig, &["add", "file"])?;
     git(
         rig,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-qm",
-            message,
-        ],
+        &["-c", "commit.gpgsign=false", "commit", "-qm", message],
     )?;
     git(rig, &["rev-parse", "HEAD"])
 }
