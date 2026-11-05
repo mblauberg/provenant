@@ -1,5 +1,8 @@
 # Event intake configuration
 
+Owner: Workflow maintainers
+Anchor: tools/front-door/src/event_intake.rs
+
 Set these environment variables for `event-intake` and its `status` command.
 The worker uses the existing `gh` authentication for GitHub REST reads.
 
