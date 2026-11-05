@@ -1932,7 +1932,7 @@ fn reports_verdict(result: &str) -> bool {
     let mut capture = provenant_records::result_capture::ResultCapture::new(None);
     capture.push(result.as_bytes());
     let captured = capture.finish();
-    captured.verdict.is_some() || captured.legacy_verdict_token().is_some()
+    captured.verdict.is_some()
 }
 /// Stored instead of the provider's answer when settlement cannot filter it.
 const UNREDACTABLE_RESULT: &str = "[result withheld: redaction failed]";
@@ -2002,12 +2002,7 @@ mod host_clock_tests {
         assert!(reports_verdict(
             "Reviewed the change.\nVERDICT: APPROVE\n```handoff\n{\"schema_version\":2,\"status\":\"done\"}\n```"
         ));
-        // The one-release legacy shape review still reads: exactly one
-        // declaration, on the first non-empty line.
-        assert!(reports_verdict(
-            "Verdict: approve\nLens: correctness\nwrite denied: true"
-        ));
-        // A verdict that is not the first or last thing said is ambiguous: the
+        // A verdict followed by prose is ambiguous: the
         // reader refuses it, and so does settlement.
         assert!(!reports_verdict(
             "Reviewed the change.\nVERDICT: APPROVE\nOne more note."
