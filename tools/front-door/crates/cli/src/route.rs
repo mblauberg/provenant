@@ -847,7 +847,7 @@ pub struct RecordedReadiness {
     pub observation: provenant_quota::ReadinessRead,
 }
 
-fn recorded_model_readiness(
+pub(crate) fn recorded_model_readiness(
     settings: &provenant_providers::accounts::Settings,
     model: &ModelId,
     pools: &[String],

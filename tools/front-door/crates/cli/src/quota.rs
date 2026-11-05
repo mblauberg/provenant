@@ -2468,6 +2468,7 @@ mod tests {
             rows[0].login_expiry.as_ref().unwrap().state,
             LoginExpiryState::Expired
         );
+        let read_at = SystemClock::new().unix_seconds();
         let readiness = read_readiness(
             roots.state.as_path(),
             &ReadinessScope {
@@ -2476,10 +2477,24 @@ mod tests {
                 account_key: "key".into(),
                 route: "claude/model".into(),
             },
-            SystemClock::new().unix_seconds(),
+            read_at,
         );
         assert_eq!(readiness.reason, Some(ReadinessReason::LoginExpired));
         assert_eq!(rows[0].readiness.as_ref(), Some(&readiness));
+        let settings = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?
+            .domains
+            .accounts;
+        let model = provenant_routing::ModelId::parse("claude/model")?;
+        let routes = crate::route::recorded_model_readiness(
+            &settings,
+            &model,
+            &[],
+            Some("key"),
+            None,
+            |scope| read_readiness(roots.state.as_path(), scope, read_at),
+        );
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].observation, readiness);
         assert!(readiness_words(&readiness).contains("login expired"));
         assert!(readiness.observed_unix_seconds.is_some());
         assert!(matches!(
