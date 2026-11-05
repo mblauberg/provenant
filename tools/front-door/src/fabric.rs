@@ -1650,7 +1650,7 @@ fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
             }
             Some(DiagnosticFact::Resource(fact)) => {
                 return FacadeError::ConfinementRefused {
-                    resource: Some(fact.clone()),
+                    resource: Some(*fact),
                 };
             }
             None => {}
@@ -1679,6 +1679,21 @@ fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
 /// failures keep their own message; rendering it by kind would read as
 /// invalid input instead of a refusal.
 fn dispatch_refused(fail: provenant_cli::run::Fail) -> FacadeError {
+    if let Some(provenant_records::diagnostic::DiagnosticFact::Resource(fact)) = fail
+        .projection
+        .as_ref()
+        .and_then(|projection| projection.fact.as_ref())
+    {
+        return FacadeError::DispatchRefused {
+            fact: Some(
+                provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::Resource(
+                    *fact,
+                ),
+            ),
+            disk: None,
+            reason: "dispatch was refused".into(),
+        };
+    }
     if matches!(
         fail.projection
             .as_ref()

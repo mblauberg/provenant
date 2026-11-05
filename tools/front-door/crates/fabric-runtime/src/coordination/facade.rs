@@ -184,6 +184,7 @@ pub enum DispatchRefusalFact {
     GraphStructuralLimit(crate::graph::GraphStructuralLimit),
     GraphEnvelope,
     GraphOutputKind(crate::graph::GraphOutputField),
+    Resource(provenant_records::diagnostic::ResourceFact),
 }
 
 /// Facts the input owner has explicitly approved for disclosure.
@@ -553,6 +554,9 @@ impl FacadeError {
             Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphStructuralLimit(limit)), .. } => {
                 projected = projected.detail(limit.to_string()).next("reduce the graph or adjust the named graph limit");
             }
+            Self::DispatchRefused { fact: Some(DispatchRefusalFact::Resource(fact)), .. } => {
+                projected = fact.project(projected);
+            }
             Self::DispatchRefused { fact: Some(fact), .. } => {
                 let (detail, action) = match fact {
                     DispatchRefusalFact::DetachedWriter => unreachable!(),
@@ -560,6 +564,7 @@ impl FacadeError {
                     DispatchRefusalFact::GraphComposite => ("graph composite or loop expansion is invalid", "inspect the composite or loop definition"),
                     DispatchRefusalFact::GraphPlan => ("graph plan is invalid", "inspect the graph plan and node dependencies"),
                     DispatchRefusalFact::GraphStructuralLimit(_) => unreachable!(),
+                    DispatchRefusalFact::Resource(_) => unreachable!(),
                     DispatchRefusalFact::GraphEnvelope => ("graph checkpoint would exceed its size limit", "split the graph into smaller runs"),
                     DispatchRefusalFact::GraphOutputKind(crate::graph::GraphOutputField::Input) => ("graph inputs[].outputs selects an unavailable output kind", "select an output supplied by the source node"),
                     DispatchRefusalFact::GraphOutputKind(crate::graph::GraphOutputField::CompositeExport) => ("graph composite.exports[].outputs selects an unavailable output kind", "select an output supplied by the source node"),

@@ -68,7 +68,7 @@ impl PressureThreshold {
 }
 
 /// Closed resource facts safe to project across host boundaries.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ResourceFact {
     MemoryPressure {
