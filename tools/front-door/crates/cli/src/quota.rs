@@ -3501,6 +3501,8 @@ mod tests {
         let registration = provenant_providers::Registration {
             adapter: &AUTH_REQUIRED_ADAPTER,
             quota_source: None,
+            stdout_decoder: None,
+            stderr_decoder: None,
             display_name: "Claude",
             quota: policy,
         };

@@ -18,6 +18,8 @@ pub struct Invocation<'a> {
 pub const REGISTRATION: crate::Registration = crate::Registration {
     adapter: &Command,
     quota_source: None,
+    stdout_decoder: None,
+    stderr_decoder: None,
     display_name: "Command",
     quota: provenant_quota::QuotaPolicy {
         adapter: "command",

@@ -30,9 +30,44 @@ impl provenant_os::capture::FrameDecoder for OpenCode {
     }
 }
 
+/// Only a line beginning with the provider's error class is live evidence.
+pub struct StderrQuota;
+impl provenant_os::capture::FrameDecoder for StderrQuota {
+    fn decode(
+        &self,
+        frame: &[u8],
+    ) -> Result<provenant_os::capture::FrameEvent, provenant_os::capture::DecodeFailure> {
+        use provenant_os::capture::FrameEvent;
+        Ok(if self.partial_terminal(frame) {
+            FrameEvent::Terminal
+        } else {
+            FrameEvent::Progress
+        })
+    }
+
+    fn partial_terminal(&self, frame: &[u8]) -> bool {
+        let Ok(mut line) = std::str::from_utf8(frame) else {
+            return false;
+        };
+        loop {
+            line = line.trim_start();
+            let Some(rest) = line.strip_prefix("\x1b[") else {
+                break;
+            };
+            let Some(end) = rest.find(|c: char| ('@'..='~').contains(&c)) else {
+                return false;
+            };
+            line = &rest[end + 1..];
+        }
+        line.starts_with("AI.Error.QuotaExceeded:")
+    }
+}
+
 pub const REGISTRATION: crate::Registration = crate::Registration {
     adapter: &OpenCode,
     quota_source: Some(&OpenCode),
+    stdout_decoder: Some(&OpenCode),
+    stderr_decoder: Some(&StderrQuota),
     display_name: "OpenCode",
     quota: provenant_quota::QuotaPolicy {
         adapter: "opencode",
@@ -737,6 +772,34 @@ crate::quota_source!(OpenCode, "opencode");
 mod tests {
     use super::*;
     use crate::Adapter;
+
+    #[test]
+    fn live_stderr_quota_requires_error_class_at_line_start() {
+        use provenant_os::capture::{FrameDecoder, FrameEvent};
+        let decoder = super::StderrQuota;
+        assert_eq!(
+            decoder
+                .decode(b"AI.Error.QuotaExceeded: Go usage limit exceeded")
+                .unwrap(),
+            FrameEvent::Terminal
+        );
+        assert_eq!(
+            decoder
+                .decode(b"\x1b[31mAI.Error.QuotaExceeded: limit")
+                .unwrap(),
+            FrameEvent::Terminal
+        );
+        for text in [
+            "The documentation mentions quota and usage limit exceeded",
+            "example AI.Error.QuotaExceeded: Go usage limit exceeded",
+            "AI.Error.QuotaExceeded elsewhere in prose",
+        ] {
+            assert_eq!(
+                decoder.decode(text.as_bytes()).unwrap(),
+                FrameEvent::Progress
+            );
+        }
+    }
 
     #[test]
     fn stderr_quota_forms_and_retry() {
