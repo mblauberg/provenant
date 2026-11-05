@@ -703,6 +703,9 @@ impl Driver<'_> {
         let budgets =
             Budgets::with_cleanup(plan.wall_ms, plan.root_flush_ms, plan.descendant_grace_ms);
         let mut state = State::prepared(budgets);
+        // Time spent queued for a build slot does not count towards the wall
+        // deadline: sample the lane's wait markers about once a second.
+        let mut slot_sampled_at: Option<Instant> = None;
         let spawn_result = self.spawn_provider(
             argv,
             env,
@@ -997,6 +1000,27 @@ impl Driver<'_> {
             } else {
                 Event::Silence
             };
+            if exit.is_none() {
+                let at = Instant::now();
+                if let Some(last) = slot_sampled_at
+                    && at.duration_since(last) >= Duration::from_secs(1)
+                {
+                    let waiting = wall_now().is_some_and(|wall| {
+                        provenant_os::build_slots::slot_wait_active(
+                            &self.attempt,
+                            u64::try_from(wall.as_micros() / 1_000_000).unwrap_or(0),
+                        )
+                    });
+                    if waiting {
+                        let ms = u64::try_from(at.duration_since(last).as_millis())
+                            .unwrap_or(0);
+                        state.extend_wall_deadline(ms);
+                    }
+                    slot_sampled_at = Some(at);
+                } else if slot_sampled_at.is_none() {
+                    slot_sampled_at = Some(at);
+                }
+            }
             let mut tick = Tick::at(now);
             tick.observed_exit = exit;
             // The monotonic clock stops while the host sleeps; the wall

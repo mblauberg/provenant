@@ -38,6 +38,7 @@ pub use reactions::Reaction;
 mod reader;
 mod retention;
 mod service;
+pub mod token_budget;
 #[cfg(test)]
 mod service_tests;
 pub mod settlement;

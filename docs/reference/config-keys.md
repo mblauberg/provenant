@@ -639,11 +639,23 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
         "effect": "Maximum rendered macOS sandbox profile size. Increase for lanes with many grants; profiles pass through argv and may still hit OS limits.",
         "type": "int"
       },
+      "projects.{project}.writer_token_budget": {
+        "allowed": "0 or more tokens",
+        "default": "host writer_token_budget",
+        "effect": "Replace the host writer token budget for this project.",
+        "type": "int"
+      },
       "projects.{project}.writer_writes": {
         "allowed": "up to 16 absolute, safe directory paths outside credential roots",
         "default": "host writer_writes",
         "effect": "Replace the host writer_writes list for this project; an empty list grants no host-configured writer roots. Origin: host configuration [domains.run.projects.<project ID>].",
         "type": "string_list"
+      },
+      "writer_token_budget": {
+        "allowed": "0 or more tokens",
+        "default": "500000",
+        "effect": "Tokens a writer attempt may use, from the usage its provider reports, before it is ended with its work committed and pushed for a continuation. 0 turns the budget off. A provider that reports no usage is warned about, not refused. Time queued for a build slot does not count towards the wall-clock deadline. The source (run, project, host or default) is shown with the budget.",
+        "type": "int"
       }
     }
   },
