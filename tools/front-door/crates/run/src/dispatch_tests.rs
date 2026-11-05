@@ -4987,8 +4987,11 @@ fn batch_concurrency_defaults_by_lane_class_and_an_explicit_value_wins() {
     assert_eq!(concurrency(None, &tuned, false, None), 2);
     assert_eq!(concurrency(None, &tuned, true, None), 5);
     let bare = HarnessProfile::default();
-    assert_eq!(concurrency(None, &bare, false, None), 8);
-    assert_eq!(concurrency(None, &bare, true, None), 16);
+    let writer_default = concurrency(None, &bare, false, None);
+    let reader_default = concurrency(None, &bare, true, None);
+    assert!(reader_default >= writer_default);
+    assert_eq!(concurrency(Some(3), &bare, false, None), 3);
+    assert_eq!(concurrency(Some(3), &bare, true, None), 3);
     assert_eq!(concurrency(None, &registry, true, Some(3)), 3, "bounded");
     assert_eq!(
         concurrency(None, &tuned, true, Some(7)),

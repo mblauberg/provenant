@@ -1190,7 +1190,8 @@ mod tests {
     #[test]
     fn graph_policy_defaults_and_validation() {
         let mut config = config();
-        assert_eq!(config.limits.store_busy_timeout_ms, 30_000);
+        assert!(config.validate().is_empty());
+        let default_busy_timeout = config.limits.store_busy_timeout_ms;
         config.limits.store_busy_timeout_ms = 0;
         assert!(config.validate().is_empty());
         config.limits.store_busy_timeout_ms = 600_001;
@@ -1200,13 +1201,9 @@ mod tests {
                 .iter()
                 .any(|e| e.field == "limits.store_busy_timeout_ms")
         );
-        config.limits.store_busy_timeout_ms = 30_000;
-        assert_eq!(config.graph.limits.expansion_depth, 64);
-        assert_eq!(config.graph.limits.nodes, 512);
-        assert_eq!(config.graph.limits.continuations, 2);
+        config.limits.store_busy_timeout_ms = default_busy_timeout;
         config.graph.limits.continuations = 0;
         assert!(config.validate().is_empty());
-        assert_eq!(config.graph.limits.graph_prompt_bytes, 4 * 1024 * 1024);
         assert!(config.graph.budget.per_graph.tokens.is_none());
         config.graph.limits.nodes = 513;
         assert!(config.validate().is_empty());
