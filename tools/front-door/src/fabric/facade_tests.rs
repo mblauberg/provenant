@@ -134,6 +134,51 @@ pub(crate) mod peer_tests {
     }
 
     #[test]
+    fn tick_dispatches_waiting_node_without_a_deadline() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::tick_dispatches_waiting_node_without_a_deadline")? { return Ok(()); }
+        use provenant_fabric_runtime::graph;
+        struct Seed(String);
+        impl graph::AttemptOwner for Seed {
+            type Error = std::convert::Infallible;
+            fn actor(&self) -> String { self.0.clone() }
+            fn observe_or_start(&mut self, _: &graph::AttemptKey, _: graph::NodeInput<'_>, _: &graph::GraphRoute,
+                _: graph::AccessMode, _: Option<&str>, _: graph::Replay<'_>) -> Result<graph::AttemptObservation, Self::Error> {
+                Ok(graph::AttemptObservation::Pending { attempt_ref: None })
+            }
+        }
+        let rig = crate::worktree_tests::support::TestRig::new()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let context = Context::open(roots.clone(), &rig.home, &rig.project)?;
+        let project = context.identity.project;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+        let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"waiter","nodes":[{"id":"one","prompt":"reply OK",
+            "access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
+        }))?;
+        let mut journal = graph::FileJournal::open(&roots.state, project, "waiter", budget, &cancel, &clock)?;
+        journal.bind(graph::GraphExecution { review_base: None, extra: Default::default(), integration_base: None,
+            directory: rig.project.clone(), document: document.clone() })?;
+        let seeded = graph::advance_with_budget(&document, &mut Seed(context.identity.inbox.actor.to_string()),
+            &mut journal, &Default::default(), &Default::default())?;
+        assert!(seeded.checkpoint.wake_at.is_none());
+        let key = seeded.checkpoint.nodes[0].attempts[0].key.clone();
+        drop(journal);
+        let resolved = crate::roots::Resolved { assets: rig.project.clone(), home: rig.home.clone(), project: rig.project.clone(),
+            roots: roots.clone(), claude_config: None, codex_home: None };
+        let tick = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers)?;
+        assert_eq!(tick.advanced, 1, "{:?}", tick.errors);
+        let factory = Factory { context, project_attribution: false, clock: SystemClock, backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(), assets: rig.project.clone(),
+            host_launch: None, mcp_project: None, workers: &FreeWorkers };
+        let owner = BinaryRunOwner { factory: &factory, allow_remote: true, actor: None, chair: None };
+        let operation = graph_operation("graph-attempt-operation", &key)?;
+        assert!(owner.store(&cancel)?.operation(&operation, &owner.call(&cancel))?.is_some());
+        Ok(())
+    }
+
+    #[test]
     fn tick_warns_once_for_missing_worktree_and_advances_another_graph()
     -> Result<(), Box<dyn std::error::Error>> {
         if host_test("fabric::peer_tests::tick_warns_once_for_missing_worktree_and_advances_another_graph")? {
