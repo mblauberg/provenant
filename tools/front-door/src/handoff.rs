@@ -1595,6 +1595,11 @@ mod tests {
                 },
             )?;
             assert!(held, "the writer lock must cover the mutation");
+            provenant_os::fixture::run_git(
+                &tree.path,
+                &["commit", "--allow-empty", "-qm", "guarded mutation"],
+            )
+            .map_err(|error| Refusal::refused("WIP_FAILED", error.to_string()))?;
             called.set(true);
             Ok(())
         })
