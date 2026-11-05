@@ -259,6 +259,7 @@ fn account_placement() -> Result {
         let prompt = Prompt::new(address.to_string());
         let account = accounts.selected(&route)?;
         let spec = Codex.prepare(PrepareInput {
+            images: &[],
             command: None,
             route: &route,
             confined: &plan,

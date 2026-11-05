@@ -219,8 +219,8 @@ const ALL_NETWORK: &[NetworkAccess] = &[
     NetworkAccess::Open,
 ];
 
-/// Declared launch capabilities. A request outside them is refused before
-/// admission, worktree preparation or receipt creation.
+/// Declared launch capabilities. Unsupported enforced controls are refused
+/// before admission; missing image input is advisory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LaunchCapabilities {
     /// Accepts a model selector; false for configured command entries.
@@ -234,7 +234,7 @@ pub struct LaunchCapabilities {
     pub control: ControlCapabilities,
     /// Network modes the adapter's sandbox profile can enforce.
     pub network: &'static [NetworkAccess],
-    /// Accepts image input in a prompt. No adapter offers this yet.
+    /// Accepts image input in a prompt.
     pub image_input: bool,
     /// Runs with worktree-write access.
     pub write: bool,
@@ -429,7 +429,7 @@ adapter_specs! { $;
                 chair: ControlSupport::MailOnly,
             },
             network: ALL_NETWORK,
-            image_input: false,
+            image_input: true,
             write: true,
         },
     },
@@ -508,7 +508,7 @@ adapter_specs! { $;
                 chair: ControlSupport::MailOnly,
             },
             network: ALL_NETWORK,
-            image_input: false,
+            image_input: true,
             write: true,
         },
     },
@@ -1186,6 +1186,18 @@ mod launch_tests {
             ),
         ] {
             assert_eq!(command.check_launch(&request).unwrap_err().field, field);
+        }
+    }
+
+    #[test]
+    fn image_input_capability_matches_native_delivery() {
+        for spec in ADAPTER_SPECS {
+            assert_eq!(
+                spec.launch.image_input,
+                matches!(spec.name, "claude" | "codex"),
+                "{}",
+                spec.name
+            );
         }
     }
 

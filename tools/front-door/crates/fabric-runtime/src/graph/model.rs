@@ -250,6 +250,8 @@ pub struct GraphNode {
     pub dispositions: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read_roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<String>,
     /// Explicit node capability set; absent inherits the writer project default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Vec<String>>,
@@ -1216,6 +1218,7 @@ pub struct NodeInput<'a> {
     pub family_peers: &'a [String],
     pub context: provenant_records::run::WorkContext,
     pub read_roots: &'a [String],
+    pub attachments: &'a [String],
     pub capabilities: Option<&'a [String]>,
     pub capability_sources: Option<&'a serde_json::Value>,
     /// Attempts of the source writer whose model families must be avoided.
