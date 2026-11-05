@@ -263,8 +263,10 @@ For recovery, use the existing operation that matches the situation:
 - **Fresh start:** cancel the old graph when appropriate, then rerun a preset
   with `--fresh` to create a new graph ID.
 
-Drain writer lanes before upgrading, as described in the
-[upgrade procedure](install.md#bootstrap-and-upgrade). Upgrading does not
+Drain in-flight graphs and writer lanes before upgrading, as described in the
+[upgrade procedure](install.md#bootstrap-and-upgrade). Finish or cancel each
+graph before upgrading: checkpoint meanings for graph lineage and lifecycle
+change together in this release. Upgrading does not
 force-cancel running lanes. An older interrupted settlement with its private
 objects can resume through the new Git receive import. Without those objects,
 recover its commits on the host and start a fresh run; the refusal names this
