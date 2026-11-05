@@ -217,8 +217,18 @@ reason = "JSON path conversion and search-path construction still need a toleran
 
 [[guard]]
 site = "providers/src/command.rs#prepare"
+boundary = "credentials"
+reason = "A configured command does not accept a provider authentication grant."
+
+[[guard]]
+site = "providers/src/command.rs#prepare"
+boundary = "authority"
+reason = "A configured command cannot silently ignore a requested continuation, model, effort or account selection."
+
+[[guard]]
+site = "providers/src/command.rs#prepare"
 boundary = "unclassified"
-reason = "Unsupported access, session, route, authentication or command invocation refuses preparation; capability eligibility is tracked separately."
+reason = "Writer capability and missing or invalid command invocation still refuse preparation; capability eligibility is tracked separately."
 
 [[guard]]
 site = "providers/src/cursor.rs#prepare"
