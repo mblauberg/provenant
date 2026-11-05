@@ -585,12 +585,6 @@ pub enum Config {
 
 pub use crate::install::{Install, Uninstall, Upgrade};
 pub use crate::route::{Model, RouteRequest};
-#[derive(Debug, Args)]
-pub struct Adapter {
-    /// Restrict to this adapter
-    #[arg(long)]
-    pub adapter: Option<String>,
-}
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 pub enum Mode {
     ReadOnly,

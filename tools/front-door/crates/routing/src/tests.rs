@@ -5,6 +5,14 @@ use provenant_records::{RouteEligibility, RouteExclusionReason, RouteReadiness};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+fn resolve_for_account(
+    request: &RouteRequest,
+    context: &RoutingContext<'_>,
+    account: Option<&str>,
+) -> Result<ResolvedRoute, RoutingError> {
+    resolve_for_account_with_seed(request, context, account, "route-preview", 0)
+}
+
 #[test]
 fn model_policy_config_accepts_layered_rules() -> Result<(), Box<dyn std::error::Error>> {
     let config = serde_json::from_value::<RoutingConfig>(serde_json::json!({
