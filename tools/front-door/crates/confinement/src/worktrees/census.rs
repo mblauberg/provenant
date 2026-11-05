@@ -7,6 +7,7 @@ pub struct WorkerEvidence {
     pub states: BTreeMap<PathBuf, WorkerState>,
     pub holders: BTreeMap<PathBuf, ObservedProcess>,
     pub details: BTreeMap<PathBuf, String>,
+    pub taints: BTreeMap<PathBuf, TaintCause>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -80,6 +81,7 @@ impl<'a> CensusSession<'a> {
                 result
                     .details
                     .retain(|root, _| requested.contains_key(root));
+                result.taints.retain(|root, _| requested.contains_key(root));
                 return result;
             }
         }
@@ -97,6 +99,31 @@ impl<'a> CensusSession<'a> {
                 .entry(root.clone())
                 .or_insert(WorkerState::Unknown);
         }
+        for root in roots {
+            match evidence.states.get(root) {
+                Some(WorkerState::Live) => {
+                    evidence.taints.entry(root.clone()).or_insert_with(|| {
+                        evidence
+                            .holders
+                            .get(root)
+                            .cloned()
+                            .map(TaintCause::LiveWriter)
+                            .unwrap_or(TaintCause::UnattributedLiveWriter)
+                    });
+                }
+                Some(WorkerState::Unknown) => {
+                    evidence
+                        .taints
+                        .entry(root.clone())
+                        .or_insert(TaintCause::Uncertainty(
+                            UncertaintyReason::CensusUnavailable,
+                        ));
+                }
+                _ => {
+                    evidence.taints.remove(root);
+                }
+            }
+        }
         let stable = requested.filter(|before| root_identities(roots).as_ref() == Some(before));
         let stable_policy =
             policy.filter(|before| self.inner.epoch_policy().as_ref() == Some(before));
@@ -108,6 +135,10 @@ impl<'a> CensusSession<'a> {
                 }
                 if evidence.states.get(root) != Some(&WorkerState::Live) {
                     evidence.states.insert(root.clone(), WorkerState::Unknown);
+                    evidence.taints.insert(
+                        root.clone(),
+                        TaintCause::Uncertainty(UncertaintyReason::RootUnreadable),
+                    );
                     evidence
                         .details
                         .entry(root.clone())
@@ -119,6 +150,10 @@ impl<'a> CensusSession<'a> {
             for root in roots {
                 if evidence.states.get(root) != Some(&WorkerState::Live) {
                     evidence.states.insert(root.clone(), WorkerState::Unknown);
+                    evidence.taints.insert(
+                        root.clone(),
+                        TaintCause::Uncertainty(UncertaintyReason::PolicyRejected),
+                    );
                     evidence
                         .details
                         .entry(root.clone())
@@ -172,6 +207,14 @@ impl WorkerObserver for CensusSession<'_> {
     fn observe_evidence(&self, roots: &[PathBuf], for_land: bool) -> WorkerEvidence {
         self.evidence(roots, for_land)
     }
+    fn observe_roots_with_taints(&self, roots: &[PathBuf]) -> WorkerTaintObservations {
+        let e = self.evidence(roots, false);
+        (e.states, e.taints)
+    }
+    fn observe_roots_for_land_with_taints(&self, roots: &[PathBuf]) -> WorkerTaintObservations {
+        let e = self.evidence(roots, true);
+        (e.states, e.taints)
+    }
     fn live_process(&self, root: &Path) -> Option<ObservedProcess> {
         self.evidence(&[root.to_path_buf()], false)
             .holders
@@ -210,6 +253,7 @@ pub trait WorkerObserver: Send + Sync {
             self.observe_roots_with_details(roots)
         };
         WorkerEvidence {
+            taints: default_taints(&states, &|_| None),
             states,
             holders: BTreeMap::new(),
             details,
@@ -286,7 +330,6 @@ pub trait WorkerObserver: Send + Sync {
         }
     }
 
-<<<<<<< HEAD
     fn observe_roots_with_policy_taints(
         &self,
         roots: &[PathBuf],
@@ -297,7 +340,9 @@ pub trait WorkerObserver: Send + Sync {
             self.observe_roots_for_land_with_taints(roots)
         } else {
             self.observe_roots_with_taints(roots)
-=======
+        }
+    }
+
     fn observe_evidence_with_policy(
         &self,
         roots: &[PathBuf],
@@ -306,10 +351,10 @@ pub trait WorkerObserver: Send + Sync {
     ) -> WorkerEvidence {
         let (states, details) = self.observe_roots_with_policy(roots, entries, for_land);
         WorkerEvidence {
+            taints: default_taints(&states, &|_| None),
             states,
             holders: BTreeMap::new(),
             details,
->>>>>>> origin/main
         }
     }
 
@@ -677,6 +722,16 @@ fn system_worker_evidence(
                 .map(|root| (root, WorkerState::Unknown))
                 .collect(),
             holders: BTreeMap::new(),
+            taints: roots
+                .iter()
+                .cloned()
+                .map(|root| {
+                    (
+                        root,
+                        TaintCause::Uncertainty(UncertaintyReason::CensusUnavailable),
+                    )
+                })
+                .collect(),
             details: roots
                 .iter()
                 .cloned()
@@ -693,21 +748,22 @@ fn system_worker_evidence(
                 .collect(),
         };
     };
-    let (states, holders, details) = observe_worker_holders(
+    let (states, holders, details, taints) = observe_worker_holders_with_taints_and_audit(
         roots,
         &SystemProcessObserver,
         &PolicyCwdObserver(entries),
         &current,
         ancestors,
+        &mut |_, _| {},
     );
     WorkerEvidence {
         states,
         holders,
         details,
+        taints,
     }
 }
 
-<<<<<<< HEAD
 pub(super) fn system_worker_roots_with_policy_taints(
     roots: &[PathBuf],
     ancestors: bool,
@@ -741,9 +797,7 @@ pub(super) fn system_worker_roots_with_policy_taints(
     )
 }
 
-=======
 #[cfg(test)]
->>>>>>> origin/main
 pub(super) fn observe_worker_roots(
     roots: &[PathBuf],
     observer: &dyn ProcessObserver,
@@ -1046,11 +1100,8 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
                             .or_insert_with(|| ObservedProcess {
                                 pid,
                                 command: fact.command.clone(),
-<<<<<<< HEAD
                                 kind,
-=======
-                                cwd: Some(location.to_path_buf()),
->>>>>>> origin/main
+                                cwd: None,
                             });
                         taints.insert(root.clone(), TaintCause::LiveWriter(holder.clone()));
                         details.insert(
@@ -1168,30 +1219,21 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
                         }
                     }
                     for root in placed {
-<<<<<<< HEAD
                         let holder = holders
                             .entry(root.clone())
                             .and_modify(|h| {
                                 if h.pid == pid {
                                     h.kind = ProcessEvidenceKind::WorkingDirectory;
+                                    h.cwd = Some(canonical.clone());
                                 }
                             })
                             .or_insert_with(|| ObservedProcess {
                                 pid,
                                 command: fact.command.clone(),
                                 kind: ProcessEvidenceKind::WorkingDirectory,
+                                cwd: Some(canonical.clone()),
                             });
                         taints.insert(root.clone(), TaintCause::LiveWriter(holder.clone()));
-=======
-                        let holder =
-                            holders
-                                .entry(root.clone())
-                                .or_insert_with(|| ObservedProcess {
-                                    pid,
-                                    command: fact.command.clone(),
-                                    cwd: Some(canonical.clone()),
-                                });
->>>>>>> origin/main
                         details.insert(root, format!("process {}: cwd inside root", holder.pid));
                     }
                 } else {

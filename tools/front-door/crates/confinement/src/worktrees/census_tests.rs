@@ -154,8 +154,18 @@ fn session_refusal_uses_decision_evidence_and_missing_root_is_unknown() -> Resul
                     ObservedProcess {
                         pid: 123,
                         command: Some("first".into()),
+                        kind: ProcessEvidenceKind::WorkingDirectory,
                         cwd: Some(root.clone()),
                     },
+                )]),
+                taints: BTreeMap::from([(
+                    root.clone(),
+                    TaintCause::LiveWriter(ObservedProcess {
+                        pid: 123,
+                        command: Some("first".into()),
+                        kind: ProcessEvidenceKind::WorkingDirectory,
+                        cwd: Some(root.clone()),
+                    }),
                 )]),
                 details: BTreeMap::from([(root, "first observation".into())]),
             }
@@ -173,6 +183,8 @@ fn session_refusal_uses_decision_evidence_and_missing_root_is_unknown() -> Resul
     assert_eq!(states[&root], WorkerState::Live);
     assert_eq!(details[&root], "first observation");
     assert_eq!(session.live_process(&root).unwrap().pid, 123);
+    let (_, taints) = session.observe_roots_with_taints(std::slice::from_ref(&root));
+    assert!(matches!(&taints[&root], TaintCause::LiveWriter(p) if p.pid == 123));
     assert_eq!(observer.0.load(Ordering::SeqCst), 1);
     let missing = root.join("missing");
     assert_eq!(
@@ -1025,6 +1037,7 @@ fn occupancy_is_placed_per_root_and_partial_results_remain_conservative()
                     states,
                     holders,
                     details,
+                    ..WorkerEvidence::default()
                 }
             }
         }
@@ -1643,6 +1656,7 @@ fn ancestor_exclusion_is_limited_to_run_admission() -> Result<(), Box<dyn Error>
             (!exclude).then(|| ObservedProcess {
                 pid: 90,
                 command: Some("shell".into()),
+                kind: ProcessEvidenceKind::WorkingDirectory,
                 cwd: Some(root.to_path_buf()),
             })
         }

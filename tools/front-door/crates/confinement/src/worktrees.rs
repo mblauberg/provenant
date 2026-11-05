@@ -298,13 +298,18 @@ impl std::fmt::Display for ProcessEvidenceKind {
 pub struct ObservedProcess {
     pub pid: i64,
     pub command: Option<String>,
-<<<<<<< HEAD
     pub kind: ProcessEvidenceKind,
+    pub cwd: Option<PathBuf>,
 }
 
 impl ObservedProcess {
     pub fn new(pid: i64, command: Option<String>, kind: ProcessEvidenceKind) -> Self {
-        Self { pid, command, kind }
+        Self {
+            pid,
+            command,
+            kind,
+            cwd: None,
+        }
     }
 
     pub fn cwd(pid: i64, command: Option<String>) -> Self {
@@ -312,6 +317,7 @@ impl ObservedProcess {
             pid,
             command,
             kind: ProcessEvidenceKind::WorkingDirectory,
+            cwd: None,
         }
     }
 
@@ -320,6 +326,7 @@ impl ObservedProcess {
             pid,
             command,
             kind: ProcessEvidenceKind::ExecutableImage,
+            cwd: None,
         }
     }
 
@@ -328,11 +335,9 @@ impl ObservedProcess {
             pid,
             command,
             kind: ProcessEvidenceKind::OtherHeldPath,
+            cwd: None,
         }
     }
-=======
-    pub cwd: Option<PathBuf>,
->>>>>>> origin/main
 }
 
 impl std::fmt::Display for ObservedProcess {

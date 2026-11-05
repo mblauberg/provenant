@@ -1031,11 +1031,8 @@ impl WorkerObserver for NamedLive {
         Some(ObservedProcess {
             pid: 4242,
             command: Some("zsh".into()),
-<<<<<<< HEAD
             kind: ProcessEvidenceKind::WorkingDirectory,
-=======
             cwd: None,
->>>>>>> origin/main
         })
     }
 }
