@@ -1751,7 +1751,9 @@ impl WriterLaunch {
         attempt: &Directory,
         scope: provenant_supervisor::custody::Scope,
     ) -> Result<()> {
-        let owned = worktrees::load_owner(&self.worktree)?
+        let owner = worktrees::load_owner(&self.worktree)?;
+        let owned = owner
+            .as_ref()
             .is_some_and(|owner| owner.origin == worktrees::WorktreeOrigin::Lane);
         crate::artifacts::seal(
             attempt,
@@ -1759,6 +1761,7 @@ impl WriterLaunch {
             &crate::db::bytes(&WriterOwnership {
                 schema_version: 1,
                 lane_owned: owned,
+                owner,
             })?,
             crate::RECORD_LIMIT,
         )?;
@@ -2220,4 +2223,6 @@ pub(crate) fn settle_launch_staging(attempt: &Directory) -> Result<()> {
 pub(crate) struct WriterOwnership {
     pub schema_version: u64,
     pub lane_owned: bool,
+    #[serde(default)]
+    pub owner: Option<worktrees::WorktreeOwner>,
 }

@@ -84,10 +84,11 @@ pub(super) fn assess_model_result(
                 .as_deref()
                 .or(record.session.as_deref())
                 .is_some_and(|session| !session.is_empty());
+        let can_continue = policy_attempt <= u64::from(policy.lane.max_continuations.unwrap_or(0));
         return Ok(run::ResultAssessment {
             cause: Some(run::PolicyCause::Unfinished),
-            refusal: Some("model reported unfinished work".into()),
-            retry: (policy_attempt <= u64::from(policy.lane.max_continuations.unwrap_or(0))).then(|| run::PolicyRetry {
+            refusal: Some(if can_continue { "model reported unfinished work" } else { "model reported unfinished work; continuations exhausted" }.into()),
+            retry: can_continue.then(|| run::PolicyRetry {
                 schema_version: 2,
                 cause: run::PolicyCause::Unfinished, action: if resume { run::PolicyAction::Resume } else { run::PolicyAction::Retry },
                 route: run::RequestedRoute::Model { extra: Default::default(), provider: route.provider.clone().unwrap_or_default(), model, effort: route.effort.clone() },

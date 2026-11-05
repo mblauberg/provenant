@@ -741,9 +741,12 @@ fn model_policy_results_check_sections_and_bound_continuations()
         ..Default::default()
     });
     decoded.result = handoff_result("stopped_early");
-    let continuation = model_assessment(&terra, task, &record, &decoded, record.attempt_number)?
-        .retry
-        .ok_or("missing continuation")?;
+    let decision = model_assessment(&terra, task, &record, &decoded, record.attempt_number)?;
+    assert_eq!(
+        decision.refusal.as_deref(),
+        Some("model reported unfinished work")
+    );
+    let continuation = decision.retry.ok_or("missing continuation")?;
     assert!(continuation.resume);
     assert_eq!(continuation.max_attempts, 3);
     decoded.session = None;
@@ -772,7 +775,11 @@ fn model_policy_results_check_sections_and_bound_continuations()
     decoded.outcome = run::Outcome::Succeeded;
     record.attempt_number = 3;
     let decision = model_assessment(&terra, task, &record, &decoded, record.attempt_number)?;
-    assert!(decision.refusal.is_some() && decision.retry.is_none());
+    assert_eq!(
+        decision.refusal.as_deref(),
+        Some("model reported unfinished work; continuations exhausted")
+    );
+    assert!(decision.retry.is_none());
     decoded.result = handoff_result("done");
     assert!(
         model_assessment(&terra, task, &record, &decoded, record.attempt_number)?
@@ -873,7 +880,7 @@ fn host_native_attempts_do_not_resume_implicitly_or_explicitly()
     )?;
     assert_eq!(
         assessment.refusal.as_deref(),
-        Some("model reported unfinished work")
+        Some("model reported unfinished work; continuations exhausted")
     );
     assert!(assessment.retry.is_none());
     Ok(())

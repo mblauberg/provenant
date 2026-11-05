@@ -775,9 +775,13 @@ mod lineage_tests {
         init_base_repository(&project)?;
         let clock = provenant_os::clock::SystemClock;
         let cancel = provenant_core::CancelToken::new();
-        for (index, origin) in [None, Some(WorktreeOrigin::Adopted)]
-            .into_iter()
-            .enumerate()
+        for (index, origin) in [
+            None,
+            Some(WorktreeOrigin::Adopted),
+            Some(WorktreeOrigin::Lane),
+        ]
+        .into_iter()
+        .enumerate()
         {
             let mut original = crate::tests::input();
             original.run_id = RunId::from_bytes([60 + index as u8; 16]);
@@ -800,8 +804,10 @@ mod lineage_tests {
                         worktrees::save_owner(
                             &tree,
                             &WorktreeOwner {
-                                attempt_id: None,
-                                operation_id: None,
+                                attempt_id: (origin == WorktreeOrigin::Lane)
+                                    .then(|| AttemptId::from_bytes([110; 16])),
+                                operation_id: (origin == WorktreeOrigin::Lane)
+                                    .then(|| "settled-owner".parse().unwrap()),
                                 branch: info
                                     .branch
                                     .clone()
@@ -1872,6 +1878,7 @@ impl RunStore {
         let mut current = record.clone();
         let mut seen = std::collections::HashSet::new();
         let mut was_owned = false;
+        let mut initial_owner = None;
         loop {
             if !seen.insert(current.attempt_id) || seen.len() > 128 {
                 return Err(RunError::Validation("continuation parent chain"));
@@ -1886,12 +1893,19 @@ impl RunStore {
             if let Some(raw) = read_sealed(&directory, "writer-owned.json", crate::RECORD_LIMIT)? {
                 // Recorded under custody before launch. A later owner removal or
                 // adoption cannot turn an owned lane into an explicit tree.
-                was_owned |= crate::db::decode::<crate::writer::WriterOwnership>(&raw)?.lane_owned;
+                let snapshot = crate::db::decode::<crate::writer::WriterOwnership>(&raw)?;
+                was_owned |= snapshot.lane_owned;
+                if current.retry_of.is_none() {
+                    initial_owner = snapshot.owner;
+                }
             }
             let Some(parent) = current.retry_of else {
                 break;
             };
             current = self.record(parent, call)?;
+        }
+        if lane.is_some() && owner == initial_owner {
+            return Ok(owner);
         }
         if lane.is_some() {
             return Err(RunError::Validation(
