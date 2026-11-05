@@ -3153,9 +3153,15 @@ pub(crate) mod peer_tests {
             return Ok(());
         }
         let fixture = SettlementFixture::resumed()?;
-        settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
         let clock = SystemClock;
         let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 10)?;
+        drop(provenant_fabric_runtime::graph::FileJournal::open(
+            &fixture.roots.state, fixture.settled.project_id, "unrelated", budget, &cancel, &clock,
+        )?);
+        std::fs::write(fixture.roots.state.as_path().join("fabric/graphs")
+            .join(fixture.settled.project_id.to_string()).join("graph-unrelated.json"), b"invalid checkpoint")?;
+        settle_owned_worktree(&fixture.settled, &fixture.roots, &FreeWorkers, None)?;
         let call = provenant_run::Request {
             clock: &clock,
             cancel: &cancel,
