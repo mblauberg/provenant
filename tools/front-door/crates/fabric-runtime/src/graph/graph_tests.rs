@@ -7705,7 +7705,8 @@ fn node_review_base_is_pinned_before_launch_and_reused_on_replay() {
     reviewer
         .extra
         .insert("review_base".into(), serde_json::json!("moving-ref"));
-    let document = graph(vec![reviewer]);
+    let mut document = graph(vec![reviewer]);
+    document.schema_version = 2;
     let pinned = "1".repeat(40);
     let mut owner = FakeOwner {
         resolved_review_base: Some(pinned.clone()),
@@ -7762,7 +7763,8 @@ fn review_base_save_failure_prevents_attempt_creation() {
     reviewer
         .extra
         .insert("review_base".into(), serde_json::json!("moving-ref"));
-    let document = graph(vec![reviewer]);
+    let mut document = graph(vec![reviewer]);
+    document.schema_version = 2;
     let mut owner = FakeOwner {
         resolved_review_base: Some("1".repeat(40)),
         ..Default::default()

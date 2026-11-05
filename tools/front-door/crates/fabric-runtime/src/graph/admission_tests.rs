@@ -37,6 +37,27 @@ fn admission_refuses_unenforced_required_output_fields() {
 }
 
 #[test]
+fn node_review_base_requires_v2_and_a_nonempty_reference() {
+    for (version, base, allowed) in [
+        (1, json!("main"), false),
+        (2, json!("main"), true),
+        (2, json!(""), false),
+        (2, json!(7), false),
+    ] {
+        let graph = document(
+            version,
+            json!([
+                {"id":"review","prompt":"review","access":"read_only","route":{"alias":"senior"},"review_base":base}
+            ]),
+        );
+        assert_eq!(
+            graph.admit(&crate::config::GraphLimits::default()).is_ok(),
+            allowed
+        );
+    }
+}
+
+#[test]
 fn required_output_contract_requires_v2_and_selected_supported_kinds() {
     let make = |version, required: Value| {
         document(

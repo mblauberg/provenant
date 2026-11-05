@@ -3,6 +3,7 @@ use super::*;
 pub(super) fn nodes_have_v2(nodes: &[GraphNode]) -> bool {
     nodes.iter().any(|node| {
         node.review.is_some()
+            || node.extra.contains_key("review_base")
             || node.family_group.is_some()
             || node
                 .inputs
@@ -47,6 +48,7 @@ fn value_has_v2(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::Object(map) => {
             map.contains_key("family_group")
+                || map.contains_key("review_base")
                 || map
                     .get("required_outputs")
                     .is_some_and(|value| value.as_array().is_none_or(|values| !values.is_empty()))
@@ -318,6 +320,13 @@ pub(super) fn validate_flat_plan(
     let mut prompt_bytes = 0usize;
     let mut nodes = Vec::with_capacity(document.nodes.len());
     for node in &document.nodes {
+        if node.extra.get("review_base").is_some_and(|value| {
+            value.as_str().is_none_or(|reference| {
+                reference.is_empty() || reference.len() > 4096 || reference.contains('\0')
+            })
+        }) {
+            return Err("node review_base must be a nonempty reference");
+        }
         if node.extra.contains_key("composite_members")
             || node.extra.contains_key("after_expansion")
         {

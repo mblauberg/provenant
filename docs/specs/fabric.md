@@ -343,8 +343,8 @@ silently treated as optional.
 Schema 2 is the minimum version when the complete typed document carries a
 deferred-review field; presets choose that version after building the document,
 while raw documents retain their authored version. Version 2 carries deferred
-review configuration (`review` and `family_group` on nodes, and `review_base`
-on the document); a version 1 document must not carry these fields. The host
+review configuration (`review`, `family_group` and `review_base` on nodes, and
+`review_base` on the document); a version 1 document must not carry these fields. The host
 pins the document `review_base` in the execution and can record review resolution in an
 expansion. A read-only node's own `review_base` is resolved in the graph's
 bound execution directory and saved on the node before its first attempt.
