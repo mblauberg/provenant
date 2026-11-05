@@ -1,4 +1,4 @@
 ## Changes
 ### Pipelines and graphs
 
-- Add groundwork for authenticated GitHub event intake; the receiver and reconciliation service are not yet available (#2846).
+- Add a GitHub event intake worker with signed webhook hints and periodic reconciliation (#2846).

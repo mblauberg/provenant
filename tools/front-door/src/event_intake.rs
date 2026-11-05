@@ -2,6 +2,10 @@
 //!
 //! This is the admission boundary only; a consumer must reconcile markers with
 //! the forge before using them as current state.
+pub mod gh;
+pub mod http;
+pub mod reconcile;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -23,11 +27,17 @@ pub struct Marker {
     pub received_at: u64,
     pub target: Target,
     pub pending: bool,
+    #[serde(default)]
+    pub event: String,
+    #[serde(default)]
+    pub completed_at: Option<u64>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct State {
     version: u32,
+    #[serde(default)]
+    repository: String,
     deliveries: BTreeMap<String, Marker>,
 }
 
@@ -95,7 +105,7 @@ impl Intake {
     /// Open a queue for one repository. The caller serialises access to the file.
     pub fn open(path: impl AsRef<Path>, repository: String, secret: Vec<u8>) -> io::Result<Self> {
         let path = path.as_ref().to_owned();
-        let state = match fs::read(&path) {
+        let mut state = match fs::read(&path) {
             Ok(bytes) => serde_json::from_slice::<State>(&bytes).map_err(io::Error::other)?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => State {
                 version: 1,
@@ -106,6 +116,12 @@ impl Intake {
         if state.version != 1 {
             return Err(io::Error::other("unsupported intake state version"));
         }
+        if !state.repository.is_empty() && state.repository != repository {
+            return Err(io::Error::other(
+                "intake state belongs to another repository",
+            ));
+        }
+        state.repository = repository.clone();
         Ok(Self {
             path,
             repository,
@@ -187,6 +203,8 @@ impl Intake {
             received_at: now,
             target: number.map_or(Target::Repository, Target::PullRequest),
             pending: true,
+            event: event.to_owned(),
+            completed_at: None,
         };
         self.state.deliveries.insert(delivery.to_owned(), marker);
         self.persist()?;
@@ -219,10 +237,20 @@ impl Intake {
 
     /// Mark only the deliveries observed before a successful reconciliation as complete.
     pub fn complete(&mut self, deliveries: &[String]) -> io::Result<()> {
+        self.complete_at(deliveries, None)
+    }
+
+    /// Record the completion time for measurement while preserving older callers.
+    pub fn complete_at(
+        &mut self,
+        deliveries: &[String],
+        completed_at: Option<u64>,
+    ) -> io::Result<()> {
         let before = self.state.clone();
         for id in deliveries {
             if let Some(marker) = self.state.deliveries.get_mut(id) {
                 marker.pending = false;
+                marker.completed_at = completed_at;
             }
         }
         if let Err(error) = self.persist() {
