@@ -2113,5 +2113,12 @@ mod user_skills_tests {
         assert_eq!(record["exposed"], false);
         assert_eq!(record["staged_file_count"], 0);
         assert_eq!(record["source"], origin);
+        let off = user_skills_exposure(
+            provenant_records::UserSkillsMode::Off,
+            serde_json::Value::Null,
+            &staged,
+        );
+        assert_eq!(off["exposed"], false);
+        assert_eq!(off["staged_file_count"], 0);
     }
 }

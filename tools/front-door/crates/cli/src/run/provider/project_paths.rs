@@ -245,6 +245,8 @@ mod tests {
             &cwd,
             &primary.join(".agent-run/locks"),
             &primary.join(".local-tools"),
+            &primary.join(".ssh"),
+            &primary.join("protected"),
             &home.join(".ssh"),
             &home.join("shared"),
         ] {
@@ -266,7 +268,7 @@ mod tests {
                 scratch: grant(root.join("scratch")),
                 private_state: Some(grant(root.join("private"))),
                 read_roots: vec![grant(cwd.clone())],
-                protected_roots: vec![],
+                protected_roots: vec![grant(primary.join("protected"))],
                 secret_roots: vec![],
                 selected_authentication: None,
                 include_continuation: false,
@@ -290,6 +292,8 @@ mod tests {
                 home.clone(),
                 "escape".into(),
                 "missing".into(),
+                ".ssh".into(),
+                "protected".into(),
             ],
             ..Default::default()
         };
@@ -336,7 +340,33 @@ mod tests {
             let serialized = serde_json::to_string(&record)?;
             assert!(!serialized.contains(root.to_str().ok_or("utf8")?));
             let warnings = record["warnings"].as_array().ok_or("warnings")?;
-            assert_eq!(warnings.len(), if writer { 8 } else { 4 });
+            assert_eq!(warnings.len(), if writer { 10 } else { 6 });
+            for (index, reason) in [
+                (1, "outside_primary_checkout"),
+                (2, "outside_primary_checkout"),
+                (3, "outside_primary_checkout"),
+                (4, "missing_or_unreadable"),
+                (5, "credential_root"),
+                (6, "protected_path"),
+            ] {
+                assert!(warnings.iter().any(|warning| warning["key"]
+                    == format!("domains.lanes.projects.example.exec_roots[{index}]")
+                    && warning["reason"] == reason
+                    && warning["code"] == "exec_root_ignored"));
+            }
+            assert!(
+                profile
+                    .spec
+                    .runtime_reads
+                    .contains(&grant(primary.join(".local-tools")))
+            );
+            assert!(
+                profile
+                    .spec
+                    .tool_writes
+                    .iter()
+                    .all(|write| !overlaps(&write.path, &primary.join(".local-tools")))
+            );
             for warning in warnings {
                 assert!(
                     warning["key"]
