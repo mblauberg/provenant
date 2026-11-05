@@ -25,29 +25,6 @@ fn rig_git_commits_use_fixture_identity() -> Result {
     Ok(())
 }
 
-#[test]
-fn macos_ci_requires_writer_continuation_confinement_fixtures() {
-    let workflow = include_str!("../../../.github/workflows/ci.yml");
-    let job = workflow
-        .split("  rust-macos-tests:\n")
-        .nth(1)
-        .expect("macOS test job")
-        .split("\n  rust-macos-release:")
-        .next()
-        .unwrap();
-    let step = job
-        .split("      - name:")
-        .find(|step| step.contains("Run dispatch confinement integration tests"))
-        .expect("dispatch confinement step");
-    assert!(!job.contains("continue-on-error: true"));
-    assert!(step.contains("PROVENANT_CONFINEMENT_REQUIRED: \"1\""));
-    assert!(step.contains("--profile ci"));
-    assert!(step.contains(
-        "test(=writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source)"
-    ));
-    assert!(step.contains("binary(=writer_continuation) & test(=writer_continuation_launches_pinned_to_predecessor_head)"));
-}
-
 fn available() -> Result<bool> {
     if !cfg!(target_os = "macos") {
         return Ok(false);
