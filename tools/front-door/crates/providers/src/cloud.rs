@@ -131,3 +131,246 @@ mod tests {
         assert!(!result.check(&"a".repeat(40), "requested").unwrap().passed);
     }
 }
+
+/// Provider-independent identity retained by the run owner after submission.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteJob {
+    pub provider: String,
+    pub target: String,
+    pub environment: String,
+    pub remote_id: String,
+    pub commit: String,
+    pub requested_model: String,
+    pub state: RemoteState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RemoteState {
+    Running,
+    Finished { result: CloudResult },
+    Cancelled,
+    CancellationUnconfirmed,
+}
+
+/// A provider owns transport and authentication of its observations.
+pub trait CloudProvider {
+    type Error;
+    fn submit(&mut self) -> Result<String, Self::Error>;
+    fn observe(&mut self, remote_id: &str) -> Result<RemoteState, Self::Error>;
+    /// True means the provider confirmed the job stopped.
+    fn cancel(&mut self, remote_id: &str) -> Result<bool, Self::Error>;
+}
+
+/// The run owner supplies an attempt-scoped store whose save is durable.
+pub trait CloudJobStore {
+    type Error;
+    fn save(&mut self, job: &RemoteJob) -> Result<(), Self::Error>;
+}
+
+#[derive(Debug)]
+pub enum CloudJobError<P, S> {
+    Provider(P),
+    /// Submission succeeded. Preserve this identity and do not blindly retry.
+    SaveAfterSubmit {
+        job: RemoteJob,
+        error: S,
+    },
+    Store(S),
+    Result(CloudResultError),
+}
+
+/// Save the identity before returning and before the first observation.
+pub fn submit<P: CloudProvider, S: CloudJobStore>(
+    provider: &mut P,
+    store: &mut S,
+    mut job: RemoteJob,
+) -> Result<RemoteJob, CloudJobError<P::Error, S::Error>> {
+    job.remote_id = provider.submit().map_err(CloudJobError::Provider)?;
+    job.state = RemoteState::Running;
+    store
+        .save(&job)
+        .map_err(|error| CloudJobError::SaveAfterSubmit {
+            job: job.clone(),
+            error,
+        })?;
+    Ok(job)
+}
+
+/// Check terminal evidence before replacing the saved state.
+pub fn reconcile<P: CloudProvider, S: CloudJobStore>(
+    provider: &mut P,
+    store: &mut S,
+    job: &mut RemoteJob,
+) -> Result<(), CloudJobError<P::Error, S::Error>> {
+    if matches!(
+        job.state,
+        RemoteState::Finished { .. } | RemoteState::Cancelled
+    ) {
+        return Ok(());
+    }
+    let state = provider
+        .observe(&job.remote_id)
+        .map_err(CloudJobError::Provider)?;
+    if let RemoteState::Finished { result } = &state {
+        result
+            .clone()
+            .check(&job.commit, &job.requested_model)
+            .map_err(CloudJobError::Result)?;
+    }
+    let mut updated = job.clone();
+    updated.state = state;
+    store.save(&updated).map_err(CloudJobError::Store)?;
+    *job = updated;
+    Ok(())
+}
+
+pub fn cancel<P: CloudProvider, S: CloudJobStore>(
+    provider: &mut P,
+    store: &mut S,
+    job: &mut RemoteJob,
+) -> Result<(), CloudJobError<P::Error, S::Error>> {
+    if matches!(
+        job.state,
+        RemoteState::Finished { .. } | RemoteState::Cancelled
+    ) {
+        return Ok(());
+    }
+    let confirmed = provider
+        .cancel(&job.remote_id)
+        .map_err(CloudJobError::Provider)?;
+    let mut updated = job.clone();
+    updated.state = if confirmed {
+        RemoteState::Cancelled
+    } else {
+        RemoteState::CancellationUnconfirmed
+    };
+    store.save(&updated).map_err(CloudJobError::Store)?;
+    *job = updated;
+    Ok(())
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    struct FakeProvider {
+        observed: RemoteState,
+        confirmed: bool,
+        submitted: usize,
+    }
+    impl CloudProvider for FakeProvider {
+        type Error = ();
+        fn submit(&mut self) -> Result<String, ()> {
+            self.submitted += 1;
+            Ok("remote-1".into())
+        }
+        fn observe(&mut self, id: &str) -> Result<RemoteState, ()> {
+            assert_eq!(id, "remote-1");
+            Ok(self.observed.clone())
+        }
+        fn cancel(&mut self, id: &str) -> Result<bool, ()> {
+            assert_eq!(id, "remote-1");
+            Ok(self.confirmed)
+        }
+    }
+    #[derive(Default)]
+    struct FakeStore {
+        saved: Option<RemoteJob>,
+        fail: bool,
+    }
+    impl CloudJobStore for FakeStore {
+        type Error = ();
+        fn save(&mut self, job: &RemoteJob) -> Result<(), ()> {
+            if self.fail {
+                Err(())
+            } else {
+                self.saved = Some(job.clone());
+                Ok(())
+            }
+        }
+    }
+    fn job() -> RemoteJob {
+        RemoteJob {
+            provider: "fake".into(),
+            target: "target".into(),
+            environment: "env".into(),
+            remote_id: String::new(),
+            commit: "a".repeat(40),
+            requested_model: "model".into(),
+            state: RemoteState::Running,
+        }
+    }
+    fn result(commit: &str) -> CloudResult {
+        CloudResult {
+            commit: commit.into(),
+            exit_status: 0,
+            tests_run: vec!["test".into()],
+            tests_failed: vec![],
+            log_location: "log".into(),
+            tracked_files_changed: false,
+            observed_model: None,
+        }
+    }
+
+    #[test]
+    fn cloud_submit_records_identity_and_reconciles_after_reopen() {
+        let mut provider = FakeProvider {
+            observed: RemoteState::Finished {
+                result: result(&"a".repeat(40)),
+            },
+            confirmed: false,
+            submitted: 0,
+        };
+        let mut store = FakeStore::default();
+        let submitted = submit(&mut provider, &mut store, job()).unwrap();
+        assert_eq!(store.saved.as_ref(), Some(&submitted));
+        let mut reopened = store.saved.clone().unwrap();
+        reconcile(&mut provider, &mut store, &mut reopened).unwrap();
+        assert!(matches!(reopened.state, RemoteState::Finished { .. }));
+        assert_eq!(store.saved.as_ref(), Some(&reopened));
+        provider.observed = RemoteState::Running;
+        reconcile(&mut provider, &mut store, &mut reopened).unwrap();
+        cancel(&mut provider, &mut store, &mut reopened).unwrap();
+        assert_eq!(store.saved, Some(reopened));
+        assert_eq!(provider.submitted, 1);
+    }
+    #[test]
+    fn cloud_rejects_wrong_commit_and_reports_unconfirmed_cancel() {
+        let mut provider = FakeProvider {
+            observed: RemoteState::Finished {
+                result: result(&"b".repeat(40)),
+            },
+            confirmed: false,
+            submitted: 0,
+        };
+        let mut store = FakeStore::default();
+        let mut job = submit(&mut provider, &mut store, job()).unwrap();
+        assert!(matches!(
+            reconcile(&mut provider, &mut store, &mut job),
+            Err(CloudJobError::Result(CloudResultError::CommitMismatch))
+        ));
+        assert_eq!(store.saved.as_ref().unwrap().state, RemoteState::Running);
+        cancel(&mut provider, &mut store, &mut job).unwrap();
+        assert_eq!(job.state, RemoteState::CancellationUnconfirmed);
+        provider.confirmed = true;
+        cancel(&mut provider, &mut store, &mut job).unwrap();
+        assert_eq!(job.state, RemoteState::Cancelled);
+    }
+    #[test]
+    fn cloud_submit_save_failure_preserves_remote_identity() {
+        let mut provider = FakeProvider {
+            observed: RemoteState::Running,
+            confirmed: false,
+            submitted: 0,
+        };
+        let mut store = FakeStore {
+            saved: None,
+            fail: true,
+        };
+        let error = submit(&mut provider, &mut store, job()).unwrap_err();
+        assert!(
+            matches!(error, CloudJobError::SaveAfterSubmit { job, .. } if job.remote_id == "remote-1")
+        );
+        assert_eq!(provider.submitted, 1);
+    }
+}
