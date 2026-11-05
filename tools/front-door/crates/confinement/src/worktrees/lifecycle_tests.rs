@@ -238,6 +238,28 @@ fn repo_facts_resolves_a_moved_ref_fresh() -> Result<(), Box<dyn Error>> {
         context.utility_budget,
         &cancel(),
     )?;
+    let registrations = facts.read_only_inventory(
+        &read_only,
+        context.executor,
+        context.utility,
+        context.utility_budget,
+        &cancel(),
+    )?;
+    assert!(registrations.starts_with(b"worktree "));
+    assert!(registrations.ends_with(b"\0\0"));
+    let limited_inventory = RepoFacts::with_limits(1, provenant_os::git::REPO_FACT_SCALAR_LIMIT)?;
+    assert!(matches!(
+        limited_inventory.read_only_inventory(
+            &read_only,
+            context.executor,
+            context.utility,
+            context.utility_budget,
+            &cancel()
+        ),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
     let tree = fixture.run(&["rev-parse", "facts-ref^{tree}"])?;
     let tree = GitOid::parse(std::str::from_utf8(&tree.stdout.bytes)?.trim())?;
     assert_eq!(

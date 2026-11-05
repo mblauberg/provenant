@@ -125,6 +125,19 @@ impl Git {
         })
     }
 
+    /// Read worktree registrations through this command's facts session.
+    pub(super) fn worktrees(&self, dir: &Path) -> Result<Vec<u8>> {
+        self.with_repo(dir, |repo| {
+            Ok(self.facts.read_only_inventory(
+                repo,
+                &self.executor,
+                &self.utility,
+                self.budget,
+                &self.cancel,
+            )?)
+        })
+    }
+
     /// Resolve a local branch through this command's facts session.
     pub(super) fn branch_commit(
         &self,

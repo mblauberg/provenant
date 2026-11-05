@@ -388,6 +388,44 @@ mod tests {
             base_commit(&git, &shared, "origin", "main")?,
             Some(expected.trim().to_owned())
         );
+        let bare = temp.path().join("bare.git");
+        let linked = temp.path().join("bare-linked");
+        provenant_os::fixture::run_git(
+            temp.path(),
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                project.to_str().ok_or("project")?,
+                bare.to_str().ok_or("bare")?,
+            ],
+        )?;
+        provenant_os::fixture::run_git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-qb",
+                "linked",
+                linked.to_str().ok_or("linked")?,
+                "HEAD",
+            ],
+        )?;
+        let listing = git.worktrees(&linked)?;
+        assert_eq!(
+            listing,
+            provenant_os::fixture::run_git(&linked, &["worktree", "list", "--porcelain", "-z"])?
+        );
+        assert!(
+            listing
+                .windows(b"bare\0".len())
+                .any(|field| field == b"bare\0")
+        );
+        assert!(
+            listing
+                .windows(b"branch refs/heads/linked\0".len())
+                .any(|field| field == b"branch refs/heads/linked\0")
+        );
         Ok(())
     }
 }

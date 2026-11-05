@@ -260,6 +260,8 @@ pub enum GitRead {
         limit: u64,
     },
     WorktreeList,
+    /// List registrations with the verified common repository's bare setting.
+    WorktreeListBare,
     /// Read repository config, excluding the utility's core.bare override.
     LocalBare,
     BranchTips,
@@ -1362,6 +1364,14 @@ fn git_args(
             args
         }
         GitRead::WorktreeList => vec![
+            "worktree".into(),
+            "list".into(),
+            "--porcelain".into(),
+            "-z".into(),
+        ],
+        GitRead::WorktreeListBare => vec![
+            "-c".into(),
+            "core.bare=true".into(),
             "worktree".into(),
             "list".into(),
             "--porcelain".into(),

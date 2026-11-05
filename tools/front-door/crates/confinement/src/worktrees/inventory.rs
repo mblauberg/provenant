@@ -238,6 +238,49 @@ impl RepoFacts {
         Ok(Some(name.to_owned()))
     }
 
+    /// Read raw worktree registrations from a read-only checkout. The common
+    /// repository's local bare setting controls Git's primary registration;
+    /// the utility's normal override otherwise changes that fact.
+    pub fn read_only_inventory(
+        &self,
+        repo: &crate::repo::ReadOnlyRepo,
+        executor: &dyn Executor,
+        utility: &UtilityRuntime,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+    ) -> Result<Vec<u8>, WorktreeError> {
+        let scalar = budget.with_stdout_cap(self.scalar_limit)?;
+        let bare = crate::utility::run_read_utility(
+            executor,
+            GitRead::LocalBare,
+            repo,
+            utility,
+            scalar,
+            cancel,
+        )?;
+        let bare = match exit_code(&bare)? {
+            0 => match trim_ascii(&bare.stdout.bytes) {
+                b"true" => true,
+                b"false" => false,
+                _ => return Err(WorktreeError::InvalidOutput),
+            },
+            1 => false,
+            _ => return Err(WorktreeError::InvalidOutput),
+        };
+        let budget = budget.with_stdout_cap(self.inventory_limit)?;
+        let operation = if bare {
+            GitRead::WorktreeListBare
+        } else {
+            GitRead::WorktreeList
+        };
+        let outcome =
+            crate::utility::run_read_utility(executor, operation, repo, utility, budget, cancel)?;
+        if exit_code(&outcome)? != 0 {
+            return Err(WorktreeError::InvalidOutput);
+        }
+        Ok(outcome.stdout.bytes)
+    }
+
     /// Read inventory afresh and invalidate any older advisory snapshot.
     pub(super) fn read_inventory(
         &self,

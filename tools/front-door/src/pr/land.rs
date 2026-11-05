@@ -270,9 +270,8 @@ fn checkouts(git: &Git, project: &Path) -> Result<Vec<Checkout>> {
 }
 
 fn discover_checkouts(git: &Git, project: &Path) -> Result<Vec<Checkout>> {
-    let listing = git
-        .full(project, &["worktree", "list", "--porcelain", "-z"])?
-        .ok_or("cannot list worktrees")?;
+    let listing = git.worktrees(project)?;
+    let listing = String::from_utf8_lossy(&listing);
     let mut checkouts: Vec<Checkout> = Vec::new();
     for field in listing.split('\0') {
         if let Some(path) = field.strip_prefix("worktree ") {

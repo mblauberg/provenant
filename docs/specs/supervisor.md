@@ -37,7 +37,9 @@ reachability. Replacement objects and grafts do not alter that ancestry check.
 Fetch, resolution and advertisement share the peer deadline. Pull-request base
 resolution and landing branch and commit tree reads each use a command-scoped facts session
 and read-only verified checkouts, including when Git uses a separate directory
-or native object alternates.
+or native object alternates. Landing inventory reads the common repository's
+local bare setting before listing worktrees, so Git's primary bare registration
+is preserved without accepting worktree-level configuration overrides.
 
 ### Worktree census sessions
 
