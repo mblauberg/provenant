@@ -2191,6 +2191,25 @@ fn preset_list_and_show_human_output_match_goldens() -> Result<(), Box<dyn std::
 }
 
 #[test]
+fn deliver_plan_explains_launch_time_review() -> Result<(), Box<dyn std::error::Error>> {
+    let on = explain_text(
+        "deliver",
+        &["--plan", "on", "--set", "parameters.worktree=\".\""],
+    )?;
+    assert!(on.contains("review panel planned at launch"), "{on}");
+    assert!(!on.contains("lens-correctness-spec"), "{on}");
+    let off = explain_text(
+        "deliver",
+        &["--plan", "off", "--set", "parameters.worktree=\".\""],
+    )?;
+    assert!(
+        off.contains("plan: off -> off (planning turned off)"),
+        "{off}"
+    );
+    Ok(())
+}
+
+#[test]
 fn review_explain_shows_lenses_tiers_families_and_the_verifier()
 -> Result<(), Box<dyn std::error::Error>> {
     let text = explain_text(
