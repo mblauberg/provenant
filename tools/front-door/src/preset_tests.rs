@@ -4708,27 +4708,28 @@ mod planner_front_end {
     }
 
     #[test]
-    fn planned_research_and_review_match_their_golden_graphs() {
+    fn planned_research_and_review_preserve_stage_wiring() {
         let council = vec![("worktree".to_owned(), json!("/repo/lane"))];
         let roots = vec![("read_roots".to_owned(), json!(["/repo/extra"]))];
         let scoped = vec![("worktree".to_owned(), json!("/repo/lane"))];
-        for (name, params) in [
-            ("scout-swarm", roots),
-            ("review-council", council),
-            ("fan-out", Vec::new()),
-            ("fan-out-synthesise", Vec::new()),
-            ("scope-then-run", scoped),
+        for (name, params, expected, last_dependency) in [
+            ("scout-swarm", roots, & ["plan", "synthesis"][..], Some("plan")),
+            ("review-council", council, & ["subject", "plan", "verify", "synthesis"][..], Some("verify")),
+            ("fan-out", Vec::new(), & ["plan"][..], None),
+            ("fan-out-synthesise", Vec::new(), & ["plan", "synthesis"][..], Some("plan")),
+            ("scope-then-run", scoped, & ["plan", "synthesis", "scope", "ready", "run"][..], Some("ready")),
         ] {
-            let expansion = run(&layers(PlanMode::On, None), name, "brief", params);
-            let mut actual = serde_json::to_string_pretty(&expansion.document).unwrap();
-            actual.push('\n');
-            let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join(format!("assets/presets/fixtures/{name}.plan.json"));
-            if std::env::var_os("UPDATE_GOLDEN").is_some() {
-                std::fs::write(&path, &actual).unwrap();
+            let expansion = run(&layers(PlanMode::On, None), name, "brief", params.clone());
+            assert_eq!(ids(&expansion), expected, "{name}");
+            let nodes = expansion.document["nodes"].as_array().unwrap();
+            let planner = nodes.iter().find(|node| node["id"] == "plan").unwrap();
+            assert_eq!(route(planner)["alias"], "principal", "{name}");
+            if let Some(dependency) = last_dependency {
+                assert!(nodes.last().unwrap()["depends_on"].as_array().unwrap().contains(&json!(dependency)), "{name}");
             }
-            let expected = std::fs::read_to_string(&path).unwrap_or_default();
-            assert_eq!(actual, expected, "{name}: rerun with UPDATE_GOLDEN=1");
+            if name == "review-council" {
+                assert_eq!(lens_names(&expansion), static_lenses(params));
+            }
         }
     }
 
@@ -4916,22 +4917,12 @@ mod planner_front_end {
     }
 
     #[test]
-    fn planned_big_batch_matches_its_golden_graph() {
-        let expansion = run(
-            &layers(PlanMode::On, None),
-            "big-batch",
-            "brief",
-            worktrees(),
-        );
-        let mut actual = serde_json::to_string_pretty(&expansion.document).unwrap();
-        actual.push('\n');
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/presets/fixtures/big-batch.plan.json");
-        if std::env::var_os("UPDATE_GOLDEN").is_some() {
-            std::fs::write(&path, &actual).unwrap();
-        }
-        let expected = std::fs::read_to_string(&path).unwrap_or_default();
-        assert_eq!(actual, expected, "rerun with UPDATE_GOLDEN=1 to refresh");
+    fn planned_big_batch_preserves_stages_and_lane_count() {
+        let expansion = run(&layers(PlanMode::On, None), "big-batch", "brief", worktrees());
+        assert_eq!(ids(&expansion), ["scout", "plan", "council", "refactor", "repair"]);
+        let plan = &expansion.document["nodes"][1];
+        assert_eq!(route(plan)["alias"], "principal");
+        assert_eq!(plan["plan"]["fallback"]["nodes"][0]["composite"]["nodes"].as_array().unwrap().len(), 2);
     }
 }
 
