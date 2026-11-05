@@ -346,7 +346,7 @@ the code or test that contradicts it, and check it against the spec. Re-emit
 every finding verbatim with one of UPHELD, FALSIFIED or UNVERIFIABLE and your
 evidence. Add any finding the lenses missed and mark it NEW. Do not edit files.
 ${local_check_policy}
-End with a findings block (schema_version 1) whose entries keep each finding's
+Include a findings block (schema_version 1) whose entries keep each finding's
 id and add "verification": "upheld", "falsified" or "unverifiable". For each
 propagated finding add "propagates": "<input-node-id>:<finding-id>" naming
 the selected input node and the finding ID as shown to you (or its stored ID).
@@ -360,6 +360,9 @@ references from the index; do not claim a complete review. Preserve the
 truncation notice and paths in your result. If more than 32 findings exist, the
 required DISPOSITION lines can carry the extra verifications and evidence; keep
 the structured findings block within its limit.
+After all findings and prose, end with exactly one final non-empty line:
+VERDICT: PASS, VERDICT: FAIL, or VERDICT: INCONCLUSIVE. A closed handoff
+fence may follow.
 """
 
 [roles."review.synthesis"]
@@ -375,7 +378,7 @@ Reconcile independent review findings against evidence for: ${prompt}
 Do not take a majority vote. Weigh each finding by its evidence and, where a
 verifier ran, by its UPHELD or FALSIFIED mark. Give every finding exactly one
 disposition with a one-line reason: accepted (must be fixed), rejected
-(evidence refutes it) or deferred (valid, not for this change). End with a
+(evidence refutes it) or deferred (valid, not for this change). Include a
 fenced findings block (schema_version 1) with up to 32 finding ids; each
 entry carries "id", "disposition" (accepted, rejected or deferred) and "reason".
 Copy the upstream qualified id exactly; a bare id works only when unambiguous.
@@ -396,11 +399,11 @@ A finding without a disposition is incomplete. Use this canonical array form:
 ```findings
 {"schema_version":1,"findings":[{"id":"member:F1","disposition":"accepted","reason":"Evidence supports it"}]}
 ```
-Emit one exact
-VERDICT: PASS only when no accepted finding remains and acceptance evidence is
-satisfied, otherwise VERDICT: FAIL.
 If the input lists unavailable lenses, state that the review is degraded and name
-them with their reasons.
+them with their reasons. After all findings and prose, end with exactly one final
+non-empty verdict line: VERDICT: PASS only when no accepted finding remains and
+acceptance evidence is satisfied, otherwise VERDICT: FAIL. Use VERDICT: INCONCLUSIVE
+when the evidence cannot support a decision. A closed handoff fence may follow.
 """
 
 [roles."review.evaluator"]
@@ -414,14 +417,15 @@ prompt = """
 Evaluate the implementation of: ${prompt}
 Spec (acceptance criteria): ${spec}
 Weigh the lens findings against the evidence. Give every finding exactly one
-disposition with a one-line reason: accepted, rejected or deferred. End with a
+disposition with a one-line reason: accepted, rejected or deferred. Include a
 fenced findings block (schema_version 1) with one entry per finding id; each
 entry carries "id", "disposition" and "reason". Copy the upstream qualified id
 exactly; a bare id works only when unambiguous. These three fields suffice for
 upstream findings; descriptive fields are inherited. New findings require
-severity, file, summary and status as well. Emit one
-exact VERDICT: PASS only when no accepted finding remains, otherwise
-VERDICT: FAIL.
+severity, file, summary and status as well. After all findings and prose, end
+with exactly one final non-empty verdict line: VERDICT: PASS only when no
+accepted finding remains, otherwise VERDICT: FAIL. Use VERDICT: INCONCLUSIVE
+when the evidence cannot support a decision. A closed handoff fence may follow.
 """
 
 [roles."write.implement"]

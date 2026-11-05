@@ -1,6 +1,6 @@
 Graph <id>
 Admission: {"status":"admitted"}
-Inspection: {"dependency_depth":2,"edges":3,"limit_reason":null,"max_attempts":3,"nodes":3,"prompt_bytes":2397}
+Inspection: {"dependency_depth":2,"edges":3,"limit_reason":null,"max_attempts":3,"nodes":3,"prompt_bytes":2568}
 Preset selection: generator-evaluator (override)
 Review shape: standard (default; size=pending (measured at review launch); kind=unknown; risk=unknown)
 Pending "planner_authority": "Planner authority is checked when the plan runs."

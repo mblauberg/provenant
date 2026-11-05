@@ -3,7 +3,7 @@
     "pattern": "generator-evaluator",
     "preset": "generator-evaluator"
   },
-  "graph_id": "preset-087961aaa2a44269f94aa04a7b058223",
+  "graph_id": "preset-309325d0b189abd7438166fd74f599a8",
   "nodes": [
     {
       "acceptance_checks": [
@@ -158,9 +158,9 @@
         }
       ],
       "kind": "synthesise",
-      "prompt": "You evaluate a writer's commit from its lens findings and decide whether it is accepted.\n\nEvaluate the implementation of: brief\nSpec (acceptance criteria): \nWeigh the lens findings against the evidence. Give every finding exactly one\ndisposition with a one-line reason: accepted, rejected or deferred. End with a\nfenced findings block (schema_version 1) with one entry per finding id; each\nentry carries \"id\", \"disposition\" and \"reason\". Copy the upstream qualified id\nexactly; a bare id works only when unambiguous. These three fields suffice for\nupstream findings; descriptive fields are inherited. New findings require\nseverity, file, summary and status as well. Emit one\nexact VERDICT: PASS only when no accepted finding remains, otherwise\nVERDICT: FAIL.\n",
+      "prompt": "You evaluate a writer's commit from its lens findings and decide whether it is accepted.\n\nEvaluate the implementation of: brief\nSpec (acceptance criteria): \nWeigh the lens findings against the evidence. Give every finding exactly one\ndisposition with a one-line reason: accepted, rejected or deferred. Include a\nfenced findings block (schema_version 1) with one entry per finding id; each\nentry carries \"id\", \"disposition\" and \"reason\". Copy the upstream qualified id\nexactly; a bare id works only when unambiguous. These three fields suffice for\nupstream findings; descriptive fields are inherited. New findings require\nseverity, file, summary and status as well. After all findings and prose, end\nwith exactly one final non-empty verdict line: VERDICT: PASS only when no\naccepted finding remains, otherwise VERDICT: FAIL. Use VERDICT: INCONCLUSIVE\nwhen the evidence cannot support a decision. A closed handoff fence may follow.\n",
       "role": "review.evaluator",
-      "role_digest": "sha256:66d1dca341ae02d304b22f453891e8dc53337c42915ca57a9253e772429277fc",
+      "role_digest": "sha256:3e9f631cb9fc7e280eeeae88ab3dbe2d461ef95ac244efa93800f4c05bb05797",
       "routes": [
         {
           "alias": "senior"
@@ -286,7 +286,7 @@
         ]
       },
       "review.evaluator": {
-        "digest": "sha256:66d1dca341ae02d304b22f453891e8dc53337c42915ca57a9253e772429277fc",
+        "digest": "sha256:3e9f631cb9fc7e280eeeae88ab3dbe2d461ef95ac244efa93800f4c05bb05797",
         "extends": [
           "review.evaluator"
         ],

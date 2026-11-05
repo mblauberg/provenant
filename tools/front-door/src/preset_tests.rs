@@ -727,6 +727,27 @@ fn bundled_role_presets_have_bounded_nested_graphs() {
 }
 
 #[test]
+fn review_verifier_and_synthesis_put_verdict_after_evidence() {
+    for (preset, id) in [
+        ("review", "verify"),
+        ("review", "synthesis"),
+        ("generator-evaluator", "evaluate"),
+    ] {
+        let expanded = expand(&Layers::empty(), preset, "brief", &[]).unwrap();
+        let nodes = expanded.document["nodes"].as_array().unwrap();
+        let prompt = nodes.iter().find(|node| node["id"] == id).unwrap()["prompt"]
+            .as_str()
+            .unwrap()
+            .to_lowercase();
+        assert!(prompt.contains("after all findings and prose"), "{id}");
+        assert!(
+            prompt.contains("final") && prompt.contains("verdict"),
+            "{id}"
+        );
+    }
+}
+
+#[test]
 fn require_findings_nodes_instruct_a_findings_block() {
     fn walk(nodes: &[Value], preset: &str) {
         for node in nodes {
