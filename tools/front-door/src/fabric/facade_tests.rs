@@ -529,6 +529,10 @@ pub(crate) mod peer_tests {
         }
 
         fn resumed_as(operation: &str) -> Result<Self, Box<dyn std::error::Error>> {
+            Self::settled_fixture(operation, None)
+        }
+
+        fn settled_fixture(operation: &str, graph_id: Option<&str>) -> Result<Self, Box<dyn std::error::Error>> {
             use provenant_confinement::worktrees::{
                 self, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
             };
@@ -590,7 +594,9 @@ pub(crate) mod peer_tests {
                     lane_depth: 1,
                     parent_attempt: None,
                     tasks: vec![provenant_run::DispatchTask {
-                        context: None,
+                        context: graph_id.map(|id| provenant_records::run::WorkContext {
+                            graph_id: Some(id.to_owned()), ..Default::default()
+                        }),
                         build_heavy: false,
                         title: None,
                         task_id: TaskId::from_bytes([3; 16]),
@@ -648,6 +654,18 @@ pub(crate) mod peer_tests {
                     Ok(())
                 },
             )?;
+            if graph_id.is_some() {
+                let record = store.record(prior, &call)?;
+                publish_success(&rig, &store, &record, info.head, &call)?;
+                let settled = provenant_run::HolderContext {
+                    schema_version: 1,
+                    roots: provenant_run::RootSeed { home: rig.home.clone(), checkout: rig.project.clone(), state_root: rig.state.clone() },
+                    project_id: identity.project, actor_id: identity.inbox.actor,
+                    run_id: record.run_id, attempt_id: record.attempt_id,
+                    host_delivery: None, launch: None, sealed: None,
+                };
+                return Ok(Self { rig, roots, store, settled, worktree: info.path });
+            }
             store.withdraw(
                 prior,
                 AttemptState::Queued {
@@ -1035,6 +1053,53 @@ pub(crate) mod peer_tests {
         assert_eq!(matching_graph_hint(&fixture.roots.state, fixture.settled.project_id, &record).as_deref(), Some("hint-test"));
         record.attempt_id = AttemptId::from_bytes([99; 16]);
         assert!(matching_graph_hint(&fixture.roots.state, fixture.settled.project_id, &record).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn settlement_advances_only_matching_graph_and_retains_writer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::settlement_advances_only_matching_graph_and_retains_writer")? { return Ok(()); }
+        use provenant_fabric_runtime::graph;
+        struct Seed { reference: String, actor: String }
+        impl graph::AttemptOwner for Seed {
+            type Error = std::convert::Infallible;
+            fn actor(&self) -> String { self.actor.clone() }
+            fn observe_or_start(&mut self, _: &graph::AttemptKey, _: graph::NodeInput<'_>, _: &graph::GraphRoute,
+                _: graph::AccessMode, _: Option<&str>, _: graph::Replay<'_>) -> Result<graph::AttemptObservation, Self::Error> {
+                Ok(graph::AttemptObservation::Pending { attempt_ref: Some(self.reference.clone()) })
+            }
+        }
+        let mut fixture = SettlementFixture::settled_fixture("graph-fixture", Some("matching"))?;
+        let clock = SystemClock;
+        let cancel = CancelToken::new();
+        let identity = Context::open(fixture.roots.clone(), &fixture.rig.home, &fixture.rig.project)?.identity;
+        let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+        for id in ["matching", "unrelated"] {
+            let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+                "schema_version":1,"graph_id":id,"nodes":[{"id":"one","prompt":"reply OK",
+                "access":"worktree_write","worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}}]
+            }))?;
+            let mut journal = graph::FileJournal::open(&fixture.roots.state, fixture.settled.project_id, id, budget, &cancel, &clock)?;
+            journal.bind(graph::GraphExecution { review_base: None, extra: Default::default(), integration_base: None,
+                directory: fixture.rig.project.clone(), document: document.clone() })?;
+            let mut seed = Seed { reference: format!("{}/{}", identity.host, fixture.settled.attempt_id), actor: identity.inbox.actor.to_string() };
+            graph::advance_with_budget(&document, &mut seed, &mut journal, &Default::default(), &Default::default())?;
+        }
+        fixture.settled.launch = Some(provenant_run::HostLaunchContext {
+            configuration_root: fixture.rig.state.clone(), cwd: fixture.rig.project.clone(), executables: Default::default(),
+            executable_search_path: Vec::new(), git: provenant_os::git::git_executable().ok_or("git")?, codex_home: None,
+            cargo_build_jobs: None, fixture_state_write: false,
+        });
+        advance_graphs_after_settlement(&fixture.settled, &FreeWorkers)?;
+        let matched = graph::FileJournal::read_checkpoint(&fixture.roots.state, fixture.settled.project_id, "matching")?.ok_or("matching")?;
+        let other = graph::FileJournal::read_checkpoint(&fixture.roots.state, fixture.settled.project_id, "unrelated")?.ok_or("unrelated")?;
+        assert_eq!(matched.nodes[0].state, graph::NodeState::Succeeded);
+        assert_eq!(other.nodes[0].state, graph::NodeState::Running);
+        assert!(fixture.worktree.exists());
+        let call = provenant_run::Request { clock: &clock, cancel: &cancel };
+        let receipt = fixture.store.worktree_settlement(fixture.settled.attempt_id, &call)?.ok_or("receipt")?;
+        assert_eq!(receipt["state"], "retained");
         Ok(())
     }
 
