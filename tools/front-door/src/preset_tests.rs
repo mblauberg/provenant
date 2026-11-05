@@ -5876,6 +5876,23 @@ fn copied_generator_evaluator_receives_the_same_request_and_nodes() {
 }
 
 #[test]
+fn evaluator_role_has_a_default_without_a_preset_specific_parameter() {
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "test",
+            "custom-evaluator",
+            "stages = [{ id = 'evaluate', role = 'review.evaluator' }]\n[parameters]\nworktree = '/repo/lane'\nspec = ''\n",
+        )
+        .unwrap();
+    let expansion = expand(&layers, "custom-evaluator", "brief", &[]).unwrap();
+    assert_eq!(
+        route(node(&expansion.document, "evaluate"))["alias"],
+        "senior"
+    );
+}
+
+#[test]
 fn tracker_advice_is_declared_by_parameter() {
     let mut layers = Layers::empty();
     layers

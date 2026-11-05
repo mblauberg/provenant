@@ -160,7 +160,7 @@
       "kind": "synthesise",
       "prompt": "You evaluate a writer's commit from its lens findings and decide whether it is accepted.\n\nEvaluate the implementation of: brief\nSpec (acceptance criteria): assets/presets/fixtures/review-spec.md\nWeigh the lens findings against the evidence. Give every finding exactly one\ndisposition with a one-line reason: accepted, rejected or deferred. End with a\nfenced findings block (schema_version 1) with one entry per finding id; each\nentry carries \"id\", \"disposition\" and \"reason\". Copy the upstream qualified id\nexactly; a bare id works only when unambiguous. These three fields suffice for\nupstream findings; descriptive fields are inherited. New findings require\nseverity, file, summary and status as well. Emit one\nexact VERDICT: PASS only when no accepted finding remains, otherwise\nVERDICT: FAIL.\n\n\nSpec file: <project>/assets/presets/fixtures/review-spec.md (sha256:1c974fb1d819bc7234bce4a1b173df30c077658eb2400f3dcea6fc46e738c564; excerpt up to 16384 bytes)\n# Acceptance criteria\n\nThe review receives this writer-worktree spec.\n",
       "role": "review.evaluator",
-      "role_digest": "sha256:0fbf01f2902e4b4fa6417287dd573e381f40366e54bfe465b5cecabc2025a3a3",
+      "role_digest": "sha256:66d1dca341ae02d304b22f453891e8dc53337c42915ca57a9253e772429277fc",
       "routes": [
         {
           "alias": "senior"
@@ -287,7 +287,7 @@
         ]
       },
       "review.evaluator": {
-        "digest": "sha256:0fbf01f2902e4b4fa6417287dd573e381f40366e54bfe465b5cecabc2025a3a3",
+        "digest": "sha256:66d1dca341ae02d304b22f453891e8dc53337c42915ca57a9253e772429277fc",
         "extends": [
           "review.evaluator"
         ],

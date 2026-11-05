@@ -390,7 +390,7 @@ them with their reasons.
 
 [roles."review.evaluator"]
 dispositions = ["accepted", "rejected", "deferred"]
-tier = "${evaluator}"
+tier = "senior"
 kind = "synthesise"
 access = "read_only"
 worktree = "${worktree}"

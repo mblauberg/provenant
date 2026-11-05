@@ -3,7 +3,7 @@
     "pattern": "scope-then-run",
     "preset": "scope-then-run"
   },
-  "graph_id": "preset-2ceed749498bd476d5891952072dc5e3",
+  "graph_id": "preset-4a040219f07779e1e2827a78ace87c2d",
   "nodes": [
     {
       "access": "read_only",
@@ -581,7 +581,7 @@
               "/repo/lane"
             ],
             "role": "review.evaluator",
-            "role_digest": "sha256:0fbf01f2902e4b4fa6417287dd573e381f40366e54bfe465b5cecabc2025a3a3",
+            "role_digest": "sha256:66d1dca341ae02d304b22f453891e8dc53337c42915ca57a9253e772429277fc",
             "routes": [
               {
                 "alias": "senior"
@@ -825,7 +825,7 @@
         "references": []
       },
       "review.evaluator": {
-        "digest": "sha256:0fbf01f2902e4b4fa6417287dd573e381f40366e54bfe465b5cecabc2025a3a3",
+        "digest": "sha256:66d1dca341ae02d304b22f453891e8dc53337c42915ca57a9253e772429277fc",
         "extends": [
           "review.evaluator"
         ],
