@@ -287,6 +287,7 @@ pub(crate) mod tests {
             head_moves: Default::default(),
             settled: None,
             dispatched: None,
+            started_at: None,
         }
     }
 

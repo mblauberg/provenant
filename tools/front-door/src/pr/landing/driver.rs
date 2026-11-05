@@ -136,6 +136,7 @@ pub fn run(
             error,
             LandingError::PublicationUnknown
                 | LandingError::PublicationUnknownAt { .. }
+                | LandingError::PublicationStale { .. }
                 | LandingError::RecoveryRequired { .. }
         );
         for number in numbers {
@@ -482,6 +483,7 @@ fn run_inner(
                         .collect(),
                     settled: None,
                     dispatched: Some(Vec::new()),
+                    started_at: super::reconcile::now_seconds(),
                 };
                 receipt::record_pending(request.state, &attempt)?;
                 let mut progress = Vec::new();
@@ -641,6 +643,7 @@ fn run_inner(
                     head_moves: record.head_moves.clone(),
                     settled: None,
                     dispatched: None,
+                    started_at: None,
                 };
                 reconcile::settle(request.state, &mut attempt, record, None)?;
                 let record = reconcile::finish_settled(
@@ -1735,6 +1738,7 @@ mod tests {
                     head_moves: Default::default(),
                     settled: None,
                     dispatched: None,
+                    started_at: None,
                 },
             )?;
             let result = reconcile::recover_pending(
@@ -1808,6 +1812,7 @@ mod tests {
                     head_moves: Default::default(),
                     settled: None,
                     dispatched: None,
+                    started_at: None,
                 },
             )?;
             let result = reconcile::recover_pending(
@@ -1901,6 +1906,7 @@ mod tests {
                 head_moves: Default::default(),
                 settled: None,
                 dispatched: None,
+                started_at: None,
             },
         )?;
         let result = reconcile::recover_pending(
@@ -2021,6 +2027,7 @@ mod tests {
                     head_moves: Default::default(),
                     settled: None,
                     dispatched: None,
+                    started_at: None,
                 },
             )?;
             let mut recovered = Vec::new();
@@ -2102,6 +2109,7 @@ mod tests {
                 head_moves: Default::default(),
                 settled: None,
                 dispatched: None,
+                started_at: None,
             },
         )?;
         let mut recovered = Vec::new();
@@ -2257,7 +2265,8 @@ mod tests {
     #[test]
     fn recovery_excludes_members_never_dispatched() -> Result<(), Box<dyn std::error::Error>> {
         use super::super::ports::{PullRequestState, StackMembership};
-        let (mut forge, mut repo, mut gate, settings, definition) = fixture(2);
+        let (mut forge, mut repo, mut gate, mut settings, definition) = fixture(2);
+        settings.publish_unknown_warn_seconds = 0;
         forge.pull_requests.get_mut(&1).unwrap().stack = Some(StackMembership {
             number: 42,
             size: 2,
@@ -2306,10 +2315,9 @@ mod tests {
             &mut recovered,
             &|_| {},
         );
-        assert!(matches!(
-            unknown,
-            Err(LandingError::PublicationUnknownAt { .. })
-        ));
+        let error = unknown.unwrap_err();
+        assert!(matches!(error, LandingError::PublicationStale { .. }));
+        assert!(error.to_string().contains("provenant land 1"));
         assert_eq!(
             receipt::pending(state.path(), "fake-repository", "main")?.len(),
             1
@@ -2393,6 +2401,7 @@ mod tests {
                 head_moves: Default::default(),
                 settled: None,
                 dispatched: None,
+                started_at: None,
             },
         )?;
         let mut recovered = Vec::new();
@@ -2481,6 +2490,7 @@ mod tests {
                 head_moves: Default::default(),
                 settled: None,
                 dispatched: None,
+                started_at: None,
             },
         )?;
         let mut recovered = Vec::new();
@@ -2573,6 +2583,7 @@ mod tests {
                     head_moves: Default::default(),
                     settled: None,
                     dispatched: None,
+                    started_at: None,
                 },
             )?;
         }

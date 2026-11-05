@@ -121,6 +121,8 @@ pub struct PendingAttempt {
     /// Members for which dispatch was prepared; absent on older markers.
     #[serde(default)]
     pub dispatched: Option<Vec<u64>>,
+    #[serde(default)]
+    pub started_at: Option<u64>,
 }
 
 /// A definite publication outcome. This phase never authorises publication.

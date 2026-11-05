@@ -45,6 +45,13 @@ pub enum LandingError {
     )]
     PublicationUnknownAt { marker: std::path::PathBuf },
     #[error(
+        "warning: publication remains unknown; inspect {marker} and run `provenant land {number}` to recover"
+    )]
+    PublicationStale {
+        marker: std::path::PathBuf,
+        number: u64,
+    },
+    #[error(
         "pending publication requires recovery; inspect {marker} and rerun land without --shadow"
     )]
     RecoveryRequired { marker: std::path::PathBuf },
@@ -155,6 +162,7 @@ fn batch_response(
         Some(
             LandingError::PublicationUnknown
             | LandingError::PublicationUnknownAt { .. }
+            | LandingError::PublicationStale { .. }
             | LandingError::RecoveryRequired { .. },
         ) => (Outcome::Pending, "LAND_PUBLICATION_UNKNOWN"),
         Some(LandingError::Contention | LandingError::TargetMoved) => {

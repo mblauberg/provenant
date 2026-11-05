@@ -429,7 +429,9 @@ omitted fields inherit. The project and tier tables accept the same fields.
   refs and `max_rebuilds` bounds rebuilds on target movement.
   `publish_settle_seconds` defaults to 30 and controls the wait before recovery
   re-observes a publication that cannot safely be retried. Setting it to `0` disables
-  the in-flight window and `land --explain` warns. The bundled CI
+  the in-flight window and `land --explain` warns. `publish_unknown_warn_seconds`
+  controls when an unresolved marker emits a warning with the recovery command
+  (default 3600 seconds); it does not resolve the outcome. The bundled CI
   trigger covers `land/**`; if you change the prefix, update the CI trigger to
   match. `land --explain` warns on a non-default prefix. The contract's forge
   queue path is not yet implemented and `forge_queue` is rejected at runtime.

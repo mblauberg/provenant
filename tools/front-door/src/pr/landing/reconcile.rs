@@ -5,6 +5,18 @@ use super::{
     postmerge, publish, receipt,
 };
 use std::collections::BTreeMap;
+
+#[allow(
+    clippy::disallowed_methods,
+    reason = "age of a durable pending publication"
+)]
+pub(crate) fn now_seconds() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|age| age.as_secs())
+}
+
 // A closed PR must never be published by a retry. A merged REST prefix may
 // remain part of the attempt, but a fast-forward retry requires all PRs open.
 fn valid_for_retry(forge: &mut dyn Forge, attempt: &PendingAttempt) -> bool {
@@ -356,8 +368,35 @@ pub(crate) fn recover_pending_with(
             continue;
         }
         let marker = receipt::pending_path(state, repository, &attempt.candidate)?;
-        let unknown = || LandingError::PublicationUnknownAt {
-            marker: marker.clone(),
+        let started_at = attempt.started_at.or_else(|| {
+            std::fs::metadata(&marker)
+                .ok()?
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|time| time.as_secs())
+        });
+        let warn_after = attempt
+            .policy
+            .settings()
+            .ok()
+            .map(|s| s.publish_unknown_warn_seconds);
+        let number = attempt.candidate.steps.first().map(|step| step.pr.number);
+        let unknown = || {
+            if let (Some(start), Some(now), Some(bound), Some(number)) =
+                (started_at, now_seconds(), warn_after, number)
+                && now.saturating_sub(start) >= bound
+            {
+                LandingError::PublicationStale {
+                    marker: marker.clone(),
+                    number,
+                }
+            } else {
+                LandingError::PublicationUnknownAt {
+                    marker: marker.clone(),
+                }
+            }
         };
         let mut tip = if shadow {
             repo.fetch_target_untracked(target)
