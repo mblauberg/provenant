@@ -6384,6 +6384,12 @@ impl Factory {
                 provenant_fabric_runtime::graph::GraphError::Invalid(reason) => {
                     FacadeError::invalid(format!("graph {reason}"))
                 }
+                provenant_fabric_runtime::graph::GraphError::Admission(reason) => match reason {
+                    provenant_fabric_runtime::graph::AdmissionError::Schema(_) => {
+                        FacadeError::invalid("graph schema version")
+                    }
+                    _ => FacadeError::InvalidInput { detail: None },
+                },
                 provenant_fabric_runtime::graph::GraphError::Extension(reason)
                 | provenant_fabric_runtime::graph::GraphError::Refused(reason) => {
                     FacadeError::DispatchRefused {

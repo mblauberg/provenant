@@ -452,7 +452,7 @@ fn an_oversized_graph_is_refused_before_its_first_save_naming_the_size() {
     let mut journal = MemoryJournal::default();
     let error = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap_err();
     assert_eq!(error.code(), "invalid_graph");
-    assert!(matches!(error, GraphError::Invalid(reason) if reason == preflight));
+    assert!(matches!(error, GraphError::Admission(reason) if reason.to_string() == preflight));
     assert!(journal.0.is_none());
 }
 

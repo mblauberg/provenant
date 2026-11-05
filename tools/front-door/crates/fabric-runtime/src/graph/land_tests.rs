@@ -635,7 +635,7 @@ fn a_review_of_an_earlier_head_never_lands_a_continuation() {
 fn refusal(value: serde_json::Value) -> &'static str {
     let document: GraphDocument = serde_json::from_value(value).unwrap();
     match advance(&document, &mut owner(), &mut Journal::default()) {
-        Err(error @ GraphError::Invalid(_)) => error.code(),
+        Err(error @ (GraphError::Invalid(_) | GraphError::Admission(_))) => error.code(),
         other => panic!("expected refusal, got {:?}", other.map(|run| run.status)),
     }
 }

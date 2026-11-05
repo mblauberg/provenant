@@ -417,6 +417,8 @@ pub enum GraphError<RunError: Error + 'static, JournalError: Error + 'static> {
     Instance(#[source] FsError),
     #[error("invalid graph: {0}")]
     Invalid(String),
+    #[error("invalid graph: {0}")]
+    Admission(AdmissionError),
     #[error("invalid extension: {0}")]
     Extension(String),
     /// The graph cannot advance as it stands; the text names the next step.
@@ -442,7 +444,7 @@ impl<R: Error + 'static, J: Error + 'static> GraphError<R, J> {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Instance(_) => "instance",
-            Self::Invalid(_) => "invalid_graph",
+            Self::Invalid(_) | Self::Admission(_) => "invalid_graph",
             Self::Extension(_) => "invalid_extension",
             Self::Refused(_) => "graph_refused",
             Self::PlanChanged => "plan_changed",
@@ -1027,11 +1029,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     }
     let stored_extensions = stored.as_ref().map_or(&[][..], |c| c.extensions.as_slice());
     let (base, _) = if stored.is_some() {
-        validate_replay_plan(document, &unbounded)
+        validate_replay_plan(document, &unbounded).map_err(GraphError::Invalid)?
     } else {
-        validate_plan_with_limits(document, &unbounded)
-    }
-    .map_err(GraphError::Invalid)?;
+        validate_plan_with_limits(document, &unbounded).map_err(GraphError::Admission)?
+    };
     let mut expanded = plans::expand(
         document,
         stored_extensions,

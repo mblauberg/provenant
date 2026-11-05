@@ -321,7 +321,8 @@ pub(crate) fn run_preset_graph(
             &error.to_string(),
             error
                 .downcast_ref::<provenant_cli::fabric::EdgeError>()
-                .and_then(|error| error.repair())
+                .and_then(provenant_cli::fabric::edge_diagnostic)
+                .and_then(|diagnostic| diagnostic.next)
                 .as_deref(),
             globals,
         ),

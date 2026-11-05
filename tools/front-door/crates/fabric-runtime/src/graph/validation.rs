@@ -162,15 +162,15 @@ pub(super) fn validate_plan(
 ) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), &'static str> {
     // Test-only: leak the rare formatted reason so assertions keep comparing &str.
     validate_plan_with_limits(document, &crate::config::GraphLimits::default())
-        .map_err(|reason| &*Box::leak(reason.into_boxed_str()))
+        .map_err(|reason| &*Box::leak(reason.to_string().into_boxed_str()))
 }
 
 pub(super) fn validate_plan_with_limits(
     document: &GraphDocument,
     limits: &crate::config::GraphLimits,
-) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), String> {
-    document.admit(limits).map_err(|error| error.to_string())?;
-    validate_replay_plan(document, limits)
+) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), AdmissionError> {
+    document.admit(limits)?;
+    validate_replay_plan(document, limits).map_err(AdmissionError::Plan)
 }
 
 pub(super) fn validate_replay_plan(

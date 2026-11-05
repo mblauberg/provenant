@@ -559,7 +559,7 @@ pub enum EdgeError {
     #[error("Git executable is unavailable")]
     GitUnavailable,
 }
-fn edge_diagnostic(error: &EdgeError) -> Option<provenant_records::diagnostic::Diagnostic> {
+pub fn edge_diagnostic(error: &EdgeError) -> Option<provenant_records::diagnostic::Diagnostic> {
     use provenant_fabric_runtime::coordination::facade::FacadeError;
     match error {
         EdgeError::StateDirectoryPermissions { path, mode } => {
@@ -571,6 +571,9 @@ fn edge_diagnostic(error: &EdgeError) -> Option<provenant_records::diagnostic::D
         }
         EdgeError::Coordination(error) => Some(error.diagnostic()),
         EdgeError::Relay(provenant_fabric_mcp::tools::ServiceError::Facade(error)) => {
+            Some(error.diagnostic())
+        }
+        EdgeError::Relay(provenant_fabric_mcp::tools::ServiceError::Coordination(error)) => {
             Some(error.diagnostic())
         }
         _ => None,

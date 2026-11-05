@@ -4521,6 +4521,7 @@ fn gate_reachability_accepts_a_limit_sized_graph_and_rejects_lower_limits() {
     assert!(
         validate_plan_with_limits(&document, &smaller)
             .unwrap_err()
+            .to_string()
             .contains("limits.nodes")
     );
     smaller = limits;
@@ -4528,6 +4529,7 @@ fn gate_reachability_accepts_a_limit_sized_graph_and_rejects_lower_limits() {
     assert!(
         validate_plan_with_limits(&document, &smaller)
             .unwrap_err()
+            .to_string()
             .contains("limits.edges")
     );
 }
@@ -9388,4 +9390,19 @@ fn launch_projection_omits_untrusted_error_sources() {
     assert!(!reason.contains("TOKEN_SENTINEL"));
     assert!(!reason.contains("/private/host"));
     assert!(!reason.chars().any(char::is_control));
+}
+
+#[test]
+fn graph_advance_preserves_typed_admission_refusal() {
+    let mut document = graph(vec![node("one", route("first"))]);
+    document.schema_version = 99;
+    let mut journal = MemoryJournal::default();
+    let error = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap_err();
+    assert_eq!(error.code(), "invalid_graph");
+    assert!(matches!(
+        error,
+        GraphError::Admission(AdmissionError::Schema(_))
+    ));
+    assert_eq!(error.to_string(), "invalid graph: schema version");
+    assert!(journal.0.is_none());
 }
