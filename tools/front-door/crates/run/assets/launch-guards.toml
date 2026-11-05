@@ -162,6 +162,11 @@ boundary = "lane_git"
 reason = "Writer grants must match held worktree authority and keep real Git metadata outside writable scratch."
 
 [[guard]]
+site = "confinement/src/permissions/render.rs#render_profile_with_limit"
+boundary = "credentials"
+reason = "GitHub CLI credential roots remain denied unless an open-network writer has explicit publishing authority."
+
+[[guard]]
 site = "confinement/src/permissions/render.rs#compile_sbpl"
 boundary = "credentials"
 reason = "Credential, secret and private-state exclusions must hold after anchors and grants are resolved."

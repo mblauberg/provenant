@@ -319,6 +319,18 @@ fn writer_publish_grants_gh_reads_only_with_open_network() -> Result<(), Box<dyn
             )));
         }
     }
+    for secret in [
+        "/fixture/home/.config/gh",
+        "/fixture/home/.config/gh/hosts.yml",
+        "/fixture/home/.config",
+    ] {
+        plan.secret_roots = vec![grant(secret, PathScope::Subtree)];
+        let hidden = render(&plan, &profile, Path::new(HOME))?;
+        let deny = format!("(deny file-read* (subpath \"{secret}\"))");
+        let allow = "(allow file-read* (subpath \"/fixture/home/.config/gh\"))";
+        assert!(hidden.find(&deny).expect(secret) > hidden.find(allow).expect(allow));
+    }
+    plan.secret_roots.clear();
     if let provenant_confinement::permissions::AccessMode::WorktreeWrite(authority) = &mut plan.mode
     {
         authority.set_publishing(false);
