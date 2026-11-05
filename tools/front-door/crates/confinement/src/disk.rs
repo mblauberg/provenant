@@ -246,6 +246,7 @@ pub fn worktrees(
             head: listed.head,
             dirty: WorktreeCondition::Unknown,
             writer,
+            owner: crate::worktrees::OwnerStatus::Unknown,
         };
         let first = report.entries.len();
         if let Some(index) = report.measure("worktree", &info.path) {

@@ -1,4 +1,5 @@
 //! Quota arguments, composition through OS crate's safe filesystem, and render.
+use crate::metadata::CatalogueArg;
 use clap::{Args, Subcommand, ValueEnum};
 use provenant_core::{CancelToken, Clock, Roots, WaitBudget};
 use provenant_os::{
@@ -62,7 +63,7 @@ pub enum Quota {
         #[command(flatten)]
         adapter: Filter,
         /// Days to include, as a rolling window back from now
-        #[arg(long, default_value_t = 7, value_parser = clap::value_parser!(u32).range(1..=365))]
+        #[arg(long, default_value_t = 7, catalog_u32_range = 1..=365)]
         days: u32,
     },
     /// List recorded quota readings with resets, plan changes and the plan price in force
@@ -81,7 +82,7 @@ pub enum Quota {
         #[arg(long, value_parser = crate::grammar::since)]
         until: Option<jiff::Timestamp>,
         /// Most readings to return
-        #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u32).range(1..=100_000))]
+        #[arg(long, default_value_t = 1000, catalog_u32_range = 1..=100_000)]
         limit: u32,
     },
     /// Set menu bar display choices, then show quota
@@ -855,29 +856,19 @@ fn credential_metadata(
     home: Option<&Path>,
 ) -> Option<Vec<CredentialMetadata>> {
     let directory = &registration.directory;
-    let names: &[&str] = match registration.adapter.as_str() {
-        "claude" => &[".credentials.json", "settings.json"],
-        "codex" => &["auth.json", "config.toml"],
-        "cursor" => &["state.vscdb", "state.vscdb-wal", "cli-config.json"],
-        "agy" => &["state.vscdb", "state.vscdb-wal"],
-        "opencode" => &[
-            "auth.json",
-            "opencode.db",
-            "opencode.db-wal",
-            "opencode.json",
-        ],
-        _ => &[],
-    };
+    let spec = provenant_records::AdapterSpec::get(&registration.adapter);
     let mut paths = vec![directory.clone()];
-    paths.extend(names.iter().map(|name| directory.join(name)));
-    if registration.adapter == "agy" {
-        // An isolated account keeps its sign-in in its own keychain, so a
-        // re-login replaces that file rather than the state database.
-        paths.push(directory.join("Library/Keychains/login.keychain-db"));
-    }
-    if registration.adapter == "claude" {
-        paths.push(directory.with_extension("json"));
-        if cfg!(target_os = "macos")
+    if let Some(spec) = spec {
+        paths.extend(
+            spec.credential_files
+                .iter()
+                .map(|name| directory.join(name)),
+        );
+        if spec.credential_profile_sibling {
+            paths.push(directory.with_extension("json"));
+        }
+        if spec.credential_host_keychain
+            && cfg!(target_os = "macos")
             && let Some(home) = home
         {
             paths.push(home.join("Library/Keychains/login.keychain-db"));
@@ -1019,10 +1010,10 @@ fn decorate(
         };
     for row in &mut report.accounts {
         row.repair = (row.error == Some(ProbeFailure::IsolatedKeychainUnavailable)).then(|| {
-            let entry = accounts
-                .entries
-                .values()
-                .find(|entry| entry.adapter == "agy" && entry.key == row.account.account_key);
+            let entry = accounts.entries.values().find(|entry| {
+                entry.adapter == provenant_records::Harness::Agy.spec().name
+                    && entry.key == row.account.account_key
+            });
             keychain_repair(entry, &row.account.label)
         });
         row.display = accounts
@@ -1747,14 +1738,23 @@ fn pool_usage(snapshot: &provenant_quota::QuotaSnapshot) -> Vec<(&str, u64)> {
 /// `gemini exhausted, claude 40%`. A pool is exhausted when any of its windows is.
 fn pool_states(snapshot: &provenant_quota::QuotaSnapshot) -> Option<String> {
     let pools = pool_usage(snapshot);
-    (pools.len() > 1).then(|| {
+    let partial = snapshot
+        .details
+        .as_ref()
+        .is_some_and(|d| d.coverage.as_deref() == Some("partial"));
+    (pools.len() > 1 || (partial && !pools.is_empty())).then(|| {
         pools
             .iter()
             .map(|(pool, used)| {
                 if *used >= 10_000 {
                     format!("{} exhausted", pool.escape_debug())
                 } else {
-                    format!("{} {}%", pool.escape_debug(), used / 100)
+                    format!(
+                        "{} {}{}%",
+                        pool.escape_debug(),
+                        if partial { ">=" } else { "" },
+                        used / 100
+                    )
                 }
             })
             .collect::<Vec<_>>()
@@ -1818,6 +1818,11 @@ fn quota_summary_at(report: &QuotaReport, time_zone: jiff::tz::TimeZone) -> crat
             .iter()
             .filter(|row| {
                 !matches!(row.status, QuotaStatus::Available | QuotaStatus::CreditOnly)
+                    || row
+                        .snapshot
+                        .as_ref()
+                        .and_then(|s| s.details.as_ref())
+                        .is_some_and(|details| details.coverage.as_deref() == Some("partial"))
                     || !row.refusals.is_empty()
                     || row
                         .snapshot
@@ -1947,6 +1952,7 @@ pub fn run(
             };
             let mut result = CommandResult::new(name, status, None);
             result.error = Some(CommandError {
+                diagnostic: None,
                 code: "QUOTA".into(),
                 message: error.to_string(),
                 cause: None,
@@ -2428,6 +2434,62 @@ mod tests {
             &mut Vec::new(),
         )?;
         assert_eq!(provenant_os::changes::read(temp.path())?.quota, Some(1));
+        Ok(())
+    }
+
+    #[test]
+    fn credential_metadata_registry_preserves_watched_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let directory = temp.path().join("account");
+        let cases: &[(&str, &[&str])] = &[
+            ("claude", &[".credentials.json", "settings.json"]),
+            ("codex", &["auth.json", "config.toml"]),
+            (
+                "cursor",
+                &["state.vscdb", "state.vscdb-wal", "cli-config.json"],
+            ),
+            (
+                "agy",
+                &[
+                    "state.vscdb",
+                    "state.vscdb-wal",
+                    "Library/Keychains/login.keychain-db",
+                ],
+            ),
+            (
+                "opencode",
+                &[
+                    "auth.json",
+                    "opencode.db",
+                    "opencode.db-wal",
+                    "opencode.json",
+                ],
+            ),
+            ("unknown", &[]),
+        ];
+        for (adapter, files) in cases {
+            let registration = serde_json::from_value(serde_json::json!({
+                "adapter": adapter, "label": "fixture", "key": "fixture", "directory": directory,
+            }))?;
+            let mut expected = vec![directory.clone()];
+            expected.extend(files.iter().map(|file| directory.join(file)));
+            if *adapter == "claude" {
+                expected.push(directory.with_extension("json"));
+                if cfg!(target_os = "macos") {
+                    expected.push(temp.path().join("Library/Keychains/login.keychain-db"));
+                }
+            }
+            let observed = credential_metadata(&registration, Some(temp.path())).unwrap();
+            assert_eq!(
+                observed
+                    .into_iter()
+                    .map(|metadata| metadata.path)
+                    .collect::<Vec<_>>(),
+                expected,
+                "{adapter}"
+            );
+        }
         Ok(())
     }
 
@@ -3246,6 +3308,14 @@ mod tests {
             "/report.json".into(),
         )?;
         let human = quota_human(&report);
+        let snapshot = report.accounts[0].snapshot.as_ref().unwrap();
+        assert!(pool_states(snapshot).unwrap().contains("five_hour >=43%"));
+        assert!(
+            quota_summary(&report)
+                .lines
+                .iter()
+                .any(|line| line.contains("five_hour >=43%"))
+        );
         assert!(
             human.contains("source: local-ledger; coverage: partial (lower bound, this host only)"),
             "{human}"

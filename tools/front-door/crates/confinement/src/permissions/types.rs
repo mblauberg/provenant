@@ -38,6 +38,10 @@ pub enum PermissionError {
     BroadRoot,
     #[error("credential root requires a selected fixture-backed mechanism")]
     CredentialRoot,
+    #[error("credential root guard refused {path}: {guard}")]
+    CredentialRootAt { path: String, guard: &'static str },
+    #[error("credential root refused for {access} grant at {}", .path.display())]
+    CredentialGrant { path: PathBuf, access: &'static str },
     #[error("permission root overlaps a protected path")]
     ProtectedOverlap,
     #[error("required held path anchor is missing or changed")]
@@ -61,7 +65,7 @@ pub enum PermissionError {
     #[error("nested confinement is unsupported by this backend")]
     NestedConfinementUnsupported,
     #[error(
-        "compiled profile is {bytes} bytes, over the {limit}-byte launch limit (profiles travel in argv); reduce the read, write or executable roots this lane is granted"
+        "compiled profile is {bytes} bytes, over the configured {limit}-byte limit; reduce granted roots or raise domains.run.profile_limit_bytes (the OS may impose its own argv limit)"
     )]
     ProfileTooLarge { bytes: usize, limit: usize },
     #[error("{family} exceeds its bound of {limit}: {path:?}")]
@@ -97,10 +101,80 @@ pub enum PermissionError {
     CacheSweepDepth,
 }
 
+impl PermissionError {
+    /// Classify only a boundary that the typed error itself establishes.
+    /// Ambiguous guards stay unclassified until their caller supplies context.
+    pub fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
+        use provenant_records::diagnostic::BoundaryClass as B;
+        match self {
+            Self::CredentialRoot | Self::CredentialRootAt { .. } | Self::CredentialGrant { .. } => {
+                B::Credentials
+            }
+            Self::GitControlHardLinked(_)
+            | Self::GitWriteAuthorityMissing
+            | Self::Repository(_) => B::LaneGit,
+            Self::AnchorMismatch
+            | Self::AnchorMismatchAt { .. }
+            | Self::InvalidFixture
+            | Self::PermissionNotRecorded
+            | Self::ProtectedOverlap
+            | Self::InvalidReadOnlyPolicy
+            | Self::ProcessPolicyMissing
+            | Self::NestedConfinementUnsupported => B::Authority,
+            _ => B::None,
+        }
+    }
+
+    /// Add the refused path to a credential guard error.
+    pub fn with_credential_path(self, path: &Path, home: Option<&Path>) -> Self {
+        if matches!(self, Self::CredentialRoot) {
+            let env_home = std::env::var_os("HOME").map(PathBuf::from);
+            Self::credential_root_at(path, home.or(env_home.as_deref()))
+        } else {
+            self
+        }
+    }
+
+    /// Preserve the requested path and identify the guard in user-facing refusals.
+    pub fn credential_root_at(path: &Path, home: Option<&Path>) -> Self {
+        let path = home
+            .and_then(|home| path.strip_prefix(home).ok())
+            .map(|relative| {
+                if relative.as_os_str().is_empty() {
+                    "~".to_owned()
+                } else {
+                    format!("~/{}", relative.display())
+                }
+            })
+            .unwrap_or_else(|| path.display().to_string());
+        Self::CredentialRootAt {
+            path,
+            guard: "credential root",
+        }
+    }
+}
+
 #[cfg(test)]
 mod repository_error_tests {
     use super::PermissionError;
     use crate::repo::RepoError;
+
+    #[test]
+    fn boundary_classification_uses_the_typed_guard_not_a_generic_code() {
+        use provenant_records::diagnostic::BoundaryClass as B;
+        for (error, expected) in [
+            (PermissionError::CredentialRoot, B::Credentials),
+            (PermissionError::GitWriteAuthorityMissing, B::LaneGit),
+            (PermissionError::AnchorMismatch, B::Authority),
+            (
+                PermissionError::ProfileTooLarge { bytes: 2, limit: 1 },
+                B::None,
+            ),
+            (PermissionError::BackendUnavailable, B::None),
+        ] {
+            assert_eq!(error.boundary_class(), expected, "{error:?}");
+        }
+    }
 
     #[test]
     fn repository_refusal_names_the_underlying_reason() {

@@ -314,12 +314,43 @@ The CLI and MCP render one typed category per run error, and peer replies
 keep their error code over the wire. MCP errors include a message and recovery
 hint, and validation identifies the expected value. Uncertain mutations carry
 their `operation_id`.
+Graph launch diagnostics and MCP projections select safe details and actions
+from the typed refusal before persisting or transporting them. An unanchored
+host path or an arbitrary source error is omitted; uncertain handoffs name the
+operation to inspect instead of directing a new launch.
 - Why: people and agents act on the code.
 - Test: `crates/cli/src/fabric.rs::upgrade_and_peer_version_refusals_match_on_both_edges`;
   `src/fabric.rs::peer_run_errors_stay_typed_through_cli_rendering`
 - Owner: `crates/fabric-runtime/src/coordination/facade.rs`
 
 ## Bounded graphs and route fallback
+
+The graph runtime owns static admission for presets, raw documents and planner
+fragments. It validates schema capability, the configured structural limits,
+the expanded plan, the worst-case checkpoint envelope and selected output
+kinds before submission. Recovery uses the same schema-capability predicate.
+For composites, the declared exports are the static public capability; admission
+checks consumers against that contract and validates export references and
+selector shapes. Whether a selected member actually made an output available is
+runtime evidence and remains visible in the composite settlement.
+Schema 2 is the minimum version when the complete typed document carries a
+deferred-review field; presets choose that version after building the document,
+while raw documents retain their authored version. Version 2 carries deferred
+review configuration (`review` and `family_group` on nodes, and `review_base`
+on the document); a version 1 document must not carry these fields. The host
+pins `review_base` in the execution and can record review resolution in an
+expansion. Checkpoint and envelope versions remain 1. A review specification
+requires a read-only plan node with a source and no ordinary plan specification.
+Older hosts reject version 2 and require an upgrade.
+
+A deferred review resolves after its subject is pinned. The host returns a
+read-only composite expansion; the runtime validates and journals it before
+running its members. Resume replays the journal without resolving again. The
+host supplies the models of previous attempts and the families of accepted
+attempts so alias retries can avoid a refused model and grouped lenses can
+prefer different families. Family separation is best effort: every lens runs
+when a suitable route exists, and a shared family is recorded as a substitution.
+
 
 ### Pipeline presets
 
@@ -329,9 +360,13 @@ ordinary graph and submits it through the graph owner; run flags are in
 do not provision branches or checkouts. The [preset runbook](../runbooks/presets.md)
 contains starting points and batch preparation guidance.
 
-`--explain` prints a compact tree of roles, tiers, scopes, worktrees, inputs,
-concurrency, attempt bounds, acceptance and effective limits without writing a
-graph or opening graph state. JSON output includes the exact submitted graph
+`--explain` prints the admission result, inspection metrics and live checks
+still pending, followed by a compact tree of roles, tiers, scopes, worktrees,
+inputs, concurrency, attempt bounds, acceptance and effective limits. It does
+not write a graph or open graph state. Pending ids are `source` (an unresolved
+source binding), `worktree` (a writer), `delivery_target` (push or integrate),
+`planner_authority` (a plan node) and `route_readiness` (an agent node).
+JSON output includes the exact submitted graph
 and effective value origins, bounded by the 8 MiB graph document limit rather
 than the ordinary 1 MiB result limit. Identical expanded graphs use the same
 graph ID and a private, content-addressed document in project scratch, so
@@ -445,8 +480,7 @@ Preset TOML files are named `NAME.toml` under
 and `.provenant/presets/` in the selected project. Values merge in bundled,
 user, repository and `--set PATH=TOML_VALUE` order. `preset list` lists names
 with each pattern's level, summary and cost; `preset show NAME` displays merged
-values and their origins; `preset explain NAME` renders the pattern, typed
-parameters, stages and roles without creating state. `extends` selects
+values and a typed parameter table; `--full` includes origins. `preset explain NAME` lists parameter names, with the pattern, typed parameters, stages and roles under `--full`, without creating state. `extends` selects
 another preset's defaults. A same-name override omits `extends` and supplies
 only its changes. Stage roles come from a role library (bundled `roles.toml`,
 then user and repository `roles.toml`, then a preset's own `[roles.*]`), listed
@@ -589,6 +623,14 @@ attempt the scheduler resolves the applied family and stores a `separation`
 record on the node (`strength`, `excluded`, `applied`, `outcome` of
 `separated`, `unavailable` or `unconstrained`). With no known upstream family
 the constraint is a no-op.
+
+A read-only node with role `lens.*` or `review.*` that returns a valid
+findings block and verdict settles succeeded regardless of verdict. A lane's
+`declared_stop` also settles as a result under those conditions; writer stops
+retain their usual failure semantics. Disposition validation still applies.
+A partial composite waits for its members to settle, exports the successful
+members and names unavailable members in its result. A blocked node reports
+its blocking upstream node and state in status.
 
 A node may declare `dispositions`, a list of allowed values. At settlement its
 findings block must parse and every finding must carry a `disposition` from
@@ -1183,17 +1225,67 @@ Review coverage semantics belong to [workflow](workflow.md#review-coverage).
 Handoff status remains a separate completion state.
 
 Findings use a fenced `findings` JSON block with `schema_version: 1`
-and a `findings` array; each item has string fields `id`, `severity`, `file`, `summary` and
+and a `findings` array (or an object keyed by finding id); each item has string fields `id`, `severity`, `file`, `summary` and
 `status`, and an optional non-negative integer `line` (which may be null).
-Unknown fields or a different schema version make the block invalid. Parsing
+A disposing node may instead emit `{ "id": "member:F1", "disposition": "rejected",
+"reason": "Evidence refutes it" }`: omitted finding fields are inherited from the
+selected upstream finding. Explicit fields still undergo normal validation.
+Composite exports qualify ids as `<member-node-id>:<id>`, using the expanded
+member node id at each composite boundary. An overlong qualified id fails the
+composite. If the combined export exceeds the count or byte limit, the composite
+keeps a severity-ranked subset, reserving each member's strongest finding when
+all such reservations fit. Severity ranks critical/blocking/P0, high/P1,
+medium/P2, low/P3, then informational/P4; unrecognised labels rank last.
+A warning gives the dropped count, members and available attempt references; the composite result also carries the
+notice. Downstream input listings identify the staged paths for those member results. When materialisation is capped or its listing is too long, an input index
+names the graph and every source, status, path, attempt reference and finding ID prefix. A member with findings
+but no attempt result supplies a materialised findings block instead. Consumers
+must read the full member results and account for omitted findings. Review-council verification and
+synthesis receive those results. When their structured blocks cannot hold all
+the findings, the additional decisions remain in the full result. For a truncated
+composite, a verifier or disposing node must emit one `DISPOSITION` JSON
+line for every original qualified finding id, with an allowed disposition and a
+non-empty reason. Lines may instead identify each finding by its expanded member
+id and zero-based index, using the same identity form throughout the result. The
+runtime checks the complete result stream for omissions, duplicates, invalid
+dispositions and disagreement with structured findings. It retains bounded
+SHA-256 identity and disposition hashes while checking, without adding the full
+set to the checkpoint. Verifiers use upheld, falsified or unverifiable for this
+check; synthesis uses its declared dispositions. New findings still belong in
+the structured block.
+Each finding has a structural root: the producing input node and its stored id.
+When a downstream node propagates a finding, it declares
+`"propagates": "<input-node-id>:<finding-id>"` on that entry. The named node
+must be an input selecting findings or a result; the finding id may be its stored
+id or the id rendered to the propagator. Resolution follows propagation chains
+to the first root. An unresolved or ambiguous marker leaves the finding
+independent and records a warning in the producing node's outputs. A matching id
+and dependency alone do not establish propagation.
+
+All selected copies of one root, including originals and intermediate copies,
+remain visible with their own evidence and share one display identity. The root's
+stored id is used when unique among groups; otherwise a qualified id is chosen
+without colliding with any other group's display id, including ids containing
+colons. One disposition settles the group. Settled outputs record that disposition
+and reason on every copy, retaining each copy's evidence even when the decision
+supplies a field already present in that copy. Independent findings need separate
+dispositions.
+Use the exported qualified id. A bare id is also accepted when it matches exactly
+one selected upstream identity; ambiguous or unknown identity-only references fail
+and name the id. New findings still require all descriptive fields.
+A different schema version makes the block invalid. Additional fields are retained. Parsing
 of findings only uses complete lines and blocks within a window, so content
 in the middle of a large result may not be captured. A block may contain at most 32 findings
-and 8 KiB of JSON, and text fields are
+and a bounded canonical representation. Dispositions have a larger checkpoint
+budget to accommodate inherited fields, and each finding’s additional fields have
+a 9,216-byte canonical limit; text fields are
 limited to 1024 bytes each; a block with an overlong field is invalid. Missing
 or invalid findings produce an empty list and, when a result exists, a warning,
 not a node failure. The final findings block in the tail window takes
 precedence; if it is absent, the final block in the head window is used. An
-invalid final block yields an empty list and warning.
+invalid final block yields an empty list and a bounded warning naming the first
+failing entry (index and id when available) and field. Nodes requiring findings
+or dispositions include that diagnostic in their settlement failure.
 The separate `required_verdict` contract checks for its exact line across the
 complete redacted stream. Writers can also provide a branch or commit.
 

@@ -12,11 +12,14 @@ mod contract;
 pub mod cursor;
 pub mod duration;
 mod dylib;
+pub use dylib::{ClosureOutcome, DependencyClosure, IncompleteReason};
 pub mod host;
 pub mod identity;
 mod lane;
 mod launch;
+mod skill_stage;
 pub use lane::{BuildSlotGate, LaneRuntime};
+pub use skill_stage::{SkillWarning, StagedUserSkills};
 pub mod opencode;
 pub mod quota;
 pub mod quota_live;
@@ -25,7 +28,10 @@ mod swift;
 pub use swift::toolchain_available as swift_toolchain_available;
 pub mod update;
 pub use contract::*;
-pub use launch::{Access, LaunchSpec, PrepareInput, Session, SetupStep, Stdin};
+pub use launch::{
+    Access, AppliedAccess, LaunchSpec, OmissionSource, OmittedGrant, PrepareInput,
+    PreparedToolRequirement, Session, SetupStep, Stdin,
+};
 pub use stream::*;
 
 use provenant_quota::QuotaSource;
@@ -96,7 +102,9 @@ macro_rules! adapter {
                     continuation.bind_stream($id, &mut stream)?;
                 }
                 let mut spec = $prepare(&input, access, session, stream)?;
+                crate::launch::prepare_tool_requirements(&input, &mut spec);
                 crate::launch::private_git_objects(&input, &mut spec)?;
+                crate::launch::prepare_tool_requirements(&input, &mut spec);
                 Ok(spec)
             }
             fn stream(

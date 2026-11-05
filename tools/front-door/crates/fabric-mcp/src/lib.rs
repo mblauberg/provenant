@@ -25,7 +25,9 @@ pub(crate) mod test_facade {
                     cancel: &CancelToken,
                 ) -> Result<provenant_fabric_runtime::inbox::InboxResult, ServiceError> {
                     if host.is_some() {
-                        return Err(ServiceError::Facade(FacadeError::InvalidInput));
+                        return Err(ServiceError::Facade(FacadeError::InvalidInput {
+                            detail: None,
+                        }));
                     }
                     Ok(self.inbox(input, budget, cancel)?)
                 }

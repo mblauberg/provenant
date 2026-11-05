@@ -8,7 +8,7 @@ mod inventory;
 mod lifecycle;
 mod owner;
 pub use census::*;
-pub use context::with_context;
+pub use context::{with_context, with_context_using_workers};
 pub use custody::*;
 pub use gc::{WorktreeGcPolicy, WorktreeGcReport, collect};
 pub use inventory::*;
@@ -82,8 +82,12 @@ pub enum WorktreeError {
     WriterBusy { holder: Option<AttemptId> },
     #[error("branch name collides with existing ref {existing}")]
     BranchCollision { existing: String },
-    #[error("branch {branch} already exists; omit --base to reuse it")]
-    BranchExistsWithBase { branch: String },
+    #[error("branch {branch} at {head} does not contain base {base}; omit --base to reuse it")]
+    BranchExistsWithBase {
+        branch: String,
+        head: GitOid,
+        base: GitOid,
+    },
     #[error("worktree or branch was not found")]
     NotFound,
     #[error("base {base} did not resolve to a commit")]
@@ -106,6 +110,8 @@ pub enum WorktreeError {
     GitOperationInProgress,
     #[error("worktree writer lock busy")]
     LockBusy,
+    #[error("worktree registry reservation timed out")]
+    RegistryLockTimeout,
     #[error("worktree writer is live")]
     LiveWriter,
     #[error(
@@ -117,6 +123,13 @@ pub enum WorktreeError {
     IncompleteCensus { detail: String },
     #[error("worktree writer or registration is unknown")]
     UnknownWriter,
+    #[error("worktree writer or registration is unknown at {}", .path.display())]
+    UnknownWriterAt { path: PathBuf },
+    /// The merged writer state is unknown specifically because native census
+    /// evidence was incomplete. The public refusal text and code stay the same
+    /// as `UnknownWriter`; lifecycle consumers get a typed retry cause.
+    #[error("worktree writer or registration is unknown")]
+    CensusUnknown { detail: String, path: PathBuf },
     #[error("Git marks the worktree {}", if *.locked { "locked" } else { "prunable" })]
     GitEntryHeld { locked: bool },
     #[error("worktree operation was cancelled")]
@@ -154,6 +167,18 @@ pub enum WorktreeError {
     PathWire(#[from] PathWireError),
 }
 
+/// Stable machine cause for worktree admission transitions. Presentation may
+/// change; lifecycle callers must branch on this value rather than refusal text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdmissionCause {
+    RegistryLockTimeout,
+    CensusIncomplete,
+    RegistrationOrCustodyUnknown,
+    LiveWriter,
+    DirtyTree,
+    PermanentFailure,
+}
+
 fn dirty_suffix(paths: &str) -> String {
     if paths.is_empty() {
         String::new()
@@ -163,10 +188,34 @@ fn dirty_suffix(paths: &str) -> String {
 }
 
 impl WorktreeError {
+    /// Returns a typed retry-relevant cause without making the error retryable
+    /// by itself. The caller still owns deadlines and transition policy.
+    pub fn admission_cause(&self) -> Option<AdmissionCause> {
+        match self {
+            Self::RegistryLockTimeout => Some(AdmissionCause::RegistryLockTimeout),
+            Self::IncompleteCensus { .. } => Some(AdmissionCause::CensusIncomplete),
+            Self::CensusUnknown { .. } => Some(AdmissionCause::CensusIncomplete),
+            Self::UnknownWriter | Self::UnknownWriterAt { .. } | Self::GitEntryHeld { .. } => {
+                Some(AdmissionCause::RegistrationOrCustodyUnknown)
+            }
+            Self::LockBusy | Self::LiveWriter | Self::LiveProcess(_) | Self::WriterBusy { .. } => {
+                Some(AdmissionCause::LiveWriter)
+            }
+            Self::Dirty(_) | Self::IgnoredPaths(_) => Some(AdmissionCause::DirtyTree),
+            _ => Some(AdmissionCause::PermanentFailure),
+        }
+    }
+
     /// Refusals that mean Provenant cannot prove who owns the tree. Callers
     /// that retain such a tree treat every one of them alike.
     pub fn is_custody_unknown(&self) -> bool {
-        matches!(self, Self::UnknownWriter | Self::GitEntryHeld { .. })
+        matches!(
+            self,
+            Self::UnknownWriter
+                | Self::UnknownWriterAt { .. }
+                | Self::CensusUnknown { .. }
+                | Self::GitEntryHeld { .. }
+        )
     }
 
     /// The operator's next step for a refusal that has one.
@@ -192,7 +241,7 @@ impl WorktreeError {
             Self::GitOperationInProgress => {
                 "run `git -C PATH status` and complete or abort the Git operation before retrying"
             }
-            Self::UnknownWriter => {
+            Self::UnknownWriter | Self::UnknownWriterAt { .. } | Self::CensusUnknown { .. } => {
                 "run `provenant worktree list` and inspect the registration and writer state before retrying"
             }
             Self::IncompleteCensus { .. } => {
@@ -249,6 +298,7 @@ impl std::fmt::Display for ProcessEvidenceKind {
 pub struct ObservedProcess {
     pub pid: i64,
     pub command: Option<String>,
+<<<<<<< HEAD
     pub kind: ProcessEvidenceKind,
 }
 
@@ -280,13 +330,20 @@ impl ObservedProcess {
             kind: ProcessEvidenceKind::OtherHeldPath,
         }
     }
+=======
+    pub cwd: Option<PathBuf>,
+>>>>>>> origin/main
 }
 
 impl std::fmt::Display for ObservedProcess {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.command {
-            Some(command) => write!(f, "{} ({command})", self.pid),
-            None => write!(f, "{}", self.pid),
+        match (&self.command, &self.cwd) {
+            (Some(command), Some(cwd)) => {
+                write!(f, "{} ({command}) at {}", self.pid, cwd.display())
+            }
+            (Some(command), None) => write!(f, "{} ({command})", self.pid),
+            (None, Some(cwd)) => write!(f, "{} at {}", self.pid, cwd.display()),
+            (None, None) => write!(f, "{}", self.pid),
         }
     }
 }
@@ -364,6 +421,16 @@ pub enum WriterState {
     Unknown,
 }
 
+/// Observed lane-ownership registration; absence does not prove custody is free.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnerStatus {
+    Registered,
+    Unowned,
+    Unknown,
+    Primary,
+}
+
 /// CLI result facts are serialize-only. Its absolute path is emitted through
 /// the explicit root-plus-PathWire envelope below, never lossy `Path::display`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -373,6 +440,7 @@ pub struct WorktreeInfo {
     pub head: GitOid,
     pub dirty: WorktreeCondition,
     pub writer: WriterState,
+    pub owner: OwnerStatus,
 }
 
 impl Serialize for WorktreeInfo {
@@ -381,12 +449,16 @@ impl Serialize for WorktreeInfo {
         S: Serializer,
     {
         let path = AbsolutePathWire::from_path(&self.path).map_err(serde::ser::Error::custom)?;
-        let mut state = serializer.serialize_struct("WorktreeInfo", 5)?;
+        let mut state = serializer.serialize_struct("WorktreeInfo", 7)?;
         state.serialize_field("path", &path)?;
         state.serialize_field("branch", &self.branch)?;
         state.serialize_field("head", &self.head)?;
         state.serialize_field("dirty", &self.dirty)?;
         state.serialize_field("writer", &self.writer)?;
+        state.serialize_field("owner", &self.owner)?;
+        if self.owner == OwnerStatus::Unowned {
+            state.serialize_field("next", "This checkout has no Provenant lane owner; it may have been created outside Provenant. Inspect its custody, then select it explicitly with --worktree <path>.")?;
+        }
         state.end()
     }
 }
@@ -555,6 +627,41 @@ mod lifecycle_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admission_causes_keep_transient_observation_distinct_from_custody() {
+        assert_eq!(
+            lifecycle::retain_reason(&WorktreeError::RegistryLockTimeout),
+            RetainReason::LockBusy
+        );
+        assert_eq!(
+            WorktreeError::RegistryLockTimeout.admission_cause(),
+            Some(AdmissionCause::RegistryLockTimeout)
+        );
+        assert_eq!(
+            WorktreeError::IncompleteCensus {
+                detail: "process listing failed".into()
+            }
+            .admission_cause(),
+            Some(AdmissionCause::CensusIncomplete)
+        );
+        assert_eq!(
+            WorktreeError::UnknownWriter.admission_cause(),
+            Some(AdmissionCause::RegistrationOrCustodyUnknown)
+        );
+        assert_eq!(
+            WorktreeError::LockBusy.admission_cause(),
+            Some(AdmissionCause::LiveWriter)
+        );
+        assert_eq!(
+            WorktreeError::Dirty(String::new()).admission_cause(),
+            Some(AdmissionCause::DirtyTree)
+        );
+        assert_eq!(
+            WorktreeError::InvalidRequest.admission_cause(),
+            Some(AdmissionCause::PermanentFailure)
+        );
+    }
 
     #[test]
     fn remove_admin_entry_handles_large_directory_and_keeps_other_targets()

@@ -4,7 +4,7 @@ stages = [
     { id = "lens", for_each = "${lenses}", role = "lens.${item.name}", require_findings = true },
   ], source = { type = "node", node = "subject" } },
   { id = "verify", role = "review.verify", count = "${verifiers}", source = { type = "node", node = "subject" } },
-  { id = "synthesis", role = "review.synthesis" },
+  { id = "synthesis", role = "review.synthesis", depends_on = ["lenses"] },
 ]
 exports = [{ node = "synthesis", outputs = ["result", "findings", "verdict", "commit"] }]
 
@@ -43,6 +43,7 @@ local_check_policy = { type = "string", default = "", doc = "Local check policy 
 subject = { type = "table", default = { type = "commit", commit = "HEAD" }, doc = "Immutable review subject: a commit, a node or the integration head." }
 worktree = { type = "string", default = "", doc = "Worktree the reviewers may read." }
 base = { type = "string", default = "", doc = "Diff reference the change is measured from, for example origin/main." }
+spec_max_bytes = { type = "integer", default = 16384, min = 1, max = 65536, doc = "Maximum bytes of a file spec included in each review brief." }
 spec = { type = "string", default = "", doc = "Issue number or file the change answers." }
 review_shape = { type = "string", default = "", doc = "Review depth override from routing review shapes (quick, standard, deep)." }
 risk_tier = { type = "string", default = "", doc = "Risk tier that selects the review shape." }

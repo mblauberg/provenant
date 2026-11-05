@@ -100,7 +100,8 @@ handled.
 2. Link a pull request with `Closes #N` only when merge leaves no user or
    external-action gate. Otherwise use `References #N` and keep the issue open.
 3. Set `In review` while exact-head checks and independent review run. A new
-   commit invalidates that exact-head evidence and it must be rerun.
+   head needs CI; apply the review ladder head-move rules, with A and B in
+   shadow until enforced and current exact-head landing gates retained.
    At acceptance, the reviewer checks spec drift and records any mismatch for
    resolution; this judgement is advisory, not an automatic gate.
 4. If machine gates pass but a user gate remains, set `Awaiting user`.
@@ -138,7 +139,7 @@ several issues or a slice) and no run vocabulary such as batch, wave, lane or
 model name. The worktree directory is the branch with `/` replaced by `-`. The
 standing `HARNESS.md` envelope covers branch and worktree creation without
 extra authority. An authorised merge covers pruning its own worktree and
-merged refs; other deletion needs user authority. Dirty worktrees are refused.
+merged refs; the chair decides other removals, as `GLOBAL-AGENTS.md` sets out. Dirty worktrees are refused.
 
 ```sh
 provenant worktree create fix/repo-runbook-mechanics --base main
@@ -156,8 +157,8 @@ provenant worktree create fix/repo-runbook-mechanics
 
 Use `provenant worktree list` to inspect worktrees and
 `provenant worktree remove NAME` to remove an eligible one; its branch goes
-too once merged. `--discard` deletes an unmerged branch and needs explicit
-user authority.
+too once merged. `--discard` deletes an unmerged branch; the chair uses it
+for superseded or abandoned work and records the returned head.
 
 Then set the issue to `In progress` (commands under
 [Project status](#project-status)).
@@ -178,7 +179,8 @@ to push its verified commit and open the pull request.
 
 ### Pull request
 
-Open the pull request against `main` and link the issue per the rule in
+Open the pull request against `main` (or its stack base as below) and link the
+issue per the rule in
 [Execute and review](#execute-and-review): `Closes #N` only when merge leaves
 no user or external-action gate, otherwise `References #N` with the issue left
 open. The body must follow the repository template
@@ -199,6 +201,53 @@ gh pr create --base main \
 Set the issue to `In review` while exact-head checks and independent review
 run, and `Awaiting user` once machine gates pass and only a user decision
 remains.
+
+### Stacked pull requests
+
+Use a stack for dependent slices of one outcome that merit separate review: a
+shared seam and its consumers, a second batch built on the first, or a large
+refactor in reviewable steps. Independent changes get separate PRs off `main`;
+do not stack a slice that cannot pass CI alone.
+
+GitHub stacked PRs are generally available, with no repository enablement.
+They form a linear chain in one repository, without forks: the bottom PR targets
+`main` and each later PR targets the branch below. The merge box shows the
+stack map. Each PR carries its own `Closes #N` or `Refs #N` per issue, following
+the closure rule above; review its own diff against the branch below.
+
+With a current `gh`, install `gh extension install github/gh-stack`. Run
+`gh stack init`, commit the first slice, then `gh stack add BRANCH` for each
+new branch on top. `gh stack submit` pushes branches, creates or updates PRs
+and creates the stack. `gh stack view` shows it; `gh stack unstack` dissolves
+it. A completed stack cannot be extended: a new submit starts a new stack.
+Alternatively create and extend stacks through the API. REST PRs carry a
+`stack` object; `GET /repos/{owner}/{repo}/stacks` lists stacks, and REST has
+create, extend and dissolve endpoints. GraphQL stack fields are read-only;
+webhooks carry `stack`.
+
+The chair normally merges `main` into branches instead of rebasing. A writer
+may rebase and force-push with lease its own unmerged branches, including a
+whole stack, never `main` or another writer's branch. Provenant's pre-push
+handler refuses non-fast-forward updates only to the default branch. `gh stack rebase`
+cascades and supports `--upstack` and `--downstack`; `gh stack push` uses an
+atomic per-branch force-with-lease, and `gh stack sync` fetches, rebases, pushes
+and syncs PR state. Recheck the changed heads and their review evidence.
+
+Required checks and branch protection apply to every PR, based on the bottom
+PR's base; stack merges cannot bypass them. CI runs for every PR; use
+`github.event.pull_request.stack` to limit expensive jobs when appropriate.
+Land bottom-first with `gh stack merge --merge-method merge` or the asynchronous
+merge API. `gh stack merge` merges through the chosen PR, all-or-nothing; one
+PR, a prefix or the whole stack can land. Upper PRs automatically retarget
+`main`. GitHub also supports squash and rebase merge methods. The legacy REST
+`PUT /pulls/{n}/merge` used by `provenant pr land` cannot merge stacked PRs;
+until Provenant supports stacks, use `gh stack` to land them. Prune merged
+branches and worktrees as usual after landing.
+
+See GitHub's [overview](https://docs.github.com/en/pull-requests/get-started/about-stacked-prs),
+[quickstart](https://docs.github.com/en/pull-requests/get-started/stacked-prs-quickstart),
+[CLI reference](https://docs.github.com/en/pull-requests/reference/stacked-prs-cli-commands)
+and [rollout guide](https://docs.github.com/en/pull-requests/tutorials/roll-out-stacked-prs).
 
 ### Project status
 
@@ -239,11 +288,11 @@ Before queueing merge for a substantial software change, confirm its delivery re
 
 Merge authority is repo-based. Review pressure follows the
 [`HARNESS.md` Review ladder](../../HARNESS.md#review-ladder), including its
-recorded-blocker fallback when cross-family review is unavailable. This
+same-family substitution, through a different lens without reducing the count,
+when cross-family review is unavailable. This
 repository is a personal harness, not production: by user directive, repository auto-merge is enabled
 and agents merge directly. An agent merges a pull request once it has passed
-its tier's review pressure (routine: chair plus objective checks; substantial+
-uses the canonical ladder on the exact head) and
+its tier's planned independent review coverage and
 `ci-status` is green on the exact head, without waiting for the user. `gh pr
 merge --auto` may be queued once those gates are met.
 
@@ -330,7 +379,7 @@ reported cause and rerun: an already-merged PR skips CI and merge and retries
 only safe cleanup. CI failures use `CI_PENDING`, `CI_FAILED`,
 `CI_UNAVAILABLE`, `CI_POLICY_UNAVAILABLE`, `CI_TIMEOUT`, `CI_CONFLICT`,
 `CI_NOT_SCHEDULED` or `HEAD_MOVED`. `CI_CONFLICT` means the PR conflicts with its
-base, so CI never starts: rebase and push. `CI_NOT_SCHEDULED` means the wait
+base, so CI never starts: merge `main` or rebase, then push. `CI_NOT_SCHEDULED` means the wait
 ended with no check registered for the head. Required checks on the exact head
 stay mandatory.
 
@@ -382,21 +431,21 @@ For status-check rollup handling and false-green traps, follow the
 [shell-pitfalls runbook](shell-pitfalls.md#shell-pitfalls).
 
 The user review/merge gate applies only when the agent is stuck: split review
-verdicts it cannot settle with primary-source evidence, an exhausted repair
-budget, or a decision outside its granted authority. Standing user gates are:
-forced branch deletion, deletion of a branch that is not merged, history
-rewrites, credential or connector setup, pushes to shared branches outside
-authorised merges, and risk-tier downgrades. Deleting a *merged* branch's own
+verdicts it cannot settle with primary-source evidence, or a decision outside
+its granted authority. An exhausted repair budget triggers the ladder's
+principal scoping, not an owner wait within approved scope. Standing user gates are:
+credential or connector setup, rewrites of or pushes to shared branches (including
+`main`) outside authorised merges, and risk-tier downgrades. Deleting a *merged* branch's own
 local ref and worktree is carried by the merge itself, under
-[post-merge pruning](../worktrees.md#ownership-and-cleanup).
+[post-merge pruning](../worktrees.md#ownership-and-cleanup); removing other
+branches and worktrees, unmerged ones included, is the chair's judgement.
 
 The live `Protect main` ruleset sets `strict_required_status_checks_policy: false`,
 so branch protection does not require the head to be up to date with `main`.
 `ci-status` gates the exact head only. Concurrent pull requests that touch the
 same files should still land as a serialised merge train: merge one, update the
-next onto the new `main`, rerun the exact-head checks and independent review (an
-update-merge is a new commit and invalidates prior exact-head evidence), then
-merge it.
+next onto the new `main`, rerun exact-head checks and apply the ladder
+head-move rules, keeping A and B in shadow until enforced, then merge it.
 
 ### Rust build cache
 
@@ -437,23 +486,16 @@ instead of the actual cause. If a PATH reduction is genuinely needed, start from
 the real `PATH` and subtract only the named executables under suspicion. Record
 the matrix and which single axis changed the outcome.
 
-### Dependabot patch-only auto-merge
+### Dependabot auto-merge
 
-One standing exception to tier review pressure:
+Dependabot updates are exempt from review: a patch or minor version bump that
+changes only manifests and lockfiles may auto-merge once `ci-status` is green.
+A major bump, a new dependency, or any change outside manifests and lockfiles
+takes at least one `routine` reviewer.
 [`dependabot-automerge.yml`](../../.github/workflows/dependabot-automerge.yml)
-(issue #155) queues `gh pr merge --auto` unattended for Dependabot updates
-when all of the following hold:
-
-- the PR author is `dependabot[bot]` and the head branch lives in this
-  repository (not a fork);
-- `dependabot/fetch-metadata` reports the update type as
-  `version-update:semver-patch` (minor and major updates wait for maintainer
-  review); and
-- Dependabot is configured for GitHub Actions and the Rust workspace's Cargo
-  dependencies; the former npm package exclusions do not apply.
-
-The queued merge still lands only after `ci-status` reports green; that gate is
-the whole review pressure for these PRs.
+queues `gh pr merge --auto` for semver-patch updates without checking changed
+paths. Until #2844 adds minor updates and the manifest-and-lockfile check, land
+minor updates by hand after CI and check a patch update's paths before it merges.
 
 ### After merge
 

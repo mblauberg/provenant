@@ -8,6 +8,14 @@ use provenant_os::fs::{Directory, PublishMode};
 use serde::Serialize;
 use toml_edit::{DocumentMut, Item, TableLike, Value};
 
+pub(crate) const RETIRED_DOMAIN_KNOBS: &[&str] = &[
+    "domains.routing.capacity_cooldown_seconds",
+    "domains.routing.settlement_retries",
+    "domains.routing.capacity_retry_seconds",
+    "domains.routing.capacity_retry_max_seconds",
+    "domains.routing.retry_delay_ceiling_seconds",
+];
+
 /// Tables whose rows may carry the retired keys, under `domains.routing`, and
 /// whether a row that has already expired is dropped instead of converted.
 const TARGETS: [(&[&str], bool); 2] = [
@@ -120,6 +128,40 @@ fn rewrite(document: &mut DocumentMut, now: i64) -> Result<Vec<Migration>, Confi
             action: "dropped",
             keys: vec!["bundle_bytes".into()],
         });
+    }
+    if document.get("profile").and_then(Item::as_str) == Some("rigorous") {
+        document.remove("profile");
+        migrations.push(Migration {
+            location: "profile".into(),
+            action: "dropped",
+            keys: vec!["rigorous".into()],
+        });
+    }
+    if let Some(knobs) = document.get_mut("knobs").and_then(Item::as_table_like_mut) {
+        let to_drop: Vec<String> = knobs
+            .iter()
+            .map(|(k, _)| k.to_owned())
+            .filter(|k| {
+                matches!(
+                    k.as_str(),
+                    "review.extra_reviewers"
+                        | "review.cross_family"
+                        | "review.rereview_scope"
+                        | "review.polish"
+                        | "confinement.census_host_list_complete"
+                ) || RETIRED_DOMAIN_KNOBS.contains(&k.as_str())
+            })
+            .collect();
+        for key in &to_drop {
+            knobs.remove(key);
+        }
+        if !to_drop.is_empty() {
+            migrations.push(Migration {
+                location: "knobs".into(),
+                action: "dropped",
+                keys: to_drop,
+            });
+        }
     }
     let Some(routing) = document
         .get_mut("domains")

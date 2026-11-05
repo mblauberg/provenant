@@ -19,6 +19,9 @@ pub struct AccessContext<'a> {
     pub disclosure_ref: &'a str,
     pub confinement_ref: &'a str,
 }
+#[cfg(test)]
+type LaunchSpecLookup<'a> = &'a dyn Fn(&str) -> Option<provenant_records::AdapterSpec>;
+
 pub struct RoutingContext<'a> {
     /// Preview-only account policy selection. It never supplies availability.
     pub policy_account_hint: Option<&'a str>,
@@ -36,6 +39,9 @@ pub struct RoutingContext<'a> {
     /// scope and `now` in unix seconds. Routing performs no I/O; `None` reads
     /// every route as unknown. Only an `unavailable` verdict excludes a route.
     pub readiness: Option<ReadinessLookup<'a>>,
+    /// Fixture-only capability facts; production always uses the adapter table.
+    #[cfg(test)]
+    pub launch_specs: Option<LaunchSpecLookup<'a>>,
     pub access: &'a [AccessContext<'a>],
     pub now: provenant_core::WallTime,
     pub host: &'a str,
@@ -493,7 +499,9 @@ fn window_matches(
         }
         PacingWindow::Daily => window.window_seconds == Some(86_400) || name.ends_with("daily"),
         PacingWindow::Rolling => {
-            adapter == "opencode" && (name.ends_with("five_hour") || name.ends_with("rolling"))
+            provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
+                spec.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
+            }) && (name.ends_with("five_hour") || name.ends_with("rolling"))
         }
     }
 }
@@ -660,6 +668,12 @@ fn pace_snapshot_factor(
         .iter()
         .filter(|w| selected_window(w, profile, adapter, model_pool))
         .filter_map(|window| {
+            if snapshot.details.as_ref().is_some_and(|details| {
+                details.coverage.as_deref() == Some("partial")
+                    && !details.calibration_active(&window.pool, now)
+            }) {
+                return None;
+            }
             let duration = window.window_seconds?;
             if duration == 0 {
                 return None;
@@ -673,11 +687,12 @@ fn pace_snapshot_factor(
             let reset_known = window.resets_unix_seconds.is_some_and(|reset| reset > now);
             let reset = match window.resets_unix_seconds {
                 Some(reset) if reset > now => reset,
-                None if adapter == "opencode"
-                    && snapshot
-                        .details
-                        .as_ref()
-                        .is_some_and(|d| d.source.as_deref() == Some("local-ledger")) =>
+                None if provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
+                    spec.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
+                }) && snapshot
+                    .details
+                    .as_ref()
+                    .is_some_and(|d| d.source.as_deref() == Some("local-ledger")) =>
                 {
                     now.checked_add(i64::try_from(duration).ok()?)?
                 }
@@ -762,7 +777,10 @@ fn pacing_factor_basis_points(
         }
         _ => detail,
     };
-    let detail = if model.adapter() == "opencode" && model.model().starts_with("opencode-go/") {
+    let detail = if provenant_records::AdapterSpec::get(model.adapter())
+        .and_then(|spec| spec.allowance_prefix)
+        .is_some_and(|prefix| model.model().starts_with(prefix))
+    {
         let observation = go_quota_observation(model, account, context);
         let details = observation.and_then(|o| o.snapshot.details.as_ref());
         if details.is_some_and(|d| d.coverage.as_deref() == Some("complete")) {
@@ -968,7 +986,9 @@ fn pacing_reserve_window(
             percent > 0
                 && (window.resets_unix_seconds.is_some_and(|reset| reset > now)
                     || (window.resets_unix_seconds.is_none()
-                        && adapter == "opencode"
+                        && provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
+                            spec.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
+                        })
                         && snapshot
                             .details
                             .as_ref()
@@ -1027,8 +1047,21 @@ fn account_reason<'q>(
     if reason.is_none()
         && let Some(q) = quota
     {
-        reason = if reading_exhausted(&q.snapshot, model, context) {
+        let partial = provenant_quota::partial_headroom(
+            &q.snapshot,
+            model.adapter(),
+            model.model(),
+            &context.catalogue.admission_pools(model),
+            context.now_seconds(),
+        );
+        reason = if partial == provenant_quota::PartialHeadroom::Exhausted
+            || reading_exhausted(&q.snapshot, model, context)
+        {
             Some(RouteExclusionReason::Exhausted)
+        } else if partial == provenant_quota::PartialHeadroom::Unknown
+            && !context.config.allow_unknown_partial_headroom
+        {
+            Some(RouteExclusionReason::UnknownPartialHeadroom)
         } else if q.snapshot.status == QuotaStatus::AuthRequired {
             Some(RouteExclusionReason::AuthRequired)
         } else {
@@ -1292,13 +1325,16 @@ fn admissible<'c>(
 /// OpenCode accepts only its catalogued routes. An explicit model outside the
 /// four flash entries is refused with the admitted routes named.
 fn refuse_unlisted_opencode(model: &ModelId, catalogue: &Catalogue) -> Result<(), RoutingError> {
-    if model.adapter() != "opencode" || catalogue.model(model).is_some() {
+    if !provenant_records::AdapterSpec::get(model.adapter())
+        .is_some_and(|spec| spec.catalogue_models_only)
+        || catalogue.model(model).is_some()
+    {
         return Ok(());
     }
     let admitted = catalogue
         .models()
         .iter()
-        .filter(|entry| entry.model.adapter() == "opencode")
+        .filter(|entry| entry.model.adapter() == model.adapter())
         .map(|entry| entry.model.as_str())
         .collect::<Vec<_>>();
     Err(RoutingError::UnlistedOpenCodeModel {
@@ -1325,6 +1361,18 @@ fn candidate(
     intent: RouteIntent,
 ) -> Result<RouteAlternative, RoutingError> {
     let entry = admissible(model, effort, context)?;
+    #[cfg(test)]
+    let spec = context
+        .launch_specs
+        .and_then(|lookup| lookup(model.adapter()))
+        .or_else(|| provenant_records::AdapterSpec::get(model.adapter()).copied());
+    #[cfg(not(test))]
+    let spec = provenant_records::AdapterSpec::get(model.adapter()).copied();
+    if let Some(spec) = spec {
+        intent
+            .check_launch(&spec, model.model(), effort)
+            .map_err(|error| RoutingError::UnsupportedLaunch(error.to_string()))?;
+    }
     let access = context.access.iter().find(|a| a.adapter == model.adapter());
     // Several registered accounts may serve one adapter: take a ready one with
     // the most pacing headroom, so exhausted accounts are skipped rather than
@@ -1746,7 +1794,7 @@ fn resolve_inner(
             )
         })
         .filter_map(|candidate| match candidate {
-            Err(RoutingError::ReadOnlyPolicy) => None,
+            Err(RoutingError::ReadOnlyPolicy | RoutingError::UnsupportedLaunch(_)) => None,
             candidate => Some(candidate),
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -1999,6 +2047,12 @@ fn classify_pool(
                         .exclusions
                         .push(format!("{}: read-only model policy", member.model.as_str()));
                     Some("read-only model policy".into())
+                }
+                Err(RoutingError::UnsupportedLaunch(detail)) => {
+                    classified
+                        .exclusions
+                        .push(format!("{}: {detail}", member.model.as_str()));
+                    Some(detail)
                 }
                 Err(RoutingError::UnsupportedEffort { .. }) => {
                     classified.exclusions.push("unsupported effort".into());

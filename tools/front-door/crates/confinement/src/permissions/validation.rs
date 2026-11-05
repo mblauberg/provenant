@@ -11,13 +11,40 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 pub(super) const MAX_PATH_BYTES: usize = 4096;
+#[cfg(test)]
 pub(super) const MAX_PATH_GRANTS: usize = 128;
-/// Bound each of the eight recorded write sources by the profile path limit.
-pub const MAX_WRITE_GRANTS: usize = MAX_PATH_GRANTS * 8;
-#[cfg(any(target_os = "macos", test))]
-pub(super) const MAX_NETWORK_GRANTS: usize = 128;
 #[cfg(target_os = "macos")]
 pub(super) const MAX_GIT_HEAD_BYTES: u64 = 1024;
+
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn validate_plan_grant_limit(
+    plan: &PlanPermissions,
+    limit: usize,
+) -> Result<(), PermissionError> {
+    for (family, count) in [
+        (
+            "total root grant count",
+            plan.read_roots
+                .len()
+                .saturating_add(plan.protected_roots.len())
+                .saturating_add(plan.secret_roots.len())
+                .saturating_add(plan.write_roots.len()),
+        ),
+        ("read root grant count", plan.read_roots.len()),
+        ("protected root grant count", plan.protected_roots.len()),
+        ("secret root grant count", plan.secret_roots.len()),
+        ("write root grant count", plan.write_roots.len()),
+    ] {
+        if count > limit {
+            return Err(PermissionError::BoundExceeded {
+                family,
+                limit,
+                path: plan.scratch.path.clone(),
+            });
+        }
+    }
+    Ok(())
+}
 
 #[cfg(target_os = "macos")]
 pub(super) fn verify_worktree_authority(
@@ -158,17 +185,35 @@ pub(super) fn verify_selected_head(
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 pub(super) fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), PermissionError> {
-    if spec.process_executables.len() > MAX_PATH_GRANTS
-        || spec.runtime_reads.len() > MAX_PATH_GRANTS
-        || spec.discovery_reads.len() > MAX_PATH_GRANTS
+    validate_profile_spec_impl(spec, None, MAX_PATH_GRANTS)
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn validate_profile_spec_with_home(
+    spec: &ProviderProfileSpec,
+    home: &Path,
+    grant_limit: usize,
+) -> Result<(), PermissionError> {
+    validate_profile_spec_impl(spec, Some(home), grant_limit)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn validate_profile_spec_impl(
+    spec: &ProviderProfileSpec,
+    home: Option<&Path>,
+    grant_limit: usize,
+) -> Result<(), PermissionError> {
+    if spec.process_executables.len() > grant_limit
+        || spec.runtime_reads.len() > grant_limit
+        || spec.discovery_reads.len() > grant_limit
         || spec.authentication.len() > 16
-        || spec.continuation_reads.len() > MAX_PATH_GRANTS
-        || spec.state_writes.len() > MAX_PATH_GRANTS
-        || spec.tool_exec_roots.len() > MAX_PATH_GRANTS
-        || spec.tool_writes.len() > MAX_PATH_GRANTS
-        || spec.provider_api.len() > MAX_NETWORK_GRANTS
+        || spec.continuation_reads.len() > grant_limit
+        || spec.state_writes.len() > grant_limit
+        || spec.tool_exec_roots.len() > grant_limit
+        || spec.tool_writes.len() > grant_limit
+        || spec.provider_api.len() > grant_limit
         || spec.native_controls.len() > 64
     {
         return Err(PermissionError::InvalidFixture);
@@ -177,19 +222,37 @@ pub(super) fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), Pe
         return Err(PermissionError::ProcessPolicyMissing);
     }
     for executable in &spec.process_executables {
-        validate_read_exec_grant(executable)?;
+        validate_read_exec_grant(executable).map_err(|error| {
+            if home.is_some() {
+                error.with_credential_path(&executable.path, home)
+            } else {
+                error
+            }
+        })?;
         if executable.scope != PathScope::Exact {
             return Err(PermissionError::InvalidPath(executable.path.clone()));
         }
     }
     if let Some(socket) = &spec.fabric_socket {
-        validate_noncredential_grant(socket)?;
+        validate_noncredential_grant(socket).map_err(|error| {
+            if home.is_some() {
+                error.with_credential_path(&socket.path, home)
+            } else {
+                error
+            }
+        })?;
         if socket.scope != PathScope::Exact {
             return Err(PermissionError::InvalidPath(socket.path.clone()));
         }
     }
     for grant in &spec.runtime_reads {
-        validate_read_exec_grant(grant)?;
+        validate_read_exec_grant(grant).map_err(|error| {
+            if home.is_some() {
+                error.with_credential_path(&grant.path, home)
+            } else {
+                error
+            }
+        })?;
     }
     for grant in &spec.discovery_reads {
         grant.validate()?;
@@ -219,7 +282,7 @@ pub(super) fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), Pe
                 return Err(PermissionError::BroadRoot);
             }
         }
-        if auth.roots.len() > MAX_PATH_GRANTS || auth.in_place_writes.len() > MAX_PATH_GRANTS {
+        if auth.roots.len() > grant_limit || auth.in_place_writes.len() > grant_limit {
             return Err(PermissionError::InvalidFixture);
         }
         for write in &auth.in_place_writes {
@@ -235,10 +298,22 @@ pub(super) fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), Pe
         }
     }
     for grant in &spec.continuation_reads {
-        validate_noncredential_grant(grant)?;
+        validate_noncredential_grant(grant).map_err(|error| {
+            if home.is_some() {
+                error.with_credential_path(&grant.path, home)
+            } else {
+                error
+            }
+        })?;
     }
     for root in &spec.tool_exec_roots {
-        validate_read_exec_grant(root)?;
+        validate_read_exec_grant(root).map_err(|error| {
+            if home.is_some() {
+                error.with_credential_path(&root.path, home)
+            } else {
+                error
+            }
+        })?;
     }
     // State may sit under a provider's home (Claude keeps transcripts beside
     // its configuration), so only the authentication roots themselves are off
@@ -251,11 +326,21 @@ pub(super) fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), Pe
             .flat_map(|auth| auth.roots.iter().chain(&auth.in_place_writes))
             .any(|root| grant.overlaps(root))
         {
-            return Err(PermissionError::CredentialRoot);
+            return Err(if home.is_some() {
+                PermissionError::credential_root_at(&grant.path, home)
+            } else {
+                PermissionError::CredentialRoot
+            });
         }
     }
     for grant in &spec.tool_writes {
-        validate_noncredential_grant(grant)?;
+        validate_noncredential_grant(grant).map_err(|error| {
+            if home.is_some() {
+                error.with_credential_path(&grant.path, home)
+            } else {
+                error
+            }
+        })?;
     }
     for endpoint in &spec.provider_api {
         validate_endpoint(endpoint)?;

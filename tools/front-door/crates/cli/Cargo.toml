@@ -1,18 +1,18 @@
 [package]
 name = "provenant-cli"
-version = "1.5.4"
+version = "1.6.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
 
 [features]
-fixture = ["provenant-run/fixture", "provenant-supervisor/fixture"]
+fixture = ["provenant-run/fixture", "provenant-supervisor/fixture", "provenant-routing/fixture"]
 
 [dependencies]
 provenant-os = { workspace = true }
 provenant-quota = { workspace = true }
-clap = { workspace = true }
+clap = { workspace = true, features = ["unstable-ext"] }
 jiff = { workspace = true }
 libc = { workspace = true }
 provenant-config = { workspace = true }
@@ -35,6 +35,8 @@ toml_edit = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+provenant-confinement = { workspace = true, features = ["snapshot"] }
+provenant-test-support = { path = "../test-support" }
 provenant-os = { workspace = true, features = ["fixture"] }
 provenant-fabric-runtime = { workspace = true, features = ["retained-seed"] }
 tempfile = { workspace = true }

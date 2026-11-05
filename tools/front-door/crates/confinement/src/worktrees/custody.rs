@@ -274,6 +274,7 @@ pub(super) fn lock_worktree(
         Some(writer)
     };
     let canonical = canonicalize(verified.path())?;
+    context.workers.invalidate();
     let (observations, details) = context
         .workers
         .observe_roots_with_details(std::slice::from_ref(&canonical));
@@ -306,13 +307,19 @@ pub(super) fn repository_lock<'a>(
     mode: LockMode,
     cancel: &CancelToken,
 ) -> Result<LockGuard, WorktreeError> {
-    Ok(context.project_state.lock(
-        OsStr::new(REPOSITORY_LOCK),
-        mode,
-        context.lock_budget,
-        cancel,
-        context.clock,
-    )?)
+    context
+        .project_state
+        .lock(
+            OsStr::new(REPOSITORY_LOCK),
+            mode,
+            context.lock_budget,
+            cancel,
+            context.clock,
+        )
+        .map_err(|error| match error {
+            FsError::LockTimeout { .. } => WorktreeError::RegistryLockTimeout,
+            other => other.into(),
+        })
 }
 
 pub(super) fn validate_binding(context: &WorktreeContext<'_>) -> Result<(), WorktreeError> {

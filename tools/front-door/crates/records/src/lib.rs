@@ -4,13 +4,14 @@
 mod adapters;
 pub use adapters::{
     ADAPTER_SPECS, AdapterSpec, COMMAND_OUTPUT_TAIL_BYTES, LaunchCapabilities, LaunchField,
-    LaunchRequest, QuotaProbeKind, UnsupportedLaunch,
+    LaunchRequest, QuotaProbeKind, SkillLocation, UnsupportedLaunch,
 };
 mod artifact_ref;
 mod attempt_fact;
 mod attempt_file;
 mod canonical;
 pub mod control;
+pub mod diagnostic;
 mod finding;
 pub mod handoff;
 mod input;
@@ -62,6 +63,7 @@ pub use resolved_route::{
 
 pub mod result_capture;
 pub mod run;
+pub use run::UserSkillsMode;
 
 /// Fields from newer writers, retained in canonical record bytes.
 pub type ExtraFields = std::collections::BTreeMap<String, serde_json::Value>;

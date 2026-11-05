@@ -9,9 +9,9 @@ Pattern
   tags: ["research","read-only"]
 
 Parameters
-  external: {"default":1,"doc":"External scouts that research outward; 0 opts out and is recorded as an explicit parameter.","max":8,"min":0,"type":"integer"}
-  read_roots: {"default":[],"doc":"Extra read roots, for example another worktree.","type":"list"}
-  width: {"default":4,"doc":"Number of parallel scouts.","max":32,"min":1,"type":"integer"}
+  external  integer  1  External scouts that research outward; 0 opts out and is recorded as an explicit parameter.
+  read_roots  list  []  Extra read roots, for example another worktree.
+  width  integer  4  Number of parallel scouts.
 
 Stages
   {"id":"scouts","parallel":[{"count":"${width}","id":"scout","role":"scout.codebase"},{"count":"${external}","id":"external","role":"scout.external"}]}
@@ -19,34 +19,3 @@ Stages
 
 Exports
   {"node":"synthesis","outputs":["result","findings"]}
-
-Origins
-  exports: bundled
-  parameters.external.default: bundled
-  parameters.external.doc: bundled
-  parameters.external.max: bundled
-  parameters.external.min: bundled
-  parameters.external.type: bundled
-  parameters.local_check_policy: bundled
-  parameters.read_roots.default: bundled
-  parameters.read_roots.doc: bundled
-  parameters.read_roots.type: bundled
-  parameters.width.default: bundled
-  parameters.width.doc: bundled
-  parameters.width.max: bundled
-  parameters.width.min: bundled
-  parameters.width.type: bundled
-  pattern.citations: bundled
-  pattern.cost: bundled
-  pattern.level: bundled
-  pattern.select_when: bundled
-  pattern.summary: bundled
-  pattern.tags: bundled
-  plan.explicit: bundled
-  plan.guidance: bundled
-  plan.patterns: bundled
-  plan.replaces: bundled
-  roles.plan.research: bundled
-  roles.scout.codebase: bundled
-  roles.scout.external: bundled
-  stages: bundled

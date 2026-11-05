@@ -766,6 +766,7 @@ pub fn render_or_publish<T: Serialize>(
             let mut failure =
                 CommandResult::new(&result.command, Outcome::Error, Overflow { artifact });
             failure.error = Some(provenant_records::CommandError {
+                diagnostic: None,
                 code: code.into(),
                 message: message.into(),
                 cause: None,

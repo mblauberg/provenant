@@ -394,6 +394,7 @@ fn output_read(
             "read_only_writable": record.read_only_writable,
             "write_grants": record.write_grants,
             "git_grants_digest": record.git_grants_digest,
+            "user_skills": record.user_skills(),
         });
         let grant_lines = grants_lines(&record);
         let trace = trace_chain(&session.store, record, call)?;
@@ -890,6 +891,41 @@ pub(super) fn grants_lines(record: &run::AttemptRecord) -> String {
     }
     if let Some(digest) = record.git_grants_digest {
         text.push_str(&format!("grant git digest={digest}\n"));
+    }
+    if let Some(warnings) = record
+        .applied_route
+        .as_ref()
+        .and_then(|route| route.extra.get("discovery_warnings"))
+        .and_then(serde_json::Value::as_array)
+    {
+        for warning in warnings.iter().filter_map(serde_json::Value::as_str) {
+            text.push_str(&format!("warning: {}\n", plain_text(warning, usize::MAX)));
+        }
+    }
+    if let Some(tools) = record
+        .applied_route
+        .as_ref()
+        .and_then(|route| route.extra.get("tool_closure"))
+        .and_then(serde_json::Value::as_array)
+    {
+        for tool in tools.iter().filter(|tool| tool["outcome"] == "incomplete") {
+            let name = tool["tool"].as_str().unwrap_or("unknown");
+            if let Some(reasons) = tool["reasons"].as_array() {
+                for reason in reasons.iter().filter_map(serde_json::Value::as_str) {
+                    text.push_str(&format!(
+                        "warning tool_closure_incomplete tool={} reason={}\n",
+                        plain_text(name, 128),
+                        plain_text(reason, 64)
+                    ));
+                }
+            }
+        }
+    }
+    if let Some(skills) = record.user_skills() {
+        text.push_str(&format!(
+            "grant user_skills {}\n",
+            plain_text(&skills.to_string(), usize::MAX)
+        ));
     }
     text
 }

@@ -38,6 +38,11 @@ mod outputs;
 mod pattern_plan;
 mod plans;
 mod validation;
+#[doc(hidden)]
+pub use plans::prompt as rendered_prompt;
+pub use validation::minimum_schema_version;
+#[cfg(test)]
+mod admission_tests;
 use budget::*;
 pub use journal::*;
 pub use model::*;
@@ -64,6 +69,22 @@ pub use plans::{
     RemainingBudgets,
 };
 
+// Reserve the existing family-separation envelope for sibling groups too.
+fn graph_envelope_reason(
+    document: &GraphDocument,
+    expansions: &[Expansion],
+    extensions: &[String],
+    plan: &PlannedGraph,
+) -> Option<String> {
+    let mut bounded = plan.clone();
+    for node in &mut bounded.nodes {
+        if node.family_group.is_some() && node.distinct_from.is_none() {
+            node.distinct_from = Some(DistinctFrom::Dependencies);
+        }
+    }
+    envelope::reason(document, expansions, extensions, &bounded)
+}
+
 pub const MAX_CANCEL_REASON_BYTES: usize = 256;
 const MAX_CHECKPOINT_BYTES: u64 = 16_777_216;
 /// Every JSON member costs at least two bytes, so the byte limit binds first.
@@ -79,9 +100,12 @@ const COMPOSITE_EXCERPT_BYTES: usize = 65_536;
 /// The raw findings block is at most 8 KiB of JSON; canonical form adds at
 /// most a null `line` per finding.
 const FINDINGS_BYTES: usize = 9_216;
+// Each disposition can inherit an entire bounded upstream entry and supply
+// independently bounded, JSON-escaped fields of its own.
+const DISPOSITION_FINDINGS_BYTES: usize = 32 * (FINDINGS_BYTES + 7 * (6 * 1024 + 2) + 512);
 const WARNING_BYTES: usize = 512;
-/// `make_outputs` records at most three warnings and a writer handoff one more.
-const MAX_WARNINGS: usize = 4;
+/// Output parsing, writer handoff and an empty review range can each add warnings.
+const MAX_WARNINGS: usize = 5;
 /// Usage failure and unknown-cost reasons.
 const NOTE_BYTES: usize = 512;
 const PAUSE_REASON_BYTES: usize = 4_096;
@@ -94,6 +118,9 @@ const MAX_USAGE_EVENTS: usize = 128;
 const LAUNCH_RETRY_FIRST_SECONDS: u64 = 5;
 /// The longest launch retry wait.
 const LAUNCH_RETRY_MAX_SECONDS: u64 = 600;
+
+/// Entries a prompt lists before referring to the complete input index.
+pub const UPSTREAM_INPUT_LIST_LIMIT: usize = 64;
 
 /// Narrow read-only host interface for CI checks.
 pub trait CiStatus {
@@ -113,6 +140,14 @@ pub trait CiStatus {
 /// is, never resubmit. Without one, the submission replays under `launch_actor`
 /// (the actor recorded before the first submit) so a changed actor cannot
 /// launch duplicate work. Provider launch and terminal publication remain run's responsibility.
+#[derive(Debug, Error)]
+pub enum ReviewResolveError {
+    #[error("review resolution is unsupported by this host")]
+    Unsupported,
+    #[error("review resolution failed: {0}")]
+    Failed(String),
+}
+
 pub trait AttemptOwner {
     type Error: Error + 'static;
 
@@ -134,6 +169,25 @@ pub trait AttemptOwner {
     /// Maximum time to admit a launch, measured from its first submission.
     fn admission_timeout_seconds(&self) -> Option<u64> {
         None
+    }
+
+    /// Re-read host-owned proof of a pre-custody preparation refusal and
+    /// released custody. Missing or unverifiable proof never authorizes a route.
+    fn preparation_fallback_evidence(
+        &mut self,
+        _key: &AttemptKey,
+        _reference: &str,
+    ) -> Result<Option<provenant_records::run::PreparationFailure>, Self::Error> {
+        Ok(None)
+    }
+
+    /// Resolve a deferred review; hosts without support fail closed.
+    fn resolve_review(
+        &mut self,
+        _node: &GraphNode,
+        _subject: &str,
+    ) -> Result<Expansion, ReviewResolveError> {
+        Err(ReviewResolveError::Unsupported)
     }
 
     /// Pin the integration branch at the instant this node is first admitted.
@@ -204,6 +258,11 @@ pub trait AttemptOwner {
         Ok(Vec::new())
     }
 
+    /// Models that served the referenced attempts, in attempt order.
+    fn attempt_models(&mut self, _attempts: &[String]) -> Result<Vec<String>, Self::Error> {
+        Ok(Vec::new())
+    }
+
     /// The effective land policy for a risk tier and the layer it came from.
     fn land_policy(
         &self,
@@ -247,6 +306,11 @@ pub trait AttemptOwner {
     /// Whether a launch already crossed run's acceptance boundary. This is
     /// read-only and must not submit a new operation.
     fn launch_accepted(&mut self, _attempt: &GraphAttempt) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
+    /// Whether the immutable task reviewed an empty commit range.
+    fn equal_review_range(&mut self, _attempt_ref: &str) -> Result<bool, Self::Error> {
         Ok(false)
     }
 
@@ -317,6 +381,8 @@ impl<R: Error + 'static, J: Error + 'static> GraphError<R, J> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct PlannedGraph {
     #[serde(skip_serializing_if = "Option::is_none")]
+    review_base: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     context: Option<provenant_records::run::WorkContext>,
     #[serde(flatten)]
     extra: provenant_records::ExtraFields,
@@ -333,6 +399,10 @@ struct PlannedGraph {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct PlannedNode {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review: Option<ReviewSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    family_group: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     context: Option<provenant_records::run::WorkContext>,
     #[serde(flatten)]
@@ -541,30 +611,17 @@ fn launch_retry_kind(error: &(dyn Error + 'static)) -> bool {
             | FacadeError::HomeUnavailable
             | FacadeError::Io { .. }
             | FacadeError::DispatchUnobserved { .. }
-            | FacadeError::HostDeliveryIo { .. }
+            | FacadeError::HostDeliveryStage { .. }
+            | FacadeError::HostDeliveryLimit { .. }
             | FacadeError::LaunchUnknown { .. }
     )
 }
 
-/// A permanent refusal's remedy, as recorded for status beside the reason.
-fn launch_remedy(error: &(dyn Error + 'static), graph_id: &str) -> String {
-    use crate::coordination::facade::FacadeError;
-    if error.downcast_ref::<FacadeError>().is_some_and(|error| {
-        matches!(
-            error,
-            FacadeError::ConfinementRefused
-                | FacadeError::LaneDepth
-                | FacadeError::LaneCoordinationRefused
-        )
-    }) {
-        format!(
-            "check the host's capacity and the access the node declares; fix the cause, cancel this graph with `provenant fabric graph cancel {graph_id}`, then rerun the document under a new graph_id"
-        )
-    } else {
-        format!(
-            "fix the node's route, worktree or inputs in the graph document, cancel this graph with `provenant fabric graph cancel {graph_id}`, then rerun the document under a new graph_id"
-        )
-    }
+fn launch_diagnostic(error: &(dyn Error + 'static)) -> provenant_records::diagnostic::Diagnostic {
+    error
+        .downcast_ref::<crate::coordination::facade::FacadeError>()
+        .map(crate::coordination::facade::FacadeError::diagnostic)
+        .unwrap_or_else(|| provenant_records::diagnostic::Diagnostic::new("launch_failed"))
 }
 
 /// Apply a persisted disposition to a node whose launch errored while its
@@ -623,13 +680,18 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
                     .and_then(|duration| now.checked_add(duration).ok())
                     .map_or(deadline, |wake| wake.min(deadline)),
             );
-            retry.reason = Some(bounded(&error.to_string(), MAX_ADVANCE_ERROR_BYTES));
+            let projected = launch_diagnostic(error);
+            retry.reason = Some(bounded(
+                projected.detail.as_deref().unwrap_or(&projected.code),
+                MAX_ADVANCE_ERROR_BYTES,
+            ));
             asks::refresh_wake(checkpoint);
             return journal.save(checkpoint).map_err(GraphError::Journal);
         }
     }
     // A permanent refusal, or a retry budget spent: block the node with the
     // reason and a remedy, and keep the refusal visible in graph status.
+    let graph_id = checkpoint.graph_id.clone();
     let progress = &mut checkpoint.nodes[index];
     let id = &progress.id;
     let code = if retrying {
@@ -638,10 +700,39 @@ fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
         "launch_refused"
     };
     progress.advance_error_code = Some(code.into());
-    progress.advance_error = Some(format!(
-        "node {id}: the launch failed: {}; {}",
-        bounded(&error.to_string(), MAX_ADVANCE_ERROR_BYTES),
-        launch_remedy(error, &checkpoint.graph_id)
+    let projected = launch_diagnostic(error);
+    let detail = projected.detail.as_deref().unwrap_or(&projected.code);
+    let action = projected
+        .next
+        .as_deref()
+        .unwrap_or("inspect the node's inputs and state before retrying");
+    let error: &(dyn Error + 'static) = error;
+    let recovery = if error
+        .downcast_ref::<crate::coordination::facade::FacadeError>()
+        .is_some_and(|e| {
+            matches!(
+                e,
+                crate::coordination::facade::FacadeError::LaunchUnknown { .. }
+            )
+        }) {
+        String::new()
+    } else if graph_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    {
+        format!(
+            "; after correcting the cause, cancel with `provenant fabric graph cancel {graph_id}` and rerun with a new graph_id"
+        )
+    } else {
+        "; inspect and cancel the graph before rerunning with a new graph_id".into()
+    };
+    progress.advance_error = Some(bounded(
+        &format!(
+            "node {}: the launch failed [{}]: {detail}; {action}{recovery}",
+            provenant_records::diagnostic::safe_text(id),
+            projected.code
+        ),
+        MAX_ADVANCE_ERROR_BYTES,
     ));
     progress.state = NodeState::Blocked;
     // Keep the attempt row even when launch handoff is uncertain. A guardian
@@ -783,6 +874,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         routes_per_node: u16::MAX as usize,
         node_prompt_bytes: usize::MAX,
         graph_prompt_bytes: usize::MAX,
+        fan_out_width: usize::MAX,
+        expansion_depth: usize::MAX,
         ..limits.clone()
     };
     let mut stored = journal
@@ -798,8 +891,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
     }
     let stored_extensions = stored.as_ref().map_or(&[][..], |c| c.extensions.as_slice());
-    let (base, _) = validate_plan_with_limits(document, &unbounded)
-        .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
+    let (base, _) = if stored.is_some() {
+        validate_replay_plan(document, &unbounded)
+    } else {
+        validate_plan_with_limits(document, &unbounded)
+    }
+    .map_err(GraphError::Invalid)?;
     let mut expanded = plans::expand(
         document,
         stored_extensions,
@@ -834,7 +931,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             checkpoint
         }
         None => {
-            if let Some(reason) = envelope::reason(document, &[], &[], &plan) {
+            if let Some(reason) = graph_envelope_reason(document, &[], &[], &plan) {
                 return Err(GraphError::Invalid(reason));
             }
             let asks = may_ask(&plan);
@@ -925,7 +1022,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 .filter(|e| !checkpoint.extensions.contains(e))
                 .cloned(),
         );
-        if let Some(reason) = envelope::reason(document, &checkpoint.expansions, &all, &plan) {
+        if let Some(reason) = graph_envelope_reason(document, &checkpoint.expansions, &all, &plan) {
             return Err(GraphError::Extension(reason));
         }
     }
@@ -999,7 +1096,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 .map_err(|reason| GraphError::Invalid(reason.to_string()))?;
             if let Some(reason) =
                 structural_limit_reason(&preview, &preview_plan, limits).or_else(|| {
-                    envelope::reason(
+                    graph_envelope_reason(
                         document,
                         &checkpoint.expansions,
                         &prospective.extensions,
@@ -1116,7 +1213,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             node.expansion_pause
                 .as_deref()
                 .map(plans::pause_reason_for_display)
-                .map(str::to_owned)
         }) {
             checkpoint.pause_reason = Some(reason);
             checkpoint.pause_code = Some("invalid_plan_expansion".into());
@@ -1124,7 +1220,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         let structural_pause = if checkpoint.nodes.iter().all(|node| node.state.settled()) {
             None
         } else {
-            structural_limit_reason(&expanded, &plan, limits)
+            structural_limit_reason(&expanded, &plan, limits).or_else(|| {
+                let reserved = plan.nodes.iter().filter(|node| !checkpoint.expansions.iter().any(|expansion| expansion.source == node.id))
+                    .filter_map(|node| node.review.as_ref()).fold(expanded.nodes.len(), |total, review| total.saturating_add(review.max_nodes));
+                (reserved > limits.nodes).then(|| format!("limits.nodes={} reached ({reserved} including deferred review reservations); set by domains.fabric.graph.limits", limits.nodes))
+            })
         };
         if let Some(reason) = &structural_pause {
             checkpoint.pause_reason = Some(bounded(reason, PAUSE_REASON_BYTES));
@@ -1148,6 +1248,18 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
 
         for node_index in 0..plan.nodes.len() {
             if checkpoint.nodes[node_index].state.settled() {
+                if checkpoint.nodes[node_index].state == NodeState::Blocked
+                    && dependency_state(&plan.nodes[node_index], &plan, &checkpoint, &positions)
+                        == Some(NodeState::Blocked)
+                    && attribute_blocker(
+                        node_index,
+                        &plan.nodes[node_index],
+                        &mut checkpoint,
+                        &positions,
+                    )
+                {
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                }
                 continue;
             }
 
@@ -1222,7 +1334,17 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             }
             let dependency = dependency_state(node, &plan, &checkpoint, &positions);
             if let Some(state) = dependency {
-                if checkpoint.nodes[node_index].state != state {
+                let mut changed = checkpoint.nodes[node_index].state != state;
+                if state == NodeState::Blocked {
+                    changed |= attribute_blocker(node_index, node, &mut checkpoint, &positions);
+                } else if changed
+                    && checkpoint.nodes[node_index].advance_error_code.as_deref()
+                        == Some("upstream_blocked")
+                {
+                    checkpoint.nodes[node_index].advance_error = None;
+                    checkpoint.nodes[node_index].advance_error_code = None;
+                }
+                if changed {
                     checkpoint.nodes[node_index].state = state;
                     journal.save(&checkpoint).map_err(GraphError::Journal)?;
                 }
@@ -1329,6 +1451,156 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 );
                 journal.save(&checkpoint).map_err(GraphError::Journal)?;
             }
+            if node.review.is_some() {
+                if structural_pause.is_some() || checkpoint.pause_reason.is_some() {
+                    continue;
+                }
+                if checkpoint.nodes[node_index].source_commit.is_none() {
+                    let commit = match node.source.as_ref() {
+                        Some(SourceBinding::Commit { commit }) => Some(commit.clone()),
+                        Some(SourceBinding::Node { node: source }) => positions
+                            .get(source)
+                            .and_then(|index| checkpoint.nodes[*index].outputs.as_ref())
+                            .and_then(|outputs| outputs.commit.clone()),
+                        Some(SourceBinding::Head { node: writer }) => {
+                            land::chain_head(&plan, &checkpoint, &positions, &node.id, writer)
+                        }
+                        Some(SourceBinding::Integration) => {
+                            owner.integration_head().map_err(GraphError::Run)?
+                        }
+                        None => None,
+                    };
+                    if commit
+                        .as_ref()
+                        .is_none_or(|value| value.parse::<provenant_core::GitOid>().is_err())
+                    {
+                        let progress = &mut checkpoint.nodes[node_index];
+                        progress.state = NodeState::Failed;
+                        progress.advance_error_code = Some("source_commit_unavailable".into());
+                        progress.advance_error = Some(format!(
+                            "node {}: source commit unavailable or invalid",
+                            node.id
+                        ));
+                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        continue;
+                    }
+                    if matches!(node.source, Some(SourceBinding::Integration))
+                        && checkpoint.integration_pin.is_none()
+                    {
+                        checkpoint.integration_pin = commit.clone();
+                    }
+                    checkpoint.nodes[node_index].source_commit = commit;
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                }
+                let subject = checkpoint.nodes[node_index]
+                    .source_commit
+                    .as_deref()
+                    .ok_or_else(|| GraphError::BadCheckpoint {
+                        node: node.id.clone(),
+                        invariant: "deferred review node must have a source commit",
+                    })?;
+                let original = expanded
+                    .nodes
+                    .iter()
+                    .find(|candidate| candidate.id == node.id)
+                    .ok_or_else(|| GraphError::BadCheckpoint {
+                        node: node.id.clone(),
+                        invariant: "deferred review node must exist in the expanded plan",
+                    })?;
+                let mut resolution_error_code = "review_resolution_failed";
+                let result = owner
+                    .resolve_review(original, subject)
+                    .map_err(|error| {
+                        if matches!(error, ReviewResolveError::Unsupported) {
+                            resolution_error_code = "review_resolution_unsupported";
+                        }
+                        error.to_string()
+                    })
+                    .and_then(|mut addition| {
+                        for child in &mut addition.nodes {
+                            if child.composite.is_none() {
+                                child.source = Some(SourceBinding::Commit {
+                                    commit: subject.to_owned(),
+                                });
+                            }
+                        }
+                        if checkpoint
+                            .expansions
+                            .iter()
+                            .filter_map(|item| item.review.as_ref())
+                            .any(|review| {
+                                addition
+                                    .review
+                                    .as_ref()
+                                    .is_some_and(|next| review.base != next.base)
+                            })
+                        {
+                            return Err("review expansions disagree on the base".into());
+                        }
+                        plans::validate_review_addition(&expanded, &addition)?;
+                        if addition.source != node.id
+                            || addition
+                                .review
+                                .as_ref()
+                                .is_none_or(|review| review.subject.to_string() != subject)
+                        {
+                            return Err("review expansion subject or source mismatch".into());
+                        }
+                        let mut preview = expanded.clone();
+                        plans::append(&mut preview, &addition);
+                        let (next_plan, next_positions) =
+                            validate_flat_plan(&preview, &plans::generous())
+                                .map_err(str::to_owned)?;
+                        if let Some(reason) = structural_limit_reason(&preview, &next_plan, limits)
+                        {
+                            return Err(reason);
+                        }
+                        let mut additions = checkpoint.expansions.clone();
+                        additions.push(addition.clone());
+                        if let Some(reason) = graph_envelope_reason(
+                            document,
+                            &additions,
+                            &checkpoint.extensions,
+                            &next_plan,
+                        ) {
+                            return Err(reason);
+                        }
+                        Ok((addition, preview, next_plan, next_positions))
+                    });
+                match result {
+                    Ok((addition, preview, next_plan, next_positions)) => {
+                        let mut prospective = checkpoint.clone();
+                        prospective.nodes[node_index].state = NodeState::Succeeded;
+                        prospective.expansions.push(addition);
+                        loops::reconcile(&mut prospective, &next_plan);
+                        for (progress, planned) in
+                            prospective.nodes.iter_mut().zip(&next_plan.nodes)
+                        {
+                            progress.children.clone_from(&planned.composite_members);
+                        }
+                        plans::remaining(&mut prospective, &preview, limits);
+                        validate_expanded_rows(&prospective, &next_plan)?;
+                        owner
+                            .validate_expansion(&preview, &prospective)
+                            .map_err(GraphError::Run)?;
+                        journal.save(&prospective).map_err(GraphError::Journal)?;
+                        checkpoint = prospective;
+                        (expanded, plan, positions) = (preview, next_plan, next_positions);
+                        continue 'schedule;
+                    }
+                    Err(reason) => {
+                        let progress = &mut checkpoint.nodes[node_index];
+                        progress.state = NodeState::Failed;
+                        progress.advance_error_code = Some(resolution_error_code.into());
+                        progress.advance_error = Some(bounded(
+                            &format!("node {}: {reason}", node.id),
+                            MAX_ADVANCE_ERROR_BYTES,
+                        ));
+                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        continue;
+                    }
+                }
+            }
             loop {
                 // A persisted launch wait defers this node until its own wake
                 // on every advance, tick or manual, so a failing host that
@@ -1392,9 +1664,25 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     }
                     Some(last)
                         if last.outcome.is_some_and(|outcome| {
-                            outcome.allows_route_fallback(node.access, last.launched)
+                            historical_fallback_admissible(outcome, node.access, last.launched)
                         }) =>
                     {
+                        let Some(outcome) = last.outcome else { break };
+                        let evidence = last.attempt_ref.as_deref().and_then(|reference| {
+                            owner
+                                .preparation_fallback_evidence(&last.key, reference)
+                                .ok()
+                                .flatten()
+                        });
+                        if !live_fallback_allowed(outcome, last.launched, evidence) {
+                            let progress = &mut checkpoint.nodes[node_index];
+                            progress.state = NodeState::Failed;
+                            progress.advance_error_code =
+                                Some("fallback_evidence_unavailable".into());
+                            progress.advance_error = Some("Cannot verify local preparation and released custody for route fallback.".into());
+                            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                            break;
+                        }
                         progress.attempts.len()
                     }
                     Some(_) => break,
@@ -1502,7 +1790,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         journal.save(&checkpoint).map_err(GraphError::Journal)?;
                         break;
                     }
-                    if !node.inputs.is_empty() && render_input(node, &checkpoint, &positions, cap).1
+                    if !node.inputs.is_empty()
+                        && render_input(node, &plan, &checkpoint, &positions, cap).1
                     {
                         let (code, reason) = if node
                             .prompt
@@ -1675,6 +1964,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             reason: None,
                         });
                     }
+                    // A retry must not replay the preceding attempt's family snapshot.
+                    checkpoint.nodes[node_index].separation = None;
                     journal.save(&checkpoint).map_err(GraphError::Journal)?;
                 }
 
@@ -1691,21 +1982,25 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .last()
                     .and_then(|attempt| attempt.input_cap)
                     .unwrap_or(limits.node_prompt_bytes);
-                let mut prompt = render_input(node, &checkpoint, &positions, input_cap).0;
+                let mut prompt = render_input(node, &plan, &checkpoint, &positions, input_cap).0;
                 // An accepted attempt is only observed, so its files exist
                 // already and its prompt is not sent again.
-                let materialised = if stored_ref.is_some() {
+                let requests = if stored_ref.is_some() {
+                    Vec::new()
+                } else {
+                    upstream_results(node, &plan, &checkpoint, &positions)
+                };
+                let materialised = if requests.is_empty() {
                     None
                 } else {
-                    let requests = upstream_results(node, &plan, &checkpoint, &positions);
-                    if requests.is_empty() {
-                        None
-                    } else {
-                        owner.materialise_inputs(&key, &requests, NODE_INPUT_FILE_BYTES)
-                    }
+                    owner.materialise_inputs(&key, &requests, NODE_INPUT_FILE_BYTES)
                 };
                 if let Some(materialised) = &materialised {
-                    prompt.push_str(&render_files(&materialised.entries));
+                    prompt.push_str(&render_files(
+                        &materialised.entries,
+                        &requests,
+                        materialised.index.as_deref(),
+                    ));
                 }
                 // The writer is the nearest writing node along the source chain,
                 // so a framing node between a lens and the writer is skipped.
@@ -1733,6 +2028,20 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     distinct_attempts.dedup();
                 } else if node.distinct_from == Some(DistinctFrom::Writer) {
                     let mut current = node;
+                    // A resolved review lens is pinned to a commit, so its writer
+                    // is found through the deferred node it was expanded from.
+                    if matches!(node.source, Some(SourceBinding::Commit { .. }))
+                        && let Some(origin) = checkpoint
+                            .expansions
+                            .iter()
+                            .find(|expansion| {
+                                expansion.review.is_some()
+                                    && expansion.nodes.iter().any(|n| n.id == node.id)
+                            })
+                            .and_then(|expansion| positions.get(&expansion.source))
+                    {
+                        current = &plan.nodes[*origin];
+                    }
                     while let Some(
                         binding @ (SourceBinding::Node { node: source }
                         | SourceBinding::Head { node: source }),
@@ -1760,17 +2069,120 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         }
                     }
                 }
+                let parent = plan
+                    .nodes
+                    .iter()
+                    .find(|candidate| candidate.composite_members.contains(&node.id))
+                    .map(|candidate| &candidate.id);
+                let peer_refs: Vec<String> =
+                    node.family_group.as_ref().map_or_else(Vec::new, |group| {
+                        plan.nodes
+                            .iter()
+                            .enumerate()
+                            .filter(|(index, peer)| {
+                                let peer_parent = plan
+                                    .nodes
+                                    .iter()
+                                    .find(|candidate| {
+                                        candidate.composite_members.contains(&peer.id)
+                                    })
+                                    .map(|candidate| &candidate.id);
+                                *index != node_index
+                                    && peer.family_group.as_ref() == Some(group)
+                                    && peer_parent == parent
+                            })
+                            .flat_map(|(index, _)| checkpoint.nodes[index].attempts.iter())
+                            .filter_map(|attempt| attempt.attempt_ref.clone())
+                            .collect()
+                    });
+                let family_peers = if node.family_group.is_some()
+                    && !needs_record
+                    && checkpoint.nodes[node_index].separation.is_some()
+                {
+                    checkpoint.nodes[node_index]
+                        .separation
+                        .as_ref()
+                        .map(|value| {
+                            if value.strength == FamilyStrength::Require {
+                                value.preferred.clone()
+                            } else {
+                                value.excluded.clone()
+                            }
+                        })
+                        .unwrap_or_default()
+                } else {
+                    owner.attempt_families(&peer_refs).unwrap_or_default()
+                };
+                let mut prior_attempts = Vec::new();
+                for attempt in checkpoint.nodes[node_index]
+                    .attempts
+                    .iter()
+                    .take(route_index)
+                {
+                    let resolved = if let Some(reference) = &attempt.attempt_ref {
+                        owner
+                            .attempt_models(std::slice::from_ref(reference))
+                            .map_err(GraphError::Run)?
+                            .into_iter()
+                            .next()
+                    } else {
+                        None
+                    };
+                    if let Some(model) = resolved.or_else(|| attempt.route.model.clone()) {
+                        prior_attempts.push(model);
+                    }
+                }
+                let require_distinct = node.distinct_strength == Some(FamilyStrength::Require)
+                    && (node.family_group.is_none() || node.distinct_from.is_some());
+                if (needs_record || checkpoint.nodes[node_index].separation.is_none())
+                    && (node.distinct_from.is_some() || node.family_group.is_some())
+                {
+                    let mut excluded = owner
+                        .attempt_families(&distinct_attempts)
+                        .unwrap_or_default();
+                    let enforced = require_distinct && !excluded.is_empty();
+                    let mut record = if enforced {
+                        let mut record = separation(FamilyStrength::Require, excluded, None);
+                        record.preferred = family_peers
+                            .iter()
+                            .take(SEPARATION_FAMILIES)
+                            .map(|family| bounded(family, FAMILY_BYTES))
+                            .collect();
+                        record
+                    } else {
+                        for family in &family_peers {
+                            if !excluded.contains(family) {
+                                excluded.push(family.clone());
+                            }
+                        }
+                        let strength = if node.family_group.is_some() {
+                            FamilyStrength::Prefer
+                        } else {
+                            node.distinct_strength.unwrap_or_default()
+                        };
+                        separation(strength, excluded, None)
+                    };
+                    record.applied = None;
+                    checkpoint.nodes[node_index].separation = Some(record);
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                }
                 let continued = land::continued_branch(node, &checkpoint, &positions);
                 let observation = match owner.observe_or_start(
                     &key,
                     NodeInput {
                         settlement_retries,
                         family_separation: node.distinct_from.is_some(),
+                        prior_attempts: &prior_attempts,
+                        family_peers: &family_peers,
                         context: node_context(&plan, node),
                         read_roots: &node.read_roots,
                         distinct_from_attempts: &distinct_attempts,
-                        require_distinct: node.distinct_strength == Some(FamilyStrength::Require),
+                        require_distinct,
                         source_commit: checkpoint.nodes[node_index].source_commit.as_deref(),
+                        review_base: node
+                            .extra
+                            .get("review_base")
+                            .and_then(serde_json::Value::as_str),
                         title: node.title.as_deref().unwrap_or(&node.id),
                         prompt: &prompt,
                         required_verdict: node.required_verdict.as_deref(),
@@ -1814,6 +2226,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     }
                     Err(error) => return Err(GraphError::Run(error)),
                 };
+                let fallback_evidence = match &observation {
+                    AttemptObservation::Terminal {
+                        attempt_ref: Some(reference),
+                        ..
+                    } => owner
+                        .preparation_fallback_evidence(&key, reference)
+                        .ok()
+                        .flatten(),
+                    _ => None,
+                };
                 let mut usage_error = None;
                 let mut cost_error = None;
                 let usage = if let AttemptObservation::Terminal {
@@ -1848,38 +2270,76 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     }
                     None
                 };
-                let recorded_separation = match (&observation, node.distinct_from) {
-                    (AttemptObservation::Terminal { attempt_ref, .. }, Some(_)) => {
-                        let excluded = owner
-                            .attempt_families(&distinct_attempts)
-                            .unwrap_or_default();
-                        let applied = attempt_ref.as_ref().and_then(|reference| {
-                            owner
-                                .attempt_families(std::slice::from_ref(reference))
-                                .ok()
-                                .and_then(|families| families.into_iter().next())
-                        });
-                        Some(separation(
-                            node.distinct_strength.unwrap_or_default(),
-                            excluded,
-                            applied,
-                        ))
-                    }
-                    _ => None,
-                };
-                // Every selected upstream finding identity needs a disposition.
-                let upstream_findings: std::collections::BTreeSet<String> =
-                    if node.dispositions.is_empty() {
-                        Default::default()
-                    } else {
-                        node.inputs
-                            .iter()
-                            .filter(|input| input.outputs.contains(&OutputKind::Findings))
-                            .filter_map(|input| positions.get(&input.node))
-                            .filter_map(|index| checkpoint.nodes[*index].outputs.as_ref())
-                            .flat_map(|outputs| outputs.findings.iter().map(|f| f.id.clone()))
-                            .collect()
+                let recorded_separation =
+                    match (&observation, node.distinct_from, &node.family_group) {
+                        (AttemptObservation::Terminal { attempt_ref, .. }, distinct, group)
+                            if distinct.is_some() || group.is_some() =>
+                        {
+                            let mut excluded = owner
+                                .attempt_families(&distinct_attempts)
+                                .unwrap_or_default();
+                            let enforced = require_distinct && !excluded.is_empty();
+                            if !enforced {
+                                for family in &family_peers {
+                                    if !excluded.contains(family) {
+                                        excluded.push(family.clone());
+                                    }
+                                }
+                            }
+                            let applied = attempt_ref.as_ref().and_then(|reference| {
+                                owner
+                                    .attempt_families(std::slice::from_ref(reference))
+                                    .ok()
+                                    .and_then(|families| families.into_iter().next())
+                            });
+                            let mut record = separation(
+                                if enforced {
+                                    FamilyStrength::Require
+                                } else if node.family_group.is_some() {
+                                    FamilyStrength::Prefer
+                                } else {
+                                    node.distinct_strength.unwrap_or_default()
+                                },
+                                excluded,
+                                applied,
+                            );
+                            if enforced {
+                                record.preferred = family_peers
+                                    .iter()
+                                    .take(SEPARATION_FAMILIES)
+                                    .map(|family| bounded(family, FAMILY_BYTES))
+                                    .collect();
+                            }
+                            Some(record)
+                        }
+                        _ => None,
                     };
+                // Every selected upstream finding identity needs a disposition.
+                let upstream_findings: Vec<Finding> = if node.dispositions.is_empty() {
+                    Default::default()
+                } else {
+                    selected_findings(node, &plan, &checkpoint, &positions)
+                        .into_iter()
+                        .map(|(_, finding)| finding)
+                        .collect()
+                };
+                let proof_dispositions = if node.dispositions.is_empty()
+                    && node.role.as_deref() == Some("review.verify")
+                {
+                    vec![
+                        "upheld".to_owned(),
+                        "falsified".to_owned(),
+                        "unverifiable".to_owned(),
+                    ]
+                } else {
+                    node.dispositions.clone()
+                };
+                let overflow_ids = if proof_dispositions.is_empty() {
+                    Vec::new()
+                } else {
+                    truncated_finding_ids(node, &plan, &checkpoint, &positions)
+                };
+                let marker_inputs = propagation_inputs(node, &plan, &checkpoint, &positions);
                 let mut settled_result = None;
                 let retry_was_pending;
                 let should_continue = {
@@ -1925,36 +2385,107 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             attempt.attempt_ref = attempt_ref;
                             // Provider success alone does not satisfy an explicit result contract.
                             let warned = result_warning.is_some();
-                            let mut outputs = make_outputs(
+                            let mut outputs = make_outputs_with_upstream(
                                 result.as_deref(),
                                 result_warning,
                                 result_path,
                                 branch,
                                 commit,
+                                &upstream_findings,
                             );
+                            let marker_warnings = propagation_warnings(&outputs, &marker_inputs);
+                            if !marker_warnings.is_empty() {
+                                outputs.warnings.truncate(MAX_WARNINGS.saturating_sub(2));
+                                outputs.warnings.extend(marker_warnings);
+                            }
+                            if node.access == AccessMode::ReadOnly
+                                && node.role.as_deref().is_some_and(|role| {
+                                    role == "lens"
+                                        || role.starts_with("lens.")
+                                        || role.starts_with("review.")
+                                })
+                                && let Some(reference) = attempt.attempt_ref.as_deref()
+                                && owner
+                                    .equal_review_range(reference)
+                                    .map_err(GraphError::Run)?
+                            {
+                                outputs
+                                    .warnings
+                                    .push("equal_base_and_head: review range is empty".into());
+                            }
                             if outcome == AttemptOutcome::UsageLimited {
                                 outputs
                                     .warnings
-                                    .retain(|warning| warning != FINDINGS_INVALID);
+                                    .retain(|warning| !warning.starts_with(FINDINGS_INVALID));
                             }
                             let disposition_error = if node.require_findings
                                 && (outputs.result.is_none()
                                     || outputs
                                         .warnings
                                         .iter()
-                                        .any(|warning| warning == FINDINGS_INVALID))
+                                        .any(|warning| warning.starts_with(FINDINGS_INVALID)))
                             {
                                 Some((
                                     "findings_required",
-                                    "the findings block is missing or invalid".to_owned(),
+                                    outputs
+                                        .warnings
+                                        .iter()
+                                        .find(|warning| warning.starts_with(FINDINGS_INVALID))
+                                        .cloned()
+                                        .unwrap_or_else(|| {
+                                            "the findings block is missing or invalid".to_owned()
+                                        }),
                                 ))
                             } else {
-                                disposition_error(&node.dispositions, &upstream_findings, &outputs)
+                                // Overflow proof covers all findings from truncated composites;
+                                // their structured subset may differ across selected inputs.
+                                let required_findings: Vec<_> = upstream_findings
+                                    .iter()
+                                    .filter(|finding| {
+                                        !overflow_ids.iter().any(|(id, _)| id == &finding.id)
+                                    })
+                                    .cloned()
+                                    .collect();
+                                disposition_error(&node.dispositions, &required_findings, &outputs)
+                                    .or_else(|| {
+                                        (!overflow_ids.is_empty() && result.as_ref().is_none_or(|capture| !capture.disposition_proof.matches(&overflow_ids, &proof_dispositions))).then(|| (
+                                            "disposition_overflow_incomplete",
+                                            format!("all {} findings from truncated composites need exactly one DISPOSITION line with an allowed disposition and non-empty reason", overflow_ids.len()),
+                                        ))
+                                    })
+                                    .or_else(|| {
+                                        let proof = &result.as_ref()?.disposition_proof;
+                                        let verifier = node.dispositions.is_empty() && node.role.as_deref() == Some("review.verify");
+                                        let mismatch = outputs.findings.iter().any(|finding| {
+                                            if !overflow_ids.iter().any(|(id, _)| id == &finding.id) { return false; }
+                                            let status = if verifier { finding.extra.get("verification").and_then(serde_json::Value::as_str) } else { finding.disposition.as_deref() };
+                                            status.is_none_or(|status| !proof.agrees(&finding.id, status, &overflow_ids))
+                                        });
+                                        mismatch.then(|| ("disposition_overflow_inconsistent", "structured findings disagree with their DISPOSITION lines".to_owned()))
+                                    })
                             };
-                            let outcome = if warned {
+                            let review_result = node.access == AccessMode::ReadOnly
+                                && node.role.as_deref().is_some_and(|role| {
+                                    role.starts_with("lens.") || role.starts_with("review.")
+                                })
+                                && outputs.verdict.is_some()
+                                && outputs.verdict_error.is_none()
+                                && outputs.result.is_some()
+                                && !outputs
+                                    .warnings
+                                    .iter()
+                                    .any(|warning| warning.starts_with(FINDINGS_INVALID))
+                                && disposition_error.is_none();
+                            let outcome = if outcome == AttemptOutcome::DeclaredStop
+                                && review_result
+                                && !warned
+                            {
+                                AttemptOutcome::Succeeded
+                            } else if warned || outcome == AttemptOutcome::DeclaredStop {
                                 AttemptOutcome::OtherFailure
                             } else if outcome == AttemptOutcome::Succeeded
-                                && (node.required_verdict.is_some()
+                                && (!review_result
+                                    && node.required_verdict.is_some()
                                     && !(plans::writer(node)
                                         && result.as_ref().is_some_and(|capture| {
                                             plans::handoff(capture).ok().flatten().is_some()
@@ -1985,13 +2516,35 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 AttemptOutcome::AuthRequired
                                 | AttemptOutcome::UsageLimited
                                 | AttemptOutcome::AdapterUnavailable => {
-                                    if !outcome.allows_route_fallback(node.access, launched)
+                                    if !live_fallback_allowed(outcome, launched, fallback_evidence)
                                         || route_index + 1 == node.routes.len()
                                     {
                                         if outcome == AttemptOutcome::UsageLimited {
                                             progress.advance_error_code =
                                                 Some("usage_limited".into());
-                                            progress.advance_error = Some("Provider quota or rate limit reached; wait for the allowance to reset or choose an eligible route.".into());
+                                            // Name the pool so the user knows which allowance ran out.
+                                            let pool = route
+                                                .alias
+                                                .as_deref()
+                                                .map_or_else(String::new, |alias| {
+                                                    format!(" for pool {alias}")
+                                                });
+                                            progress.advance_error = Some(bounded(
+                                                &format!(
+                                                    "Provider quota or rate limit reached{pool}; wait for the allowance to reset or choose an eligible route."
+                                                ),
+                                                MAX_ADVANCE_ERROR_BYTES,
+                                            ));
+                                        }
+                                        if !live_fallback_allowed(
+                                            outcome,
+                                            launched,
+                                            fallback_evidence,
+                                        ) && route_index + 1 < node.routes.len()
+                                        {
+                                            progress.advance_error_code =
+                                                Some("fallback_evidence_unavailable".into());
+                                            progress.advance_error = Some("Cannot verify local preparation and released custody for route fallback.".into());
                                         }
                                         progress.state = NodeState::Failed;
                                         false
@@ -2008,7 +2561,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 }
                                 AttemptOutcome::TaskFailed
                                 | AttemptOutcome::OtherFailure
-                                | AttemptOutcome::ReviewRequired => {
+                                | AttemptOutcome::ReviewRequired
+                                | AttemptOutcome::DeclaredStop => {
                                     progress.state = NodeState::Failed;
                                     false
                                 }
@@ -2166,6 +2720,39 @@ impl PlannedNode {
                 .iter()
                 .any(|input| input.node == gate && input.outputs.contains(&OutputKind::Findings))
         })
+    }
+}
+
+/// Explain an unexplained Blocked non-gate node by naming its first failed or blocked parent.
+/// Returns whether the checkpoint changed.
+fn attribute_blocker(
+    node_index: usize,
+    node: &PlannedNode,
+    checkpoint: &mut GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> bool {
+    // These nodes have their own settlement and checkpoint evidence rules.
+    if node.condition.is_some()
+        || node.composite.is_some()
+        || node.land.is_some()
+        || checkpoint.nodes[node_index].advance_error.is_some()
+    {
+        return false;
+    }
+    let blocker = node
+        .after_expansion
+        .iter()
+        .chain(&node.depends_on)
+        .map(|id| &checkpoint.nodes[positions[id]])
+        .find(|parent| matches!(parent.state, NodeState::Failed | NodeState::Blocked));
+    if let Some(parent) = blocker {
+        let reason = format!("blocked by {} ({:?})", parent.id, parent.state);
+        checkpoint.nodes[node_index].advance_error =
+            Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
+        checkpoint.nodes[node_index].advance_error_code = Some("upstream_blocked".into());
+        true
+    } else {
+        false
     }
 }
 

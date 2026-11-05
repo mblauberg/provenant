@@ -32,8 +32,8 @@ pub(crate) struct AppliedWriteGrants {
 /// concurrency. The writer caps are configurable below these
 /// (`domains.fabric.lanes.max_writer_lanes`, default 40, and
 /// `max_project_writer_lanes`, default 30).
-pub const HOST_ACTIVE: u64 = 64;
-pub const PROJECT_ACTIVE: u64 = 32;
+pub const HOST_ACTIVE: u64 = provenant_config::WRITER_LANES_CEILING;
+pub const PROJECT_ACTIVE: u64 = provenant_config::PROJECT_WRITER_LANES_CEILING;
 pub const HOST_QUEUED: u64 = 256;
 
 /// Floors and windows recorded on each ticket at submission. A task queued
@@ -52,7 +52,7 @@ impl Default for AdmissionPolicy {
     /// Defaults: five per cent memory, the GC disk floor, 20 s writer spacing, 2 s
     /// read-only spacing and a one-hour admission deadline.
     fn default() -> Self {
-        let mut policy = Self {
+        let policy = Self {
             memory_floor_basis_points: 500,
             startup_spacing_ms: 20_000,
             read_only_spacing_ms: 2_000,
@@ -63,12 +63,16 @@ impl Default for AdmissionPolicy {
         // full 20 s. The override only lowers a spacing, and release builds
         // ignore it.
         #[cfg(debug_assertions)]
-        if let Some(ms) = std::env::var_os(provenant_supervisor::STARTUP_SPACING_ENV)
-            .and_then(|value| value.to_str()?.parse::<u64>().ok())
-        {
-            policy.startup_spacing_ms = policy.startup_spacing_ms.min(ms);
-            policy.read_only_spacing_ms = policy.read_only_spacing_ms.min(ms);
-        }
+        let policy = {
+            let mut policy = policy;
+            if let Some(ms) = std::env::var_os(provenant_supervisor::STARTUP_SPACING_ENV)
+                .and_then(|value| value.to_str()?.parse::<u64>().ok())
+            {
+                policy.startup_spacing_ms = policy.startup_spacing_ms.min(ms);
+                policy.read_only_spacing_ms = policy.read_only_spacing_ms.min(ms);
+            }
+            policy
+        };
         policy
     }
 }
@@ -651,6 +655,28 @@ impl RunStore {
             update_attempt(tx, &old, &next)
         })
     }
+    /// Advance an integration fixture through the real launch transition without
+    /// spawning a guardian. Custody fixtures require a nonzero generation.
+    #[cfg(feature = "fixture")]
+    #[doc(hidden)]
+    pub fn mark_starting_for_fixture(
+        &self,
+        id: AttemptId,
+        route: &RouteRecord,
+        call: &Request<'_>,
+    ) -> Result<AttemptRecord> {
+        self.mark_starting_with_priority(
+            &self.record(id, call)?,
+            route,
+            &[],
+            &AppliedWriteGrants::default(),
+            None,
+            None,
+            0,
+            call,
+        )
+    }
+
     /// Move a queued attempt to `starting` with a fresh custody generation
     /// and its applied route, just before supervisor handoff. `head` is the
     /// checkout HEAD the host observed for a read-only lane; never lane output.

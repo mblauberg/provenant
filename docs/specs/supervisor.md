@@ -16,6 +16,27 @@ relative to `tools/front-door/`.
 
 ## Custody
 
+### Worktree census sessions
+
+Each command owns a census session. Within an unchanged observation epoch,
+root state, holder identity and refusal detail come from the same process
+evidence. The session is scoped to the command and effective host policy; it is
+not a cross-command cache and elapsed time alone does not authorise reuse.
+Adding a candidate root requires evidence that can place occupants for that
+root, otherwise the session refreshes. Root identity, ancestor-exclusion
+mode, effective host policy, or command-controlled process, custody or
+worktree changes start a new epoch.
+
+Uncertainty remains attached to each root the available evidence cannot
+exclude. Positive occupants remain live when another part of the census is
+incomplete. Ordinary custody may accept `Unknown` where its writer proof
+permits it; land and complete-census collection require a positive `Free`.
+Destructive decisions always acquire fresh evidence after writer custody is
+held, and repeat required census checks after output preparation. A native
+process that does not take the advisory writer lock may start after the
+observation; the census is not atomic exclusion and never grants signalling
+authority.
+
 ### Closed stop reasons; natural exit wins
 
 Only `ProviderGroup::stop(StopReason)` signals a provider: explicit cancellation, wall deadline, protocol rejection, supervisor signal or post-terminal
@@ -236,6 +257,28 @@ that profile's support.
 Rendered profiles are pinned by
 `crates/providers/src/seatbelt_snapshots.rs::seatbelt_profiles_match_snapshots`.
 The rules below are what every profile must keep.
+
+### Tool requirements and runtime closure
+
+Launch preparation records selected executable requirements and resolves their
+Mach-O dependencies into exact read-only file grants. Closure results distinguish
+complete, incomplete and unsupported images. Missing, malformed,
+loader-relative, limit-bound and credential or protected-root dependencies are
+recorded in the receipt; dependencies covered by lane-owned roots are recorded
+as already covered and still traversed for their own dependencies.
+Trace output names the tool and reason without exposing dependency directories.
+An incomplete closure leaves the resolved grants in place and does not itself
+refuse launch. The host dependency-preparation PATH does not grant lane access.
+
+### Staged user content
+
+The host captures user skills in an attempt-owned tree and grants the lane read
+access to the staged copy. Links are copied as content rather than retained;
+links resolving into credential roots, cycles, changed entries and content
+exceeding the configured size bound are skipped with warnings. Optional grant
+discovery also omits credential-root targets with warnings. Required executable,
+worktree and configured grants keep the credential-root guard. Confinement
+limits access; it does not make a networked lane hermetic.
 
 ### Database IPC shares the host namespace
 
@@ -519,6 +562,8 @@ Git-internal roots. `~/.ssh`, `~/.aws`, `~/.kube`, `~/.secrets` and Cargo
 `credentials` are denied after every grant. Unsupported or nested
 confinement fails `ConfinementUnavailable` and never widens access; Linux has
 no backend.
+An optional discovered root that resolves into a credential root is omitted
+with a warning; required roots continue to fail closed.
 Literal discovery grants accept absent entries or real directories through
   held, revalidated parents. They refuse symlinks and other entry types and
   grant no reads of children beyond existing read roots. Anchor refusals during
@@ -534,6 +579,16 @@ Literal discovery grants accept absent entries or real directories through
 - Owner: `crates/confinement/src/permissions.rs`, `crates/providers/src/opencode.rs`
 
 ### Git write set
+
+The host exports `PROVENANT_PRIMARY_CHECKOUT` and, for a linked worktree,
+`PROVENANT_WORKTREE_GITDIR`. These identify host paths without changing the
+lane's private Git view. The real admin directory receives read access only.
+Project `shared_paths` add read-write grants for existing host resources to
+writer lanes; `exec_roots` add read and execution grants to primary-checkout
+toolchain directories and never write access. Git, credentials, protected host
+state and overlaps with executable roots remain excluded from shared writes.
+Invalid entries warn and are ignored. Applied grants and portable paths in the
+receipt derive from one host-side resolution.
 
 A writer owns a complete Git directory and object store under attempt scratch,
 including its index, HEAD, refs, config, temporary files, stash, rebase and merge
@@ -878,13 +933,12 @@ retained directory access; a reported team proves neither trusted signer
 provenance nor safe cwd behaviour. See [configuration](../runbooks/configuration.md#unreadable-process-census-exceptions)
 for entry syntax and validation.
 
-The host owner sets the strict host-only boolean
-`confinement.census_host_list_complete = true` after listing their host's
-unreadable daemons. Its default is `false`; the declaration grants no exception
-and changes no runtime custody decision. Without complete host coverage, land
-cleanup is expected to report the first unlisted daemon rather than remove the
-worktree. Non-platform diagnostics include `CS_OPS_TEAMID` (or `unavailable`),
-so the owner can configure an exact executable/signer pair.
+After listing unreadable daemons, the host owner can set
+`PROVENANT_CENSUS_HOST_LIST_COMPLETE=1` for native acceptance. This test-only
+declaration grants no exception and changes no runtime custody decision.
+Without complete host coverage, land cleanup is expected to report the first
+unlisted daemon rather than remove the worktree. Non-platform diagnostics
+include `CS_OPS_TEAMID` (or `unavailable`).
 
 Native acceptance always audits every unplaceable process from the actual
 census pass, printing its pid, executable path, real/effective/saved uids, signing flags, team and
@@ -943,7 +997,7 @@ has admissible built-in evidence and reports each one's pid, path, all three
 uids, signing flags, team and failed condition; unavailable fields are explicit.
 It places a same-user `/bin/sleep` child inside and requires the existing
 stronger `Live` refusal with a placing detail. Only when
-`confinement.census_host_list_complete=true` does it also assert clean `Free`;
+`PROVENANT_CENSUS_HOST_LIST_COMPLETE` is set does it also assert clean `Free`;
 otherwise it explicitly logs that assertion's skip and why. Incomplete process
 enumeration fails the audit. Its main marker appears after the unconditional
 audit and sleep assertions. The isolated WindowServer fixture selects

@@ -1,5 +1,139 @@
 use super::*;
 
+pub(super) fn nodes_have_v2(nodes: &[GraphNode]) -> bool {
+    nodes.iter().any(|node| {
+        node.review.is_some()
+            || node.family_group.is_some()
+            || node.plan.as_ref().is_some_and(|spec| {
+                spec.patterns
+                    .iter()
+                    .any(|pattern| pattern.nodes.iter().any(value_has_v2))
+            })
+            || node
+                .composite
+                .as_ref()
+                .is_some_and(|spec| nodes_have_v2(&spec.nodes))
+            || node
+                .loop_body
+                .as_ref()
+                .is_some_and(|spec| nodes_have_v2(&spec.body))
+            || node
+                .plan
+                .as_ref()
+                .and_then(|spec| spec.fallback.as_ref())
+                .is_some_and(|spec| nodes_have_v2(&spec.nodes))
+    })
+}
+
+fn value_has_v2(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.contains_key("family_group")
+                || map.get("review").is_some_and(serde_json::Value::is_object)
+                || map.values().any(value_has_v2)
+        }
+        serde_json::Value::Array(values) => values.iter().any(value_has_v2),
+        _ => false,
+    }
+}
+
+/// Minimum document schema capable of representing the document's fields.
+/// Schema 2 is a superset, so callers may retain an authored version 2 even
+/// when the minimum is 1.
+pub fn minimum_schema_version(document: &GraphDocument) -> u32 {
+    if document_requires_schema_v2(document) {
+        2
+    } else {
+        1
+    }
+}
+
+pub(super) fn document_requires_schema_v2(document: &GraphDocument) -> bool {
+    document.review_base.is_some() || nodes_have_v2(&document.nodes)
+}
+
+pub(super) fn supplied_kinds(node: &GraphNode) -> Vec<OutputKind> {
+    if let Some(composite) = &node.composite {
+        return composite
+            .exports
+            .iter()
+            .flat_map(|input| input.outputs.iter().copied())
+            .fold(Vec::new(), |mut kinds, kind| {
+                if !kinds.contains(&kind) {
+                    kinds.push(kind);
+                }
+                kinds
+            });
+    }
+    let mut kinds = vec![
+        OutputKind::Result,
+        OutputKind::Findings,
+        OutputKind::Verdict,
+        OutputKind::Remaining,
+    ];
+    if node.kind == Some(NodeKind::Loop) {
+        return kinds;
+    }
+    let write = node.access == AccessMode::WorktreeWrite;
+    if write || node.kind == Some(NodeKind::Land) {
+        kinds.push(OutputKind::Branch);
+    }
+    let pinned = node.source.is_some();
+    if write || pinned || node.kind == Some(NodeKind::Land) {
+        kinds.push(OutputKind::Commit);
+    }
+    kinds
+}
+
+pub(super) fn validate_output_kinds(document: &GraphDocument) -> Result<(), String> {
+    let by_id: std::collections::BTreeMap<_, _> =
+        document.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    for consumer in &document.nodes {
+        // A composite's export declaration is its public output contract. Its
+        // members are validated in their own scopes; consumers are checked
+        // against the declared composite outputs through `supplied_kinds`.
+        for input in consumer.inputs.iter().chain(
+            consumer
+                .composite
+                .iter()
+                .flat_map(|composite| &composite.exports),
+        ) {
+            let source_id = input.node.strip_prefix("previous.").unwrap_or(&input.node);
+            let Some(source) = by_id.get(source_id) else {
+                continue;
+            };
+            let available = supplied_kinds(source);
+            for kind in &input.outputs {
+                if !available.contains(kind) {
+                    let labels = available
+                        .iter()
+                        .map(|v| format!("{v:?}").to_lowercase())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(format!(
+                        "node {} selects {} from {}, which supplies only {}",
+                        consumer.id,
+                        format!("{kind:?}").to_lowercase(),
+                        source_id,
+                        labels
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_schema(document: &GraphDocument) -> Result<(), &'static str> {
+    let has_v2 = document.review_base.is_some() || nodes_have_v2(&document.nodes);
+    // Version 2 is a superset: it may omit every v2 field, but version 1
+    // cannot carry one.
+    if !matches!(document.schema_version, 1 | 2) || document.schema_version == 1 && has_v2 {
+        return Err("schema version");
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_access(
     access: AccessMode,
     worktree: Option<&str>,
@@ -35,15 +169,34 @@ pub(super) fn validate_plan_with_limits(
     document: &GraphDocument,
     limits: &crate::config::GraphLimits,
 ) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), String> {
-    let expanded = loops::expand(document, &[], limits)?;
-    validate_flat_plan(&expanded, limits).map_err(String::from)
+    document.admit(limits)?;
+    validate_replay_plan(document, limits)
+}
+
+pub(super) fn validate_replay_plan(
+    document: &GraphDocument,
+    limits: &crate::config::GraphLimits,
+) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), String> {
+    validate_schema(document).map_err(String::from)?;
+    let expansion_limits = crate::config::GraphLimits {
+        nodes: limits.nodes.max(16_384),
+        expansion_depth: limits.expansion_depth.max(64),
+        edges: usize::MAX,
+        routes_per_node: u16::MAX as usize,
+        node_prompt_bytes: usize::MAX,
+        graph_prompt_bytes: usize::MAX,
+        ..limits.clone()
+    };
+    let expanded = loops::expand(document, &[], &expansion_limits)?;
+    let plan = validate_flat_plan(&expanded, &expansion_limits).map_err(String::from)?;
+    Ok(plan)
 }
 
 pub(super) fn validate_flat_plan(
     document: &GraphDocument,
     limits: &crate::config::GraphLimits,
 ) -> Result<(PlannedGraph, std::collections::BTreeMap<String, usize>), &'static str> {
-    if document.schema_version != 1 {
+    if !matches!(document.schema_version, 1 | 2) {
         return Err("schema version");
     }
     if document
@@ -104,7 +257,24 @@ pub(super) fn validate_flat_plan(
         if node.deadline_seconds == Some(0) {
             return Err("node deadline_seconds must be positive");
         }
-        plans::validate_spec(node)?;
+        if node.review.is_some()
+            && (node.kind != Some(NodeKind::Plan)
+                || node.plan.is_some()
+                || node.access != AccessMode::ReadOnly
+                || node.source.is_none())
+        {
+            return Err("review requires a read-only plan node with a source and no plan");
+        }
+        if node
+            .review
+            .as_ref()
+            .is_some_and(|review| review.max_nodes == 0)
+        {
+            return Err("review max_nodes must be positive");
+        }
+        if node.review.is_none() {
+            plans::validate_spec(node)?;
+        }
         let is_composite = node.kind == Some(NodeKind::Composite);
         if is_composite != node.composite.is_some() {
             return Err("composite requires nodes and exports");
@@ -254,7 +424,13 @@ pub(super) fn validate_flat_plan(
         if document.delivery == Some(DeliveryMode::Pr) && node.delivery == Some(DeliveryMode::Pr) {
             return Err("graph PR is exclusive with node PRs");
         }
-        if !is_gate && !is_loop && !is_composite && !is_decide && !is_land && node.prompt.is_empty()
+        if !is_gate
+            && !is_loop
+            && !is_composite
+            && !is_decide
+            && !is_land
+            && node.review.is_none()
+            && node.prompt.is_empty()
             || plans::prompt(node).len() > limits.node_prompt_bytes
         {
             return Err("prompt size");
@@ -273,7 +449,14 @@ pub(super) fn validate_flat_plan(
         }
 
         let routes = match (&node.route, &node.routes) {
-            (None, None) if is_gate || is_loop || is_composite || is_decide || is_land => {
+            (None, None)
+                if is_gate
+                    || is_loop
+                    || is_composite
+                    || is_decide
+                    || is_land
+                    || node.review.is_some() =>
+            {
                 Vec::new()
             }
             (Some(route), None) => vec![route.clone()],
@@ -353,6 +536,8 @@ pub(super) fn validate_flat_plan(
         let mut depends_on = node.depends_on.clone();
         depends_on.sort();
         nodes.push(PlannedNode {
+            review: node.review.clone(),
+            family_group: node.family_group.clone(),
             context: node.context.clone(),
             extra: node.extra.clone(),
             composite_members: node.composite_members.clone(),
@@ -481,12 +666,13 @@ pub(super) fn validate_flat_plan(
         .collect();
     Ok((
         PlannedGraph {
+            review_base: document.review_base.clone(),
             context: document.context.clone(),
             extra: document.extra.clone(),
             integration_branch: document.integration_branch.clone(),
             delivery: document.delivery.clone(),
             decision_session: document.decision_session.clone(),
-            schema_version: 1,
+            schema_version: document.schema_version,
             graph_id: document.graph_id.clone(),
             nodes: topological_nodes,
         },
@@ -536,22 +722,21 @@ pub(super) fn route_is_bounded(route: &GraphRoute) -> bool {
 /// identity must appear exactly once.
 pub(super) fn disposition_error(
     dispositions: &[String],
-    upstream: &std::collections::BTreeSet<String>,
+    upstream: &[Finding],
     outputs: &NodeOutputs,
 ) -> Option<(&'static str, String)> {
     if dispositions.is_empty() || outputs.result.is_none() {
         return None;
     }
     let allowed = dispositions.join(", ");
-    if outputs.findings.is_empty()
-        && outputs
-            .warnings
-            .iter()
-            .any(|warning| warning == FINDINGS_INVALID)
+    if let Some(warning) = outputs
+        .warnings
+        .iter()
+        .find(|warning| warning.starts_with(FINDINGS_INVALID))
     {
         return Some((
             "disposition_findings_invalid",
-            format!("dispositions required ({allowed}): the findings block is missing or invalid"),
+            format!("dispositions required ({allowed}): {warning}"),
         ));
     }
     for finding in &outputs.findings {
@@ -580,13 +765,19 @@ pub(super) fn disposition_error(
             ));
         }
     }
-    for id in upstream {
+    for id in upstream
+        .iter()
+        .map(|finding| &finding.id)
+        .collect::<std::collections::BTreeSet<_>>()
+    {
         let count = outputs.findings.iter().filter(|f| &f.id == id).count();
-        if count != 1 {
+        let copies = upstream.iter().filter(|f| &f.id == id).count();
+        if count != copies {
             return Some((
                 "disposition_count",
                 format!(
-                    "upstream finding {id} needs exactly one disposition of {allowed}; found {count}"
+                    "upstream finding {id} needs exactly one disposition of {allowed}; found {}",
+                    count / copies
                 ),
             ));
         }
@@ -618,6 +809,7 @@ pub(super) fn separation(
             .take(SEPARATION_FAMILIES)
             .map(|family| bounded(family, FAMILY_BYTES))
             .collect(),
+        preferred: Vec::new(),
         applied: applied.map(|family| bounded(&family, FAMILY_BYTES)),
         outcome,
     }
@@ -868,7 +1060,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 || (index + 1 < progress.attempts.len()
                     && (attempt.state != AttemptState::Terminal
                         || !attempt.outcome.is_some_and(|outcome| {
-                            outcome.allows_route_fallback(node.access, attempt.launched)
+                            historical_fallback_admissible(outcome, node.access, attempt.launched)
                         })))
             {
                 return Err(bad(
@@ -892,7 +1084,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 Some(attempt) if attempt.state != AttemptState::Terminal => true,
                 Some(attempt) => {
                     attempt.outcome.is_some_and(|outcome| {
-                        outcome.allows_route_fallback(node.access, attempt.launched)
+                        historical_fallback_admissible(outcome, node.access, attempt.launched)
                     }) && progress.attempts.len() < node.routes.len()
                 }
                 None => false,
@@ -904,6 +1096,15 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                     attempt.state == AttemptState::Terminal
                         && attempt.outcome == Some(AttemptOutcome::Succeeded)
                 }) || fallback_settled(node, progress, document, checkpoint)
+                    || (node.review.is_some()
+                        && progress.source_commit.as_ref().is_some_and(|subject| {
+                            checkpoint.expansions.iter().any(|expansion| {
+                                expansion.source == node.id
+                                    && expansion.review.as_ref().is_some_and(|review| {
+                                        review.subject.to_string() == *subject
+                                    })
+                            })
+                        }))
             }
             NodeState::Failed if progress.advance_error.is_some() => last.is_none_or(|attempt| {
                 attempt.state == AttemptState::Terminal
@@ -920,7 +1121,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                             | AttemptOutcome::ReviewRequired,
                         ) => true,
                         Some(outcome) if outcome != AttemptOutcome::Succeeded => {
-                            !outcome.allows_route_fallback(node.access, attempt.launched)
+                            !historical_fallback_admissible(outcome, node.access, attempt.launched)
                                 || progress.attempts.len() == node.routes.len()
                         }
                         _ => false,

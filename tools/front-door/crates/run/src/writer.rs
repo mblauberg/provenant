@@ -4,8 +4,8 @@ use crate::{PathCheck, Result, RunError, WriterRequest};
 use provenant_confinement::{
     ConfinedPlan, UtilityBudget, UtilityRuntime, VerifiedWorktree,
     permissions::{
-        AccessMode, AnchoredDirectory, Anchors, BackendContext, ProviderProfile,
-        prepare_writer_directories, required_anchors, system_backend,
+        AccessMode, AnchoredDirectory, Anchors, BackendContext, ProfileLimits, ProviderProfile,
+        prepare_writer_directories, required_anchors, system_backend_with_limits,
     },
     repo::GitRefName,
     worktrees,
@@ -303,6 +303,29 @@ pub(crate) fn cleanup_git_pins(
     }
     Ok(())
 }
+fn writer_branch(worktree: &VerifiedWorktree) -> Result<GitRefName> {
+    let head_path = worktree.repo().private_git_dir().join("HEAD");
+    let mut head = Vec::new();
+    worktree
+        .repo()
+        .private_dir()
+        .open_read(OsStr::new("HEAD"))
+        .map_err(|error| anchored_error(error, worktree.repo().private_git_dir()))?
+        .take(4097)
+        .read_to_end(&mut head)
+        .map_err(error("read writer HEAD", Some(&head_path)))?;
+    if head.len() > 4096 {
+        return Err(RunError::Validation("writer HEAD exceeds bound"));
+    }
+    let head = std::str::from_utf8(&head).map_err(error("decode writer HEAD", Some(&head_path)))?;
+    GitRefName::new(
+        head.trim()
+            .strip_prefix("ref: ")
+            .ok_or(RunError::Validation("writer needs a branch"))?,
+    )
+    .map_err(error("parse writer branch", Some(&head_path)))
+}
+
 /// Reopen the persisted scope and verify current Git worktree membership.
 /// The subsequent supervisor writer flock supplies exclusion.
 pub fn prepare_writer(
@@ -318,26 +341,7 @@ pub fn prepare_writer(
         .map_err(error("open writer repository", Some(&request.project)))?;
     let worktree = provenant_confinement::verify_worktree(&repo, &request.worktree)
         .map_err(worktrees::WorktreeError::from)?;
-    let head_path = worktree.repo().private_git_dir().join("HEAD");
-    let mut head = Vec::new();
-    worktree
-        .repo()
-        .private_dir()
-        .open_read(OsStr::new("HEAD"))
-        .map_err(|error| anchored_error(error, worktree.repo().private_git_dir()))?
-        .take(4097)
-        .read_to_end(&mut head)
-        .map_err(error("read writer HEAD", Some(&head_path)))?;
-    if head.len() > 4096 {
-        return Err(RunError::Validation("writer HEAD exceeds bound"));
-    }
-    let head = std::str::from_utf8(&head).map_err(error("decode writer HEAD", Some(&head_path)))?;
-    let branch = GitRefName::new(
-        head.trim()
-            .strip_prefix("ref: ")
-            .ok_or(RunError::Validation("writer needs a branch"))?,
-    )
-    .map_err(error("parse writer branch", Some(&head_path)))?;
+    let branch = writer_branch(&worktree)?;
     let base = provenant_confinement::run_utility(
         &executor,
         provenant_confinement::GitRead::ResolveRefOid {
@@ -441,12 +445,21 @@ impl LaunchConfinement {
     ) -> Result<Vec<OsString>> {
         let executor =
             SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
-        let backend = system_backend(&BackendContext {
-            executor: &executor,
-            cancel,
-            #[cfg(target_os = "macos")]
-            env: &[],
-        })
+        let config = provenant_confinement::run_config::RunConfig::read(&self.state_root)
+            .map_err(error("read launch resource limits", None))?;
+        let limits = ProfileLimits {
+            grant_limit: config.grant_limit,
+            profile_limit_bytes: config.profile_limit_bytes,
+        };
+        let backend = system_backend_with_limits(
+            &BackendContext {
+                executor: &executor,
+                cancel,
+                #[cfg(target_os = "macos")]
+                env: &[],
+            },
+            limits,
+        )
         .map_err(RunError::Confinement)?;
         let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
         // Run holds writer custody here: create the derived ref parents and the
@@ -1902,7 +1915,13 @@ impl WriterLaunch {
             )?;
             // The private index may contain staged edits which the host's
             // quarantine must observe. Restore it only after receive succeeds.
-            if let Some(source) = &source {
+            if let Some(source) = &source
+                && crate::objects::resolve_ref(
+                    &git_executable,
+                    self.worktree.repo(),
+                    self.branch.as_str(),
+                )? == verified_tip
+            {
                 crate::objects::restore_index(source, self.worktree.repo())?;
             }
             settlement.advance(crate::settlement::Phase::Record)?;
@@ -1950,7 +1969,14 @@ impl WriterLaunch {
             self.worktree.repo(),
             provenant_confinement::GitRead::RevParseHead,
         )?;
-        if tip != verified_tip {
+        if tip != verified_tip
+            && !crate::objects::is_ancestor(
+                &git_executable,
+                self.worktree.repo(),
+                verified_tip,
+                tip,
+            )
+        {
             return Err(RunError::Validation(
                 "writer head changed during object verification",
             ));
@@ -2008,16 +2034,17 @@ impl WriterLaunch {
                 self.worktree.repo(),
                 provenant_confinement::GitRead::MergeBase {
                     left: target,
-                    right: tip,
+                    right: verified_tip,
                 },
             )
         })()
         .unwrap_or(snapshot.head());
         let outcome = git
-            .quarantine_instructions(
+            .quarantine_instructions_at(
                 custody,
                 &snapshot,
                 comparison_base,
+                verified_tip,
                 &archive,
                 &self.review_exempt,
             )
@@ -2065,7 +2092,7 @@ impl WriterLaunch {
             "writer-terminal.json",
             &crate::db::bytes(&WriterTerminal {
                 schema_version: 1,
-                head: tip,
+                head: verified_tip,
                 protected_paths,
             })?,
             crate::RECORD_LIMIT,

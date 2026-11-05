@@ -43,6 +43,12 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
         if let Some(reason) = &node.skip_reason {
             human.push_str(&format!(" ({})", bounded_reason(reason)));
         }
+        if !full
+            && node.state == provenant_fabric_runtime::graph::NodeState::Blocked
+            && let Some(error) = &node.advance_error
+        {
+            human.push_str(&format!(" ({})", bounded_reason(error)));
+        }
         if full {
             if let Some(retry) = node.extra.get("retry") {
                 human.push_str(&format!(
@@ -102,6 +108,11 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
             human.push_str(&format!(" source={head}"));
         }
         human.push('\n');
+        if full && let Some(outputs) = &node.outputs {
+            for warning in &outputs.warnings {
+                human.push_str(&format!("    warning: {}\n", bounded_reason(warning)));
+            }
+        }
     }
     if let Some(error) = &run.advance_error {
         human.push_str(&format!("Advance error: {error}\n"));

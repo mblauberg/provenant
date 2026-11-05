@@ -20,6 +20,7 @@ mod continuation;
 mod fixtures;
 mod observation;
 mod preparation;
+mod project_paths;
 
 use command::*;
 use confinement::*;
@@ -35,6 +36,7 @@ pub(super) use fixtures::start_fabric_relay;
 #[cfg(feature = "fixture")]
 pub use fixtures::{prepare_fixture, writer_fixture_plan};
 pub(super) use observation::observe_codex_rollout;
+use preparation::PrepareError;
 pub(super) use preparation::prepare;
 
 #[cfg(test)]

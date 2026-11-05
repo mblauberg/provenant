@@ -1,7 +1,7 @@
 stages = [
   { id = "implement", role = "write.implement" },
-  { id = "lens", parallel = [
-    { id = "lens", for_each = "${lenses}", role = "lens.${item.name}", outputs = ["result", "commit"] },
+  { id = "lens", min_successful = "${min_lenses}", parallel = [
+    { id = "lens", for_each = "${lenses}", role = "lens.${item.name}", require_findings = true, outputs = ["result", "commit"] },
   ], source = { type = "node", node = "implement" } },
   { id = "evaluate", role = "review.evaluator", source = { type = "node", node = "implement" } },
 ]
@@ -25,11 +25,13 @@ scope = { type = "list", default = ["."], doc = "Literal relative paths the writ
 subject = { type = "table", default = { type = "commit", commit = "HEAD" }, doc = "Source the writer starts from." }
 delivery = { type = "string", default = "none", doc = "Delivery mode for the writer commit." }
 base = { type = "string", default = "", doc = "Diff reference the slice is measured from." }
+spec_max_bytes = { type = "integer", default = 16384, min = 1, max = 65536, doc = "Maximum bytes of a file spec included in each review brief." }
 spec = { type = "string", default = "", doc = "Issue number or file holding the acceptance criteria." }
 risk_tier = { type = "string", default = "", doc = "Risk tier that selects the review shape." }
 review_shape = { type = "string", default = "", doc = "Explicit review shape override." }
 kind = { type = "string", default = "", doc = "Change kind that scales the lens panel: refactor, docs. Empty uses the task kind." }
-size = { type = "string", default = "", doc = "Review size override (small, medium, large). Empty measures the worktree's current head against base when the graph expands, before the writer runs, as a proxy; pass a size when the expected scope is known." }
+size = { type = "string", default = "", doc = "Review size override (small, medium, large). Empty defers the choice: the host measures the pinned reviewed commit against base when the review starts, so the panel fits the work actually written; pass a size to fix it now." }
+min_lenses = { type = "integer", default = 0, min = 0, max = 32, doc = "Minimum settled lenses; 0 means all but one, at least one." }
 evaluator = { type = "string", default = "senior", doc = "Routing tier for the evaluator that reconciles the lens findings." }
 risk_tags = { type = "list", default = [], doc = "Tags that trigger conditional lenses." }
 lenses = [

@@ -14,6 +14,9 @@ struct QuotaRow: Identifiable, Equatable, Sendable {
         let pool: String
         let percent: Double
         let resetsAt: Date?
+        let lowerBound: Bool
+        var displayPercent: Int { Int(percent.rounded(lowerBound ? .down : .toNearestOrAwayFromZero)) }
+        var value: String { "\(lowerBound ? "≥" : "")\(displayPercent)%" }
     }
     struct Refusal: Equatable, Sendable {
         let model: String
@@ -62,7 +65,8 @@ final class QuotaPanelModel {
         let rows = show.accounts.map { account -> QuotaRow in
             let windows = (account.snapshot?.windows ?? []).map {
                 QuotaRow.Window(pool: $0.pool, percent: Double($0.usedBasisPoints) / 100,
-                                resetsAt: $0.resetsUnixSeconds.map { Date(timeIntervalSince1970: TimeInterval($0)) })
+                                resetsAt: $0.resetsUnixSeconds.map { Date(timeIntervalSince1970: TimeInterval($0)) },
+                                lowerBound: account.snapshot?.details?.coverage == "partial")
             }
             let trend = (history?.readings ?? [])
                 .filter { $0.provider == account.account.adapter && $0.accountKey == account.account.accountKey }

@@ -8,6 +8,28 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 pub struct OpenCode;
 
+/// Only a typed quota refusal ends a live attempt; ordinary text and malformed
+/// frames retain the existing exit-time decoding policy.
+impl provenant_os::capture::FrameDecoder for OpenCode {
+    fn decode(
+        &self,
+        frame: &[u8],
+    ) -> Result<provenant_os::capture::FrameEvent, provenant_os::capture::DecodeFailure> {
+        use provenant_os::capture::FrameEvent;
+        Ok(
+            if decode(frame).is_ok_and(|events| {
+                events
+                    .iter()
+                    .any(|event| matches!(event, E::QuotaLimited { .. }))
+            }) {
+                FrameEvent::Terminal
+            } else {
+                FrameEvent::Progress
+            },
+        )
+    }
+}
+
 pub const REGISTRATION: crate::Registration = crate::Registration {
     adapter: &OpenCode,
     quota_source: Some(&OpenCode),
@@ -76,6 +98,7 @@ fn prepare(
     stream: StreamState,
 ) -> Result<LaunchSpec, ProviderError> {
     let plan = input.confined.permissions();
+    let mut tool_requirements = crate::launch::ToolRequirements::default();
     if plan.selected_authentication.is_some() {
         return Err(ProviderError::UnsupportedPolicy);
     }
@@ -122,14 +145,48 @@ fn prepare(
             .to_str()
             .ok_or(ProviderError::InvalidPath)?
     );
+    let staged_skills = input.stage_user_skills();
+    let user_skills = staged_skills.root.clone();
+    let skill_reads = user_skills.iter().map(subtree).collect::<Vec<_>>();
+    let mut omitted_discovery = Vec::new();
     let mut permission = serde_json::json!({
         "edit": edit,
         "bash": edit,
         "webfetch": "deny",
     });
+    let mut external = serde_json::Map::new();
+    let mut reads = serde_json::Map::new();
     if input.git_context {
-        permission["external_directory"] = serde_json::json!({scratch.clone(): "allow"});
-        permission["read"] = serde_json::json!({scratch: "allow"});
+        external.insert(scratch.clone(), "allow".into());
+        reads.insert(scratch, "allow".into());
+    }
+    if let Some(skills) = &user_skills {
+        // Keep native paths usable even when the skills root is itself a link.
+        let pattern = format!("{}/**", skills.display());
+        external.insert(pattern.clone(), "allow".into());
+        reads.insert(pattern, "allow".into());
+    }
+    for grant in &skill_reads {
+        let directory = match grant.scope {
+            provenant_confinement::permissions::PathScope::Exact => {
+                grant.path.parent().ok_or(ProviderError::InvalidPath)?
+            }
+            provenant_confinement::permissions::PathScope::Subtree => &grant.path,
+        };
+        external.insert(format!("{}/**", directory.display()), "allow".into());
+        let path = match grant.scope {
+            provenant_confinement::permissions::PathScope::Exact => {
+                grant.path.display().to_string()
+            }
+            provenant_confinement::permissions::PathScope::Subtree => {
+                format!("{}/**", grant.path.display())
+            }
+        };
+        reads.insert(path, "allow".into());
+    }
+    if !external.is_empty() {
+        permission["external_directory"] = external.into();
+        permission["read"] = reads.into();
     }
     let config = serde_json::json!({
         "autoupdate": false,
@@ -168,18 +225,59 @@ fn prepare(
     let data_home = xdg("XDG_DATA_HOME", ".local/share");
     let data = data_home.join("opencode");
     let mut runtime_reads = vec![subtree(package), subtree(&data)];
-    runtime_reads.extend(
-        crate::dylib::linked_libraries(input.provenant.git)
-            .into_iter()
-            .map(exact),
-    );
     if access == Access::WorktreeWrite {
+        let start = runtime_reads.len();
         runtime_reads.extend(crate::launch::git_global_files(&config_home));
+        crate::launch::filter_optional_grants(
+            &mut runtime_reads,
+            start,
+            input.home,
+            crate::launch::OmissionSource::Toolchain,
+            &mut omitted_discovery,
+        );
     }
+    // Preserve the existing provider configuration without making skills
+    // readable when discovery is off. Do not follow unrelated config links.
     let config_dir = config_home.join("opencode");
-    if config_dir.is_dir() {
-        runtime_reads.push(subtree(config_dir));
+    let optional_start = runtime_reads.len();
+    if let Ok(config_dir) = std::fs::canonicalize(&config_dir)
+        && !provenant_confinement::refuses_lane_root(&config_dir, true, Some(input.home))
+        && let Ok(entries) = std::fs::read_dir(&config_dir)
+    {
+        runtime_reads.push(exact(&config_dir));
+        for entry in entries.flatten() {
+            if entry.file_name() == "skills" {
+                continue;
+            }
+            if let Ok(kind) = entry.file_type() {
+                if kind.is_dir() {
+                    runtime_reads.push(subtree(entry.path()));
+                } else if kind.is_file() {
+                    runtime_reads.push(exact(entry.path()));
+                }
+            }
+        }
     }
+    if let Ok(config_dir) = std::fs::canonicalize(&config_dir)
+        && provenant_confinement::refuses_lane_root(&config_dir, true, Some(input.home))
+        && !omitted_discovery.iter().any(|entry| {
+            entry.path == config_dir
+                && entry.source == crate::launch::OmissionSource::ProviderConfig
+        })
+    {
+        omitted_discovery.push(crate::launch::OmittedGrant {
+            path: config_dir,
+            source: crate::launch::OmissionSource::ProviderConfig,
+        });
+    }
+    crate::launch::filter_optional_grants(
+        &mut runtime_reads,
+        optional_start,
+        input.home,
+        crate::launch::OmissionSource::ProviderConfig,
+        &mut omitted_discovery,
+    );
+    runtime_reads.extend(skill_reads);
     // Keep the account store readable but outside all writable state grants.
     let mut state_writes = ["opencode.db", "opencode.db-shm", "opencode.db-wal"]
         .map(|name| exact(data.join(name)))
@@ -192,6 +290,33 @@ fn prepare(
             target: input.provenant.git.to_owned(),
         },
     ];
+    // Mirror provider configuration as individual links; staged skills have their own tree.
+    let private_config = private.join("config");
+    {
+        let private_opencode = private_config.join("opencode");
+        setup.push(SetupStep::CreateDir(private_opencode.clone()));
+        if let Ok(canonical) = std::fs::canonicalize(&config_dir)
+            && !provenant_confinement::refuses_lane_root(&canonical, true, Some(input.home))
+            && let Ok(entries) = std::fs::read_dir(&config_dir)
+        {
+            for entry in entries.flatten() {
+                if entry.file_name() != "skills"
+                    && entry.file_type().is_ok_and(|kind| !kind.is_symlink())
+                {
+                    setup.push(SetupStep::Symlink {
+                        link: private_opencode.join(entry.file_name()),
+                        target: entry.path(),
+                    });
+                }
+            }
+        }
+        if let Some(skills) = &staged_skills.root {
+            setup.push(SetupStep::Symlink {
+                link: private_opencode.join("skills"),
+                target: skills.clone(),
+            });
+        }
+    }
     // `shell` holds per-project shell state; the server creates its entry
     // while resolving the location, and refuses every request (HTTP 500)
     // when that mkdir is denied.
@@ -212,16 +337,17 @@ fn prepare(
         // `rg` from PATH, then from its cache bin ($XDG_CACHE_HOME/opencode/bin),
         // and installs it there when absent. The lane sets XDG_CACHE_HOME to
         // its private state, whose grant already covers the read, so grant
-        // exactly that binary for execution. No shell is enabled.
-        tool_exec_roots.push(exact(private.join("cache/opencode/bin/rg")));
+        // exactly that binary for execution, alongside system grep. No shell is enabled.
+        let rg = private.join("cache/opencode/bin/rg");
+        // Resolve install-name symlinks to exact files, accepting libraries by
+        // content regardless of the host's package manager or PATH ordering.
+        tool_exec_roots.push(exact(rg));
+        tool_exec_roots.push(exact("/usr/bin/grep"));
     }
     env.extend([
         ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
         ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-        (
-            "XDG_CONFIG_HOME".into(),
-            config_home.clone().into_os_string(),
-        ),
+        ("XDG_CONFIG_HOME".into(), private_config.into_os_string()),
         ("XDG_DATA_HOME".into(), data_home.clone().into_os_string()),
         (
             "XDG_CACHE_HOME".into(),
@@ -234,20 +360,12 @@ fn prepare(
     ]);
     // Only lanes whose permissions allow bash can run the toolchain.
     if shell {
-        crate::launch::rust_tools(
-            input,
-            access,
-            &mut runtime_reads,
-            &mut tool_exec_roots,
-            &mut env,
-            &mut setup,
-        );
+        crate::launch::rust_tools(input, access, &mut tool_requirements, &mut env, &mut setup);
         crate::launch::node_tools(
             input.home,
             access,
             crate::launch::lane_cache(input),
-            &mut runtime_reads,
-            &mut tool_exec_roots,
+            &mut tool_requirements,
             &mut env,
         );
     }
@@ -261,13 +379,16 @@ fn prepare(
     ] {
         env.push((key.into(), "1".into()));
     }
-    Ok(LaunchSpec {
+    let mut spec = LaunchSpec {
         argv,
         env,
         stdin: Stdin::Bytes(input.prompt.text().as_bytes().to_vec()),
         secret_input: None,
         cwd: input.cwd.to_owned(),
         setup,
+        omitted_discovery,
+        user_skills: staged_skills,
+        tool_requirements,
         git_wrapper: Default::default(),
         profile: ProviderProfile {
             spec: ProviderProfileSpec {
@@ -300,7 +421,9 @@ fn prepare(
             observations: Default::default(),
         },
         stream,
-    })
+    };
+    crate::launch::prepare_tool_requirements(input, &mut spec);
+    Ok(spec)
 }
 
 /// The server's own cause for a failed HTTP request, from its log lines
@@ -996,7 +1119,7 @@ mod tests {
     }
 
     #[test]
-    fn read_only_search_grants_only_ripgrep_in_the_lane_cache() {
+    fn read_only_search_grants_cached_ripgrep_and_system_grep() {
         use provenant_confinement::permissions::{PathGrant, PathScope};
         use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
 
@@ -1056,7 +1179,10 @@ mod tests {
             spec.profile.spec.process_executables,
             [exact(input.executable), exact(input.provenant.git)]
         );
-        assert_eq!(spec.profile.spec.tool_exec_roots, std::slice::from_ref(&rg));
+        assert_eq!(
+            spec.profile.spec.tool_exec_roots,
+            [rg.clone(), exact("/usr/bin/grep")]
+        );
         // No shell toolchain leaks into a read-only lane.
         let path: Vec<_> = std::env::split_paths(&env("PATH").expect("PATH")).collect();
         assert!(!path.contains(&input.home.join(".cargo/bin")), "{path:?}");
@@ -1076,6 +1202,263 @@ mod tests {
         );
         // The private state grant is the read access ripgrep needs.
         assert!(profile.contains("(allow file-read* (subpath \"/fixture/provider-state\"))"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cached_search_library_grants_follow_content_and_exclude_lane_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::symlink;
+        use std::path::Path;
+
+        fn image(path: &Path, file_type: u32, dependencies: &[&Path]) -> std::io::Result<()> {
+            let mut bytes = vec![0; 32];
+            bytes[..4].copy_from_slice(&0xfeed_facf_u32.to_le_bytes());
+            bytes[12..16].copy_from_slice(&file_type.to_le_bytes());
+            bytes[16..20].copy_from_slice(&(dependencies.len() as u32).to_le_bytes());
+            for dependency in dependencies {
+                let name = dependency.to_str().unwrap().as_bytes();
+                let start = bytes.len();
+                let size = (24 + name.len() + 1).next_multiple_of(8);
+                bytes.extend(0xc_u32.to_le_bytes());
+                bytes.extend((size as u32).to_le_bytes());
+                bytes.extend(24_u32.to_le_bytes());
+                bytes.resize(start + 24, 0);
+                bytes.extend(name);
+                bytes.resize(start + size, 0);
+            }
+            std::fs::create_dir_all(path.parent().unwrap())?;
+            std::fs::write(path, bytes)
+        }
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let lane = root.join("lane");
+        let cwd = lane.join("repo");
+        let home = lane.join("home");
+        let first = root.join("host/arbitrary/first.dylib");
+        let second = root.join("host/other/second.dylib");
+        image(&first, 6, &[&second])?;
+        image(&second, 6, &[])?;
+        let alias = root.join("host/alias.dylib");
+        symlink(&first, &alias)?;
+        let denied = [
+            home.join("Documents/plain.txt"),
+            root.join("host/Cellar/plain.txt"),
+            home.join("fixture.dylib"),
+            lane.join("state/fixture.dylib"),
+            lane.join("scratch/fixture.dylib"),
+            cwd.join("fixture.dylib"),
+            root.join("host/.ssh/fixture.dylib"),
+            root.join("host/executable"),
+            root.join("host/directory"),
+        ];
+        // Already-covered images still contribute their own dependencies.
+        let hidden = root.join("host/hidden.dylib");
+        image(&hidden, 6, &[])?;
+        for path in &denied {
+            image(path, 6, &[&hidden])?;
+        }
+        std::fs::write(&denied[0], "plain text")?;
+        std::fs::write(&denied[1], "plain text")?;
+        image(&denied[7], 2, &[&hidden])?;
+        std::fs::remove_file(&denied[8])?;
+        std::fs::create_dir(&denied[8])?;
+        let cached = lane.join("state/cache/opencode/bin/rg");
+        let mut dependencies = vec![alias.as_path()];
+        dependencies.extend(denied.iter().map(|path| path.as_path()));
+        image(&cached, 2, &dependencies)?;
+        // A non-executable, unrelated rg earlier on PATH cannot suppress grants.
+        let host_bin = root.join("host/bin");
+        std::fs::create_dir_all(&host_bin)?;
+        std::fs::write(host_bin.join("rg"), "unrelated")?;
+        let plan = crate::tests::read_only_plan(lane.to_str().unwrap(), None);
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        let mut input = crate::tests::fixture_input(&route, &plan, &prompt, &cwd, None);
+        input.home = &home;
+        let host_var = |name: &str| (name == "PATH").then(|| host_bin.clone().into_os_string());
+        input.host_var = &host_var;
+        let spec = prepare(
+            &input,
+            Access::ReadOnly,
+            Session::Fresh,
+            OpenCode.stream(None)?,
+        )?;
+        let tool = spec
+            .prepared_tools()
+            .iter()
+            .find(|tool| tool.executable == cached)
+            .expect("cached rg has prepared closure facts");
+        assert_eq!(
+            tool.dependency_closure.outcome,
+            crate::ClosureOutcome::Incomplete
+        );
+        assert!(
+            tool.dependency_closure
+                .reasons
+                .iter()
+                .any(|reason| matches!(reason, crate::IncompleteReason::Malformed(_)))
+        );
+        for path in [&first, &second, &denied[2], &hidden] {
+            assert!(
+                tool.dependency_closure.libraries.contains(path),
+                "{}",
+                path.display()
+            );
+            assert_eq!(std::fs::canonicalize(path)?, *path);
+            assert!(
+                spec.profile
+                    .spec
+                    .runtime_reads
+                    .iter()
+                    .all(|grant| grant.scope
+                        != provenant_confinement::permissions::PathScope::Subtree
+                        || !path.starts_with(&grant.path))
+            );
+            assert!(
+                provenant_confinement::write_grants(plan.permissions(), &spec.profile)
+                    .iter()
+                    .all(|grant| !path.starts_with(&grant.path) && !grant.path.starts_with(path))
+            );
+        }
+        for path in [&denied[3], &denied[4], &denied[5]] {
+            assert!(
+                tool.dependency_closure.already_covered.contains(path),
+                "{}",
+                path.display()
+            );
+        }
+        assert!(
+            tool.dependency_closure
+                .omitted
+                .contains(&root.join("host/.ssh/fixture.dylib"))
+        );
+        assert!(
+            tool.dependency_closure
+                .reasons
+                .iter()
+                .any(|reason| matches!(
+                    reason, crate::IncompleteReason::OmittedCredential(path)
+                        if path == &root.join("host/.ssh/fixture.dylib")
+                ))
+        );
+        assert!(
+            !tool
+                .receipt()
+                .to_string()
+                .contains(&root.display().to_string())
+        );
+        let profile = provenant_confinement::permissions::snapshot::render(
+            plan.permissions(),
+            &spec.profile,
+            &home,
+        )?;
+        for path in [&first, &second, &denied[2], &hidden] {
+            assert!(
+                profile.contains(&format!(
+                    "(allow file-read* (literal \"{}\"))",
+                    path.display()
+                )),
+                "{}",
+                path.display()
+            );
+        }
+        for path in denied
+            .iter()
+            .enumerate()
+            .filter_map(|(index, path)| (index != 2).then_some(path))
+            .chain([&alias])
+        {
+            assert!(
+                !profile.contains(&format!(
+                    "(allow file-read* (literal \"{}\"))",
+                    path.display()
+                )),
+                "{}",
+                path.display()
+            );
+        }
+        assert!(!profile.contains("(allow process-exec (subpath"));
+        Ok(())
+    }
+
+    fn search_tool(path: &std::ffi::OsStr, required: bool) -> Result<Option<PathBuf>, String> {
+        let rg = std::env::split_paths(path)
+            .map(|dir| dir.join("rg"))
+            .find(|path| path.is_file());
+        if rg.is_none() {
+            provenant_test_support::missing_prerequisite(required, "rg for native search")?;
+        }
+        Ok(rg)
+    }
+
+    #[test]
+    fn missing_native_search_tool_obeys_required_control() {
+        let path = tempfile::tempdir().unwrap();
+        let error = search_tool(path.path().as_os_str(), true).unwrap_err();
+        assert!(error.contains("rg"));
+        assert_eq!(search_tool(path.path().as_os_str(), false).unwrap(), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn read_only_search_runs_in_native_profile() -> Result<(), Box<dyn std::error::Error>> {
+        let Some(rg) = search_tool(
+            &std::env::var_os("PATH").unwrap_or_default(),
+            std::env::var_os("PROVENANT_CONFINEMENT_REQUIRED").is_some(),
+        )?
+        else {
+            return Ok(());
+        };
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let cached = root.join("state/cache/opencode/bin/rg");
+        std::fs::create_dir_all(cached.parent().unwrap())?;
+        std::fs::copy(rg, &cached)?;
+        let plan = crate::tests::read_only_plan(root.to_str().unwrap(), None);
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        let mut input = crate::tests::fixture_input(&route, &plan, &prompt, &root, None);
+        input.host_var = &|name| std::env::var_os(name);
+        let spec = prepare(
+            &input,
+            Access::ReadOnly,
+            Session::Fresh,
+            OpenCode.stream(None)?,
+        )?;
+        let requirement = spec
+            .prepared_tools()
+            .iter()
+            .find(|tool| tool.executable == cached)
+            .expect("cached rg has prepared closure facts");
+        for library in &requirement.dependency_closure.libraries {
+            assert!(spec.profile.spec.runtime_reads.contains(&exact(library)));
+        }
+        let profile = provenant_confinement::permissions::snapshot::render(
+            plan.permissions(),
+            &spec.profile,
+            input.home,
+        )?;
+        for program in [cached.as_path(), std::path::Path::new("/usr/bin/grep")] {
+            let output = std::process::Command::new("/usr/bin/sandbox-exec")
+                .args(["-p", &profile])
+                .arg(program)
+                .arg("--version")
+                .output()?;
+            let diagnostic = String::from_utf8_lossy(&output.stderr);
+            if diagnostic.contains("sandbox_apply: Operation not permitted") {
+                provenant_test_support::skip_sandbox_dependent_test(diagnostic.to_string())?;
+                return Ok(());
+            }
+            assert!(
+                output.status.success(),
+                "{}: {diagnostic}",
+                program.display()
+            );
+        }
+        Ok(())
     }
 
     #[test]
@@ -1211,20 +1594,23 @@ mod tests {
                 link: bin.join("git"),
                 target: input.provenant.git.to_owned(),
             }));
-            // Read-only discovery enables only OpenCode's search binary; a
+            // Read-only discovery enables OpenCode's cached search binary and system grep; a
             // writer's toolchain roots follow the system and package roots.
             let roots = &spec.profile.spec.tool_exec_roots;
             if access == Access::ReadOnly {
                 assert_eq!(
                     roots,
-                    &[exact(
-                        plan.permissions()
-                            .private_state
-                            .as_ref()
-                            .unwrap()
-                            .path
-                            .join("cache/opencode/bin/rg")
-                    )]
+                    &[
+                        exact(
+                            plan.permissions()
+                                .private_state
+                                .as_ref()
+                                .unwrap()
+                                .path
+                                .join("cache/opencode/bin/rg")
+                        ),
+                        exact("/usr/bin/grep"),
+                    ]
                 );
             } else {
                 assert_eq!(
@@ -1361,6 +1747,11 @@ mod tests {
             fs::set_permissions(project_parent.join(name), fs::Permissions::from_mode(0o700))
                 .unwrap();
         }
+        let cached = project_parent.join("state/cache/opencode/bin/rg");
+        if access == Access::ReadOnly && std::path::Path::new("/opt/homebrew/bin/rg").is_file() {
+            fs::create_dir_all(cached.parent().unwrap()).unwrap();
+            fs::copy("/opt/homebrew/bin/rg", &cached).unwrap();
+        }
         let plan = crate::tests::read_only_plan(project_parent.to_str().unwrap(), None);
         let route = crate::tests::route("opencode", "fixture-model");
         let prompt = crate::Prompt::new("fixture".into());
@@ -1437,7 +1828,7 @@ mod tests {
     }
 
     #[test]
-    fn xdg_homes_follow_absolute_host_variables() {
+    fn xdg_data_home_follows_absolute_host_variable() {
         let plan = crate::tests::read_only_plan("/fixture", None);
         let route = crate::tests::route("opencode", "fixture-model");
         let prompt = crate::Prompt::new("fixture".into());
@@ -1469,7 +1860,7 @@ mod tests {
                 .find(|(name, _)| name == key)
                 .map(|(_, value)| value.clone())
         };
-        assert_eq!(env("XDG_CONFIG_HOME"), Some("/xdg/config".into()));
+        assert_eq!(env("XDG_CONFIG_HOME"), Some("/fixture/state/config".into()));
         // A relative XDG path is ignored, as the XDG base directory spec says.
         assert_eq!(
             env("XDG_DATA_HOME"),

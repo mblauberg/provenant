@@ -3,6 +3,7 @@ use provenant_fabric_runtime::read_roots::ReadRoots;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -11,6 +12,15 @@ const DEPTH: usize = 8;
 #[path = "preset_cli.rs"]
 mod presentation;
 
+#[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "integration fixtures include the preset module without unit tests"
+)]
+pub(super) fn human_for_test(data: &Value, full: bool) -> String {
+    presentation::human(data, full)
+}
+
 #[path = "preset_plan.rs"]
 pub mod planner;
 
@@ -18,6 +28,7 @@ mod panel;
 #[cfg(test)]
 #[allow(unused_imports, reason = "preset tests construct a selector result")]
 pub use panel::ShapeHint;
+pub(crate) use panel::format_family_group;
 pub use panel::{ShapeSelector, review_selector};
 
 #[derive(Default)]
@@ -25,7 +36,13 @@ pub struct Layers {
     /// Routing review shapes. Each review stage selects its own shape from its
     /// final `review_shape` and `risk_tier` parameters.
     pub review: Option<ShapeSelector>,
+    pub project_dir: Option<PathBuf>,
+    /// Launch directory, used to resolve relative worktree bindings.
+    pub launch_dir: Option<PathBuf>,
+    pub default_worktree: Option<PathBuf>,
     used_shapes: std::cell::RefCell<BTreeSet<String>>,
+    /// Bases of the deferred reviews this expansion emitted; a graph has one.
+    review_bases: std::cell::RefCell<BTreeSet<String>>,
     /// The role library: bundled roles, then user and repository `roles.toml`.
     pub roles: RoleLibrary,
     /// Named routes the routing configuration defines. `None` skips the
@@ -34,6 +51,7 @@ pub struct Layers {
     used_roles: std::cell::RefCell<BTreeMap<String, Value>>,
     pub substitutions: std::cell::RefCell<Vec<Value>>,
     warnings: std::cell::RefCell<Vec<String>>,
+    spec_contexts: std::cell::RefCell<BTreeMap<String, Option<String>>>,
     entries: BTreeMap<String, Vec<(String, Value)>>,
     errors: BTreeMap<String, Vec<String>>,
     repo_files: BTreeSet<String>,
@@ -875,9 +893,11 @@ pub fn expand_with(
                 .map(|expansion| expansion.document["nodes"].clone())
         });
     layers.used_shapes.borrow_mut().clear();
+    layers.review_bases.borrow_mut().clear();
     layers.used_roles.borrow_mut().clear();
     layers.substitutions.borrow_mut().clear();
     layers.warnings.borrow_mut().clear();
+    layers.spec_contexts.borrow_mut().clear();
     let mut repo_files = Vec::new();
     let (mut config, mut origins) = layers.resolve_inner(name, &mut Vec::new(), &mut repo_files)?;
     for (key, value) in params {
@@ -956,8 +976,20 @@ pub fn expand_with(
     .to_string();
     let id = format!("preset-{}", &digest[7..39]);
     check_expansion(&nodes, "", 0)?;
-    check_selections(&nodes)?;
+    let bases = layers.review_bases.take();
+    if bases.len() > 1 {
+        return Err(format!(
+            "preset {name}: review stages disagree on the base ({}); a graph has one review base",
+            bases.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    // A graph that states a review field, including the document-level review
+    // base, is schema 2: the runtime refuses a v1 document that carries one.
+    // Every other preset keeps its v1 document and digest.
     let mut document = json!({"schema_version":1,"graph_id":id,"context":{"preset":name,"pattern":name},"nodes":nodes});
+    if let Some(base) = bases.into_iter().next() {
+        document["review_base"] = json!(base);
+    }
     let parameters = flatten_parameters(
         name,
         config.get("parameters").unwrap_or(&json!({})),
@@ -1012,6 +1044,11 @@ pub fn expand_with(
     if let Some(decision) = &plan {
         document["provenance"]["plan"] = decision.to_json();
     }
+    let typed: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(document.clone()).map_err(|error| error.to_string())?;
+    document["schema_version"] = json!(provenant_fabric_runtime::graph::minimum_schema_version(
+        &typed
+    ));
     if serde_json::to_vec(&document)
         .map_err(|e| e.to_string())?
         .len()
@@ -1295,6 +1332,114 @@ fn selected_inputs(deps: &[String], outputs: &Value) -> Value {
     )
 }
 
+fn spec_context(layers: &Layers, parameters: &Value) -> Option<String> {
+    let key = json!([
+        parameters.get("spec"),
+        parameters.get("worktree"),
+        parameters.get("spec_max_bytes")
+    ])
+    .to_string();
+    if let Some(context) = layers.spec_contexts.borrow().get(&key) {
+        return context.clone();
+    }
+    let context = read_spec_context(layers, parameters);
+    layers
+        .spec_contexts
+        .borrow_mut()
+        .insert(key, context.clone());
+    context
+}
+
+fn read_spec_context(layers: &Layers, parameters: &Value) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let spec = parameters.get("spec")?.as_str()?.trim();
+    if spec.is_empty()
+        || spec
+            .trim_start_matches('#')
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let cap = parameters.get("spec_max_bytes")?.as_u64()? as usize;
+    let project = layers
+        .project_dir
+        .clone()
+        .or_else(|| std::env::current_dir().ok())?;
+    let worktree = parameters
+        .get("worktree")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| layers.default_worktree.clone());
+    let path = Path::new(spec);
+    let launch = layers.launch_dir.as_deref().unwrap_or(&project);
+    let mut candidates: Vec<_> = worktree
+        .into_iter()
+        .map(|w| launch.join(w).join(path))
+        .chain(std::iter::once(project.join(path)))
+        .collect();
+    if let Some(main) = project_worktrees(&project).first() {
+        let candidate = main.join(path);
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+    let mut errors = Vec::new();
+    for candidate in candidates {
+        let error = match std::fs::File::open(&candidate) {
+            Ok(mut file) => {
+                let mut hash = Sha256::new();
+                let mut excerpt = Vec::new();
+                let mut buffer = [0u8; 8192];
+                let result = loop {
+                    match file.read(&mut buffer) {
+                        Ok(0) => break Ok(()),
+                        Ok(n) => {
+                            hash.update(&buffer[..n]);
+                            let take = n.min(cap.saturating_sub(excerpt.len()));
+                            excerpt.extend_from_slice(&buffer[..take]);
+                        }
+                        Err(e) => break Err(e),
+                    }
+                };
+                if let Err(error) = result {
+                    error
+                } else {
+                    let digest: String = hash
+                        .finalize()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect();
+                    let mut text = String::from_utf8_lossy(&excerpt).into_owned();
+                    if text.len() > cap {
+                        let mut end = cap;
+                        while !text.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        text.truncate(end);
+                    }
+                    return Some(format!(
+                        "\n\nSpec file: {} (sha256:{digest}; excerpt up to {cap} bytes)\n{text}",
+                        candidate.display()
+                    ));
+                }
+            }
+            Err(e) => e,
+        };
+        errors.push(format!("{}: {error}", candidate.display()));
+    }
+    let warning = format!(
+        "spec file '{spec}' could not be read: {}; pass an issue-number spec instead",
+        errors.join("; ")
+    );
+    let mut warnings = layers.warnings.borrow_mut();
+    if !warnings.contains(&warning) {
+        warnings.push(warning);
+    }
+    None
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "leaf lowering shares the preset's layers, roles and parameters"
@@ -1382,6 +1527,7 @@ fn lower_leaf(
             "continues",
             "land",
             "retry",
+            "family_group",
         ]
         .contains(&key.as_str())
         {
@@ -1389,6 +1535,15 @@ fn lower_leaf(
         }
     }
     map.insert("id".into(), json!(id));
+    // Carry the preset's diff reference to read-only graph nodes.
+    if map.get("access").and_then(Value::as_str) == Some("read_only")
+        && let Some(base) = parameters
+            .get("base")
+            .and_then(Value::as_str)
+            .filter(|base| !base.is_empty())
+    {
+        map.insert("review_base".into(), json!(base));
+    }
     // An empty land session, such as an unset decision session, means unset.
     if let Some(land) = map.get_mut("land").and_then(Value::as_object_mut)
         && land.get("session").is_some_and(|session| session == "")
@@ -1490,6 +1645,13 @@ fn lower_leaf(
         }
         map.insert("prompt".into(), json!(brief));
     }
+    if role.is_some_and(|role| {
+        role.starts_with("lens.") || role.starts_with("review.") || role == "plan.review"
+    }) && let Some(context) = spec_context(layers, parameters)
+    {
+        let brief = map.get("prompt").and_then(Value::as_str).unwrap_or(prompt);
+        map.insert("prompt".into(), json!(format!("{brief}{context}")));
+    }
     match family.as_ref().and_then(Value::as_str) {
         None | Some("" | "any") => {}
         Some("cross_preferred" | "cross_required") => {
@@ -1559,6 +1721,7 @@ fn lower_leaf(
     if let Some(requested) = map.get("tier").and_then(Value::as_str).map(str::to_owned)
         && let Some(fallback) = fallback_tier.as_ref().and_then(Value::as_str)
         && let Some(routes) = &layers.known_routes
+        && !requested.contains('/')
         && !routes.contains(&requested)
         && requested != fallback
     {
@@ -1592,6 +1755,7 @@ fn lower_leaf(
             }
         }
     }
+    let input_dependencies = dependencies.clone();
     if let Some(source) = map
         .get("source")
         .filter(|source| source["type"] == "node")
@@ -1625,36 +1789,47 @@ fn lower_leaf(
                     .cloned()
                     .unwrap_or_else(|| json!("senior"))
             });
-            if route.is_array() {
-                if effort.is_some() {
-                    return Err(format!(
-                        "node {id}: route lists cannot be combined with effort"
-                    ));
-                }
-                map.insert("routes".into(), route);
-            } else {
-                let mut route = match route {
-                    Value::String(name) if !name.is_empty() => json!({"alias":name}),
-                    Value::Object(_) => route,
-                    _ => {
-                        return Err(format!(
-                            "node {id}: tier must be a name, route table or route list"
-                        ));
-                    }
-                };
-                if let Some(effort) = effort {
-                    route["effort"] = effort;
-                }
-                map.insert("route".into(), route);
-            }
+            let read_only = map.get("access").is_none_or(|access| access == "read_only");
+            let (key, value) = tier_route(id, &route, effort.as_ref(), read_only)?;
+            map.insert(key.into(), value);
         }
     } else {
         map.remove("tier");
         map.remove("effort");
     }
     let outputs = map.remove("outputs").unwrap_or_else(|| json!(["result"]));
-    if !deps.is_empty() && !map.contains_key("inputs") && !control {
-        map.insert("inputs".into(), selected_inputs(deps, &outputs));
+    if !control
+        && (!deps.is_empty() || (map.contains_key("dispositions") && !dependencies.is_empty()))
+    {
+        if !map.contains_key("inputs") {
+            map.insert(
+                "inputs".into(),
+                selected_inputs(&input_dependencies, &outputs),
+            );
+        }
+        if map.contains_key("dispositions") {
+            let inputs = map
+                .get_mut("inputs")
+                .and_then(Value::as_array_mut)
+                .ok_or("inputs must be an array")?;
+            for input in inputs.iter_mut() {
+                let outputs = input
+                    .get_mut("outputs")
+                    .and_then(Value::as_array_mut)
+                    .ok_or("input outputs must be an array")?;
+                if !outputs.iter().any(|output| output == "findings") {
+                    outputs.push(json!("findings"));
+                }
+            }
+            for dep in &dependencies {
+                if !inputs
+                    .iter()
+                    .any(|input| input.get("node").and_then(Value::as_str) == Some(dep))
+                {
+                    inputs.push(json!({"node": dep, "outputs": ["findings"]}));
+                }
+            }
+        }
     }
     if map.get("worktree").is_some_and(|value| value == "") {
         map.remove("worktree");
@@ -1704,6 +1879,74 @@ fn lower_leaf(
         }
     }
     Ok(node)
+}
+
+/// Lower a tier (a pool name, an exact `ADAPTER/ID[@effort]`, a route table or
+/// a route list) to the `route` or `routes` entry a node carries. A read-only
+/// pool name repeats once, so a usage-limited first member falls back to the
+/// next resolution. Writers keep one entry. A route table that names neither
+/// an alias nor an adapter and model is refused rather than dropped.
+pub(crate) fn tier_route(
+    id: &str,
+    tier: &Value,
+    effort: Option<&Value>,
+    read_only: bool,
+) -> Result<(&'static str, Value), String> {
+    if tier.is_array() {
+        if effort.is_some() {
+            return Err(format!(
+                "node {id}: route lists cannot be combined with effort"
+            ));
+        }
+        return Ok(("routes", tier.clone()));
+    }
+    let mut route = match tier {
+        Value::String(name) if !name.is_empty() => {
+            if let Some((adapter, model)) = name.split_once('/') {
+                let (model, embedded_effort) = model
+                    .split_once('@')
+                    .map_or((model, None), |(model, effort)| (model, Some(effort)));
+                if adapter.is_empty() || model.is_empty() || embedded_effort == Some("") {
+                    return Err(format!("node {id}: invalid exact-model tier {name}"));
+                }
+                if embedded_effort.is_some() && effort.is_some() {
+                    return Err(format!(
+                        "node {id}: exact-model tier and effort both specify effort"
+                    ));
+                }
+                let mut route = json!({"adapter":adapter,"model":model});
+                if let Some(embedded_effort) = embedded_effort {
+                    route["effort"] = json!(embedded_effort);
+                }
+                route
+            } else {
+                json!({"alias":name})
+            }
+        }
+        Value::Object(table) => {
+            let named = |key: &str| table.get(key).is_some_and(|value| value.is_string());
+            if !named("alias") && !(named("adapter") && named("model")) {
+                return Err(format!(
+                    "node {id}: route table needs an alias, or an adapter and a model"
+                ));
+            }
+            tier.clone()
+        }
+        _ => {
+            return Err(format!(
+                "node {id}: tier must be a name, route table or route list"
+            ));
+        }
+    };
+    if let Some(effort) = effort {
+        route["effort"] = effort.clone();
+    }
+    let alias_only = route.get("alias").is_some() && route.get("model").is_none();
+    if read_only && alias_only {
+        Ok(("routes", json!([route.clone(), route])))
+    } else {
+        Ok(("route", route))
+    }
 }
 
 #[allow(
@@ -1934,6 +2177,7 @@ impl StageBuilder<'_> {
             object.remove("for_each");
             object.remove("id");
             let fallback_stage = object.remove("fallback_stage");
+            let distinct_families = object.remove("distinct_families");
             let outputs = interpolate(
                 object.get("outputs").unwrap_or(&json!(["result"])),
                 &self.parameters,
@@ -2108,28 +2352,50 @@ impl StageBuilder<'_> {
                     .as_array()
                     .filter(|entries| !entries.is_empty())
                     .ok_or("parallel must be a nonempty array")?;
-                let mut children = Vec::new();
-                let mut ends = Vec::new();
-                for (position, entry) in entries.iter().enumerate() {
-                    ends.extend(self.entry(
-                        entry,
-                        &format!("p{}", position + 1),
-                        &[],
-                        &mut children,
-                        depth + 1,
-                    )?);
+                if let Some(deferred) =
+                    self.deferred_review(&id, entries, &object, deps, &outputs, depth, nodes)?
+                {
+                    object.remove("min_successful");
+                    object.remove("exports");
+                    (deferred, true)
+                } else {
+                    let mut children = Vec::new();
+                    let mut ends = Vec::new();
+                    for (position, entry) in entries.iter().enumerate() {
+                        ends.extend(self.entry(
+                            entry,
+                            &format!("p{}", position + 1),
+                            &[],
+                            &mut children,
+                            depth + 1,
+                        )?);
+                    }
+                    let exports = object
+                        .remove("exports")
+                        .unwrap_or_else(|| selected_inputs(&ends, &json!(["result", "findings"])));
+                    let min_successful = object
+                        .remove("min_successful")
+                        .map(|value| {
+                            if value.as_str() == Some("${min_lenses}") {
+                                let requested =
+                                    interpolate(&value, &self.parameters, self.prompt, 1)?
+                                        .as_u64()
+                                        .ok_or("min_lenses must be a non-negative integer")?;
+                                Ok(if requested == 0 {
+                                    ends.len().saturating_sub(1).max(1) as u64
+                                } else {
+                                    requested
+                                })
+                            } else {
+                                self.minimum_successful(&value)
+                            }
+                        })
+                        .transpose()?;
+                    (
+                        composite(&id, children, exports, deps, &outputs, min_successful),
+                        true,
+                    )
                 }
-                let exports = object
-                    .remove("exports")
-                    .unwrap_or_else(|| selected_inputs(&ends, &json!(["result", "findings"])));
-                let min_successful = object
-                    .remove("min_successful")
-                    .map(|value| self.minimum_successful(&value))
-                    .transpose()?;
-                (
-                    composite(&id, children, exports, deps, &outputs, min_successful),
-                    true,
-                )
             } else if let Some(stages) = object.remove("stages") {
                 let mut children = Vec::new();
                 let ends = self.sequence(&stages, "", &[], &mut children, depth + 1)?;
@@ -2155,6 +2421,25 @@ impl StageBuilder<'_> {
                     false,
                 )
             };
+            // Siblings of a fan-out prefer different model families. It is a
+            // preference only: every branch still runs.
+            if let Some(flag) = distinct_families {
+                let on = interpolate(&flag, &self.parameters, self.prompt, index as usize)?;
+                match on {
+                    Value::Bool(true) if !decorate_wrapper => {
+                        if count > 1 {
+                            node["family_group"] = json!(base);
+                        }
+                    }
+                    Value::Bool(false) => {}
+                    Value::String(ref text) if text.is_empty() => {}
+                    _ => {
+                        return Err(format!(
+                            "stage {id}: distinct_families must be a boolean on a leaf stage"
+                        ));
+                    }
+                }
+            }
             if decorate_wrapper {
                 object.remove("outputs");
                 for key in object.keys() {
@@ -2318,103 +2603,6 @@ fn composite(
     node
 }
 
-/// Output kinds a node can supply. Every node reports a result, findings, a
-/// verdict and the remaining window. `commit` needs write access or a pinned
-/// source (its own or inherited from an enclosing composite); `branch` needs
-/// write access, since a read-only node has no delivery receipt. Loops settle
-/// with a verdict only, and a composite supplies what it exports.
-fn produced(node: &Value, inherited: bool) -> Vec<String> {
-    if let Some(exports) = node.pointer("/composite/exports").and_then(Value::as_array) {
-        let mut kinds: Vec<String> = Vec::new();
-        for kind in exports
-            .iter()
-            .filter_map(|export| export["outputs"].as_array())
-            .flatten()
-            .filter_map(Value::as_str)
-        {
-            if !kinds.iter().any(|known| known == kind) {
-                kinds.push(kind.into());
-            }
-        }
-        return kinds;
-    }
-    let mut kinds: Vec<String> = ["result", "findings", "verdict", "remaining"]
-        .map(String::from)
-        .into();
-    if node["kind"] == "loop" {
-        return kinds;
-    }
-    let writes = node["access"] != "read_only" && !node["access"].is_null();
-    let sourced = inherited || node.get("source").is_some_and(|s| !s.is_null());
-    if writes || node["kind"] == "land" {
-        kinds.push("branch".into());
-    }
-    if writes || sourced || node["kind"] == "land" {
-        kinds.push("commit".into());
-    }
-    kinds
-}
-
-/// Nodes visible to a selection: the sibling list first, then enclosing scopes,
-/// each node paired with whether it inherits a pinned source.
-type Scope<'a> = Vec<(&'a Value, bool)>;
-
-fn check_selection(owner: &str, selected: &Value, scope: &Scope) -> Result<(), String> {
-    let Some(target) = selected["node"].as_str() else {
-        return Ok(());
-    };
-    // `previous.X` names body node X of the loop's earlier round.
-    let target = target.strip_prefix("previous.").unwrap_or(target);
-    let Some((source, inherited)) = scope.iter().find(|(node, _)| node["id"] == target) else {
-        return Ok(());
-    };
-    let available = produced(source, *inherited);
-    for kind in selected["outputs"].as_array().into_iter().flatten() {
-        let kind = kind.as_str().unwrap_or_default();
-        if !available.iter().any(|known| known == kind) {
-            return Err(format!(
-                "{owner} selects {kind} from {target}, which supplies only {}",
-                available.join(", ")
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Refuse an input or export that selects an output its source cannot
-/// supply, naming both nodes.
-fn check_selections(nodes: &[Value]) -> Result<(), String> {
-    check_scope(nodes, &Vec::new(), false)
-}
-
-fn check_scope<'a>(nodes: &'a [Value], outer: &Scope<'a>, inherited: bool) -> Result<(), String> {
-    let mut scope: Scope = nodes.iter().map(|node| (node, inherited)).collect();
-    scope.extend(outer.iter().copied());
-    for node in nodes {
-        let id = node["id"].as_str().unwrap_or_default();
-        for input in node["inputs"].as_array().into_iter().flatten() {
-            check_selection(&format!("node {id}"), input, &scope)?;
-        }
-        let pinned = inherited || node.get("source").is_some_and(|s| !s.is_null());
-        if let Some(children) = node.pointer("/composite/nodes").and_then(Value::as_array) {
-            let inner: Scope = children.iter().map(|child| (child, pinned)).collect();
-            for export in node
-                .pointer("/composite/exports")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-            {
-                check_selection(&format!("composite {id} export"), export, &inner)?;
-            }
-            check_scope(children, &scope, pinned)?;
-        }
-        if let Some(children) = node.pointer("/loop/body").and_then(Value::as_array) {
-            check_scope(children, &scope, pinned)?;
-        }
-    }
-    Ok(())
-}
-
 fn check_expansion(nodes: &[Value], prefix: &str, depth: usize) -> Result<usize, String> {
     if depth > DEPTH {
         return Err(format!("preset composition depth exceeds {DEPTH}"));
@@ -2481,7 +2669,7 @@ fn configured(globals: &provenant_cli::Globals) -> Result<Layers, String> {
 fn report(command: &str, result: Result<Value, String>, globals: &provenant_cli::Globals) -> u8 {
     match result {
         Ok(data) => {
-            let human = presentation::human(&data);
+            let human = presentation::human(&data, globals.full);
             let summary = provenant_cli::Summary::verbatim(&human, None);
             crate::emit_summarised(
                 &provenant_records::CommandResult::new(
@@ -2714,6 +2902,19 @@ pub(crate) fn bind_run_context(
         let container = node.get("composite").is_some() || node.get("loop").is_some();
         if !container && !matches!(node["kind"].as_str(), Some("gate" | "land" | "decide")) {
             let writer = node["access"] == "worktree_write";
+            // A deferred review measures in the bound worktree unless it names one.
+            if let Some(worktree) = &request.access.worktree
+                && node.get("review").is_some_and(Value::is_object)
+                && node["review"]["worktree"]
+                    .as_str()
+                    .is_none_or(str::is_empty)
+            {
+                node["review"]["worktree"] = json!(if worktree.is_absolute() {
+                    worktree.clone()
+                } else {
+                    directory.join(worktree)
+                });
+            }
             if writer
                 && node
                     .get("worktree")
@@ -2836,6 +3037,19 @@ pub(crate) fn bind_run_context(
             .map(|oid| oid.to_string())
             .unwrap_or_else(|_| "absent".into());
         identity.extend_from_slice(format!("\nintegration-head:{head}").as_bytes());
+    }
+    // `--fresh` makes this run a new graph even when its inputs are unchanged,
+    // for example to rerun after a cancel.
+    if request.fresh {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        use provenant_core::Clock;
+        let nanos = provenant_os::clock::SystemClock::new()
+            .wall_now()
+            .map_or(0, |now| now.as_timestamp().as_nanosecond());
+        let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        identity.extend_from_slice(
+            format!("\nfresh:{nanos}:{}:{count}", std::process::id()).as_bytes(),
+        );
     }
     let digest = provenant_records::CanonicalV1::file_digest(&identity).to_string();
     let graph_id = format!("preset-{}", &digest[7..39]);
@@ -3020,12 +3234,82 @@ fn family(node: &Value) -> String {
     }
 }
 
+pub(super) fn pending_checks(document: &Value) -> Vec<Value> {
+    let mut ids = BTreeSet::new();
+    fn walk(nodes: &[Value], ids: &mut BTreeSet<String>) {
+        for node in nodes {
+            if node
+                .get("source")
+                .and_then(Value::as_object)
+                .is_some_and(|source| source.get("type").and_then(Value::as_str) != Some("commit"))
+            {
+                ids.insert("source".into());
+            }
+            if node["access"] == "worktree_write" {
+                ids.insert("worktree".into());
+            }
+            if node["kind"] == "plan" {
+                ids.insert("planner_authority".into());
+            }
+            let kind = node["kind"].as_str();
+            let agent = !matches!(
+                kind,
+                Some("composite" | "loop" | "land" | "gate" | "decide")
+            );
+            if agent {
+                ids.insert("route_readiness".into());
+            }
+            for key in ["composite", "loop"] {
+                if let Some(children) = node
+                    .pointer(&format!("/{key}/nodes"))
+                    .or_else(|| node.pointer(&format!("/{key}/body")))
+                    .and_then(Value::as_array)
+                {
+                    walk(children, ids);
+                }
+            }
+        }
+    }
+    walk(
+        document["nodes"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default(),
+        &mut ids,
+    );
+    if document["delivery"]
+        .as_str()
+        .is_some_and(|d| d == "pr" || d.starts_with("integrate:"))
+        || document["nodes"].as_array().into_iter().flatten().any(|n| {
+            n["delivery"]
+                .as_str()
+                .is_some_and(|d| d == "pr" || d.starts_with("integrate:"))
+        })
+    {
+        ids.insert("delivery_target".into());
+    }
+    ids.into_iter()
+        .map(|id| {
+            let reason = match id.as_str() {
+                "source" => "Source binding must be resolved and verified at execution.",
+                "worktree" => "Writer worktree ownership is checked at execution.",
+                "delivery_target" => "Delivery target is checked before delivery.",
+                "planner_authority" => "Planner authority is checked when the plan runs.",
+                _ => "Route readiness and quota are checked before launch.",
+            };
+            json!({"id":id,"reason":reason})
+        })
+        .collect()
+}
+
 fn explain_tree(nodes: &[Value], indent: usize, text: &mut String) {
     for node in nodes {
         let field = |name: &str| node.get(name).and_then(Value::as_str).unwrap_or("-");
         let tier = node
             .pointer("/route/alias")
             .or_else(|| node.pointer("/route/model"))
+            .or_else(|| node.pointer("/routes/0/alias"))
+            .or_else(|| node.pointer("/routes/0/model"))
             .and_then(Value::as_str)
             .unwrap_or("-");
         text.push_str(&format!(
@@ -3112,17 +3396,34 @@ fn explain(
         let document: provenant_fabric_runtime::graph::GraphDocument =
             serde_json::from_value(expansion.document.clone()).map_err(|e| e.to_string())?;
         let limits = config.domains.fabric.graph.limits.clone();
+        let admission = document.admit(&limits);
         let inspection = document.inspect(&limits);
-        Ok((limits, inspection))
+        Ok((limits, admission, inspection))
     })();
-    let (limits, metrics, validation_error) = match inspection {
-        Ok((limits, Ok(metrics))) => (json!(limits), json!(metrics), Value::Null),
-        Ok((limits, Err(error))) => (json!(limits), Value::Null, json!(error)),
-        Err(error) => (Value::Null, Value::Null, json!(error)),
+    let (limits, admission, metrics) = match inspection {
+        Ok((limits, Ok(()), Ok(metrics))) => {
+            (json!(limits), json!({"status":"admitted"}), json!(metrics))
+        }
+        Ok((limits, Err(reason), metrics)) => (
+            json!(limits),
+            json!({"status":"refused","reason":reason}),
+            metrics.map_or(Value::Null, |m| json!(m)),
+        ),
+        Ok((limits, Ok(()), Err(reason))) => (
+            json!(limits),
+            json!({"status":"admitted"}),
+            json!({"unavailable":reason}),
+        ),
+        Err(error) => (
+            Value::Null,
+            json!({"status":"refused","reason":error}),
+            Value::Null,
+        ),
     };
+    let pending = pending_checks(&expansion.document);
     let mut human = format!(
-        "Graph {}\nLimits: {}\nExecution: {}\n",
-        expansion.document["graph_id"], limits, metrics
+        "Graph {}\nLimits: {}\nAdmission: {}\nInspection: {}\n",
+        expansion.document["graph_id"], limits, admission, metrics
     );
     if let Some(context) = expansion.document.get("context") {
         human.push_str(&format!(
@@ -3140,8 +3441,8 @@ fn explain(
             human.push_str(&format!("Planner route: {}\n", decision.route));
         }
     }
-    if !validation_error.is_null() {
-        human.push_str(&format!("Requires configuration: {validation_error}\n"));
+    for item in &pending {
+        human.push_str(&format!("Pending {}: {}\n", item["id"], item["reason"]));
     }
     if let Some(nodes) = expansion.document["nodes"].as_array() {
         explain_tree(nodes, 0, &mut human);
@@ -3168,7 +3469,7 @@ fn explain(
     for warning in &expansion.warnings {
         human.push_str(&format!("Warning: {warning}\n"));
     }
-    let mut data = json!({"roles": expansion.roles, "substitutions": expansion.substitutions, "graph": expansion.document, "origins": expansion.origins, "limits":limits,"execution":metrics,"validation_error":validation_error,"review_shape":expansion.review_shape,"plan":expansion.plan.as_ref().map(planner::Decision::to_json)});
+    let mut data = json!({"roles": expansion.roles, "substitutions": expansion.substitutions, "graph": expansion.document, "origins": expansion.origins, "limits":limits,"admission":admission,"inspection":metrics,"pending":pending,"review_shape":expansion.review_shape,"plan":expansion.plan.as_ref().map(planner::Decision::to_json)});
     if !brief_warnings.is_empty() {
         data["warnings"] = json!(brief_warnings);
     }
@@ -3380,6 +3681,16 @@ pub fn run(
             None => Vec::new(),
         };
         let mut layers = configured(globals)?;
+        layers.launch_dir = Some(directory.clone());
+        // Default project selection may be a subdirectory of a checkout.
+        layers.project_dir = Some(
+            provenant_os::git::repository_path(
+                &directory,
+                provenant_os::git::RepositoryPath::Toplevel,
+            )
+            .unwrap_or_else(|_| directory.clone()),
+        );
+        layers.default_worktree = request.access.worktree.clone();
         let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
         layers.known_routes = Some(config.domains.routing.route_names(&catalogue));
         {

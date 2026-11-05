@@ -313,7 +313,7 @@ fn brief_read_root_warnings_skips_root_ancestors_and_home_and_warns_on_outside_f
     // Acceptance 1: A brief containing `/` and the parent of the worktree gives no warning.
     let worktree_parent = project.parent().ok_or("worktree parent")?;
     let brief = format!(
-        "Inspect `/` and `{}` and `~` and `~/`; do not touch them.",
+        "Inspect `/` and `{}` and `~` and `~/`.",
         worktree_parent.display()
     );
     let warnings = super::brief_read_root_warnings(&brief, &project, None, &[], &home);
@@ -343,6 +343,47 @@ fn brief_read_root_warnings_skips_root_ancestors_and_home_and_warns_on_outside_f
         "explicit root ancestor warned: {warnings:?}"
     );
 
+    Ok(())
+}
+
+#[test]
+fn brief_read_root_warnings_skip_prohibited_lines_only() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let project = root.join("project");
+    let home = root.join("home");
+    let outside = root.join("outside");
+    std::fs::create_dir_all(&project)?;
+    std::fs::create_dir_all(home.join(".gemini"))?;
+    std::fs::write(&outside, "outside")?;
+    let forbidden_tmp = home.join("tmp");
+    std::fs::create_dir_all(&forbidden_tmp)?;
+
+    let brief = format!(
+        "Never touch ~/.gemini or write to {}.",
+        forbidden_tmp.display()
+    );
+    assert!(super::brief_read_root_warnings(&brief, &project, None, &[], &home).is_empty());
+
+    for phrase in [
+        "NEVER",
+        "Do Not",
+        "DON'T",
+        "Must Not",
+        "Not Allowed",
+        "FORBIDDEN",
+    ] {
+        let brief = format!("{phrase} read ~/.gemini\nRead {}", outside.display());
+        let warnings = super::brief_read_root_warnings(&brief, &project, None, &[], &home);
+        assert_eq!(warnings.len(), 1, "{phrase}: {warnings:?}");
+        assert!(warnings[0].contains(&outside.display().to_string()));
+    }
+
+    let brief = format!("Read {} whenever needed", outside.display());
+    assert_eq!(
+        super::brief_read_root_warnings(&brief, &project, None, &[], &home).len(),
+        1
+    );
     Ok(())
 }
 
@@ -614,6 +655,42 @@ fn model_policy_results_check_sections_and_bound_continuations()
             .is_none()
     );
     record.continuation = None;
+    // Failed, uncommitted and input-required outcomes cannot escalate even
+    // when their result fails the quality check.
+    for outcome in [
+        run::Outcome::Failed,
+        run::Outcome::Uncommitted,
+        run::Outcome::InputRequired,
+    ] {
+        decoded.outcome = outcome;
+        assert!(
+            model_assessment(&gemini, task, &record, &decoded, record.attempt_number)?
+                .retry
+                .is_none()
+        );
+    }
+    decoded.outcome = run::Outcome::Succeeded;
+    decoded.complete = false;
+    assert!(
+        model_assessment(&gemini, task, &record, &decoded, record.attempt_number)?
+            .retry
+            .is_none()
+    );
+    decoded.complete = true;
+    let mut pinned = task.clone();
+    pinned.account = Some("work".into());
+    assert!(
+        model_assessment(&gemini, &pinned, &record, &decoded, record.attempt_number)?
+            .retry
+            .is_none()
+    );
+    let mut writer = task.clone();
+    writer.access.write_roots.push(temp.path().to_owned());
+    assert!(
+        model_assessment(&gemini, &writer, &record, &decoded, record.attempt_number)?
+            .retry
+            .is_none()
+    );
     decoded.result = "unstructured answer".into();
     let decision = model_assessment(&gemini, task, &record, &decoded, record.attempt_number)?;
     assert!(decision.refusal.is_none() && decision.retry.is_none());
@@ -721,175 +798,6 @@ fn model_policy_results_check_sections_and_bound_continuations()
     Ok(())
 }
 #[test]
-fn an_alternate_account_is_spent_only_by_routing_rule_or_a_live_refusal()
--> Result<(), Box<dyn std::error::Error>> {
-    use provenant_quota::{AccountRecord, AccountScope, QuotaSnapshot, QuotaStatus, QuotaWindow};
-    use std::os::unix::fs::PermissionsExt;
-    let temp = tempfile::tempdir()?;
-    let state = temp.path().canonicalize()?.join("state");
-    std::fs::create_dir_all(&state)?;
-    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
-    let model = ModelId::parse("codex/gpt-6-luna")?;
-    let now = 1_800_000_000;
-    let scope = |key: &str| AccountScope {
-        adapter: "codex".into(),
-        account_key: key.into(),
-        label: key.into(),
-    };
-    let exhausted = |key: &str, resets: i64| {
-        let mut record = AccountRecord::empty(scope(key));
-        record.snapshot = Some(QuotaSnapshot {
-            schema_version: 1,
-            account: scope(key),
-            revision: 0,
-            status: QuotaStatus::Exhausted,
-            observed_unix_seconds: now - 7_200,
-            source_ref: "fixture".into(),
-            authority_ref: None,
-            windows: vec![QuotaWindow {
-                pool: "seven_day".into(),
-                window_seconds: Some(604_800),
-                used_basis_points: 10_000,
-                resets_unix_seconds: Some(resets),
-            }],
-            details: None,
-        });
-        record
-    };
-    let keys = ["work", "other"];
-    let catalogue = provenant_routing::Catalogue::bundled()?;
-    let policies = provenant_providers::quota_policies(provenant_providers::REGISTRY);
-    let alternative = |quota: &[AccountRecord]| {
-        unspent_alternative(keys, quota, &policies, "work", &model, &catalogue, now)
-    };
-    // Unknown is not spent.
-    assert!(alternative(&[]));
-    // An exhausted reading binds until its full windows reset, as routing has it.
-    assert!(!alternative(&[exhausted("other", now + 3_600)]));
-    assert!(alternative(&[exhausted("other", now - 60)]));
-    // A live refusal recorded by a settlement, read back from the cache.
-    crate::quota::persist_provider_refusal(
-        &state,
-        &run::RouteRecord {
-            provider: Some("codex".into()),
-            model: Some("codex/gpt-6-luna".into()),
-            account_key: Some("other".into()),
-            account_label: Some("other".into()),
-            ..Default::default()
-        },
-        None,
-        now - 60,
-        None,
-    )?;
-    let cache = crate::quota::read_cache_at(&state)?;
-    assert!(!alternative(&cache));
-    // It holds only that model, and only for its hour.
-    let other = ModelId::parse("codex/gpt-6.1-sol")?;
-    assert!(unspent_alternative(
-        keys, &cache, &policies, "work", &other, &catalogue, now
-    ));
-    assert!(unspent_alternative(
-        keys,
-        &cache,
-        &policies,
-        "work",
-        &model,
-        &catalogue,
-        now + 3_600
-    ));
-    // A persisted account mismatch is spent too, as admission has it.
-    let mut mismatched = AccountRecord::empty(scope("other"));
-    mismatched.last_error = Some(provenant_quota::ProbeFailure::AccountMismatch);
-    assert!(!alternative(&[mismatched]));
-    // The spent account itself never counts.
-    assert!(!unspent_alternative(
-        ["work"],
-        &[],
-        &policies,
-        "work",
-        &model,
-        &catalogue,
-        now
-    ));
-    Ok(())
-}
-#[test]
-fn settlement_alternates_read_the_configured_polling_interval_like_admission()
--> Result<(), Box<dyn std::error::Error>> {
-    use provenant_quota::{
-        AccountRecord, AccountScope, PollingIntervals, QuotaSnapshot, QuotaStatus, QuotaWindow,
-        Refusal, Settings,
-    };
-    let model = ModelId::parse("agy/gemini-3.8-flash")?;
-    let now = 1_800_000_000;
-    let scope = AccountScope {
-        adapter: "agy".into(),
-        account_key: "other".into(),
-        label: "other".into(),
-    };
-    // A refusal, then a comparable reading with headroom that is older than
-    // agy's default 1200 s timer interval but inside a configured 3600 s one.
-    let mut record = AccountRecord::empty(scope.clone());
-    record.refusals.push(Refusal {
-        extra: Default::default(),
-        account: scope.clone(),
-        model: model.model().into(),
-        pool: Some("gemini".into()),
-        observed_unix_seconds: now - 2_000,
-        resets_unix_seconds: None,
-    });
-    record.snapshot = Some(QuotaSnapshot {
-        schema_version: 1,
-        account: scope,
-        revision: 0,
-        status: QuotaStatus::Available,
-        observed_unix_seconds: now - 1_500,
-        source_ref: "fixture".into(),
-        authority_ref: None,
-        windows: vec![QuotaWindow {
-            pool: "gemini".into(),
-            window_seconds: Some(604_800),
-            used_basis_points: 1_000,
-            resets_unix_seconds: Some(now + 3_600),
-        }],
-        details: None,
-    });
-    let catalogue = provenant_routing::Catalogue::bundled()?;
-    let pools = catalogue.admission_pools(&model);
-    let mut configured = Settings::default();
-    configured.polling_intervals.insert(
-        "agy".into(),
-        PollingIntervals {
-            timer_seconds: Some(3_600),
-            panel_seconds: None,
-        },
-    );
-    for (settings, cleared) in [(Settings::default(), false), (configured, true)] {
-        let (records, policies) =
-            crate::route::account_evidence(&settings, vec![record.clone()], now);
-        let blocked = provenant_quota::Admission {
-            policies: &policies,
-            now_unix_seconds: now,
-            records: &records,
-            pools: &pools,
-        }
-        .account_block("agy", "other", model.model())?
-        .is_some();
-        let alternative = unspent_alternative(
-            ["work", "other"],
-            &records,
-            &policies,
-            "work",
-            &model,
-            &catalogue,
-            now,
-        );
-        assert_eq!(blocked, !cleared);
-        assert_eq!(alternative, cleared, "assess must agree with admission");
-    }
-    Ok(())
-}
-#[test]
 fn host_native_attempts_do_not_resume_implicitly_or_explicitly()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -972,6 +880,54 @@ fn host_native_attempts_do_not_resume_implicitly_or_explicitly()
 }
 
 #[test]
+fn quota_handoff_recovery_requires_an_unpinned_writer_with_unfinished_work()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_records::handoff::Handoff;
+    let unfinished = Handoff::from_json(
+        br#"{"schema_version":2,"status":"stopped_early","note":"quota","remaining":["rest"],"decisions":[],"verify":[]}"#,
+    )?;
+    let done = Handoff::from_json(
+        br#"{"schema_version":2,"status":"done","note":"finished","remaining":[],"decisions":[],"verify":[]}"#,
+    )?;
+    let input = trace_run(
+        7,
+        AttemptId::from_bytes([8; 16]),
+        WallTime::from_unix_seconds(0)?,
+    )?;
+    let reader = input.request.tasks[0].clone();
+    let mut writer = reader.clone();
+    writer.writer = Some(run::WriterRequest {
+        extra: Default::default(),
+        project: "/fixture/project".into(),
+        worktree: "/fixture/project/.worktrees/lane".into(),
+    });
+    let mut pinned = writer.clone();
+    pinned.account = Some("work".into());
+    let quota = run::Outcome::QuotaLimited;
+    assert!(quota_handoff_recovery_eligible(
+        quota,
+        &writer,
+        Some(&unfinished)
+    ));
+    for (outcome, task, handoff) in [
+        (quota, &pinned, Some(&unfinished)),
+        (quota, &reader, Some(&unfinished)),
+        (quota, &writer, Some(&done)),
+        (quota, &writer, None),
+        (run::Outcome::ModelUnavailable, &writer, Some(&unfinished)),
+        (run::Outcome::Failed, &writer, Some(&unfinished)),
+    ] {
+        assert!(
+            !quota_handoff_recovery_eligible(outcome, task, handoff),
+            "{outcome:?} account={:?} writer={} handoff={:?}",
+            task.account,
+            task.writer.is_some(),
+            handoff.map(Handoff::unfinished)
+        );
+    }
+    Ok(())
+}
+#[test]
 fn capacity_and_quota_settlements_retry_within_their_bounds()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -1046,11 +1002,11 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
     assert!(assess_recovered(&Registry::default())?.retry.is_some());
     const NOW: i64 = 1_800_000_000;
     let assess_at = |record: &run::AttemptRecord,
-                     task: &run::TaskRequest,
+                     _task: &run::TaskRequest,
                      decoded: &run::Decoded,
                      attempt: u64,
-                     others: bool| {
-        assess_settlement_retry(&config, |_, _| others, task, record, decoded, attempt, NOW)
+                     _others: bool| {
+        assess_settlement_retry(&config, record, decoded, attempt, NOW, false)
     };
     let assess = |task: &run::TaskRequest, decoded: &run::Decoded, attempt: u64, others: bool| {
         assess_at(&record, task, decoded, attempt, others)
@@ -1086,31 +1042,21 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
         .collect();
     assert!(draws.len() > 1, "{draws:?}");
     assert!(assess(&task, &capacity, 3, false).retry.is_none());
-    // Without a session a pool route is drawn again, fresh.
+    // A launched attempt cannot switch route or account automatically.
     let sessionless = decoded(
         run::Outcome::ModelUnavailable,
         None,
         "provider capacity: Selected model is at capacity",
     );
-    let redraw = assess(&task, &sessionless, 1, false)
-        .retry
-        .ok_or("redraw")?;
-    assert!(!redraw.resume);
-    assert_eq!(redraw.route, task.route);
-    // A read-only lane takes its first fallback; a writer keeps its route.
     let mut fallback = task.clone();
     fallback.fallback = vec![run::RouteRecord {
         provider: Some("claude".into()),
         model: Some("claude/claude-sonnet-5-5".into()),
         ..Default::default()
     }];
-    let read_only = assess(&fallback, &sessionless, 1, false)
-        .retry
-        .ok_or("fallback")?;
-    assert!(
-        matches!(&read_only.route, run::RequestedRoute::Model { model, .. } if model == "claude/claude-sonnet-5-5")
-    );
+    assert!(assess(&fallback, &sessionless, 1, false).retry.is_none());
     fallback.access.write_roots.push(temp.path().to_owned());
+<<<<<<< HEAD
     let writer = assess(&fallback, &sessionless, 1, false)
         .retry
         .ok_or("writer")?;
@@ -1143,19 +1089,21 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
     fallback.access.write_roots.clear();
     assert!(assess(&fallback, &sessionless, 1, false).retry.is_some());
     // Other model failures are not capacity.
+=======
+    assert!(assess(&fallback, &sessionless, 1, false).retry.is_none());
+>>>>>>> origin/main
     let unavailable = decoded(
         run::Outcome::ModelUnavailable,
         Some("thread"),
         "provider model unavailable: no route",
     );
     assert!(assess(&task, &unavailable, 1, true).retry.is_none());
-    // A spent account redraws at once; an exact model needs another
-    // registered account, and a pinned account is never swapped.
     let quota = decoded(
         run::Outcome::QuotaLimited,
         None,
         "You've hit your weekly limit",
     );
+<<<<<<< HEAD
     fallback.access.write_roots.push(temp.path().to_owned());
     let graph_writer_quota = assess(&fallback, &quota, 1, true);
     assert_eq!(graph_writer_quota.cause, Some(run::PolicyCause::Quota));
@@ -1169,16 +1117,20 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
     assert!(!retry.resume && retry.not_before_unix_seconds.is_none());
     // It keeps the applied model, so admission refuses the spent account
     // and resolution falls through to another for that model.
+=======
+    assert!(assess(&task, &quota, 1, true).retry.is_none());
+    let recovery = assess_settlement_retry(&config, &record, &quota, 1, NOW, true)
+        .retry
+        .ok_or("verified handoff continuation")?;
+    assert!(!recovery.resume);
+>>>>>>> origin/main
     assert!(
-        matches!(&retry.route, run::RequestedRoute::Model { model, .. } if model == "codex/gpt-6-luna")
-    );
-    assert_eq!(
-        spent.note.as_deref(),
-        Some("retrying on the next eligible account (attempt 2 of 3)")
+        matches!(&recovery.route, run::RequestedRoute::Model { model, .. } if model == "codex/gpt-6-luna")
     );
     let mut pinned = task.clone();
     pinned.account = Some("work".into());
     assert!(assess(&pinned, &quota, 1, true).retry.is_none());
+<<<<<<< HEAD
     let mut exact = task.clone();
     exact.route = input.request.tasks[0].route.clone();
     assert!(assess(&exact, &quota, 1, false).retry.is_none());
@@ -1246,13 +1198,15 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
         2
     );
     assert!(assess(&graph_reader, &quota, 2, true).retry.is_none());
+=======
+>>>>>>> origin/main
     // Zero retries turns the behaviour off.
     let off = provenant_routing::RoutingConfig {
         settlement_retries: 0,
         ..Default::default()
     };
     assert!(
-        assess_settlement_retry(&off, |_, _| true, &task, &record, &quota, 1, NOW)
+        assess_settlement_retry(&off, &record, &quota, 1, NOW, false)
             .retry
             .is_none()
     );
@@ -1264,7 +1218,7 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
         retry_delay_ceiling_seconds: 7_200,
         ..Default::default()
     };
-    let capped = assess_settlement_retry(&tuned, |_, _| false, &task, &record, &capacity, 4, NOW)
+    let capped = assess_settlement_retry(&tuned, &record, &capacity, 4, NOW, false)
         .retry
         .ok_or("tuned retry")?;
     assert_eq!(capped.max_attempts, 6);
@@ -1273,7 +1227,7 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
         retry_delay_ceiling_seconds: 45,
         ..tuned
     };
-    let ceiled = assess_settlement_retry(&ceiling, |_, _| false, &task, &record, &capacity, 1, NOW)
+    let ceiled = assess_settlement_retry(&ceiling, &record, &capacity, 1, NOW, false)
         .retry
         .ok_or("ceiled retry")?;
     assert_eq!(wait(&ceiled), Some(45));
@@ -1287,10 +1241,8 @@ fn unsafe_store_path_reason_survives_cli_conversion() {
         path: "runs/example/process.json".into(),
         check: provenant_run::PathCheck::Links,
     });
-    assert_eq!(
-        failure.message,
-        "run-store path runs/example/process.json is not private or contained: link count"
-    );
+    assert!(failure.message.contains("runs/example/process.json"));
+    assert!(failure.message.contains("link count"));
 }
 
 #[test]
@@ -1315,10 +1267,53 @@ fn host_delivery_limit_keeps_its_text_as_typed_io_detail() {
         });
         assert_eq!(failure.message, text);
         assert_eq!(failure.kind, ErrorKind::Io);
-        let detail = failure.detail.expect("typed detail");
-        assert_eq!(detail.code(), "io");
-        assert_eq!(detail.to_string(), text);
+        let detail = failure.projection.expect("typed detail");
+        assert!(matches!(
+            detail.fact,
+            Some(provenant_records::diagnostic::DiagnosticFact::DeliveryLimit(_))
+        ));
+        assert_eq!(detail.code, "IO");
+        assert_eq!(detail.detail.as_deref(), Some(text));
     }
+    let failure = super::Fail::from(provenant_run::RunError::Delivery(
+        provenant_records::run::WriterDeliveryStage::Prepare,
+    ));
+    let detail = failure.projection.expect("stage detail");
+    assert!(matches!(
+        detail.fact,
+        Some(provenant_records::diagnostic::DiagnosticFact::DeliveryStage(_))
+    ));
+    assert_eq!(detail.detail.as_deref(), Some(failure.message.as_str()));
+}
+
+#[test]
+fn host_delivery_limit_cli_error_matches_golden() -> Result<(), Box<dyn std::error::Error>> {
+    let failure = super::Fail::from(provenant_run::RunError::DeliveryLimit {
+        stage: provenant_records::run::WriterDeliveryStage::Integrate,
+        tool: "git",
+        command: "worktree list".into(),
+        limit: provenant_os::exec::DEFAULT_CAPTURE_LIMIT,
+    });
+    let reply = super::reply("run", Err(failure));
+    let mut rendered = Vec::new();
+    crate::render::render(
+        &reply.result,
+        crate::render::RenderMode::Human {
+            text: &reply.human,
+            summary: reply.summary.as_ref(),
+            read_only: reply.read_only,
+        },
+        &mut rendered,
+    )?;
+    let actual = String::from_utf8(rendered)?;
+    let golden_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/golden/delivery-limit-error.txt");
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        std::fs::write(&golden_path, &actual)?;
+    }
+    let expected = std::fs::read_to_string(&golden_path)?;
+    assert_eq!(actual, expected);
+    Ok(())
 }
 
 #[test]
@@ -1787,9 +1782,15 @@ fn dispatch_existing_worktree_checks_custody_and_replays() -> Result<(), Box<dyn
                 .ok_or("detached error")?
                 .message;
             assert!(message.contains("detached HEAD at"), "{message}");
+            let action = detached
+                .result
+                .error
+                .as_ref()
+                .and_then(|error| error.repair.as_deref())
+                .unwrap_or_default();
             assert!(
-                message.contains("remove --worktree and pass --mode read-only"),
-                "{message}"
+                action.contains("remove --worktree and pass --mode read-only"),
+                "{action}"
             );
             assert!(
                 session
@@ -2098,6 +2099,47 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
         .ok_or("PR destination")?;
     check_delivery_branch(&project, &pr.branch).map_err(|error| error.message)?;
     assert!(pr.open_pr);
+    let native_path = root.join("native checkout");
+    run_git(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "native-branch",
+            native_path.to_str().ok_or("path")?,
+            "HEAD",
+        ],
+    )?;
+    let refused = super::own_worktree(
+        &super::OwnedWorktree {
+            branch: "native-branch".into(),
+            host,
+            created_at: WallTime::from_micros(2)?,
+        },
+        Some("HEAD"),
+        &OperationId::parse("native-branch-refusal")?,
+        &edge,
+        &Unknown,
+        |_| false,
+        &mut None,
+        &clock,
+        &cancel,
+    )
+    .unwrap_err();
+    let failure: super::Fail = refused.into();
+    let action = failure
+        .projection
+        .as_ref()
+        .and_then(|value| value.next.as_deref())
+        .ok_or("missing next action")?;
+    assert!(
+        action.contains(&format!("--worktree '{}'", native_path.display())),
+        "{action}"
+    );
+    let writer = run::resolve_writer(roots.state.as_path(), &project, &native_path)?;
+    assert_eq!(writer.worktree, native_path);
     for origin in [
         None,
         Some(WorktreeOrigin::Lane),
@@ -2318,6 +2360,446 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
 }
 
 #[test]
+fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::worktrees::{
+        self, ObservedProcess, WorkerObserver, WorkerState, WorktreeCreate, WorktreeOrigin,
+        WorktreeOwner,
+    };
+    use provenant_core::RootInputs;
+    struct LiveObserver(PathBuf, std::sync::atomic::AtomicUsize);
+    impl WorkerObserver for LiveObserver {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .map(|root| (root.clone(), WorkerState::Live))
+                .collect()
+        }
+
+        fn observe_evidence_with_policy(
+            &self,
+            roots: &[PathBuf],
+            _entries: &[provenant_os::pid::CensusIgnoreEntry],
+            _for_land: bool,
+        ) -> provenant_confinement::worktrees::WorkerEvidence {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            provenant_confinement::worktrees::WorkerEvidence {
+                states: roots
+                    .iter()
+                    .cloned()
+                    .map(|root| (root, WorkerState::Live))
+                    .collect(),
+                holders: roots
+                    .iter()
+                    .cloned()
+                    .map(|root| {
+                        (
+                            root,
+                            ObservedProcess {
+                                pid: 54321,
+                                command: Some("foreign-writer".into()),
+                                cwd: Some(self.0.clone()),
+                            },
+                        )
+                    })
+                    .collect(),
+                details: Default::default(),
+            }
+        }
+        fn live_process(&self, _root: &Path) -> Option<ObservedProcess> {
+            Some(ObservedProcess {
+                pid: 54321,
+                command: Some("foreign-writer".into()),
+                cwd: Some(self.0.clone()),
+            })
+        }
+    }
+    struct Free;
+    impl WorkerObserver for Free {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .map(|root| (root.clone(), WorkerState::Free))
+                .collect()
+        }
+    }
+    struct CountedUnknown(std::sync::atomic::AtomicUsize);
+    impl WorkerObserver for CountedUnknown {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, WorkerState::Unknown))
+                .collect()
+        }
+
+        fn observe_roots_with_details(
+            &self,
+            roots: &[PathBuf],
+        ) -> provenant_confinement::worktrees::WorkerObservations {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (
+                roots
+                    .iter()
+                    .map(|root| (root.clone(), WorkerState::Unknown))
+                    .collect(),
+                roots
+                    .iter()
+                    .cloned()
+                    .map(|root| (root, "injected census incomplete".into()))
+                    .collect(),
+            )
+        }
+
+        fn incomplete_census_detail(&self) -> String {
+            "injected census incomplete".into()
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let home = root.join("home");
+    let state = root.join("state");
+    let project = root.join("project");
+    std::fs::create_dir_all(&home)?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(&state)?;
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::create_dir_all(&project)?;
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "base",
+        ],
+    ] {
+        provenant_os::fixture::run_git(&project, &args)?;
+    }
+    let mut inputs = RootInputs::new(home.clone(), project.clone());
+    inputs.state_dir = Some(state);
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let edge = Edge {
+        roots: &roots,
+        home: &home,
+        assets: &project,
+        cwd: &project,
+    };
+    let host = provenant_config::bind_host(&roots)?;
+    let prior_attempt = AttemptId::from_bytes([111; 16]);
+    let branch = "live-refusal-branch";
+    let (path, _) = worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+        let context = &worktrees::WorktreeContext {
+            workers: &Free,
+            ..*context
+        };
+        let info = worktrees::create(
+            context,
+            WorktreeCreate {
+                branch: branch.into(),
+                base: None,
+            },
+            &cancel,
+        )?;
+        let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
+        worktrees::save_owner(
+            &tree,
+            &WorktreeOwner {
+                attempt_id: Some(prior_attempt),
+                operation_id: Some("prior-op".parse().unwrap()),
+                branch: branch.into(),
+                base: info.head.to_string(),
+                host,
+                created_at: WallTime::from_micros(1)
+                    .map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
+                origin: WorktreeOrigin::Lane,
+                label: None,
+            },
+        )?;
+        Ok((info.path, info.head))
+    })?;
+
+    // Exercise the actual owned-run admission boundary for an existing,
+    // unowned tree whose registration and on-disk custody are known but whose
+    // process census is incomplete.
+    let census_branch = "census-refusal-branch";
+    worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+        let context = &worktrees::WorktreeContext {
+            workers: &Free,
+            ..*context
+        };
+        worktrees::create(
+            context,
+            WorktreeCreate {
+                branch: census_branch.into(),
+                base: None,
+            },
+            &cancel,
+        )?;
+        Ok(())
+    })?;
+    let counted = CountedUnknown(std::sync::atomic::AtomicUsize::new(0));
+    let session = worktrees::CensusSession::new(&counted, &clock);
+    let census_error = super::own_worktree(
+        &super::OwnedWorktree {
+            branch: census_branch.into(),
+            host,
+            created_at: WallTime::from_micros(2)?,
+        },
+        None,
+        &OperationId::parse("census-op")?,
+        &edge,
+        &session,
+        |_| false,
+        &mut None,
+        &clock,
+        &cancel,
+    );
+    match census_error {
+        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
+            provenant_confinement::worktrees::WorktreeError::CensusUnknown { detail, .. },
+        ))) => assert_eq!(detail, "injected census incomplete"),
+        other => panic!("expected typed census refusal, got {other:?}"),
+    }
+    assert_eq!(counted.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let census_unknown = worktrees::WorktreeError::CensusUnknown {
+        path: path.clone(),
+        detail: "injected census incomplete".into(),
+    };
+    assert_eq!(
+        census_unknown.admission_cause(),
+        Some(worktrees::AdmissionCause::CensusIncomplete)
+    );
+    assert_eq!(
+        census_unknown.to_string(),
+        worktrees::WorktreeError::UnknownWriter.to_string()
+    );
+
+    let observer = LiveObserver(path.clone(), std::sync::atomic::AtomicUsize::new(0));
+    let live_policy = worktrees::CensusPolicyWorkers::for_run(&observer, &roots)?;
+    let live_session = worktrees::CensusSession::new(&live_policy, &clock);
+    let err = super::own_worktree(
+        &super::OwnedWorktree {
+            branch: branch.into(),
+            host,
+            created_at: WallTime::from_micros(2)?,
+        },
+        None,
+        &OperationId::parse("new-op")?,
+        &edge,
+        &live_session,
+        |_| false,
+        &mut None,
+        &clock,
+        &cancel,
+    );
+    match err {
+        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
+            provenant_confinement::worktrees::WorktreeError::LiveProcess(proc),
+        ))) => {
+            assert_eq!(proc.pid, 54321);
+            assert_eq!(proc.command.as_deref(), Some("foreign-writer"));
+            assert_eq!(proc.cwd.as_ref(), Some(&path));
+            let msg = proc.to_string();
+            assert!(!msg.contains(&prior_attempt.to_string()));
+        }
+        other => panic!("expected LiveProcess, got {other:?}"),
+    }
+    assert_eq!(observer.1.load(std::sync::atomic::Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[test]
+fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::worktrees::{
+        self, CensusPolicyWorkers, ObservedProcess, WorkerObserver, WorkerState, WorktreeCreate,
+    };
+    use provenant_core::RootInputs;
+    struct ControlledObserver {
+        target: PathBuf,
+    }
+    impl WorkerObserver for ControlledObserver {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .map(|root| {
+                    (
+                        root.clone(),
+                        if root == &self.target {
+                            WorkerState::Live
+                        } else {
+                            WorkerState::Free
+                        },
+                    )
+                })
+                .collect()
+        }
+
+        fn observe_roots_for_land(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .map(|root| (root.clone(), WorkerState::Free))
+                .collect()
+        }
+
+        fn live_process(&self, root: &Path) -> Option<ObservedProcess> {
+            (root == self.target).then(|| ObservedProcess {
+                pid: 24680,
+                command: Some("ancestor-shell".into()),
+                cwd: Some(self.target.clone()),
+            })
+        }
+
+        fn live_process_for_land(&self, _root: &Path) -> Option<ObservedProcess> {
+            None
+        }
+    }
+    struct Free;
+    impl WorkerObserver for Free {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+            roots
+                .iter()
+                .map(|root| (root.clone(), WorkerState::Free))
+                .collect()
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let home = root.join("home");
+    let state = root.join("state");
+    let project = root.join("project");
+    std::fs::create_dir_all(&home)?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(&state)?;
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::create_dir_all(&project)?;
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "base",
+        ],
+    ] {
+        provenant_os::fixture::run_git(&project, &args)?;
+    }
+    let mut inputs = RootInputs::new(home.clone(), project.clone());
+    inputs.state_dir = Some(state);
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let host = provenant_config::bind_host(&roots)?;
+    let branch = "inside-worktree-branch";
+    let (path, head) =
+        worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+            let context = &worktrees::WorktreeContext {
+                workers: &Free,
+                ..*context
+            };
+            let info = worktrees::create(
+                context,
+                WorktreeCreate {
+                    branch: branch.into(),
+                    base: None,
+                },
+                &cancel,
+            )?;
+            Ok((info.path, info.head))
+        })?;
+
+    // Admission launched from cwd inside target worktree:
+    let edge_inside = Edge {
+        roots: &roots,
+        home: &home,
+        assets: &project,
+        cwd: &path,
+    };
+    let observer = ControlledObserver {
+        target: path.clone(),
+    };
+
+    // Ordinary policy without run ancestor exclusion refuses admission because
+    // the inside process is observed live:
+    let ordinary = CensusPolicyWorkers::from_roots(&observer, &roots)?;
+    let refused = super::own_worktree(
+        &super::OwnedWorktree {
+            branch: branch.into(),
+            host,
+            created_at: WallTime::from_micros(2)?,
+        },
+        None,
+        &OperationId::parse("inside-op-refused")?,
+        &edge_inside,
+        &ordinary,
+        |_| false,
+        &mut None,
+        &clock,
+        &cancel,
+    );
+    match refused {
+        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
+            provenant_confinement::worktrees::WorktreeError::LiveProcess(proc),
+        ))) => {
+            assert_eq!(proc.pid, 24680);
+            assert_eq!(proc.command.as_deref(), Some("ancestor-shell"));
+            assert_eq!(proc.cwd.as_ref(), Some(&path));
+        }
+        other => panic!("expected LiveProcess refusal without ancestor exclusion, got {other:?}"),
+    }
+
+    // Real run policy applies ancestor exclusion, so admission succeeds:
+    let run_policy = CensusPolicyWorkers::for_run(&observer, &roots)?;
+    let admitted = super::own_worktree(
+        &super::OwnedWorktree {
+            branch: branch.into(),
+            host,
+            created_at: WallTime::from_micros(2)?,
+        },
+        None,
+        &OperationId::parse("inside-op")?,
+        &edge_inside,
+        &run_policy,
+        |_| false,
+        &mut None,
+        &clock,
+        &cancel,
+    )?;
+    assert_eq!(admitted.0.path, path);
+    assert_eq!(admitted.0.head, head);
+    Ok(())
+}
+
+#[test]
 fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
     use provenant_core::RootInputs;
@@ -2445,6 +2927,59 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
         "-qm",
         "second",
     ])?;
+    // Move the named base between early resolution and creation.
+    struct MoveBase {
+        project: PathBuf,
+        moved: std::sync::atomic::AtomicBool,
+    }
+    impl provenant_confinement::worktrees::WorkerObserver for MoveBase {
+        fn observe_roots(
+            &self,
+            roots: &[PathBuf],
+        ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::WorkerState>
+        {
+            if !self.moved.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                provenant_os::fixture::run_git(
+                    &self.project,
+                    &["update-ref", "refs/heads/moving-base", "HEAD"],
+                )
+                .unwrap();
+            }
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, provenant_confinement::worktrees::WorkerState::Free))
+                .collect()
+        }
+    }
+    run_git(&["branch", "moving-base", "HEAD^"])?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let moving = MoveBase {
+        project: project.clone(),
+        moved: std::sync::atomic::AtomicBool::new(false),
+    };
+    let (created_info, created_base) = own_worktree(
+        &OwnedWorktree {
+            branch: "moving-base-lane".into(),
+            host: provenant_config::bind_host(&roots)?,
+            created_at: clock.wall_now()?,
+        },
+        Some("moving-base"),
+        &OperationId::parse("moving-base-lane")?,
+        &edge,
+        &moving,
+        |_| false,
+        &mut None,
+        &clock,
+        &cancel,
+    )
+    .map_err(|fail| fail.to_string())?;
+    assert_eq!(created_info.head, created_base);
+    assert_eq!(
+        created_base.to_string(),
+        String::from_utf8(run_git(&["rev-parse", "HEAD"])?)?.trim()
+    );
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
@@ -3002,7 +3537,7 @@ fn refused_provider_continuation_keeps_a_durable_attempt() -> Result<(), Box<dyn
             _: &str,
             _: &run::LaunchPaths,
             resume: Option<&run::AttemptRecord>,
-        ) -> Result<run::PreparedLaunch, String> {
+        ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
             assert_eq!(resume.map(|prior| prior.attempt_id), self.prior);
             Err("fixture continuation refused; run provenant run".into())
         }
@@ -3094,6 +3629,33 @@ fn grants_lines_list_each_applied_grant_and_stay_empty_for_older_attempts()
             .is_some_and(|l| l.starts_with("grant git digest="))
     );
     assert_eq!(lines.next(), None);
+    Ok(())
+}
+
+#[test]
+fn grants_lines_report_incomplete_tool_closure() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel).map_err(|f| f.message)?;
+    let store = trace_store(&temp, &call)?;
+    let prepared = trace_run(10, AttemptId::from_bytes([9; 16]), clock.wall_now()?)?;
+    store.create(&prepared, &call)?;
+    let mut record = store.record(prepared.attempts[0].attempt_id, &call)?;
+    record.applied_route = Some(run::RouteRecord {
+        extra: [(
+            "tool_closure".into(),
+            serde_json::json!([{
+                "tool": "rg", "outcome": "incomplete", "reason": "missing", "reasons": ["missing"]
+            }]),
+        )]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    });
+    assert!(
+        grants_lines(&record).contains("warning tool_closure_incomplete tool=rg reason=missing\n")
+    );
     Ok(())
 }
 
@@ -5723,6 +6285,77 @@ fn claude_session_reaches_the_decoded_attempt() {
 }
 
 #[test]
+fn agy_repeated_answer_is_captured_once() {
+    let answer = "# Review\n\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"low\",\"file\":\"a.rs\",\"summary\":\"issue\",\"status\":\"open\"}]}\n```\nVERDICT: PASS\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"done\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```";
+    let route = run::RouteRecord {
+        provider: Some("agy".into()),
+        ..Default::default()
+    };
+    let decode = |step: &str, response: &str| {
+        let stream = format!(
+            "{}\n{}\n{}\n",
+            json!({"event":"init","conversation_id":"s","init":{"model":"m"}}),
+            json!({"event":"step_update","step_update":{"conversation_id":"s","step_type":"agent_response","text_delta":step}}),
+            json!({"event":"result","result":{"conversation_id":"s","status":"SUCCESS","response":response,"usage":{"input_tokens":1,"output_tokens":1}}})
+        );
+        Registry::default()
+            .decode(
+                &route,
+                stream.as_bytes(),
+                &clean_exit(),
+                Path::new("/unused"),
+            )
+            .unwrap()
+    };
+    for decoded in [
+        decode(&format!("{answer}\n"), answer),
+        decode("", &format!("  {answer}\n\n{answer}  ")),
+    ] {
+        assert_eq!(decoded.outcome, run::Outcome::Succeeded);
+        assert_eq!(decoded.result, answer);
+        let mut capture = provenant_records::result_capture::ResultCapture::new(None);
+        capture.push(decoded.result.as_bytes());
+        let captured = capture.finish();
+        assert!(captured.handoff.unwrap().is_some());
+        assert_eq!(captured.verdict.as_deref(), Some("VERDICT: PASS"));
+        assert_eq!(captured.declarations, 1);
+        assert_eq!(decoded.result.matches("```findings").count(), 1);
+    }
+    for response in [
+        format!("{answer}\nextra"),
+        format!(
+            "{answer}\n{}",
+            answer.replace("\"note\":\"done\"", "\"note\":\"different\"")
+        ),
+    ] {
+        let decoded = decode("", &response);
+        assert_eq!(decoded.result, response);
+        assert!(provenant_records::handoff::Handoff::from_result(&decoded.result).is_err());
+    }
+}
+
+#[test]
+fn repeated_answer_from_non_agy_adapter_is_unchanged() {
+    let route = run::RouteRecord {
+        provider: Some("claude".into()),
+        ..Default::default()
+    };
+    let stream = concat!(
+        "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n",
+        "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"s\",\"result\":\"answer\\nanswer\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n"
+    );
+    let decoded = Registry::default()
+        .decode(
+            &route,
+            stream.as_bytes(),
+            &clean_exit(),
+            Path::new("/unused"),
+        )
+        .unwrap();
+    assert_eq!(decoded.result, "answer\nanswer");
+}
+
+#[test]
 fn claude_usage_records_cache_read_and_cache_write() {
     let route = run::RouteRecord {
         provider: Some("claude".into()),
@@ -5922,6 +6555,7 @@ fn wait_follows_a_policy_chain_to_the_ceiling_reading_state_before_tail() {
 }
 
 #[test]
+<<<<<<< HEAD
 fn run_explain_reports_admission_timeout_with_visible_origin()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -6555,3 +7189,395 @@ fn dispatch_restart_honours_saved_admission_wake_and_deadline()
     )??;
     Ok(())
 }
+=======
+fn every_adapter_sign_in_failure_settles_auth_required() -> Result<(), Box<dyn std::error::Error>> {
+    use run::Providers;
+    let fixtures: &[(&str, &[u8])] = &[
+        (
+            "cursor",
+            include_bytes!("../../../../tests/fixtures/providers/cursor/auth-required.stderr"),
+        ),
+        (
+            "codex",
+            include_bytes!("../../../../tests/fixtures/providers/codex/auth-required.stderr"),
+        ),
+        (
+            "opencode",
+            include_bytes!("../../../../tests/fixtures/providers/opencode/auth-required.stderr"),
+        ),
+        (
+            "agy",
+            include_bytes!("../../../../tests/fixtures/providers/agy/auth-required.stderr"),
+        ),
+    ];
+    let temp = tempfile::tempdir()?;
+    let mut exit = clean_exit();
+    exit.termination = Some(provenant_os::exec::Termination::Exit(1));
+    for (adapter, stderr) in fixtures {
+        let route = run::RouteRecord {
+            provider: Some((*adapter).into()),
+            model: Some(format!("{adapter}/example")),
+            ..Default::default()
+        };
+        let decoded =
+            Registry::default().decode_captures(&route, b"", stderr, &exit, temp.path(), None)?;
+        assert_eq!(decoded.outcome, run::Outcome::AuthRequired, "{adapter}");
+        assert!(
+            decoded.reason.as_deref().unwrap().contains(
+                provenant_records::AdapterSpec::get(adapter)
+                    .unwrap()
+                    .login_hint
+            )
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn successful_output_with_incidental_auth_stderr_stays_successful() {
+    let route = run::RouteRecord {
+        provider: Some("cursor".into()),
+        model: Some("cursor/example".into()),
+        ..Default::default()
+    };
+    let decoded = Registry::default()
+        .decode_captures(
+            &route,
+            include_bytes!("../../../../tests/fixtures/providers/cursor/fresh.jsonl"),
+            include_bytes!("../../../../tests/fixtures/providers/cursor/auth-required.stderr"),
+            &clean_exit(),
+            Path::new("/unused"),
+            None,
+        )
+        .unwrap();
+    assert_eq!(decoded.outcome, run::Outcome::Succeeded);
+}
+
+#[cfg(feature = "fixture")]
+#[test]
+fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
+-> Result<(), Box<dyn std::error::Error>> {
+    if reexec_test_in_lane(
+        "run::tests::reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence",
+    )? {
+        return Ok(());
+    }
+    use provenant_os::fs::{Directory, LockMode, PublishMode};
+    use provenant_supervisor::custody::{self, Scope};
+    use std::ffi::OsStr;
+    for import_done in [false, true] {
+        let reason = if import_done {
+            "r".repeat(4096)
+        } else {
+            "worktree rebuilt by chair".into()
+        };
+        let phase = if import_done { "release" } else { "publish" };
+        let blocker = if import_done {
+            "release evidence missing"
+        } else {
+            "lane Git import failed"
+        };
+        let fixture = linked_fixture()?;
+        with_edge(
+            &fixture.root,
+            &fixture.project,
+            |edge| -> Result<(), Box<dyn std::error::Error>> {
+                let clock = SystemClock::new();
+                let cancel = CancelToken::new();
+                let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+                let session = open(edge, &call).map_err(|fail| fail.message)?;
+                let mut input = trace_run(30, AttemptId::from_bytes([9; 16]), clock.wall_now()?)?;
+                input.request.parent_attempt = None;
+                input.request.lane_depth = None;
+                input.request.tasks[0].writer = Some(run::WriterRequest {
+                    extra: Default::default(),
+                    project: fixture.project.clone(),
+                    worktree: fixture.tree.clone(),
+                });
+                session.store.create(&input, &call)?;
+                let id = input.attempts[0].attempt_id;
+                let record = session.store.mark_starting_for_fixture(
+                    id,
+                    &run::RouteRecord::default(),
+                    &call,
+                )?;
+                let scope = Scope {
+                    run: input.run_id,
+                    attempt: id,
+                    generation: record.generation,
+                };
+                let attempt_path = edge
+                    .roots
+                    .state
+                    .as_path()
+                    .join(format!("runs/{}/attempts/{id}", input.run_id));
+                let attempt = Directory::open_anchor(&attempt_path)?;
+                let slot_path = edge.roots.state.as_path().join(format!(
+                    "worktrees/{}/abandon-fixture",
+                    session.context.project_id
+                ));
+                std::fs::create_dir_all(&slot_path)?;
+                let lease = provenant_supervisor::fixture::acquire_writer(
+                    Directory::open_anchor(&slot_path)?,
+                    scope,
+                    call.lock_budget(),
+                    &cancel,
+                    &clock,
+                )?;
+                let recovery = provenant_supervisor::fixture::bind_writer_attempt(lease, &attempt)?
+                    .into_recovery()?;
+                let fence = session
+                    .store
+                    .writer_fences()?
+                    .into_iter()
+                    .find(|f| f.scope == scope)
+                    .ok_or("fence")?;
+                let evidence = Directory::open_anchor(
+                    fence.reservation.parent().ok_or("reservation parent")?,
+                )?;
+                evidence
+                    .atomic_write(
+                        OsStr::new("import-retained.json"),
+                        ".test-",
+                        &serde_json::to_vec(&json!({"schema_version":1,"scope":scope}))?,
+                        PublishMode::NoReplace,
+                    )?
+                    .require_durable()?;
+                let exit = ExitObservation {
+                    scope,
+                    terminal_observed: true,
+                    settlement_evidence: custody::SettlementEvidence::DarwinCensusAndCustodyLease,
+                    ..clean_exit()
+                };
+                let mut exit_json = serde_json::to_value(&exit)?;
+                exit_json["schema_version"] = 1.into();
+                attempt
+                    .atomic_write(
+                        OsStr::new("process-exit.json"),
+                        ".test-",
+                        &serde_json::to_vec(&exit_json)?,
+                        PublishMode::NoReplace,
+                    )?
+                    .require_durable()?;
+                session.store.publish_terminal(
+                    id,
+                    session.store.record(id, &call)?.revision,
+                    &run::TerminalPublication {
+                        outcome: run::Outcome::Unsettled,
+                        finished_at: clock.wall_now()?,
+                        started_at: None,
+                        provider_ms: None,
+                        reason: Some("publish refused".into()),
+                        result: "retained provider evidence",
+                        complete: true,
+                        redacted: false,
+                        resolved_route: None,
+                        applied_route: None,
+                        observed_route: None,
+                        usage: Default::default(),
+                        session: None,
+                        partial_signals: vec![],
+                    },
+                    &exit,
+                    &call,
+                )?;
+                let import = if import_done {
+                    run::EffectDisposition::Done
+                } else {
+                    run::EffectDisposition::Failed {
+                        reason: blocker.into(),
+                        retryable: true,
+                    }
+                };
+                session.store.record_effect(
+                    id,
+                    scope.generation,
+                    run::SettlementEffect::GitImport,
+                    import.clone(),
+                    &call,
+                )?;
+                attempt
+                    .atomic_write(
+                        OsStr::new("settlement-progress.json"),
+                        ".test-",
+                        &serde_json::to_vec(&json!({
+                            "schema_version":1, "scope":scope, "phase":phase, "attempts":1,
+                            "head":null, "base":null, "owner":null, "blocking_reason":blocker
+                        }))?,
+                        PublishMode::Replace,
+                    )?
+                    .require_durable()?;
+                std::fs::create_dir_all(attempt_path.join("tmp/candidate-0/git-common"))?;
+                std::fs::write(
+                    attempt_path.join("tmp/candidate-0/git-common/evidence"),
+                    "private objects",
+                )?;
+                let parse = |args: &[&str]| -> Result<Reconcile, Box<dyn std::error::Error>> {
+                    let crate::ParseOutcome::Invocation(inv) =
+                        crate::parse(args.iter().map(std::ffi::OsString::from))
+                    else {
+                        return Err("parse reconcile".into());
+                    };
+                    let crate::Command::Reconcile(command) = inv.command else {
+                        return Err("reconcile command".into());
+                    };
+                    Ok(command)
+                };
+                let driver =
+                    attempt.try_lock(OsStr::new("settlement-driver.lock"), LockMode::Exclusive)?;
+                let run_id = input.run_id.to_string();
+                let reported = reconcile(parse(&["reconcile", "--id", &run_id, "--json"])?, edge);
+                let json = serde_json::to_value(&reported.result)?;
+                if !import_done {
+                    assert_eq!(
+                        json["data"]["runs"][0]["attempts"][0]["found"]["phase"],
+                        "publish"
+                    );
+                    assert_eq!(
+                        json["data"]["runs"][0]["attempts"][0]["found"]["blocking_reason"],
+                        "lane Git import failed"
+                    );
+                    assert!(reported.human.contains("lane Git import failed"));
+                }
+                let selection = format!("{run_id}/{id}");
+                assert!(parse(&["reconcile", "--abandon", &selection]).is_err());
+                assert!(parse(&["reconcile", "--reason", "missing attempt"]).is_err());
+                assert!(
+                    parse(&[
+                        "reconcile",
+                        "--id",
+                        &run_id,
+                        "--abandon",
+                        &selection,
+                        "--reason",
+                        "ambiguous action"
+                    ])
+                    .is_err()
+                );
+                let args = [
+                    "reconcile",
+                    "--abandon",
+                    &selection,
+                    "--reason",
+                    reason.as_str(),
+                    "--json",
+                ];
+                assert_ne!(
+                    reconcile(parse(&args)?, edge).result.status,
+                    Status::Ok,
+                    "live driver excludes abandonment"
+                );
+                drop(driver);
+                assert_ne!(
+                    reconcile(parse(&args)?, edge).result.status,
+                    Status::Ok,
+                    "held writer lock excludes abandonment"
+                );
+                drop(recovery);
+                let abandoned = reconcile(parse(&args)?, edge);
+                assert_eq!(
+                    abandoned.result.status,
+                    Status::Ok,
+                    "{:?}",
+                    abandoned.result.error
+                );
+                assert_eq!(abandoned.result.data["found"]["state"], "abandoned");
+                assert_eq!(abandoned.result.data["found"]["reason"], reason);
+                assert!(session.store.writer_fences()?.is_empty());
+                session
+                    .store
+                    .reconcile_for_fixture(input.run_id, &Registry::default(), &call)?;
+                assert_eq!(
+                    session
+                        .store
+                        .record(id, &call)?
+                        .settlement_receipts
+                        .unwrap()
+                        .git_import,
+                    import
+                );
+                let journal: Value = serde_json::from_slice(&std::fs::read(
+                    attempt_path.join("settlement-progress.json"),
+                )?)?;
+                assert_eq!(
+                    journal["abandonment"]["actor"],
+                    session.context.actor_id.to_string()
+                );
+                assert_eq!(journal["abandonment"]["phase"], phase);
+                assert_eq!(journal["blocking_reason"], blocker);
+                assert_eq!(
+                    reconcile(parse(&args)?, edge).result.status,
+                    Status::Ok,
+                    "same reason is idempotent"
+                );
+                reconcile(parse(&["reconcile", "--id", &run_id, "--json"])?, edge);
+                assert!(
+                    attempt_path
+                        .join("tmp/candidate-0/git-common/evidence")
+                        .is_file()
+                );
+                let different = [
+                    "reconcile",
+                    "--abandon",
+                    &selection,
+                    "--reason",
+                    "different explanation",
+                    "--json",
+                ];
+                assert_ne!(
+                    reconcile(parse(&different)?, edge).result.status,
+                    Status::Ok,
+                    "recorded reason cannot be replaced"
+                );
+                let state = Directory::open_anchor(edge.roots.state.as_path())?;
+                let later =
+                    WallTime::from_micros(clock.wall_now()?.as_micros() + 90 * 86_400_000_000)?;
+                let collected = session
+                    .store
+                    .gc_provider_state(&state, 7, later, false, &call)?;
+                assert!(collected.attempt_tmp.is_empty());
+                assert!(
+                    attempt_path
+                        .join("tmp/candidate-0/git-common/evidence")
+                        .is_file()
+                );
+                assert_eq!(
+                    std::fs::read_to_string(attempt_path.join("result.md"))?,
+                    "retained provider evidence"
+                );
+                Ok(())
+            },
+        )??;
+    }
+    Ok(())
+}
+
+#[test]
+fn projected_cli_error_omits_unsafe_source_and_keeps_bounded_fields() {
+    let failure = super::Fail::from(provenant_run::RunError::Io(std::io::Error::other(
+        "TOKEN_SENTINEL\u{1b}",
+    )));
+    let reply = super::reply("run", Err(failure));
+    let wire = serde_json::to_value(&reply.result).unwrap();
+    assert_eq!(wire["error"]["code"], "IO");
+    assert_eq!(wire["error"]["category"], "error");
+    assert!(wire["error"].get("detail").is_none());
+    assert!(!wire.to_string().contains("TOKEN_SENTINEL"));
+    let mut rendered = Vec::new();
+    crate::render::render(
+        &reply.result,
+        crate::render::RenderMode::Human {
+            text: "",
+            summary: None,
+            read_only: false,
+        },
+        &mut rendered,
+    )
+    .unwrap();
+    assert!(
+        !String::from_utf8(rendered)
+            .unwrap()
+            .contains("TOKEN_SENTINEL")
+    );
+}
+>>>>>>> origin/main

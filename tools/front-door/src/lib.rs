@@ -200,39 +200,6 @@ fn accounts_summary(settings: &provenant_providers::accounts::Settings) -> prove
         .collect();
     provenant_cli::Summary::new(headline, rows, None)
 }
-/// Single-lane flags a preset graph cannot honour. An explicit `--preset`
-/// rejects them at parse time; automatic selection refuses them here rather
-/// than drop them silently. `--network`, `--read-root` and `--worktree` bind
-/// into the graph instead.
-fn preset_ignored_flags(request: &provenant_cli::Dispatch) -> Vec<&'static str> {
-    let route = &request.route;
-    let access = &request.access;
-    [
-        ("--account", request.account.is_some()),
-        ("--effort", route.effort.is_some()),
-        ("--fallback", !route.fallback.is_empty()),
-        ("--confidential", route.confidential),
-        ("--read-heavy", route.read_heavy),
-        ("--host", request.host.is_some()),
-        ("--branch", request.branch.is_some()),
-        ("--worktree-branch", request.worktree_branch.is_some()),
-        ("--deliver", request.deliver.is_some()),
-        ("--deliver-remote", request.deliver_remote.is_some()),
-        ("--deliver-branch", request.deliver_branch.is_some()),
-        ("--open-pr", request.open_pr),
-        ("--write-root", !access.write_root.is_empty()),
-        ("--capability", !access.capability.is_empty()),
-        ("--knob", !request.knobs.is_empty()),
-        ("--delivery-id", request.delivery_id.is_some()),
-        ("--head", request.head.is_some()),
-        ("--base", request.base.is_some()),
-        ("--title", request.title.is_some()),
-        ("--build-heavy", request.build_heavy),
-    ]
-    .into_iter()
-    .filter_map(|(flag, set)| set.then_some(flag))
-    .collect()
-}
 fn fail(
     command: &str,
     status: Outcome,
@@ -252,6 +219,7 @@ fn fail_with_repair(
 ) -> u8 {
     let mut result = CommandResult::new(command, status, ());
     result.error = Some(CommandError {
+        diagnostic: None,
         code: code.into(),
         message: message.into(),
         cause: None,
@@ -410,6 +378,7 @@ fn sync_registered_account(
         Err(message) => {
             reply.result.status = Outcome::Error;
             reply.result.error = Some(CommandError {
+                diagnostic: None,
                 code: "ACCOUNT_SYNC".into(),
                 message: format!(
                     "account registered, but syncing managed content failed: {message}"
@@ -569,7 +538,7 @@ fn live_quota(
 ) -> Result<provenant_providers::quota_live::LiveQuota, Box<dyn std::error::Error>> {
     let accounts = account_settings(&resolved.roots)?;
     Ok(provenant_providers::quota_live::LiveQuota::new(
-        resolved.roots.state.as_path(),
+        &resolved.roots,
         &resolved.home,
         &accounts,
     )?)
@@ -628,6 +597,7 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
             disk: Some(&disk),
             holder: Some(&holder),
             nested_children: Some(&holder),
+            stdout_decoder: Some(holder.stdout_decoder()),
             stdout_filter: Some(&mut stdout_filter),
             stderr_filter: Some(&mut stderr_filter),
             ..Default::default()
@@ -737,6 +707,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                             serde_json::Value::Null,
                         );
                         result.error = Some(CommandError {
+                            diagnostic: None,
                             code: "ACCOUNT".into(),
                             message,
                             cause: None,
@@ -1004,7 +975,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                     && cmd.route.model.is_none()
                     && cmd.route.route.is_none()) =>
         {
-            let ignored = preset_ignored_flags(&cmd);
+            let ignored = &inv.preset_incompatible_flags;
             if cmd.preset.is_none() && !ignored.is_empty() {
                 return fail_with_repair(
                     &inv.leaf,
@@ -1196,6 +1167,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                     Err(message) => {
                         reply.result.status = Outcome::Invalid;
                         reply.result.error = Some(CommandError {
+                            diagnostic: None,
                             code: "EXPERIMENT_REPORT".into(),
                             message,
                             cause: None,

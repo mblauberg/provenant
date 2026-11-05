@@ -323,7 +323,7 @@ fn outputs(
     spec: &CompositeSpec,
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,
-) -> NodeOutputs {
+) -> Result<NodeOutputs, String> {
     let mut selected = NodeOutputs {
         extra: Default::default(),
         schema_version: 2,
@@ -338,6 +338,9 @@ fn outputs(
         remaining: None,
     };
     let mut results = Vec::new();
+    let mut finding_members = Vec::new();
+    let mut truncation_header = None;
+    let mut inherited_notices = Vec::new();
     let partial = spec.min_successful.is_some();
     let unavailable = unavailable(spec, checkpoint, positions);
     selected.warnings = unavailable
@@ -365,12 +368,99 @@ fn outputs(
                     selected.verdict = source.verdict.clone();
                     selected.verdict_error = source.verdict_error.clone();
                 }
-                OutputKind::Findings => selected.findings.extend(source.findings.clone()),
+                OutputKind::Findings => {
+                    if source
+                        .warnings
+                        .iter()
+                        .any(|warning| warning.starts_with("composite findings truncated:"))
+                        && let Some(notice) = source.result.as_ref().and_then(|result| {
+                            result
+                                .excerpt
+                                .lines()
+                                .find(|line| line.starts_with("composite findings truncated:"))
+                        })
+                    {
+                        inherited_notices.push(notice.to_owned());
+                    }
+                    if !source.findings.is_empty() {
+                        finding_members.push((
+                            export.node.clone(),
+                            member
+                                .attempts
+                                .iter()
+                                .rev()
+                                .find_map(|attempt| attempt.attempt_ref.clone()),
+                        ));
+                    }
+                    selected
+                        .findings
+                        .extend(source.findings.iter().cloned().map(|mut finding| {
+                            finding.id = format!("{}:{}", export.node, finding.id);
+                            finding
+                        }))
+                }
                 OutputKind::Branch => selected.branch = source.branch.clone(),
                 OutputKind::Commit => selected.commit = source.commit.clone(),
                 OutputKind::Remaining => selected.remaining = source.remaining.clone(),
             }
         }
+    }
+    if selected
+        .findings
+        .iter()
+        .any(|finding| finding.id.len() > OUTPUT_FIELD_BYTES)
+    {
+        return Err("composite exported findings exceed cap".into());
+    }
+    let total = selected.findings.len();
+    if total > MAX_FINDINGS || canonical_len(&selected.findings) > FINDINGS_BYTES {
+        selected.findings = bounded_findings(std::mem::take(&mut selected.findings));
+        let dropped = total - selected.findings.len();
+        let members = finding_members
+            .iter()
+            .map(|(name, reference)| match reference {
+                Some(reference) => format!("{name} (attempt {reference})"),
+                None => name.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        let warning = format!(
+            "composite findings truncated: {dropped} dropped; full member results in staged inputs: {members}"
+        );
+        let mut rest = warning.as_str();
+        let mut notices = Vec::new();
+        while !rest.is_empty() && notices.len() < MAX_WARNINGS {
+            let part = bounded(rest, WARNING_BYTES);
+            if part.is_empty() {
+                break;
+            }
+            rest = &rest[part.len()..];
+            notices.push(part);
+        }
+        if !rest.is_empty()
+            && let Some(last) = notices.last_mut()
+        {
+            *last = format!(
+                "{}... full members in composite result",
+                bounded(last, WARNING_BYTES - 40)
+            );
+        }
+        notices.extend(selected.warnings);
+        notices.truncate(MAX_WARNINGS);
+        selected.warnings = notices;
+        truncation_header = Some(warning);
+    }
+    if !inherited_notices.is_empty() {
+        let inherited = inherited_notices.join("\n");
+        for notice in &inherited_notices {
+            if selected.warnings.len() < MAX_WARNINGS {
+                selected.warnings.push(bounded(notice, WARNING_BYTES));
+            }
+        }
+        truncation_header = Some(match truncation_header {
+            Some(own) => format!("{own}\n{inherited}"),
+            None => inherited,
+        });
     }
     selected.result = match results.as_slice() {
         [] => None,
@@ -394,11 +484,23 @@ fn outputs(
             })
         }
     };
-    if !unavailable.is_empty() {
+    if !unavailable.is_empty() || truncation_header.is_some() {
         // The unavailable list leads and is bounded on its own, so a long
         // review body can never truncate it away.
-        let full_header = format!("Unavailable lenses:\n{}", selected.warnings.join("\n"));
-        let header = bounded(&full_header, COMPOSITE_EXCERPT_BYTES / 2);
+        let mut headers = Vec::new();
+        let header_limit = if truncation_header.is_some() {
+            COMPOSITE_EXCERPT_BYTES
+        } else {
+            COMPOSITE_EXCERPT_BYTES / 2
+        };
+        if let Some(notice) = truncation_header {
+            headers.push(notice);
+        }
+        if !unavailable.is_empty() {
+            headers.push(format!("Unavailable lenses:\n{}", unavailable.join("\n")));
+        }
+        let full_header = headers.join("\n");
+        let header = bounded(&full_header, header_limit);
         let header_truncated = header.len() < full_header.len();
         let (body, source_truncated) = selected
             .result
@@ -422,17 +524,96 @@ fn outputs(
             path: None,
         });
     }
-    let total = selected.findings.len();
-    selected.findings.truncate(MAX_FINDINGS);
-    while canonical_len(&selected.findings) > FINDINGS_BYTES {
-        selected.findings.pop();
+    Ok(selected)
+}
+
+/// Reserve each member's strongest finding when all such reservations fit,
+/// then fill remaining space in severity order. Ties preserve export order.
+fn bounded_findings(findings: Vec<Finding>) -> Vec<Finding> {
+    fn severity(value: &str) -> u8 {
+        match value.to_ascii_lowercase().as_str() {
+            "critical" | "blocker" | "blocking" | "p0" => 0,
+            "high" | "error" | "p1" => 1,
+            "medium" | "moderate" | "should-fix" | "p2" => 2,
+            "low" | "warning" | "p3" => 3,
+            "info" | "informational" | "note" | "p4" => 4,
+            _ => 5,
+        }
     }
-    if selected.findings.len() < total {
-        selected
-            .warnings
-            .push("composite exported findings exceed cap".into());
+    let mut order: Vec<usize> = (0..findings.len()).collect();
+    order.sort_by_key(|&index| severity(&findings[index].severity));
+    let mut members = BTreeSet::new();
+    let mut reserved = Vec::new();
+    for &index in &order {
+        let member = findings[index]
+            .id
+            .split_once(':')
+            .map_or("", |(member, _)| member);
+        if members.insert(member) {
+            reserved.push(index);
+        }
     }
-    selected
+    let fits = |indices: &[usize]| {
+        indices.len() <= MAX_FINDINGS
+            && canonical_len(&indices.iter().map(|&i| &findings[i]).collect::<Vec<_>>())
+                <= FINDINGS_BYTES
+    };
+    let mut kept = if fits(&reserved) {
+        reserved
+    } else {
+        // A member's strongest finding may be much larger than another one.
+        // Try its smallest finding before deciding that coverage cannot fit.
+        let mut smallest: BTreeMap<&str, usize> = BTreeMap::new();
+        for (index, finding) in findings.iter().enumerate() {
+            let member = finding.id.split_once(':').map_or("", |(member, _)| member);
+            smallest
+                .entry(member)
+                .and_modify(|old| {
+                    if canonical_len(finding) < canonical_len(&findings[*old]) {
+                        *old = index;
+                    }
+                })
+                .or_insert(index);
+        }
+        let mut compact: Vec<_> = smallest.into_values().collect();
+        if fits(&compact) {
+            for &index in &order {
+                let member = findings[index]
+                    .id
+                    .split_once(':')
+                    .map_or("", |(member, _)| member);
+                if let Some(slot) = compact.iter().position(|&old| {
+                    findings[old]
+                        .id
+                        .split_once(':')
+                        .map_or("", |(name, _)| name)
+                        == member
+                        && severity(&findings[index].severity) < severity(&findings[old].severity)
+                }) {
+                    let old = compact[slot];
+                    compact[slot] = index;
+                    if !fits(&compact) {
+                        compact[slot] = old;
+                    }
+                }
+            }
+            compact
+        } else {
+            Vec::new()
+        }
+    };
+    for index in order {
+        if !kept.contains(&index) {
+            kept.push(index);
+            if !fits(&kept) {
+                kept.pop();
+            }
+        }
+    }
+    kept.sort_by_key(|&index| (severity(&findings[index].severity), index));
+    kept.into_iter()
+        .map(|index| findings[index].clone())
+        .collect()
 }
 
 /// Distinct exporting members, in export order.
@@ -512,12 +693,25 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
     if shortfall.is_some() {
         state = NodeState::Failed;
     }
-    let exported = (state == NodeState::Succeeded).then(|| outputs(spec, checkpoint, positions));
+    let mut exported = None;
+    let mut export_error = None;
+    if state == NodeState::Succeeded {
+        match outputs(spec, checkpoint, positions) {
+            Ok(value) => exported = Some(value),
+            Err(reason) => {
+                state = NodeState::Failed;
+                export_error = Some(reason);
+            }
+        }
+    }
     let progress = &mut checkpoint.nodes[index];
     if progress.state != state || progress.outputs != exported {
         progress.state = state;
         progress.outputs = exported;
-        if let Some(reason) = shortfall {
+        if let Some(reason) = export_error {
+            progress.advance_error_code = Some("composite_findings_exceed_cap".into());
+            progress.advance_error = Some(reason);
+        } else if let Some(reason) = shortfall {
             progress.advance_error_code = Some("coverage_below_minimum".into());
             progress.advance_error = Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
         }
@@ -615,27 +809,84 @@ pub(super) fn validate_progress(
         && state == NodeState::Succeeded
         && progress.advance_error_code.as_deref() == Some("coverage_below_minimum")
         && progress.advance_error == shortfall;
+    let export = node
+        .composite
+        .as_ref()
+        .map(|spec| outputs(spec, checkpoint, positions));
+    let failed_for_export = progress.state == NodeState::Failed
+        && state == NodeState::Succeeded
+        && shortfall.is_none()
+        && progress.advance_error_code.as_deref() == Some("composite_findings_exceed_cap")
+        && matches!(&export, Some(Err(reason)) if progress.advance_error.as_ref() == Some(reason));
     let valid = progress.attempts.is_empty()
         && progress.gate.is_none()
         && progress.ci.is_none()
-        && (progress.advance_error.is_none() || failed_for_coverage)
+        && (progress.advance_error.is_none() || failed_for_coverage || failed_for_export)
         && progress.source_commit.is_none()
         && match progress.state {
-            NodeState::Failed => failed_for_coverage && progress.outputs.is_none(),
+            NodeState::Failed => {
+                (failed_for_coverage || failed_for_export) && progress.outputs.is_none()
+            }
             NodeState::Pending => progress.outputs.is_none(),
             NodeState::Running => state == NodeState::Running && progress.outputs.is_none(),
             NodeState::Succeeded => {
                 state == NodeState::Succeeded
                     && shortfall.is_none()
-                    && progress.outputs
-                        == node
-                            .composite
-                            .as_ref()
-                            .map(|spec| outputs(spec, checkpoint, positions))
+                    && progress.outputs == export.and_then(Result::ok)
             }
             NodeState::Blocked | NodeState::Skipped => {
                 state == progress.state && progress.outputs.is_none()
             }
         };
     if valid { Ok(()) } else { Err(()) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_findings_reserves_members_then_prefers_severity() {
+        let finding = |id: &str, severity: &str| {
+            serde_json::from_value::<Finding>(serde_json::json!({
+                "id": id, "severity": severity, "file": "a", "summary": "s", "status": "open"
+            }))
+            .unwrap()
+        };
+        let mut findings: Vec<_> = (0..40)
+            .map(|i| finding(&format!("a:F{i}"), if i < 34 { "high" } else { "low" }))
+            .collect();
+        findings.push(finding("b:F1", "low"));
+        let selected = bounded_findings(findings);
+        assert_eq!(selected.len(), MAX_FINDINGS);
+        assert!(selected.iter().any(|f| f.id == "b:F1"));
+        assert_eq!(selected.iter().filter(|f| f.severity == "high").count(), 31);
+        assert!(canonical_len(&selected) <= FINDINGS_BYTES);
+    }
+    #[test]
+    fn member_coverage_uses_smaller_entries_when_strongest_do_not_fit() {
+        let finding = |id: &str, severity: &str, summary: String| {
+            serde_json::from_value::<Finding>(serde_json::json!({
+                "id": id, "severity": severity, "file": "a", "summary": summary, "status": "open"
+            }))
+            .unwrap()
+        };
+        let mut findings = Vec::new();
+        for member in 0..10 {
+            findings.push(finding(
+                &format!("m{member}:strong"),
+                "high",
+                "x".repeat(1000),
+            ));
+            findings.push(finding(&format!("m{member}:small"), "low", "s".into()));
+        }
+        let kept = bounded_findings(findings);
+        assert!(canonical_len(&kept) <= FINDINGS_BYTES);
+        for member in 0..10 {
+            assert!(
+                kept.iter()
+                    .any(|f| f.id.starts_with(&format!("m{member}:")))
+            );
+        }
+    }
 }

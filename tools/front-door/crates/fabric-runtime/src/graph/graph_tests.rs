@@ -57,8 +57,15 @@ struct FakeOwner {
     expansion_validations: usize,
     integration_heads: VecDeque<String>,
     source_commits: Vec<Option<String>>,
+    equal_range: bool,
     read_roots: Vec<Vec<String>>,
     distinct_from: Vec<Vec<String>>,
+    family_peers: Vec<Vec<String>>,
+    family_pool: Vec<String>,
+    prior_attempts: Vec<Vec<String>>,
+    models: std::collections::BTreeMap<String, String>,
+    review_expansion: Option<Expansion>,
+    review_calls: usize,
     require_distinct: Vec<bool>,
     deadlines: Vec<Option<u64>>,
     families: std::collections::BTreeMap<String, String>,
@@ -69,6 +76,9 @@ struct FakeOwner {
     file_requests: Vec<Vec<InputRequest>>,
     file_caps: Vec<usize>,
     materialise: Option<fn(&[InputRequest]) -> MaterialisedInputs>,
+    fallback_evidence:
+        std::collections::BTreeMap<String, provenant_records::run::PreparationFailure>,
+    omit_fallback_evidence: bool,
 }
 
 /// An inbox reply from `chair`, choosing `option` or sending `text`.
@@ -84,6 +94,7 @@ fn reply(option: Option<&str>, text: Option<&str>) -> AskReply {
 impl AttemptOwner for FakeOwner {
     type Error = NoObservation;
 
+<<<<<<< HEAD
     fn retry_allowance(
         &self,
         _: &provenant_records::ExtraFields,
@@ -95,6 +106,32 @@ impl AttemptOwner for FakeOwner {
         Ok(self.retry_used)
     }
 
+=======
+    fn preparation_fallback_evidence(
+        &mut self,
+        _key: &AttemptKey,
+        reference: &str,
+    ) -> Result<Option<provenant_records::run::PreparationFailure>, Self::Error> {
+        Ok(self.fallback_evidence.get(reference).copied())
+    }
+
+    fn resolve_review(
+        &mut self,
+        _node: &GraphNode,
+        _subject: &str,
+    ) -> Result<Expansion, ReviewResolveError> {
+        self.review_calls += 1;
+        self.review_expansion
+            .clone()
+            .ok_or(ReviewResolveError::Unsupported)
+    }
+    fn attempt_models(&mut self, attempts: &[String]) -> Result<Vec<String>, Self::Error> {
+        Ok(attempts
+            .iter()
+            .filter_map(|attempt| self.models.get(attempt).cloned())
+            .collect())
+    }
+>>>>>>> origin/main
     fn stop_cancelled_attempt(&mut self, _attempt: &GraphAttempt) -> Result<(), Self::Error> {
         self.cancellation_stops += 1;
         Ok(())
@@ -175,6 +212,10 @@ impl AttemptOwner for FakeOwner {
         Ok(Some("https://example.invalid/pr/1".into()))
     }
 
+    fn equal_review_range(&mut self, _: &str) -> Result<bool, Self::Error> {
+        Ok(self.equal_range)
+    }
+
     fn observe_or_start(
         &mut self,
         key: &AttemptKey,
@@ -189,6 +230,8 @@ impl AttemptOwner for FakeOwner {
         self.read_roots.push(node.read_roots.to_vec());
         self.distinct_from
             .push(node.distinct_from_attempts.to_vec());
+        self.family_peers.push(node.family_peers.to_vec());
+        self.prior_attempts.push(node.prior_attempts.to_vec());
         self.require_distinct.push(node.require_distinct);
         self.deadlines.push(node.deadline_seconds);
         self.titles.push(node.title.to_owned());
@@ -200,7 +243,39 @@ impl AttemptOwner for FakeOwner {
         self.launch_actors.push(replay.launch_actor.to_owned());
         self.calls.push((key.clone(), route.clone()));
         self.permissions.push((access, worktree.map(str::to_owned)));
-        self.observations.pop_front().ok_or(NoObservation)
+        if !self.family_pool.is_empty() {
+            let family = self
+                .family_pool
+                .iter()
+                .find(|family| !node.family_peers.contains(family))
+                .unwrap_or(&self.family_pool[0])
+                .clone();
+            let reference = format!("h/{}", self.calls.len());
+            self.families.insert(reference.clone(), family);
+            return Ok(done_as(&reference));
+        }
+        let observation = self.observations.pop_front().ok_or(NoObservation)?;
+        if let AttemptObservation::Terminal {
+            attempt_ref: Some(reference),
+            outcome,
+            launched: false,
+            ..
+        } = &observation
+        {
+            use provenant_records::run::PreparationFailure;
+            let evidence = match outcome {
+                AttemptOutcome::AuthRequired => Some(PreparationFailure::AuthRequired),
+                AttemptOutcome::UsageLimited => Some(PreparationFailure::UsageLimited),
+                AttemptOutcome::AdapterUnavailable => Some(PreparationFailure::AdapterUnavailable),
+                _ => None,
+            };
+            if let Some(evidence) = evidence
+                && !self.omit_fallback_evidence
+            {
+                self.fallback_evidence.insert(reference.clone(), evidence);
+            }
+        }
+        Ok(observation)
     }
 }
 
@@ -218,6 +293,8 @@ fn route(adapter: &str) -> GraphRoute {
 
 fn node(id: &str, route: GraphRoute) -> GraphNode {
     GraphNode {
+        review: None,
+        family_group: None,
         context: None,
         extra: Default::default(),
         composite_members: Vec::new(),
@@ -261,6 +338,7 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
 
 fn graph(nodes: Vec<GraphNode>) -> GraphDocument {
     GraphDocument {
+        review_base: None,
         context: None,
         extra: Default::default(),
         decision_session: None,
@@ -333,6 +411,10 @@ fn distinct_from_writer_passes_the_writer_attempts_to_the_owner() {
     assert!(run.checkpoint.successful());
     assert_eq!(owner.distinct_from[0], Vec::<String>::new());
     assert_eq!(owner.distinct_from[1], vec!["host/7".to_owned()]);
+    assert_eq!(
+        owner.source_commits[1].as_deref(),
+        Some("3333333333333333333333333333333333333333")
+    );
     // Without a writing source the constraint has nothing to exclude.
     let mut unsourced = node("lone", route("first"));
     unsourced.distinct_from = Some(DistinctFrom::Writer);
@@ -405,6 +487,500 @@ fn separation_run(
     )
     .unwrap();
     (owner, run.checkpoint)
+}
+
+#[test]
+fn deferred_review_journals_and_replays_without_resolving_again() {
+    let oid = "1".repeat(40);
+    let mut review = node("review", route("first"));
+    review.kind = Some(NodeKind::Plan);
+    review.route = None;
+    review.source = Some(SourceBinding::Commit {
+        commit: oid.clone(),
+    });
+    review.review = Some(ReviewSpec {
+        shape: None,
+        risk_tier: None,
+        kind: None,
+        size: None,
+        risk_tags: vec![],
+        worktree: None,
+        lenses: vec![],
+        min_successful: Some(1),
+        max_nodes: 3,
+    });
+    let mut outer = node("outer", route("first"));
+    outer.kind = Some(NodeKind::Composite);
+    outer.route = None;
+    outer.prompt.clear();
+    outer.composite = Some(CompositeSpec {
+        min_successful: Some(1),
+        nodes: vec![review],
+        exports: vec![GraphInput {
+            extra: Default::default(),
+            node: "review".into(),
+            outputs: vec![OutputKind::Result],
+        }],
+    });
+    let mut document = graph(vec![outer]);
+    document.schema_version = 2;
+    let unsupported = advance(
+        &document,
+        &mut FakeOwner::default(),
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    let failed = unsupported
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "outer--review")
+        .unwrap();
+    assert_eq!(
+        failed.advance_error_code.as_deref(),
+        Some("review_resolution_unsupported")
+    );
+    let mut root = node("outer--review--review", route("first"));
+    root.kind = Some(NodeKind::Composite);
+    root.route = None;
+    root.prompt.clear();
+    let mut lens = node("lens", route("first"));
+    lens.source = Some(SourceBinding::Commit {
+        commit: oid.clone(),
+    });
+    root.composite = Some(CompositeSpec {
+        min_successful: Some(1),
+        nodes: vec![lens],
+        exports: vec![GraphInput {
+            extra: Default::default(),
+            node: "lens".into(),
+            outputs: vec![OutputKind::Result],
+        }],
+    });
+    let expanded = composites::expand(&graph(vec![root]), &plans::generous()).unwrap();
+    let addition = Expansion {
+        review: Some(ReviewResolution {
+            subject: oid.parse().unwrap(),
+            base: oid.parse().unwrap(),
+            measured_size: "small".into(),
+            shape: "quick".into(),
+            source: "fixture".into(),
+        }),
+        extra: Default::default(),
+        source: "outer--review".into(),
+        continuation: false,
+        nodes: expanded.nodes,
+        patterns: vec![],
+    };
+    let mut invalid = addition.clone();
+    invalid.review = None;
+    let invalid_run = advance(
+        &document,
+        &mut FakeOwner {
+            review_expansion: Some(invalid),
+            ..Default::default()
+        },
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    let failed = invalid_run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "outer--review")
+        .unwrap();
+    assert_eq!(
+        failed.advance_error_code.as_deref(),
+        Some("review_resolution_failed")
+    );
+    assert!(invalid_run.checkpoint.expansions.is_empty());
+    let mut owner = FakeOwner {
+        review_expansion: Some(addition),
+        observations: [
+            AttemptObservation::Pending {
+                attempt_ref: Some("h/1".into()),
+            },
+            terminal_from("lens result", "h/1"),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let first = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(first.checkpoint.expansions.len(), 1);
+    assert_eq!(owner.review_calls, 1);
+    journal.0 = Some(
+        serde_json::from_str(&serde_json::to_string(journal.0.as_ref().unwrap()).unwrap()).unwrap(),
+    );
+    let completed = resume(&document, &mut owner, &mut journal).unwrap();
+    assert!(completed.checkpoint.successful());
+    let outer = completed
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "outer")
+        .unwrap();
+    assert_eq!(
+        outer
+            .outputs
+            .as_ref()
+            .unwrap()
+            .result
+            .as_ref()
+            .unwrap()
+            .excerpt,
+        "lens result"
+    );
+    assert_eq!(owner.review_calls, 1);
+}
+
+#[test]
+fn family_group_replay_keeps_launch_peers() {
+    let mut nodes = Vec::new();
+    for id in ["one", "two", "three"] {
+        let mut member = node(id, route("first"));
+        member.family_group = Some("panel".into());
+        nodes.push(member);
+    }
+    let mut document = graph(nodes);
+    document.schema_version = 2;
+    let mut owner = FakeOwner {
+        observations: [
+            done_as("h/1"),
+            AttemptObservation::Pending {
+                attempt_ref: Some("h/2".into()),
+            },
+            done_as("h/3"),
+            done_as("h/2"),
+        ]
+        .into(),
+        families: [
+            ("h/1".into(), "a".into()),
+            ("h/2".into(), "b".into()),
+            ("h/3".into(), "c".into()),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    advance(&document, &mut owner, &mut journal).unwrap();
+    let run = resume(&document, &mut owner, &mut journal).unwrap();
+    assert!(run.checkpoint.successful());
+    assert_eq!(owner.family_peers[3], ["a"]);
+    assert_eq!(
+        run.checkpoint.nodes[1]
+            .separation
+            .as_ref()
+            .unwrap()
+            .excluded,
+        ["a"]
+    );
+}
+
+#[test]
+fn alias_retry_receives_the_prior_model() {
+    let mut member = node("lens", route("first"));
+    let alias = GraphRoute {
+        extra: Default::default(),
+        adapter: None,
+        name: None,
+        model: None,
+        alias: Some("senior".into()),
+        effort: None,
+        account: None,
+    };
+    member.route = None;
+    member.routes = Some(vec![alias.clone(), alias]);
+    let mut limited = done_as("h/1");
+    if let AttemptObservation::Terminal {
+        outcome, launched, ..
+    } = &mut limited
+    {
+        *outcome = AttemptOutcome::UsageLimited;
+        *launched = false;
+    }
+    let mut owner = FakeOwner {
+        observations: [limited, done_as("h/2")].into(),
+        models: [("h/1".into(), "first/model".into())].into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![member]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert!(run.checkpoint.successful());
+    assert_eq!(run.checkpoint.nodes[0].attempts.len(), 2);
+    assert_eq!(owner.prior_attempts[1], ["first/model"]);
+}
+
+#[test]
+fn family_group_passes_peers_and_records_shared_family() {
+    for families in [["a", "b", "c"], ["a", "a", "a"]] {
+        let mut nodes = Vec::new();
+        for id in ["one", "two", "three"] {
+            let mut member = node(id, route("first"));
+            member.family_group = Some("panel".into());
+            nodes.push(member);
+        }
+        let mut document = graph(nodes);
+        document.schema_version = 2;
+        let mut owner = FakeOwner {
+            family_pool: families.iter().map(|family| (*family).to_owned()).collect(),
+            ..Default::default()
+        };
+        let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+        assert!(run.checkpoint.successful());
+        assert_eq!(owner.family_peers[1], [families[0]]);
+        assert_eq!(owner.families["h/1"], families[0]);
+        assert_eq!(owner.families["h/2"], families[1]);
+        assert_eq!(owner.families["h/3"], families[2]);
+        assert_eq!(
+            run.checkpoint.nodes[2].separation.as_ref().unwrap().outcome,
+            if families[0] == families[2] {
+                SeparationOutcome::Unavailable
+            } else {
+                SeparationOutcome::Separated
+            }
+        );
+    }
+}
+
+#[test]
+fn panel_with_one_usage_limited_member_reaches_synthesis() {
+    let alias = GraphRoute {
+        extra: Default::default(),
+        adapter: None,
+        name: None,
+        model: None,
+        alias: Some("junior".into()),
+        effort: None,
+        account: None,
+    };
+    let mut nodes = Vec::new();
+    for id in ["one", "two", "three"] {
+        let mut member = node(id, route("first"));
+        member.route = None;
+        member.routes = Some(vec![alias.clone(), alias.clone()]);
+        member.family_group = Some("panel".into());
+        nodes.push(member);
+    }
+    let mut synthesis = node("synthesis", route("first"));
+    synthesis.depends_on = vec!["one".into(), "two".into(), "three".into()];
+    nodes.push(synthesis);
+    let mut document = graph(nodes);
+    document.schema_version = 2;
+    let mut limited = done_as("h/1");
+    if let AttemptObservation::Terminal {
+        outcome, launched, ..
+    } = &mut limited
+    {
+        *outcome = AttemptOutcome::UsageLimited;
+        *launched = false;
+    }
+    let mut owner = FakeOwner {
+        observations: [
+            limited,
+            done_as("h/2"),
+            done_as("h/3"),
+            done_as("h/4"),
+            done_as("h/5"),
+        ]
+        .into(),
+        models: [("h/1".into(), "go/glm-flash".into())].into(),
+        families: [
+            ("h/1".into(), "zhipu".into()),
+            ("h/2".into(), "openai".into()),
+            ("h/3".into(), "anthropic".into()),
+            ("h/4".into(), "google".into()),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert!(run.checkpoint.successful(), "{:#?}", run.checkpoint.nodes);
+    assert_eq!(run.checkpoint.nodes[0].attempts.len(), 2);
+    // The retry excludes the refused model by id, as the host receives it.
+    assert_eq!(owner.prior_attempts[1], ["go/glm-flash"]);
+    // Siblings prefer the families already used; none of them is a gate.
+    assert_eq!(owner.family_peers[2], ["zhipu", "openai"]);
+    assert_eq!(owner.family_peers[3], ["zhipu", "openai", "anthropic"]);
+    assert!(owner.require_distinct.iter().all(|required| !required));
+    let separation = run.checkpoint.nodes[2].separation.as_ref().unwrap();
+    assert_eq!(separation.strength, FamilyStrength::Prefer);
+    assert_eq!(separation.outcome, SeparationOutcome::Separated);
+}
+
+#[test]
+fn required_writer_separation_records_enforced_and_preferred_families() {
+    let mut write = node("write", route("first"));
+    write.access = AccessMode::WorktreeWrite;
+    write.worktree = Some(".worktrees/write".into());
+    let mut lenses = Vec::new();
+    for id in ["one", "two"] {
+        let mut lens = node(id, route("first"));
+        lens.source = Some(SourceBinding::Node {
+            node: "write".into(),
+        });
+        lens.depends_on = vec!["write".into()];
+        lens.distinct_from = Some(DistinctFrom::Writer);
+        lens.distinct_strength = Some(FamilyStrength::Require);
+        lens.family_group = Some("panel".into());
+        lenses.push(lens);
+    }
+    let mut nodes = vec![write];
+    nodes.extend(lenses);
+    let mut document = graph(nodes);
+    document.schema_version = 2;
+    let mut writer_done = done_as("h/1");
+    if let AttemptObservation::Terminal { commit, .. } = &mut writer_done {
+        *commit = Some("3".repeat(40));
+    }
+    let mut owner = FakeOwner {
+        observations: [writer_done, done_as("h/2"), done_as("h/3")].into(),
+        families: [
+            ("h/1".into(), "openai".into()),
+            ("h/2".into(), "anthropic".into()),
+            ("h/3".into(), "anthropic".into()),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert!(run.checkpoint.successful(), "{:#?}", run.checkpoint.nodes);
+    assert_eq!(owner.family_peers[2], ["anthropic"]);
+    assert!(owner.require_distinct[2]);
+    // The writer exclusion is mandatory and sibling diversity is preferred.
+    let separation = run.checkpoint.nodes[2].separation.as_ref().unwrap();
+    assert_eq!(separation.strength, FamilyStrength::Require);
+    assert_eq!(separation.excluded, ["openai"]);
+    assert_eq!(separation.preferred, ["anthropic"]);
+    assert_eq!(separation.outcome, SeparationOutcome::Separated);
+}
+
+#[test]
+fn pending_lens_journals_required_writer_and_sibling_preference() {
+    let mut writer = node("write", route("first"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some(".worktrees/write".into());
+    let mut lenses = Vec::new();
+    for id in ["one", "two"] {
+        let mut lens = node(id, route("first"));
+        lens.source = Some(SourceBinding::Node {
+            node: "write".into(),
+        });
+        lens.depends_on = vec!["write".into()];
+        lens.distinct_from = Some(DistinctFrom::Writer);
+        lens.distinct_strength = Some(FamilyStrength::Require);
+        lens.family_group = Some("panel".into());
+        lenses.push(lens);
+    }
+    let mut document = graph(vec![writer, lenses.remove(0), lenses.remove(0)]);
+    document.schema_version = 2;
+    let mut writer_done = done_as("h/1");
+    if let AttemptObservation::Terminal { commit, .. } = &mut writer_done {
+        *commit = Some("3".repeat(40));
+    }
+    let mut owner = FakeOwner {
+        observations: [
+            writer_done,
+            done_as("h/2"),
+            AttemptObservation::Pending {
+                attempt_ref: Some("h/3".into()),
+            },
+        ]
+        .into(),
+        families: [
+            ("h/1".into(), "openai".into()),
+            ("h/2".into(), "anthropic".into()),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let separation = run.checkpoint.nodes[2].separation.as_ref().unwrap();
+    assert_eq!(separation.strength, FamilyStrength::Require);
+    assert_eq!(separation.excluded, ["openai"]);
+    assert_eq!(separation.preferred, ["anthropic"]);
+    assert_eq!(
+        journal.0.as_ref().unwrap().nodes[2].separation.as_ref(),
+        Some(separation)
+    );
+}
+
+#[test]
+fn retry_start_clears_previous_family_snapshot_before_saving() {
+    #[derive(Default)]
+    struct History(Vec<GraphCheckpoint>);
+    impl GraphJournal for History {
+        type Error = Infallible;
+        fn load(&mut self, graph_id: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+            Ok(self
+                .0
+                .last()
+                .filter(|row| row.graph_id == graph_id)
+                .cloned())
+        }
+        fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+            self.0.push(checkpoint.clone());
+            Ok(())
+        }
+    }
+    let mut writer = node("write", route("first"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some(".worktrees/write".into());
+    let mut lens = node("lens", route("first"));
+    lens.route = None;
+    lens.routes = Some(vec![route("first"), route("second")]);
+    lens.source = Some(SourceBinding::Node {
+        node: "write".into(),
+    });
+    lens.depends_on = vec!["write".into()];
+    lens.distinct_from = Some(DistinctFrom::Writer);
+    lens.distinct_strength = Some(FamilyStrength::Require);
+    lens.family_group = Some("panel".into());
+    let mut document = graph(vec![writer, lens]);
+    document.schema_version = 2;
+    let mut writer_done = done_as("h/1");
+    if let AttemptObservation::Terminal { commit, .. } = &mut writer_done {
+        *commit = Some("3".repeat(40));
+    }
+    let mut limited = done_as("h/2");
+    if let AttemptObservation::Terminal {
+        outcome, launched, ..
+    } = &mut limited
+    {
+        *outcome = AttemptOutcome::UsageLimited;
+        *launched = false;
+    }
+    let mut owner = FakeOwner {
+        observations: [writer_done, limited, done_as("h/3")].into(),
+        families: [
+            ("h/1".into(), "openai".into()),
+            ("h/2".into(), "anthropic".into()),
+            ("h/3".into(), "google".into()),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = History::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert!(run.checkpoint.successful());
+    let retry = journal
+        .0
+        .iter()
+        .find_map(|row| {
+            let lens = &row.nodes[1];
+            (lens.attempts.len() == 2 && lens.attempts[1].state == AttemptState::Starting)
+                .then_some(lens)
+        })
+        .unwrap();
+    assert!(
+        retry.separation.is_none(),
+        "retry inherited a stale separation"
+    );
 }
 
 #[test]
@@ -580,6 +1156,196 @@ fn a_synthesis_settles_with_a_disposition_and_reason_for_every_finding() {
     );
 }
 
+// Small: settlement uses only the in-memory graph owner.
+#[test]
+fn identity_only_dispositions_inherit_selected_findings() {
+    let mut synthesis = node("synthesis", route("first"));
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.depends_on = vec!["review".into()];
+    synthesis.inputs = vec![GraphInput {
+        extra: Default::default(),
+        node: "review".into(),
+        outputs: vec![OutputKind::Findings],
+    }];
+    for (id, state) in [
+        ("F1", NodeState::Succeeded),
+        ("missing-F9", NodeState::Failed),
+    ] {
+        let text = findings_text(&format!(
+            r#"{{"id":"{id}","disposition":"rejected","reason":"falsified"}}"#
+        ));
+        let mut owner = FakeOwner {
+            observations: [
+                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+                terminal_with_result(AttemptOutcome::Succeeded, &text),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let run = advance(
+            &graph(vec![node("review", route("first")), synthesis.clone()]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
+        let progress = &run.checkpoint.nodes[1];
+        assert_eq!(progress.state, state);
+        if state == NodeState::Succeeded {
+            let finding = &progress.outputs.as_ref().unwrap().findings[0];
+            assert_eq!(finding.summary, "s");
+            assert_eq!(finding.file, "a.rs");
+            assert_eq!(finding.severity, "high");
+            assert_eq!(finding.status, "open");
+            assert_eq!(finding.reason.as_deref(), Some("falsified"));
+        } else {
+            let error = progress.advance_error.as_deref().unwrap();
+            assert!(
+                error.contains("(missing-F9) field id: unknown upstream identity"),
+                "{error}"
+            );
+        }
+    }
+}
+
+// Small: composite export and downstream settlement share the real graph path.
+#[test]
+fn composite_findings_have_qualified_ids_and_unambiguous_bare_aliases() {
+    for (second_id, cited, state) in [
+        (
+            "F1",
+            vec!["reviews--a:F1", "reviews--b:F1"],
+            NodeState::Succeeded,
+        ),
+        ("F2", vec!["F1", "F2"], NodeState::Succeeded),
+        ("inner:F2", vec!["F1", "inner:F2"], NodeState::Succeeded),
+        (
+            "inner:F2",
+            vec!["reviews--a:F1", "reviews--b:inner:F2"],
+            NodeState::Succeeded,
+        ),
+        ("F1", vec!["F1", "reviews--b:F1"], NodeState::Failed),
+    ] {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1, "graph_id":"qualified-findings", "nodes":[
+                {"id":"reviews", "kind":"composite", "access":"read_only", "composite":{
+                    "nodes":[
+                        {"id":"a", "access":"read_only", "prompt":"review", "route":{"alias":"senior"}},
+                        {"id":"b", "access":"read_only", "prompt":"review", "route":{"alias":"senior"}}
+                    ], "exports":[{"node":"a", "outputs":["findings"]}, {"node":"b", "outputs":["findings"]}]
+                }},
+                {"id":"synthesis", "kind":"synthesise", "access":"read_only", "prompt":"dispose", "route":{"alias":"senior"},
+                 "depends_on":["reviews"], "inputs":[{"node":"reviews", "outputs":["findings"]}],
+                 "dispositions":["accepted", "rejected", "deferred"]}
+            ]
+        })).unwrap();
+        let entries: Vec<_> = cited
+            .iter()
+            .map(|id| serde_json::json!({"id":id, "disposition":"rejected", "reason":"falsified"}))
+            .collect();
+        let text = format!(
+            "```findings\n{}\n```\nVERDICT: PASS",
+            serde_json::json!({"schema_version":1,"findings":entries})
+        );
+        let mut owner = FakeOwner {
+            observations: [
+                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+                terminal_with_result(
+                    AttemptOutcome::Succeeded,
+                    &findings_text(&entry("").replace("F1", second_id)),
+                ),
+                terminal_with_result(AttemptOutcome::Succeeded, &text),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        let composite = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "reviews")
+            .unwrap();
+        let ids: Vec<_> = composite
+            .outputs
+            .as_ref()
+            .unwrap()
+            .findings
+            .iter()
+            .map(|finding| finding.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["reviews--a:F1", &format!("reviews--b:{second_id}")]
+        );
+        let synthesis = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "synthesis")
+            .unwrap();
+        assert_eq!(synthesis.state, state);
+        if state == NodeState::Succeeded {
+            assert_eq!(
+                synthesis
+                    .outputs
+                    .as_ref()
+                    .unwrap()
+                    .findings
+                    .iter()
+                    .map(|finding| finding.id.as_str())
+                    .collect::<Vec<_>>(),
+                ids
+            );
+        } else {
+            let error = synthesis.advance_error.as_deref().unwrap();
+            assert!(
+                error.contains("F1") && error.contains("ambiguous"),
+                "{error}"
+            );
+        }
+        assert_eq!(
+            advance(&document, &mut FakeOwner::default(), &mut journal)
+                .unwrap()
+                .checkpoint,
+            run.checkpoint
+        );
+    }
+}
+
+// Small: malformed entries must retain a bounded, actionable diagnostic.
+#[test]
+fn findings_error_names_first_entry_and_field() {
+    for (entry, field) in [
+        (
+            r#"{"id":"broken","severity":42},{"id":"later"}"#.to_owned(),
+            "severity",
+        ),
+        (
+            r#"{"id":"broken","severity":"high","file":"a"}"#.to_owned(),
+            "summary",
+        ),
+        (
+            entry("").replace("null", "-1").replace("F1", "broken"),
+            "line",
+        ),
+    ] {
+        let progress = synthesis_run(&findings_text(&entry));
+        let error = progress.advance_error.as_deref().unwrap();
+        assert!(
+            error.contains("entry 1") && error.contains("broken"),
+            "{error}"
+        );
+        assert!(error.contains(field), "{error}");
+        assert!(!error.contains("later"), "{error}");
+    }
+    let progress = synthesis_run(&findings_text(&format!(
+        r#"{{"id":"{}","disposition":"rejected","reason":"unknown"}}"#,
+        "界".repeat(2000)
+    )));
+    assert!(progress.advance_error.as_ref().unwrap().len() <= MAX_ADVANCE_ERROR_BYTES);
+}
+
 #[test]
 fn a_synthesis_must_dispose_of_every_selected_upstream_finding_exactly_once() {
     let disposed = |id: &str| {
@@ -631,6 +1397,672 @@ fn a_synthesis_must_dispose_of_every_selected_upstream_finding_exactly_once() {
             Some("disposition_count")
         );
     }
+}
+
+#[test]
+fn synthesis_disposes_once_of_findings_propagated_through_verifier() {
+    let lens = node("lens", route("first"));
+    let mut verify = node("verify", route("first"));
+    verify.depends_on = vec!["lens".into()];
+    verify.inputs = vec![GraphInput {
+        extra: Default::default(),
+        node: "lens".into(),
+        outputs: vec![OutputKind::Result],
+    }];
+    let mut synthesis = node("synthesis", route("first"));
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.depends_on = vec!["lens".into(), "verify".into()];
+    synthesis.inputs = ["verify", "lens"]
+        .into_iter()
+        .map(|id| GraphInput {
+            extra: Default::default(),
+            node: id.into(),
+            outputs: vec![OutputKind::Findings],
+        })
+        .collect();
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(&entry(
+                    ",\"verification\":\"upheld\",\"propagates\":\"lens:F1\"",
+                )),
+            ),
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(r#"{"id":"F1","disposition":"accepted","reason":"verified"}"#),
+            ),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![lens, verify, synthesis]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    let finding = &run.checkpoint.nodes[2].outputs.as_ref().unwrap().findings[0];
+    assert_eq!(finding.id, "F1");
+    assert_eq!(finding.extra["verification"], "upheld");
+}
+
+// Small: the verifier sees a composite-qualified ID and synthesis accepts its bare alias.
+#[test]
+fn composite_qualified_propagation_resolves_identity_only_disposition() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":1, "graph_id":"composite-propagation", "nodes":[
+            {"id":"lenses", "kind":"composite", "access":"read_only", "composite":{
+                "nodes":[{"id":"lens-correctness-spec", "access":"read_only", "prompt":"review", "route":{"alias":"senior"}}],
+                "exports":[{"node":"lens-correctness-spec", "outputs":["findings"]}]
+            }},
+            {"id":"verify", "access":"read_only", "prompt":"verify", "route":{"alias":"senior"},
+             "depends_on":["lenses"], "inputs":[{"node":"lenses", "outputs":["findings"]}]},
+            {"id":"synthesis", "kind":"synthesise", "access":"read_only", "prompt":"dispose", "route":{"alias":"senior"},
+             "depends_on":["lenses", "verify"], "inputs":[{"node":"lenses", "outputs":["findings"]}, {"node":"verify", "outputs":["findings"]}],
+             "dispositions":["accepted", "rejected", "deferred"]}
+        ]
+    })).unwrap();
+    let propagated = entry(
+        ",\"verification\":\"upheld\",\"propagates\":\"lenses:lenses--lens-correctness-spec:F1\"",
+    )
+    .replace(
+        "\"id\":\"F1\"",
+        "\"id\":\"lenses--lens-correctness-spec:F1\"",
+    );
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&propagated)),
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(r#"{"id":"F1","disposition":"accepted","reason":"verified"}"#),
+            ),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let synthesis = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "synthesis")
+        .unwrap();
+    assert_eq!(
+        synthesis.state,
+        NodeState::Succeeded,
+        "{:?}",
+        synthesis.advance_error
+    );
+    let findings = &synthesis.outputs.as_ref().unwrap().findings;
+    assert_eq!(findings.len(), 2);
+    assert!(
+        findings
+            .iter()
+            .all(|f| f.id == "lenses--lens-correctness-spec:F1")
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.extra.get("verification").is_some_and(|v| v == "upheld"))
+    );
+}
+
+#[test]
+fn qualified_propagations_group_colliding_originals() {
+    let input = |id: &str| GraphInput {
+        extra: Default::default(),
+        node: id.into(),
+        outputs: vec![OutputKind::Findings],
+    };
+    let mut verify = node("verify", route("first"));
+    verify.depends_on = vec!["a".into(), "b".into()];
+    verify.inputs = vec![input("a"), input("b")];
+    let mut synthesis = node("synthesis", route("first"));
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.depends_on = vec!["a".into(), "b".into(), "verify".into()];
+    synthesis.inputs = vec![input("a"), input("b"), input("verify")];
+    let propagated = ["a", "b"]
+        .map(|source| {
+            entry(&format!(
+                ",\"verification\":\"{source}-verified\",\"propagates\":\"{source}:F1\""
+            ))
+            .replace("\"id\":\"F1\"", &format!("\"id\":\"{source}:F1\""))
+        })
+        .join(",");
+    let decisions = r#"{"id":"a:F1","disposition":"accepted","reason":"yes"},{"id":"b:F1","disposition":"rejected","reason":"no"}"#;
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(&entry(",\"original\":\"a-original\"")),
+            ),
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(&entry(",\"original\":\"b-original\"")),
+            ),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&propagated)),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(decisions)),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![
+            node("a", route("first")),
+            node("b", route("first")),
+            verify,
+            synthesis,
+        ]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        run.checkpoint.nodes[3].state,
+        NodeState::Succeeded,
+        "{:?}",
+        run.checkpoint.nodes[3].advance_error
+    );
+    let prompt = &owner.prompts[3];
+    assert!(prompt.contains("a-verified") && prompt.contains("b-verified"));
+    assert!(prompt.contains("a-original") && prompt.contains("b-original"));
+    let findings = &run.checkpoint.nodes[3].outputs.as_ref().unwrap().findings;
+    assert_eq!(
+        findings.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
+        vec!["a:F1", "a:F1", "b:F1", "b:F1"]
+    );
+    assert_eq!(findings[0].extra["original"], "a-original");
+    assert_eq!(findings[1].extra["verification"], "a-verified");
+    assert_eq!(findings[2].extra["original"], "b-original");
+    assert_eq!(findings[3].extra["verification"], "b-verified");
+}
+
+#[test]
+fn multiple_verifiers_share_one_disposition_and_keep_evidence() {
+    let input = |id: &str| GraphInput {
+        extra: Default::default(),
+        node: id.into(),
+        outputs: vec![OutputKind::Findings],
+    };
+    let verifier = |id: &str| {
+        let mut n = node(id, route("first"));
+        n.depends_on = vec!["lens".into()];
+        n.inputs = vec![input("lens")];
+        n
+    };
+    let mut synthesis = node("synthesis", route("first"));
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.depends_on = vec!["lens".into(), "verify".into(), "verify2".into()];
+    synthesis.inputs = vec![input("lens"), input("verify"), input("verify2")];
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(&entry(
+                    ",\"verification\":\"evidence-one\",\"propagates\":\"lens:F1\"",
+                )),
+            ),
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(&entry(
+                    ",\"verification\":\"evidence-two\",\"propagates\":\"lens:F1\"",
+                )),
+            ),
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(r#"{"id":"F1","disposition":"accepted","reason":"verified","verification":"combined"}"#),
+            ),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![
+            node("lens", route("first")),
+            verifier("verify"),
+            verifier("verify2"),
+            synthesis,
+        ]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        run.checkpoint.nodes[3].state,
+        NodeState::Succeeded,
+        "{:?}",
+        run.checkpoint.nodes[3].advance_error
+    );
+    let prompt = &owner.prompts[3];
+    assert!(prompt.contains("evidence-one") && prompt.contains("evidence-two"));
+    assert!(!prompt.contains("verify:F1") && !prompt.contains("verify2:F1"));
+    let findings = &run.checkpoint.nodes[3].outputs.as_ref().unwrap().findings;
+    assert_eq!(findings.len(), 3);
+    assert!(
+        findings
+            .iter()
+            .all(|f| f.id == "F1" && f.disposition.as_deref() == Some("accepted"))
+    );
+    assert_eq!(findings[1].extra["verification"], "evidence-one");
+    assert_eq!(findings[2].extra["verification"], "evidence-two");
+}
+
+#[test]
+fn chain_resolves_rendered_markers_and_preserves_every_copy() {
+    let input = |id: &str| GraphInput {
+        extra: Default::default(),
+        node: id.into(),
+        outputs: vec![OutputKind::Findings],
+    };
+    let mut v1 = node("v1", route("first"));
+    v1.depends_on = vec!["a".into(), "b".into()];
+    v1.inputs = vec![input("a"), input("b")];
+    let mut v2 = node("v2", route("first"));
+    v2.depends_on = vec!["v1".into()];
+    v2.inputs = vec![input("v1")];
+    let mut synth = node("synthesis", route("first"));
+    synth.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synth.depends_on = vec!["a".into(), "b".into(), "v1".into(), "v2".into()];
+    synth.inputs = vec![input("a"), input("b"), input("v1"), input("v2")];
+    let propagated = entry(",\"evidence\":\"middle\",\"propagates\":\"a:a:F1\"");
+    let last = entry(",\"evidence\":\"last\",\"propagates\":\"v1:F1\"");
+    let decisions = r#"{"id":"a:F1","disposition":"accepted","reason":"yes"},{"id":"b:F1","disposition":"rejected","reason":"no"}"#;
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(&entry(",\"evidence\":\"first\"")),
+            ),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&propagated)),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&last)),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(decisions)),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![
+            node("a", route("first")),
+            node("b", route("first")),
+            v1,
+            v2,
+            synth,
+        ]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    let progress = &run.checkpoint.nodes[4];
+    assert_eq!(
+        progress.state,
+        NodeState::Succeeded,
+        "{:?}",
+        progress.advance_error
+    );
+    let findings = &progress.outputs.as_ref().unwrap().findings;
+    assert_eq!(findings.len(), 4);
+    let copies: Vec<_> = findings.iter().filter(|f| f.id == "a:F1").collect();
+    assert_eq!(copies.len(), 3);
+    for (finding, evidence) in copies.iter().zip(["first", "middle", "last"]) {
+        assert_eq!(finding.extra["evidence"], evidence);
+        assert_eq!(finding.disposition.as_deref(), Some("accepted"));
+        assert!(owner.prompts[4].contains(evidence));
+    }
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.id == "b:F1" && f.disposition.as_deref() == Some("rejected"))
+    );
+}
+
+#[test]
+fn result_only_inputs_do_not_change_rendered_finding_ids() {
+    let input = |id: &str, output| GraphInput {
+        extra: Default::default(),
+        node: id.into(),
+        outputs: vec![output],
+    };
+    let mut verify = node("verify", route("first"));
+    verify.depends_on = vec!["a".into(), "b".into(), "c".into()];
+    verify.inputs = vec![
+        input("a", OutputKind::Result),
+        input("b", OutputKind::Findings),
+        input("c", OutputKind::Findings),
+    ];
+    let mut synth = node("synthesis", route("first"));
+    synth.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synth.depends_on = vec!["b".into(), "verify".into()];
+    synth.inputs = vec![
+        input("b", OutputKind::Findings),
+        input("verify", OutputKind::Findings),
+    ];
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(&entry("").replace("\"id\":\"F1\"", "\"id\":\"b:F1\"")),
+            ),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(&entry(",\"propagates\":\"b:b:F1\"")),
+            ),
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(r#"{"id":"F1","disposition":"accepted","reason":"yes"}"#),
+            ),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![
+            node("a", route("first")),
+            node("b", route("first")),
+            node("c", route("first")),
+            verify,
+            synth,
+        ]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        run.checkpoint.nodes[4].state,
+        NodeState::Succeeded,
+        "{:?}",
+        run.checkpoint.nodes[4].advance_error
+    );
+    assert_eq!(
+        run.checkpoint.nodes[4]
+            .outputs
+            .as_ref()
+            .unwrap()
+            .findings
+            .len(),
+        2
+    );
+    assert!(
+        !run.checkpoint.nodes[3]
+            .outputs
+            .as_ref()
+            .unwrap()
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("unresolved propagates"))
+    );
+}
+
+#[test]
+fn qualified_id_collision_requires_three_distinct_dispositions() {
+    let input = |id: &str| GraphInput {
+        extra: Default::default(),
+        node: id.into(),
+        outputs: vec![OutputKind::Findings],
+    };
+    for (decisions, expected) in [
+        (
+            r#"{"id":"a:F1","disposition":"accepted","reason":"yes"},{"id":"b:F1","disposition":"rejected","reason":"no"}"#,
+            NodeState::Failed,
+        ),
+        (
+            r#"{"id":"a:F1:1","disposition":"accepted","reason":"yes"},{"id":"b:F1","disposition":"rejected","reason":"no"},{"id":"a:F1","disposition":"deferred","reason":"later"}"#,
+            NodeState::Succeeded,
+        ),
+    ] {
+        let mut synth = node("synthesis", route("first"));
+        synth.dispositions = DISPOSITIONS.map(String::from).to_vec();
+        synth.depends_on = vec!["a".into(), "b".into(), "c".into()];
+        synth.inputs = vec![input("a"), input("b"), input("c")];
+        let mut owner = FakeOwner {
+            observations: [
+                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+                terminal_with_result(
+                    AttemptOutcome::Succeeded,
+                    &findings_text(&entry("").replace("\"id\":\"F1\"", "\"id\":\"a:F1\"")),
+                ),
+                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(decisions)),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let run = advance(
+            &graph(vec![
+                node("a", route("first")),
+                node("b", route("first")),
+                node("c", route("first")),
+                synth,
+            ]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            run.checkpoint.nodes[3].state, expected,
+            "{:?}",
+            run.checkpoint.nodes[3].advance_error
+        );
+    }
+}
+
+#[test]
+fn ambiguous_propagation_warns_and_remains_independent() {
+    let input = |id: &str| GraphInput {
+        extra: Default::default(),
+        node: id.into(),
+        outputs: vec![OutputKind::Findings],
+    };
+    let mut a = node("a", route("first"));
+    a.depends_on = vec!["b".into()];
+    a.inputs = vec![input("b")];
+    let mut verify = node("verify", route("first"));
+    verify.depends_on = vec!["a".into(), "b".into(), "c".into()];
+    verify.inputs = vec![input("a"), input("b"), input("c")];
+    let mut synth = node("synthesis", route("first"));
+    synth.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synth.depends_on = vec!["b".into(), "verify".into()];
+    synth.inputs = vec![input("b"), input("verify")];
+    // a:b:F1 matches the stored ID of a's independent finding and the
+    // rendered ID of a's propagated copy of b:F1.
+    let renamed = entry("").replace("\"id\":\"F1\"", "\"id\":\"b:F1\"");
+    let a_findings = format!("{},{}", entry(",\"propagates\":\"b:F1\""), renamed);
+    let c_findings = format!("{},{}", entry(""), renamed);
+    let decisions = r#"{"id":"b:F1","disposition":"accepted","reason":"yes"},{"id":"verify:F1","disposition":"rejected","reason":"no"}"#;
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&c_findings)),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&a_findings)),
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(&entry(",\"propagates\":\"a:b:F1\"")),
+            ),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(decisions)),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![
+            node("b", route("first")),
+            node("c", route("first")),
+            a,
+            verify,
+            synth,
+        ]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    let warning = &run.checkpoint.nodes[3].outputs.as_ref().unwrap().warnings;
+    assert!(
+        warning
+            .iter()
+            .any(|w| w.contains("unresolved propagates marker") && w.contains("a:b:F1"))
+    );
+    assert_eq!(
+        run.checkpoint.nodes[4].state,
+        NodeState::Succeeded,
+        "{:?}",
+        run.checkpoint.nodes[4].advance_error
+    );
+    let findings = &run.checkpoint.nodes[4].outputs.as_ref().unwrap().findings;
+    assert_eq!(
+        findings.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
+        ["b:F1", "verify:F1"]
+    );
+    assert_eq!(findings[0].disposition.as_deref(), Some("accepted"));
+    assert_eq!(findings[1].disposition.as_deref(), Some("rejected"));
+}
+
+#[test]
+fn unresolved_marker_warns_and_remains_an_independent_identity() {
+    let input = |id: &str| GraphInput {
+        extra: Default::default(),
+        node: id.into(),
+        outputs: vec![OutputKind::Findings],
+    };
+    let mut verify = node("verify", route("first"));
+    verify.depends_on = vec!["a".into()];
+    verify.inputs = vec![input("a")];
+    let mut synth = node("synthesis", route("first"));
+    synth.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synth.depends_on = vec!["a".into(), "verify".into()];
+    synth.inputs = vec![input("a"), input("verify")];
+    let decisions = r#"{"id":"a:F1","disposition":"accepted","reason":"yes"},{"id":"verify:F1","disposition":"rejected","reason":"no"}"#;
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &findings_text(&entry(",\"propagates\":\"not-an-input:F1\"")),
+            ),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(decisions)),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![node("a", route("first")), verify, synth]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert!(
+        run.checkpoint.nodes[1]
+            .outputs
+            .as_ref()
+            .unwrap()
+            .warnings
+            .iter()
+            .any(|w| w.contains("unresolved propagates marker") && w.contains("not-an-input"))
+    );
+    assert_eq!(run.checkpoint.nodes[2].state, NodeState::Succeeded);
+    let findings = &run.checkpoint.nodes[2].outputs.as_ref().unwrap().findings;
+    assert_eq!(
+        findings.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
+        ["a:F1", "verify:F1"]
+    );
+}
+
+#[test]
+fn dependent_reviewers_with_independent_same_ids_require_distinct_dispositions() {
+    let a = node("a", route("first"));
+    let mut b = node("b", route("first"));
+    b.depends_on = vec!["a".into()];
+    b.inputs = vec![GraphInput {
+        extra: Default::default(),
+        node: "a".into(),
+        outputs: vec![OutputKind::Result],
+    }];
+    let mut synthesis = node("synthesis", route("first"));
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.depends_on = vec!["a".into(), "b".into()];
+    synthesis.inputs = ["a", "b"]
+        .into_iter()
+        .map(|id| GraphInput {
+            extra: Default::default(),
+            node: id.into(),
+            outputs: vec![OutputKind::Findings],
+        })
+        .collect();
+    for (decisions, expected) in [
+        (
+            r#"{"id":"a:F1","disposition":"accepted","reason":"yes"}"#,
+            NodeState::Failed,
+        ),
+        (
+            r#"{"id":"a:F1","disposition":"accepted","reason":"yes"},{"id":"b:F1","disposition":"rejected","reason":"no"}"#,
+            NodeState::Succeeded,
+        ),
+    ] {
+        let mut owner = FakeOwner {
+            observations: [
+                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+                terminal_with_result(
+                    AttemptOutcome::Succeeded,
+                    &findings_text(
+                        &entry("").replace("\"summary\":\"s\"", "\"summary\":\"other\""),
+                    ),
+                ),
+                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(decisions)),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let run = advance(
+            &graph(vec![a.clone(), b.clone(), synthesis.clone()]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
+        assert!(owner.prompts[2].contains("a:F1") && owner.prompts[2].contains("b:F1"));
+        assert_eq!(run.checkpoint.nodes[2].state, expected);
+    }
+}
+
+#[test]
+fn unknown_disposition_does_not_hide_an_undisposed_finding_on_replay() {
+    let mut synthesis = node("synthesis", route("first"));
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.depends_on = vec!["review".into()];
+    synthesis.inputs = vec![GraphInput {
+        extra: Default::default(),
+        node: "review".into(),
+        outputs: vec![OutputKind::Findings],
+    }];
+    let document = graph(vec![node("review", route("first")), synthesis]);
+    let upstream = format!("{},{}", entry(""), entry("").replace("F1", "F2"));
+    let decisions = r#"{"id":"F1","disposition":"accepted","reason":"yes"},{"id":"F9","disposition":"rejected","reason":"no"}"#;
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&upstream)),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(decisions)),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.checkpoint.nodes[1].state, NodeState::Failed);
+    assert_eq!(
+        run.checkpoint.nodes[1].advance_error_code.as_deref(),
+        Some("disposition_count")
+    );
+    let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
+    assert_eq!(replay.checkpoint.nodes[1].state, NodeState::Failed);
+    assert_eq!(
+        replay.checkpoint.nodes[1].advance_error_code.as_deref(),
+        Some("disposition_count")
+    );
 }
 
 #[test]
@@ -799,7 +2231,7 @@ fn source_and_read_roots_survive_retry_and_replay() {
             AttemptObservation::Pending {
                 attempt_ref: Some("existing".into()),
             },
-            terminal(AttemptOutcome::AuthRequired),
+            preparation_refusal("existing", AttemptOutcome::AuthRequired),
             terminal(AttemptOutcome::Succeeded),
         ]
         .into(),
@@ -1018,7 +2450,7 @@ fn composite_rejects_ambiguous_exports_and_blocks_on_child_failure() {
             "composite":{"nodes":[
                 {"id":"a","access":"read_only","prompt":"a","route":{"alias":"junior"}},
                 {"id":"b","access":"read_only","prompt":"b","route":{"alias":"junior"}}
-            ],"exports":[{"node":"a","outputs":["commit"]},{"node":"b","outputs":["commit"]}]}
+            ],"exports":[{"node":"a","outputs":["verdict"]},{"node":"b","outputs":["verdict"]}]}
         }]
     }))
     .unwrap();
@@ -1041,6 +2473,7 @@ fn composite_rejects_ambiguous_exports_and_blocks_on_child_failure() {
         run.checkpoint.nodes.last().unwrap().state,
         NodeState::Blocked
     );
+    assert_eq!(run.checkpoint.nodes.last().unwrap().advance_error, None);
     assert!(!run.checkpoint.successful());
     assert_eq!(
         advance(&document, &mut FakeOwner::default(), &mut journal)
@@ -1084,6 +2517,185 @@ fn partial_review(minimum: usize) -> (GraphDocument, FakeOwner) {
 }
 
 #[test]
+fn review_fail_and_one_unavailable_reach_evaluator() {
+    let (mut document, mut owner) = partial_review(2);
+    let spec = document.nodes[0].composite.as_mut().unwrap();
+    for (i, node) in spec.nodes.iter_mut().enumerate() {
+        node.role = Some(format!("lens.test{i}"));
+    }
+    let fail = findings_text(&entry("")).replace("VERDICT: PASS", "VERDICT: FAIL");
+    owner.observations = VecDeque::from([
+        terminal_with_result(AttemptOutcome::DeclaredStop, &fail),
+        terminal_with_result(AttemptOutcome::Succeeded, &findings_text("")),
+        terminal(AttemptOutcome::AdapterUnavailable),
+        terminal_with_result(AttemptOutcome::Succeeded, "evaluated"),
+    ]);
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let lens = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id.ends_with("--lens-a"))
+        .unwrap();
+    assert_eq!(lens.state, NodeState::Succeeded);
+    assert_eq!(
+        lens.outputs.as_ref().unwrap().verdict.as_deref(),
+        Some("VERDICT: FAIL")
+    );
+    assert_eq!(
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == "verify")
+            .unwrap()
+            .state,
+        NodeState::Succeeded
+    );
+    assert!(owner.prompts[3].contains("F1"));
+    assert!(owner.prompts[3].contains("lens-c"));
+}
+
+#[test]
+fn successful_review_with_fail_verdict_is_a_result() {
+    let mut review = node("review", route("fixture"));
+    review.role = Some("review.evaluator".into());
+    review.required_verdict = Some("VERDICT: PASS".into());
+    let result = findings_text("").replace("VERDICT: PASS", "VERDICT: FAIL");
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([terminal_with_result(AttemptOutcome::Succeeded, &result)]),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![review]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(
+        run.checkpoint.nodes[0]
+            .outputs
+            .as_ref()
+            .unwrap()
+            .verdict
+            .as_deref(),
+        Some("VERDICT: FAIL")
+    );
+}
+
+#[test]
+fn declared_stop_requires_a_valid_review_result_and_never_accepts_a_writer() {
+    for (role, text) in [
+        ("lens.test", "VERDICT: FAIL".to_owned()),
+        (
+            "lens.test",
+            "```findings\n{\"schema_version\":1,\"findings\":[]}\n```".to_owned(),
+        ),
+        ("write.implement", findings_text("")),
+    ] {
+        let mut subject = node("subject", route("fixture"));
+        subject.role = Some(role.into());
+        if role.starts_with("write.") {
+            subject.access = AccessMode::WorktreeWrite;
+            subject.worktree = Some(".worktrees/write".into());
+        }
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([terminal_with_result(
+                AttemptOutcome::DeclaredStop,
+                &text,
+            )]),
+            ..Default::default()
+        };
+        let run = advance(
+            &graph(vec![subject]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            run.checkpoint.nodes[0].state,
+            NodeState::Failed,
+            "{role}: {text}"
+        );
+    }
+}
+
+#[test]
+fn review_all_members_quorum_blocks_evaluator_and_names_upstream() {
+    let (document, mut owner) = partial_review(3);
+    owner.observations[1] = terminal_with_result(AttemptOutcome::Succeeded, &findings_text(""));
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let verify = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id == "verify")
+        .unwrap();
+    assert_eq!(verify.state, NodeState::Blocked);
+    assert!(
+        verify
+            .advance_error
+            .as_deref()
+            .unwrap()
+            .contains("lenses (Failed)")
+    );
+}
+
+#[test]
+fn replay_attributes_an_unexplained_blocked_node_without_overwriting_other_reasons() {
+    let (document, mut owner) = partial_review(3);
+    owner.observations[1] = terminal_with_result(AttemptOutcome::Succeeded, &findings_text(""));
+    let mut journal = MemoryJournal::default();
+    advance(&document, &mut owner, &mut journal).unwrap();
+    let checkpoint = journal.0.as_mut().unwrap();
+    let verify = checkpoint
+        .nodes
+        .iter_mut()
+        .find(|n| n.id == "verify")
+        .unwrap();
+    assert_eq!(verify.state, NodeState::Blocked);
+    verify.advance_error = None;
+    verify.advance_error_code = None;
+
+    let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
+    let verify = replay
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id == "verify")
+        .unwrap();
+    assert_eq!(
+        verify.advance_error_code.as_deref(),
+        Some("upstream_blocked")
+    );
+    assert_eq!(
+        verify.advance_error.as_deref(),
+        Some("blocked by lenses (Failed)")
+    );
+    assert_eq!(journal.0.as_ref().unwrap(), &replay.checkpoint);
+
+    let verify = journal
+        .0
+        .as_mut()
+        .unwrap()
+        .nodes
+        .iter_mut()
+        .find(|n| n.id == "verify")
+        .unwrap();
+    verify.advance_error = Some("existing reason".into());
+    verify.advance_error_code = Some("other_reason".into());
+    let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
+    let verify = replay
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id == "verify")
+        .unwrap();
+    assert_eq!(verify.advance_error.as_deref(), Some("existing reason"));
+    assert_eq!(verify.advance_error_code.as_deref(), Some("other_reason"));
+}
+
+#[test]
 fn partial_composite_exports_only_successful_members_and_lists_the_unavailable() {
     let (document, mut owner) = partial_review(1);
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
@@ -1105,7 +2717,10 @@ fn partial_composite_exports_only_successful_members_and_lists_the_unavailable()
     assert_eq!(lenses.findings.len(), 1);
     let excerpt = &lenses.result.as_ref().unwrap().excerpt;
     assert!(excerpt.starts_with("Unavailable lenses:"), "{excerpt}");
-    assert!(excerpt.contains("lens-b: the findings block is missing or invalid"));
+    assert!(
+        excerpt
+            .contains("lens-b: findings block missing or invalid: field findings: block missing")
+    );
     assert!(excerpt.contains("lens-c: adapter unavailable"));
     assert!(excerpt.contains("LENS-A-OK"));
     assert!(!excerpt.contains("LENS-B-NO-FINDINGS"));
@@ -1721,15 +3336,17 @@ fn gate_reachability_accepts_a_limit_sized_graph_and_rejects_lower_limits() {
     assert!(validate_plan_with_limits(&document, &limits).is_ok());
     let mut smaller = limits.clone();
     smaller.nodes -= 1;
-    assert_eq!(
-        validate_plan_with_limits(&document, &smaller).unwrap_err(),
-        "node count"
+    assert!(
+        validate_plan_with_limits(&document, &smaller)
+            .unwrap_err()
+            .contains("limits.nodes")
     );
     smaller = limits;
     smaller.edges = document.nodes.len() / 2 - 1;
-    assert_eq!(
-        validate_plan_with_limits(&document, &smaller).unwrap_err(),
-        "edge count"
+    assert!(
+        validate_plan_with_limits(&document, &smaller)
+            .unwrap_err()
+            .contains("limits.edges")
     );
 }
 
@@ -1883,6 +3500,8 @@ fn gate_only_graph_obeys_structural_limits_before_evaluating() {
             extra: Default::default(),
         }),
         GraphNode {
+            review: None,
+            family_group: None,
             id: "second".into(),
             ..gate_node(GateCondition::Budget {
                 extra: Default::default(),
@@ -2518,6 +4137,19 @@ fn terminal(outcome: AttemptOutcome) -> AttemptObservation {
     }
 }
 
+fn preparation_refusal(reference: &str, outcome: AttemptOutcome) -> AttemptObservation {
+    AttemptObservation::Terminal {
+        attempt_ref: Some(reference.into()),
+        outcome,
+        launched: false,
+        result: None,
+        result_warning: None,
+        result_path: None,
+        branch: None,
+        commit: None,
+    }
+}
+
 fn terminal_with_result(outcome: AttemptOutcome, result: &str) -> AttemptObservation {
     AttemptObservation::Terminal {
         attempt_ref: None,
@@ -2567,6 +4199,7 @@ fn parent_and_child(
 #[test]
 fn upstream_files_are_listed_next_to_the_excerpts_and_the_launch_is_unchanged() {
     let (document, mut owner) = parent_and_child(Some(|requests| MaterialisedInputs {
+        index: None,
         directory: Some("/state/graph-inputs/child-0".into()),
         entries: requests
             .iter()
@@ -2586,6 +4219,8 @@ fn upstream_files_are_listed_next_to_the_excerpts_and_the_launch_is_unchanged() 
         vec![vec![InputRequest {
             label: "parent".into(),
             attempt_ref: Some("host-a/attempt-1".into()),
+            inline_findings: None,
+            finding_prefix: None,
         }]]
     );
     assert_eq!(owner.file_caps, vec![outputs::NODE_INPUT_FILE_BYTES]);
@@ -2600,6 +4235,7 @@ fn upstream_files_are_listed_next_to_the_excerpts_and_the_launch_is_unchanged() 
 #[test]
 fn a_remote_upstream_is_named_unavailable_and_the_node_still_runs() {
     let (document, mut owner) = parent_and_child(Some(|requests| MaterialisedInputs {
+        index: None,
         directory: None,
         entries: requests
             .iter()
@@ -2614,13 +4250,14 @@ fn a_remote_upstream_is_named_unavailable_and_the_node_still_runs() {
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
     assert!(
         owner.prompts[1]
-            .contains("- parent: unavailable: its result could not be read: peer unavailable")
+            .contains("- parent: unavailable: its result could not be read: peer unavailable; full result attempt: host-a/attempt-1")
     );
 }
 
 #[test]
 fn capped_upstream_results_are_named_in_the_prompt() {
     let (document, mut owner) = parent_and_child(Some(|requests| MaterialisedInputs {
+        index: Some("/state/graph-inputs/child-0/upstream-index.json".into()),
         directory: Some("/state/graph-inputs/child-0".into()),
         entries: vec![
             MaterialisedInput::File {
@@ -2640,7 +4277,61 @@ fn capped_upstream_results_are_named_in_the_prompt() {
         prompt.contains("CAPPED: 1234 more bytes omitted"),
         "{prompt}"
     );
+    assert!(
+        prompt.contains("full result attempt: host-a/attempt-1"),
+        "{prompt}"
+    );
     assert!(prompt.contains("- later: CAPPED: not written"), "{prompt}");
+}
+
+#[test]
+fn long_upstream_listing_points_to_complete_index() {
+    let (document, mut owner) = parent_and_child(Some(|_| MaterialisedInputs {
+        directory: Some("/inputs".into()),
+        index: Some("/inputs/upstream-index.json".into()),
+        entries: (0..=UPSTREAM_INPUT_LIST_LIMIT)
+            .map(|i| MaterialisedInput::File {
+                label: format!("member-{i}"),
+                path: format!("/inputs/{i}").into(),
+                bytes: 1,
+                omitted: 0,
+            })
+            .collect(),
+    }));
+    advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let prompt = &owner.prompts[1];
+    assert!(prompt.contains("Complete input index: /inputs/upstream-index.json"));
+    assert!(prompt.contains("1 more upstream results are not listed"));
+}
+
+#[test]
+fn truncation_notice_names_readable_staged_results() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reviews--a.md");
+    std::fs::write(&path, "full findings from a").unwrap();
+    let entries = vec![MaterialisedInput::File {
+        label: "reviews--a".into(),
+        path,
+        bytes: 20,
+        omitted: 0,
+    }];
+    let requests = vec![InputRequest {
+        label: "reviews--a".into(),
+        attempt_ref: None,
+        inline_findings: None,
+        finding_prefix: Some("reviews--a:".into()),
+    }];
+    let notice = render_files(&entries, &requests, None);
+    let source = notice
+        .lines()
+        .find_map(|line| line.strip_prefix("composite findings truncated: full member result: "))
+        .unwrap();
+    let source: serde_json::Value = serde_json::from_str(source).unwrap();
+    assert_eq!(source["label"], "reviews--a");
+    assert_eq!(
+        std::fs::read_to_string(source["path"].as_str().unwrap()).unwrap(),
+        "full findings from a"
+    );
 }
 
 #[test]
@@ -2656,6 +4347,7 @@ fn a_host_without_materialisation_leaves_the_prompt_as_it_was() {
 fn partial_composite_materialises_only_its_successful_members() {
     let (document, mut owner) = partial_review(1);
     owner.materialise = Some(|requests| MaterialisedInputs {
+        index: None,
         directory: Some("/state/graph-inputs/verify-0".into()),
         entries: requests
             .iter()
@@ -2845,6 +4537,8 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
         route("fourth"),
     ];
     let document = graph(vec![GraphNode {
+        review: None,
+        family_group: None,
         context: None,
         extra: Default::default(),
         composite_members: Vec::new(),
@@ -2886,9 +4580,9 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
     }]);
     let mut owner = FakeOwner {
         observations: VecDeque::from([
-            terminal(AttemptOutcome::AuthRequired),
-            terminal(AttemptOutcome::UsageLimited),
-            terminal(AttemptOutcome::AdapterUnavailable),
+            preparation_refusal("host/a", AttemptOutcome::AuthRequired),
+            preparation_refusal("host/b", AttemptOutcome::UsageLimited),
+            preparation_refusal("host/c", AttemptOutcome::AdapterUnavailable),
             terminal(AttemptOutcome::Succeeded),
         ]),
         ..FakeOwner::default()
@@ -2919,6 +4613,38 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
 }
 
 #[test]
+fn read_only_sign_in_failure_falls_back_to_next_route() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 1, "graph_id": "signed-out", "nodes": [{
+            "id": "review", "prompt": "review", "access": "read_only", "routes": [
+                {"adapter": "cursor", "model": "cursor/example"},
+                {"adapter": "codex", "model": "codex/example"}
+            ]
+        }]
+    }))
+    .expect("graph fixture");
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([
+            preparation_refusal("host/a", AttemptOutcome::AuthRequired),
+            terminal(AttemptOutcome::Succeeded),
+        ]),
+        ..FakeOwner::default()
+    };
+    let run =
+        advance(&document, &mut owner, &mut MemoryJournal::default()).expect("fallback advances");
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(
+        run.checkpoint.nodes[0].attempts[0].outcome,
+        Some(AttemptOutcome::AuthRequired)
+    );
+    assert_eq!(
+        run.checkpoint.nodes[0].attempts[1].outcome,
+        Some(AttemptOutcome::Succeeded)
+    );
+}
+
+#[test]
 fn route_fallback_preserves_each_selected_account() {
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version": 1, "graph_id": "accounts", "nodes": [{
@@ -2931,7 +4657,7 @@ fn route_fallback_preserves_each_selected_account() {
     .unwrap();
     let mut owner = FakeOwner {
         observations: VecDeque::from([
-            terminal(AttemptOutcome::AuthRequired),
+            preparation_refusal("host/first", AttemptOutcome::AuthRequired),
             terminal(AttemptOutcome::Succeeded),
         ]),
         ..FakeOwner::default()
@@ -2985,7 +4711,7 @@ fn pool_only_and_mixed_routes_advance_in_order() {
     let mut owner = FakeOwner {
         observations: VecDeque::from([
             terminal(AttemptOutcome::Succeeded),
-            terminal(AttemptOutcome::AuthRequired),
+            preparation_refusal("host/1", AttemptOutcome::AuthRequired),
             terminal(AttemptOutcome::Succeeded),
         ]),
         ..FakeOwner::default()
@@ -3085,6 +4811,8 @@ fn pending_and_unknown_keep_observing_the_same_route_without_fallback() {
     ] {
         let routes = vec![route("first"), route("second")];
         let document = graph(vec![GraphNode {
+            review: None,
+            family_group: None,
             context: None,
             extra: Default::default(),
             composite_members: Vec::new(),
@@ -3192,6 +4920,42 @@ fn usage_limit_failure_reports_cause_instead_of_missing_findings() {
     );
 }
 
+#[test]
+fn exhausted_pool_names_the_cause_and_the_pool() {
+    let alias = GraphRoute {
+        extra: Default::default(),
+        adapter: None,
+        name: None,
+        model: None,
+        alias: Some("junior".into()),
+        effort: None,
+        account: None,
+    };
+    let mut lens = node("lens", route("first"));
+    lens.route = None;
+    lens.routes = Some(vec![alias.clone(), alias]);
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([
+            preparation_refusal("host/1", AttemptOutcome::UsageLimited),
+            preparation_refusal("host/2", AttemptOutcome::UsageLimited),
+        ]),
+        ..FakeOwner::default()
+    };
+    let run = advance(
+        &graph(vec![lens]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    let node = &run.checkpoint.nodes[0];
+    assert_eq!(node.state, NodeState::Failed);
+    assert_eq!(node.attempts.len(), 2);
+    assert_eq!(node.advance_error_code.as_deref(), Some("usage_limited"));
+    let error = node.advance_error.as_deref().unwrap();
+    assert!(error.contains("quota or rate limit"), "{error}");
+    assert!(error.contains("pool junior"), "{error}");
+}
+
 fn check_fallback(
     case: &str,
     access: AccessMode,
@@ -3285,21 +5049,21 @@ fn fallback_outcomes_are_named_by_access_and_launch_state() {
             AccessMode::ReadOnly,
             true,
             AttemptOutcome::UsageLimited,
-            true,
+            false,
         ),
         (
             "reader auth refusal after launch",
             AccessMode::ReadOnly,
             true,
             AttemptOutcome::AuthRequired,
-            true,
+            false,
         ),
         (
             "reader unavailable adapter after launch",
             AccessMode::ReadOnly,
             true,
             AttemptOutcome::AdapterUnavailable,
-            true,
+            false,
         ),
         (
             "writer auth refusal after launch",
@@ -3318,6 +5082,68 @@ fn fallback_outcomes_are_named_by_access_and_launch_state() {
     ] {
         check_fallback(case, access, launched, outcome, expected);
     }
+}
+
+#[test]
+fn live_fallback_without_release_proof_stops() {
+    let mut task = node("node", route("first"));
+    task.route = None;
+    task.routes = Some(vec![route("first"), route("second")]);
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([preparation_refusal(
+            "host/attempt",
+            AttemptOutcome::AuthRequired,
+        )]),
+        omit_fallback_evidence: true,
+        ..Default::default()
+    };
+    let result = advance(
+        &graph(vec![task]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(result.checkpoint.nodes[0].state, NodeState::Failed);
+    assert_eq!(owner.calls.len(), 1);
+}
+
+#[test]
+fn resumed_fallback_requires_current_local_custody_evidence() {
+    let mut task = node("node", route("first"));
+    task.route = None;
+    task.routes = Some(vec![route("first"), route("second")]);
+    let document = graph(vec![task]);
+    let first = AttemptObservation::Terminal {
+        attempt_ref: Some("host/attempt".into()),
+        outcome: AttemptOutcome::AuthRequired,
+        launched: false,
+        result: None,
+        result_warning: None,
+        result_path: None,
+        branch: None,
+        commit: None,
+    };
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([first, terminal(AttemptOutcome::Succeeded)]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let result = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(result.checkpoint.nodes[0].attempts.len(), 2);
+    let mut checkpoint = result.checkpoint;
+    let progress = &mut checkpoint.nodes[0];
+    progress.attempts.pop();
+    progress.state = NodeState::Running;
+    progress.outputs = None;
+    let mut restarted = FakeOwner::default();
+    let mut journal = MemoryJournal(Some(checkpoint));
+    let stopped = advance(&document, &mut restarted, &mut journal).unwrap();
+    assert_eq!(stopped.checkpoint.nodes[0].state, NodeState::Failed);
+    assert_eq!(
+        stopped.checkpoint.nodes[0].advance_error_code.as_deref(),
+        Some("fallback_evidence_unavailable")
+    );
+    assert!(restarted.calls.is_empty());
 }
 
 #[test]
@@ -3425,6 +5251,8 @@ fn resume_after_a_crash_before_the_reference_save_replays_under_the_launch_actor
 #[test]
 fn terminal_task_failure_does_not_try_a_fallback_route() {
     let document = graph(vec![GraphNode {
+        review: None,
+        family_group: None,
         context: None,
         extra: Default::default(),
         composite_members: Vec::new(),
@@ -3590,7 +5418,10 @@ fn outputs_feed_direct_dependants_and_survive_replay() {
 fn output_parsing_is_lenient_and_rendering_fails_instead_of_omitting() {
     let failed = make_outputs(Some(&capture("no findings")), None, None, None, None);
     assert!(failed.findings.is_empty());
-    assert_eq!(failed.warnings, ["findings block missing or invalid"]);
+    assert_eq!(
+        failed.warnings,
+        ["findings block missing or invalid: field findings: block missing"]
+    );
     let oversized = format!(
         "```findings\n{{\"schema_version\":1,\"findings\":[],\"extra\":\"{}\"}}\n```",
         "x".repeat(8192)
@@ -3714,7 +5545,8 @@ fn findings_and_verdict_at_the_end_of_a_large_result_are_parsed() {
         let text = format!("```findings\n{block}\n```");
         let outputs = make_outputs(Some(&capture(&text)), None, None, None, None);
         assert!(outputs.findings.is_empty());
-        assert_eq!(outputs.warnings, [FINDINGS_INVALID]);
+        assert_eq!(outputs.warnings.len(), 1);
+        assert!(outputs.warnings[0].starts_with(FINDINGS_INVALID));
     }
 }
 
@@ -4550,10 +6382,16 @@ fn an_unobserved_writer_disk_check_is_a_retryable_launch_error() {
 
 #[test]
 fn a_host_git_limit_reason_reaches_the_graph_retry_and_the_blocked_node() {
-    let reason = "host writer delivery failed at Prepare (worktree): git worktree list output exceeded the 8388608-byte host limit";
-    let error = || crate::coordination::facade::FacadeError::HostDeliveryIo {
-        reason: reason.into(),
-    };
+    let fact = provenant_records::diagnostic::DeliveryLimit::new(
+        provenant_records::run::WriterDeliveryStage::Prepare,
+        "git",
+        "worktree list",
+        8388608,
+    )
+    .unwrap();
+    let reason = fact.detail();
+    let error =
+        || crate::coordination::facade::FacadeError::HostDeliveryLimit { fact: fact.clone() };
     let document = graph(vec![node("one", route("first"))]);
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
@@ -4564,7 +6402,7 @@ fn a_host_git_limit_reason_reaches_the_graph_retry_and_the_blocked_node() {
     advance(&document, &mut owner, &mut journal).unwrap();
     let retry = retry_of(journal.0.as_ref().unwrap());
     assert_eq!(retry.failures, 1);
-    assert_eq!(retry.reason.as_deref(), Some(reason));
+    assert_eq!(retry.reason.as_deref(), Some(reason.as_str()));
 
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
@@ -4582,7 +6420,7 @@ fn a_host_git_limit_reason_reaches_the_graph_retry_and_the_blocked_node() {
     let progress = &journal.0.as_ref().unwrap().nodes[0];
     assert_eq!(progress.state, NodeState::Blocked);
     let text = progress.advance_error.as_deref().unwrap();
-    assert!(text.contains(reason), "{text}");
+    assert!(text.contains(&reason), "{text}");
 }
 
 #[test]
@@ -4721,7 +6559,11 @@ fn a_permanent_refusal_blocks_the_node_at_once_with_reason_and_remedy() {
     let document = graph(vec![node("one", route("first"))]);
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
-        errors: [(1, crate::coordination::facade::FacadeError::InvalidInput)].into(),
+        errors: [(
+            1,
+            crate::coordination::facade::FacadeError::InvalidInput { detail: None },
+        )]
+        .into(),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
@@ -4808,6 +6650,8 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
         FacadeError::Timeout,
         FacadeError::HomeUnavailable,
         FacadeError::Io {
+            delivery_limit: None,
+            delivery_stage: None,
             operation: "read file".into(),
             path: None,
         },
@@ -4818,9 +6662,11 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
         assert!(launch_retry_kind(&transient), "{transient}");
     }
     for permanent in [
-        FacadeError::InvalidInput,
+        FacadeError::InvalidInput { detail: None },
         FacadeError::ConfinementRefused,
         FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
             reason: "why".into(),
         },
         FacadeError::NotFound,
@@ -4842,6 +6688,7 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
 }
 
 #[test]
+<<<<<<< HEAD
 fn advisory_composite_failure_preserves_cause_and_launches_dependant() {
     for outcome in [AttemptOutcome::ReviewRequired, AttemptOutcome::TaskFailed] {
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
@@ -4865,20 +6712,123 @@ fn advisory_composite_failure_preserves_cause_and_launches_dependant() {
             .find(|n| n.id == "scout--synthesis")
             .unwrap();
         assert_eq!(scout.attempts[0].outcome, Some(outcome));
+=======
+fn composite_truncates_over_cap_findings_and_reaches_downstream() {
+    for long in [false, true] {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"over-cap","nodes":[
+                {"id":"reviews","kind":"composite","access":"read_only","composite":{
+                    "nodes":[{"id":"a","access":"read_only","prompt":"review","route":{"alias":"senior"}},
+                             {"id":"b","access":"read_only","prompt":"review","route":{"alias":"senior"}}],
+                    "exports":[{"node":"a","outputs":["result","findings"]},{"node":"b","outputs":["result","findings"]}]
+                }},
+                {"id":"verify","access":"read_only","prompt":"verify","route":{"alias":"senior"},
+                 "depends_on":["reviews"],"inputs":[{"node":"reviews","outputs":["result","findings"]}]}
+            ]
+        })).unwrap();
+        let count = if long { 8 } else { 20 };
+        let entries: Vec<_> = (0..count).map(|i| serde_json::json!({"id":format!("F{i}"),"severity":"high","file":"a", "summary":if long {"s".repeat(800)} else {"s".into()},"status":"open"})).collect();
+        let text = format!(
+            "```findings\n{}\n```",
+            serde_json::json!({"schema_version":1,"findings":entries})
+        );
+        let observation = |path: &str| {
+            let mut result = terminal_with_result(AttemptOutcome::Succeeded, &text);
+            if let AttemptObservation::Terminal {
+                result_path,
+                attempt_ref,
+                ..
+            } = &mut result
+            {
+                *result_path = Some(path.into());
+                *attempt_ref = Some(format!("fixture/{}", path.rsplit('/').next().unwrap()));
+            }
+            result
+        };
+        let mut owner = FakeOwner {
+            observations: [
+                observation("/results/a"),
+                observation("/results/b"),
+                terminal(AttemptOutcome::Succeeded),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        let composite = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == "reviews")
+            .unwrap();
+        assert_eq!(composite.state, NodeState::Succeeded);
+        let outputs = composite.outputs.as_ref().unwrap();
+        assert!(outputs.findings.len() < 2 * count);
+        assert!(outputs.findings.len() <= MAX_FINDINGS);
+        assert!(canonical_len(&outputs.findings) <= FINDINGS_BYTES);
+        assert!(
+            outputs.warnings[0]
+                .contains(&format!("{} dropped", 2 * count - outputs.findings.len()))
+        );
+        assert!(
+            outputs.warnings[0].contains("reviews--a")
+                && outputs.warnings[0].contains("reviews--b")
+                && !outputs.warnings[0].contains("/results/")
+                && outputs.warnings[0].contains("fixture/a")
+                && outputs.warnings[0].contains("fixture/b")
+        );
+>>>>>>> origin/main
         assert_eq!(
             run.checkpoint
                 .nodes
                 .iter()
+<<<<<<< HEAD
                 .find(|n| n.id == "lane")
+=======
+                .find(|n| n.id == "verify")
+>>>>>>> origin/main
                 .unwrap()
                 .state,
             NodeState::Succeeded
         );
+<<<<<<< HEAD
         assert!(owner.prompts.last().unwrap().contains("scout: unavailable"));
+=======
+        assert!(owner.prompts[2].contains("composite findings truncated"));
+        if !long {
+            let (plan, positions) = validate_plan(&document).unwrap();
+            let mut checkpoint = run.checkpoint.clone();
+            checkpoint.nodes[positions["reviews--a"]]
+                .outputs
+                .as_mut()
+                .unwrap()
+                .result = None;
+            let requests = upstream_results(
+                &plan.nodes[positions["verify"]],
+                &plan,
+                &checkpoint,
+                &positions,
+            );
+            let gate = requests
+                .iter()
+                .find(|request| request.label == "reviews--a")
+                .unwrap();
+            assert_eq!(gate.inline_findings.as_ref().unwrap().len(), count);
+            assert_eq!(gate.finding_prefix.as_deref(), Some("reviews--a:"));
+        }
+        assert_eq!(
+            advance(&document, &mut FakeOwner::default(), &mut journal)
+                .unwrap()
+                .checkpoint,
+            run.checkpoint
+        );
+>>>>>>> origin/main
     }
 }
 
 #[test]
+<<<<<<< HEAD
 fn cumulative_allowance_counts_run_successors_and_survives_observation_replay() {
     let mut lane = node("lane", route("first"));
     lane.route = None;
@@ -4922,17 +6872,176 @@ fn configured_route_and_run_retries_share_the_remaining_allowance() {
         observations: [
             terminal(AttemptOutcome::UsageLimited),
             terminal(AttemptOutcome::UsageLimited),
+=======
+fn nested_composite_propagates_its_members_truncation_notice() {
+    let doc: GraphDocument = serde_json::from_value(serde_json::json!({"schema_version":1,"graph_id":"nested-cap","nodes":[
+        {"id":"outer","kind":"composite","access":"read_only","composite":{"nodes":[
+            {"id":"inner","kind":"composite","access":"read_only","composite":{"nodes":[
+                {"id":"a","access":"read_only","prompt":"review","route":{"alias":"senior"}},
+                {"id":"b","access":"read_only","prompt":"review","route":{"alias":"senior"}}
+            ],"exports":[{"node":"a","outputs":["result","findings"]},{"node":"b","outputs":["result","findings"]}]}}
+        ],"exports":[{"node":"inner","outputs":["findings"]}]}},
+        {"id":"next","access":"read_only","prompt":"use findings","route":{"alias":"senior"},"depends_on":["outer"],"inputs":[{"node":"outer","outputs":["findings"]}]}
+    ]})).unwrap();
+    let entries: Vec<_> = (0..20).map(|i| serde_json::json!({"id":format!("F{i}"),"severity":"high","file":"a","summary":"s","status":"open"})).collect();
+    let text = format!(
+        "```findings\n{}\n```",
+        serde_json::json!({"schema_version":1,"findings":entries})
+    );
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, &text),
+            terminal_with_result(AttemptOutcome::Succeeded, &text),
+>>>>>>> origin/main
             terminal(AttemptOutcome::Succeeded),
         ]
         .into(),
         ..Default::default()
     };
+<<<<<<< HEAD
     let run = advance(
         &graph(vec![lane]),
+=======
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let outer = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "outer")
+        .unwrap();
+    assert_eq!(outer.state, NodeState::Succeeded);
+    assert!(
+        outer
+            .outputs
+            .as_ref()
+            .unwrap()
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("8 dropped"))
+    );
+    assert!(owner.prompts[2].contains("8 dropped"));
+    let (plan, positions) = validate_plan(&doc).unwrap();
+    let requests = upstream_results(
+        &plan.nodes[positions["next"]],
+        &plan,
+        &run.checkpoint,
+        &positions,
+    );
+    let member = requests
+        .iter()
+        .find(|request| request.label == "outer--inner--a")
+        .unwrap();
+    assert_eq!(
+        member.finding_prefix.as_deref(),
+        Some("outer--inner:outer--inner--a:")
+    );
+    let ids = truncated_finding_ids(
+        &plan.nodes[positions["next"]],
+        &plan,
+        &run.checkpoint,
+        &positions,
+    );
+    assert_eq!(ids.len(), 40);
+    assert!(ids.contains(&(
+        "outer--inner:outer--inner--a:F0".into(),
+        "outer--inner--a:0".into()
+    )));
+    assert!(ids.contains(&(
+        "outer--inner:outer--inner--b:F19".into(),
+        "outer--inner--b:19".into()
+    )));
+}
+
+// Small: a qualified ID that cannot fit must fail the composite, including on replay.
+#[test]
+fn composite_rejects_overlong_qualified_finding_id() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":1,"graph_id":"long-id","nodes":[
+            {"id":"reviews","kind":"composite","access":"read_only","composite":{
+                "nodes":[{"id":"a","access":"read_only","prompt":"review","route":{"alias":"senior"}}],
+                "exports":[{"node":"a","outputs":["findings"]}]
+            }},
+            {"id":"synthesis","kind":"synthesise","access":"read_only","prompt":"dispose","route":{"alias":"senior"},
+             "depends_on":["reviews"],"inputs":[{"node":"reviews","outputs":["findings"]}],"dispositions":["rejected"]}
+        ]
+    })).unwrap();
+    let text = findings_text(&entry("").replace("F1", &"x".repeat(1024)));
+    let mut owner = FakeOwner {
+        observations: [terminal_with_result(AttemptOutcome::Succeeded, &text)].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let composite = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id == "reviews")
+        .unwrap();
+    assert_eq!(composite.state, NodeState::Failed);
+    assert_eq!(
+        composite.advance_error_code.as_deref(),
+        Some("composite_findings_exceed_cap")
+    );
+    assert_ne!(
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == "synthesis")
+            .unwrap()
+            .state,
+        NodeState::Succeeded
+    );
+    assert_eq!(
+        advance(&document, &mut FakeOwner::default(), &mut journal)
+            .unwrap()
+            .checkpoint,
+        run.checkpoint
+    );
+}
+
+// Small: inherited descriptions can exceed the ordinary findings budget.
+#[test]
+fn identity_dispositions_preserve_large_inherited_fields() {
+    let mut synthesis = node("synthesis", route("first"));
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.depends_on = vec!["review".into()];
+    synthesis.inputs = vec![GraphInput {
+        extra: Default::default(),
+        node: "review".into(),
+        outputs: vec![OutputKind::Findings],
+    }];
+    let long = "x".repeat(1024);
+    let entries: Vec<_> = (0..2).map(|i| serde_json::json!({"id":format!("F{i}"),"severity":long,"file":long,"summary":long,"status":long})).collect();
+    let review = format!(
+        "```findings\n{}\n```\nVERDICT: PASS",
+        serde_json::json!({"schema_version":1,"findings":entries})
+    );
+    let decisions = (0..2)
+        .map(|i| {
+            format!(
+                r#"{{"id":"F{i}","disposition":"rejected","reason":"{}"}}"#,
+                "r".repeat(700)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, &review),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&decisions)),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![node("review", route("first")), synthesis]),
+>>>>>>> origin/main
         &mut owner,
         &mut MemoryJournal::default(),
     )
     .unwrap();
+<<<<<<< HEAD
     assert!(run.checkpoint.successful());
     assert_eq!(owner.retry_budgets, vec![Some(2), Some(1), Some(0)]);
 }
@@ -4959,12 +7068,196 @@ fn writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source() {
     // Writer predecessor committed and hit quota; its continuation succeeded with head_2.
     let writer_done = AttemptObservation::Terminal {
         attempt_ref: Some("host/writer-cont".into()),
+=======
+    let result = &run.checkpoint.nodes[1];
+    assert_eq!(
+        result.state,
+        NodeState::Succeeded,
+        "{:?}",
+        result.advance_error
+    );
+    let findings = &result.outputs.as_ref().unwrap().findings;
+    assert!(canonical_len(findings) > FINDINGS_BYTES);
+    assert_eq!(findings[0].summary, long);
+}
+
+// Small: directly selected sources with the same ID remain distinct.
+#[test]
+fn direct_reviewers_with_duplicate_ids_require_distinct_dispositions() {
+    let mut synthesis = node("synthesis", route("first"));
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.depends_on = vec!["a".into(), "b".into()];
+    synthesis.inputs = ["a", "b"]
+        .into_iter()
+        .map(|id| GraphInput {
+            extra: Default::default(),
+            node: id.into(),
+            outputs: vec![OutputKind::Findings],
+        })
+        .collect();
+    for (decisions, expected) in [
+        (
+            r#"{"id":"F1","disposition":"rejected","reason":"no"}"#,
+            NodeState::Failed,
+        ),
+        (
+            r#"{"id":"a:F1","disposition":"rejected","reason":"no"},{"id":"b:F1","disposition":"rejected","reason":"no"}"#,
+            NodeState::Succeeded,
+        ),
+    ] {
+        let mut owner = FakeOwner {
+            observations: [
+                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+                terminal_with_result(
+                    AttemptOutcome::Succeeded,
+                    &findings_text(
+                        &entry("").replace("\"summary\":\"s\"", "\"summary\":\"other\""),
+                    ),
+                ),
+                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(decisions)),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let run = advance(
+            &graph(vec![
+                node("a", route("first")),
+                node("b", route("first")),
+                synthesis.clone(),
+            ]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
+        let result = &run.checkpoint.nodes[2];
+        assert!(owner.prompts[2].contains("a:F1"));
+        assert!(owner.prompts[2].contains("b:F1"));
+        assert_eq!(result.state, expected, "{:?}", result.advance_error);
+        if expected == NodeState::Succeeded {
+            let findings = &result.outputs.as_ref().unwrap().findings;
+            assert_eq!(
+                (&findings[0].summary, &findings[1].summary),
+                (&"s".to_owned(), &"other".to_owned())
+            );
+        } else {
+            assert!(
+                result
+                    .advance_error
+                    .as_deref()
+                    .unwrap()
+                    .contains("ambiguous")
+            );
+        }
+    }
+}
+
+#[test]
+fn review_plan_schema_validation() {
+    let mut reader = node("reader", route("first"));
+    reader.kind = Some(NodeKind::Plan);
+    reader.source = Some(SourceBinding::Commit {
+        commit: "1".repeat(40),
+    });
+    reader.review = Some(ReviewSpec {
+        shape: None,
+        risk_tier: None,
+        kind: None,
+        size: None,
+        risk_tags: vec![],
+        worktree: None,
+        lenses: vec![],
+        min_successful: None,
+        max_nodes: 4,
+    });
+    let mut document = graph(vec![reader]);
+    assert!(validate_plan(&document).is_err());
+    document.schema_version = 2;
+    assert!(validate_plan(&document).is_ok());
+    document.nodes[0].source = None;
+    assert!(validate_plan(&document).is_err());
+    document.nodes[0].source = Some(SourceBinding::Commit {
+        commit: "1".repeat(40),
+    });
+    document.nodes[0].kind = None;
+    assert!(validate_plan(&document).is_err());
+}
+
+/// A resolved review lens is pinned to a commit, yet it still finds the writer
+/// through the deferred node it expanded from, so family separation holds.
+#[test]
+fn a_deferred_review_lens_keeps_the_writer_for_family_separation() {
+    let oid = "3".repeat(40);
+    let mut write = node("write", route("first"));
+    write.access = AccessMode::WorktreeWrite;
+    write.worktree = Some(".worktrees/write".into());
+    let mut review = node("review", route("first"));
+    review.kind = Some(NodeKind::Plan);
+    review.route = None;
+    review.depends_on = vec!["write".into()];
+    review.source = Some(SourceBinding::Node {
+        node: "write".into(),
+    });
+    review.review = Some(ReviewSpec {
+        shape: None,
+        risk_tier: None,
+        kind: None,
+        size: None,
+        risk_tags: vec![],
+        worktree: None,
+        lenses: vec![],
+        min_successful: Some(1),
+        max_nodes: 3,
+    });
+    let mut root = node("review--review", route("first"));
+    root.kind = Some(NodeKind::Composite);
+    root.route = None;
+    root.prompt.clear();
+    let mut lens = node("lens", route("first"));
+    lens.distinct_from = Some(DistinctFrom::Writer);
+    lens.distinct_strength = Some(FamilyStrength::Require);
+    root.composite = Some(CompositeSpec {
+        min_successful: Some(1),
+        nodes: vec![lens],
+        exports: vec![GraphInput {
+            extra: Default::default(),
+            node: "lens".into(),
+            outputs: vec![OutputKind::Result],
+        }],
+    });
+    let expanded = composites::expand(&graph(vec![root]), &plans::generous()).unwrap();
+    let mut nodes = expanded.nodes;
+    for member in &mut nodes {
+        member.depends_on = vec!["write".into()];
+    }
+    for member in nodes.iter_mut().filter(|member| member.composite.is_none()) {
+        member.source = Some(SourceBinding::Commit {
+            commit: oid.clone(),
+        });
+    }
+    let addition = Expansion {
+        review: Some(ReviewResolution {
+            subject: oid.parse().unwrap(),
+            base: "2".repeat(40).parse().unwrap(),
+            measured_size: "small".into(),
+            shape: "quick".into(),
+            source: "fixture".into(),
+        }),
+        extra: Default::default(),
+        source: "review".into(),
+        continuation: false,
+        nodes,
+        patterns: vec![],
+    };
+    let writer_done = AttemptObservation::Terminal {
+        attempt_ref: Some("host/7".into()),
+>>>>>>> origin/main
         outcome: AttemptOutcome::Succeeded,
         launched: true,
         result: None,
         result_warning: None,
         result_path: None,
         branch: Some("writer".into()),
+<<<<<<< HEAD
         commit: Some(head_2.clone()),
     };
     let lens_done = terminal(AttemptOutcome::Succeeded);
@@ -4989,4 +7282,114 @@ fn writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source() {
     assert_eq!(owner.source_commits[0], Some(node_source.clone()));
     // Lens diff base stays the original node_source, not advancing to writer's intermediate/final head.
     assert_eq!(owner.source_commits[1], Some(node_source));
+=======
+        commit: Some(oid.clone()),
+    };
+    let mut owner = FakeOwner {
+        observations: [writer_done, terminal(AttemptOutcome::Succeeded)].into(),
+        review_expansion: Some(addition),
+        ..Default::default()
+    };
+    let mut document = graph(vec![write, review]);
+    document.schema_version = 2;
+    advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(owner.distinct_from.last(), Some(&vec!["host/7".to_owned()]));
+}
+
+#[test]
+fn equal_review_range_warns_on_review_nodes() {
+    let mut review = node("review", route("review"));
+    review.role = Some("lens.correctness-spec".into());
+    let mut other = node("other", route("other"));
+    other.role = Some("scout".into());
+    let mut owner = FakeOwner {
+        equal_range: true,
+        observations: [
+            terminal_from(
+                "```findings\n{\"schema_version\":1,\"findings\":[]}\n```",
+                "host/one",
+            ),
+            terminal_from(
+                "```findings\n{\"schema_version\":1,\"findings\":[]}\n```",
+                "host/two",
+            ),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![review, other]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        run.checkpoint.nodes[0].outputs.as_ref().unwrap().warnings,
+        ["equal_base_and_head: review range is empty"]
+    );
+    assert!(
+        run.checkpoint.nodes[1]
+            .outputs
+            .as_ref()
+            .unwrap()
+            .warnings
+            .is_empty()
+    );
+}
+
+#[test]
+fn admitted_invalid_launch_projects_safe_schema_reason_and_action() {
+    let document = graph(vec![node("one", route("first"))]);
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: [(
+            1,
+            crate::coordination::facade::FacadeError::InvalidInput {
+                detail: Some(
+                    "graph document schema_version is invalid TOKEN_SENTINEL\u{1b}".into(),
+                ),
+            },
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let result = advance(&document, &mut owner, &mut journal).unwrap();
+    let progress = &result.checkpoint.nodes[0];
+    assert_eq!(progress.state, NodeState::Blocked);
+    let reason = progress.advance_error.as_deref().unwrap();
+    assert!(reason.contains("invalid_input"));
+    assert!(reason.contains("schema_version"));
+    assert!(reason.contains("check the named input field"));
+    assert!(!reason.contains("TOKEN_SENTINEL"));
+    assert!(!reason.chars().any(char::is_control));
+}
+
+#[test]
+fn launch_projection_omits_untrusted_error_sources() {
+    let document = graph(vec![node("one", route("first"))]);
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: [(
+            1,
+            crate::coordination::facade::FacadeError::Io {
+                delivery_limit: None,
+                delivery_stage: None,
+                operation: "TOKEN_SENTINEL\u{1b}".into(),
+                path: Some("/private/host".into()),
+            },
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    advance(&document, &mut owner, &mut journal).unwrap();
+    let reason = retry_of(journal.0.as_ref().unwrap())
+        .reason
+        .as_deref()
+        .unwrap();
+    assert!(!reason.contains("TOKEN_SENTINEL"));
+    assert!(!reason.contains("/private/host"));
+    assert!(!reason.chars().any(char::is_control));
+>>>>>>> origin/main
 }

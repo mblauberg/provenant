@@ -1,5 +1,5 @@
 //! Routing's frozen clap leaves and read-only composition/rendering edge.
-use crate::Globals;
+use crate::{Globals, metadata::CatalogueArg};
 use clap::{Args, Subcommand, ValueEnum};
 use provenant_core::{Clock, Roots, WallTime};
 use provenant_os::clock::SystemClock;
@@ -132,7 +132,7 @@ pub struct RouteSet {
     /// Exact catalogue model in ADAPTER/ID form.
     pub model: Model,
     /// Selection weight from 0 (fallback only) to 100.
-    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=100))]
+    #[arg(long, catalog_u8_range = 0..=100)]
     pub weight: Option<u8>,
     /// Default effort for this member.
     #[arg(long)]
@@ -209,7 +209,7 @@ pub struct RouteRequest {
     #[arg(long)]
     pub confidential: bool,
     /// Fallback models in ADAPTER/ID form, comma separated
-    #[arg(long, value_delimiter = ',', action = clap::ArgAction::Set)]
+    #[arg(long, value_delimiter = ',', action = clap::ArgAction::Set, catalog_bounds = (0, 2))]
     pub fallback: Vec<Model>,
     /// Keep a provider (claude), account (label, entry or ADAPTER/KEY) or
     /// exact model (ADAPTER/ID) out of a named route's pool (repeatable).
@@ -261,6 +261,7 @@ impl RouteRequest {
                     provenant_routing::Workload::General
                 },
                 writes: false,
+                ..Default::default()
             },
             choice,
             effort: self.effort.clone(),
@@ -469,22 +470,6 @@ fn match_name(
 /// Up to eight routes and models that share the name as a substring or a
 /// prefix, or are one or two edits away.
 fn close_matches(lower: &str, routes: &BTreeSet<String>, models: &[String]) -> Vec<String> {
-    fn edits(a: &str, b: &str) -> usize {
-        let b: Vec<char> = b.chars().collect();
-        let mut row: Vec<usize> = (0..=b.len()).collect();
-        for (i, ca) in a.chars().enumerate() {
-            let mut diagonal = row[0];
-            row[0] = i + 1;
-            for (j, cb) in b.iter().enumerate() {
-                let above = row[j + 1];
-                row[j + 1] = (diagonal + usize::from(ca != *cb))
-                    .min(row[j] + 1)
-                    .min(above + 1);
-                diagonal = above;
-            }
-        }
-        row[b.len()]
-    }
     let near = |candidate: &str| {
         let candidate = candidate.to_ascii_lowercase();
         let id = candidate.split_once('/').map_or(&*candidate, |(_, id)| id);
@@ -496,8 +481,8 @@ fn close_matches(lower: &str, routes: &BTreeSet<String>, models: &[String]) -> V
         id.contains(lower)
             || lower.contains(id)
             || prefix >= 3
-            || edits(lower, id) <= 2
-            || edits(lower, &candidate) <= 2
+            || crate::edit_distance(lower, id) <= 2
+            || crate::edit_distance(lower, &candidate) <= 2
     };
     routes
         .iter()
@@ -848,6 +833,7 @@ fn override_value(row: &provenant_routing::PacingOverride) -> toml_edit::Value {
 }
 #[derive(Serialize)]
 pub struct RoutePreview {
+    pub allow_unknown_partial_headroom: provenant_config::KnobValue,
     /// Persisted exclusion rows that were repaired or ignored on reading.
     pub exclusion_notes: Vec<String>,
     pub model_policy: provenant_routing::EffectiveModelPolicy,
@@ -1049,9 +1035,21 @@ fn with_context<T>(
         &[provenant_quota::QuotaPolicy],
     ) -> Result<T, EdgeError>,
 ) -> Result<T, EdgeError> {
-    let domains = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?.domains;
+    let resolved_config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?;
+    let partial_headroom_source = resolved_config
+        .knobs
+        .get("routing.allow_unknown_partial_headroom")
+        .cloned()
+        .ok_or(RoutingError::InvalidValue)?;
+    let allow_unknown = partial_headroom_source
+        .value
+        .as_bool()
+        .ok_or(RoutingError::InvalidValue)?;
+    let domains = resolved_config.domains;
     let policies = provenant_providers::scheduling_policies(&domains.quota, REGISTRY);
     let mut config = domains.routing;
+    config.allow_unknown_partial_headroom = allow_unknown;
+    config.partial_headroom_source = Some(partial_headroom_source);
     resolve_pacing_accounts(&mut config, &domains.accounts)?;
     let catalogue = Catalogue::bundled()?;
     // A lane holds no grant on the shared quota store: route without a
@@ -1146,13 +1144,40 @@ pub(crate) fn resolve_dispatch(
     availability: &[AvailabilityRecord],
     access: &[AccessContext<'_>],
     host: &str,
-    excluded_families: Option<(&[String], bool)>,
+    excluded_families: Option<(&[String], bool, &[String])>,
     rules: &[provenant_routing::ExclusionRule],
 ) -> Result<provenant_records::ResolvedRoute, DispatchError> {
+    resolve_dispatch_rejecting(
+        request,
+        roots,
+        account,
+        seed,
+        availability,
+        access,
+        host,
+        excluded_families,
+        rules,
+        &[],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_dispatch_rejecting(
+    request: &provenant_routing::RouteRequest,
+    roots: &Roots,
+    account: Option<&str>,
+    seed: (&str, u64),
+    availability: &[AvailabilityRecord],
+    access: &[AccessContext<'_>],
+    host: &str,
+    excluded_families: Option<(&[String], bool, &[String])>,
+    rules: &[provenant_routing::ExclusionRule],
+    rejected: &[ModelId],
+) -> Result<provenant_records::ResolvedRoute, DispatchError> {
     let catalogue = Catalogue::bundled()?;
-    let (excluded_families, required) = match excluded_families {
-        Some((families, required)) => (Some(families), required),
-        None => (None, false),
+    let (excluded_families, required, preferred) = match excluded_families {
+        Some((families, required, preferred)) => (Some(families), required, preferred),
+        None => (None, false, &[][..]),
     };
     let excluded: Vec<ModelId> = catalogue
         .models()
@@ -1163,6 +1188,19 @@ pub(crate) fn resolve_dispatch(
         })
         .map(|model| model.model.clone())
         .collect();
+    let preferred_excluded: Vec<ModelId> = catalogue
+        .models()
+        .iter()
+        .filter(|model| review_family_excluded(model.family.as_deref(), preferred))
+        .map(|model| model.model.clone())
+        .collect();
+    let combined: Vec<ModelId> = excluded
+        .iter()
+        .chain(&preferred_excluded)
+        .cloned()
+        .collect();
+    let with_rejected =
+        |members: &[ModelId]| members.iter().chain(rejected).cloned().collect::<Vec<_>>();
     let selected = resolve_dispatch_excluding(
         request,
         roots,
@@ -1171,7 +1209,7 @@ pub(crate) fn resolve_dispatch(
         availability,
         access,
         host,
-        &excluded,
+        &with_rejected(&combined),
         rules,
     );
     // The unused families have no member to take: none is eligible, or the one
@@ -1181,11 +1219,42 @@ pub(crate) fn resolve_dispatch(
     let exhausted = match &selected {
         Err(EdgeError::Routing(error)) => error.code() == "no_eligible_pool_member",
         Ok(route) => {
-            !excluded.is_empty()
+            !combined.is_empty()
                 && matches!(
                     &route.readiness,
                     RouteReadiness::Unavailable { reason, .. } if reason.is_account_block()
                 )
+        }
+        Err(_) => false,
+    };
+    let selected = if exhausted && !preferred_excluded.is_empty() {
+        let relaxed = resolve_dispatch_excluding(
+            request,
+            roots,
+            account,
+            seed,
+            availability,
+            access,
+            host,
+            &with_rejected(&excluded),
+            rules,
+        );
+        match (relaxed, selected) {
+            // Keep the preferred-stage route when relaxing would only trade one
+            // unavailable route for another.
+            (Ok(route), Ok(spent)) if !matches!(route.readiness, RouteReadiness::Ready { .. }) => {
+                Ok(spent)
+            }
+            (relaxed, _) => relaxed,
+        }
+    } else {
+        selected
+    };
+    let exhausted = match &selected {
+        Err(EdgeError::Routing(error)) => error.code() == "no_eligible_pool_member",
+        Ok(route) => {
+            !excluded.is_empty()
+                && matches!(&route.readiness, RouteReadiness::Unavailable { reason, .. } if reason.is_account_block())
         }
         Err(_) => false,
     };
@@ -1203,7 +1272,7 @@ pub(crate) fn resolve_dispatch(
             availability,
             access,
             host,
-            &[],
+            rejected,
             rules,
         );
         match (relaxed, selected) {
@@ -1216,6 +1285,34 @@ pub(crate) fn resolve_dispatch(
     } else {
         selected.map_err(DispatchError::from)
     }
+}
+
+/// Resolve a dispatch using synthetic availability and catalogue fixtures.
+#[cfg(feature = "fixture")]
+#[allow(clippy::too_many_arguments)]
+pub fn fixture_resolve_dispatch(
+    request: &provenant_routing::RouteRequest,
+    roots: &Roots,
+    account: Option<&str>,
+    seed: (&str, u64),
+    availability: &[AvailabilityRecord],
+    access: &[AccessContext<'_>],
+    host: &str,
+    excluded_families: Option<(&[String], bool, &[String])>,
+    rules: &[provenant_routing::ExclusionRule],
+) -> Result<provenant_records::ResolvedRoute, String> {
+    resolve_dispatch(
+        request,
+        roots,
+        account,
+        seed,
+        availability,
+        access,
+        host,
+        excluded_families,
+        rules,
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn review_family_excluded(family: Option<&str>, families: &[String]) -> bool {
@@ -1281,7 +1378,12 @@ fn resolve_dispatch_excluding(
                 .map_err(EdgeError::GoAllowance)
                 .and_then(|()| {
                     if matches!(&resolved.readiness, RouteReadiness::Ready { .. }) {
-                        admission.check(&resolved).map_err(EdgeError::from)
+                        admission
+                            .check_with_partial_headroom(
+                                &resolved,
+                                context.config.allow_unknown_partial_headroom,
+                            )
+                            .map_err(EdgeError::from)
                     } else {
                         Ok(())
                     }
@@ -1471,9 +1573,14 @@ pub(crate) fn check_dispatch_candidate(
     let catalogue = Catalogue::bundled().map_err(|e| e.to_string())?;
     let model =
         ModelId::parse(&format!("{}/{}", route.adapter, route.model)).map_err(|e| e.to_string())?;
-    let domains = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-        .map_err(|e| e.to_string())?
-        .domains;
+    let resolved_config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+        .map_err(|e| e.to_string())?;
+    let allow_unknown = resolved_config
+        .knobs
+        .get("routing.allow_unknown_partial_headroom")
+        .and_then(|v| v.value.as_bool())
+        .unwrap_or(false);
+    let domains = resolved_config.domains;
     provenant_routing::check_go_allowance(&model, &domains.routing, &catalogue)?;
     let pools = catalogue.admission_pools(&model);
     let now = SystemClock::new().unix_seconds();
@@ -1485,7 +1592,7 @@ pub(crate) fn check_dispatch_candidate(
         records: &records,
         pools: &pools,
     }
-    .check(route)
+    .check_with_partial_headroom(route, allow_unknown)
     .map_err(|e| e.to_string())
 }
 
@@ -2072,7 +2179,8 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
                             && (route.account_key.as_deref()
                                 == Some(r.account.account_key.as_str())
                                 || (route.account_key.is_none()
-                                    && route.adapter == "opencode"
+                                    && provenant_records::AdapterSpec::get(&route.adapter)
+                                        .is_some_and(|spec| spec.allowance_prefix.is_some())
                                     && snapshot_governs(
                                         &route.adapter,
                                         &r.account.account_key,
@@ -2082,7 +2190,13 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
                     .and_then(|r| r.snapshot.clone());
                 let pacing = provenant_routing::pacing_preview(&model, context);
                 let entry = context.catalogue.model(&model);
+                let allow_unknown_partial_headroom = context
+                    .config
+                    .partial_headroom_source
+                    .clone()
+                    .ok_or(RoutingError::InvalidValue)?;
                 Ok(Data::Resolved(Box::new(RoutePreview {
+                    allow_unknown_partial_headroom,
                     exclusion_notes: context.config.model_exclusions.notes().to_vec(),
                     model_policy,
                     compaction_break_even_turns,
@@ -2297,7 +2411,10 @@ pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<S
                         availability_ref: "preview".into(),
                         expires_unix_seconds: now + 60,
                     };
-                    match admission.check(&probe) {
+                    match admission.check_with_partial_headroom(
+                        &probe,
+                        context.config.allow_unknown_partial_headroom,
+                    ) {
                         Ok(()) if !spent(record, now) => return Ok(None),
                         Ok(()) => member.push("allowance exhausted".to_owned()),
                         Err(error) => member.push(error.to_string()),
@@ -2387,6 +2504,10 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
             }
         }
     }
+    text.push_str(&format!(
+        "allow unknown partial headroom: {} (source: {:?})\n",
+        preview.allow_unknown_partial_headroom.value, preview.allow_unknown_partial_headroom.source
+    ));
     if let Some(details) = preview.quota.as_ref().and_then(|q| q.details.as_ref())
         && let (Some(source), Some(coverage)) = (&details.source, &details.coverage)
     {
@@ -2446,6 +2567,7 @@ pub fn run(
             };
             let mut result = CommandResult::new(name, status, None);
             result.error = Some(CommandError {
+                diagnostic: None,
                 code: code.into(),
                 message: error.to_string(),
                 cause: None,
@@ -2727,6 +2849,22 @@ mod route_tests {
         };
         let (data, text) = super::explain_dispatch(&request, &roots)?;
         assert_ne!(data["adapter"], "claude");
+        assert_eq!(data["allow_unknown_partial_headroom"]["value"], false);
+        assert_eq!(data["allow_unknown_partial_headroom"]["source"], "default");
+        std::fs::write(
+            roots.state.as_path().join("config.toml"),
+            "schema_version=1\n[knobs]\n'routing.allow_unknown_partial_headroom'=true\n",
+        )?;
+        let (override_data, override_text) = super::explain_dispatch(&request, &roots)?;
+        assert_eq!(
+            override_data["allow_unknown_partial_headroom"]["value"],
+            true
+        );
+        assert_eq!(
+            override_data["allow_unknown_partial_headroom"]["source"],
+            "override"
+        );
+        assert!(override_text.contains("allow unknown partial headroom: true (source: Override)"));
         assert!(
             text.contains("claude/claude-haiku-5-5: excluded by flag: provider claude"),
             "{text}"
@@ -3702,7 +3840,7 @@ mod route_tests {
                 &availability,
                 &access,
                 "fixture",
-                Some((excluded, false)),
+                Some((excluded, false, &[])),
                 &[],
             )
         };
@@ -3730,7 +3868,7 @@ mod route_tests {
             &availability,
             &access,
             "fixture",
-            Some((&all, true)),
+            Some((&all, true, &[])),
             &[],
         )
         .err()
@@ -3739,6 +3877,23 @@ mod route_tests {
             refused,
             super::DispatchError::FamilySeparation(..)
         ));
+        // A sibling preference can relax while the writer exclusion remains hard.
+        let composed = super::resolve_dispatch(
+            &request,
+            &roots,
+            None,
+            ("fixture", 0),
+            &availability,
+            &access,
+            "fixture",
+            Some((
+                std::slice::from_ref(&family),
+                true,
+                std::slice::from_ref(&other),
+            )),
+            &[],
+        )?;
+        assert_eq!(composed.adapter, second.adapter);
         // The next family's provider is excluded: a required separation reports
         // none, and an optional one never substitutes the excluded provider.
         let rules = [provenant_routing::ExclusionRule {
@@ -3754,7 +3909,7 @@ mod route_tests {
                 &availability,
                 &access,
                 "fixture",
-                Some((std::slice::from_ref(&family), required)),
+                Some((std::slice::from_ref(&family), required, &[])),
                 &rules,
             )
         };
@@ -3780,7 +3935,7 @@ mod route_tests {
             &availability[..1],
             &access,
             "fixture",
-            Some((&["openai".into()], false)),
+            Some((&["openai".into()], false, &[])),
             &[],
         )?;
         assert_eq!(deferred.adapter, "claude");
@@ -3887,7 +4042,7 @@ mod route_tests {
                 &self.availability,
                 &self.access,
                 "fixture",
-                Some((&used, required)),
+                Some((&used, required, &[])),
                 &[],
             )
         }
@@ -4011,7 +4166,7 @@ mod route_tests {
             &fixture.availability,
             &fixture.access,
             "fixture",
-            Some((&used, true)),
+            Some((&used, true, &[])),
             &rules,
         )
         .unwrap_err();
@@ -4098,6 +4253,33 @@ mod route_tests {
             fixture.resolve(true),
             Err(super::DispatchError::FamilySeparation(..))
         ));
+        // Relaxing the sibling preference must not exchange one refused
+        // route for another unavailable route.
+        crate::quota::persist_provider_refusal(
+            fixture.roots.state.as_path(),
+            &provenant_records::run::RouteRecord {
+                provider: Some("codex".into()),
+                model: Some("codex/gpt-6-luna".into()),
+                account_key: Some("codex-account".into()),
+                account_label: Some("codex-account".into()),
+                ..Default::default()
+            },
+            None,
+            fixture.now,
+            Some(fixture.now + 3_600),
+        )?;
+        let selected = super::resolve_dispatch(
+            &fixture.request,
+            &fixture.roots,
+            None,
+            ("fixture", 0),
+            &fixture.availability,
+            &fixture.access,
+            "fixture",
+            Some((&[], false, &["openai".into()])),
+            &[],
+        )?;
+        assert_eq!(selected.adapter, "claude");
         Ok(())
     }
 

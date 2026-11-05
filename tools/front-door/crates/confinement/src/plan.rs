@@ -94,13 +94,9 @@ impl ConfinedPlan {
         if p.nested_confinement {
             return Err(PermissionError::NestedConfinementUnsupported.into());
         }
-        if p.read_roots.len() + p.protected_roots.len() + p.secret_roots.len() + p.write_roots.len()
-            > 128
-        {
-            return Err(PlanError::InvalidRoots);
-        }
         for grant in &p.write_roots {
-            crate::permissions::validate_noncredential_grant(grant)?;
+            crate::permissions::validate_noncredential_grant(grant)
+                .map_err(|error| error.with_credential_path(&grant.path, None))?;
             if p.protected_roots
                 .iter()
                 .chain(&p.secret_roots)
@@ -112,10 +108,12 @@ impl ConfinedPlan {
             }
         }
         for grant in &p.read_roots {
-            crate::permissions::validate_read_exec_grant(grant)?;
+            crate::permissions::validate_read_exec_grant(grant)
+                .map_err(|error| error.with_credential_path(&grant.path, None))?;
         }
         for grant in &p.protected_roots {
-            crate::permissions::validate_noncredential_grant(grant)?;
+            crate::permissions::validate_noncredential_grant(grant)
+                .map_err(|error| error.with_credential_path(&grant.path, None))?;
         }
         for secret in &p.secret_roots {
             secret.validate()?;
@@ -128,7 +126,8 @@ impl ConfinedPlan {
             }
         }
         for private in std::iter::once(&p.scratch).chain(&p.private_state) {
-            crate::permissions::validate_noncredential_grant(private)?;
+            crate::permissions::validate_noncredential_grant(private)
+                .map_err(|error| error.with_credential_path(&private.path, None))?;
             if private.scope != PathScope::Subtree
                 || p.read_roots
                     .iter()

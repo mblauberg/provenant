@@ -17,23 +17,28 @@ Conventions and the review ladder come from the repo's own `AGENTS.md`,
 ```sh
 provenant run --preset review-council --prompt-file BRIEF.md \
   --set 'parameters.subject.commit="SHA"' --set 'parameters.base="origin/main"' \
-  --set 'parameters.spec="#N"' --set 'parameters.risk_tags=["security"]' --explain
+  --set 'parameters.spec="#N"' --set 'parameters.risk_tags=["security"]' --plan on --explain
 ```
 
-The default is a panel scaled to the change's size and kind, with the risk
-tier setting the minimum. The base lenses are `correctness-spec`,
+The default is a planner-led panel under the HARNESS review floors. The chair
+checks its recorded plan and supplies missing reviewers or lenses; today's
+planner can only narrow the runtime-selected catalogue. The base lenses are
+`correctness-spec`,
 `design-fit-reuse`, `simplicity`, `conventions-readability`, `tests`,
 `refactor-cleanup`, `reliability`, and `flexibility`; risk tags add
 `security-privacy`, `concurrency-data-errors` and `adversarial`. Integration
-heads get the full panel; a docs change gets `conventions-readability` alone. A verifier tries to falsify each finding and a senior synthesis gives
-each a disposition. For a quick fan-out without a graph:
+heads get the full panel; the runtime may select `conventions-readability` alone
+for docs, so add the policy-required coverage. A verifier tries to falsify
+each finding and a senior synthesis gives each a disposition. For a quick fan-out without a graph:
 `provenant review TARGET --brief-file B --shape quick|standard|deep`.
 `deliver` already runs this council on the newest head.
 
 For a native panel, take the lens list from `provenant review TARGET --explain`,
 which prints the selected shape, lenses and the reason without dispatching. Launch
-one independent read-only sub-agent per selected lens in parallel. Include the cross-family leg required by the review ladder,
+one independent read-only sub-agent per selected lens in parallel. Include the cross-family leg the review ladder asks for,
 then have the chair synthesise findings and dispositions across the panel.
+
+Review a stacked PR against its own base; do not re-review lower PRs. See the [stacked PR workflow](../../docs/runbooks/github-workflow.md#stacked-pull-requests).
 
 ## Independence
 
@@ -41,9 +46,9 @@ then have the chair synthesise findings and dispositions across the panel.
   `git diff`, never the working tree, and uses no Git write verbs.
 - The brief carries the subject, the base and the spec. Never send the
   author's hypothesis, expected verdict or scratchpad.
-- Use a distinct model family from the author when one is available; the
-  HARNESS.md review ladder requires it for `substantial` and higher work. When
-  none is available, require an independent same-family reviewer through a
+- Prefer a model family distinct from every author and repairer; the
+  HARNESS.md review ladder asks for it from `substantial` upward when one is
+  available. When none is available, require an independent same-family reviewer through a
   different lens, without reducing the review count, and record that the
   family separation was unavailable; do not claim it.
 - A review that cannot read its rubric or required context is `incomplete`,
@@ -66,8 +71,9 @@ for a cohesion defect, not a finding.
 End with one final-line declaration using the
 [review wire grammar](../../docs/specs/fabric.md#typed-node-outputs).
 The author marks each
-finding accepted, rejected (with evidence) or deferred. One repair follows and
-re-review covers only that repair. `clean` is a valid verdict.
+finding accepted, rejected (with evidence) or deferred. A separate writer repairs
+accepted findings; the lenses that raised them re-review the delta. Follow the
+HARNESS repair and redesign loop. `clean` is a valid verdict.
 
 ## What a clean verdict proves
 

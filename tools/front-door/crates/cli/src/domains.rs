@@ -1,6 +1,7 @@
 //! The binary edge registers the closed aggregate of landed domain owners.
 use provenant_config::{DomainConfig, DomainSection, DomainSections, FieldMetadata, SectionError};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -16,6 +17,8 @@ pub struct Domains {
     pub run: provenant_confinement::run_config::RunConfig,
     #[serde(default)]
     pub pr: PrSettings,
+    #[serde(default)]
+    pub lanes: LanesSettings,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -57,7 +60,66 @@ const PR_SECTION: DomainSection =
         },
     ]);
 
-static ENTRIES: [DomainSection; 8] = [
+pub use provenant_records::UserSkillsMode;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LanesSettings {
+    pub user_skills: UserSkillsMode,
+    pub skill_stage_max_bytes: u64,
+    #[serde(default)]
+    pub projects: std::collections::BTreeMap<String, ProjectLanesConfig>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectLanesConfig {
+    #[serde(default)]
+    pub user_skills: Option<UserSkillsMode>,
+    #[serde(default)]
+    pub shared_paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub exec_roots: Vec<PathBuf>,
+}
+
+impl Default for LanesSettings {
+    fn default() -> Self {
+        Self {
+            user_skills: UserSkillsMode::default(),
+            skill_stage_max_bytes: 16 * 1024 * 1024,
+            projects: Default::default(),
+        }
+    }
+}
+
+impl LanesSettings {
+    pub fn user_skills_for(&self, project: Option<&str>) -> UserSkillsMode {
+        project
+            .and_then(|id| self.projects.get(id))
+            .and_then(|p| p.user_skills)
+            .unwrap_or(self.user_skills)
+    }
+}
+
+impl DomainConfig for LanesSettings {
+    fn validate(&self) -> Vec<SectionError> {
+        Vec::new()
+    }
+}
+
+const LANES_SECTION: DomainSection = DomainSection::new::<LanesSettings>(
+    "lanes",
+    |_| "user_skills = \"discover\"\nskill_stage_max_bytes = 16777216\n",
+)
+.with_fields(&[
+    FieldMetadata::enumeration("user_skills", &["discover", "off"]),
+    FieldMetadata::new("skill_stage_max_bytes", "int"),
+    FieldMetadata::enumeration("projects.{project}.user_skills", &["discover", "off"]),
+    FieldMetadata::new("projects.{project}.shared_paths", "array"),
+    FieldMetadata::new("projects.{project}.exec_roots", "array"),
+]);
+
+static ENTRIES: [DomainSection; 9] = [
     crate::wait::SECTION,
     provenant_providers::accounts::SECTION,
     provenant_quota::SECTION,
@@ -66,6 +128,7 @@ static ENTRIES: [DomainSection; 8] = [
     provenant_confinement::guard::SECTION,
     provenant_confinement::run_config::SECTION,
     PR_SECTION,
+    LANES_SECTION,
 ];
 pub static SECTIONS: DomainSections<Domains> = DomainSections::new(&ENTRIES);
 
@@ -346,5 +409,103 @@ read_only = true
             edited.config.domains.quota.polling_intervals["claude"].timer_seconds,
             Some(17)
         );
+    }
+
+    #[test]
+    fn lanes_user_skills_defaults_to_discover_and_supports_project_overrides() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp);
+
+        // Default value is discover.
+        let (config, revision) = provenant_config::show(&roots, &SECTIONS).unwrap();
+        let schema = provenant_config::schema(&config, &SECTIONS, revision).unwrap();
+        let field = schema
+            .fields
+            .iter()
+            .find(|field| field.path == "domains.lanes.user_skills")
+            .unwrap();
+        assert_eq!(field.default, json!("discover"));
+        assert_eq!(field.source, provenant_config::Layer::Default);
+        assert_eq!(field.values, ["discover", "off"]);
+        assert_eq!(config.domains.lanes.user_skills, UserSkillsMode::Discover);
+        assert_eq!(
+            config.domains.lanes.user_skills_for(None),
+            UserSkillsMode::Discover
+        );
+        assert_eq!(
+            config.domains.lanes.user_skills_for(Some("proj-a")),
+            UserSkillsMode::Discover
+        );
+
+        // Can be switched to "off".
+        let edited = edit(&roots, json!({"domains.lanes.user_skills": "off"})).unwrap();
+        assert_eq!(edited.config.domains.lanes.user_skills, UserSkillsMode::Off);
+        assert_eq!(
+            edited.config.domains.lanes.user_skills_for(None),
+            UserSkillsMode::Off
+        );
+
+        assert!(matches!(
+            edited.config.origins.get("domains.lanes.user_skills"),
+            Some(provenant_config::Origin::User { .. })
+        ));
+        // Project override overrides host default.
+        let edited = edit(
+            &roots,
+            json!({
+                "domains.lanes.user_skills": "off",
+                "domains.lanes.projects.my-proj.user_skills": "discover",
+            }),
+        )
+        .unwrap();
+        assert_eq!(edited.config.domains.lanes.user_skills, UserSkillsMode::Off);
+        assert_eq!(
+            edited.config.domains.lanes.user_skills_for(Some("my-proj")),
+            UserSkillsMode::Discover
+        );
+        assert_eq!(
+            edited
+                .config
+                .domains
+                .lanes
+                .user_skills_for(Some("other-proj")),
+            UserSkillsMode::Off
+        );
+    }
+
+    #[test]
+    fn project_paths_and_skill_stage_bound_have_defaults_and_user_origins() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp);
+        let (config, _) = provenant_config::show(&roots, &SECTIONS).unwrap();
+        assert_eq!(config.domains.lanes.skill_stage_max_bytes, 16 * 1024 * 1024);
+        assert!(ProjectLanesConfig::default().shared_paths.is_empty());
+        assert!(ProjectLanesConfig::default().exec_roots.is_empty());
+        let edited = edit(
+            &roots,
+            json!({
+                "domains.lanes.projects.example.shared_paths": [".agent-run/locks", "~/locks"],
+                "domains.lanes.projects.example.exec_roots": [".local-tools"],
+                "domains.lanes.skill_stage_max_bytes": 1024,
+            }),
+        )
+        .unwrap();
+        let project = &edited.config.domains.lanes.projects["example"];
+        assert_eq!(
+            project.shared_paths,
+            [PathBuf::from(".agent-run/locks"), PathBuf::from("~/locks")]
+        );
+        assert_eq!(project.exec_roots, [PathBuf::from(".local-tools")]);
+        assert_eq!(edited.config.domains.lanes.skill_stage_max_bytes, 1024);
+        for key in [
+            "domains.lanes.projects.example.shared_paths",
+            "domains.lanes.projects.example.exec_roots",
+            "domains.lanes.skill_stage_max_bytes",
+        ] {
+            assert!(matches!(
+                edited.config.origins.get(key),
+                Some(provenant_config::Origin::User { .. })
+            ));
+        }
     }
 }

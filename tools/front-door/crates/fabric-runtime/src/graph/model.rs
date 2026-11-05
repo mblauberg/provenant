@@ -34,6 +34,8 @@ pub(super) fn canonical_len<T: Serialize>(value: &T) -> usize {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<provenant_records::run::WorkContext>,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
@@ -76,6 +78,8 @@ pub struct GraphRoute {
 /// Host-only inputs retained for advancement after the submitting process exits.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphExecution {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_base: Option<provenant_core::GitOid>,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     /// Integration head pinned before the graph's first node is admitted.
@@ -116,6 +120,9 @@ pub struct FamilySeparation {
     pub strength: FamilyStrength,
     /// Families that served the upstream attempts.
     pub excluded: Vec<String>,
+    /// Sibling families avoided when possible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preferred: Vec<String>,
     /// Family of the attempt that settled, when it launched.
     pub applied: Option<String>,
     pub outcome: SeparationOutcome,
@@ -132,6 +139,38 @@ pub enum SeparationOutcome {
     Unconstrained,
 }
 
+/// Deferred review configuration supplied to the host resolver.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewSpec {
+    pub shape: Option<String>,
+    pub risk_tier: Option<String>,
+    pub kind: Option<String>,
+    pub size: Option<String>,
+    #[serde(default)]
+    pub risk_tags: Vec<String>,
+    pub worktree: Option<String>,
+    #[serde(default)]
+    pub lenses: Vec<ReviewLens>,
+    pub min_successful: Option<usize>,
+    pub max_nodes: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewLens {
+    pub name: String,
+    pub when: Option<String>,
+    pub tier: serde_json::Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewResolution {
+    pub subject: provenant_core::GitOid,
+    pub base: provenant_core::GitOid,
+    pub measured_size: String,
+    pub shape: String,
+    pub source: String,
+}
+
 // Wire presence is transient decoding metadata, not part of node identity.
 #[derive(Clone, Debug, Default)]
 pub(super) struct TopologyPresence(pub [bool; 2]);
@@ -145,6 +184,10 @@ impl Eq for TopologyPresence {}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphNode {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<ReviewSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family_group: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<provenant_records::run::WorkContext>,
     #[serde(flatten)]
@@ -260,17 +303,54 @@ impl GraphDocument {
     /// A plan whose worst-case checkpoint would not fit is refused here, naming
     /// the size, rather than stopping mid-run on an oversized checkpoint.
     pub fn expanded(&self, limits: &crate::config::GraphLimits) -> Result<Self, String> {
-        let expanded = loops::expand(self, &[], limits)?;
-        if let Ok((plan, _)) = validate_flat_plan(&expanded, &plans::generous())
-            && let Some(reason) = envelope::reason(self, &[], &[], &plan)
-        {
+        self.admit(limits)?;
+        loops::expand(self, &[], limits)
+    }
+
+    /// The checks admission applies to a submitted document, without running
+    /// it: the schema version against the fields it carries, then the
+    /// expanded plan against `limits`. A document that passes here is not
+    /// refused as invalid when it is submitted.
+    pub fn validate(&self, limits: &crate::config::GraphLimits) -> Result<(), String> {
+        self.admit(limits)
+    }
+
+    /// The single static admission decision for a submitted graph. The reason
+    /// is suitable for bounded display and typed projection by the front door.
+    pub fn admit(&self, limits: &crate::config::GraphLimits) -> Result<(), String> {
+        validate_schema(self).map_err(String::from)?;
+        let expansion_limits = crate::config::GraphLimits {
+            nodes: limits.nodes.max(16_384),
+            expansion_depth: limits.expansion_depth.max(64),
+            edges: usize::MAX,
+            routes_per_node: u16::MAX as usize,
+            node_prompt_bytes: usize::MAX,
+            graph_prompt_bytes: usize::MAX,
+            ..limits.clone()
+        };
+        let expanded = loops::expand(self, &[], &expansion_limits)?;
+        let (plan, _) = validate_flat_plan(&expanded, &expansion_limits).map_err(String::from)?;
+        if let Some(reason) = structural_limit_reason(&expanded, &plan, limits) {
             return Err(reason);
         }
-        Ok(expanded)
+        if let Some(reason) = envelope::reason(self, &[], &[], &plan) {
+            return Err(reason);
+        }
+        validate_output_kinds(&expanded)
     }
 
     pub fn inspect(&self, limits: &crate::config::GraphLimits) -> Result<GraphInspection, String> {
-        let expanded = self.expanded(limits)?;
+        validate_schema(self).map_err(String::from)?;
+        let inspect_limits = crate::config::GraphLimits {
+            nodes: limits.nodes.max(16_384),
+            expansion_depth: limits.expansion_depth.max(64),
+            edges: usize::MAX,
+            routes_per_node: u16::MAX as usize,
+            node_prompt_bytes: usize::MAX,
+            graph_prompt_bytes: usize::MAX,
+            ..limits.clone()
+        };
+        let expanded = loops::expand(self, &[], &inspect_limits)?;
         let generous = crate::config::GraphLimits {
             nodes: usize::MAX,
             edges: usize::MAX,
@@ -904,13 +984,19 @@ pub struct NodeInput<'a> {
     pub settlement_retries: Option<u8>,
     /// A family-constrained node never redraws its alias after settlement.
     pub family_separation: bool,
+    /// Models selected for earlier attempts of this node.
+    pub prior_attempts: &'a [String],
+    /// Sibling families to avoid where possible, never a routing requirement.
+    pub family_peers: &'a [String],
     pub context: provenant_records::run::WorkContext,
     pub read_roots: &'a [String],
     /// Attempts of the source writer whose model families must be avoided.
     pub distinct_from_attempts: &'a [String],
-    /// Refuse a route inside those families instead of substituting one.
+    /// Refuse a route inside distinct_from_attempts' families. family_peers
+    /// remain a preference even when writer separation is enforced.
     pub require_distinct: bool,
     pub source_commit: Option<&'a str>,
+    pub review_base: Option<&'a str>,
     pub title: &'a str,
     pub prompt: &'a str,
     pub required_verdict: Option<&'a str>,
@@ -927,6 +1013,10 @@ pub struct NodeInput<'a> {
 pub struct InputRequest {
     pub label: String,
     pub attempt_ref: Option<String>,
+    /// Findings from a non-attempt member, such as a CI gate with no result file.
+    pub inline_findings: Option<Vec<Finding>>,
+    /// Composite qualification to apply to IDs in the source result.
+    pub finding_prefix: Option<String>,
 }
 
 /// What became of one requested upstream result.
@@ -949,6 +1039,8 @@ pub enum MaterialisedInput {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MaterialisedInputs {
     pub directory: Option<std::path::PathBuf>,
+    /// Optional index of all inputs when the prompt cannot list every source.
+    pub index: Option<std::path::PathBuf>,
     pub entries: Vec<MaterialisedInput>,
 }
 

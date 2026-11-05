@@ -31,6 +31,9 @@ fn grant(path: &str, scope: PathScope) -> PathGrant {
 /// and Command Line Tools roots, a Homebrew or `/usr/local` prefix). They would
 /// make the snapshots differ by machine, so the tests drop them.
 fn host_probed(path: &Path) -> bool {
+    if path.starts_with("/opt/homebrew/Cellar/provider/1.0") {
+        return false;
+    }
     const PREFIX_DIRECTORIES: [&str; 10] = [
         "bin",
         "sbin",
@@ -49,7 +52,7 @@ fn host_probed(path: &Path) -> bool {
         || ["/opt/homebrew", "/usr/local"].iter().any(|prefix| {
             PREFIX_DIRECTORIES
                 .iter()
-                .any(|name| path == Path::new(prefix).join(name))
+                .any(|name| path.starts_with(Path::new(prefix).join(name)))
         })
 }
 

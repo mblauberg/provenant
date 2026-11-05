@@ -19,6 +19,26 @@ pub enum Workload {
 pub struct RouteIntent {
     pub workload: Workload,
     pub writes: bool,
+    /// Requested network mode, when the caller has a concrete launch request.
+    pub network: Option<provenant_records::run::NetworkAccess>,
+}
+
+impl RouteIntent {
+    /// Check the normalised launch controls against one adapter's declared capabilities.
+    pub fn check_launch(
+        self,
+        spec: &provenant_records::AdapterSpec,
+        model: &str,
+        effort: Option<&str>,
+    ) -> Result<(), provenant_records::UnsupportedLaunch> {
+        spec.check_launch(&provenant_records::LaunchRequest {
+            model: Some(model),
+            effort,
+            resume: false,
+            network: self.network,
+            write: self.writes,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +78,7 @@ pub struct LanePolicy {
     pub stop_early_ok: Option<bool>,
     pub max_continuations: Option<u8>,
     pub read_only: Option<bool>,
+    pub user_skills: Option<provenant_records::run::UserSkillsMode>,
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -104,7 +125,8 @@ impl ModelPolicy {
             max_turns,
             stop_early_ok,
             max_continuations,
-            read_only
+            read_only,
+            user_skills,
         );
         overlay!(
             self.result,
@@ -162,10 +184,13 @@ impl ModelPolicy {
     /// This is a launch control only for Claude. Other providers receive
     /// task-boundary advice, never guessed provider environment variables.
     pub fn launch_env(&self, adapter: &str) -> Vec<(String, String)> {
-        if adapter == "claude" && self.compaction.mode != Some(CompactionMode::Never) {
+        if let Some(variable) = provenant_records::AdapterSpec::get(adapter)
+            .and_then(|spec| spec.compaction_env)
+            .filter(|_| self.compaction.mode != Some(CompactionMode::Never))
+        {
             self.compaction
                 .window
-                .map(|window| vec![("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), window.to_string())])
+                .map(|window| vec![(variable.into(), window.to_string())])
                 .unwrap_or_default()
         } else {
             Vec::new()
@@ -899,6 +924,79 @@ mod tests {
     }
 
     #[test]
+    fn normalised_launch_requirements_use_adapter_capabilities() {
+        use provenant_records::run::NetworkAccess;
+        use provenant_records::{ADAPTER_SPECS, AdapterSpec, LaunchCapabilities, LaunchField};
+        let narrow = AdapterSpec {
+            launch: LaunchCapabilities {
+                network: &[NetworkAccess::Provider],
+                write: false,
+                ..ADAPTER_SPECS[0].launch
+            },
+            ..ADAPTER_SPECS[0]
+        };
+        for (intent, expected) in [
+            (
+                RouteIntent {
+                    network: Some(NetworkAccess::Provider),
+                    ..Default::default()
+                },
+                None,
+            ),
+            (
+                RouteIntent {
+                    writes: true,
+                    network: Some(NetworkAccess::Provider),
+                    ..Default::default()
+                },
+                Some(LaunchField::Write),
+            ),
+            (
+                RouteIntent {
+                    network: Some(NetworkAccess::Open),
+                    ..Default::default()
+                },
+                Some(LaunchField::Network),
+            ),
+        ] {
+            assert_eq!(
+                intent
+                    .check_launch(&narrow, "model", None)
+                    .err()
+                    .map(|e| e.field),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn user_skills_route_policy_overlays_defaults() -> Result<(), Box<dyn std::error::Error>> {
+        let policies: ModelPolicies = toml_edit::de::from_str(
+            "[defaults.lane]\nuser_skills='off'\n[[rules]]\nadapter='claude'\n[rules.policy.lane]\nuser_skills='discover'\n",
+        )?;
+        for (model, expected) in [
+            (
+                "claude/claude-sonnet-5-5",
+                provenant_records::UserSkillsMode::Discover,
+            ),
+            (
+                "codex/gpt-6.1-terra",
+                provenant_records::UserSkillsMode::Off,
+            ),
+        ] {
+            assert_eq!(
+                policies
+                    .effective(&ModelId::parse(model)?, None, at(1))
+                    .policy
+                    .lane
+                    .user_skills,
+                Some(expected)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn malformed_suffix_selectors_do_not_broaden_rules() -> Result<(), Box<dyn std::error::Error>> {
         for suffix in [
             serde_json::json!(""),
@@ -1428,6 +1526,7 @@ mod tests {
         let intent = RouteIntent {
             workload: Workload::ReadHeavy,
             writes: false,
+            ..Default::default()
         };
         assert_eq!(deepseek.cache_factor_basis_points(intent), 30_000);
         let deepseek_model = ModelId::parse("opencode/opencode-go/deepseek-v4.1-flash")?;

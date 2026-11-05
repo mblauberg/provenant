@@ -11,6 +11,22 @@ log and a writing matcher that runs on JSON rules, with no process runner or MCP
 tool. Pull requests carry their own evidence. This spec grants no merge,
 install or release authority. Paths are relative to `tools/front-door/`.
 
+## Findings dispositions
+
+A leaf node declaring dispositions selects findings from each dependency and
+explicitly selected upstream node. A
+synthesis may cite a selected finding by its qualified id, or by a unique bare
+id, and inherit its descriptive fields. Each selected upstream finding still
+requires exactly one disposition and reason. An unknown identity without the
+descriptive fields is skipped with a warning when another valid entry remains;
+if none remains, the findings block is invalid.
+
+- Why: reviewers can reconcile findings by identity without repeating their descriptions.
+- Test: `crates/fabric-runtime/src/graph/outputs.rs::alias_tests::unknown_identity_warns_when_another_disposition_is_valid`;
+  `crates/fabric-runtime/src/graph/graph_tests.rs::a_synthesis_must_dispose_of_every_selected_upstream_finding_exactly_once`;
+  `tests/dispatch_provider.rs::review_council_resolves_identity_only_dispositions`
+- Owner: `src/preset.rs`, `crates/fabric-runtime/src/graph/outputs.rs`
+
 ## Review coverage
 
 ### Test changes always receive the tests lens
@@ -49,7 +65,8 @@ measured against all authors.
 ### Required coverage by risk
 
 [HARNESS.md](../../HARNESS.md#review-ladder) owns the review ladder. This
-spec enforces its counts:
+spec describes the current checker counts, which are below the policy floors
+for routine, substantial and terminal work:
 
 | Risk | Counted independent passing reviews | Enforced beyond the count |
 |---|---:|---|

@@ -17,7 +17,8 @@
 //! choose lenses that panel allows, at a tier it may lower or raise but never
 //! at a lens the panel left out.
 use super::{
-    Layers, StageBuilder, Value, flatten_parameters, interpolate, json, lower_leaf, stage_id,
+    Layers, StageBuilder, Value, flatten_parameters, interpolate, json, lower_leaf, spec_context,
+    stage_id,
 };
 use provenant_fabric_runtime::config::{PlanAuto, PlanMode};
 use std::collections::{BTreeMap, BTreeSet};
@@ -309,7 +310,9 @@ pub fn decide(
         PlanMode::Auto => {
             let size = if catalogue.get("by_size").and_then(Value::as_bool) == Some(true) {
                 with_builder(layers, name, config, origins, brief, |builder| {
-                    Ok(builder.shape_hint()?.and_then(|hint| hint.size))
+                    Ok(builder
+                        .shape_hint(builder.defers_review_size())?
+                        .and_then(|hint| hint.size))
                 })?
             } else {
                 None
@@ -508,6 +511,23 @@ pub fn apply(
         planner["read_roots"] = roots;
     }
     stages[position] = planner;
+    // Explicit references to the replaced stage must follow its planner too.
+    for stage in stages.iter_mut().skip(position + 1) {
+        if let Some(deps) = stage.get_mut("depends_on").and_then(Value::as_array_mut) {
+            for dep in deps {
+                if dep.as_str() == Some(replaces.as_str()) {
+                    *dep = json!("plan");
+                }
+            }
+        }
+        if let Some(inputs) = stage.get_mut("inputs").and_then(Value::as_array_mut) {
+            for input in inputs {
+                if input.get("node").and_then(Value::as_str) == Some(replaces.as_str()) {
+                    input["node"] = json!("plan");
+                }
+            }
+        }
+    }
     // Stages the planned fragment needs after it, for example the synthesis
     // that reconciles the evidence the static stage reconciled in itself.
     if let Some(after) = catalogue.get("after") {
@@ -730,8 +750,17 @@ fn lower_pattern(
     for parameter in declared.keys() {
         slots.insert(parameter.clone(), json!(format!("${{{parameter}}}")));
     }
+    // lower_leaf must not resolve the runtime worktree placeholder again.
+    slots.remove("spec_max_bytes");
     let parameters = interpolate(&Value::Object(declared.clone()), values, brief, 1)
         .map_err(|error| format!("plan pattern {name}: {error}"))?;
+    // Pattern worktrees are runtime choices. Resolve one shared spec from the
+    // bound batch worktree (or the preset's ordinary worktree), never a lane.
+    let mut spec_values = values.clone();
+    if let Some(worktree) = values.get("batch_worktree") {
+        spec_values["worktree"] = worktree.clone();
+    }
+    let context = spec_context(layers, &spec_values);
     // The brief is text for the planner's lanes, never a template.
     let brief = brief.replace("${", "$ {");
     let mut nodes = Vec::new();
@@ -776,6 +805,15 @@ fn lower_pattern(
             values["item"] = item;
         }
         let mut node = lower_leaf(layers, &entry, roles, &values, &task, 1, &id, &[])?;
+        if node["role"].as_str().is_some_and(|role| {
+            role.starts_with("lens.") || role.starts_with("review.") || role == "plan.review"
+        }) && let Some(context) = &context
+        {
+            // Like the brief, file contents are text, never pattern parameters.
+            let context = context.replace("${", "$ {");
+            let prompt = node["prompt"].as_str().unwrap_or_default();
+            node["prompt"] = json!(format!("{prompt}{context}"));
+        }
         for (key, value) in kept {
             node[key] = interpolate(&value, &bound, &task, 1)?;
         }

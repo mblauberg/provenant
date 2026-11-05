@@ -280,12 +280,12 @@ mod graph_review_tests {
                 "id": "council", "kind": "composite", "access": "read_only",
                 "composite": {
                     "nodes": [
-                        {"id":"subject", "role":"plan.review", "access":"read_only", "prompt":"Frame"},
-                        {"id":"lens", "role":"lens.correctness-spec", "access":"read_only", "prompt":"Review"},
-                        {"id":"verify", "role":"review.verify", "access":"read_only", "prompt":"Verify"},
-                        {"id":"synthesis", "role":"review.synthesis", "access":"read_only", "prompt":"Reconcile"},
-                        {"id":"other", "role":"plan", "access":"read_only", "prompt":"Plan"},
-                        {"id":"writer", "role":"review.verify", "access":"worktree_write", "worktree":"lane", "prompt":"Write"}
+                        {"id":"subject", "route":{"alias":"junior"}, "role":"plan.review", "access":"read_only", "prompt":"Frame"},
+                        {"id":"lens", "route":{"alias":"junior"}, "role":"lens.correctness-spec", "access":"read_only", "prompt":"Review"},
+                        {"id":"verify", "route":{"alias":"junior"}, "role":"review.verify", "access":"read_only", "prompt":"Verify"},
+                        {"id":"synthesis", "route":{"alias":"junior"}, "role":"review.synthesis", "access":"read_only", "prompt":"Reconcile"},
+                        {"id":"other", "route":{"alias":"junior"}, "role":"plan", "access":"read_only", "prompt":"Plan"},
+                        {"id":"writer", "route":{"alias":"junior"}, "role":"review.verify", "access":"worktree_write", "worktree":"lane", "prompt":"Write"}
                     ],
                     "exports": [{"node":"synthesis","outputs":["result"]}]
                 }
@@ -815,6 +815,28 @@ mod result_tests {
     }
 
     #[test]
+    fn graph_status_names_blocking_upstream() {
+        let mut run = graph_status_fixture();
+        let node = &mut run.checkpoint.nodes[1];
+        node.state = provenant_fabric_runtime::graph::NodeState::Blocked;
+        node.advance_error = Some("blocked by ordinary (Failed)".into());
+        assert!(super::graph_human(&run).contains("composite: Blocked (blocked by ordinary (Failed))"));
+        assert!(super::graph_human::graph_human_full(&run).contains("error=blocked by ordinary (Failed)"));
+        let summary = super::graph_human::graph_summary(&serde_json::to_value(&run).unwrap());
+        assert!(format!("{summary:?}").contains("blocked by ordinary (Failed)"));
+    }
+
+    #[test]
+    fn graph_status_full_shows_node_warnings() {
+        let mut run = graph_status_fixture();
+        run.checkpoint.nodes[0].outputs = Some(serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "result": null, "verdict": null, "findings": [],
+            "branch": null, "commit": null, "warnings": ["equal_base_and_head: review range is empty"]
+        })).unwrap());
+        assert!(super::graph_human::graph_human_full(&run).contains("warning: equal_base_and_head: review range is empty"));
+    }
+
+    #[test]
     fn graph_status_full_lists_checkpoint_nodes_attempts_and_errors() {
         let run = graph_status_fixture();
         let full = super::graph_human::graph_human_full(&run);
@@ -1006,7 +1028,10 @@ mod result_tests {
             "schema_version":1, "graph_id":"fixture", "nodes":[
                 {"id":"ordinary","role":"plan","access":"read_only","prompt":"test"}]
         }))?;
-        let checkpoint = graph_status_fixture().checkpoint;
+        let mut checkpoint = graph_status_fixture().checkpoint;
+        let display = "node ordinary expansion paused: planner fragment invalid: invalid fragment: missing nodes; fallback expansion paused: source requires a full commit ID";
+        checkpoint.pause_reason = Some(display.into());
+        checkpoint.nodes[0].expansion_pause = Some(format!("{display}\n[planner-fragment-retry-context:{}", provenant_core::hex(b"invalid fragment: missing nodes")));
         let mut journal = FileJournal::open(
             &roots.state,
             project,
@@ -1015,7 +1040,7 @@ mod result_tests {
             &cancel,
             &factory.clock,
         )?;
-        journal.bind(GraphExecution {
+        journal.bind(GraphExecution {review_base: None,
             extra: Default::default(),
             integration_base: None,
             directory: rig.project.clone(),
@@ -1032,7 +1057,13 @@ mod result_tests {
             budget,
             &cancel,
         )?;
-        assert_eq!(status.checkpoint, before);
+        let reason = status.checkpoint.pause_reason.as_deref().unwrap();
+        assert!(reason.contains("invalid fragment: missing nodes"), "{reason}");
+        assert!(reason.find("invalid fragment") < reason.find("fallback expansion paused"));
+        let human = super::graph_display(&status, "fabric graph status", &provenant_cli::Globals::default());
+        assert!(human.contains("invalid fragment: missing nodes"), "{human}");
+        let json = serde_json::to_value(&status)?;
+        assert!(json["checkpoint"]["pause_reason"].as_str().unwrap().contains("invalid fragment: missing nodes"));
         assert_eq!(
             FileJournal::read_checkpoint(&roots.state, project, "fixture")?.unwrap(),
             before
@@ -1142,6 +1173,8 @@ mod result_tests {
         let request = |label: &str, attempt_ref: Option<&str>| InputRequest {
             label: label.into(),
             attempt_ref: attempt_ref.map(str::to_owned),
+            inline_findings: None,
+            finding_prefix: None,
         };
         let key = AttemptKey {
             extra: Default::default(),
@@ -1172,6 +1205,11 @@ mod result_tests {
         };
         assert_eq!(std::fs::read_to_string(path)?, text);
         assert_eq!(*omitted, 0);
+        let index: serde_json::Value = serde_json::from_slice(&std::fs::read(inputs.index.as_ref().ok_or("input index")?)?)?;
+        assert_eq!(index[0]["status"], "complete");
+        assert_eq!(index[1]["status"], "unavailable");
+        assert_eq!(index[1]["attempt_ref"], format!("{}/{attempt}", provenant_core::HostId::from_bytes([7; 16])));
+        assert_eq!(index[2]["label"], "never-ran");
         // Exercise the graph scheduler with the real staging adapter and a
         // fixture peer, including a consumer that reads its materialised file.
         use provenant_fabric_runtime::graph;
@@ -1318,6 +1356,17 @@ mod result_tests {
         assert_eq!(*bytes, 5);
         assert_eq!(*omitted, (text.len() - 5) as u64);
         assert!(std::fs::read_to_string(path)?.starts_with("full "));
+        let index: serde_json::Value = serde_json::from_slice(&std::fs::read(capped.index.as_ref().ok_or("capped index")?)?)?;
+        assert_eq!(index[0]["status"], "capped");
+        assert_eq!(index[0]["attempt_ref"], format!("{remote_host}/{attempt}"));
+        let finding: graph::Finding = serde_json::from_value(serde_json::json!({"id":"ci-1","severity":"high","file":"","summary":"failed check","status":"open"}))?;
+        let inline = graph_inputs::materialise(
+            &factory, WaitBudget::cli(factory.clock.mono_now(), 30)?, &CancelToken::new(), &key,
+            &[InputRequest { label: "ci".into(), attempt_ref: None, inline_findings: Some(vec![finding]), finding_prefix: None }], 16_384,
+        );
+        let MaterialisedInput::File { path, omitted: 0, .. } = &inline.entries[0] else { return Err(format!("{inline:?}").into()); };
+        let inline_text = std::fs::read_to_string(path)?;
+        assert!(inline_text.contains("```findings\n") && inline_text.contains("failed check"));
         assert!(
             matches!(&inputs.entries[1], MaterialisedInput::Unavailable { label, reason } if label == "offline" && reason.contains("result could not be read")),
             "{inputs:?}"
@@ -1602,7 +1651,7 @@ mod result_tests {
     #[test]
     fn newer_graph_schemas_report_upgrade_required() {
         let document_error =
-            super::decode_graph_document(br#"{"schema_version":2,"future_shape":true}"#)
+            super::decode_graph_document(br#"{"schema_version":3,"future_shape":true}"#)
                 .unwrap_err();
         let decode_error = provenant_records::decode_v1::<serde_json::Value, _>(
             br#"{"schema_version":2,"future_shape":true}"#.as_slice(),
@@ -1612,9 +1661,9 @@ mod result_tests {
         let checkpoint_error = super::graph_journal_error(
             provenant_fabric_runtime::graph::JournalError::Decode(decode_error),
         );
-        for (error, record_kind) in [
-            (document_error, "graph document schema"),
-            (checkpoint_error, "graph checkpoint schema"),
+        for (error, record_kind, expected_version) in [
+            (document_error, "graph document schema", 3),
+            (checkpoint_error, "graph checkpoint schema", 2),
         ] {
             assert_eq!(error.code(), "upgrade_required");
             let super::FacadeError::UpgradeRequired {
@@ -1629,18 +1678,18 @@ mod result_tests {
             assert_eq!(reader_release, env!("CARGO_PKG_VERSION"));
             assert_eq!(writer_release, "unknown");
             assert_eq!(record, record_kind);
-            assert_eq!(version, 2);
+            assert_eq!(version, expected_version);
         }
         assert_eq!(
             super::decode_graph_document(br#"{"schema_version":0}"#).unwrap_err(),
-            super::FacadeError::InvalidInput
+            super::FacadeError::invalid("graph document schema_version must be 1 or 2")
         );
     }
 
     #[test]
     fn oversized_graph_checkpoint_is_refused_with_size_reason() {
         match super::graph_journal_error(provenant_fabric_runtime::graph::JournalError::TooLarge) {
-            super::FacadeError::DispatchRefused { reason } => {
+            super::FacadeError::DispatchRefused { reason, .. } => {
                 assert!(reason.contains("byte limit"))
             }
             other => panic!("unexpected error: {other:?}"),
@@ -1651,7 +1700,7 @@ mod result_tests {
 #[cfg(test)]
 #[allow(unused_imports, dead_code)] // The custom worktree driver compiles without a test harness.
 mod policy_tail_confirmation_tests {
-    use super::{FacadeError, confirm_stable_tail};
+    use super::{FacadeError, confirm_stable_tail, lane_timeout};
 
     // Each pass returns (attempt, pass index), so a test can tell which pass's
     // record came back.
@@ -1694,6 +1743,12 @@ mod policy_tail_confirmation_tests {
         );
         assert!(matches!(result, Err(FacadeError::StateCorrupt)));
         assert_eq!(calls, ceiling + 1);
+    }
+
+    #[test]
+    fn lane_timeout_is_node_deadline_capped_by_graph_timeout() {
+        assert_eq!(lane_timeout(Some(120), 60), 60);
+        assert_eq!(lane_timeout(Some(30), 60), 30);
     }
 }
 

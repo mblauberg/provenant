@@ -2028,6 +2028,13 @@ mod tests {
     #[test]
     #[allow(clippy::print_stderr)] // An optional live off-volume fixture must report its availability.
     fn native_offsealed_platform_process_is_refused_when_present() {
+        fn unavailable(reason: &str) {
+            assert!(
+                std::env::var_os("PROVENANT_CONFINEMENT_REQUIRED").is_none(),
+                "off-sealed platform process: {reason}"
+            );
+            eprintln!("SKIP #1: off-sealed platform process: {reason}");
+        }
         let mut pids = vec![0i32; 65_536];
         // SAFETY: the vector supplies writable storage of the supplied byte
         // size and libproc does not retain the pointer.
@@ -2038,9 +2045,7 @@ mod tests {
             )
         };
         if count <= 0 || count as usize >= pids.len() {
-            eprintln!(
-                "SKIP: optional off-sealed platform fixture: process enumeration unavailable or incomplete"
-            );
+            unavailable("process enumeration unavailable or incomplete");
             return;
         }
         for &pid in &pids[..count as usize] {
@@ -2066,7 +2071,7 @@ mod tests {
             );
             return;
         }
-        eprintln!("SKIP: no observable off-sealed platform process is present");
+        unavailable("no observable off-sealed platform process is present");
     }
 
     #[test]

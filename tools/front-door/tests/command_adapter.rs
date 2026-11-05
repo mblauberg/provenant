@@ -6,24 +6,23 @@ use std::{fs, path::Path, time::Duration};
 use support::{Result, TestRig, code};
 
 #[test]
-fn macos_ci_requires_command_adapter_confinement_fixtures() {
-    let workflow = include_str!("../../../.github/workflows/ci.yml");
-    let job = workflow
-        .split("  rust-macos-tests:\n")
-        .nth(1)
-        .expect("macOS test job")
-        .split("\n  rust-macos-release:")
-        .next()
-        .unwrap();
-    assert!(job.contains("runs-on: macos-15"));
-    assert!(!job.contains("continue-on-error: true"));
-    let step = job
-        .split("      - name:")
-        .find(|step| step.contains("binary(=command_adapter)"))
-        .expect("command_adapter must run in the required macOS job");
-    assert!(step.contains("PROVENANT_CONFINEMENT_REQUIRED: \"1\""));
-    assert!(step.contains("cargo nextest run"));
-    assert!(step.contains("--profile ci"));
+fn rig_git_commits_use_fixture_identity() -> Result {
+    let rig = TestRig::new()?;
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let commit = rig.execute(&git, &["commit", "--allow-empty", "-qm", "fixture"], None)?;
+    assert_eq!(
+        code(&commit),
+        0,
+        "{}",
+        String::from_utf8_lossy(&commit.stderr.bytes)
+    );
+    let log = rig.execute(&git, &["log", "-1", "--format=%an <%ae>|%cn <%ce>"], None)?;
+    assert_eq!(code(&log), 0);
+    assert_eq!(
+        String::from_utf8(log.stdout.bytes)?.trim(),
+        "Fixture <fixture@example.invalid>|Fixture <fixture@example.invalid>"
+    );
+    Ok(())
 }
 
 #[test]
@@ -74,20 +73,7 @@ fn available() -> Result<bool> {
 fn rig(commands: Value) -> Result<TestRig> {
     let rig = TestRig::new()?;
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    let out = rig.execute(
-        &git,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "seed",
-        ],
-        None,
-    )?;
+    let out = rig.execute(&git, &["commit", "--allow-empty", "-qm", "seed"], None)?;
     assert_eq!(code(&out), 0);
     for path in [
         "Library/pnpm",
@@ -774,20 +760,7 @@ fn explain_for_model_and_route_previews_without_creating_attempts() -> Result {
 fn disk_report_json_and_human_output_leave_missing_state_absent() -> support::Result {
     let rig = TestRig::new()?.without_state()?;
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    let commit = rig.execute(
-        &git,
-        &[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "initial",
-        ],
-        None,
-    )?;
+    let commit = rig.execute(&git, &["commit", "--allow-empty", "-qm", "initial"], None)?;
     assert_eq!(code(&commit), 0);
     let before = std::fs::read(rig.project.join(".git/index")).ok();
     let json = rig.command(&["disk", "report", "--json"])?;

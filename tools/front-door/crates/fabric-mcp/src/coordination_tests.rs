@@ -73,6 +73,7 @@ struct SubmitFacade {
     large_wait: bool,
     expire_run: bool,
     run_unsatisfied: bool,
+    run_io: bool,
     clock: Option<SharedClock>,
     budgets: Vec<u64>,
     reads: Vec<u64>,
@@ -110,6 +111,14 @@ impl F3Facade for SubmitFacade {
     ) -> Result<Value, FacadeError> {
         self.budgets
             .push(budget.remaining(MonoTime::from_micros(0)).as_micros());
+        if self.run_io {
+            return Err(FacadeError::Io {
+                delivery_limit: None,
+                delivery_stage: None,
+                operation: "read".into(),
+                path: Some("/private/host/wait".into()),
+            });
+        }
         if self.expire_run {
             if let Some(clock) = &self.clock {
                 clock.advance(DurationMicros::from_seconds(2 * crate::MAX_WAIT_SECONDS).unwrap());
@@ -140,7 +149,12 @@ impl F3Facade for SubmitFacade {
         };
         self.reads.push(max_bytes);
         if self.fail_first && self.reads.len() == 1 {
-            return Err(FacadeError::NotFound);
+            return Err(FacadeError::Io {
+                delivery_limit: None,
+                delivery_stage: None,
+                operation: "read".into(),
+                path: Some("/private/host/output".into()),
+            });
         }
         serde_json::from_value(json!({"kind":"chunk", "target":target, "part":"result", "state":"terminal", "reason":null, "offset":0, "next_offset":2, "eof":true, "digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bytes":{"encoding":"utf8", "data":"ok"}})).map_err(|_| FacadeError::StateCorrupt)
     }
@@ -178,6 +192,7 @@ fn submit_wait_merges_outputs_and_uses_independent_budgets() -> Result<(), Box<d
         large_wait: false,
         expire_run: false,
         run_unsatisfied: false,
+        run_io: false,
         clock: None,
         budgets: vec![],
         reads: vec![],
@@ -191,7 +206,8 @@ fn submit_wait_merges_outputs_and_uses_independent_budgets() -> Result<(), Box<d
     assert_eq!(response["receipt"]["operation_id"], "op");
     assert_eq!(response["wait"]["timed_out"], false);
     assert_eq!(response["outputs"].as_array().unwrap().len(), 2);
-    assert_eq!(response["outputs"][0]["error"]["code"], "not_found");
+    assert_eq!(response["outputs"][0]["error"]["code"], "io");
+    assert!(!response.to_string().contains("/private/host"));
     assert_eq!(response["outputs"][1]["bytes"]["data"], "ok", "{response}");
     let limits = provenant_fabric_runtime::config::Limits {
         body_bytes: 65536,
@@ -227,6 +243,13 @@ fn submit_wait_merges_outputs_and_uses_independent_budgets() -> Result<(), Box<d
             .all(|bytes| *bytes > 0 && *bytes < 1500)
     );
     assert!(serde_json::to_vec(&response)?.len() <= 3000);
+    service.facade.run_io = true;
+    let failed_wait = request()?
+        .execute(&mut service, &CancelToken::new())?
+        .structured_content;
+    assert_eq!(failed_wait["observation_error"]["code"], "io");
+    assert!(!failed_wait.to_string().contains("/private/host"));
+    service.facade.run_io = false;
     service.facade.large_wait = true;
     let response = request()?
         .execute(&mut service, &CancelToken::new())?
@@ -275,6 +298,7 @@ fn wait_that_expires_before_observation_reports_timed_out() -> Result<(), Box<dy
         large_wait: false,
         expire_run: true,
         run_unsatisfied: false,
+        run_io: false,
         clock: Some(clock.clone()),
         budgets: vec![],
         reads: vec![],

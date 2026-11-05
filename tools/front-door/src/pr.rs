@@ -360,6 +360,7 @@ pub fn run(command: Pr, globals: &Globals, _workers: &dyn WorkerObserver) -> u8 
     );
     if let Err(error) = result {
         report.error = Some(provenant_records::CommandError {
+            diagnostic: None,
             code: "PR".into(),
             message: format!("fail #{number} {head}: {error}"),
             cause: None,

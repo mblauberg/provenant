@@ -17,6 +17,25 @@ fn fragments_cannot_inject_persisted_topology_through_extra_fields() {
 }
 
 #[test]
+fn admission_planner_fragment_capability() {
+    let fragment = json!({
+        "schema_version": 1,
+        "nodes": [{
+            "id": "child", "access": "read_only", "goal": "Do a slice",
+            "acceptance_checks": ["Check it"], "route": {"alias": "senior"},
+            "family_group": "group"
+        }]
+    });
+    let output = format!("```fragment\n{}\n```", fragment);
+    let mut owner = fixture_owner(&[&output]);
+    let run = advance(&planner(4), &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+    assert!(run.checkpoint.pause_reason.as_deref().unwrap().contains("schema version"), "{:?}", run.checkpoint.pause_reason);
+    assert!(run.checkpoint.expansions.is_empty());
+}
+
+#[test]
 fn raw_expansion_rejects_each_injected_topology_field() {
     let doc = planner(2);
     let output = result(vec![slice("child", &[])]);
@@ -431,6 +450,10 @@ fn missing_fragment_fallback_retries_after_raising_the_structural_limit() {
     )
     .unwrap();
     assert_eq!(paused.status, GraphStatus::Paused);
+    let reason = paused.checkpoint.pause_reason.as_deref().unwrap();
+    assert!(reason.contains("planner fragment invalid: fragment block missing"), "{reason}");
+    assert!(reason.contains("fallback expansion paused: limits.nodes=3"), "{reason}");
+    assert!(reason.find("fragment block missing") < reason.find("fallback expansion paused"));
     assert!(paused
         .checkpoint
         .nodes
@@ -623,7 +646,7 @@ fn refused_planner_fragment_retries_after_file_journal_reopen() {
         let mut owner = fixture_owner(&[&output]);
         {
             let mut journal = FileJournal::open(&root, project, &doc.graph_id, budget, &cancel, &clock).unwrap();
-            journal.bind(GraphExecution {extra: Default::default(),  integration_base: None, directory: base.clone(), document: doc.clone() }).unwrap();
+            journal.bind(GraphExecution {review_base: None, extra: Default::default(),  integration_base: None, directory: base.clone(), document: doc.clone() }).unwrap();
             let run = advance_with_budget(&doc, &mut owner, &mut journal, &limits, &Default::default()).unwrap();
             assert_eq!(run.status, GraphStatus::Paused);
             assert!(run.checkpoint.nodes[0].outputs.as_ref().unwrap().result.as_ref().unwrap().truncated);
@@ -994,9 +1017,6 @@ fn pattern_required_sample_does_not_violate_bounds_at_admission() {
 #[test]
 fn pattern_children_obey_plan_node_and_kind_limits() {
     let instance = json!({"id":"impl", "pattern":"generator"});
-    let mut owner = fixture_owner(&[&pattern_result(instance.clone())]);
-    let run = advance(&pattern_planner(2), &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
     let mut doc = pattern_planner(4);
     doc.nodes[0].plan.as_mut().unwrap().kinds = vec![NodeKind::Gate];
     let mut owner = fixture_owner(&[&pattern_result(instance)]);
@@ -1006,16 +1026,23 @@ fn pattern_children_obey_plan_node_and_kind_limits() {
 
 #[test]
 fn pattern_expansion_respects_plan_max_nodes_boundary() {
-    let instance = json!({"id":"impl", "pattern":"generator"});
-    let output = pattern_result(instance);
+    let output = pattern_result(json!({"id":"impl", "pattern":"generator"}));
     let mut owner = fixture_owner(&[&output, "implemented", "reviewed", "checked"]);
-    let run = advance(&pattern_planner(3), &mut owner, &mut MemoryJournal::default()).unwrap();
+    let run = advance(&pattern_planner(1), &mut owner, &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
     assert_eq!(run.checkpoint.expansions[0].nodes.len(), 3);
-    let mut owner = fixture_owner(&[&output]);
-    let run = advance(&pattern_planner(2), &mut owner, &mut MemoryJournal::default()).unwrap();
+
+    let output = pattern_result_all(vec![json!({"id":"a", "pattern":"generator"}), json!({"id":"b", "pattern":"generator"})]);
+    let run = advance(&pattern_planner(1), &mut fixture_owner(&[&output]), &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
-    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+    assert!(run.checkpoint.pause_reason.as_deref().unwrap().contains("fragment requires 1..1 nodes and schema_version 1"));
+    assert!(run.checkpoint.expansions.is_empty());
+
+    let output = pattern_result(json!({"id":"impl", "pattern":"generator"}));
+    let limits = crate::config::GraphLimits { nodes: 4, ..Default::default() };
+    let run = advance_with_budget(&pattern_planner(1), &mut fixture_owner(&[&output]), &mut MemoryJournal::default(), &limits, &Default::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Paused);
+    assert!(run.checkpoint.pause_reason.as_deref().unwrap().contains("limits.nodes=4 reached (5)"), "{:?}", run.checkpoint.pause_reason);
     assert!(run.checkpoint.expansions.is_empty());
 }
 

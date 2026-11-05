@@ -8,8 +8,24 @@ pub fn with_context<T>(
     roots: &Roots,
     home: &Path,
     project: &Path,
-    clock: &dyn Clock,
+    clock: &(dyn Clock + Sync),
     cancel: &CancelToken,
+    action: impl FnOnce(&WorktreeContext<'_>) -> Result<T, WorktreeError>,
+) -> Result<T, WorktreeError> {
+    let policy_workers = CensusPolicyWorkers::from_roots(&SystemWorkerObserver, roots)?;
+    let workers = CensusSession::new(&policy_workers, clock);
+    with_context_using_workers(roots, home, project, clock, cancel, &workers, action)
+}
+
+/// Build the ordinary worktree context around a caller-owned command census.
+/// This lets commands that construct several contexts share one evidence epoch.
+pub fn with_context_using_workers<T>(
+    roots: &Roots,
+    home: &Path,
+    project: &Path,
+    clock: &(dyn Clock + Sync),
+    cancel: &CancelToken,
+    workers: &dyn WorkerObserver,
     action: impl FnOnce(&WorktreeContext<'_>) -> Result<T, WorktreeError>,
 ) -> Result<T, WorktreeError> {
     fn child(parent: &Directory, name: &OsStr) -> Result<Directory, WorktreeError> {
@@ -43,7 +59,6 @@ pub fn with_context<T>(
     .map_err(|_| WorktreeError::InvalidRequest)?;
     let registry = child(&state, OsStr::new("worktrees"))?;
     let project_state = child(&registry, OsStr::new(&binding.project_id().to_string()))?;
-    let workers = CensusPolicyWorkers::from_roots(&SystemWorkerObserver, roots)?;
     let lock_budget =
         WaitBudget::cli(clock.mono_now(), 5).map_err(|_| WorktreeError::InvalidRequest)?;
     action(&WorktreeContext {
@@ -53,7 +68,7 @@ pub fn with_context<T>(
         project_state: &project_state,
         executor: &executor,
         utility: &runtime,
-        workers: &workers,
+        workers,
         clock,
         utility_budget: budget,
         mutation_budget: UtilityBudget::bounded(Duration::from_secs(120))?,

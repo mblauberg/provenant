@@ -85,6 +85,10 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     std::fs::write(&cargo_credentials, b"token")?;
     let project_locks = root.join("agent-run");
     std::fs::create_dir(&project_locks)?;
+    let shared_locks = root.join("shared-locks");
+    let configured_tools = root.join("configured-tools");
+    std::fs::create_dir(&shared_locks)?;
+    std::fs::create_dir(&configured_tools)?;
     let private = linked.repo().private_git_dir().to_owned();
     let common = linked.repo().common_git_dir().to_owned();
     let private_logs = private.join("logs");
@@ -124,20 +128,29 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
             deny_keychain_access: true,
             allow_process_fork: true,
             allow_database_ipc: true,
-            runtime_reads: vec![PathGrant {
-                path: cargo.clone(),
-                scope: PathScope::Subtree,
-            }],
-            tool_writes: vec![PathGrant {
-                path: cargo.join("registry"),
-                scope: PathScope::Subtree,
-            }],
+            runtime_reads: [cargo.clone(), configured_tools.clone(), private.clone()]
+                .map(|path| PathGrant {
+                    path,
+                    scope: PathScope::Subtree,
+                })
+                .to_vec(),
+            tool_writes: [cargo.join("registry"), shared_locks.clone()]
+                .map(|path| PathGrant {
+                    path,
+                    scope: PathScope::Subtree,
+                })
+                .to_vec(),
             tool_exec_roots: ["/bin", "/usr/bin", "/usr/libexec"]
                 .map(|path| PathGrant {
                     path: path.into(),
                     scope: PathScope::Subtree,
                 })
-                .to_vec(),
+                .into_iter()
+                .chain(std::iter::once(PathGrant {
+                    path: configured_tools.clone(),
+                    scope: PathScope::Subtree,
+                }))
+                .collect(),
             process_executables: executables
                 .iter()
                 .cloned()
@@ -213,6 +226,8 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     let mut anchor_paths = vec![
         root.clone(),
         cargo.clone(),
+        shared_locks.clone(),
+        configured_tools.clone(),
         scratch.clone(),
         cache.clone(),
         provider_state.clone(),
@@ -249,6 +264,14 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
         ("XDG_CONFIG_HOME".into(), xdg.into_os_string()),
         ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
         ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+        (
+            "PROVENANT_PRIMARY_CHECKOUT".into(),
+            fixture.repo.root_path().as_os_str().to_owned(),
+        ),
+        (
+            "PROVENANT_WORKTREE_GITDIR".into(),
+            private.as_os_str().to_owned(),
+        ),
     ];
     let (baseline, baseline_diagnostic) = probe_sandbox_with_diagnostic(&BackendContext {
         executor: &fixture.executor,
@@ -264,7 +287,10 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
         ))?;
         return Ok(());
     }
-    let backend = MacOsSandboxBackend { ready: true };
+    let backend = MacOsSandboxBackend {
+        ready: true,
+        limits: ProfileLimits::default(),
+    };
     // Existing hard links in the scratch, the worktree and its ignored
     // build and dependency trees do not refuse the launch: the sandbox
     // denies new links, and the few Git control files are checked directly.
@@ -492,17 +518,71 @@ semop($sem, pack("s!3", 0, 1, 0)) or die "semop: $!\n";
     // A build script built into a declared write root (a shared
     // CARGO_TARGET_DIR) runs; the sandbox checks the exec of the file.
     let build_script = project_locks.join("build-script-main");
+    let configured_script = configured_tools.join("tool");
     let scratch_script = scratch.join("build-script-main");
     let undeclared_target = root.join("undeclared-target");
     std::fs::create_dir_all(&undeclared_target)?;
     let undeclared_script = undeclared_target.join("build-script-main");
     {
         use std::os::unix::fs::PermissionsExt;
-        for script in [&build_script, &scratch_script, &undeclared_script] {
+        for script in [
+            &build_script,
+            &scratch_script,
+            &undeclared_script,
+            &configured_script,
+        ] {
             std::fs::write(script, "#!/bin/sh\nexit 0\n")?;
             std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o755))?;
         }
     }
+    for profile in [&sbpl, &read_only_sbpl] {
+        let identity = run_in(
+            profile,
+            &executables[3],
+            &[
+                Path::new("-c"),
+                Path::new(
+                    "test -d \"$PROVENANT_PRIMARY_CHECKOUT\" && /bin/cat \"$PROVENANT_WORKTREE_GITDIR/HEAD\"",
+                ),
+            ],
+        );
+        assert!(successful_probe(&identity));
+        assert!(!successful_probe(&run_in(
+            profile,
+            &executables[0],
+            &[&private.join("HEAD")]
+        )));
+        assert!(successful_probe(&run_in(profile, &configured_script, &[])));
+        assert!(!successful_probe(&run_in(
+            profile,
+            &executables[0],
+            &[&configured_script]
+        )));
+    }
+    // The configured shared directory is writable but is not an executable
+    // root. Its lock is the same host inode, rather than a lane-local copy.
+    let shared_lock = shared_locks.join("heavy.lock");
+    let lock_directory = provenant_os::fs::Directory::open_anchor(&shared_locks)?;
+    let held = lock_directory.try_lock(
+        std::ffi::OsStr::new("heavy.lock"),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
+    let lock_probe = |profile: &str| {
+        run_in(
+            profile,
+            &executables[6],
+            &[
+                Path::new("-e"),
+                Path::new(
+                    "open(my $f, '>>', $ARGV[0]) or die $!; flock($f, 2|4) or exit 35; print qq(locked\\n);",
+                ),
+                &shared_lock,
+            ],
+        )
+    };
+    assert!(!successful_probe(&lock_probe(&sbpl)));
+    drop(held);
+    assert!(successful_probe(&lock_probe(&sbpl)));
     for (name, outcome) in [
         (
             "tool store write",

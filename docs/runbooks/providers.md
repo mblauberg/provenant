@@ -7,6 +7,12 @@ OpenCode) are enabled by default in every access and session mode with a launch
 form; recordings serve replay tests only. Use `provenant route list`
 to inspect the catalogue; readiness is decided at dispatch.
 
+`AdapterSpec` owns credential metadata watch files, authentication markers, login
+hints, compaction environment controls and allowance prefixes. Credential watches
+inspect metadata only. Recognised missing or expired provider logins settle as
+`auth_required`, including when every candidate is skipped before launch.
+Read-only graph nodes can then try their next declared route.
+
 ## Launch capabilities
 
 One declared table per adapter (`AdapterSpec::launch` in
@@ -149,12 +155,89 @@ refreshes tokens. This is an accepted limit. A lane is not granted other
 providers' credential stores, and GitHub CLI configuration stays denied
 ([#2432](https://github.com/mblauberg/provenant/issues/2432)).
 
-Codex scans `$HOME/.agents/skills` at startup, independently of `CODEX_HOME`.
-`HOME` is unchanged for the lane, so HOME-derived defaults keep working. A
-Codex lane (read-only or worktree-write) is granted the host's
-`~/.agents/skills` directory read-only when it exists at prepare time, so the
-scan succeeds. There is no write grant for it. Repository-local skills remain
-discoverable.
+## Project paths and host checkout identity
+
+Lanes receive `PROVENANT_PRIMARY_CHECKOUT`, the canonical primary checkout.
+Linked-worktree lanes also receive `PROVENANT_WORKTREE_GITDIR`, their real,
+read-only admin directory. A writer's `git rev-parse --git-common-dir` still
+names its private Git view; use the environment variable to locate host-owned
+project state instead of querying Git against the primary checkout.
+
+Configure existing shared paths and repo-managed tools per registered project:
+
+```toml
+[domains.lanes.projects."PROJECT-ID"]
+shared_paths = [".agent-run/locks", "~/shared-test-state"]
+exec_roots = [".local-tools"]
+```
+
+`shared_paths` gives this project's writers read-write access. Paths may be
+absolute, home-relative or relative to the primary checkout; missing paths are
+never created. Read-only lanes get no additional writes. Git directories,
+credential stores, protected host state and executable roots are omitted with a
+`shared_path_ignored` warning.
+
+`exec_roots` gives lanes read and execution access to directory subtrees under
+the primary checkout. Entries that escape it, are missing, overlap writes or
+name protected or credential paths are ignored with `exec_root_ignored`.
+Neither setting changes the lane's PATH; call tools by a project-resolved path.
+The receipt's `project_paths` records the applied paths and warnings with their
+configuration keys. Paths use checkout- or home-relative forms; external paths
+require inspection of the host configuration.
+
+## User skills in lanes
+
+Lanes discover host user skills read-only by default. The
+`domains.lanes.user_skills` setting accepts `"discover"` (default) or `"off"`.
+`provenant config show` and `provenant config schema` show its value, default
+and origin. Set it in the selected state root's `config.toml`:
+
+```toml
+[domains.lanes]
+user_skills = "off"
+
+# Override the host default for a registered Fabric project ID.
+# Find the ID with `provenant fabric identity`.
+[domains.lanes.projects."PROJECT-ID"]
+user_skills = "discover"
+
+# Narrow discovery to particular routes with the existing model policy.
+[[domains.routing.model_policy.rules]]
+adapter = "claude"
+[domains.routing.model_policy.rules.policy.lane]
+user_skills = "off"
+```
+
+A supplied route policy wins over the project override, which wins over the
+host default. Omit an override to inherit. A brief can still name or quote a
+skill explicitly when discovery is off. Project skills remain in the worktree;
+this setting controls host user skills only.
+
+| Provider | Host user skill directory |
+|---|---|
+| Claude | `~/.claude/skills` |
+| Codex | `~/.agents/skills` |
+| agy | `~/.gemini/skills` |
+| OpenCode | `$XDG_CONFIG_HOME/opencode/skills`, falling back to `~/.config/opencode/skills`; relative XDG overrides are ignored |
+| Cursor | `~/.cursor/skills` |
+
+The host copies selected skills to an attempt-owned tree before launch. The
+lane receives read-only access to that tree, and the provider discovers the
+staged copy. Links are followed into the copy, but targets in credential roots
+are skipped with a warning. Missing directories are skipped. Files exceeding
+the staging byte limit and entries that change during capture are skipped with
+a warning. If the staged tree cannot be written, the lane continues without
+user skills and records a warning. The staged tree contains no links and
+receives no write grant.
+`domains.lanes.skill_stage_max_bytes` sets the total capture limit (16 MiB by
+default); the receipt records its effective value and configuration origin.
+Project skills and selected-provider credential access keep their existing
+rules. Reading a skill does not change nested dispatch policy.
+
+Each attempt's applied route records `user_skills` with its requested mode,
+whether skills were exposed, the home-relative source when available, staged
+file count, warnings and setting source. `provenant output ATTEMPT --json`
+includes that receipt; older attempts have no receipt.
 
 ## Claude network access
 
@@ -216,6 +299,19 @@ Unregistered and registered agy behave differently at launch:
 - With a registration, agy accounts are pinned: a launch verifies the signed-in
   Google account against the registered key and skips the route if it differs
   (`changed identity; re-register it`). Register every account you route to.
+
+Quota probes also verify the signed-in fingerprint. When it changes, the old
+key is marked `account_mismatch` and excluded from routing. Provenant updates
+that directory's registration to the new key under the config lock, preserving
+its label and settings; the new account appears on the next quota pass. A
+concurrent manual registration takes precedence; if the new identity is already
+registered under another account, automatic rebinding is refused and Provenant
+prompts to inspect accounts with `provenant accounts list` while keeping the stale
+key excluded from routing. Dispatch can reuse a verified
+fingerprint for 30 seconds, capturing keychain metadata before probing to guard
+against concurrent sign-ins; a keychain metadata change or a new quota probe
+invalidates the cached observation earlier. No credentials or email addresses
+are stored in this cache.
 
 Register the first account, the one signed in on your own login keychain,
 with the home directory itself:
@@ -324,7 +420,17 @@ without reinstalling. Once a writer's head and route are verified, and before
 its provider starts, Provenant runs `pnpm install --frozen-lockfile` on the
 host when the worktree has `pnpm-lock.yaml` and no `node_modules/.modules.yaml`
 (pnpm's completion marker), so a partial `node_modules` is repaired. The
-install is bounded, runs outside the sandbox, and is cancelled with the
+install resolves pnpm using the host account's login-shell PATH, and passes
+that PATH to pnpm so it can also find node when the peer daemon has a narrower
+PATH. The login-shell probe runs from the account home, is bounded to ten
+seconds, and is cancelled with the dispatch. If pnpm is missing,
+`dependency_tool_not_found` names the searched PATH; install pnpm on that host
+and check `pnpm --version` in its login shell before retrying. If the probe fails, preparation falls back to the host process PATH and records
+`daemon_fallback` as the PATH source in the dependency preparation outcome; a
+missing pnpm refusal also names that source and the searched PATH. If no daemon
+PATH is available, `dependency_path_unavailable` reports the probe failure.
+Cancellation stops preparation without falling back.
+The install is bounded, runs outside the sandbox, and is cancelled with the
 dispatch, with its process group cleaned up. Disable it with
 `--knob lanes.prepare_deps=false` or the `lanes.prepare_deps` config key. An
 install failure refuses the lane and includes the command, the exit status or

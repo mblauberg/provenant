@@ -117,39 +117,49 @@ pub(super) const PSEUDO_TTY_RULES: &str = r##"(allow pseudo-tty)
 "##;
 /// Profiles travel in argv: leave headroom below macOS's 1 MiB ARG_MAX for
 /// provider arguments and environment.
-#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[cfg(any(test, feature = "snapshot"))]
 pub(super) const PROFILE_LIMIT: usize = 512 * 1024;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", any(test, feature = "snapshot")))]
 pub(super) fn compile_sbpl(
     plan: &PlanPermissions,
     profile: &ProviderProfile,
     anchors: &Anchors<'_>,
 ) -> Result<ConfinedLaunch, PermissionError> {
+    compile_sbpl_impl(plan, profile, anchors, false, ProfileLimits::default())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn compile_sbpl_with_diagnostic(
+    plan: &PlanPermissions,
+    profile: &ProviderProfile,
+    anchors: &Anchors<'_>,
+    limits: ProfileLimits,
+) -> Result<ConfinedLaunch, PermissionError> {
+    compile_sbpl_impl(plan, profile, anchors, true, limits)
+}
+
+#[cfg(target_os = "macos")]
+fn compile_sbpl_impl(
+    plan: &PlanPermissions,
+    profile: &ProviderProfile,
+    anchors: &Anchors<'_>,
+    diagnostic: bool,
+    limits: ProfileLimits,
+) -> Result<ConfinedLaunch, PermissionError> {
     anchors.verify_all()?;
     if plan.nested_confinement {
         return Err(PermissionError::NestedConfinementUnsupported);
     }
-    for (family, count) in [
-        ("read root grant count", plan.read_roots.len()),
-        ("protected root grant count", plan.protected_roots.len()),
-        ("secret root grant count", plan.secret_roots.len()),
-        ("write root grant count", plan.write_roots.len()),
-    ] {
-        if count > MAX_PATH_GRANTS {
-            return Err(PermissionError::BoundExceeded {
-                family,
-                limit: MAX_PATH_GRANTS,
-                path: plan.scratch.path.clone(),
-            });
-        }
-    }
-    validate_profile_spec(&profile.spec)?;
+    validate_plan_grant_limit(plan, limits.grant_limit)?;
+    validate_profile_spec_with_home(&profile.spec, anchors.home, limits.grant_limit)?;
     for grant in &plan.read_roots {
-        validate_read_exec_grant(grant)?;
+        validate_read_exec_grant(grant)
+            .map_err(|error| error.with_credential_path(&grant.path, Some(anchors.home)))?;
     }
     for grant in &plan.protected_roots {
-        validate_noncredential_grant(grant)?;
+        validate_noncredential_grant(grant)
+            .map_err(|error| error.with_credential_path(&grant.path, Some(anchors.home)))?;
     }
     let worktree_grants = match &plan.mode {
         AccessMode::ReadOnly => None,
@@ -163,7 +173,8 @@ pub(super) fn compile_sbpl(
         }
         read_only.revalidate()?;
         for grant in &read_only.writes {
-            validate_noncredential_grant(grant)?;
+            validate_noncredential_grant(grant)
+                .map_err(|error| error.with_credential_path(&grant.path, Some(anchors.home)))?;
             if plan
                 .protected_roots
                 .iter()
@@ -189,16 +200,20 @@ pub(super) fn compile_sbpl(
         .collect();
     // The path checks above know only conventional homes; the host's own home
     // is broad and its nested credential roots stay hidden wherever it lives.
-    if all_reads()
+    if let Some(grant) = all_reads()
         .chain(shared_writes.iter().copied())
         .chain(&profile.spec.tool_exec_roots)
         .chain(&profile.spec.state_writes)
-        .any(|grant| encloses_home_credentials(grant, anchors.home))
+        .find(|grant| encloses_home_credentials(grant, anchors.home))
     {
-        return Err(PermissionError::CredentialRoot);
+        return Err(if diagnostic {
+            PermissionError::credential_root_at(&grant.path, Some(anchors.home))
+        } else {
+            PermissionError::CredentialRoot
+        });
     }
     for grant in read_grants {
-        anchors.verify_grant_held(grant)?;
+        anchors.verify_read_held(grant)?;
     }
     for grant in &profile.spec.discovery_reads {
         anchors.verify_discovery_grant(grant)?;
@@ -227,7 +242,8 @@ pub(super) fn compile_sbpl(
     if plan.scratch.scope != PathScope::Subtree {
         return Err(PermissionError::InvalidPath(plan.scratch.path.clone()));
     }
-    validate_noncredential_grant(&plan.scratch)?;
+    validate_noncredential_grant(&plan.scratch)
+        .map_err(|error| error.with_credential_path(&plan.scratch.path, Some(anchors.home)))?;
     anchors.verify_grant_held(&plan.scratch)?;
     let mut scratch_exclusions: Vec<&PathGrant> = all_reads()
         .chain(&plan.protected_roots)
@@ -269,7 +285,8 @@ pub(super) fn compile_sbpl(
     }
     verify_private_scratch(&plan.scratch, &scratch_exclusions, anchors)?;
     if let Some(state) = &plan.private_state {
-        validate_noncredential_grant(state)?;
+        validate_noncredential_grant(state)
+            .map_err(|error| error.with_credential_path(&state.path, Some(anchors.home)))?;
         if state.overlaps(&plan.scratch) {
             return Err(PermissionError::ProtectedOverlap);
         }
@@ -307,7 +324,7 @@ pub(super) fn compile_sbpl(
         return Err(PermissionError::ProtectedOverlap);
     }
 
-    let mut profile_bytes = render(&grants)?.into_bytes();
+    let mut profile_bytes = render_with_limit(&grants, limits.profile_limit_bytes)?.into_bytes();
     let profile_digest = Sha256::digest(&profile_bytes).into();
     // SBPL grants pathnames, so rebind them to their held identities after
     // rendering, immediately before returning the launch profile.
@@ -411,15 +428,24 @@ impl<'a> GrantSet<'a> {
 }
 
 /// Render a built grant set without filesystem or environment access.
-#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[cfg(any(test, feature = "snapshot"))]
 pub(crate) fn render(grants: &GrantSet<'_>) -> Result<String, PermissionError> {
-    let source = String::from_utf8(render_profile(
+    render_with_limit(grants, PROFILE_LIMIT)
+}
+
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+pub(super) fn render_with_limit(
+    grants: &GrantSet<'_>,
+    limit: usize,
+) -> Result<String, PermissionError> {
+    let source = String::from_utf8(render_profile_with_limit(
         grants.plan,
         grants.profile,
         &grants.reads,
         &grants.credential_writes,
         grants.worktree.as_ref(),
         grants.home,
+        limit,
     )?)
     .map_err(|_| PermissionError::NonUtf8Path)?;
     Ok(source)
@@ -483,7 +509,8 @@ pub(super) fn verify_shared_writes(
     anchors: &Anchors<'_>,
 ) -> Result<(), PermissionError> {
     for grant in writes {
-        validate_noncredential_grant(grant)?;
+        validate_noncredential_grant(grant)
+            .map_err(|error| error.with_credential_path(&grant.path, Some(anchors.home)))?;
         if plan
             .secret_roots
             .iter()
@@ -575,7 +602,7 @@ pub(super) fn verify_private_scratch(
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[cfg(all(test, target_os = "macos"))]
 pub(super) fn render_profile(
     plan: &PlanPermissions,
     profile: &ProviderProfile,
@@ -583,6 +610,27 @@ pub(super) fn render_profile(
     credential_writes: &[PathGrant],
     worktree_grants: Option<&WorktreeWriteGrants>,
     home: &Path,
+) -> Result<Vec<u8>, PermissionError> {
+    render_profile_with_limit(
+        plan,
+        profile,
+        reads,
+        credential_writes,
+        worktree_grants,
+        home,
+        PROFILE_LIMIT,
+    )
+}
+
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+fn render_profile_with_limit(
+    plan: &PlanPermissions,
+    profile: &ProviderProfile,
+    reads: &[PathGrant],
+    credential_writes: &[PathGrant],
+    worktree_grants: Option<&WorktreeWriteGrants>,
+    home: &Path,
+    limit: usize,
 ) -> Result<Vec<u8>, PermissionError> {
     let mut source = String::from("(version 1)\n(deny default)\n");
     // Apple dyld bootstrap rules are shared with the backend probe to keep
@@ -812,10 +860,10 @@ pub(super) fn render_profile(
             PathScope::Exact,
         )?;
     }
-    if source.len() > PROFILE_LIMIT {
+    if source.len() > limit {
         return Err(PermissionError::ProfileTooLarge {
             bytes: source.len(),
-            limit: PROFILE_LIMIT,
+            limit,
         });
     }
     Ok(source.into_bytes())

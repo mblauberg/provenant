@@ -230,6 +230,12 @@ pub struct RoutingConfig {
     pub writer_advisory: Option<WriterAdvisoryOverride>,
     /// Silence the advisory for Opus implementation lanes.
     pub suppress_opus_writer_warning: bool,
+    /// Effective setting from the registered routing knob.
+    #[serde(skip)]
+    pub allow_unknown_partial_headroom: bool,
+    /// Source captured with the effective value by the composition edge.
+    #[serde(skip)]
+    pub partial_headroom_source: Option<provenant_config::KnobValue>,
     pub capacity_cooldown_seconds: u64,
     /// Further attempts after a capacity or quota settlement, on the same
     /// session where it resumes or a fresh draw where it cannot. Zero retries
@@ -258,26 +264,58 @@ pub const DEFAULT_SETTLEMENT_RETRIES: u8 = 2;
 /// Longest configurable settlement retry wait: one week.
 pub const MAX_RETRY_WAIT_SECONDS: u64 = 7 * 24 * 3_600;
 
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct BundledRoutingDefaults {
+    model_exclusions: ModelExclusions,
+    model_policy: crate::ModelPolicies,
+    writer_advisory: Option<WriterAdvisoryOverride>,
+    suppress_opus_writer_warning: bool,
+    capacity_cooldown_seconds: u64,
+    settlement_retries: u8,
+    capacity_retry_seconds: u64,
+    capacity_retry_max_seconds: u64,
+    retry_delay_ceiling_seconds: u64,
+    review: crate::ReviewConfig,
+    routes: BTreeMap<String, NamedRoute>,
+    pools: BTreeMap<String, Vec<RoutePoolMember>>,
+    pacing: PacingSettings,
+    pacing_reserve: BTreeMap<String, PacingReserve>,
+    pacing_overrides: Vec<PacingOverride>,
+    opencode_go: OpenCodeGoSettings,
+}
+
 impl Default for RoutingConfig {
+    #[allow(clippy::expect_used)] // The bundled asset is validated by tests.
     fn default() -> Self {
-        Self {
-            model_exclusions: ModelExclusions::default(),
-            model_policy: crate::ModelPolicies::default(),
-            writer_advisory: None,
-            suppress_opus_writer_warning: false,
-            capacity_cooldown_seconds: 600,
-            settlement_retries: DEFAULT_SETTLEMENT_RETRIES,
-            capacity_retry_seconds: 30,
-            capacity_retry_max_seconds: 600,
-            retry_delay_ceiling_seconds: 3_600,
-            review: crate::ReviewConfig::default(),
-            routes: BTreeMap::new(),
-            pools: BTreeMap::new(),
-            pacing: PacingSettings::default(),
-            pacing_reserve: BTreeMap::new(),
-            pacing_overrides: Vec::new(),
-            opencode_go: OpenCodeGoSettings::default(),
-        }
+        static DEFAULT: std::sync::OnceLock<RoutingConfig> = std::sync::OnceLock::new();
+        DEFAULT
+            .get_or_init(|| {
+                let asset: BundledRoutingDefaults =
+                    toml_edit::de::from_str(defaults(Profile::Balanced))
+                        .expect("bundled routing defaults are valid");
+                Self {
+                    model_exclusions: asset.model_exclusions,
+                    model_policy: asset.model_policy,
+                    writer_advisory: asset.writer_advisory,
+                    suppress_opus_writer_warning: asset.suppress_opus_writer_warning,
+                    allow_unknown_partial_headroom: false,
+                    partial_headroom_source: None,
+                    capacity_cooldown_seconds: asset.capacity_cooldown_seconds,
+                    settlement_retries: asset.settlement_retries,
+                    capacity_retry_seconds: asset.capacity_retry_seconds,
+                    capacity_retry_max_seconds: asset.capacity_retry_max_seconds,
+                    retry_delay_ceiling_seconds: asset.retry_delay_ceiling_seconds,
+                    review: asset.review,
+                    routes: asset.routes,
+                    pools: asset.pools,
+                    pacing: asset.pacing,
+                    pacing_reserve: asset.pacing_reserve,
+                    pacing_overrides: asset.pacing_overrides,
+                    opencode_go: asset.opencode_go,
+                }
+            })
+            .clone()
     }
 }
 
@@ -997,7 +1035,11 @@ pub fn check_go_allowance(
     catalogue: &Catalogue,
 ) -> Result<(), String> {
     let floor = config.opencode_go.min_monthly_allowance_usd;
-    if floor == 0 || model.adapter() != "opencode" || !model.model().starts_with("opencode-go/") {
+    if floor == 0
+        || !provenant_records::AdapterSpec::get(model.adapter())
+            .and_then(|spec| spec.allowance_prefix)
+            .is_some_and(|prefix| model.model().starts_with(prefix))
+    {
         return Ok(());
     }
     let allowance = catalogue
@@ -1137,8 +1179,8 @@ impl WriterAdvisoryOverride {
     }
 }
 
-/// Only the bundled asset constructs a catalogue. A caller cannot deserialize or
-/// change family/effort rows while retaining an existing revision.
+/// Production catalogues come from the bundled asset. A caller cannot deserialize
+/// or change family/effort rows while retaining an existing revision.
 #[derive(Debug, Clone, Serialize)]
 pub struct Catalogue {
     pub(crate) schema_version: u64,
@@ -1159,10 +1201,58 @@ struct CatalogueAsset {
     #[serde(default)]
     pacing: BTreeMap<String, PacingPolicy>,
 }
+// The fixture feature provides an isolated catalogue for integration tests. It
+// never changes the process-wide bundled catalogue or production behaviour.
+#[cfg(feature = "fixture")]
+thread_local! {
+    static FIXTURE_CATALOGUE: std::cell::RefCell<Option<Catalogue>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Restores the calling thread's catalogue after an integration fixture.
+#[cfg(feature = "fixture")]
+pub struct FixtureFamilyOverride {
+    previous: Option<Catalogue>,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[cfg(feature = "fixture")]
+impl Drop for FixtureFamilyOverride {
+    fn drop(&mut self) {
+        FIXTURE_CATALOGUE.with(|slot| *slot.borrow_mut() = self.previous.take());
+    }
+}
+
+/// Override existing model families only for the current fixture thread.
+#[cfg(feature = "fixture")]
+pub fn fixture_family_override(
+    families: &[(&str, &str)],
+) -> Result<FixtureFamilyOverride, RoutingError> {
+    let mut catalogue = Catalogue::bundled()?;
+    catalogue.revision.push_str("-fixture");
+    for (model, family) in families {
+        let id = ModelId::parse(model)?;
+        let entry = catalogue
+            .models
+            .iter_mut()
+            .find(|entry| entry.model == id)
+            .ok_or(RoutingError::Catalogue)?;
+        entry.family = Some((*family).to_owned());
+    }
+    let previous = FIXTURE_CATALOGUE.with(|slot| slot.borrow_mut().replace(catalogue));
+    Ok(FixtureFamilyOverride {
+        previous,
+        _thread: std::marker::PhantomData,
+    })
+}
+
 impl Catalogue {
     /// The bundled catalogue, parsed and validated once per process. Routing
     /// resolves it for every lane, so rebuilding it dominated a multi-lane run.
     pub fn bundled() -> Result<Self, RoutingError> {
+        #[cfg(feature = "fixture")]
+        if let Some(catalogue) = FIXTURE_CATALOGUE.with(|slot| slot.borrow().clone()) {
+            return Ok(catalogue);
+        }
         static BUNDLED: std::sync::OnceLock<Catalogue> = std::sync::OnceLock::new();
         if let Some(catalogue) = BUNDLED.get() {
             return Ok(catalogue.clone());
@@ -1214,7 +1304,9 @@ impl Catalogue {
         }
         // Every OpenCode path component before the model name is its namespace.
         fn parts(id: &ModelId) -> (&str, &str) {
-            if id.adapter() == "opencode" {
+            if provenant_records::AdapterSpec::get(id.adapter())
+                .is_some_and(|spec| spec.namespaced_models)
+            {
                 id.model().rsplit_once('/').unwrap_or(("", id.model()))
             } else {
                 ("", id.model())
@@ -1424,6 +1516,7 @@ mod tests {
             capacity_cooldowns: &[],
             accounts: &[],
             quota_policies: &[],
+            launch_specs: None,
             readiness: None,
             access: &[],
             now: provenant_core::WallTime::from_micros(0)?,
@@ -1505,6 +1598,7 @@ mod tests {
             capacity_cooldowns: &[],
             accounts: &[],
             quota_policies: &[],
+            launch_specs: None,
             readiness: None,
             access: &[],
             now: provenant_core::WallTime::from_micros(0)?,
@@ -1598,6 +1692,7 @@ mod tests {
             capacity_cooldowns: &[],
             accounts: &[],
             quota_policies: &[],
+            launch_specs: None,
             readiness: None,
             access: &[],
             now: provenant_core::WallTime::from_micros(0)?,
@@ -1760,6 +1855,7 @@ mod tests {
             capacity_cooldowns: &[],
             accounts: &[],
             quota_policies: &[],
+            launch_specs: None,
             readiness: None,
             access: &access,
             now: provenant_core::WallTime::from_micros(100_000_000)?,

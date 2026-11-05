@@ -242,7 +242,7 @@ mod tests {
             _: &str,
             _: &LaunchPaths,
             _: Option<&AttemptRecord>,
-        ) -> std::result::Result<PreparedLaunch, String> {
+        ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
             Err("holder-only fixture does not launch".into())
         }
         fn decode(

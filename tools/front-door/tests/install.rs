@@ -1537,6 +1537,16 @@ fn bootstrap_source_build_requires_consent_and_cleans_its_target() -> Result {
 if IFS= read -r unexpected; then exit 91; fi
 printf '%s\n' "$CARGO_TARGET_DIR" > '{}'
 [ "$1" = run ] || exit 0
+shift
+[ "$1" = --release ] || exit 92
+shift
+[ "$1" = --locked ] || exit 92
+shift
+[ "$1" = --bin ] || exit 92
+shift
+[ "$1" = package-release ] || exit 92
+shift
+[ "$1" = -- ] || exit 92
 while [ "$1" != --out ]; do shift; done
 mkdir -p "$2/bin"
 printf '#!/bin/sh\nexit 0\n' > "$2/bin/provenant"

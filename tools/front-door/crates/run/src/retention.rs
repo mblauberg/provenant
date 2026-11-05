@@ -122,23 +122,37 @@ impl RunStore {
     pub fn gc_temporary(
         &self,
         expected: &Directory,
+        days: u64,
+        logs_days: u64,
         now: WallTime,
         dry_run: bool,
         call: &Request<'_>,
     ) -> Result<ProviderStateGc> {
-        self.gc_retention(expected, 7, 30, now, dry_run, true, None, call)
+        self.gc_retention(expected, days, logs_days, now, dry_run, true, None, call)
     }
 
     /// Pressure collection restricted to the selected project identities.
+    #[allow(clippy::too_many_arguments)]
     pub fn gc_temporary_for_projects(
         &self,
         expected: &Directory,
+        days: u64,
+        logs_days: u64,
         now: WallTime,
         dry_run: bool,
         projects: &[provenant_core::ProjectId],
         call: &Request<'_>,
     ) -> Result<ProviderStateGc> {
-        self.gc_retention(expected, 7, 30, now, dry_run, true, Some(projects), call)
+        self.gc_retention(
+            expected,
+            days,
+            logs_days,
+            now,
+            dry_run,
+            true,
+            Some(projects),
+            call,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -241,6 +255,9 @@ impl RunStore {
                     Err(error) if missing_directory(&error) => return Ok(()),
                     Err(error) => return Err(error),
                 };
+                if crate::settlement::abandoned(&attempt, Self::scope(&record))?.is_some() {
+                    return Ok(());
+                }
                 let _writer = match attempt.try_lock_existing(
                     OsStr::new(AttemptFile::WriterLock.name()),
                     LockMode::Exclusive,
@@ -1441,6 +1458,8 @@ mod tests {
         fs::write(attempt.join("stdout.log"), vec![1; 200_000])?;
         let scoped = store.gc_temporary_for_projects(
             &Directory::open_anchor(context.state_root.as_path())?,
+            7,
+            30,
             WallTime::from_micros(200 + 31 * DAY_MICROS)?,
             false,
             &[provenant_core::ProjectId::from_bytes([99; 16])],
@@ -1450,6 +1469,8 @@ mod tests {
         assert!(attempt.join("tmp/payload").is_file());
         let report = store.gc_temporary(
             &Directory::open_anchor(context.state_root.as_path())?,
+            7,
+            30,
             WallTime::from_micros(200 + 31 * DAY_MICROS)?,
             false,
             &call,
@@ -1657,18 +1678,20 @@ mod tests {
         use provenant_core::{Clock, MonoTime, TimeError};
         // Each DB observation completes within its own five-second budget,
         // while time between observations exceeds the original deadline.
-        struct AdvancingClock(std::cell::Cell<u64>);
+        struct AdvancingClock(std::sync::Mutex<u64>);
         impl Clock for AdvancingClock {
             fn mono_now(&self) -> MonoTime {
-                let now = self.0.get();
-                self.0.set(now + 2_000_000);
+                let mut value = self.0.lock().unwrap();
+                let now = *value;
+                *value += 2_000_000;
                 MonoTime::from_micros(now)
             }
             fn wall_now(&self) -> std::result::Result<WallTime, TimeError> {
                 WallTime::from_micros(200 + DAY_MICROS)
             }
             fn wait_until(&self, deadline: MonoTime) -> std::result::Result<(), TimeError> {
-                self.0.set(self.0.get().max(deadline.as_micros()));
+                let mut value = self.0.lock().unwrap();
+                *value = (*value).max(deadline.as_micros());
                 Ok(())
             }
         }
@@ -1681,7 +1704,7 @@ mod tests {
             .mode(0o700)
             .create(attempt.join("tmp"))?;
         store.set_temporary_retained(id, true, &call)?;
-        let slow = AdvancingClock(std::cell::Cell::new(0));
+        let slow = AdvancingClock(std::sync::Mutex::new(0));
         let call = Request {
             clock: &slow,
             cancel: &cancel,

@@ -161,10 +161,13 @@ provenant run --preset scout-swarm --prompt-file brief.md \
   --read-root /absolute/path/to/another-worktree --concurrency 4 --wait 30m
 ```
 
-`--explain` creates no graph state. Human output groups children under their
-composite and shows roles, tiers, scopes, worktrees, selected inputs, attempt
-bounds, acceptance and effective limits. `--json --explain` includes the exact
-graph and origins. The same resolved graph has the same ID, so retrying its
+`--explain` creates no graph state. It reports the same admission result as
+submission, separate inspection metrics, and pending source, worktree,
+delivery-target, planner-authority and route-readiness checks derived from the
+document. Human output then groups children under their composite and shows
+roles, tiers, scopes, worktrees, selected inputs, attempt bounds, acceptance
+and effective limits. `--json --explain` includes the exact graph and origins.
+The same resolved graph has the same ID, so retrying its
 submission observes the existing graph. Change the prompt or parameters when
 you intend a separate run.
 
@@ -376,6 +379,11 @@ generator-evaluator, deliver, scope-then-run and review-council.
 
 ## Review and source subjects
 
+The policy default is `review-council --plan on`; the chair checks the plan
+against the [review ladder](../../HARNESS.md#review-ladder) and supplies any
+missing required reviewers and lenses. Runtime selection and partial-success
+thresholds below do not yet enforce those floors or every triggered lens.
+
 `review-council` runs one `lens.NAME` role per entry of the `lenses` list: correctness
 against the spec, design fit and reuse, simplicity, conventions and
 readability, and tests. `security-privacy` and `concurrency-data-errors` join
@@ -385,12 +393,44 @@ correctness against the spec and simplicity by default. Every lens prompt
 carries the same context. The reviewer has read access to the whole
 repository, treats the diff stat and slices as navigation aids rather than the
 scope, reads callers, existing utilities and architecture, and reviews against
-the `spec` (an issue number or file) and the `base` (the diff reference). The
+the `spec` (an issue number or file) and the `base` (the diff reference). File
+specs resolve first in the bound writer worktree, then in the launch checkout
+root, then in the main checkout. Relative writer worktrees resolve from the
+launch directory. Each
+review brief includes the resolved file path, SHA-256 of the full file and an excerpt
+(default 16,384 bytes); set `parameters.spec_max_bytes` from 1 to 65,536 to
+change the cap. Planned big-batch reviews share one excerpt resolved from the
+bound `batch_worktree`, then the project roots above. They do not resolve
+specs from the worktrees the planner may assign to lanes. Missing or unreadable
+files produce a named warning in explain and at launch, with guidance to pass
+an issue-number spec instead. Issue numbers are passed through unchanged. The
 subject node states both. Prompts live in
 `skills/code-review/references/lenses/`. After the lenses a verifier tries to
 falsify every finding (`verifiers = 0` skips it), and the synthesis gives each
 finding one disposition: accepted, rejected or deferred, with a reason. The
-`generator-evaluator` evaluator does the same over its lens findings.
+`generator-evaluator` evaluator does the same over its lens findings. Its
+`min_lenses` parameter defaults to 0 (all selected lenses but one, at least
+one); set a positive number to require that many, including the full panel.
+Preset explain shows the parameter and its origin. Unavailable lenses are
+named in the evaluator input.
+
+A review of a `head` or `node` subject with no `size` or `review_shape`
+(`deliver`, `generator-evaluator`, `big-batch`) cannot be measured when the
+graph expands, because the commit does not exist yet. The graph (schema 2,
+with `review_base`) carries one deferred `review` node that holds a lowered
+prompt for every candidate lens. When the subject is pinned the host measures
+it, picks the shape and lenses, and adds the panel to the graph. Pass `size` or
+`review_shape` to keep a static panel. `--explain` shows the size as pending.
+
+A `fan-out` stage with `distinct_families = true` (the `distinct_families`
+parameter) labels its branches as one family group, so the scheduler prefers
+different model families across them. It is a preference only: every branch
+still runs.
+
+`--fresh` makes a preset run a new graph even when its inputs are unchanged,
+for example to rerun after a cancel. A plain rerun of the same inputs resolves
+to the same graph, so it resumes or replays; `--fresh` adds a one-off nonce to
+the graph identity. It requires `--preset`.
 
 Every `review-council` lens emits a fenced `findings` block before its single
 verdict line. The block uses `schema_version: 1`, a `findings` array, and at
@@ -405,13 +445,13 @@ only successful lenses flow to verification and synthesis, after an
 `coverage_below_minimum: N of M lenses succeeded, minimum K; unavailable: ...`
 when fewer than `min_reviews` lenses succeed, which stops the council for the
 chair to substitute a lens through a different lens or decide. `min_reviews`
-defaults to the review ladder minimum for `risk_tier` (`substantial` 1,
+currently defaults by `risk_tier` (`substantial` 1,
 `crucial` and `terminal` 2) and is at least 1; it is capped at the lens count.
 A lens that ran and found blocking issues still blocks through its verdict.
 Councils where every lens succeeds are unchanged.
 
-The routing review shapes are canonical for who reviews. A lens whose `tier`
-is empty takes its pool from the review selection for `risk_tier` or the
+The routing review shapes describe the runtime selection, not the policy floor.
+A lens whose `tier` is empty takes its pool from the review selection for `risk_tier` or the
 `review_shape` override. See [review shapes](model-routing.md#review-shapes)
 for the shape rules and reviewer counts. Conditional lenses add to that count.
 Set a lens `tier` to override the shape for that lens.
@@ -706,9 +746,8 @@ plan uses the research; position is per preset. The planner may assign only the
 registered writer worktrees: the project's linked worktrees by default, or
 `--set 'parameters.worktrees=["/path/a","/path/b"]'`. Overlapping write scopes
 inside one wave, a worktree outside the list and a budget above the graph
-timeout refuse the plan before anything is admitted. A lane budget is advisory:
-graph nodes have no per-node timer, so only `limits.graph_timeout_seconds`
-is enforced.
+timeout refuse the plan before anything is admitted. A node's `deadline_seconds`
+sets its lane timeout, capped by `limits.graph_timeout_seconds`.
 
 `--plan` defaults to `[domains.fabric.plan] mode` (`auto`). `auto` stays off when
 `lanes` (or the catalogue's other `explicit` parameter, such as `width` or
@@ -803,3 +842,11 @@ exhausted bounded loop pauses for a chair decision; a synthesis does not
 override failed acceptance evidence. Confinement, writer exclusion, immutable
 sources and acceptance checks remain deterministic while the models choose
 how to carry out each assigned role.
+
+Generator-evaluator lenses and the evaluator review the implement node's settled
+commit. Their host-written Git context compares that pinned commit with the
+preset's `base`. When `base` is empty, the review uses the graph's pinned
+integration base if available, otherwise the source commit itself, preserving
+launches in repositories without `origin/HEAD`. Set `base` to the intended
+comparison commit for a nonempty range. An `equal_base_and_head` node warning
+means that comparison has no commit range to review.

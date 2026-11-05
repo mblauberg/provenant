@@ -9,6 +9,21 @@ final class ReportTests: XCTestCase {
         return try QuotaReport.project(CLIClient.decode(run, command: "quota show", as: QuotaWireReport.self))
     }
 
+    @MainActor func testPartialCoverageAppearsInMenuRow() throws {
+        let json = #"""
+        {"schema_version":1,"command":"quota show","status":"ok","error":null,"data":{
+         "schema_version":1,"generated_unix_seconds":1899680400,
+         "accounts":[{"account":{"adapter":"codex","account_key":"a","label":"A"},"status":"available","refreshing":false,
+         "snapshot":{"windows":[{"pool":"primary","used_basis_points":2456,"resets_unix_seconds":1899698400}],"details":{"coverage":"partial"}}}],
+         "sources":[],"coverage":{"total":1,"known":1},"refreshing_ids":[],"report_path":"/tmp/report"}}
+        """#
+        let report = try decodeShow(json)
+        let account = try XCTUnwrap(report.accounts.first)
+        let row = QuotaMenu.account(account, now: report.generatedAt, alert: report.alertPercent)
+        XCTAssertEqual(row.value, "≥24%")
+        XCTAssertTrue(MenuStyle.spoken(row).contains("at least 24%"))
+    }
+
     func testPanelEventIsRetainedDuringRefresh() {
         XCTAssertEqual(Trigger.panel.queued(after: nil), .panel)
         XCTAssertEqual(Trigger.panel.queued(after: .power), .panel)
@@ -37,7 +52,7 @@ final class ReportTests: XCTestCase {
                   {"pool": "secondary", "used_basis_points": 10000, "resets_unix_seconds": 1899676800, "window_seconds": 18000}
                 ],
                 "details": {
-                  "plan": "Max 5x", "fingerprint": "0123456789abcdef", "priority": 2,
+                  "coverage": "partial", "plan": "Max 5x", "fingerprint": "0123456789abcdef", "priority": 2,
                   "credit_balance": "USD 4.50", "reset_credits": 2,
                   "reset_expiries_unix_seconds": [1900200000, 1900100000], "note": "fixed profile"
                 }
@@ -85,6 +100,8 @@ final class ReportTests: XCTestCase {
         XCTAssertEqual(account.banked?.expiresAt.map(\.timeIntervalSince1970), [1900100000, 1900200000])
         XCTAssertEqual(account.note, "fixed profile")
         let session = try XCTUnwrap(account.windows.first { $0.name == "five_hour" })
+        XCTAssertTrue(session.lowerBound)
+        XCTAssertEqual(Fmt.used(session), "≥3%")
         XCTAssertEqual(session.title, "5-hour")
         XCTAssertEqual(session.windowMinutes, 300)
         XCTAssertEqual(session.pace.state, "on_pace")
@@ -171,7 +188,7 @@ final class ReportTests: XCTestCase {
         let advisory = QuotaReport.Window(
             name: "advisory", label: nil, usedPercent: 100, windowMinutes: 60,
             resetAt: now.addingTimeInterval(3600), usedAmount: nil, limitAmount: nil,
-            currency: nil, advisory: true, pool: "weekly", poolLabel: nil,
+            currency: nil, advisory: true, pool: "weekly", poolLabel: nil, lowerBound: false,
             pace: .init(state: "exhausted", runsOutAt: nil, summary: nil))
         XCTAssertTrue(QuotaReport.Account.current([advisory], now: now).isEmpty)
         XCTAssertNil(QuotaReport.Account.worst(QuotaReport.Account.current(

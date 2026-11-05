@@ -3,7 +3,7 @@
     "pattern": "review-council",
     "preset": "review-council"
   },
-  "graph_id": "preset-994c9d6eccc93bea77087488e44b1837",
+  "graph_id": "preset-b55acf6d1879eb8a699541e76760a25c",
   "nodes": [
     {
       "access": "read_only",
@@ -12,9 +12,14 @@
       "prompt": "You frame an immutable review subject. Do not edit files.\n\nFrame the immutable review subject for: brief\nBase (diff reference): \nSpec (acceptance criteria): \nIdentify acceptance criteria and risk areas from the pinned source commit,\nreading the spec where one is named. Do not edit files. Subsequent independent\nlenses review this exact commit against the base and the spec.\n",
       "role": "plan.review",
       "role_digest": "sha256:cc9b118bf74049c200dc2e053a9d30de01f36479c4688392153484bcf832a60c",
-      "route": {
-        "alias": "senior"
-      },
+      "routes": [
+        {
+          "alias": "senior"
+        },
+        {
+          "alias": "senior"
+        }
+      ],
       "source": {
         "commit": "HEAD",
         "type": "commit"
@@ -105,9 +110,14 @@
             "require_findings": true,
             "role": "lens.correctness-spec",
             "role_digest": "sha256:bf578197d0881e91746f43b0888c298a0bc6ce3a4f97293690e3b495a9138ea2",
-            "route": {
-              "alias": "senior"
-            },
+            "routes": [
+              {
+                "alias": "senior"
+              },
+              {
+                "alias": "senior"
+              }
+            ],
             "title": "lens-correctness-spec"
           },
           {
@@ -140,9 +150,14 @@
             "require_findings": true,
             "role": "lens.tests",
             "role_digest": "sha256:1acffad6d7ba2cf1a0d514ee9310a7a39e6d077695178d7cb63c2baf19f793d0",
-            "route": {
-              "alias": "senior"
-            },
+            "routes": [
+              {
+                "alias": "senior"
+              },
+              {
+                "alias": "senior"
+              }
+            ],
             "title": "lens-tests"
           },
           {
@@ -165,9 +180,14 @@
             "require_findings": true,
             "role": "lens.design-fit-reuse",
             "role_digest": "sha256:8106a66fd80eccc42c6f86526921fa553cd8a0164b72aaa6c38c9f93dda2ade2",
-            "route": {
-              "alias": "senior"
-            },
+            "routes": [
+              {
+                "alias": "senior"
+              },
+              {
+                "alias": "senior"
+              }
+            ],
             "title": "lens-design-fit-reuse"
           },
           {
@@ -190,9 +210,14 @@
             "require_findings": true,
             "role": "lens.simplicity",
             "role_digest": "sha256:46d20a75ff5d5cb89b53165b558efb8205a2801263593b4365e23d20150c41b4",
-            "route": {
-              "alias": "senior"
-            },
+            "routes": [
+              {
+                "alias": "senior"
+              },
+              {
+                "alias": "senior"
+              }
+            ],
             "title": "lens-simplicity"
           },
           {
@@ -215,9 +240,14 @@
             "require_findings": true,
             "role": "lens.conventions-readability",
             "role_digest": "sha256:2a3ed542701c73aac20e2fcf061be84dc3ffe0eb7cae60b4d26d53a38bff2416",
-            "route": {
-              "alias": "senior"
-            },
+            "routes": [
+              {
+                "alias": "senior"
+              },
+              {
+                "alias": "senior"
+              }
+            ],
             "title": "lens-conventions-readability"
           },
           {
@@ -240,9 +270,14 @@
             "require_findings": true,
             "role": "lens.refactor-cleanup",
             "role_digest": "sha256:55978dc6912a015ecfb5af368430ebd46b9fb0631e2b76d8bcdefc2ce4b57ec0",
-            "route": {
-              "alias": "senior"
-            },
+            "routes": [
+              {
+                "alias": "senior"
+              },
+              {
+                "alias": "senior"
+              }
+            ],
             "title": "lens-refactor-cleanup"
           },
           {
@@ -265,16 +300,21 @@
             "require_findings": true,
             "role": "lens.reliability",
             "role_digest": "sha256:3fc6619b72f1afc2023c8f3e495979675d5e6dc74b90ca18da1f172a5ddd3cae",
-            "route": {
-              "alias": "senior"
-            },
+            "routes": [
+              {
+                "alias": "senior"
+              },
+              {
+                "alias": "senior"
+              }
+            ],
             "title": "lens-reliability"
           },
           {
             "access": "read_only",
             "depends_on": [],
             "id": "lens-flexibility",
-            "prompt": "Lens flexibility. Check configuration and coupling.\n\nLens: flexibility. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: flexibility\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Ownership and structure\".\n\n- Identify hard-coded names and values that should be configuration.\n- Check coupling to a single provider, platform or account.\n- Can supported extensions fit without speculative abstraction?\n",
+            "prompt": "Lens flexibility. Check configuration and coupling.\n\nLens: flexibility. Subject: brief\nBase (diff reference): \nSpec (acceptance criteria): \nCheck correctness against the spec as well as this lens.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose findings are a JSON array,\nwith at most 32 entries and an empty array when there are no findings. Keep each\nsummary to one line. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\"}]}\n```\nFor no findings, use `{\"schema_version\":1,\"findings\":[]}`.\nPut the findings block before the verdict line.\nEnd with exactly one verdict line: VERDICT: PASS or VERDICT: FAIL. Do not\ninclude another verdict line elsewhere in the result.\n\n\n# Reviewer context\n\nEvery lens reviewer receives the same context, in a Fabric preset or a manual\ncouncil.\n\n- You have read access to the whole repository. The diff stat and per-file\n  slices are navigation aids, not the scope of the review.\n- Read the callers of changed code, the existing utilities it could have\n  reused, and the surrounding architecture. A review that sees only the diff\n  cannot judge reuse, conventions or design fit.\n- Review against the spec and the base named in your task: the spec is the\n  issue or file with the acceptance criteria, and the base is the diff\n  reference the change is measured from.\n- Read the pinned subject commit named in your task, not the working tree. Use\n  `git show <commit>:<path>` and `git diff <base> <commit>`. Do not edit files\n  or run Git write commands.\n- Report only findings that name a location, a failing scenario, the mechanism\n  and the smallest fix. Claims that something is missing cite the search that\n  shows it. Class each finding blocking, should-fix or note (three notes at\n  most). Do not report style that lint covers, new abstractions, tests for\n  states the types make impossible, or scope growth.\n- If you cannot read required context, say `inconclusive` and name the path and\n  the coverage gap. \"No findings\" is a valid result when coverage is complete.\n- End with a fenced `findings` block before one exact `VERDICT: PASS` or\n  `VERDICT: FAIL` line. The block uses schema version 1 and a JSON `findings`\n  array, with at most 32 entries. Keep each summary to one line. Each finding has `id`, `severity`, `file`,\n  `line`, `summary` and `status`; use an empty array when there are no findings.\n\n\n# Lens: flexibility\n\nCanonical questions: [review-lenses.md](../review-lenses.md), section\n\"Ownership and structure\".\n\n- Identify hard-coded names and values that should be configuration.\n- Check coupling to a single provider, platform or account.\n- Can supported extensions fit without speculative abstraction?\n- Flag a lane or launch refusal, or a guard that blocks ordinary work, outside\n  the hard boundaries the repository declares as a defect to loosen: prefer\n  warn-and-continue or a configurable default.\n",
             "references": [
               {
                 "digest": "sha256:378e2048d16e92581ef5c0ee2fc20b00dc727acf5c443055d7c36f42a1f6af50",
@@ -282,17 +322,22 @@
                 "when": "always"
               },
               {
-                "digest": "sha256:7d4ca44bdf4fdc5ef57255df02fb391c7351722e82bd7f1fd8c60c2c5e97d3d2",
+                "digest": "sha256:c89f5e9655744103673c3944e6baa86078bdd0b0b39a37fea553f86f492f7cf4",
                 "ref": "skill:code-review/references/lenses/flexibility.md",
                 "when": "always"
               }
             ],
             "require_findings": true,
             "role": "lens.flexibility",
-            "role_digest": "sha256:50b373883f21025aee2a7052850c74685f00f1f2b1f9aa1074a112de3644724d",
-            "route": {
-              "alias": "senior"
-            },
+            "role_digest": "sha256:8a886d149360b69b7e1291612bbdd40c436d4de0e63170c31aac5faa55f86960",
+            "routes": [
+              {
+                "alias": "senior"
+              },
+              {
+                "alias": "senior"
+              }
+            ],
             "title": "lens-flexibility"
           }
         ]
@@ -331,12 +376,17 @@
           ]
         }
       ],
-      "prompt": "You falsify review findings. A finding stands only if you cannot break it.\n\nVerify the lens findings for: brief\nTry to falsify every finding against the pinned commit: reproduce it, look for\nthe code or test that contradicts it, and check it against the spec. Re-emit\nevery finding verbatim with one of UPHELD, FALSIFIED or UNVERIFIABLE and your\nevidence. Add any finding the lenses missed and mark it NEW. Do not edit files.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose entries keep each finding's\nid and add \"verification\": \"upheld\", \"falsified\" or \"unverifiable\".\nCarry any listed unavailable lenses into your result.\n",
+      "prompt": "You falsify review findings. A finding stands only if you cannot break it.\n\nVerify the lens findings for: brief\nTry to falsify every finding against the pinned commit: reproduce it, look for\nthe code or test that contradicts it, and check it against the spec. Re-emit\nevery finding verbatim with one of UPHELD, FALSIFIED or UNVERIFIABLE and your\nevidence. Add any finding the lenses missed and mark it NEW. Do not edit files.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\nEnd with a findings block (schema_version 1) whose entries keep each finding's\nid and add \"verification\": \"upheld\", \"falsified\" or \"unverifiable\". For each\npropagated finding add \"propagates\": \"<input-node-id>:<finding-id>\" naming\nthe selected input node and the finding ID as shown to you (or its stored ID).\nDo not add it to new findings.\nCarry any listed unavailable lenses into your result. If composite findings are\ntruncated, read every listed full member result and verify every finding, including\nthose omitted from the bounded export. Apply the listed finding ID prefix to each\nmember's IDs. Read the complete input index when listed.\nIf any full result is capped or unavailable, report the coverage gap and source\nreferences from the index; do not claim a complete review. Preserve the\ntruncation notice and paths in your result. If more than 32 findings exist, the\nrequired DISPOSITION lines can carry the extra verifications and evidence; keep\nthe structured findings block within its limit.\n",
       "role": "review.verify",
-      "role_digest": "sha256:fc0f5571d88891cacc2ba568ab52e671f979028b72b676d7756736cfb308cf83",
-      "route": {
-        "alias": "verifier"
-      },
+      "role_digest": "sha256:665007e1e9514aaf0fc943a4039b14eed83bf1296136ee3eb94b827fcc820db6",
+      "routes": [
+        {
+          "alias": "verifier"
+        },
+        {
+          "alias": "verifier"
+        }
+      ],
       "source": {
         "node": "subject",
         "type": "node"
@@ -347,6 +397,7 @@
       "access": "read_only",
       "depends_on": [
         "verify",
+        "lenses",
         "subject"
       ],
       "dispositions": [
@@ -359,17 +410,36 @@
         {
           "node": "verify",
           "outputs": [
-            "result"
+            "result",
+            "findings"
+          ]
+        },
+        {
+          "node": "lenses",
+          "outputs": [
+            "result",
+            "findings"
+          ]
+        },
+        {
+          "node": "subject",
+          "outputs": [
+            "findings"
           ]
         }
       ],
       "kind": "synthesise",
-      "prompt": "You reconcile review findings into one verdict with a disposition for each.\n\nReconcile independent review findings against evidence for: brief\nDo not take a majority vote. Weigh each finding by its evidence and, where a\nverifier ran, by its UPHELD or FALSIFIED mark. Give every finding exactly one\ndisposition with a one-line reason: accepted (must be fixed), rejected\n(evidence refutes it) or deferred (valid, not for this change). End with a\nfenced findings block (schema_version 1) with one entry per finding id; each\nentry carries \"disposition\" (accepted, rejected or deferred) and \"reason\".\nIf the verifier's findings block is missing, empty or truncated, use its prose\nUPHELD/FALSIFIED marks together with the original lens findings. Record each\nupheld finding as accepted, with a reason citing the verifier's evidence.\nA finding without a disposition is incomplete. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"src/lib.rs\",\"line\":12,\"summary\":\"Describe the finding\",\"status\":\"open\",\"disposition\":\"accepted\",\"reason\":\"Evidence supports it\"}]}\n```\nEmit one exact\nVERDICT: PASS only when no accepted finding remains and acceptance evidence is\nsatisfied, otherwise VERDICT: FAIL.\nIf the input lists unavailable lenses, state that the review is degraded and name\nthem with their reasons.\n",
+      "prompt": "You reconcile review findings into one verdict with a disposition for each.\n\nReconcile independent review findings against evidence for: brief\nDo not take a majority vote. Weigh each finding by its evidence and, where a\nverifier ran, by its UPHELD or FALSIFIED mark. Give every finding exactly one\ndisposition with a one-line reason: accepted (must be fixed), rejected\n(evidence refutes it) or deferred (valid, not for this change). End with a\nfenced findings block (schema_version 1) with up to 32 finding ids; each\nentry carries \"id\", \"disposition\" (accepted, rejected or deferred) and \"reason\".\nCopy the upstream qualified id exactly; a bare id works only when unambiguous.\nThese three fields suffice for upstream findings; descriptive fields are inherited.\nNew findings require severity, file, summary and status as well.\nIf the verifier's findings block is missing, empty or truncated, use its prose\nUPHELD/FALSIFIED marks together with the original lens findings. Record each\nupheld finding as accepted, with a reason citing the verifier's evidence.\nIf composite findings are truncated, read every listed full member result and\ndispose of every finding, including those omitted from the bounded export. Apply\nthe listed finding ID prefix to each member's IDs. Read the complete input index\nwhen listed. If any full result is capped or unavailable, report the coverage\ngap and source references from the index; do not claim a complete review.\nWhen more than 32 findings exist, the required DISPOSITION lines can carry the\nadditional dispositions and reasons; keep the structured block within its\n32-entry limit. Name the truncation and full result paths in your result.\nA finding without a disposition is incomplete. Use this canonical array form:\n```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"member:F1\",\"disposition\":\"accepted\",\"reason\":\"Evidence supports it\"}]}\n```\nEmit one exact\nVERDICT: PASS only when no accepted finding remains and acceptance evidence is\nsatisfied, otherwise VERDICT: FAIL.\nIf the input lists unavailable lenses, state that the review is degraded and name\nthem with their reasons.\n",
       "role": "review.synthesis",
-      "role_digest": "sha256:8295dd0bc5ed682b02aafdb53f43d98d7b4da96e4718d652626cea0a84dfcb51",
-      "route": {
-        "alias": "senior"
-      },
+      "role_digest": "sha256:68848fe2b0b2a762445ac11b39b789e95d7dc81ca94c406fab40207d44477a08",
+      "routes": [
+        {
+          "alias": "senior"
+        },
+        {
+          "alias": "senior"
+        }
+      ],
       "source": {
         "node": "subject",
         "type": "node"
@@ -411,6 +481,11 @@
       "parameters.spec.default": "bundled",
       "parameters.spec.doc": "bundled",
       "parameters.spec.type": "bundled",
+      "parameters.spec_max_bytes.default": "bundled",
+      "parameters.spec_max_bytes.doc": "bundled",
+      "parameters.spec_max_bytes.max": "bundled",
+      "parameters.spec_max_bytes.min": "bundled",
+      "parameters.spec_max_bytes.type": "bundled",
       "parameters.subject.default.commit": "bundled",
       "parameters.subject.default.type": "bundled",
       "parameters.subject.doc": "bundled",
@@ -514,7 +589,7 @@
         ]
       },
       "lens.flexibility": {
-        "digest": "sha256:50b373883f21025aee2a7052850c74685f00f1f2b1f9aa1074a112de3644724d",
+        "digest": "sha256:8a886d149360b69b7e1291612bbdd40c436d4de0e63170c31aac5faa55f86960",
         "extends": [
           "lens.flexibility",
           "lens"
@@ -527,7 +602,7 @@
             "when": "always"
           },
           {
-            "digest": "sha256:7d4ca44bdf4fdc5ef57255df02fb391c7351722e82bd7f1fd8c60c2c5e97d3d2",
+            "digest": "sha256:c89f5e9655744103673c3944e6baa86078bdd0b0b39a37fea553f86f492f7cf4",
             "ref": "skill:code-review/references/lenses/flexibility.md",
             "when": "always"
           }
@@ -633,7 +708,7 @@
         "references": []
       },
       "review.synthesis": {
-        "digest": "sha256:8295dd0bc5ed682b02aafdb53f43d98d7b4da96e4718d652626cea0a84dfcb51",
+        "digest": "sha256:68848fe2b0b2a762445ac11b39b789e95d7dc81ca94c406fab40207d44477a08",
         "extends": [
           "review.synthesis"
         ],
@@ -641,7 +716,7 @@
         "references": []
       },
       "review.verify": {
-        "digest": "sha256:fc0f5571d88891cacc2ba568ab52e671f979028b72b676d7756736cfb308cf83",
+        "digest": "sha256:665007e1e9514aaf0fc943a4039b14eed83bf1296136ee3eb94b827fcc820db6",
         "extends": [
           "review.verify"
         ],

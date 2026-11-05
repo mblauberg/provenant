@@ -166,6 +166,37 @@ pub struct Decoded {
     /// Partial-finish signals the provider decode found; run adds its own.
     pub partial_signals: Vec<PartialSignal>,
 }
+/// A task-local preparation refusal, retaining candidate classifications.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct PrepareRefusal {
+    pub message: String,
+    pub skipped_routes: Vec<SkippedRoute>,
+    pub fallback_outcome: Option<provenant_records::run::PreparationFailure>,
+}
+impl PrepareRefusal {
+    pub fn auth_required(&self) -> bool {
+        !self.skipped_routes.is_empty()
+            && self
+                .skipped_routes
+                .iter()
+                .all(|route| route.kind == SkipKind::AuthRequired)
+    }
+}
+impl From<String> for PrepareRefusal {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            skipped_routes: Vec::new(),
+            fallback_outcome: None,
+        }
+    }
+}
+impl From<&str> for PrepareRefusal {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
 /// Run-owned per-attempt paths. Allocated once, shared by explicit fallback candidates.
 pub struct LaunchPaths {
     pub attempt_id: AttemptId,
@@ -330,7 +361,11 @@ impl RunStore {
         let prompt = output_prompt(&base, &attempt.prompt);
         let plan = providers
             .check_policy(task)
-            .and_then(|()| providers.prepare(task, &prompt, &paths, None))
+            .and_then(|()| {
+                providers
+                    .prepare(task, &prompt, &paths, None)
+                    .map_err(|error| error.to_string())
+            })
             .and_then(|plan| {
                 applied_write_grants(&plan)
                     .map(|_| plan)
@@ -386,7 +421,7 @@ pub trait Providers {
         prompt: &str,
         paths: &LaunchPaths,
         resume: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, String>;
+    ) -> std::result::Result<PreparedLaunch, PrepareRefusal>;
     /// A recognised diagnostic from the sealed stderr of a failed provider.
     fn failure_diagnostic(&self, _route: &RouteRecord, _stderr: &[u8]) -> Option<String> {
         None
@@ -464,11 +499,31 @@ pub fn access_root_allowed(root: &std::path::Path, state: &std::path::Path, read
 /// sit inside a parent write root and each read root inside any parent root.
 /// The host repeats submission checks: roots must be existing canonical
 /// directories, clear of state except installed release roots granted for reads.
+#[cfg(test)]
 fn child_access_within(
     parent: &TaskRequest,
     child: &TaskRequest,
     state_root: &std::path::Path,
     home: Option<&std::path::Path>,
+) -> Result<()> {
+    child_access_within_impl(parent, child, state_root, home, false)
+}
+
+fn child_access_with_diagnostic(
+    parent: &TaskRequest,
+    child: &TaskRequest,
+    state_root: &std::path::Path,
+    home: Option<&std::path::Path>,
+) -> Result<()> {
+    child_access_within_impl(parent, child, state_root, home, true)
+}
+
+fn child_access_within_impl(
+    parent: &TaskRequest,
+    child: &TaskRequest,
+    state_root: &std::path::Path,
+    home: Option<&std::path::Path>,
+    diagnostic: bool,
 ) -> Result<()> {
     if child.access.database_ipc && !parent.access.database_ipc {
         return Err(RunError::Validation(
@@ -516,9 +571,14 @@ fn child_access_within(
                 provenant_confinement::refuses_lane_root(&canonical, read, home)
             })
         {
-            return Err(RunError::Confinement(
-                provenant_confinement::permissions::PermissionError::CredentialRoot,
-            ));
+            return Err(RunError::Confinement(if diagnostic {
+                provenant_confinement::permissions::PermissionError::CredentialGrant {
+                    path: root.clone(),
+                    access: if read { "read" } else { "write" },
+                }
+            } else {
+                provenant_confinement::permissions::PermissionError::CredentialRoot
+            }));
         }
     }
     let writes: Vec<PathBuf> = parent
@@ -601,6 +661,30 @@ mod release_root_tests {
         assert!(error.to_string().contains(
             &provenant_confinement::permissions::PermissionError::CredentialRoot.to_string()
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn child_credential_refusal_names_fixture_path_and_guard()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let home = std::fs::canonicalize(temp.path())?;
+        let root = home.join(".gemini/skills");
+        std::fs::create_dir_all(&root)?;
+        let mut parent = crate::tests::input().request.tasks.remove(0);
+        parent.access.read_roots = vec![root.clone()];
+        let child = parent.clone();
+        let error = child_access_with_diagnostic(&parent, &child, &home.join("state"), Some(&home))
+            .unwrap_err();
+        let local = error.diagnostic(provenant_records::diagnostic::Destination::Local);
+        let remote = error.diagnostic(provenant_records::diagnostic::Destination::Remote {
+            repository: None,
+            home: Some(&home),
+        });
+        assert!(local.detail.unwrap().contains(&root.display().to_string()));
+        let detail = remote.detail.unwrap();
+        assert!(detail.contains("~/.gemini/skills"), "{detail}");
+        assert!(detail.contains("read grant"), "{detail}");
         Ok(())
     }
 
@@ -938,7 +1022,7 @@ impl RunStore {
             if task.writer.is_some() || task.deliver.is_some() {
                 return Err(RunError::Validation("a lane cannot propose a writer child"));
             }
-            child_access_within(
+            child_access_with_diagnostic(
                 parent_task,
                 &validated.effective_task(task),
                 self.context.state_root.as_path(),
@@ -1351,6 +1435,15 @@ impl RunStore {
                     .transpose()?;
                 // Every launcher, the settling guardian or a later sweep, waits
                 // for the retry's sealed launch time.
+                if record.continuation.as_deref() == Some("policy_fallback") {
+                    let released = prior
+                        .as_ref()
+                        .is_some_and(|prior| self.custody_released(prior, call).unwrap_or(false));
+                    if !released {
+                        started.push(Started::Deferred(id));
+                        continue;
+                    }
+                }
                 let not_before = match &prior {
                     Some(prior) => self
                         .staged_policy_retry(prior)?
@@ -1499,12 +1592,17 @@ impl RunStore {
             };
             let prepared = providers
                 .priority(task)
-                .map_err(|reason| (RefusalKind::PriorityUnavailable, reason))
+                .map_err(|reason| {
+                    (
+                        RefusalKind::PriorityUnavailable,
+                        PrepareRefusal::from(reason),
+                    )
+                })
                 .and_then(|priority| {
                     providers
                         .check_policy(task)
                         .map(|()| priority)
-                        .map_err(|reason| (RefusalKind::Policy, reason))
+                        .map_err(|reason| (RefusalKind::Policy, PrepareRefusal::from(reason)))
                 })
                 .and_then(|priority| {
                     providers
@@ -1523,15 +1621,27 @@ impl RunStore {
                 });
             let (mut plan, priority) = match prepared {
                 Ok(prepared) => prepared,
-                Err((kind, reason)) => {
-                    match self.withdraw(
+                Err((kind, refusal)) => {
+                    if !refusal.skipped_routes.is_empty() {
+                        self.record_skipped_routes(id, &refusal.skipped_routes, call)?;
+                    }
+                    let outcome = if refusal.auth_required() {
+                        Outcome::AuthRequired
+                    } else {
+                        Outcome::Rejected
+                    };
+                    let reason = refusal.message;
+                    match self.withdraw_with_preparation_failure(
                         id,
-                        AttemptState::Queued {
-                            extra: Default::default(),
+                        crate::store::Withdrawal {
+                            expected: AttemptState::Queued {
+                                extra: Default::default(),
+                            },
+                            outcome,
+                            reason: &reason,
+                            finished_at: now()?,
+                            failure: refusal.fallback_outcome,
                         },
-                        Outcome::Rejected,
-                        &reason,
-                        now()?,
                         call,
                     ) {
                         Ok(Some(_)) => crate::writer::settle_launch_staging(&attempt)?,
@@ -1781,6 +1891,7 @@ mod retry_pin_tests {
             effort: None,
             excluded_families: Vec::new(),
             distinct_families: false,
+            preferred_families: vec![],
             require_distinct: false,
         };
         let model = |provider: &str| RequestedRoute::Model {

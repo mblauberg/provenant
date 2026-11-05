@@ -9,6 +9,17 @@ results. The [cross-cutting decisions](README.md#cross-cutting-decisions)
 define the envelope, exit codes and wait budgets. The machine-readable help
 catalogue owns command syntax; the generated [CLI reference](../reference/cli.md)
 lists every leaf, flag and bound. Paths are relative to `tools/front-door/`.
+Numeric range and requirement builders in `crates/cli/src/metadata.rs` install
+clap rules and retain their catalogue metadata from the same declaration;
+clap does not expose those rules through public getters. Compact help uses
+command markers and the grammar's descriptions. Explicit and automatic
+preset selection share one incompatible-flag table.
+
+Waits, lane watches and time-based `--since` filters share a whole-number span
+grammar: bare seconds or the suffix `s`, `m`, `h` or `d`. Waits and watches
+retain their four-hour runtime limit; since filters also accept dates and
+RFC3339 timestamps. Git-revision and console-cursor `--since` options keep
+their own types.
 
 ## Agent output
 
@@ -424,6 +435,12 @@ with its meaning, in `ErrorKind`; `help --all --json` lists them under
 renders that list. Tests assert the code and stable identifiers such as a
 configuration key or repair command, never message prose. Other owners and
 per-attempt launch refusals still use coarser codes.
+
+Run refusals may include `category`, `detail` and `next` alongside the
+established error envelope. These are bounded, terminal-safe facts selected by
+the owner. The local CLI can name an absolute worktree or refused grant;
+remote diagnostics need a repository or home anchor or use an inspection
+action. A writer with unknown custody remains refused until custody is checked.
 - Why: agents and tests act on the code, and a reworded message must break
   neither.
 - Test: `crates/run/src/service_tests.rs::each_refusal_has_its_own_stable_code`;
@@ -657,8 +674,8 @@ The guard is advisory: confinement and custody stay authoritative.
 ### Pre-push refuses data loss
 
 `hook git pre-push` refuses default-branch deletion, non-fast-forward
-updates, pushes from linked worktrees to the default branch and, by default,
-literal conflict markers, each with an accepted example on stderr. The
+updates to the default branch, pushes from linked worktrees to the default
+branch and, by default, literal conflict markers, each with an accepted example on stderr. The
 conflict-marker check is advisory and `[domains.run] push_conflict_markers =
 false` turns it off; the other refusals remain. It identifies the default
 branch from the remote's advertisement, refuses when any inspection fails,

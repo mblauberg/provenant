@@ -118,7 +118,7 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
         &cancel,
         &factory.clock,
     )?;
-    journal.bind(graph::GraphExecution {extra: Default::default(),
+    journal.bind(graph::GraphExecution {review_base: None, extra: Default::default(),
         integration_base: None,
         directory: fixture.rig.project.clone(),
         document: document.clone(),

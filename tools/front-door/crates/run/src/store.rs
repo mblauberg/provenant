@@ -73,6 +73,14 @@ pub struct TerminalPublication<'a> {
     /// Why the attempt is flagged as a partial finish, if it is.
     pub partial_signals: Vec<PartialSignal>,
 }
+pub(crate) struct Withdrawal<'a> {
+    pub expected: AttemptState,
+    pub outcome: Outcome,
+    pub reason: &'a str,
+    pub finished_at: WallTime,
+    pub failure: Option<provenant_records::run::PreparationFailure>,
+}
+
 impl RunStore {
     /// A sealed decision is not a certificate that an unfinished import can
     /// relinquish its reservation or private object inputs: the import must
@@ -84,6 +92,9 @@ impl RunStore {
         call: &Request<'_>,
     ) -> Result<bool> {
         let attempt = self.attempt_dir(record.run_id, record.attempt_id, false)?;
+        if crate::settlement::abandoned(&attempt, Self::scope(record))?.is_some() {
+            return Ok(true);
+        }
         if crate::holder::object_import_refused(&attempt, Self::scope(record))?.is_some() {
             return Ok(true);
         }
@@ -587,7 +598,7 @@ impl RunStore {
                     profile: task.profile.clone(),
                     schema_version: 2, attempt_id: new.attempt_id, run_id: run.run_id, project_id: run.project_id, task_id: task.task_id, operation_id: run.operation_id.clone(), attempt_number: u64::try_from(number).map_err(|_| RunError::Validation("attempt number"))?, revision: 1, generation: 0,
                     delivery_id: task.delivery_id, retry_of: input.request.parent, superseded_by: None, requested_route: task.route.clone(), resolved_route: None, applied_route: None, observed_route: None, authority_digest: task.authority_digest, read_only_writable: Vec::new(), write_grants: Vec::new(), git_grants_digest: None, granted_tracking_ref: None, subject: None, head: None, protected_paths: Vec::new(), delivery: None, verified_owner: Some(context.actor_id), session: None,
-                queued_at: input.created_at, started_at: None, priority: None, requested_priority: None, last_output_at: None, provider_silent_for_ms: provenant_records::run::Transient(None), process_observation_valid: provenant_records::run::Transient(false), provider_silence_suppressed: provenant_records::run::Transient(false), provider_launched: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, partial_signals: Vec::new(), state: AttemptState::Queued { extra: Default::default() }, usage: UsageRecord::default(),
+                queued_at: input.created_at, started_at: None, priority: None, requested_priority: None, last_output_at: None, provider_silent_for_ms: provenant_records::run::Transient(None), process_observation_valid: provenant_records::run::Transient(false), provider_silence_suppressed: provenant_records::run::Transient(false), provider_launched: None, preparation_failure: None, provider_ms: None, admission_deadline: None, runtime_deadline: None, partial_signals: Vec::new(), state: AttemptState::Queued { extra: Default::default() }, usage: UsageRecord::default(),
                     terminal_evidence: None, settlement_reason: None, cancellation_disposition: None, settlement_receipts: None, custody_pending: None,
                     prompt: ArtifactRecord {extra: Default::default(),  path: artifact_path(new.attempt_id, AttemptFile::Prompt.name())?, digest: task.prompt_digest, bytes: new.prompt.len() as u64, complete: true, redacted: false }, result: None, publication_error: None, exit_evidence: None, skipped_routes: Vec::new(),
                     trace: provenant_records::Trace {extra: Default::default(),
@@ -735,7 +746,42 @@ impl RunStore {
         finished_at: WallTime,
         call: &Request<'_>,
     ) -> Result<Option<AttemptRecord>> {
-        if !matches!(outcome, Outcome::Rejected | Outcome::Cancelled) {
+        self.withdraw_with_preparation_failure(
+            id,
+            Withdrawal {
+                expected,
+                outcome,
+                reason,
+                finished_at,
+                failure: None,
+            },
+            call,
+        )
+    }
+
+    /// Seal a typed refusal made in local provider preparation before custody.
+    pub(crate) fn withdraw_with_preparation_failure(
+        &self,
+        id: AttemptId,
+        withdrawal: Withdrawal<'_>,
+        call: &Request<'_>,
+    ) -> Result<Option<AttemptRecord>> {
+        let Withdrawal {
+            expected,
+            outcome,
+            reason,
+            finished_at,
+            failure,
+        } = withdrawal;
+        if failure.is_some() && !matches!(expected, AttemptState::Queued { .. }) {
+            return Err(RunError::Validation(
+                "preparation evidence requires queued attempt",
+            ));
+        }
+        if !matches!(
+            outcome,
+            Outcome::Rejected | Outcome::Cancelled | Outcome::AuthRequired
+        ) {
             return Err(RunError::Validation("withdrawal outcome"));
         }
         let defer_writer_cleanup = matches!(expected, AttemptState::Starting { .. });
@@ -748,7 +794,7 @@ impl RunStore {
             call.cancel,
             call.clock,
         )?;
-        let old = self.record(id, call)?;
+        let mut old = self.record(id, call)?;
         if let AttemptState::Terminal { .. } = old.state {
             return Ok(None);
         }
@@ -764,7 +810,7 @@ impl RunStore {
         let attempt_dir = self.attempt_dir(old.run_id, id, true)?;
         // An interrupted withdrawal resumes its own sealed facts, so a retry
         // never renders a second finished_at or reason.
-        let (outcome, finished_at, reason) = match read_sealed(
+        let (outcome, finished_at, reason, preparation_failure) = match read_sealed(
             &attempt_dir,
             AttemptFile::TerminalPending.name(),
             RECORD_LIMIT,
@@ -774,7 +820,10 @@ impl RunStore {
                 super::reader::validate_attempt(&saved)?;
                 match saved.state {
                     AttemptState::Terminal {
-                        outcome: saved_outcome @ (Outcome::Rejected | Outcome::Cancelled),
+                        outcome:
+                            saved_outcome @ (Outcome::Rejected
+                            | Outcome::Cancelled
+                            | Outcome::AuthRequired),
                         exit_code: None,
                         finished_at,
                         reason,
@@ -786,7 +835,12 @@ impl RunStore {
                         && saved.provider_launched == Some(false)
                         && Some(saved.revision) == revision.checked_add(1) =>
                     {
-                        (saved_outcome, finished_at, reason)
+                        (
+                            saved_outcome,
+                            finished_at,
+                            reason,
+                            saved.preparation_failure,
+                        )
                     }
                     _ => return Err(RunError::TerminalRecoveryRequired),
                 }
@@ -795,8 +849,10 @@ impl RunStore {
                 outcome,
                 finished_at,
                 Some(reason.chars().take(256).collect()),
+                failure,
             ),
         };
+        old.preparation_failure = preparation_failure;
         let publication = TerminalPublication {
             outcome,
             finished_at,
@@ -860,6 +916,15 @@ impl RunStore {
         recovery: Option<&provenant_supervisor::custody::Recovery>,
         call: &Request<'_>,
     ) {
+        let Ok(attempt_dir) = self.attempt_dir(record.run_id, record.attempt_id, false) else {
+            return;
+        };
+        if !matches!(
+            crate::settlement::abandoned(&attempt_dir, Self::scope(record)),
+            Ok(None)
+        ) {
+            return;
+        }
         if !self.import_release_permitted(record, call).unwrap_or(false) {
             let _ = self.set_temporary_retained(record.attempt_id, true, call);
             return;
@@ -874,26 +939,24 @@ impl RunStore {
         }
         // The terminal record retains tmp before cleanup; clear that hint only
         // after removal succeeds.
-        if let Ok(attempt_dir) = self.attempt_dir(record.run_id, record.attempt_id, false) {
-            // A resource refusal has no graph certificate. Keep all private
-            // evidence until its retained writer reservation is recovered.
-            match crate::holder::object_import_refused(&attempt_dir, Self::scope(record)) {
-                Ok(None) => {}
-                Ok(Some(_)) | Err(_) => {
-                    let _ = self.set_temporary_retained(record.attempt_id, true, call);
-                    return;
-                }
+        // A resource refusal has no graph certificate. Keep all private
+        // evidence until its retained writer reservation is recovered.
+        match crate::holder::object_import_refused(&attempt_dir, Self::scope(record)) {
+            Ok(None) => {}
+            Ok(Some(_)) | Err(_) => {
+                let _ = self.set_temporary_retained(record.attempt_id, true, call);
+                return;
             }
-            let _ = crate::retention::prune_caches(
-                &attempt_dir,
-                record,
-                false,
-                &mut ProviderStateGc::default(),
-            );
-            let _ = self.set_temporary_retained(record.attempt_id, true, call);
-            if remove_temporary_best_effort(&attempt_dir).is_ok() {
-                let _ = self.set_temporary_retained(record.attempt_id, false, call);
-            }
+        }
+        let _ = crate::retention::prune_caches(
+            &attempt_dir,
+            record,
+            false,
+            &mut ProviderStateGc::default(),
+        );
+        let _ = self.set_temporary_retained(record.attempt_id, true, call);
+        if remove_temporary_best_effort(&attempt_dir).is_ok() {
+            let _ = self.set_temporary_retained(record.attempt_id, false, call);
         }
     }
     /// Seal result and terminal intent, then commit the attempt, run summary,

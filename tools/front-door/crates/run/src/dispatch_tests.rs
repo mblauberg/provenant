@@ -896,7 +896,7 @@ impl Providers for PrepareHook<'_> {
         prompt: &str,
         paths: &LaunchPaths,
         resume: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, String> {
+    ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
         (self.0)().map_err(|error| error.to_string())?;
         Ready.prepare(task, prompt, paths, resume)
     }
@@ -1366,7 +1366,7 @@ impl Providers for Ready {
         _: &str,
         _: &LaunchPaths,
         _: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, String> {
+    ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
         Ok(PreparedLaunch {
             argv: vec!["fixture".into()],
             environment: Vec::new(),
@@ -1406,7 +1406,7 @@ impl Providers for FirstPriorityFailure {
         prompt: &str,
         paths: &LaunchPaths,
         resume: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, String> {
+    ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
         Ready.prepare(task, prompt, paths, resume)
     }
     fn decode(
@@ -1479,7 +1479,7 @@ impl Providers for Confined {
         prompt: &str,
         paths: &LaunchPaths,
         resume: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, String> {
+    ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
         use provenant_confinement::permissions::{
             AccessMode, NetworkAccess, PlanPermissions, ProviderProfile, ProviderProfileSpec,
             WorktreeWriteAuthority,
@@ -1631,7 +1631,7 @@ impl Providers for FirstOversized {
         prompt: &str,
         paths: &LaunchPaths,
         resume: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, String> {
+    ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
         let provider = if task.task_id == self.first {
             &self.oversized
         } else {
@@ -2956,6 +2956,7 @@ pub(super) struct Fake {
     partial: Vec<PartialSignal>,
     /// Report `QuotaLimited` only when this exact sealed stderr arrives.
     quota_stderr: Option<&'static [u8]>,
+    assess_empty: bool,
 }
 
 #[test]
@@ -2987,6 +2988,35 @@ fn policy_refusal_skips_provider_preparation_and_preserves_sibling_progress() ->
 }
 
 impl Providers for Fake {
+    fn assess_result(
+        &self,
+        _: &TaskRequest,
+        record: &AttemptRecord,
+        decoded: &Decoded,
+        _: Option<&provenant_records::handoff::Handoff>,
+        _: Option<&crate::HolderContext>,
+        _: u64,
+    ) -> std::result::Result<crate::ResultAssessment, String> {
+        if self.assess_empty
+            && decoded.outcome == Outcome::Succeeded
+            && decoded.complete
+            && decoded.result.is_empty()
+        {
+            return Ok(crate::ResultAssessment {
+                refusal: Some("empty result rejected by policy".into()),
+                retry: Some(crate::PolicyRetry {
+                    schema_version: 1,
+                    route: record.requested_route.clone(),
+                    resume: false,
+                    max_attempts: 2,
+                    instruction: "Try again".into(),
+                    not_before_unix_seconds: None,
+                }),
+                note: None,
+            });
+        }
+        Ok(Default::default())
+    }
     fn check_policy(&self, task: &TaskRequest) -> std::result::Result<(), String> {
         if self.policy_task == Some(task.task_id) {
             return Err("insufficient disk space; run `provenant gc`".into());
@@ -3000,7 +3030,7 @@ impl Providers for Fake {
         prompt: &str,
         paths: &LaunchPaths,
         resume: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, String> {
+    ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
         self.network
             .set(Some(task.access.network(task.writer.is_some())));
         self.prepared.set(self.prepared.get() + 1);
@@ -3275,6 +3305,47 @@ fn settlement_scrubs_provider_session_history() -> TestResult {
         );
         assert!(text.contains("[REDACTED]"));
     }
+    Ok(())
+}
+
+#[test]
+fn empty_success_is_assessed_before_settlement_rejects_it() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+    let dir = store.attempt_dir(run.run_id, id, false)?;
+    artifacts::seal(&dir, "stdout.log", b"", CAPTURE_LIMIT)?;
+    let mut observed = exit();
+    observed.scope = RunStore::scope(&store.record(id, &call)?);
+    seal_exit(&store, &observed)?;
+    let fake = Fake {
+        observed: Some(route()),
+        answer: Some(String::new()),
+        assess_empty: true,
+        ..Fake::default()
+    };
+    let record = store.finish(id, &dir, &observed, &fake, &call)?;
+    assert!(matches!(
+        record.state,
+        AttemptState::Terminal {
+            outcome: Outcome::Failed,
+            ..
+        }
+    ));
+    assert!(store.staged_policy_retry(&record)?.is_some());
     Ok(())
 }
 
@@ -4091,49 +4162,47 @@ fn a_nested_lane_reads_class_spacing_from_the_host_ledger_only_with_the_host_roo
 /// move the wall and monotonic clocks together like `TestClock`.
 struct Stepped {
     inner: TestClock,
-    wall_offset_micros: Cell<i64>,
-    host_base_micros: Cell<u64>,
-    boot: RefCell<&'static str>,
-    host_readable: Cell<bool>,
-    boot_readable: Cell<bool>,
+    wall_offset_micros: std::sync::Mutex<i64>,
+    host_base_micros: std::sync::Mutex<u64>,
+    boot: std::sync::RwLock<&'static str>,
+    host_readable: std::sync::Mutex<bool>,
+    boot_readable: std::sync::Mutex<bool>,
 }
 impl Stepped {
     /// A host that has been up `host_ms`, in boot `"boot-a"`.
     fn up(host_ms: u64) -> Self {
         Self {
             inner: clock(),
-            wall_offset_micros: Cell::new(0),
-            host_base_micros: Cell::new(host_ms * 1000),
-            boot: RefCell::new("boot-a"),
-            host_readable: Cell::new(true),
-            boot_readable: Cell::new(true),
+            wall_offset_micros: std::sync::Mutex::new(0),
+            host_base_micros: std::sync::Mutex::new(host_ms * 1000),
+            boot: std::sync::RwLock::new("boot-a"),
+            host_readable: std::sync::Mutex::new(true),
+            boot_readable: std::sync::Mutex::new(true),
         }
     }
     /// The wall clock alone steps, as an operator or NTP can make it.
     fn step_wall_ms(&self, ms: i64) {
-        self.wall_offset_micros
-            .set(self.wall_offset_micros.get() + ms * 1000);
+        *self.wall_offset_micros.lock().unwrap() += ms * 1000;
     }
     /// Real time passes: the wall and host clocks both move.
     fn pass_micros(&self, micros: u64) {
-        self.host_base_micros
-            .set(self.host_base_micros.get() + micros);
-        self.wall_offset_micros
-            .set(self.wall_offset_micros.get() + i64::try_from(micros).unwrap_or(0));
+        *self.host_base_micros.lock().unwrap() += micros;
+        *self.wall_offset_micros.lock().unwrap() += i64::try_from(micros).unwrap_or(0);
     }
     fn pass_ms(&self, ms: u64) {
         self.pass_micros(ms * 1000);
     }
     /// The host restarts: a new boot whose clock has run `host_ms`.
     fn reboot(&self, boot: &'static str, host_ms: u64) {
-        *self.boot.borrow_mut() = boot;
-        self.host_base_micros
-            .set(host_ms * 1000 - self.inner.mono_now().as_micros());
+        *self.boot.write().unwrap() = boot;
+        *self.host_base_micros.lock().unwrap() = host_ms * 1000 - self.inner.mono_now().as_micros();
     }
 }
 impl Clock for Stepped {
     fn wall_now(&self) -> std::result::Result<WallTime, provenant_core::TimeError> {
-        WallTime::from_micros(self.inner.wall_now()?.as_micros() + self.wall_offset_micros.get())
+        WallTime::from_micros(
+            self.inner.wall_now()?.as_micros() + *self.wall_offset_micros.lock().unwrap(),
+        )
     }
     fn mono_now(&self) -> MonoTime {
         self.inner.mono_now()
@@ -4142,16 +4211,16 @@ impl Clock for Stepped {
         self.inner.wait_until(deadline)
     }
     fn host_monotonic_micros(&self) -> std::result::Result<u64, provenant_core::TimeError> {
-        if !self.host_readable.get() {
+        if !*self.host_readable.lock().unwrap() {
             return Err(provenant_core::TimeError::HostClock);
         }
-        Ok(self.inner.mono_now().as_micros() + self.host_base_micros.get())
+        Ok(self.inner.mono_now().as_micros() + *self.host_base_micros.lock().unwrap())
     }
     fn boot_identity(&self) -> std::result::Result<String, provenant_core::TimeError> {
-        if !self.boot_readable.get() {
+        if !*self.boot_readable.lock().unwrap() {
             return Err(provenant_core::TimeError::HostClock);
         }
-        Ok((*self.boot.borrow()).to_owned())
+        Ok((*self.boot.read().unwrap()).to_owned())
     }
 }
 fn stepped_call<'a>(clock: &'a Stepped, cancel: &'a CancelToken) -> Request<'a> {
@@ -4278,7 +4347,7 @@ fn an_unreadable_host_clock_or_boot_identity_refuses_the_claim() -> TestResult {
         (&host.host_readable, "monotonic clock"),
         (&host.boot_readable, "boot identity"),
     ] {
-        readable.set(false);
+        *readable.lock().unwrap() = false;
         assert!(
             matches!(
                 store.claim(lane_id, &host, &call),
@@ -4296,7 +4365,7 @@ fn an_unreadable_host_clock_or_boot_identity_refuses_the_claim() -> TestResult {
             },
             "nothing started"
         );
-        readable.set(true);
+        *readable.lock().unwrap() = true;
     }
     assert!(
         store.claim(lane_id, &host, &call)?.is_some(),
@@ -4329,7 +4398,7 @@ fn lane_waits_count_spacing_on_the_host_clock_and_say_nothing_when_it_is_unreada
         "writer startup spacing: 15.0 s left of 20.0 s",
         "the wall clock stepped a day and is not what the wait counts"
     );
-    host.host_readable.set(false);
+    *host.host_readable.lock().unwrap() = false;
     assert!(
         wait(&host)?.starts_with("host capacity"),
         "no wait is stated when the host clock cannot be read"
@@ -4543,7 +4612,7 @@ fn a_version_1_upgrade_refuses_when_the_host_clock_cannot_be_read() -> TestResul
     let store = RunStore::open(&context(temp.path())?, &call)?;
     version_1_start(&store, &host, 5_000)?;
     let writer = starting(&store, &lane(103, true), &call)?;
-    host.boot_readable.set(false);
+    *host.boot_readable.lock().unwrap() = false;
     assert!(matches!(
         store.claim(writer, &host, &call),
         Err(RunError::Admission(AdmissionError::Clock))
@@ -4556,7 +4625,7 @@ fn a_version_1_upgrade_refuses_when_the_host_clock_cannot_be_read() -> TestResul
         (1, 1),
         "the refused upgrade dropped nothing"
     );
-    host.boot_readable.set(true);
+    *host.boot_readable.lock().unwrap() = true;
     assert!(store.claim(writer, &host, &call)?.is_none());
     Ok(())
 }
@@ -5575,7 +5644,7 @@ fn rejected_resume_remains_visible_and_addressable() -> TestResult {
             _: &str,
             _: &LaunchPaths,
             prior: Option<&AttemptRecord>,
-        ) -> std::result::Result<PreparedLaunch, String> {
+        ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
             assert!(prior.is_some());
             Err("route differs from the prior attempt's provider, model or account".into())
         }
@@ -7928,7 +7997,7 @@ fn read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt
 }
 
 #[test]
-fn write_grants_are_bounded_at_admission_and_read_and_preserve_git_digest() -> TestResult {
+fn write_grants_wire_bound_and_git_digest_are_preserved() -> TestResult {
     use std::os::unix::ffi::OsStringExt;
 
     let temp = tempfile::tempdir()?;
@@ -7947,24 +8016,16 @@ fn write_grants_are_bounded_at_admission_and_read_and_preserve_git_digest() -> T
         scope: PathScope::Subtree,
     };
     let mut applied = admission::AppliedWriteGrants {
-        grants: vec![grant.clone(); provenant_confinement::MAX_WRITE_GRANTS + 1],
+        grants: vec![grant.clone(); 1025],
         git_grants_digest: Some(provenant_core::Digest::from_bytes([7; 32])),
     };
     let mut record = store.record(id, &call)?;
-    assert!(matches!(
-        store.mark_starting(&record, &route(), &[], &applied, None, &call),
-        Err(RunError::Validation("invalid write grants"))
-    ));
     record.write_grants = applied.grants.clone();
-    assert!(matches!(
-        reader::validate_attempt(&record),
-        Err(RunError::Validation("invalid write grants"))
-    ));
-    applied.grants.pop();
+    reader::validate_attempt(&record)?;
     assert!(reader::valid_write_grants(&applied.grants));
     assert!(reader::write_grants_fit(&applied.grants));
     // Native bytes double in the wire encoding, exceeding the cap even
-    // though the raw path is smaller. Old records still decode by count.
+    // though the raw path is smaller. Existing records remain readable.
     let mut path = b"/fixture/".to_vec();
     path.extend(vec![b'x'; 128 * 1024]);
     path.push(0xff);
@@ -8714,6 +8775,17 @@ fn a_policy_retry_launches_for_no_launcher_before_its_sealed_time() -> TestResul
         clock: &clock,
         cancel: &cancel,
     };
+    // Even after the delay, a result-quality successor cannot start while
+    // the prior attempt's custody remains held or unverifiable.
+    let directory = store.attempt_dir(run.run_id, id, false)?;
+    let custody = directory.try_lock(
+        std::ffi::OsStr::new("custody.lock"),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
+    let started = store.start(run.run_id, &fake, &|_, _| unreachable!(), &later)?;
+    assert!(matches!(started.as_slice(), [Started::Deferred(attempt)] if *attempt == next));
+    assert_eq!(fake.prepared.get(), 0);
+    drop(custody);
     let started = store.start(run.run_id, &fake, &|_, _| unreachable!(), &later)?;
     assert!(matches!(started.as_slice(), [Started::Refused { attempt, .. }] if *attempt == next));
     assert_eq!(fake.prepared.get(), 1);
@@ -8730,7 +8802,7 @@ impl Providers for RefusesAfterAlias {
         _: &str,
         paths: &LaunchPaths,
         _: Option<&AttemptRecord>,
-    ) -> std::result::Result<PreparedLaunch, String> {
+    ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
         self.0.set(Some(paths.temporary_alias.is_some()));
         Err("provider unavailable".into())
     }
@@ -8815,5 +8887,92 @@ fn resolved_named_route_survives_launch_admission() -> TestResult {
         Some("high")
     );
     assert_eq!(record.resolved_route, record.applied_route);
+    Ok(())
+}
+
+#[test]
+fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
+    struct SignedOut(bool);
+    impl Providers for SignedOut {
+        fn prepare(
+            &self,
+            _: &TaskRequest,
+            _: &str,
+            _: &LaunchPaths,
+            _: Option<&AttemptRecord>,
+        ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
+            Err(crate::PrepareRefusal {
+                message: "all candidates require sign-in; run provenant accounts".into(),
+                fallback_outcome: (!self.0)
+                    .then_some(provenant_records::run::PreparationFailure::AuthRequired),
+                skipped_routes: ["cursor/example", "codex/example"]
+                    .map(|route| SkippedRoute {
+                        extra: Default::default(),
+                        route: route.into(),
+                        kind: if self.0 && route.starts_with("codex/") {
+                            SkipKind::Unavailable
+                        } else {
+                            SkipKind::AuthRequired
+                        },
+                        detail: "sign-in required".into(),
+                    })
+                    .to_vec(),
+            })
+        }
+        fn decode(
+            &self,
+            _: &RouteRecord,
+            _: &[u8],
+            _: &ExitObservation,
+            _: &std::path::Path,
+        ) -> std::result::Result<Decoded, String> {
+            unreachable!()
+        }
+    }
+    for mixed in [false, true] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let run = input();
+        let id = run.attempts[0].attempt_id;
+        store.create(&run, &call)?;
+        store.start(run.run_id, &SignedOut(mixed), &|_, _| unreachable!(), &call)?;
+        assert_eq!(
+            terminal(&store, id, &call)?,
+            if mixed {
+                Outcome::Rejected
+            } else {
+                Outcome::AuthRequired
+            }
+        );
+        let record = store.record(id, &call)?;
+        assert_eq!(
+            record.terminal_evidence,
+            Some(provenant_records::run::TerminalEvidence::PreLaunchRefusal)
+        );
+        assert_eq!(record.provider_launched, Some(false));
+        assert_eq!(
+            record.preparation_failure,
+            (!mixed).then_some(provenant_records::run::PreparationFailure::AuthRequired)
+        );
+        assert!(store.custody_released(&record, &call)?);
+        if !mixed {
+            let mut corrupt = record.clone();
+            corrupt.provider_launched = None;
+            assert!(matches!(
+                crate::reader::validate_attempt(&corrupt),
+                Err(RunError::Validation("preparation failure evidence"))
+            ));
+        }
+        assert_eq!(record.skipped_routes.len(), 2);
+        assert_eq!(
+            record
+                .skipped_routes
+                .iter()
+                .all(|route| route.kind == SkipKind::AuthRequired),
+            !mixed
+        );
+    }
     Ok(())
 }

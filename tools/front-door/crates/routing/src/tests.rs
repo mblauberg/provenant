@@ -232,6 +232,7 @@ fn read_heavy_routing_records_cache_preference_without_forcing_edit_work()
             intent: RouteIntent {
                 workload,
                 writes: false,
+                ..Default::default()
             },
             choice: RouteChoice::NamedRoute(RouteName::parse("cachetest")?),
             effort: None,
@@ -273,6 +274,7 @@ fn context<'a>(
         capacity_cooldowns: &[],
         accounts: &[],
         quota_policies: &[],
+        launch_specs: None,
         readiness: None,
         access: &[],
         now,
@@ -490,7 +492,9 @@ fn model_selector_keeps_the_entire_provider_path() -> Result<(), RoutingError> {
 fn route_names_validate_at_the_string_boundary() -> Result<(), Box<dyn std::error::Error>> {
     let wire = r#"{"intent":{"workload":"general","writes":false},"choice":{"kind":"named_route","value":"review.v1-_2"},"effort":null,"confidential":false,"fallback":{"kind":"none"}}"#;
     let query: RouteRequest = serde_json::from_str(wire)?;
-    assert_eq!(serde_json::to_string(&query)?, wire);
+    let roundtrip: RouteRequest = serde_json::from_str(&serde_json::to_string(&query)?)?;
+    assert_eq!(roundtrip, query);
+    assert_eq!(query.intent.network, None);
     assert_eq!(
         query.choice,
         RouteChoice::NamedRoute(RouteName::parse("review.v1-_2")?)
@@ -1439,6 +1443,41 @@ fn cooling_free_route_falls_back_to_another_junior_member() -> Result<(), Box<dy
 }
 
 #[test]
+fn usage_limited_free_route_falls_back_to_another_junior_member()
+-> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let records = opencode_accounts();
+    let access = opencode_access();
+    let scope = provenant_quota::AccountScope {
+        adapter: "opencode".into(),
+        account_key: "zen".into(),
+        label: "test".into(),
+    };
+    let refused = [provenant_quota::record_refusal(
+        None,
+        &scope,
+        "opencode/opencode/deepseek-v4.1-flash-free",
+        Some("opencode-free"),
+        90,
+        None,
+    )?
+    .replacement
+    .ok_or("record")?];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    ctx.accounts = &refused;
+    let mut query = request("codex/gpt-6-luna")?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("junior")?);
+    for route in junior_draws(&query, &ctx)? {
+        assert!(!catalogue.is_free_model(&picked_model(&route)?));
+        assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+    }
+    Ok(())
+}
+
+#[test]
 fn alternatives_are_bounded_distinct_and_keep_the_callers_order()
 -> Result<(), Box<dyn std::error::Error>> {
     let catalogue = Catalogue::bundled()?;
@@ -1799,6 +1838,7 @@ fn configured_domain_is_closed_and_registered_without_config_dependency_cycles()
     let write = crate::RouteIntent {
         workload: crate::Workload::General,
         writes: true,
+        ..Default::default()
     };
     let model = crate::ModelId::parse("codex/gpt-6.1-terra")?;
     for text in [
@@ -3368,7 +3408,10 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
     use provenant_quota::{AccountRecord, Calibration, QuotaDetails, QuotaStatus, QuotaWindow};
     let catalogue = Catalogue::bundled()?;
     let model = "opencode/opencode-go/deepseek-v4.1-flash";
-    let mut config = RoutingConfig::default();
+    let mut config = RoutingConfig {
+        allow_unknown_partial_headroom: true,
+        ..RoutingConfig::default()
+    };
     config.pacing.accounts.insert(
         "go".into(),
         PacingProfile {
@@ -3423,6 +3466,32 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
         resets_unix_seconds: None,
     })
     .collect();
+    // Selection and admission treat the same uncalibrated lower bound alike.
+    let mut default_config = config.clone();
+    default_config.allow_unknown_partial_headroom = false;
+    let observations = [duplicate(&raw)];
+    let mut ctx = context(&catalogue, &default_config, now()?);
+    ctx.availability = &availability;
+    ctx.access = &access;
+    ctx.quota = &observations;
+    let explicit = request(model)?;
+    let refused = resolve(&explicit, &ctx)?;
+    assert!(matches!(
+        refused.readiness,
+        RouteReadiness::Unavailable {
+            reason: RouteExclusionReason::UnknownPartialHeadroom,
+            ..
+        }
+    ));
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &availability;
+    ctx.access = &access;
+    ctx.quota = &observations;
+    assert!(matches!(
+        resolve(&explicit, &ctx)?.readiness,
+        RouteReadiness::Ready { .. }
+    ));
+
     let mut settings = provenant_quota::Settings::default();
     settings.calibration.insert(
         "go".into(),
@@ -3551,7 +3620,7 @@ fn go_pool_calibration_is_advisory_and_paces_the_maximum() -> Result<(), Box<dyn
         window.resets_unix_seconds = Some(99);
     }
     for (observation, expected_factor) in [
-        (duplicate(&raw), 7516),
+        (duplicate(&raw), 10_000),
         (calibrated, 4100),
         (apply(&higher_ledger), 3000),
         (passed_reset, 4100),
@@ -4204,7 +4273,11 @@ fn read_only_policy_model_stays_in_junior_and_senior_pools_for_read_only_work()
     };
     let gemini_exclusion = |pool: &str, writes: bool, workload| {
         let request = RouteRequest {
-            intent: RouteIntent { workload, writes },
+            intent: RouteIntent {
+                workload,
+                writes,
+                ..Default::default()
+            },
             choice: RouteChoice::NamedRoute(RouteName::parse(pool)?),
             effort: None,
             confidential: false,
@@ -5286,5 +5359,112 @@ fn evidenced_exclusions_are_applied_to_routing_at_snapshot_time()
         trial_picks(&catalogue, &records, &[evidence(member("other"), None)])?,
         ["claude", "codex"]
     );
+    Ok(())
+}
+
+#[test]
+fn routing_default_matches_bundled_asset() {
+    let asset: RoutingConfig =
+        toml_edit::de::from_str(include_str!("../assets/review-defaults.toml")).unwrap();
+    assert_eq!(
+        serde_json::to_value(RoutingConfig::default()).unwrap(),
+        serde_json::to_value(asset).unwrap()
+    );
+}
+
+#[test]
+fn mixed_capability_pool_filters_before_drawing_and_explicit_routes_refuse()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_records::{ADAPTER_SPECS, AdapterSpec, LaunchCapabilities, run::NetworkAccess};
+    let catalogue = Catalogue::bundled()?;
+    let mut config = RoutingConfig::default();
+    config.pools.insert(
+        "fixture-capabilities".into(),
+        vec![
+            RoutePoolMember {
+                model: ModelId::parse("cursor/gpt-5.3-codex-low")?,
+                weight: 1,
+                effort: None,
+                efforts: vec![],
+                free: false,
+            },
+            RoutePoolMember {
+                model: ModelId::parse("codex/gpt-6-luna")?,
+                weight: 0,
+                effort: None,
+                efforts: vec![],
+                free: false,
+            },
+        ],
+    );
+    let narrow = AdapterSpec {
+        launch: LaunchCapabilities {
+            write: false,
+            network: &[NetworkAccess::Provider],
+            ..ADAPTER_SPECS[2].launch
+        },
+        ..ADAPTER_SPECS[2]
+    };
+    let lookup = |adapter: &str| {
+        if adapter == "cursor" {
+            Some(narrow)
+        } else {
+            AdapterSpec::get(adapter).copied()
+        }
+    };
+    let mut cursor = availability();
+    cursor.adapter = "cursor".into();
+    let availability = [cursor, availability()];
+    let access = [
+        AccessContext {
+            adapter: "cursor",
+            disclosure_ref: "policy",
+            confinement_ref: "grant",
+        },
+        AccessContext {
+            adapter: "codex",
+            disclosure_ref: "policy",
+            confinement_ref: "grant",
+        },
+    ];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &availability;
+    ctx.access = &access;
+    ctx.launch_specs = Some(&lookup);
+    for (writes, network, expected) in [
+        (false, NetworkAccess::Provider, "cursor"),
+        (true, NetworkAccess::Provider, "codex"),
+        (false, NetworkAccess::Open, "codex"),
+    ] {
+        let mut query = request("cursor/gpt-5.3-codex-low")?;
+        query.choice = RouteChoice::NamedRoute(RouteName::parse("fixture-capabilities")?);
+        query.intent.writes = writes;
+        query.intent.network = Some(network);
+        let selected = resolve(&query, &ctx)?;
+        assert_eq!(
+            selected.adapter, expected,
+            "writes={writes} network={network:?}"
+        );
+        if expected == "codex" {
+            assert!(
+                selected
+                    .pool_selection
+                    .unwrap()
+                    .candidates
+                    .iter()
+                    .any(|candidate| candidate.model.starts_with("cursor/")
+                        && candidate.exclusion.is_some())
+            );
+        }
+        let mut explicit = request("cursor/gpt-5.3-codex-low")?;
+        explicit.intent = query.intent;
+        assert_eq!(
+            matches!(
+                resolve(&explicit, &ctx),
+                Err(RoutingError::UnsupportedLaunch(_))
+            ),
+            expected == "codex"
+        );
+    }
     Ok(())
 }

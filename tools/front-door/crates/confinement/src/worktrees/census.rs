@@ -1,10 +1,233 @@
 //! Process census and worker observation.
 use super::*;
 
+/// A single acquisition supplies both the decision and its refusal evidence.
+#[derive(Clone, Default)]
+pub struct WorkerEvidence {
+    pub states: BTreeMap<PathBuf, WorkerState>,
+    pub holders: BTreeMap<PathBuf, ObservedProcess>,
+    pub details: BTreeMap<PathBuf, String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CensusEpochPolicy {
+    pub entries: Vec<CensusIgnoreEntry>,
+    pub exclude_ancestors: bool,
+}
+
+type RootIdentity = (u64, u64, u32);
+
+fn root_identity(root: &Path) -> Option<RootIdentity> {
+    let metadata = std::fs::metadata(root).ok()?;
+    metadata
+        .is_dir()
+        .then(|| (metadata.dev(), metadata.ino(), metadata.uid()))
+}
+
+fn root_identities(roots: &[PathBuf]) -> Option<BTreeMap<PathBuf, RootIdentity>> {
+    roots
+        .iter()
+        .map(|root| Some((root.clone(), root_identity(root)?)))
+        .collect()
+}
+
+struct CensusEpoch {
+    roots: BTreeMap<PathBuf, RootIdentity>,
+    for_land: bool,
+    policy: CensusEpochPolicy,
+    observed_at: provenant_core::MonoTime,
+    evidence: WorkerEvidence,
+}
+
+/// Command-local census. Changing the root set acquires a new complete result;
+/// results are never carried across commands or explicit mutation fences.
+pub struct CensusSession<'a> {
+    inner: &'a dyn WorkerObserver,
+    clock: &'a dyn Clock,
+    epoch: std::sync::Mutex<Option<CensusEpoch>>,
+}
+
+impl<'a> CensusSession<'a> {
+    pub fn new(inner: &'a dyn WorkerObserver, clock: &'a dyn Clock) -> Self {
+        Self {
+            inner,
+            clock,
+            epoch: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn evidence(&self, roots: &[PathBuf], for_land: bool) -> WorkerEvidence {
+        let mut epoch = self
+            .epoch
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let requested = root_identities(roots);
+        let policy = self.inner.epoch_policy();
+        if let (Some(current), Some(requested), Some(policy)) = (&*epoch, &requested, &policy) {
+            let existing: Vec<_> = current.roots.keys().cloned().collect();
+            if current.for_land == for_land
+                && &current.policy == policy
+                && root_identities(&existing).as_ref() == Some(&current.roots)
+                && requested
+                    .iter()
+                    .all(|(path, id)| current.roots.get(path) == Some(id))
+            {
+                let mut result = current.evidence.clone();
+                result.states.retain(|root, _| requested.contains_key(root));
+                result
+                    .holders
+                    .retain(|root, _| requested.contains_key(root));
+                result
+                    .details
+                    .retain(|root, _| requested.contains_key(root));
+                return result;
+            }
+        }
+        let before: BTreeMap<_, _> = roots
+            .iter()
+            .map(|root| (root.clone(), root_identity(root)))
+            .collect();
+        let mut evidence = match &policy {
+            Some(policy) => self.inner.observe_captured_policy(roots, for_land, policy),
+            None => self.inner.observe_evidence(roots, for_land),
+        };
+        for root in roots {
+            evidence
+                .states
+                .entry(root.clone())
+                .or_insert(WorkerState::Unknown);
+        }
+        let stable = requested.filter(|before| root_identities(roots).as_ref() == Some(before));
+        let stable_policy =
+            policy.filter(|before| self.inner.epoch_policy().as_ref() == Some(before));
+        if stable.is_none() {
+            for root in roots {
+                let identity = before.get(root).copied().flatten();
+                if identity.is_some() && identity == root_identity(root) {
+                    continue;
+                }
+                if evidence.states.get(root) != Some(&WorkerState::Live) {
+                    evidence.states.insert(root.clone(), WorkerState::Unknown);
+                    evidence
+                        .details
+                        .entry(root.clone())
+                        .or_insert_with(|| "root identity unavailable or changed".into());
+                }
+            }
+        }
+        if stable_policy.is_none() {
+            for root in roots {
+                if evidence.states.get(root) != Some(&WorkerState::Live) {
+                    evidence.states.insert(root.clone(), WorkerState::Unknown);
+                    evidence
+                        .details
+                        .entry(root.clone())
+                        .or_insert_with(|| "census policy unavailable or changed".into());
+                }
+            }
+        }
+        *epoch = stable
+            .zip(stable_policy)
+            .map(|(roots, policy)| CensusEpoch {
+                roots,
+                for_land,
+                policy,
+                observed_at: self.clock.mono_now(),
+                evidence: evidence.clone(),
+            });
+        evidence
+    }
+
+    pub fn invalidate(&self) {
+        *self
+            .epoch
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = None;
+    }
+
+    pub fn observed_at(&self) -> Option<provenant_core::MonoTime> {
+        self.epoch
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_ref()
+            .map(|epoch| epoch.observed_at)
+    }
+}
+
+impl WorkerObserver for CensusSession<'_> {
+    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        self.evidence(roots, false).states
+    }
+    fn observe_roots_for_land(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        self.evidence(roots, true).states
+    }
+    fn observe_roots_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
+        let e = self.evidence(roots, false);
+        (e.states, e.details)
+    }
+    fn observe_roots_for_land_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
+        let e = self.evidence(roots, true);
+        (e.states, e.details)
+    }
+    fn observe_evidence(&self, roots: &[PathBuf], for_land: bool) -> WorkerEvidence {
+        self.evidence(roots, for_land)
+    }
+    fn live_process(&self, root: &Path) -> Option<ObservedProcess> {
+        self.evidence(&[root.to_path_buf()], false)
+            .holders
+            .remove(root)
+    }
+    fn live_process_for_land(&self, root: &Path) -> Option<ObservedProcess> {
+        self.evidence(&[root.to_path_buf()], true)
+            .holders
+            .remove(root)
+    }
+    fn requires_complete_census(&self) -> bool {
+        self.inner.requires_complete_census()
+    }
+    fn incomplete_census_detail(&self) -> String {
+        self.inner.incomplete_census_detail()
+    }
+    fn invalidate(&self) {
+        CensusSession::invalidate(self)
+    }
+}
+
 /// Injectable native observation seam. Implementations return one conservative
 /// state per canonical candidate root; they never grant signal authority.
 pub trait WorkerObserver: Send + Sync {
     fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState>;
+
+    /// Effective policy defining the current epoch; `None` prevents reuse.
+    fn epoch_policy(&self) -> Option<CensusEpochPolicy> {
+        Some(CensusEpochPolicy::default())
+    }
+
+    fn observe_evidence(&self, roots: &[PathBuf], for_land: bool) -> WorkerEvidence {
+        let (states, details) = if for_land {
+            self.observe_roots_for_land_with_details(roots)
+        } else {
+            self.observe_roots_with_details(roots)
+        };
+        WorkerEvidence {
+            states,
+            holders: BTreeMap::new(),
+            details,
+        }
+    }
+
+    /// Acquire with the same policy used to identify the session epoch.
+    fn observe_captured_policy(
+        &self,
+        roots: &[PathBuf],
+        for_land: bool,
+        _policy: &CensusEpochPolicy,
+    ) -> WorkerEvidence {
+        self.observe_evidence(roots, for_land)
+    }
+
+    /// Discard command-local evidence before a custody or mutation boundary.
+    fn invalidate(&self) {}
 
     /// Landing requires positive observation of a free root. Ordinary removal
     /// still relies on writer custody when the host census is unobservable.
@@ -63,6 +286,7 @@ pub trait WorkerObserver: Send + Sync {
         }
     }
 
+<<<<<<< HEAD
     fn observe_roots_with_policy_taints(
         &self,
         roots: &[PathBuf],
@@ -73,6 +297,19 @@ pub trait WorkerObserver: Send + Sync {
             self.observe_roots_for_land_with_taints(roots)
         } else {
             self.observe_roots_with_taints(roots)
+=======
+    fn observe_evidence_with_policy(
+        &self,
+        roots: &[PathBuf],
+        entries: &[CensusIgnoreEntry],
+        for_land: bool,
+    ) -> WorkerEvidence {
+        let (states, details) = self.observe_roots_with_policy(roots, entries, for_land);
+        WorkerEvidence {
+            states,
+            holders: BTreeMap::new(),
+            details,
+>>>>>>> origin/main
         }
     }
 
@@ -123,20 +360,87 @@ fn default_taints(
 pub struct CensusPolicyWorkers<'a> {
     inner: &'a dyn WorkerObserver,
     pub(super) entries: Vec<CensusIgnoreEntry>,
+    pub(super) exclude_ancestors: bool,
+    roots: provenant_core::Roots,
+    for_run: bool,
 }
 impl<'a> CensusPolicyWorkers<'a> {
     pub fn from_roots(
         inner: &'a dyn WorkerObserver,
         roots: &provenant_core::Roots,
     ) -> Result<Self, WorktreeError> {
+        Self::configured(inner, roots, false)
+    }
+
+    /// Apply the host ancestor-exclusion setting only for run admission.
+    pub fn for_run(
+        inner: &'a dyn WorkerObserver,
+        roots: &provenant_core::Roots,
+    ) -> Result<Self, WorktreeError> {
+        Self::configured(inner, roots, true)
+    }
+
+    fn configured(
+        inner: &'a dyn WorkerObserver,
+        roots: &provenant_core::Roots,
+        for_run: bool,
+    ) -> Result<Self, WorktreeError> {
         let config = provenant_config::read_knobs(roots)?;
         Ok(Self {
             inner,
             entries: config.census_ignore_unreadable()?,
+            exclude_ancestors: for_run && config.census_exclude_ancestors()?,
+            roots: roots.clone(),
+            for_run,
         })
     }
 }
 impl WorkerObserver for CensusPolicyWorkers<'_> {
+    fn epoch_policy(&self) -> Option<CensusEpochPolicy> {
+        let config = provenant_config::read_knobs(&self.roots).ok()?;
+        Some(CensusEpochPolicy {
+            entries: config.census_ignore_unreadable().ok()?,
+            exclude_ancestors: self.for_run && config.census_exclude_ancestors().ok()?,
+        })
+    }
+    fn observe_evidence(&self, roots: &[PathBuf], for_land: bool) -> WorkerEvidence {
+        let Some(policy) = self.epoch_policy() else {
+            return WorkerEvidence {
+                states: roots
+                    .iter()
+                    .cloned()
+                    .map(|root| (root, WorkerState::Unknown))
+                    .collect(),
+                ..WorkerEvidence::default()
+            };
+        };
+        self.inner.observe_evidence_with_policy(
+            roots,
+            &policy.entries,
+            for_land || policy.exclude_ancestors,
+        )
+    }
+    fn observe_captured_policy(
+        &self,
+        roots: &[PathBuf],
+        for_land: bool,
+        policy: &CensusEpochPolicy,
+    ) -> WorkerEvidence {
+        self.inner.observe_evidence_with_policy(
+            roots,
+            &policy.entries,
+            for_land || policy.exclude_ancestors,
+        )
+    }
+    fn observe_evidence_with_policy(
+        &self,
+        roots: &[PathBuf],
+        entries: &[CensusIgnoreEntry],
+        for_land: bool,
+    ) -> WorkerEvidence {
+        self.inner
+            .observe_evidence_with_policy(roots, entries, for_land)
+    }
     fn observe_roots_with_policy(
         &self,
         roots: &[PathBuf],
@@ -174,7 +478,7 @@ impl WorkerObserver for CensusPolicyWorkers<'_> {
     }
     fn observe_roots_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
         self.inner
-            .observe_roots_with_policy(roots, &self.entries, false)
+            .observe_roots_with_policy(roots, &self.entries, self.exclude_ancestors)
     }
     fn observe_roots_for_land_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
         self.inner
@@ -190,7 +494,7 @@ impl WorkerObserver for CensusPolicyWorkers<'_> {
     }
     fn live_process(&self, root: &Path) -> Option<ObservedProcess> {
         self.inner
-            .live_process_with_policy(root, &self.entries, false)
+            .live_process_with_policy(root, &self.entries, self.exclude_ancestors)
     }
     fn live_process_for_land(&self, root: &Path) -> Option<ObservedProcess> {
         self.inner
@@ -213,6 +517,17 @@ pub fn live_refusal(workers: &dyn WorkerObserver, root: &Path) -> WorktreeError 
 pub struct SystemWorkerObserver;
 
 impl WorkerObserver for SystemWorkerObserver {
+    fn observe_evidence_with_policy(
+        &self,
+        roots: &[PathBuf],
+        entries: &[CensusIgnoreEntry],
+        for_land: bool,
+    ) -> WorkerEvidence {
+        system_worker_evidence(roots, for_land, entries)
+    }
+    fn observe_evidence(&self, roots: &[PathBuf], for_land: bool) -> WorkerEvidence {
+        system_worker_evidence(roots, for_land, &[])
+    }
     fn observe_roots_with_policy(
         &self,
         roots: &[PathBuf],
@@ -345,14 +660,24 @@ pub(super) fn system_worker_roots_with_policy(
     ancestors: bool,
     entries: &[CensusIgnoreEntry],
 ) -> WorkerObservations {
+    let evidence = system_worker_evidence(roots, ancestors, entries);
+    (evidence.states, evidence.details)
+}
+
+fn system_worker_evidence(
+    roots: &[PathBuf],
+    ancestors: bool,
+    entries: &[CensusIgnoreEntry],
+) -> WorkerEvidence {
     let ProcessObservation::Present(current) = current_process() else {
-        return (
-            roots
+        return WorkerEvidence {
+            states: roots
                 .iter()
                 .cloned()
                 .map(|root| (root, WorkerState::Unknown))
                 .collect(),
-            roots
+            holders: BTreeMap::new(),
+            details: roots
                 .iter()
                 .cloned()
                 .map(|root| {
@@ -366,17 +691,23 @@ pub(super) fn system_worker_roots_with_policy(
                     )
                 })
                 .collect(),
-        );
+        };
     };
-    observe_worker_roots(
+    let (states, holders, details) = observe_worker_holders(
         roots,
         &SystemProcessObserver,
         &PolicyCwdObserver(entries),
         &current,
         ancestors,
-    )
+    );
+    WorkerEvidence {
+        states,
+        holders,
+        details,
+    }
 }
 
+<<<<<<< HEAD
 pub(super) fn system_worker_roots_with_policy_taints(
     roots: &[PathBuf],
     ancestors: bool,
@@ -410,6 +741,9 @@ pub(super) fn system_worker_roots_with_policy_taints(
     )
 }
 
+=======
+#[cfg(test)]
+>>>>>>> origin/main
 pub(super) fn observe_worker_roots(
     roots: &[PathBuf],
     observer: &dyn ProcessObserver,
@@ -712,7 +1046,11 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
                             .or_insert_with(|| ObservedProcess {
                                 pid,
                                 command: fact.command.clone(),
+<<<<<<< HEAD
                                 kind,
+=======
+                                cwd: Some(location.to_path_buf()),
+>>>>>>> origin/main
                             });
                         taints.insert(root.clone(), TaintCause::LiveWriter(holder.clone()));
                         details.insert(
@@ -830,6 +1168,7 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
                         }
                     }
                     for root in placed {
+<<<<<<< HEAD
                         let holder = holders
                             .entry(root.clone())
                             .and_modify(|h| {
@@ -843,6 +1182,16 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
                                 kind: ProcessEvidenceKind::WorkingDirectory,
                             });
                         taints.insert(root.clone(), TaintCause::LiveWriter(holder.clone()));
+=======
+                        let holder =
+                            holders
+                                .entry(root.clone())
+                                .or_insert_with(|| ObservedProcess {
+                                    pid,
+                                    command: fact.command.clone(),
+                                    cwd: Some(canonical.clone()),
+                                });
+>>>>>>> origin/main
                         details.insert(root, format!("process {}: cwd inside root", holder.pid));
                     }
                 } else {

@@ -179,6 +179,7 @@ fn advance_error_is_recorded_replaced_and_cleared_and_rebind_moves_directory() {
     for directory in [base.clone(), base.join("state")] {
         journal
             .bind(GraphExecution {
+                review_base: None,
                 extra: Default::default(),
                 integration_base: None,
                 directory,
@@ -198,6 +199,46 @@ fn advance_error_is_recorded_replaced_and_cleared_and_rebind_moves_directory() {
     set(None);
     assert_eq!(read(), None);
     set(None);
+}
+#[test]
+fn version_two_checkpoint_without_v2_fields_reloads() {
+    let root = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(root.path()).unwrap();
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.join("state"));
+    std::fs::create_dir(base.join("state")).unwrap();
+    std::fs::set_permissions(base.join("state"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    // Version 2 is a superset of version 1, so a plain document saves and reloads.
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({"schema_version":2,"graph_id":"plain-v2","nodes":[{"id":"one","prompt":"test","access":"read_only","route":{"adapter":"fixture","model":"fixture"}}]})).unwrap();
+    let checkpoint = {
+        let mut journal =
+            FileJournal::open(&root, project, "plain-v2", budget, &cancel, &clock).unwrap();
+        journal
+            .bind(GraphExecution {
+                review_base: None,
+                extra: Default::default(),
+                integration_base: None,
+                directory: base.clone(),
+                document: document.clone(),
+            })
+            .unwrap();
+        advance(&document, &mut Owner, &mut journal)
+            .unwrap()
+            .checkpoint
+    };
+    assert_eq!(
+        FileJournal::read_checkpoint(&root, project, "plain-v2").unwrap(),
+        Some(checkpoint.clone())
+    );
+    let mut journal =
+        FileJournal::open(&root, project, "plain-v2", budget, &cancel, &clock).unwrap();
+    assert_eq!(journal.load("plain-v2").unwrap(), Some(checkpoint));
 }
 #[test]
 fn checkpoint_reopens_with_project_isolation_and_detects_tampering() {
@@ -225,6 +266,7 @@ fn checkpoint_reopens_with_project_isolation_and_detects_tampering() {
             FileJournal::open(&root, project, "reopen", budget, &cancel, &clock).unwrap();
         journal
             .bind(GraphExecution {
+                review_base: None,
                 extra: Default::default(),
                 integration_base: Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap()),
                 directory: base.clone(),
@@ -248,6 +290,7 @@ fn checkpoint_reopens_with_project_isolation_and_detects_tampering() {
     assert_eq!(
         FileJournal::pending_execution(&root, project, "reopen").unwrap(),
         Some(GraphExecution {
+            review_base: None,
             extra: Default::default(),
             integration_base: Some(provenant_core::GitOid::parse(&"a".repeat(40)).unwrap()),
             directory: base.clone(),
@@ -264,6 +307,7 @@ fn checkpoint_reopens_with_project_isolation_and_detects_tampering() {
         );
         assert!(matches!(
             journal.bind(GraphExecution {
+                review_base: None,
                 extra: Default::default(),
                 integration_base: None,
                 directory: base.clone(),

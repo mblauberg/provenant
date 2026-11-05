@@ -585,6 +585,8 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
     assert!(store.open_runs(100, &call)?.contains(&input.run_id));
     let gc = store.gc_temporary(
         &Directory::open_anchor(execution.state_root.as_path())?,
+        7,
+        30,
         provenant_core::WallTime::from_micros(86_400_000_150)?,
         false,
         &call,
@@ -645,7 +647,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
             prompt: &str,
             paths: &LaunchPaths,
             resume: Option<&AttemptRecord>,
-        ) -> std::result::Result<PreparedLaunch, String> {
+        ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
             use provenant_confinement::permissions::{
                 AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions, ProviderProfile,
                 ProviderProfileSpec, WorktreeWriteAuthority,
@@ -3048,12 +3050,15 @@ impl PrepareFixture {
     fn prepare(&self) -> Result<HostDeliveryContext> {
         HostDeliveryContext::new(self.environment.clone()).prepare(&self.writer, &self.request)
     }
-    fn lane_git(&self, args: &[&str]) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    pub(crate) fn lane_git(
+        &self,
+        args: &[&str],
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut command = vec!["-C", self.writer.worktree.to_str().ok_or("lane")?];
         command.extend_from_slice(args);
         self.git(&command)
     }
-    fn commit(
+    pub(crate) fn commit(
         &self,
         path: &Path,
         message: &str,
@@ -3083,13 +3088,14 @@ impl PrepareFixture {
         base_ref: Option<&str>,
         write: impl FnOnce() -> std::result::Result<(), Box<dyn std::error::Error>>,
     ) -> std::result::Result<bool, Box<dyn std::error::Error>> {
-        self.terminal_via_inner(remote, base_ref, false, write)
+        self.terminal_via_inner(remote, base_ref, false, false, write)
     }
     fn terminal_via_inner(
         &self,
         remote: &str,
         base_ref: Option<&str>,
         resume_after_publish: bool,
+        advance_after_publish: bool,
         write: impl FnOnce() -> std::result::Result<(), Box<dyn std::error::Error>>,
     ) -> std::result::Result<bool, Box<dyn std::error::Error>> {
         use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime};
@@ -3203,6 +3209,11 @@ impl PrepareFixture {
                 base,
                 tip,
             )?;
+            if advance_after_publish {
+                std::fs::write(self.writer.worktree.join("AGENTS.md"), "later writer\n")?;
+                self.lane_git(&["add", "AGENTS.md"])?;
+                self.commit(&self.writer.worktree, "later writer")?;
+            }
             // Drop the process owner at the crash boundary before the phase
             // checkpoint. A fresh driver must safely replay publication.
             drop(settlement);
@@ -3241,6 +3252,13 @@ impl PrepareFixture {
         )?;
         if !review {
             assert!(terminal.protected_paths.is_empty());
+        }
+        if advance_after_publish {
+            assert_eq!(terminal.head, tip);
+            let evidence: serde_json::Value = serde_json::from_slice(
+                &archive.read_bounded(OsStr::new("evidence.json"), RECORD_LIMIT)?,
+            )?;
+            assert_eq!(evidence["observed_head"], tip.to_string());
         }
         Ok(review)
     }
@@ -3686,8 +3704,8 @@ fn oversize_host(
 fn many_linked_worktrees_do_not_block_protection_checks()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;
-    // Each entry is about 155 bytes, so 200 linked worktrees exceed 16 KiB.
-    for index in 0..200 {
+    // Each entry is about 155 bytes, so 201 linked worktrees exceed 16 KiB.
+    for index in 0..201 {
         let path = fixture.root.join(format!("tree-{index}"));
         fixture.git(&[
             "worktree",
@@ -3797,6 +3815,31 @@ fn worktree_listing_keeps_the_raised_limit_and_others_keep_theirs() {
         stdout_limit(false, &["worktree", "list", "--porcelain"]),
         provenant_os::exec::DEFAULT_CAPTURE_LIMIT
     );
+    assert_eq!(
+        stdout_limit(false, &["for-each-ref", "--format=%(refname)"]),
+        provenant_os::exec::DEFAULT_CAPTURE_LIMIT
+    );
+    for args in [
+        &[
+            "--git-dir",
+            "repo.git",
+            "--work-tree",
+            "tree",
+            "for-each-ref",
+        ][..],
+        &[
+            "-c",
+            "remote.origin.uploadpack=git-upload-pack",
+            "ls-remote",
+            "origin",
+        ],
+        &["--git-dir=repo.git", "worktree", "list", "--porcelain"],
+    ] {
+        assert_eq!(
+            stdout_limit(false, args),
+            provenant_os::exec::DEFAULT_CAPTURE_LIMIT
+        );
+    }
     assert_eq!(stdout_limit(false, &["remote"]), 16 * 1024);
     assert_eq!(stdout_limit(true, &["log"]), 56_000);
 }
@@ -4394,7 +4437,7 @@ fn landed_writer_fence_fixture(
 fn terminal_resumes_after_branch_publication_before_its_phase_checkpoint()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;
-    let review = fixture.terminal_via_inner("origin", None, true, || {
+    let review = fixture.terminal_via_inner("origin", None, true, false, || {
         std::fs::write(
             fixture.writer.worktree.join("resumed.txt"),
             "durable branch\n",
@@ -4409,6 +4452,23 @@ fn terminal_resumes_after_branch_publication_before_its_phase_checkpoint()
         b"durable branch\n"
     );
     assert!(fixture.root.join("attempt/writer-terminal.json").is_file());
+    Ok(())
+}
+
+#[test]
+fn terminal_attributes_only_the_pinned_head_after_branch_advances()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let review = fixture.terminal_via_inner("origin", None, true, true, || {
+        std::fs::write(fixture.writer.worktree.join("writer.txt"), "writer\n")?;
+        fixture.lane_git(&["add", "writer.txt"])?;
+        fixture.commit(&fixture.writer.worktree, "writer")
+    })?;
+    assert!(!review);
+    assert_eq!(
+        std::fs::read(fixture.writer.worktree.join("AGENTS.md"))?,
+        b"later writer\n"
+    );
     Ok(())
 }
 

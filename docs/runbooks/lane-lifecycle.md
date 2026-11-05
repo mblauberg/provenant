@@ -3,6 +3,13 @@
 Owner: run and Fabric maintainers
 Anchor: docs/specs/run.md, docs/specs/fabric.md
 
+For host-owned project paths, use `PROVENANT_PRIMARY_CHECKOUT`. A linked
+worktree's read-only admin directory is `PROVENANT_WORKTREE_GITDIR`; the writer's
+Git commands continue to use its private view. Project `shared_paths` can expose
+an existing host lock directory read-write to writers, and `exec_roots` can
+expose a repo-managed toolchain read-only. Both are empty by default. See
+[project paths](providers.md#project-paths-and-host-checkout-identity).
+
 Create a writer checkout, submit and wait with one command:
 
 ```sh
@@ -94,14 +101,28 @@ checkout; for an absolute path or a path below `.worktrees/`, use
 `--branch BRANCH` to create it. Git's worktree inventory establishes membership,
 so native linked checkouts and checkouts recreated at a previously used path
 need no registration or adoption. Another project's checkout is refused.
-A held writer lock reports busy; lifecycle removal also refuses an observed
-live process and names its pid and command when available.
+A held writer lock reports busy; lifecycle removal and admission refuse an observed
+live process and name its pid, command and working directory when available.
+
+Live-writer detection at run admission excludes the invoking process and, by default,
+its verified ancestor chain (such as the invoking shell). A run launched from inside
+the target worktree is admitted when no other writer or foreign process is active in
+the tree. When a genuine live writer or foreign process is observed, admission is refused
+with an error naming the observed process (PID, command and working directory), rather
+than blaming a previous attempt. Hosts can tighten this policy by setting
+`confinement.census_exclude_ancestors = false` in `[knobs]` in host configuration
+(default `true`); when disabled, any ancestor shell whose working directory is inside
+the worktree is treated as a live writer and refused.
 
 A new writer may reuse a registered worktree from a terminal lane when the tree is clean and
 writer custody is free. Dirty trees, held locks and observed live writers still refuse. When
-`--base` is supplied for a branch that already exists, Provenant reuses its worktree only when
-the branch contains that base; otherwise the refusal says to omit `--base`. If the branch
-exists without a worktree, omit `--base` to check it out.
+`--base` is supplied for a branch that already exists, Provenant accepts the branch only when
+it already contains that base (reusing its existing worktree or creating one); otherwise the refusal
+names the branch head and the base, and says to omit `--base` to reuse it.
+If a linked checkout has no Provenant lane-owner record, the worktree list
+shows that fact separately from its observed writer state. It may have been
+created outside Provenant. Inspect custody and use `--worktree <path>` to select
+the checkout explicitly; an unknown writer remains unknown until checked.
 
 A refusal that says repository authority could not be revalidated includes the
 underlying repository error and its reason. Inspect that reason and the

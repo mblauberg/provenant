@@ -52,15 +52,21 @@ pub(crate) fn private_dir(root: &Path, path: &Path) -> Result<Directory, EdgeErr
         }
         Err(error) => return Err(error.into()),
     };
-    if dir.metadata()?.mode & 0o077 != 0 {
-        return Err(EdgeError::Invalid);
+    let mode = dir.metadata()?.mode & 0o7777;
+    if mode & 0o077 != 0 {
+        return Err(EdgeError::StateDirectoryPermissions {
+            path: root.to_owned(),
+            mode,
+        });
     }
+    let mut current_path = root.to_owned();
     for part in path
         .strip_prefix(root)
         .map_err(|_| EdgeError::Invalid)?
         .components()
     {
         if let Component::Normal(name) = part {
+            current_path.push(name);
             dir = match dir.open_verified_directory(name) {
                 Ok(child) => child,
                 Err(error) if error.is_not_found() => {
@@ -73,8 +79,12 @@ pub(crate) fn private_dir(root: &Path, path: &Path) -> Result<Directory, EdgeErr
                 }
                 Err(error) => return Err(error.into()),
             };
-            if dir.metadata()?.mode & 0o077 != 0 {
-                return Err(EdgeError::Invalid);
+            let mode = dir.metadata()?.mode & 0o7777;
+            if mode & 0o077 != 0 {
+                return Err(EdgeError::StateDirectoryPermissions {
+                    path: current_path,
+                    mode,
+                });
             }
         } else {
             return Err(EdgeError::Invalid);
@@ -462,7 +472,7 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
         FacadeError::PeerVersion | FacadeError::PeerProtocolMismatch { .. } => {
             (Outcome::Refused, ErrorKind::PeerVersion)
         }
-        FacadeError::InvalidInput => (Outcome::Invalid, ErrorKind::Invalid),
+        FacadeError::InvalidInput { .. } => (Outcome::Invalid, ErrorKind::Invalid),
         FacadeError::NotFound => (Outcome::Invalid, ErrorKind::NotFound),
         FacadeError::Conflict | FacadeError::GenerationConflict { .. } => {
             (Outcome::Refused, ErrorKind::Conflict)
@@ -471,10 +481,13 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
         FacadeError::OperationConflict => (Outcome::Refused, ErrorKind::OperationConflict),
         FacadeError::Busy => (Outcome::Refused, ErrorKind::QueueFull),
         FacadeError::ConfinementRefused => (Outcome::Refused, ErrorKind::Refused),
+        FacadeError::WriterBusy => (Outcome::Refused, ErrorKind::WriterBusy),
+        FacadeError::WriterUnknown => (Outcome::Refused, ErrorKind::WriterUnknown),
+        FacadeError::CredentialRoot { .. } => (Outcome::Refused, ErrorKind::CredentialRoot),
         FacadeError::DispatchRefused { .. } => (Outcome::Refused, ErrorKind::Refused),
-        FacadeError::DispatchUnobserved { .. } | FacadeError::HostDeliveryIo { .. } => {
-            (Outcome::Error, ErrorKind::Io)
-        }
+        FacadeError::DispatchUnobserved { .. }
+        | FacadeError::HostDeliveryStage { .. }
+        | FacadeError::HostDeliveryLimit { .. } => (Outcome::Error, ErrorKind::Io),
         FacadeError::WorktreeMissing => (Outcome::Invalid, ErrorKind::WorktreeMissing),
         FacadeError::WorktreeUnregistered { .. } => {
             (Outcome::Refused, ErrorKind::WorktreeUnregistered)

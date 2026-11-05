@@ -266,6 +266,21 @@ impl LaneAccess {
     }
 }
 
+/// Whether a lane discovers the host's user skills read-only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserSkillsMode {
+    #[default]
+    Discover,
+    Off,
+}
+
+impl UserSkillsMode {
+    pub fn is_discover(&self) -> bool {
+        matches!(self, Self::Discover)
+    }
+}
+
 /// Canonical repository and linked worktree selected at the submission edge.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WriterRequest {
@@ -447,6 +462,9 @@ pub enum RequestedRoute {
         effort: Option<String>,
         excluded_families: Vec<String>,
         distinct_families: bool,
+        /// Additional families to avoid when possible, without weakening required exclusions.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        preferred_families: Vec<String>,
         /// Refuse a route inside an excluded family instead of substituting one.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         require_distinct: bool,
@@ -683,6 +701,15 @@ pub enum AttemptState {
         reason: Option<String>,
     },
 }
+/// A typed refusal made during local provider preparation, before custody.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreparationFailure {
+    AuthRequired,
+    UsageLimited,
+    AdapterUnavailable,
+}
+
 /// Why a fallback candidate did not launch. Typed so `lanes` and `output` can
 /// show a skipped leg without reading prose.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -964,6 +991,9 @@ pub struct AttemptRecord {
     /// Custody evidence. None in older records must never authorise a writer retry.
     #[serde(default)]
     pub provider_launched: Option<bool>,
+    /// Confirmed pre-custody preparation refusal, sealed with its terminal row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation_failure: Option<PreparationFailure>,
     pub provider_ms: Option<u64>,
     pub admission_deadline: Option<WallTime>,
     pub runtime_deadline: Option<WallTime>,
@@ -1000,6 +1030,11 @@ pub struct AttemptRecord {
     /// all unknown.
     #[serde(default)]
     pub trace: crate::Trace,
+}
+impl AttemptRecord {
+    pub fn user_skills(&self) -> Option<&serde_json::Value> {
+        self.applied_route.as_ref()?.extra.get("user_skills")
+    }
 }
 /// A live-only value that is deliberately absent from durable identity and
 /// equality. It can decorate a record read without making two reads of that

@@ -64,6 +64,7 @@ pub enum Account<'a> {
 pub struct AccountInfo {
     pub name: OsString,
     pub home: OsString,
+    pub shell: OsString,
 }
 
 pub fn account(account: Account<'_>) -> Result<Option<AccountInfo>, SysError> {
@@ -164,7 +165,18 @@ pub fn account(account: Account<'_>) -> Result<Option<AccountInfo>, SysError> {
         // SAFETY: the successful _r call returned a NUL-terminated home
         // pointer into our live buffer; it is copied before the next call.
         let home = OsString::from_vec(unsafe { CStr::from_ptr(entry.pw_dir) }.to_bytes().to_vec());
-        return Ok(Some(AccountInfo { name, home }));
+        let shell = if entry.pw_shell.is_null() {
+            OsString::new()
+        } else {
+            // SAFETY: the successful _r call returned a NUL-terminated shell
+            // pointer into our live buffer; copy it before the buffer is dropped.
+            OsString::from_vec(
+                unsafe { CStr::from_ptr(entry.pw_shell) }
+                    .to_bytes()
+                    .to_vec(),
+            )
+        };
+        return Ok(Some(AccountInfo { name, home, shell }));
     }
 }
 

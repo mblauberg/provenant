@@ -36,6 +36,8 @@ which must then be set. Follow a run with
 `provenant status` and `provenant fabric graph status ID`; take over a stalled
 landing with `provenant land N --head SHA --wait`.
 
+Split a large dependent change into a stack; see the [stacked PR workflow](../../docs/runbooks/github-workflow.md#stacked-pull-requests).
+
 Other shapes: `generator-evaluator` for a slice that stays in your worktree,
 `big-batch` for several lanes, `single` when the change is routine. Read
 `docs/runbooks/presets.md` for parameters.
@@ -47,6 +49,15 @@ criteria, the files and owners already found, the checks to run, and the
 instruction to stop and report instead of widening scope. One writer per
 worktree. Name the method skill: `test-design` for observable behaviour,
 `refactor` for restructuring, `diagnose` for an unknown cause.
+
+The preset does not yet implement the planner-led policy or review repair loop.
+Run `review-council --plan on` and supplement its panel to meet HARNESS floors.
+`deliver` has no gate for that supplemental review, so pass `land=0` when the
+panel needs supplementing and land by hand once it passes. A failed council
+stops `deliver`. A separate writer repairs accepted findings,
+then the raising lenses re-review the delta. After three cycles or a concrete
+design concern, obtain read-only principal scoping; proceed within approved
+scope and notify the owner, but wait at changed scope or one-way doors.
 
 ## Rules the preset cannot enforce
 

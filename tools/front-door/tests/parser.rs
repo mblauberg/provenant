@@ -522,6 +522,149 @@ fn core_run_creates_a_new_managed_worktree_from_a_name_or_branch() -> Result {
 }
 
 #[test]
+fn run_base_consistency_on_existing_branch() -> Result {
+    let rig = TestRig::new()?;
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let commit_args = |message: &'static str| ["commit", "--allow-empty", "-qm", message];
+    for args in [
+        vec!["commit", "--allow-empty", "-qm", "base-a"],
+        vec!["branch", "-M", "main"],
+    ] {
+        assert_eq!(code(&rig.execute(&git, &args, None)?), 0);
+    }
+    let base_a = String::from_utf8(
+        rig.execute(&git, &["rev-parse", "HEAD"], None)?
+            .stdout
+            .bytes,
+    )?
+    .trim()
+    .to_owned();
+
+    // Create branch feat/test-base from base_a
+    assert_eq!(
+        code(&rig.execute(&git, &["branch", "feat/test-base"], None)?),
+        0
+    );
+
+    // Advance main to base_b so base_b is not an ancestor of feat/test-base
+    assert_eq!(code(&rig.execute(&git, &commit_args("base-b"), None)?), 0);
+    let base_b = String::from_utf8(
+        rig.execute(&git, &["rev-parse", "HEAD"], None)?
+            .stdout
+            .bytes,
+    )?
+    .trim()
+    .to_owned();
+
+    // Commit on feat/test-base so its head is feat_head
+    assert_eq!(
+        code(&rig.execute(&git, &["checkout", "-q", "feat/test-base"], None)?),
+        0
+    );
+    assert_eq!(
+        code(&rig.execute(&git, &commit_args("feat-commit"), None)?),
+        0
+    );
+    let feat_head = String::from_utf8(
+        rig.execute(&git, &["rev-parse", "HEAD"], None)?
+            .stdout
+            .bytes,
+    )?
+    .trim()
+    .to_owned();
+    assert_eq!(
+        code(&rig.execute(&git, &["checkout", "-q", "main"], None)?),
+        0
+    );
+
+    // 1. Existing branch that contains base_a is accepted
+    let out_accepted = rig.execute(
+        std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &[
+            "run",
+            "--prompt-stdin",
+            "--model",
+            "codex/gpt-6-luna",
+            "--branch",
+            "feat/test-base",
+            "--base",
+            &base_a,
+            "--wait",
+            "1s",
+            "--json",
+        ],
+        Some(b"fixture prompt"),
+    )?;
+    assert_eq!(code(&out_accepted), 1, "{out_accepted:?}");
+    let accepted: serde_json::Value = serde_json::from_slice(&out_accepted.stdout.bytes)?;
+    assert_eq!(accepted["command"], "run");
+    assert!(accepted["error"].is_null(), "unexpected error: {accepted}");
+    let run_id = accepted["data"]["run_id"]
+        .as_str()
+        .ok_or("expected run_id in accepted run")?;
+    let lane = &accepted["data"]["lanes"][0];
+    let attempt_id = lane["attempt_id"]
+        .as_str()
+        .ok_or("expected attempt_id in accepted lane")?;
+    assert_eq!(
+        accepted["data"]["worktree"]["branch"].as_str(),
+        Some("feat/test-base")
+    );
+    // Stable admission outcome: created attempt directory and request receipt exist
+    let attempt_dir = rig
+        .state
+        .join("runs")
+        .join(run_id)
+        .join("attempts")
+        .join(attempt_id);
+    assert!(
+        attempt_dir.is_dir(),
+        "expected attempt directory at {}",
+        attempt_dir.display()
+    );
+    let request_file = rig.state.join("runs").join(run_id).join("request.json");
+    assert!(
+        request_file.is_file(),
+        "expected request receipt at {}",
+        request_file.display()
+    );
+
+    // 2. Existing branch that does NOT contain base_b is refused, with both commits named
+    let out_refused = rig.execute(
+        std::path::Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &[
+            "run",
+            "--prompt-stdin",
+            "--model",
+            "codex/gpt-6-luna",
+            "--branch",
+            "feat/test-base",
+            "--base",
+            &base_b,
+            "--wait",
+            "1s",
+            "--json",
+        ],
+        Some(b"fixture prompt"),
+    )?;
+    assert_ne!(code(&out_refused), 0);
+    let value: serde_json::Value = serde_json::from_slice(&out_refused.stdout.bytes)?;
+    let message = value["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(&feat_head),
+        "expected branch head {feat_head} in message: {message}"
+    );
+    assert!(
+        message.contains(&base_b),
+        "expected requested base {base_b} in message: {message}"
+    );
+    let repair = value["error"]["repair"].as_str().unwrap_or_default();
+    assert!(repair.contains("omit --base"), "{repair}");
+
+    Ok(())
+}
+
+#[test]
 fn invalid_json_is_an_envelope() -> Result {
     let rig = TestRig::new()?;
     let invalid = rig.command(&["lanes", "--wait", "0", "--json"])?;

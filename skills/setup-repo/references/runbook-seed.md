@@ -26,14 +26,16 @@ worktree, named by replacing `/` with `-`.
 
 One `Closes #n` per issue in the PR body only when merge leaves no user or external
 gate; otherwise `References #n` and leave the issue open. Never use a closing keyword
-in a commit message. A new commit invalidates exact-head evidence: rerun checks and
-review before merge.
+in a commit message. A new commit needs green checks on the new head. Review
+the delta of a later commit; a clean base merge needs only CI. Apply the
+HARNESS head-move classes in shadow until tooling enforces them, retaining
+current exact-head landing gates.
 
 ## Merge authority
 
 The target's owner decides and records it. Ask whether agents may merge once
 tier-appropriate review and CI are green on the exact head, or whether every merge
-needs a user. Unmerged or forced branch deletion, history rewrites, credential setup,
-pushes to shared branches outside authorised merges and risk downgrades stay user
-gates. An authorised merge covers pruning its own merged branch and worktree, nothing
-else. Provenant's own choice (merge directly once gates pass) is an offer, not a default.
+needs a user. Credential setup, rewrites of or pushes to shared branches outside
+authorised merges and risk downgrades stay user gates. An authorised merge prunes its
+own merged branch and worktree; the chair decides other branch and worktree removals,
+recording each removed tip. Provenant's own choice (merge directly once gates pass) is an offer, not a default.

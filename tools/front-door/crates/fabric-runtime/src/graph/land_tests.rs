@@ -265,6 +265,9 @@ fn a_repair_without_a_delivered_branch_fails_before_launch() {
         Some("continuation_delivery_missing")
     );
     assert_eq!(owner.launches.len(), 1);
+    let land = node(&checkpoint, "land");
+    assert_eq!(land.state, NodeState::Blocked);
+    assert_eq!(land.advance_error, None);
 }
 
 #[test]

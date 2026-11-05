@@ -93,7 +93,8 @@ pub struct Fail {
     pub kind: ErrorKind,
     pub message: String,
     /// Safe typed detail retained for the MCP edge, without raw source errors.
-    pub detail: Option<provenant_fabric_runtime::coordination::facade::FacadeError>,
+    pub detail: Option<Box<provenant_fabric_runtime::coordination::facade::FacadeError>>,
+    pub projection: Option<Box<provenant_records::diagnostic::Diagnostic>>,
 }
 impl Fail {
     fn new(status: Status, kind: ErrorKind, message: impl Into<String>) -> Self {
@@ -102,69 +103,35 @@ impl Fail {
             kind,
             message: message.into(),
             detail: None,
+            projection: None,
         }
     }
 }
 impl From<run::RunError> for Fail {
     fn from(error: run::RunError) -> Self {
-        use provenant_fabric_runtime::coordination::facade::FacadeError;
-        let detail = match &error {
-            run::RunError::DeliveryPrepare { .. } | run::RunError::DeliveryLimit { .. } => {
-                Some(FacadeError::HostDeliveryIo {
-                    reason: error.to_string(),
-                })
-            }
-            run::RunError::GenerationConflict { current_generation } => {
-                Some(FacadeError::GenerationConflict {
-                    current_generation: *current_generation,
-                })
-            }
-            run::RunError::WorktreeUnregistered(path) => Some(FacadeError::WorktreeUnregistered {
-                path: path.to_string_lossy().into_owned(),
-            }),
-            run::RunError::Filesystem(error) | run::RunError::Publication(error) => {
-                Some(FacadeError::filesystem(error))
-            }
-            run::RunError::OperationIo {
-                operation, path, ..
-            } => Some(FacadeError::Io {
-                operation: (*operation).into(),
-                path: path
-                    .as_ref()
-                    .filter(|path| path.is_absolute())
-                    .map(|path| path.to_string_lossy().into_owned()),
-            }),
-            _ => None,
-        };
         let kind = ErrorKind::from(&error);
-        let status = match kind {
-            ErrorKind::Invalid
-            | ErrorKind::OperationConflict
-            | ErrorKind::NotFound
-            | ErrorKind::WorktreeMissing => Status::Invalid,
-            ErrorKind::WorktreeUnregistered
-            | ErrorKind::Refused
-            | ErrorKind::WriterScope
-            | ErrorKind::WriterProjectMismatch
-            | ErrorKind::Confinement
-            | ErrorKind::DiskFloor
-            | ErrorKind::MemoryPressure
-            | ErrorKind::LaneCap
-            | ErrorKind::BuildSettings
-            | ErrorKind::GuardianIdentity
-            | ErrorKind::Nonterminal
-            | ErrorKind::ProviderStateExpired
-            | ErrorKind::Conflict
-            | ErrorKind::LaneDepth
-            | ErrorKind::QueueFull
-            | ErrorKind::SecretInput
-            | ErrorKind::Unsupported
-            | ErrorKind::ContinuationUnsupported => Status::Refused,
+        let projection = error.diagnostic(provenant_records::diagnostic::Destination::Local);
+        let message = projection.detail.as_ref().map_or_else(
+            || kind.summary().to_owned(),
+            |detail| {
+                if matches!(
+                    error,
+                    run::RunError::Delivery(_) | run::RunError::DeliveryLimit { .. }
+                ) {
+                    detail.clone()
+                } else {
+                    format!("{} {detail}", kind.summary())
+                }
+            },
+        );
+        let status = match kind.category() {
+            "invalid" => Status::Invalid,
+            "refused" => Status::Refused,
             _ => Status::Error,
         };
         Self {
-            detail,
-            ..Self::new(status, kind, error.to_string())
+            projection: Some(Box::new(projection)),
+            ..Self::new(status, kind, message)
         }
     }
 }
@@ -198,10 +165,14 @@ fn reply(command: &str, outcome: Result<(Value, String), Fail>) -> Reply {
         Err(fail) => {
             let mut result = CommandResult::new(command, fail.status, Value::Null);
             result.error = Some(CommandError {
+                diagnostic: fail.projection.as_deref().map(Into::into),
                 code: fail.kind.code().into(),
                 message: fail.message,
-                cause: None,
-                repair: None,
+                cause: fail
+                    .projection
+                    .as_ref()
+                    .and_then(|projection| projection.detail.clone()),
+                repair: fail.projection.and_then(|projection| projection.next),
             });
             Reply {
                 result,
@@ -234,7 +205,7 @@ impl Registry<'_> {
         paths: &run::LaunchPaths,
         resume: Option<&run::AttemptRecord>,
         wait: Option<u64>,
-    ) -> Result<run::PreparedLaunch, String> {
+    ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
         let prepared = provider::prepare(self, task, prompt, paths, resume, wait)?;
         #[cfg(feature = "fixture")]
         let prepared = {
@@ -336,18 +307,12 @@ impl run::Providers for Registry<'_> {
                     .map_err(|error| error.to_string())
             })
             .transpose()?;
-        let (routing, accounts, quota, quota_settings) = match context_roots.as_ref().or(self.roots)
-        {
+        let routing = match context_roots.as_ref().or(self.roots) {
             Some(roots) => {
-                let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-                    .map_err(|error| error.to_string())?;
-                (
-                    config.domains.routing,
-                    config.domains.accounts.with_derived_accounts(),
-                    // Unreadable quota is unknown, and unknown is not spent.
-                    crate::quota::read_cache_at(roots.state.as_path()).unwrap_or_default(),
-                    config.domains.quota,
-                )
+                provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+                    .map_err(|error| error.to_string())?
+                    .domains
+                    .routing
             }
             None => Default::default(),
         };
@@ -369,35 +334,54 @@ impl run::Providers for Registry<'_> {
         if assessment.refusal.is_some() || assessment.retry.is_some() {
             return Ok(assessment);
         }
-        let catalogue =
-            provenant_routing::Catalogue::bundled().map_err(|error| error.to_string())?;
-        // The same calibrated records and configured polling intervals that
-        // resolution and the admission recheck read.
-        let (quota, policies) =
-            crate::route::account_evidence(&quota_settings, quota, now.unix_seconds());
-        let other_account = |adapter: &str, key: &str| {
-            unspent_alternative(
-                accounts
-                    .entries
-                    .values()
-                    .filter(|entry| entry.adapter == adapter)
-                    .map(|entry| entry.key.as_str()),
-                &quota,
-                &policies,
-                key,
-                &model,
-                &catalogue,
-                now.unix_seconds(),
-            )
-        };
+        // A quota-stopped writer with a recorded unfinished handoff may
+        // continue its retained worktree on another eligible account.
+        let quota_handoff_recovery =
+            if quota_handoff_recovery_eligible(decoded.outcome, task, handoff) {
+                if let (Some(roots), Some(adapter), Some(key)) = (
+                    context_roots.as_ref().or(self.roots),
+                    route.provider.as_deref(),
+                    route.account_key.as_deref(),
+                ) {
+                    let config =
+                        provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
+                            .map_err(|error| error.to_string())?;
+                    let accounts = config.domains.accounts.with_derived_accounts();
+                    let quota =
+                        crate::quota::read_cache_at(roots.state.as_path()).unwrap_or_default();
+                    let (quota, policies) = crate::route::account_evidence(
+                        &config.domains.quota,
+                        quota,
+                        now.unix_seconds(),
+                    );
+                    let catalogue = provenant_routing::Catalogue::bundled()
+                        .map_err(|error| error.to_string())?;
+                    unspent_alternative(
+                        accounts
+                            .entries
+                            .values()
+                            .filter(|entry| entry.adapter == adapter)
+                            .map(|entry| entry.key.as_str()),
+                        &quota,
+                        &policies,
+                        key,
+                        &model,
+                        &catalogue,
+                        now.unix_seconds(),
+                    )
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
         Ok(assess_settlement_retry(
             &routing,
-            other_account,
-            task,
             record,
             decoded,
             policy_attempt,
             now.unix_seconds(),
+            quota_handoff_recovery,
         ))
     }
     fn priority(&self, task: &run::TaskRequest) -> Result<u8, String> {
@@ -510,7 +494,7 @@ impl run::Providers for Registry<'_> {
         prompt: &str,
         paths: &run::LaunchPaths,
         resume: Option<&run::AttemptRecord>,
-    ) -> Result<run::PreparedLaunch, String> {
+    ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
         self.prepare_with_wait(task, prompt, paths, resume, None)
     }
 
@@ -534,7 +518,8 @@ impl Registry<'_> {
         provider_state: &Path,
         host_settlement: bool,
     ) -> Result<run::Decoded, String> {
-        let is_claude = route.provider.as_deref() == Some("claude");
+        let is_claude =
+            route.provider.as_deref() == Some(provenant_records::Harness::Claude.spec().name);
         let failed = |reason: &str| run::Decoded {
             outcome: run::Outcome::Failed,
             result: String::new(),
@@ -575,7 +560,7 @@ impl Registry<'_> {
         events.extend(outcome.final_events().iter().cloned());
         // Stderr quota text is evidence only for a run the adapter did not
         // accept; a successful run may print incidental quota wording.
-        if adapter.id() == "opencode"
+        if adapter.id() == provenant_records::Harness::Opencode.spec().name
             && !matches!(outcome.status(), OutcomeStatus::Success)
             && let Some(event) = provenant_providers::opencode::stderr_quota(stderr)
         {
@@ -593,18 +578,19 @@ impl Registry<'_> {
             .and_then(|observed| observed.as_ref().err())
             .map(|error| format!("Codex rollout identity: {error}"));
         // OpenCode's stream names no model; its session record does.
-        let opencode_model = (adapter.id() == "opencode").then(|| {
-            let data = std::env::var_os("XDG_DATA_HOME")
-                .map(std::path::PathBuf::from)
-                .filter(|path| path.is_absolute())
-                .or_else(|| self.home.map(|home| home.join(".local/share")))
-                .map(|data| data.join("opencode"))
-                .ok_or(provenant_providers::ProviderError::UnknownIdentity)?;
-            let session = outcome
-                .session()
-                .ok_or(provenant_providers::ProviderError::UnknownIdentity)?;
-            provenant_providers::opencode::observe_model(&data, session)
-        });
+        let opencode_model = (adapter.id() == provenant_records::Harness::Opencode.spec().name)
+            .then(|| {
+                let data = std::env::var_os("XDG_DATA_HOME")
+                    .map(std::path::PathBuf::from)
+                    .filter(|path| path.is_absolute())
+                    .or_else(|| self.home.map(|home| home.join(".local/share")))
+                    .map(|data| data.join(provenant_records::Harness::Opencode.spec().name))
+                    .ok_or(provenant_providers::ProviderError::UnknownIdentity)?;
+                let session = outcome
+                    .session()
+                    .ok_or(provenant_providers::ProviderError::UnknownIdentity)?;
+                provenant_providers::opencode::observe_model(&data, session)
+            });
         let opencode_model = match opencode_model {
             Some(Ok(model)) => Some(model),
             Some(Err(error)) => {
@@ -617,7 +603,7 @@ impl Registry<'_> {
         let observed_model = if adapter.id() == "codex" {
             // Missing or invalid rollout evidence cannot fall back to another source.
             rollout.as_ref().map(|turn| turn.model.as_str())
-        } else if adapter.id() == "opencode" {
+        } else if adapter.id() == provenant_records::Harness::Opencode.spec().name {
             opencode_model.as_deref()
         } else {
             outcome.model()
@@ -685,6 +671,21 @@ impl Registry<'_> {
                 _ => {}
             }
         }
+        if adapter.id() == provenant_records::Harness::Agy.spec().name {
+            // Agy can repeat the whole answer across its streamed response and
+            // result, or within the result itself. Leave distinct text intact.
+            let answer = decoded.result.trim();
+            let mut middle = answer.len() / 2;
+            while !answer.is_char_boundary(middle) {
+                middle -= 1;
+            }
+            let (left, right) = answer.split_at(middle);
+            let first = left.trim_end();
+            let second = right.trim_start();
+            if !first.is_empty() && first == second && first.len() + second.len() < answer.len() {
+                decoded.result = first.to_owned();
+            }
+        }
         if adapter.id() == "command" {
             decoded.observed_route = Some(run::RouteRecord {
                 source: Some("command_exit".into()),
@@ -696,7 +697,9 @@ impl Registry<'_> {
                     .insert_str(0, "[output truncated; retained tail]\n");
             }
         }
-        if (is_claude || adapter.id() == "claude") && !has_usage {
+        if (is_claude || adapter.id() == provenant_records::Harness::Claude.spec().name)
+            && !has_usage
+        {
             let has_result = stdout.split(|&b| b == b'\n').any(|line| {
                 serde_json::from_slice::<serde_json::Value>(line)
                     .is_ok_and(|event| event["type"] == "result")
@@ -707,10 +710,24 @@ impl Registry<'_> {
                 "absent: no result event".into()
             });
         }
-        let auth = events.contains(&ProviderEvent::AuthRequired);
+        let failure_cause = if events.contains(&ProviderEvent::AuthRequired) {
+            provenant_providers::FailureCause::AuthRequired
+        } else {
+            adapter.failure_cause(stderr)
+        };
+        let auth = failure_cause == provenant_providers::FailureCause::AuthRequired;
+        let provider_failed = outcome.status() == OutcomeStatus::Failed
+            && failure_cause == provenant_providers::FailureCause::Provider;
         (decoded.outcome, decoded.reason) = match outcome.status() {
             OutcomeStatus::Success => (run::Outcome::Succeeded, None),
-            OutcomeStatus::Refused if auth => (run::Outcome::AuthRequired, None),
+            _ if auth && outcome.status() != OutcomeStatus::Success => (
+                run::Outcome::AuthRequired,
+                Some(format!(
+                    "provider sign-in required; {}",
+                    provenant_records::AdapterSpec::get(adapter.id())
+                        .map_or("run provenant accounts", |spec| spec.login_hint)
+                )),
+            ),
             OutcomeStatus::Refused => (run::Outcome::Rejected, Some("provider refused".into())),
             OutcomeStatus::Failed => (run::Outcome::Failed, Some("provider failed".into())),
             OutcomeStatus::Partial => {
@@ -747,7 +764,7 @@ impl Registry<'_> {
             .find(|event| matches!(event, ProviderEvent::Denied { .. }))
         {
             if decoded.outcome == run::Outcome::Failed
-                && decoded.reason.as_deref() == Some("provider failed")
+                && provider_failed
                 && code == Some(0)
                 && !timed_out
                 && !events
@@ -944,6 +961,7 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
     Ok(provenant_routing::RouteRequest {
         intent: provenant_routing::RouteIntent {
             writes: run::Service::has_writes(task.writer.is_some(), &task.access.write_roots),
+            network: Some(task.access.network(task.writer.is_some())),
             workload: if matches!(task.route, run::RequestedRoute::Review { .. }) {
                 provenant_routing::Workload::Review
             } else {

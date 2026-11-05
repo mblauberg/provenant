@@ -1,4 +1,5 @@
 //! Fabric's clap subtree and edge composition. Runtime owns coordination policy.
+use crate::metadata::CatalogueArg;
 mod context;
 
 pub(crate) use context::private_dir;
@@ -86,7 +87,7 @@ pub enum Graph {
         /// Graph ID, project-local document path or document SHA-256 hash
         id: String,
         /// Why the graph was cancelled (up to 256 bytes)
-        #[arg(long)]
+        #[arg(long, value_parser = crate::grammar::reason, catalog_bounds = (0, 256))]
         reason: Option<String>,
     },
     /// Resume a task graph from its document
@@ -109,16 +110,16 @@ pub struct Operation {
 #[derive(Debug, Args)]
 pub struct Lease {
     /// Lease duration in seconds (1 to 3600)
-    #[arg(long, default_value = "300", value_parser = clap::value_parser!(u64).range(1..=3600))]
+    #[arg(long, default_value = "300", catalog_u64_range = 1..=3600)]
     pub lease_seconds: u64,
 }
 #[derive(Debug, Args)]
 pub struct SequencePage {
     /// Return entries after this sequence number
-    #[arg(long, value_parser = clap::value_parser!(i64).range(0..))]
+    #[arg(long, catalog_i64_range = 0..)]
     pub after: Option<i64>,
     /// Maximum entries (1 to 100)
-    #[arg(long, default_value = "100", value_parser = clap::value_parser!(u64).range(1..=100))]
+    #[arg(long, default_value = "100", catalog_u64_range = 1..=100)]
     pub limit: u64,
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -160,7 +161,7 @@ pub enum Mail {
     /// Mark messages read up to a sequence number
     MarkRead {
         /// Last sequence number to mark read
-        #[arg(value_parser = clap::value_parser!(i64).range(0..))]
+        #[arg(catalog_i64_range = 0..)]
         through: i64,
         /// Exact chair session whose mailbox to mark, instead of this agent's
         #[arg(long)]
@@ -217,7 +218,7 @@ impl FromStr for Token {
 #[derive(Debug, Args)]
 pub struct Fence {
     /// Fence generation
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    #[arg(long, catalog_u64_range = 1..)]
     generation: u64,
     /// Fence token (32 lowercase hex digits)
     #[arg(long)]
@@ -262,7 +263,7 @@ pub enum Task {
         #[arg(long)]
         after: Option<TaskId>,
         /// Maximum tasks (1 to 100)
-        #[arg(long, default_value = "100", value_parser = clap::value_parser!(u64).range(1..=100))]
+        #[arg(long, default_value = "100", catalog_u64_range = 1..=100)]
         limit: u64,
     },
     /// Claim a task under a lease
@@ -310,7 +311,7 @@ pub enum Events {
         #[command(flatten)]
         page: SequencePage,
         /// Wait up to this many seconds for new entries
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=provenant_core::MAX_LANE_RUNTIME_SECONDS))]
+        #[arg(long, catalog_duration())]
         wait: Option<u64>,
     },
     /// Add a note to the activity log
@@ -412,7 +413,7 @@ pub enum Claim {
         #[arg(long)]
         after: Option<ClaimId>,
         /// Maximum claims (1 to 100)
-        #[arg(long, default_value = "100", value_parser = clap::value_parser!(u64).range(1..=100))]
+        #[arg(long, default_value = "100", catalog_u64_range = 1..=100)]
         limit: u64,
     },
 }
@@ -425,7 +426,7 @@ pub struct LandingFence {
     #[arg(long)]
     id: ClaimId,
     /// Lease generation
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    #[arg(long, catalog_u64_range = 1..)]
     generation: u64,
 }
 #[derive(Debug, thiserror::Error)]
@@ -512,7 +513,7 @@ pub enum Landing {
         #[arg(long)]
         generation: u64,
         /// Seconds to wait (1 to 14400)
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=provenant_core::MAX_LANE_RUNTIME_SECONDS))]
+        #[arg(long, catalog_duration())]
         wait: u64,
     },
 }
@@ -541,12 +542,25 @@ pub enum EdgeError {
     Time(#[from] provenant_core::TimeError),
     #[error(transparent)]
     Encode(#[from] serde_json::Error),
+    #[error("Fabric state directory {} has mode {mode:04o}; other users can read or access it; {}", path.display(), self.repair().unwrap_or_default())]
+    StateDirectoryPermissions { path: PathBuf, mode: u32 },
     #[error("invalid Fabric input")]
     Invalid,
     #[error("invalid Fabric input: {0}")]
     InvalidField(&'static str),
     #[error("Git executable is unavailable")]
     GitUnavailable,
+}
+impl EdgeError {
+    pub fn repair(&self) -> Option<String> {
+        match self {
+            Self::StateDirectoryPermissions { path, .. } => Some(format!(
+                "run chmod 700 '{}' and retry",
+                path.to_string_lossy().replace('\'', "'\"'\"'")
+            )),
+            _ => None,
+        }
+    }
 }
 fn json(value: impl Serialize) -> Result<Value, EdgeError> {
     Ok(serde_json::to_value(value)?)
@@ -1054,6 +1068,7 @@ pub fn run(
                 EdgeError::Identity(_)
                 | EdgeError::Invalid
                 | EdgeError::InvalidField(_)
+                | EdgeError::StateDirectoryPermissions { .. }
                 | EdgeError::Root(_) => (Outcome::Invalid, "invalid_input"),
                 EdgeError::Relay(error) => (Outcome::Error, error.code()),
                 EdgeError::Config(_) => (Outcome::Invalid, "config"),
@@ -1061,10 +1076,11 @@ pub fn run(
             };
             let mut result = CommandResult::new(&command, status, Value::Null);
             result.error = Some(CommandError {
+                diagnostic: None,
                 code: code.into(),
                 message: error.to_string(),
                 cause: None,
-                repair: None,
+                repair: error.repair(),
             });
             result
         }
@@ -1098,7 +1114,7 @@ pub fn coordination_outcome(
 ) -> Outcome {
     use provenant_fabric_runtime::coordination::facade::FacadeError;
     match error {
-        FacadeError::InvalidInput | FacadeError::NotFound => Outcome::Invalid,
+        FacadeError::InvalidInput { .. } | FacadeError::NotFound => Outcome::Invalid,
         FacadeError::StaleFence
         | FacadeError::GenerationConflict { .. }
         | FacadeError::Conflict

@@ -37,6 +37,23 @@ fn request(root: &Path) -> PlanRequest {
 }
 
 #[test]
+fn required_credential_grant_refusal_names_path_and_guard() {
+    let temp = fixture();
+    let root = fs::canonicalize(temp.path()).unwrap();
+    let refused = root.join(".gemini/skills");
+    fs::create_dir_all(&refused).unwrap();
+    let mut input = request(&root);
+    input.agy_state = None;
+    input.permissions.read_roots = vec![PathGrant {
+        path: refused.clone(),
+        scope: PathScope::Subtree,
+    }];
+    let message = ConfinedPlan::new(input).err().unwrap().to_string();
+    assert!(message.contains(".gemini/skills"), "{message}");
+    assert!(message.contains("credential root"), "{message}");
+}
+
+#[test]
 fn private_state_cannot_expose_credentials_or_alias_the_source() {
     let temp = fixture();
     let mut input = request(temp.path());

@@ -20,6 +20,16 @@ list. Typed causes survive across crate, graph checkpoint and MCP boundaries
 instead of being flattened to prose. Tests assert the code and stable
 identifiers, never message text.
 
+The shared diagnostic record carries a required code and optional category,
+detail and next action. Owners select safe facts; a source error, prompt or
+captured output is not a safe fact merely because it implements `Display`.
+Projected fields escape terminal controls and are limited to 1,024 UTF-8 bytes.
+Local CLI projections may name absolute paths. Remote and MCP projections
+disclose only paths relative to an explicitly supplied repository or home
+anchor; otherwise they identify the grant or inspection action instead.
+Run error codes and their typed confinement causes declare the ADR 0035
+boundary class; a generic code alone cannot classify an ambiguous guard.
+
 ## Consequences
 
 A code is public surface: renaming one is a breaking change, so add rather than

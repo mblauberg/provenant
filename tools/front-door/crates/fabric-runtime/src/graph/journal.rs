@@ -546,11 +546,11 @@ pub(super) fn decode_checkpoint(
     if stored.schema_version != 1 {
         return Err(JournalError::BadEnvelope);
     }
-    for found in [
-        stored.checkpoint.schema_version,
-        stored.execution.document.schema_version,
+    for (found, supported) in [
+        (stored.checkpoint.schema_version, 1),
+        (stored.execution.document.schema_version, 2),
     ] {
-        if found > 1 {
+        if found > supported {
             return Err(DecodeError::UnsupportedVersion {
                 found,
                 line: 1,
@@ -558,6 +558,21 @@ pub(super) fn decode_checkpoint(
             }
             .into());
         }
+    }
+    let document = &stored.execution.document;
+    let has_v2 = document_requires_schema_v2(document)
+        || stored.execution.review_base.is_some()
+        || stored
+            .checkpoint
+            .expansions
+            .iter()
+            .any(|expansion| expansion.review.is_some() || nodes_have_v2(&expansion.nodes));
+    // Matches validate_schema: version 2 may omit every v2 field.
+    if !matches!(document.schema_version, 1 | 2)
+        || document.schema_version < u64::from(minimum_schema_version(document))
+        || document.schema_version == 1 && has_v2
+    {
+        return Err(JournalError::BadEnvelope);
     }
     let digest = CanonicalV1::record_digest(
         "fabric-graph-checkpoint",

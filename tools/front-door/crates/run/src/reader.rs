@@ -1005,16 +1005,15 @@ impl RunStore {
     }
 }
 pub(crate) fn valid_write_grants(grants: &[WriteGrantRecord]) -> bool {
-    grants.len() <= provenant_confinement::MAX_WRITE_GRANTS
-        && grants.iter().all(|grant| {
-            grant
-                .path
-                .to_path_buf()
-                .is_ok_and(|path| path.is_absolute())
-        })
+    grants.iter().all(|grant| {
+        grant
+            .path
+            .to_path_buf()
+            .is_ok_and(|path| path.is_absolute())
+    })
 }
 
-/// Launch-time bound only; stored records are validated by count.
+/// Launch-time wire-size bound; stored records remain readable.
 pub(crate) fn write_grants_fit(grants: &[WriteGrantRecord]) -> bool {
     valid_write_grants(grants)
         && provenant_records::CanonicalV1::bytes(&grants).is_ok_and(|bytes| {
@@ -1023,6 +1022,18 @@ pub(crate) fn write_grants_fit(grants: &[WriteGrantRecord]) -> bool {
 }
 
 pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
+    if r.preparation_failure.is_some()
+        && (r.provider_launched != Some(false)
+            || !matches!(
+                r.state,
+                AttemptState::Terminal {
+                    outcome: Outcome::Rejected | Outcome::AuthRequired,
+                    ..
+                }
+            ))
+    {
+        return Err(RunError::Validation("preparation failure evidence"));
+    }
     if r.context.as_ref().is_some_and(|context| !context.valid()) {
         return Err(RunError::Validation("work context"));
     }
@@ -1083,7 +1094,7 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
                     if outcome != Outcome::Unsettled && r.exit_evidence.is_some() => {}
                 (
                     Some(TerminalEvidence::PreLaunchRefusal),
-                    Outcome::Rejected | Outcome::Cancelled,
+                    Outcome::Rejected | Outcome::Cancelled | Outcome::AuthRequired,
                 ) if r.provider_launched == Some(false) => {}
                 (Some(TerminalEvidence::EffectiveCancellation), Outcome::Cancelled) => {}
                 (Some(TerminalEvidence::ImportCancellation), Outcome::Cancelled)
@@ -1111,8 +1122,10 @@ pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {
                 return Err(RunError::Validation("terminal exit artifact"));
             }
             Some(_) => {}
-            None if matches!(outcome, Outcome::Rejected | Outcome::Cancelled)
-                && r.started_at.is_none() => {}
+            None if matches!(
+                outcome,
+                Outcome::Rejected | Outcome::Cancelled | Outcome::AuthRequired
+            ) && r.started_at.is_none() => {}
             None if lost => {}
             None => return Err(RunError::Validation("terminal exit evidence missing")),
         }

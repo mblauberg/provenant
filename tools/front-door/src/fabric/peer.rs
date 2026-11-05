@@ -248,7 +248,7 @@ pub fn peer(
                     PeerResult::Error {
                         data: provenant_fabric_runtime::hosts::PeerResultError {
                             extra: Default::default(),
-                            error: FacadeError::InvalidInput,
+                            error: FacadeError::InvalidInput { detail: None },
                         },
                         extra: Default::default(),
                     }
@@ -289,7 +289,7 @@ pub fn peer(
                     PeerResult::Error {
                         data: provenant_fabric_runtime::hosts::PeerResultError {
                             extra: Default::default(),
-                            error: FacadeError::InvalidInput,
+                            error: FacadeError::InvalidInput { detail: None },
                         },
                         extra: Default::default(),
                     }
@@ -322,7 +322,7 @@ pub fn peer(
                     extra: Default::default(),
                 };
                 if *limit > context.config.limits.page_rows {
-                    error(FacadeError::InvalidInput)
+                    error(FacadeError::InvalidInput { detail: None })
                 } else {
                     match provenant_cli::inbox::console_inbox_page(&context.roots, *state, *limit) {
                         Ok(data) => PeerResult::Console {
@@ -343,7 +343,7 @@ pub fn peer(
                     Err(_) => PeerResult::Error {
                         data: provenant_fabric_runtime::hosts::PeerResultError {
                             extra: Default::default(),
-                            error: FacadeError::InvalidInput,
+                            error: FacadeError::InvalidInput { detail: None },
                         },
                         extra: Default::default(),
                     },
@@ -354,7 +354,7 @@ pub fn peer(
                     PeerResult::Error {
                         data: provenant_fabric_runtime::hosts::PeerResultError {
                             extra: Default::default(),
-                            error: FacadeError::InvalidInput,
+                            error: FacadeError::InvalidInput { detail: None },
                         },
                         extra: Default::default(),
                     }
@@ -412,7 +412,7 @@ pub fn peer(
                     PeerResult::Error {
                         data: provenant_fabric_runtime::hosts::PeerResultError {
                             extra: Default::default(),
-                            error: FacadeError::InvalidInput,
+                            error: FacadeError::InvalidInput { detail: None },
                         },
                         extra: Default::default(),
                     }
