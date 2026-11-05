@@ -48,6 +48,19 @@ fn pending_markers_follow_saves_and_rebuild_after_loss() {
             .unwrap()
             .is_empty()
     );
+    // A crash after publishing a marker but before publishing pending state
+    // leaves a harmless marker, which is cleared under the journal lock.
+    std::fs::write(markers.join("g-test.pending"), b"1").unwrap();
+    assert_eq!(
+        FileJournal::pending_graph_ids(&root, project).unwrap(),
+        ["g-test"]
+    );
+    journal.clear_stale_pending().unwrap();
+    assert!(
+        FileJournal::pending_graph_ids(&root, project)
+            .unwrap()
+            .is_empty()
+    );
     drop(journal);
     std::fs::remove_file(markers.join("complete")).unwrap();
     std::fs::write(
