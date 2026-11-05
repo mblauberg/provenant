@@ -434,6 +434,42 @@ fn land_waits_for_new_checks_to_stop_registering_when_no_check_is_required() -> 
     Ok(())
 }
 
+fn land_plain_singleton_uses_batch_driver() -> Result {
+    let rig = self::rig()?;
+    let git = provenant_os::git::git_executable().ok_or("Git executable")?;
+    let remote = rig.root.join("unused-remote.git");
+    assert_eq!(
+        code(&rig.execute(
+            &git,
+            &[
+                "remote",
+                "add",
+                "origin",
+                remote.to_str().ok_or("remote path")?
+            ],
+            None
+        )?),
+        0
+    );
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version = 1\n[domains.pr.land]\nbatch_wait_seconds = 0\n",
+    )?;
+    let output = rig.command(&["land", "1668", "--json"])?;
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_ne!(code(&output), 0, "an unapproved PR must not land");
+    assert_eq!(report["data"]["outcomes"]["1668"], "excluded", "{report}");
+    assert_eq!(report["error"]["code"], "LAND_REFUSED", "{report}");
+    let calls = fs::read_to_string(rig.project.join("gh-calls"))?.replace("api --include ", "api ");
+    assert!(calls.contains("api repos/{owner}/{repo}"), "{calls}");
+    assert!(
+        calls.contains("api repos/{owner}/{repo}/pulls/1668"),
+        "{calls}"
+    );
+    assert!(!rig.project.join("merge-args").exists());
+    Ok(())
+}
+
 fn land_explains_poll_and_budget_sources() -> Result {
     let rig = self::rig()?;
     let show = |args: &[&str]| -> Result<serde_json::Value> {
@@ -442,15 +478,35 @@ fn land_explains_poll_and_budget_sources() -> Result {
         Ok(serde_json::from_slice(&output.stdout.bytes)?)
     };
     let default = show(&["land", "1668", "--explain", "--json"])?;
-    assert_eq!(default["data"]["poll_seconds"], 30);
-    assert_eq!(default["data"]["poll_source"], "compiled default");
+    assert_eq!(default["data"]["fields"]["poll_seconds"]["value"], 30);
+    assert_eq!(
+        default["data"]["fields"]["poll_seconds"]["source"]["layer"],
+        "bundled"
+    );
     fs::write(
         rig.state.join("config.toml"),
-        "schema_version = 1\n[domains.pr.land]\npoll_seconds = 45\n",
+        "schema_version = 1\n[domains.pr.land]\npoll_seconds = 45\npublish_settle_seconds = 0\ncandidate_ref_prefix = 'custom/'\n",
     )?;
     let config = show(&["land", "1668", "--explain", "--json"])?;
-    assert_eq!(config["data"]["poll_seconds"], 45);
-    assert_eq!(config["data"]["poll_source"], "host config");
+    assert_eq!(config["data"]["fields"]["poll_seconds"]["value"], 45);
+    assert_eq!(
+        config["data"]["fields"]["poll_seconds"]["source"]["layer"],
+        "host"
+    );
+    assert!(
+        config["data"]["warnings"][0]
+            .as_str()
+            .unwrap_or_default()
+            .contains("CI trigger")
+    );
+    assert!(
+        config["data"]["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|warning| warning
+                .as_str()
+                .unwrap_or_default()
+                .contains("disables the in-flight")))
+    );
     let cli = show(&[
         "land",
         "1668",
@@ -460,10 +516,39 @@ fn land_explains_poll_and_budget_sources() -> Result {
         "--wait=90s",
         "--json",
     ])?;
-    assert_eq!(cli["data"]["poll_seconds"], 7);
-    assert_eq!(cli["data"]["poll_source"], "--poll");
+    assert_eq!(cli["data"]["fields"]["poll_seconds"]["value"], 7);
+    assert_eq!(
+        cli["data"]["fields"]["poll_seconds"]["source"]["layer"],
+        "invocation"
+    );
     assert_eq!(cli["data"]["retry_budget_seconds"], 90);
     assert_eq!(cli["data"]["retry_budget_source"], "--wait");
+    let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let binding = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(fs::canonicalize(rig.project.join(".git"))?)?,
+    )?;
+    fs::write(
+        rig.state.join("config.toml"),
+        format!(
+            "schema_version=1\n[domains.pr.land.projects.\"{}\"]\npoll_seconds=21\n[domains.pr.land.tiers.crucial]\npoll_seconds=12\n",
+            binding.project_id()
+        ),
+    )?;
+    let project = show(&["land", "--explain", "--json"])?;
+    assert_eq!(project["data"]["fields"]["poll_seconds"]["value"], 21);
+    assert_eq!(
+        project["data"]["fields"]["poll_seconds"]["source"]["layer"],
+        "project"
+    );
+    let tier = show(&["land", "--explain", "--tier", "crucial", "--json"])?;
+    assert_eq!(tier["data"]["fields"]["poll_seconds"]["value"], 12);
+    assert_eq!(
+        tier["data"]["fields"]["poll_seconds"]["source"]["layer"],
+        "tier"
+    );
     assert!(!rig.project.join("gh-calls").exists());
     Ok(())
 }
@@ -758,6 +843,12 @@ fn fake_gh(args: &[String]) -> Result<u8> {
     )?;
     let normalised = call.replace("api --include ", "api ");
     match normalised.as_str() {
+        "api repos/{owner}/{repo}" => {
+            io::stdout().write_all(br#"{"default_branch":"main","html_url":"https://github.com/owner/repo","full_name":"owner/repo","owner":{"login":"owner"}}"#)?;
+        }
+        "api --paginate --slurp repos/{owner}/{repo}/pulls/1668/reviews?per_page=100" => {
+            io::stdout().write_all(b"[[]]")?;
+        }
         "api repos/{owner}/{repo}/pulls/1668" => {
             if Path::new("read-fail-after-merge").exists() && Path::new("merge-args").exists() {
                 writeln!(io::stderr(), "HTTP 502 Bad Gateway")?;
@@ -1044,6 +1135,10 @@ fn main() -> ExitCode {
             (
                 "land_waits_for_new_checks_to_stop_registering_when_no_check_is_required",
                 land_waits_for_new_checks_to_stop_registering_when_no_check_is_required,
+            ),
+            (
+                "land_plain_singleton_uses_batch_driver",
+                land_plain_singleton_uses_batch_driver,
             ),
             (
                 "land_explains_poll_and_budget_sources",

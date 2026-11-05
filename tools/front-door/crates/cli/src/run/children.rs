@@ -6,19 +6,29 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-/// Armed from the admitted route, never from provider-controlled output.
+/// Bound to the admitted route, never provider-controlled output.
 #[derive(Default)]
-struct QuotaFrames(std::sync::atomic::AtomicBool);
+struct QuotaFrames(Mutex<Option<&'static dyn provenant_os::capture::FrameDecoder>>);
 impl provenant_os::capture::FrameDecoder for QuotaFrames {
     fn decode(
         &self,
         frame: &[u8],
     ) -> Result<provenant_os::capture::FrameEvent, provenant_os::capture::DecodeFailure> {
-        if self.0.load(std::sync::atomic::Ordering::Relaxed) {
-            provenant_providers::opencode::OpenCode.decode(frame)
-        } else {
-            Ok(provenant_os::capture::FrameEvent::Progress)
+        match *self
+            .0
+            .lock()
+            .map_err(|_| provenant_os::capture::DecodeFailure)?
+        {
+            Some(decoder) => decoder.decode(frame),
+            None => Ok(provenant_os::capture::FrameEvent::Progress),
         }
+    }
+    fn partial_terminal(&self, frame: &[u8]) -> bool {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|decoder| *decoder)
+            .is_some_and(|decoder| decoder.partial_terminal(frame))
     }
 }
 
@@ -33,7 +43,8 @@ struct Service {
 /// and observing cancellation while child provider preparation runs.
 pub struct HostHolder<'a> {
     inner: &'a dyn Holder,
-    quota_frames: QuotaFrames,
+    stdout_frames: QuotaFrames,
+    stderr_frames: QuotaFrames,
     fabric_relay: Mutex<Option<provenant_fabric_mcp::lane::HostRelay>>,
     service: Mutex<Option<Service>>,
     settled: Mutex<Option<run::HolderContext>>,
@@ -42,7 +53,8 @@ impl<'a> HostHolder<'a> {
     pub fn new(inner: &'a dyn Holder) -> Self {
         Self {
             inner,
-            quota_frames: QuotaFrames::default(),
+            stdout_frames: QuotaFrames::default(),
+            stderr_frames: QuotaFrames::default(),
             fabric_relay: Mutex::new(None),
             service: Mutex::new(None),
             settled: Mutex::new(None),
@@ -50,7 +62,11 @@ impl<'a> HostHolder<'a> {
     }
     /// Live stdout lifecycle evidence, bound during admission before spawn.
     pub fn stdout_decoder(&self) -> &dyn provenant_os::capture::FrameDecoder {
-        &self.quota_frames
+        &self.stdout_frames
+    }
+    /// Live stderr lifecycle evidence, bound during admission before spawn.
+    pub fn stderr_decoder(&self) -> &dyn provenant_os::capture::FrameDecoder {
+        &self.stderr_frames
     }
     /// Available after supervise returns, when custody locks have been released.
     pub fn settled(&self) -> custody::Result<Option<run::HolderContext>> {
@@ -160,14 +176,25 @@ impl Holder for HostHolder<'_> {
                 },
             )
             .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error)))?;
-        self.quota_frames.0.store(
-            record
-                .applied_route
-                .as_ref()
-                .and_then(|route| route.provider.as_deref())
-                == Some(provenant_records::Harness::Opencode.spec().name),
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        let registration = provenant_providers::REGISTRY.iter().find(|entry| {
+            Some(entry.adapter.id())
+                == record
+                    .applied_route
+                    .as_ref()
+                    .and_then(|route| route.provider.as_deref())
+        });
+        *self
+            .stdout_frames
+            .0
+            .lock()
+            .map_err(|_| custody::CustodyError::InvalidRecord)? =
+            registration.and_then(|entry| entry.stdout_decoder);
+        *self
+            .stderr_frames
+            .0
+            .lock()
+            .map_err(|_| custody::CustodyError::InvalidRecord)? =
+            registration.and_then(|entry| entry.stderr_decoder);
         if context.launch.is_none() {
             return Ok(());
         }

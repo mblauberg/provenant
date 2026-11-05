@@ -14,6 +14,8 @@ pub struct Codex;
 pub const REGISTRATION: crate::Registration = crate::Registration {
     adapter: &Codex,
     quota_source: Some(&Codex),
+    stdout_decoder: None,
+    stderr_decoder: None,
     display_name: "Codex",
     quota: provenant_quota::QuotaPolicy {
         adapter: "codex",
