@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct GraphNodeWait {
     pub node: String,
+    pub state: NodeState,
     pub wait: &'static str,
     pub disposition: &'static str,
     pub code: String,
@@ -17,6 +18,11 @@ pub struct GraphNodeWait {
     pub limit_source: String,
     pub wake_at: String,
     pub next: String,
+    pub cause: Option<String>,
+    pub branch: Option<String>,
+    pub head: Option<String>,
+    pub handoff: Option<String>,
+    pub output_path: Option<String>,
 }
 
 /// Derive status without changing wake scheduling or checkpoint bytes.
@@ -24,14 +30,11 @@ pub fn graph_waits(checkpoint: &GraphCheckpoint) -> Vec<GraphNodeWait> {
     checkpoint
         .nodes
         .iter()
-        .filter_map(|node| {
+        .map(|node| {
             let attempt = node.attempts.last();
             let quota = node.state == NodeState::Failed
                 && attempt.and_then(|attempt| attempt.outcome)
                     == Some(AttemptOutcome::UsageLimited);
-            if !matches!(node.state, NodeState::Running | NodeState::Blocked) && !quota {
-                return None;
-            }
             let approval = checkpoint.asks.iter().find(|ask| {
                 ask.node.as_deref() == Some(node.id.as_str()) && !ask.closed && !ask.resolved
             });
@@ -63,6 +66,10 @@ pub fn graph_waits(checkpoint: &GraphCheckpoint) -> Vec<GraphNodeWait> {
                 "terminal"
             } else if wait == "launch_retry" {
                 "retry"
+            } else if node.state == NodeState::Pending {
+                "pending"
+            } else if node.state != NodeState::Running {
+                "terminal"
             } else {
                 "running"
             };
@@ -79,8 +86,9 @@ pub fn graph_waits(checkpoint: &GraphCheckpoint) -> Vec<GraphNodeWait> {
                 .and_then(|error| error.split_once("next: ").map(|(_, next)| next.to_owned()))
                 .filter(|next| !next.is_empty())
                 .unwrap_or_else(|| "unavailable".into());
-            Some(GraphNodeWait {
+            GraphNodeWait {
                 node: node.id.clone(),
+                state: node.state,
                 wait,
                 disposition,
                 code,
@@ -107,7 +115,33 @@ pub fn graph_waits(checkpoint: &GraphCheckpoint) -> Vec<GraphNodeWait> {
                     }
                 }),
                 next,
-            })
+                cause: node
+                    .advance_error_code
+                    .clone()
+                    .or_else(|| node.loop_pause_code.clone())
+                    .or_else(|| quota.then(|| "usage_limited".into())),
+                branch: node
+                    .outputs
+                    .as_ref()
+                    .and_then(|output| output.branch.clone())
+                    .or_else(|| node.land.as_ref().map(|land| land.branch.clone())),
+                head: node
+                    .outputs
+                    .as_ref()
+                    .and_then(|output| output.commit.clone())
+                    .or_else(|| node.land.as_ref().map(|land| land.head.clone()))
+                    .or_else(|| {
+                        node.writer_binding
+                            .as_ref()
+                            .map(|binding| binding.head.clone())
+                    }),
+                handoff: node.handoff.clone(),
+                output_path: node
+                    .outputs
+                    .as_ref()
+                    .and_then(|output| output.result.as_ref())
+                    .and_then(|result| result.path.clone()),
+            }
         })
         .collect()
 }
@@ -128,12 +162,25 @@ mod tests {
                 {"id":"land","state":"running","worktree":null,"attempts":[],"land":{"tier":"routine","policy":"auto","policy_source":"default","branch":"work","head":"abc"}},
                 {"id":"retry","state":"running","worktree":null,"launch_retry":{"policy":{"limit":3,"limit_source":"host","first_seconds":5,"max_seconds":60},"failures":2,"wake_at":"2026-01-01T00:00:00.000000Z"},"attempts":[{"launched":false,"key":{"graph_id":"g","node_id":"retry","route_index":0},"route":{"alias":"senior"},"state":"starting","attempt_ref":"host/attempt","outcome":null,"launch_actor":"actor"}]},
                 {"id":"blocked","state":"blocked","worktree":null,"advance_error_code":"launch_retry_exhausted","last_launch_retry":{"policy":{"limit":1,"limit_source":"project","first_seconds":5,"max_seconds":60},"failures":2},"attempts":[]},
-                {"id":"quota","state":"failed","worktree":null,"attempts":[{"launched":true,"key":{"graph_id":"g","node_id":"quota","route_index":0},"route":{"alias":"senior"},"state":"terminal","attempt_ref":"host/quota","outcome":"usage_limited","launch_actor":"actor"}]}
+                {"id":"quota","state":"failed","worktree":null,"attempts":[{"launched":true,"key":{"graph_id":"g","node_id":"quota","route_index":0},"route":{"alias":"senior"},"state":"terminal","attempt_ref":"host/quota","outcome":"usage_limited","launch_actor":"actor"}]},
+                {"id":"pending","state":"pending","worktree":null,"attempts":[]},
+                {"id":"done","state":"succeeded","worktree":null,"handoff":"done","outputs":{"schema_version":1,"result":{"digest":"sha256:test","excerpt":"","truncated":false,"path":"result.txt"},"verdict":null,"findings":[],"branch":"lane","commit":"abc","warnings":[]},"attempts":[]}
             ]
         })).unwrap();
         let before = serde_json::to_vec(&checkpoint).unwrap();
         let waits = graph_waits(&checkpoint);
         let by_id = |id: &str| waits.iter().find(|wait| wait.node == id).unwrap();
+        assert_eq!(waits.len(), checkpoint.nodes.len());
+        assert_eq!(by_id("pending").disposition, "pending");
+        assert_eq!(by_id("done").disposition, "terminal");
+        assert_eq!(by_id("done").branch.as_deref(), Some("lane"));
+        assert_eq!(by_id("done").head.as_deref(), Some("abc"));
+        assert_eq!(by_id("done").handoff.as_deref(), Some("done"));
+        assert_eq!(by_id("done").output_path.as_deref(), Some("result.txt"));
+        assert_eq!(
+            by_id("blocked").cause.as_deref(),
+            Some("launch_retry_exhausted")
+        );
         assert_eq!(by_id("approval").wait, "approval");
         assert_eq!(by_id("ci").wait, "ci");
         assert_eq!(by_id("land").wait, "land");
@@ -146,6 +193,7 @@ mod tests {
         assert_eq!(by_id("blocked").disposition, "blocked");
         assert_eq!(by_id("blocked").code, "launch_retry_exhausted");
         assert_eq!(by_id("quota").code, "usage_limited");
+        assert_eq!(by_id("quota").cause.as_deref(), Some("usage_limited"));
         assert_eq!(by_id("quota").disposition, "terminal");
         assert_eq!(by_id("quota").wake_at, "none");
         assert_eq!(by_id("approval").next, "unavailable");
