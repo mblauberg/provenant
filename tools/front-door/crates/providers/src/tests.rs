@@ -7573,7 +7573,7 @@ fn staged_skills_probe_child() {
 
 #[test]
 fn opencode_starts_each_completed_text_part_on_a_new_message() -> Result<(), ProviderError> {
-    let stream = br#"{"type":"text","sessionID":"s","part":{"text":"prose"}}
+    let stream = r#"{"type":"text","sessionID":"s","part":{"text":"prose"}}
 {"type":"text","sessionID":"s","part":{"text":"VERDICT: PASS"}}
 "#;
     let (events, _) = replay(&opencode::OpenCode, stream, EXIT)?;
