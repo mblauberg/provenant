@@ -101,13 +101,18 @@ pub fn save_lane_owner_when_free(
         return Err(WorktreeError::IdentityChanged);
     }
     let branch = format!("refs/heads/{}", owner.branch);
-    if !read_worktrees(context, cancel)?.iter().any(|entry| {
-        canonicalize(&entry.path).ok().as_deref() == Some(tree.path())
-            && entry.branch.as_ref().map(GitRefName::as_str) == Some(branch.as_str())
-            && entry.head == expected_head
-            && !entry.locked
-            && !entry.prunable
-    }) {
+    if !context
+        .facts
+        .read_inventory(context, cancel)?
+        .iter()
+        .any(|entry| {
+            canonicalize(&entry.path).ok().as_deref() == Some(tree.path())
+                && entry.branch.as_ref().map(GitRefName::as_str) == Some(branch.as_str())
+                && entry.head == expected_head
+                && !entry.locked
+                && !entry.prunable
+        })
+    {
         return Err(WorktreeError::IdentityChanged);
     }
     let _writer =
@@ -189,7 +194,7 @@ pub fn prune_owned(
     };
     collect(context, &lanes, &output_policy, cancel)?;
     let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
-    let entries = read_worktrees(context, cancel)?;
+    let entries = context.facts.read_inventory(context, cancel)?;
     let entry = entries
         .iter()
         .find(|entry| canonicalize(&entry.path).ok().as_deref() == Some(path))

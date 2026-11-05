@@ -113,7 +113,8 @@ impl RepoFacts {
         Ok(Some(name.to_owned()))
     }
 
-    pub(super) fn capture_inventory(
+    /// Read inventory afresh and invalidate any older advisory snapshot.
+    pub(super) fn read_inventory(
         &self,
         context: &WorktreeContext<'_>,
         cancel: &CancelToken,
@@ -133,7 +134,15 @@ impl RepoFacts {
         if exit_code(&outcome)? != 0 {
             return Err(WorktreeError::InvalidOutput);
         }
-        let entries = parse_worktree_list(&outcome.stdout.bytes)?;
+        parse_worktree_list(&outcome.stdout.bytes)
+    }
+
+    pub(super) fn capture_inventory(
+        &self,
+        context: &WorktreeContext<'_>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<GitWorktree>, WorktreeError> {
+        let entries = self.read_inventory(context, cancel)?;
         self.remember_inventory(context, &entries);
         Ok(entries)
     }
@@ -336,19 +345,6 @@ pub(super) fn run_git(
         cancel,
     )
     .map_err(WorktreeError::from)
-}
-
-pub(super) fn read_worktrees(
-    context: &WorktreeContext<'_>,
-    cancel: &CancelToken,
-) -> Result<Vec<GitWorktree>, WorktreeError> {
-    // A guarded fresh read supersedes any advisory preview snapshot.
-    let _ = context.facts.take_inventory(context);
-    let outcome = run_git(context, context.repo, GitRead::WorktreeList, cancel)?;
-    if exit_code(&outcome)? != 0 {
-        return Err(WorktreeError::InvalidOutput);
-    }
-    parse_worktree_list(&outcome.stdout.bytes)
 }
 
 pub(super) fn read_branch_tips(

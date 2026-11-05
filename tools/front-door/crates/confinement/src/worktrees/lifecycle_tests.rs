@@ -220,7 +220,7 @@ fn repo_facts_resolves_a_moved_ref_fresh() -> Result<(), Box<dyn Error>> {
         Some("refs/heads/facts-ref".into())
     );
     context.facts.capture_inventory(&context, &cancel())?;
-    read_worktrees(&context, &cancel())?;
+    context.facts.read_inventory(&context, &cancel())?;
     assert!(context.facts.take_inventory(&context).is_none());
     let inventory_limit = provenant_os::exec::DEFAULT_CAPTURE_LIMIT;
     assert!(RepoFacts::with_limits(inventory_limit, 0).is_err());
@@ -245,6 +245,12 @@ fn repo_facts_resolves_a_moved_ref_fresh() -> Result<(), Box<dyn Error>> {
         }))
     ));
     let limited_inventory = RepoFacts::with_limits(1, provenant_os::git::REPO_FACT_SCALAR_LIMIT)?;
+    assert!(matches!(
+        limited_inventory.read_inventory(&context, &cancel()),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
     assert!(matches!(
         limited_inventory.capture_inventory(&context, &cancel()),
         Err(WorktreeError::Utility(UtilityError::Truncated {
@@ -740,7 +746,7 @@ fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>>
     assert!(load_owner(&tree)?.is_none());
     assert_eq!(fs::read(attempt.join("reservation.json"))?, reservation);
     assert_eq!(fs::read(attempt.join("import-retained.json"))?, b"retained");
-    let entries = read_worktrees(&context, &cancel())?;
+    let entries = context.facts.read_inventory(&context, &cancel())?;
     let entry = entries
         .iter()
         .find(|entry| entry.path == path)
@@ -1113,14 +1119,18 @@ fn fallback_writer_after_a_partial_commit_continues_past_the_pin() -> Result<(),
         &info.path,
         &["commit", "--allow-empty", "-m", "partial work"],
     )?;
-    let ahead = read_worktrees(&context, &cancel())?
+    let ahead = context
+        .facts
+        .read_inventory(&context, &cancel())?
         .into_iter()
         .find(|entry| entry.path == info.path)
         .ok_or("missing writer")?
         .head;
     assert_ne!(ahead, pin);
     fast_forward(&context, &info.path, pin, &cancel())?;
-    let after = read_worktrees(&context, &cancel())?
+    let after = context
+        .facts
+        .read_inventory(&context, &cancel())?
         .into_iter()
         .find(|entry| entry.path == info.path)
         .ok_or("missing writer")?
@@ -1162,7 +1172,9 @@ fn source_fast_forward_refuses_dirty_diverged_or_leased_tree() -> Result<(), Box
                 &["commit", "--allow-empty", "-m", "diverged writer"],
             )?;
         }
-        let before = read_worktrees(&context, &cancel())?
+        let before = context
+            .facts
+            .read_inventory(&context, &cancel())?
             .into_iter()
             .find(|entry| entry.path == info.path)
             .ok_or("missing writer")?
@@ -1180,7 +1192,9 @@ fn source_fast_forward_refuses_dirty_diverged_or_leased_tree() -> Result<(), Box
             "leased" => assert!(matches!(error, WorktreeError::LockBusy)),
             _ => unreachable!(),
         }
-        let after = read_worktrees(&context, &cancel())?
+        let after = context
+            .facts
+            .read_inventory(&context, &cancel())?
             .into_iter()
             .find(|entry| entry.path == info.path)
             .ok_or("missing writer")?
@@ -1219,7 +1233,9 @@ fn source_fast_forward_preserves_ignored_files_that_become_tracked() -> Result<(
         fast_forward(&context, &info.path, target, &cancel()),
         Err(WorktreeError::SourceAdvanceFailed { target: requested }) if requested == target
     ));
-    let after = read_worktrees(&context, &cancel())?
+    let after = context
+        .facts
+        .read_inventory(&context, &cancel())?
         .into_iter()
         .find(|entry| entry.path == info.path)
         .ok_or("missing writer")?
@@ -2232,7 +2248,7 @@ fn gc_idle_output_requires_ignored_idle_and_free_writer() -> Result<(), Box<dyn 
         if scenario == "untracked" {
             // Call the pruning owner directly so the early dirty-lane gate
             // cannot mask the non-ignored output protection.
-            let entries = read_worktrees(&context, &cancel())?;
+            let entries = context.facts.read_inventory(&context, &cancel())?;
             let entry = entries
                 .iter()
                 .find(|entry| entry.path == created.path)
@@ -4360,7 +4376,9 @@ fn create_skips_prunable_worktree_registrations() -> Result<(), Box<dyn Error>> 
     assert!(created.path.is_dir());
     assert!(!stale.path.exists());
     assert!(
-        read_worktrees(&context, &cancel())?
+        context
+            .facts
+            .read_inventory(&context, &cancel())?
             .iter()
             .any(|entry| entry.path == stale.path && entry.prunable)
     );
@@ -4440,7 +4458,9 @@ fn remove_reports_stale_registration_by_branch_and_directory() -> Result<(), Box
     }
     assert!(branch_exists(&fixture, "scratch/stale"));
     assert!(
-        read_worktrees(&context, &cancel())?
+        context
+            .facts
+            .read_inventory(&context, &cancel())?
             .iter()
             .any(|entry| entry.path == stale.path && entry.prunable)
     );
@@ -4473,7 +4493,7 @@ fn prune_treats_a_prunable_branch_as_not_checked_out() -> Result<(), Box<dyn Err
         "merge stale work",
     ])?;
     fs::remove_dir_all(&stale.path)?;
-    let entries = read_worktrees(&context, &cancel())?;
+    let entries = context.facts.read_inventory(&context, &cancel())?;
     let branch = GitRefName::branch("scratch/stale")?;
     assert!(matching_worktree(&entries, &branch, &fixture.root)?.is_none());
     assert!(!checked_out_elsewhere(&entries, &branch, None)?);

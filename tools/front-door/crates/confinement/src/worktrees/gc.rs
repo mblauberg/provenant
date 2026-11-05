@@ -74,10 +74,10 @@ fn collect_impl(
         if policy.dry_run {
             match snapshot {
                 Some(entries) => entries,
-                None => read_worktrees(context, cancel)?,
+                None => context.facts.read_inventory(context, cancel)?,
             }
         } else {
-            read_worktrees(context, cancel)?
+            context.facts.read_inventory(context, cancel)?
         }
     };
     // Preview all candidates against one census snapshot. Applying still
@@ -411,7 +411,11 @@ fn prune_unknown_output(
         if policy.dry_run {
             tree_unchanged(preview_entries, entry, lane.head)?;
         } else {
-            tree_unchanged(&read_worktrees(context, cancel)?, entry, lane.head)?;
+            tree_unchanged(
+                &context.facts.read_inventory(context, cancel)?,
+                entry,
+                lane.head,
+            )?;
         }
     }
     if policy.dry_run {
