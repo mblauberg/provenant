@@ -28,7 +28,7 @@ fn doctor_reports_installed_fake_provider_signin() -> Result {
     let output = rig.command(&["hosts", "doctor", "--json"])?;
     assert_eq!(code(&output), 0, "{output:?}");
     let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
-    let rows = report["data"]["installed_signins"]
+    let rows = report["data"]["installed_sign_ins"]
         .as_array()
         .ok_or("sign-in rows")?;
     for (adapter, state) in [("codex", "signed_in"), ("cursor", "signed_out")] {

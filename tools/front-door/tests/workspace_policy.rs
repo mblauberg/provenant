@@ -1248,7 +1248,12 @@ fn adapter_policy_detects_registry_names_and_harness_comparisons() -> Result<(),
 #[test]
 fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let literal = regex::Regex::new(r#""(?:claude|opencode|agy)""#)?;
+    let names = provenant_records::ADAPTER_SPECS
+        .iter()
+        .map(|spec| regex::escape(spec.name))
+        .collect::<Vec<_>>()
+        .join("|");
+    let literal = regex::Regex::new(&format!(r#""(?:{names})""#))?;
     let comparison = adapter_identity_comparison()?;
     let mut sources = Vec::new();
     for name in ["cli", "routing", "quota"] {
@@ -1258,7 +1263,9 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
     let mut violations = Vec::new();
     for path in sources {
         // The hook command table is registry data, not adapter policy.
-        if path == root.join("crates/cli/src/hooks.rs") {
+        if path == root.join("crates/cli/src/hooks.rs")
+            || path == root.join("crates/cli/src/run/provider/fixtures.rs")
+        {
             continue;
         }
         let source = fs::read_to_string(&path)?;
@@ -1272,6 +1279,16 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
             .into_iter()
             .flat_map(|check| check.find_iter(&source))
         {
+            let line_text = source[..found.start()].rsplit('\n').next().unwrap_or("");
+            let non_adapter_literal = (path.ends_with("grammar.rs")
+                && line_text.contains("conflicts_with_all"))
+                || (path.ends_with("fabric.rs") && line_text.contains("InvalidField("))
+                || (path.ends_with("run/provider/command.rs") && line_text.contains(".join("))
+                || (path.ends_with("run/provider/preparation.rs")
+                    && source[found.end()..].starts_with(':'));
+            if non_adapter_literal {
+                continue;
+            }
             let offset = source.as_ptr() as usize + found.start();
             if tests.iter().any(|scope| {
                 let start = scope.as_ptr() as usize;

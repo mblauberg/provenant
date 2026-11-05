@@ -81,7 +81,7 @@ pub(crate) struct Report {
     unobserved_adapters: Vec<String>,
     /// Fresh local sign-in checks, separate from recorded account readiness.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    installed_signins: Vec<InstalledSignin>,
+    installed_sign_ins: Vec<InstalledSignin>,
     /// The executable lanes can resolve through their read-only Rust toolchain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     nextest: Option<String>,
@@ -117,7 +117,7 @@ fn unobserved_adapters(accounts: &[LoginAccount], installed: impl Fn(&str) -> bo
         .map(|spec| spec.name.to_owned())
         .collect()
 }
-fn installed_signins(
+fn installed_sign_ins(
     adapters: &[String],
     home: &Path,
     executable: impl Fn(&str) -> Option<PathBuf>,
@@ -356,10 +356,10 @@ pub(crate) fn local(
     };
     let unobserved_adapters =
         unobserved_adapters(&login_accounts, |binary| executable(binary).is_some());
-    let installed_signins = SystemExecutor::new(1)
+    let installed_sign_ins = SystemExecutor::new(1)
         .ok()
         .map_or_else(Vec::new, |executor| {
-            installed_signins(
+            installed_sign_ins(
                 &unobserved_adapters,
                 home,
                 executable,
@@ -371,7 +371,7 @@ pub(crate) fn local(
         claude,
         login_accounts,
         unobserved_adapters,
-        installed_signins,
+        installed_sign_ins,
         nextest: lane_nextest(home),
         peer_agent: provenant_fabric_runtime::peer_agent::status(state, home),
         tick_agent: crate::tick_agent::diagnosis(state, home),
@@ -444,8 +444,8 @@ fn valid_remote(report: &Report) -> bool {
         && report.unobserved_adapters.iter().all(|name| {
             !name.is_empty() && name.len() <= 128 && !name.chars().any(char::is_control)
         })
-        && report.installed_signins.len() <= 128
-        && report.installed_signins.iter().all(|row| {
+        && report.installed_sign_ins.len() <= 128
+        && report.installed_sign_ins.iter().all(|row| {
             !row.adapter.is_empty()
                 && row.adapter.len() <= 128
                 && !row.adapter.chars().any(char::is_control)
@@ -589,7 +589,7 @@ pub fn run(command: Hosts, globals: &Globals) -> u8 {
             for adapter in &report.unobserved_adapters {
                 text.push_str(&format!("recorded account readiness {}: unknown (no account observation; configure an account if needed, then run `provenant quota tick` to probe)\n", adapter.escape_debug()));
             }
-            for row in &report.installed_signins {
+            for row in &report.installed_sign_ins {
                 let state = match row.state {
                     provenant_providers::host::LocalSignin::SignedIn => "signed in",
                     provenant_providers::host::LocalSignin::SignedOut => "signed out",
@@ -793,7 +793,7 @@ mod tests {
             "cursor".to_owned(),
             "opencode".to_owned(),
         ];
-        let rows = super::installed_signins(
+        let rows = super::installed_sign_ins(
             &adapters,
             std::path::Path::new("/fixture/home"),
             |name| Some(std::path::PathBuf::from(format!("/fixture/{name}"))),

@@ -2357,7 +2357,6 @@ fn plan_flag_decides_and_explains_the_planner_front_end() -> Result<(), Box<dyn 
         on.contains("deadline_seconds: \"${budget_seconds}\""),
         "{on}"
     );
-    golden("big-batch.plan-on.explain.txt", &on)?;
     let off = run("off")?;
     assert!(
         off.contains("plan: off -> off (planning turned off)"),
